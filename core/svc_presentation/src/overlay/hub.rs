@@ -13,6 +13,16 @@
 //! This module owns no HTTP/SSE/websocket framing itself -- that's P4's
 //! job (`crate::http::overlay`), which is the only intended caller of
 //! [`PresentationHub::publish`]/[`PresentationHub::subscribe`].
+//!
+//! # Generic over the frame type
+//!
+//! The hub fans out whatever `T` it is instantiated with. The service holds
+//! two instances (see [`crate::http::AppState`]): the live overlay routes use
+//! a `PresentationHub<RenderedFrame>` that only ever carries frames already
+//! detokenized + HTML-escaped by [`crate::overlay::detok::OverlayDetokenizer`]
+//! (so nothing raw can reach a browser through `/live`/`/live/ws`), while the
+//! caption pipeline keeps the default `PresentationHub<OverlayPush>` it
+//! validates itself (`crate::http::captions`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -106,17 +116,19 @@ pub fn register_hub_metrics(registry: &prometheus::Registry) -> HubMetrics {
 }
 
 type ChannelKey = (i64, Surface);
-type ChannelMap = HashMap<ChannelKey, broadcast::Sender<Arc<OverlayPush>>>;
+type ChannelMap<T> = HashMap<ChannelKey, broadcast::Sender<Arc<T>>>;
 
 /// The in-process push fan-out: one broadcast channel per (community,
-/// surface), created lazily on first publish or subscribe.
-pub struct PresentationHub {
-    channels: Arc<Mutex<ChannelMap>>,
+/// surface), created lazily on first publish or subscribe. `T` is the frame
+/// type fanned out (default [`OverlayPush`], the caption pipeline's raw
+/// frame; the live overlay routes use `RenderedFrame`).
+pub struct PresentationHub<T = OverlayPush> {
+    channels: Arc<Mutex<ChannelMap<T>>>,
     capacity: usize,
     metrics: HubMetrics,
 }
 
-impl PresentationHub {
+impl<T: Send + Sync + 'static> PresentationHub<T> {
     /// Builds a hub with the production [`CHANNEL_CAPACITY`].
     pub fn new(metrics: HubMetrics) -> Self {
         Self::with_capacity(CHANNEL_CAPACITY, metrics)
@@ -139,7 +151,7 @@ impl PresentationHub {
     /// subscribers have all already disconnected, is simply a no-op
     /// (`broadcast::Sender::send`'s `Err` means "no active receivers",
     /// not a failure this caller needs to react to or retry).
-    pub fn publish(&self, community_id: i64, surface: Surface, push: OverlayPush) {
+    pub fn publish(&self, community_id: i64, surface: Surface, push: T) {
         let start = Instant::now();
         // Publish never creates a channel: with no entry there are no
         // subscribers, and creating one here would leak an entry per
@@ -163,7 +175,7 @@ impl PresentationHub {
     /// the legacy Python hub's own per-connection queue semantics (a late
     /// subscriber there was never handed anything published before it
     /// connected either).
-    pub fn subscribe(&self, community_id: i64, surface: Surface) -> HubSubscription {
+    pub fn subscribe(&self, community_id: i64, surface: Surface) -> HubSubscription<T> {
         // Subscribe while holding the map lock so a concurrent
         // `HubSubscription::drop` GC can never remove the channel between
         // our lookup and our `subscribe()`.
@@ -203,21 +215,21 @@ impl PresentationHub {
 /// always decrements the subscriber gauge and records the connection's
 /// lifetime via [`Drop`], so P4's route handlers never need to remember to
 /// do that bookkeeping themselves on every exit path.
-pub struct HubSubscription {
-    receiver: broadcast::Receiver<Arc<OverlayPush>>,
+pub struct HubSubscription<T = OverlayPush> {
+    receiver: broadcast::Receiver<Arc<T>>,
     metrics: HubMetrics,
     surface: Surface,
     connected_at: Instant,
     key: ChannelKey,
     /// Weak so a live subscriber never keeps the hub's senders alive:
     /// dropping the hub still closes every channel.
-    channels: Weak<Mutex<ChannelMap>>,
+    channels: Weak<Mutex<ChannelMap<T>>>,
 }
 
 /// One outcome of [`HubSubscription::recv`].
-pub enum RecvOutcome {
+pub enum RecvOutcome<T = OverlayPush> {
     /// A frame to forward to the client.
-    Push(Arc<OverlayPush>),
+    Push(Arc<T>),
     /// This subscriber fell behind by `n` frames, which were dropped
     /// (never delivered) rather than queued without bound. Already
     /// counted in [`HubMetrics::dropped_frames_total`] by the time this is
@@ -225,12 +237,12 @@ pub enum RecvOutcome {
     Lagged(u64),
 }
 
-impl HubSubscription {
+impl<T: Send + Sync + 'static> HubSubscription<T> {
     /// Waits for the next frame (or lag notification). Returns `None` once
     /// the channel is permanently closed (every sender side dropped --
     /// in practice only at process shutdown, since [`PresentationHub`]
     /// itself lives for the process lifetime behind `Arc` in `AppState`).
-    pub async fn recv(&mut self) -> Option<RecvOutcome> {
+    pub async fn recv(&mut self) -> Option<RecvOutcome<T>> {
         match self.receiver.recv().await {
             Ok(push) => Some(RecvOutcome::Push(push)),
             Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -245,7 +257,7 @@ impl HubSubscription {
     }
 }
 
-impl Drop for HubSubscription {
+impl<T> Drop for HubSubscription<T> {
     fn drop(&mut self) {
         // GC: this receiver is still counted while `drop` runs, so a count
         // of <= 1 means we are the last one -- remove the channel so
@@ -400,7 +412,7 @@ mod tests {
     async fn subscriber_gauge_increments_on_subscribe_and_decrements_on_drop() {
         let registry = prometheus::Registry::new();
         let metrics = register_hub_metrics(&registry);
-        let hub = PresentationHub::new(metrics);
+        let hub: PresentationHub = PresentationHub::new(metrics);
         {
             let _sub = hub.subscribe(5, Surface::AlertBox);
             let rendered = crate::telemetry::render_metrics(&registry).unwrap();
@@ -416,7 +428,7 @@ mod tests {
     async fn dropping_a_subscription_records_its_connection_duration() {
         let registry = prometheus::Registry::new();
         let metrics = register_hub_metrics(&registry);
-        let hub = PresentationHub::new(metrics);
+        let hub: PresentationHub = PresentationHub::new(metrics);
         drop(hub.subscribe(11, Surface::FullScreen));
         let rendered = crate::telemetry::render_metrics(&registry).unwrap();
         assert!(rendered.contains("svc_presentation_overlay_connection_duration_seconds"));
@@ -434,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn channel_closes_once_the_hub_and_all_senders_are_dropped() {
-        let hub = PresentationHub::new(test_metrics());
+        let hub: PresentationHub = PresentationHub::new(test_metrics());
         let mut sub = hub.subscribe(3, Surface::Image);
         drop(hub);
         assert!(sub.recv().await.is_none());

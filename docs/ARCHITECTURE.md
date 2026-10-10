@@ -31,7 +31,7 @@ hub-api**, not its own container.
 | `svc-core` | Identity, security, credentials, entitlement — synchronous gRPC, every stage depends on it | RustLang | 8203 | 50203 |
 | `hub-api` | Admin, tenancy, marketplace, billing, AI routing, MCP — control plane | Python/Quart | 8204 | 50204 |
 | `hub-webui` | SPA assets, static-serve + `/api` proxy for the ReactJS webui | ExpressScript + ReactJS | 8205 | — |
-| `svc-presentation` | Core overlays (`full_screen`/`media`/`crawler`) + Music Station + bundles' `presentation` component | RustLang | 8207 | — |
+| `svc-presentation` | Core overlays (`full_screen`/`media`/`crawler`/`ticker`/`alert_box`/`chat`/`goals`) + Music Station + bundles' `presentation` component; every push is detokenized + HTML-escaped before it is fanned out to the browser page ([guide](guides/overlay-browser-source.md)) | RustLang | 8207 | — |
 | `svc-streaming` | RTC + HLS/RTMP/AV1 record/forward/transcode control plane | RustLang | 8208 | 50208 |
 
 `svc-core` is synchronous gRPC, not a pipeline stage — every other container calls it directly for
