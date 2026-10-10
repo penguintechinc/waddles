@@ -1,0 +1,40 @@
+name: Rust egress-assertion (lint + test)
+
+# core/egress_assertion's own tests (the signed egress-allowlist assertion
+# wire format and its verifier) ran only indirectly: rust-bundle-host-http.yml
+# and rust-egress-proxy.yml test THEIR crates. This gates the shared crate
+# itself with fmt + clippy + cargo-deny + a >=90% coverage gate.
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/egress_assertion/**'
+      - '.github/workflows/rust-egress-assertion.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/egress_assertion/**'
+      # Self-test: a change to this workflow must prove it still gates.
+      - '.github/workflows/rust-egress-assertion.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: egress-assertion
+      working_directory: core/egress_assertion
+      # aws-lc-sys (the jsonwebtoken aws_lc_rs backend) needs cmake + a
+      # C/C++ compiler to build -- same rationale as rust-egress-proxy.yml.
+      extra_apt_packages: cmake build-essential
+      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain)'

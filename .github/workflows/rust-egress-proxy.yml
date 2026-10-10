@@ -5,12 +5,18 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/egress_proxy/**'
+      # Same-repo path dependencies: the machine-JWT verifier and the signed
+      # assertion verifier this proxy's authentication is built on.
+      - 'core/service_auth/**'
+      - 'core/egress_assertion/**'
       - '.github/workflows/rust-egress-proxy.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
       - 'core/egress_proxy/**'
+      - 'core/service_auth/**'
+      - 'core/egress_assertion/**'
   workflow_dispatch:
 
 permissions:

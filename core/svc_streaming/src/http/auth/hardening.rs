@@ -443,10 +443,10 @@ pub fn report_outcome(
     }
 }
 
+#[cfg(test)]
 /// In-memory metrics capture for tests: an SDK meter provider whose exporter
 /// snapshots every data point, so a test can assert the exact instrument
 /// names, units and label sets without any network or global state.
-#[cfg(test)]
 pub(crate) mod test_support {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -963,5 +963,25 @@ mod tests {
             bounds.iter().any(|b| *b >= 1.0),
             "resolves a slow JWKS fetch"
         );
+    }
+
+    /// The production code of this module is a byte-for-byte mirror of
+    /// `core/service_auth/src/jwt_hardening.rs` (only the module docs and
+    /// the test scaffolding differ). Edit BOTH or neither: this is what
+    /// keeps the Python / `service_auth` / `svc_streaming` verifiers on one
+    /// vocabulary and one metric contract.
+    #[test]
+    fn production_code_is_identical_to_the_service_auth_original() {
+        const ORIGINAL: &str = include_str!("../../../../service_auth/src/jwt_hardening.rs");
+        const MIRROR: &str = include_str!("hardening.rs");
+
+        fn production_body(source: &'static str) -> &'static str {
+            let start = source.find("use std::fmt;").expect("production code start");
+            let end = source.find("#[cfg(test)]").expect("test scaffolding start");
+            &source[start..end]
+        }
+
+        assert!(!production_body(ORIGINAL).is_empty());
+        assert_eq!(production_body(ORIGINAL), production_body(MIRROR));
     }
 }
