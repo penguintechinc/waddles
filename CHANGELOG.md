@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Real OTel metrics for the Rust data plane (replacing the `penguin_spine::NoopMetrics` stubs and the executor's
+  unexported atomics): svc-process / svc-action emit stage latency, executor-call and host-call latency histograms,
+  bundle load, drain batch size, consumer-group backlog, sandbox trips, dispatch attempts, DLQ / tenant-boundary counters;
+  bundle-executor emits load phases (fetch / verify / precompile), invoke / guest / instantiate latency, host-call round
+  trips, sandbox trips, resident-bundle and in-flight gauges and host-API session health, exported over OTLP/gRPC **only**
+  when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (default off: no new executor egress). The capability gate's grant/denial
+  counters (`waddles_bundle_capability_{authorized,denied}_total`), which were silently dropped by an uninstalled
+  `metrics`-facade recorder, now export through an OTel-backed recorder. New dashboard `waddles-stage-pipeline`. See
+  `docs/observability/data-plane-metrics.md`.
 - Enterprise SSO for hub-api: SAML 2.0 and OpenID Connect (Enterprise tier, `waddles.auth.sso_saml`) and Google OAuth2 (Professional tier, `waddles.auth.sso_google`). Per-tenant connections with admin API, JIT provisioning keyed on (connection, subject) with no email adoption, PKCE + nonce + local ID-token validation, signature-wrapping/replay/XXE-hardened SAML SP, SSRF-guarded IdP HTTP, AES-256-GCM secret storage, login-CSRF binder cookie, OTel metrics/traces. Migration `0049_sso_connections`; auto-provisioned `SSO_ENCRYPTION_KEY` (alpha/local) that never fails the chart elsewhere. See `docs/SSO.md`.
 - Enterprise tamper-evident audit logging (GRC audit finding #3): append-only per-tenant SHA-256 hash chain
   (`audit_events`, migration `0053_audit_events_hash_chain`), `GET /api/v1/compliance/audit/{events,head,verify,export}`,
