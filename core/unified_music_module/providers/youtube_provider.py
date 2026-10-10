@@ -34,6 +34,86 @@ class YouTubeAPIError(YouTubeProviderError):
     pass
 
 
+class _StripHttpxQueryFilter(logging.Filter):
+    """Remove the query string from httpx's ``HTTP Request: GET <url>`` INFO lines.
+
+    The YouTube API takes the user's search text (``q=``) and the API key (``key=``)
+    in the query string, and httpx logs the full URL for every request at INFO.
+    Query strings are user data / secrets, so none may reach the log stream.
+    """
+
+    @staticmethod
+    def _strip(value: Any) -> Any:
+        """Return `value` without its query string if it is a URL, else unchanged."""
+        if isinstance(value, httpx.URL):
+            return value.copy_with(query=None)
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value.split("?", 1)[0]
+        return value
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Rewrite the record's URL argument(s) in place; never drops the record."""
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._strip(arg) for arg in record.args)
+        return True
+
+
+def _install_httpx_query_redaction() -> None:
+    """Attach `_StripHttpxQueryFilter` to the ``httpx`` logger exactly once."""
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(f, _StripHttpxQueryFilter) for f in httpx_logger.filters):
+        httpx_logger.addFilter(_StripHttpxQueryFilter())
+
+
+_install_httpx_query_redaction()
+
+_REASON_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+
+
+def _api_error_reason(response: httpx.Response) -> Optional[str]:
+    """Return Google's machine-readable error reason (e.g. ``quotaExceeded``), if safe.
+
+    Only the ``errors[0].reason`` enum is read -- never the free-text ``message``,
+    which may echo request parameters (search text, video IDs, the API key).
+    """
+    try:
+        reason = response.json()["error"]["errors"][0]["reason"]
+    except Exception:  # noqa: BLE001 -- body may be non-JSON or shaped differently
+        return None
+    if isinstance(reason, str) and _REASON_RE.fullmatch(reason):
+        return reason
+    return None
+
+
+def _describe_error(exc: BaseException) -> str:
+    """Describe `exc` for logs without its message: type, HTTP status, API reason.
+
+    ``str(httpx.HTTPStatusError)`` embeds the full request URL -- the user's
+    search text and the ``key=`` API key -- so it must never be logged.
+    """
+    parts = [type(exc).__name__]
+    if isinstance(exc, YouTubeProviderError):
+        # our own messages are static / built by `_to_api_error` -- safe to log
+        parts.append(f"detail={exc}")
+    if isinstance(exc, httpx.HTTPStatusError):
+        parts.append(f"status={exc.response.status_code}")
+        reason = _api_error_reason(exc.response)
+        if reason:
+            parts.append(f"reason={reason}")
+    return " ".join(parts)
+
+
+def _to_api_error(exc: httpx.HTTPStatusError | httpx.RequestError) -> YouTubeAPIError:
+    """Build the `YouTubeAPIError` for an httpx failure without echoing request data."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        message = f"YouTube API error: {exc.response.status_code}"
+        reason = _api_error_reason(exc.response)
+        if reason:
+            message += f" - {reason}"
+        return YouTubeAPIError(message)
+    return YouTubeAPIError(f"YouTube API request failed: {type(exc).__name__}")
+
+
 class YouTubeProvider(BaseMusicProvider):
     """YouTube music provider implementation.
 
@@ -259,13 +339,13 @@ class YouTubeProvider(BaseMusicProvider):
                 "videoCategoryId": "10",  # Music category
             }
 
-            logger.debug(f"Searching YouTube for: {query}")
+            logger.debug("Searching YouTube (query_len=%d, limit=%d)", len(query), limit)
             search_response = await client.get(search_url, params=search_params)
             search_response.raise_for_status()
             search_data = search_response.json()
 
             if "items" not in search_data or not search_data["items"]:
-                logger.info(f"No results found for query: {query}")
+                logger.info("No YouTube results for search (query_len=%d)", len(query))
                 return []
 
             # Get video IDs
@@ -289,22 +369,15 @@ class YouTubeProvider(BaseMusicProvider):
                 for video in videos_data.get("items", [])
             ]
 
-            logger.info(f"Found {len(tracks)} YouTube videos for query: {query}")
+            logger.info(
+                "Found %d YouTube videos for search (query_len=%d)", len(tracks), len(query)
+            )
             return tracks
 
-        except httpx.HTTPStatusError as e:
-            error_msg = f"YouTube API error: {e.response.status_code}"
-            try:
-                error_data = e.response.json()
-                error_msg += f" - {error_data.get('error', {}).get('message', '')}"
-            except Exception:
-                pass
-            logger.error(error_msg)
-            raise YouTubeAPIError(error_msg) from e
-        except httpx.RequestError as e:
-            error_msg = f"YouTube API request failed: {str(e)}"
-            logger.error(error_msg)
-            raise YouTubeAPIError(error_msg) from e
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.error("YouTube search failed: %s", _describe_error(e))
+            # `from None`: the cause's message is the full request URL (search text + API key)
+            raise _to_api_error(e) from None
 
     async def get_track(self, track_id: str) -> Optional[MusicTrack]:
         """Get YouTube video details by video ID.
@@ -326,7 +399,7 @@ class YouTubeProvider(BaseMusicProvider):
         if self.is_youtube_url(track_id):
             video_id = self.extract_video_id(track_id)
             if not video_id:
-                logger.warning(f"Could not extract video ID from URL: {track_id}")
+                logger.warning("Could not extract video ID from the supplied URL")
                 return None
             track_id = video_id
 
@@ -353,19 +426,10 @@ class YouTubeProvider(BaseMusicProvider):
             logger.info(f"Retrieved YouTube video: {track.name}")
             return track
 
-        except httpx.HTTPStatusError as e:
-            error_msg = f"YouTube API error: {e.response.status_code}"
-            try:
-                error_data = e.response.json()
-                error_msg += f" - {error_data.get('error', {}).get('message', '')}"
-            except Exception:
-                pass
-            logger.error(error_msg)
-            raise YouTubeAPIError(error_msg) from e
-        except httpx.RequestError as e:
-            error_msg = f"YouTube API request failed: {str(e)}"
-            logger.error(error_msg)
-            raise YouTubeAPIError(error_msg) from e
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.error("YouTube video lookup failed: %s", _describe_error(e))
+            # `from None`: the cause's message is the full request URL (video ID + API key)
+            raise _to_api_error(e) from None
 
     async def play(self, track_id: str) -> bool:
         """Start playing a YouTube video via browser source.
@@ -506,7 +570,7 @@ class YouTubeProvider(BaseMusicProvider):
                 logger.info("YouTube authentication successful")
                 return True
             except Exception as e:
-                logger.error(f"YouTube authentication failed: {e}")
+                logger.error("YouTube authentication failed: %s", _describe_error(e))
                 return False
 
         return False
@@ -538,5 +602,5 @@ class YouTubeProvider(BaseMusicProvider):
             return True
 
         except Exception as e:
-            logger.error(f"YouTube health check failed: {e}")
+            logger.error("YouTube health check failed: %s", _describe_error(e))
             return False
