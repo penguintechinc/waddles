@@ -1,0 +1,70 @@
+name: Bundle Hygiene
+
+# Static gates for the defect classes App Bundles keep re-introducing. Pure
+# source/manifest analysis (stdlib + PyYAML, no build, no cluster, ~15s), kept
+# in its own workflow so it never competes with ci-gate.yml / rust-crate-ci.yml.
+#
+#   1. log-pii         -- bundle log calls carrying raw user input / identity
+#                         (`rest=rest`, f"{username}", event.actor, ...).
+#   2. manifest perms  -- hub-manifest.yaml `permissions:` in the legacy
+#                         bare-string form (parses to ZERO grants at install).
+#   3. silent-except   -- broad `except Exception: pass/return <default>`
+#                         handlers with no log call (shapes check-no-stubs'
+#                         semgrep layer does not match).
+#
+# ci-gate.yml aggregates every check-run on the head SHA, so each failure here
+# is fatal to the merge queue with no ci-gate edit. No `paths:` filter on
+# purpose -- a path-filtered workflow that does not run reports nothing, and
+# these checks are cheap enough to run on every PR.
+
+on:
+  pull_request:
+    branches: [main, 'release/**']
+  merge_group:
+    types: [checks_requested]
+    branches: ['release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundle-hygiene-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle-hygiene:
+    name: Bundle hygiene (log PII, manifest permissions, silent except)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      # Exact pins (critical-rules.md Dependency Pinning), same versions the
+      # no-stubs gate and the alembic unit-test step already use.
+      - name: Install PyYAML + pytest
+        run: pip install --disable-pip-version-check --no-cache-dir "pyyaml==6.0.3" "pytest==9.1.1"
+
+      # A gate that cannot fail is not a gate: this proves, on every run, that
+      # each rule still exits non-zero on a planted violation (and stays quiet
+      # on the safe shapes real bundles use) before the real tree is judged.
+      - name: Self-test the gates (planted violations must fail)
+        run: python3 -m pytest scripts/ci/tests/test_check_bundle_hygiene.py -v -p no:cacheprovider
+
+      # Each step prints the count it examined; zero examined is a FAIL.
+      - name: Bundle log calls carry no raw user input (PII)
+        run: python3 scripts/ci/check-bundle-source-hygiene.py --check log-pii
+
+      - name: Bundle manifests use V2 structured permissions
+        run: python3 scripts/ci/check-bundle-manifest-permissions.py
+
+      - name: Bundle handlers do not silently swallow broad exceptions
+        run: python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except

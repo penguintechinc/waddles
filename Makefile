@@ -1,11 +1,11 @@
-.PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs generate-bundle-signing-key
+        check-no-stubs check-bundle-hygiene generate-bundle-signing-key
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -26,6 +26,10 @@ docker-push:
 
 lint:
 	@bash scripts/lint.sh
+
+openapi-hubapi:
+	@python3 scripts/export-hubapi-openapi.py
+	@spectral lint openapi/v1.yaml --fail-severity=error
 
 check-docs:
 	@bash scripts/check-doc-refs.sh
@@ -62,6 +66,15 @@ check-alpha-deploy-no-wait:
 # `semgrep` on PATH (pinned in CI; see scripts/ci/semgrep-silent-fallback.yml).
 check-no-stubs:
 	@bash scripts/ci/check-no-stubs.sh
+
+# Bundle hygiene gates (.github/workflows/bundle-hygiene.yml): raw user input in
+# bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, and
+# broad silent `except` swallows. Each prints the count it examined and exits
+# non-zero on a hit (or on zero examined). Needs PyYAML for the manifest check.
+check-bundle-hygiene:
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check log-pii
+	@python3 scripts/ci/check-bundle-manifest-permissions.py
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
 
 test:
 	@$(MAKE) test-unit

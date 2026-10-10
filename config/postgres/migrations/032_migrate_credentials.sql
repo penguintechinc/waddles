@@ -15,7 +15,22 @@
 -- Risk Level: LOW (read-only source, insert-only target with ON CONFLICT)
 -- =============================================================================
 
-BEGIN;
+-- Fresh-DB replay: 000_create_base_schema creates platform_configs in its newer
+-- key/value shape (config_key/config_value), which has none of the legacy credential
+-- columns (access_token, ...) this file reads, so it always failed on an empty DB --
+-- where there is also nothing to migrate. The whole migration is therefore gated on the
+-- legacy column being present; it runs unchanged against any DB that really has the
+-- legacy table shape. (Already-migrated DBs have this file recorded as applied.)
+DO $outer$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = 'public' AND table_name = 'platform_configs'
+                   AND column_name = 'access_token') THEN
+    RAISE NOTICE '032_migrate_credentials: legacy platform_configs shape absent (fresh DB); nothing to migrate';
+    RETURN;
+  END IF;
+
+  EXECUTE $body$
 
 -- =============================================================================
 -- PART 1: Pre-Migration Validation
@@ -377,7 +392,7 @@ BEGIN
     RAISE NOTICE '';
 END $$;
 
-COMMIT;
+
 
 
 -- =============================================================================
@@ -453,3 +468,6 @@ ORDER BY platform, integration_type
 LIMIT 20;
 
 */
+  $body$;
+END
+$outer$;

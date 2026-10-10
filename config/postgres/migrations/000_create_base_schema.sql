@@ -40,6 +40,21 @@
 -- =============================================================================
 
 -- =============================================================================
+-- Shared updated_at trigger function
+-- Many later migrations (009_add_shoutout_config, 018, 024, 028, 034, ...)
+-- attach triggers to this function before (or without) defining it themselves.
+-- Defining it once here removes that forward reference on a fresh-DB replay;
+-- CREATE OR REPLACE keeps it idempotent for the files that redefine it.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- =============================================================================
 -- Immutable tsvector wrapper for GENERATED columns
 -- PostgreSQL marks to_tsvector() as STABLE, not IMMUTABLE, so it cannot be
 -- used directly in GENERATED ALWAYS AS expressions.  This thin wrapper
@@ -473,6 +488,28 @@ CREATE INDEX IF NOT EXISTS idx_cookie_consent_user
 
 CREATE INDEX IF NOT EXISTS idx_cookie_consent_expires
     ON cookie_consent(expires_at);
+
+-- =============================================================================
+-- credential_access_log
+-- Audit trail of platform credential access, owned by the credential manager
+-- (docs/architecture/table-ownership.md: migration 000). 031_rls_policies and
+-- 032_rls_policies enable RLS on it (db_user = current_user self-access policy), but no
+-- earlier migration ever created it, so both files failed on a fresh-DB replay.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS credential_access_log (
+    id BIGSERIAL PRIMARY KEY,
+    db_user VARCHAR(255) NOT NULL DEFAULT current_user,
+    integration_id INTEGER,
+    platform VARCHAR(50),
+    community_id INTEGER,
+    action VARCHAR(50) NOT NULL,
+    success BOOLEAN NOT NULL DEFAULT TRUE,
+    detail TEXT,
+    accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_credential_access_log_db_user
+    ON credential_access_log(db_user, accessed_at DESC);
 
 -- =============================================================================
 -- cookie_audit_log
