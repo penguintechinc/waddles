@@ -46,6 +46,36 @@ Shared utilities and components for all WaddleBot Flask/Quart modules.
 - CORS headers support
 - Pagination utilities
 
+### Feature flags & license-tier enforcement (`entitlement.py`, `feature_flags.py`, `tier_catalog.py`)
+
+Every `feature_enabled(flag, tenant=..., community=...)` is a **two-gate** check and
+**both must pass**:
+
+1. the PostHog flag is ON (rollout switch / kill-switch), **and**
+2. the tenant's **effective tier** is at or above the feature's **required tier**.
+
+A PostHog flag alone never grants a licensed feature -- a Free tenant with the flag on is
+denied a Professional/Enterprise feature.
+
+| Concept | Rule |
+|---|---|
+| Required tier | Stricter of: explicit `EntitlementClient.tier_requirements`, the registered `FeatureContract.min_tier` (live `FeatureRegistry`), and the static `tier_catalog.FEATURE_MIN_TIERS` snapshot. No source can lower another; unlisted flag = `free`; an unrecognised tier is unsatisfiable (denies), never free. |
+| Effective tier | `max(tenant_tier, community_tier)`, cascading down: a tenant's tier lifts every community in it; a community can be allocated *above* its tenant (optional `CommunityTierSource`), never below. Tenant-wide checks (`community=None`) use the tenant tier only. `feature_flags.get_tier()` exposes it (`free` on any doubt). |
+| Tenant tier source | `penguin_licensing.LicenseClient.validate().tier` against `license.penguintech.io` (`community` == `free`). |
+| Fail closed | Tier is a hard veto over flag state, the degradation cache and the caller's `default`. License gate unreachable -> last-known tier within `ENTITLEMENT_TIER_GRACE_SECONDS` (default 72h); never seen/expired -> a licensed feature is **denied**, not defaulted. Only Free-tier flags degrade to `default`. |
+| Bypass | Hardcoded domains only (`*.penguincloud.io`, `*.penguintech.cloud` = every scope; `*.waddles.app` = tenant-wide only). Skips the tier check, never the flag. **No env var, CLI flag or config switch lifts a tier** -- env baselines exist for plain FEATURE flags only. |
+| Statutory rights | DSAR, erasure, Do-Not-Sell and consent withdrawal are never tier-gated: not in the catalog/contracts, and their endpoints never call `feature_enabled`. |
+
+**Adding or changing a feature's tier:** edit the contract's `min_tier` in
+`libs/<module>_module/features.py` **and** `tier_catalog._FEATURE_MIN_TIERS` -- the catalog exists
+because the hub-api image installs `flask_core` alone (the `*_module` packages and their
+registrations are absent there). `tests/test_tier_enforcement.py::TestCatalogMatchesContracts`
+fails if the two drift, in either direction.
+
+Observability: counter `waddles_entitlement_decisions_total{outcome,reason,required_tier}`
+(`reason=tier_denied` is licensing enforcement firing; `tier_unverifiable` is a fail-closed deny) and
+histogram `waddles_entitlement_tier_resolution_seconds{source}`. Labels never carry tenant/PII.
+
 ## Installation
 
 ```bash
