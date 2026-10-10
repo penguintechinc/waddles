@@ -304,9 +304,16 @@ jobs:
           before = json.load(open("/tmp/secret-hashes-before.json"))
           after_raw = json.load(open("/tmp/secrets-after.json"))
           compared = 0
+          helm_records = 0
           changed = []
           for s in after_raw["items"]:
               name = s["metadata"]["name"]
+              if s.get("type") == "helm.sh/release.v1":
+                  # Helm own release record (sh.helm.release.v1.<rel>.vN): an upgrade
+                  # rewrites the PREVIOUS revision record (deployed -> superseded), so
+                  # its data legitimately changes. Not a chart-managed Secret.
+                  helm_records += 1
+                  continue
               if name not in before:
                   continue  # new secret introduced by upgrade - not a regression signal here
               compared += 1
@@ -314,7 +321,7 @@ jobs:
               digest = hashlib.sha256(blob).hexdigest()
               if digest != before[name]["sha256"]:
                   changed.append(name)
-          print(f"secrets compared: {compared}")
+          print(f"secrets compared: {compared} (excluded {helm_records} helm release record(s))")
           if compared == 0:
               print("::error::zero secrets compared - denominator check failed")
               sys.exit(1)
