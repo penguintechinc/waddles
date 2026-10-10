@@ -35,7 +35,7 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
-from libs.calendar_sync.base import CalendarProviderBase
+from libs.calendar_sync.base import CalendarProviderBase, describe_error
 from libs.calendar_sync.schema import normalize_event
 
 logger = logging.getLogger(__name__)
@@ -536,7 +536,7 @@ class AppleCalendarProvider(CalendarProviderBase):
                         return f"{self._server_url}{href}"
                     return href
         except ET.ParseError as exc:
-            self.logger.error(f"[APPLE] Failed to parse PROPFIND XML: {exc}")
+            self.logger.error("[APPLE] Failed to parse PROPFIND XML: %s", describe_error(exc))
         return None
 
     async def _get_ctag(self, calendar_id: str) -> Optional[str]:
@@ -606,7 +606,7 @@ class AppleCalendarProvider(CalendarProviderBase):
                     "_ctag": ctag,
                 })
         except ET.ParseError as exc:
-            self.logger.error(f"[APPLE] Failed to parse calendar PROPFIND: {exc}")
+            self.logger.error("[APPLE] Failed to parse calendar PROPFIND: %s", describe_error(exc))
         return calendars
 
     def _parse_report_response(
@@ -636,7 +636,7 @@ class AppleCalendarProvider(CalendarProviderBase):
                     events.append(parsed)
 
         except ET.ParseError as exc:
-            self.logger.error(f"[APPLE] Failed to parse REPORT response: {exc}")
+            self.logger.error("[APPLE] Failed to parse REPORT response: %s", describe_error(exc))
         return events
 
     def _parse_vcal(self, ical_text: str) -> Optional[Dict[str, Any]]:
