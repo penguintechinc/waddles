@@ -71,8 +71,15 @@ class TestMigrationMetadata:
     ) -> None:
         assert len(migration.revision) <= 32
 
-    def test_exactly_one_head_and_it_is_this_revision(self) -> None:
-        """heads == 1: no other revision chains off this one's parent, and nothing chains off us."""
+    def test_exactly_one_head_and_no_sibling_chains_off_our_parent(
+        self, migration: ModuleType
+    ) -> None:
+        """heads == 1, and this is the only revision chained off its parent.
+
+        Deliberately does NOT assert that this revision is the head: a later
+        migration (0058_provider_connections) legitimately chains off it, and an
+        "I am the head" assertion would turn red on release the moment that lands.
+        """
         revisions: set[str] = set()
         down_revisions: list[str] = []
         files = [p for p in _VERSIONS.glob("*.py") if p.name != "__init__.py"]
@@ -83,8 +90,9 @@ class TestMigrationMetadata:
             if module.down_revision is not None:
                 down_revisions.append(module.down_revision)
         heads = revisions - set(down_revisions)
-        assert heads == {"0057_communities_overlay_code"}
-        assert down_revisions.count("0056_economy_idempotency") == 1
+        assert len(heads) == 1, f"diverged alembic heads: {sorted(heads)}"
+        assert migration.revision in revisions
+        assert down_revisions.count(migration.down_revision) == 1
 
 
 class TestEmittedSql:
