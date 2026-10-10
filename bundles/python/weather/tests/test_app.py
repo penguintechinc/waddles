@@ -462,11 +462,12 @@ def test_logs_are_pii_free(fake_host, api) -> None:
 
 def test_manifest_declares_exactly_one_egress_host_and_no_secret_value() -> None:
     import pathlib
+    import re
 
     root = pathlib.Path(app.__file__).resolve().parent.parent
     for name in ("bundle.yaml", "hub-manifest.yaml"):
         text = (root / name).read_text()
-        assert "net.http.fqdn:api.weatherapi.com" in text
+        # Exact host equality on the extracted egress hosts -- not a substring check.
+        assert re.findall(r"net\.http\.fqdn:([A-Za-z0-9.-]+)", text) == ["api.weatherapi.com"]
         assert text.count("net.http.") == 1
-        assert "api.weatherapi.com" in text
         assert "apikey" not in text.lower() and "secret:" not in text.lower()
