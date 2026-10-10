@@ -37,6 +37,19 @@ from typing import Any, Final
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import jwt
+from flask_core.jwt_hardening import (
+    OUTCOME_OK,
+    REASON_FORBIDDEN_HEADER,
+    REASON_INVALID,
+    REASON_MALFORMED,
+    REASON_UNKNOWN_KID,
+    VERIFIER_OIDC_ID_TOKEN,
+    JwtRejection,
+    classify_decode_error,
+    inspect_header,
+    log_rejection,
+    record_verification,
+)
 from jwt import PyJWK
 
 from services.sso_http import SsoHttp
@@ -293,15 +306,46 @@ class OidcClient:
         client_id: str,
         expected_nonce: str,
     ) -> dict[str, Any]:
+        started = time.perf_counter()
         try:
-            header = jwt.get_unverified_header(id_token)
-        except jwt.PyJWTError as exc:
-            raise SsoProtocolError("oidc_id_token_malformed", "ID token is malformed") from exc
-        alg = header.get("alg")
-        if alg not in ALLOWED_ID_TOKEN_ALGS:
-            raise SsoProtocolError("oidc_alg_rejected", "ID token algorithm is not allowed")
-        kid = header.get("kid")
-        key = await self._signing_key(meta, kid if isinstance(kid, str) else None)
+            # H-2 Phase 0 header vetting: `alg` from the fixed asymmetric allow-list,
+            # `none` (any case) and key-material params (jku/jwk/x5u/x5c/crit) refused
+            # before any key is fetched or any signature checked. `kid` stays
+            # unvalidated here -- IdPs use arbitrary strings -- and only ever selects a
+            # key from the IdP's own JWKS.
+            header = inspect_header(id_token, allowed_algs=ALLOWED_ID_TOKEN_ALGS)
+        except JwtRejection as rejection:
+            record_verification(
+                verifier=VERIFIER_OIDC_ID_TOKEN,
+                alg=rejection.alg,
+                outcome=rejection.reason,
+                started=started,
+            )
+            log_rejection(
+                verifier=VERIFIER_OIDC_ID_TOKEN, reason=rejection.reason, alg=rejection.alg
+            )
+            if rejection.reason == REASON_MALFORMED:
+                raise SsoProtocolError(
+                    "oidc_id_token_malformed", "ID token is malformed"
+                ) from rejection
+            if rejection.reason == REASON_FORBIDDEN_HEADER:
+                raise SsoProtocolError(
+                    "oidc_header_rejected", "ID token header carries a forbidden parameter"
+                ) from rejection
+            raise SsoProtocolError(
+                "oidc_alg_rejected", "ID token algorithm is not allowed"
+            ) from rejection
+        alg = header.alg
+        try:
+            key = await self._signing_key(meta, header.kid)
+        except SsoProtocolError as exc:
+            record_verification(
+                verifier=VERIFIER_OIDC_ID_TOKEN,
+                alg=alg,
+                outcome=REASON_UNKNOWN_KID if exc.code == "oidc_unknown_kid" else REASON_INVALID,
+                started=started,
+            )
+            raise
 
         issuers = GOOGLE_ISSUERS if protocol == PROTOCOL_GOOGLE else (oidc.issuer,)
         try:
@@ -315,10 +359,18 @@ class OidcClient:
                 options={"require": ["exp", "iat", "iss", "aud", "sub"]},
             )
         except jwt.PyJWTError as exc:
+            reason = classify_decode_error(exc)
+            record_verification(
+                verifier=VERIFIER_OIDC_ID_TOKEN, alg=alg, outcome=reason, started=started
+            )
+            log_rejection(verifier=VERIFIER_OIDC_ID_TOKEN, reason=reason, alg=alg)
             # PyJWT messages can echo claim values; withhold them (type is logged).
             raise SsoProtocolError(
                 "oidc_id_token_invalid", f"ID token failed validation ({type(exc).__name__})"
             ) from exc
+        record_verification(
+            verifier=VERIFIER_OIDC_ID_TOKEN, alg=alg, outcome=OUTCOME_OK, started=started
+        )
 
         audience = claims.get("aud")
         if isinstance(audience, list) and len(audience) > 1 and claims.get("azp") != client_id:

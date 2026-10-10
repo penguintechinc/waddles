@@ -41,7 +41,6 @@ from .auth import (
     verify_service_key,
     setup_default_roles,
     DEFAULT_TENANT_SLUG,
-    TENANT_CLAIM_MIGRATION_CUTOFF,
     SCOPE_BUNDLES,
 )
 from .tenancy import (
@@ -257,7 +256,6 @@ __all__ = [
     "verify_service_key",
     "setup_default_roles",
     "DEFAULT_TENANT_SLUG",
-    "TENANT_CLAIM_MIGRATION_CUTOFF",
     "SCOPE_BUNDLES",
     # Tenancy
     "TenantContext",
