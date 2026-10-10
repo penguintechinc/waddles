@@ -226,8 +226,14 @@ pub async fn caption_ws(
         return Err(err.into());
     }
 
-    let key = query.key.unwrap_or_default();
-    if let Err(err) = validate_view_token(state.view_store.as_ref(), community_id, &key).await {
+    // An absent key is its own explicit rejection (401), not an empty string
+    // quietly fed through validation; an empty `?key=` is rejected the same
+    // way inside `validate_view_token` before any database lookup.
+    let validated = match query.key {
+        Some(key) => validate_view_token(state.view_store.as_ref(), community_id, &key).await,
+        None => Err(OverlayAuthError::MissingKey),
+    };
+    if let Err(err) = validated {
         metrics
             .ws_connections_total
             .with_label_values(&["denied"])
