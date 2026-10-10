@@ -19,6 +19,11 @@ import time
 from dataclasses import dataclass, field
 
 from flask_core import describe_db_error
+from flask_core.ai_guard import (
+    render_search_results,
+    sanitize_model_output,
+    wrap_untrusted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -167,17 +172,14 @@ class PatchNotesService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'PATCH_NOTES_SYSTEM_PROMPT',
                 PATCH_NOTES_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Game: {game_name}\n"
-                f"Question: {query}\n\n"
+                f"Game: {wrap_untrusted(game_name, max_chars=300)}\n"
+                f"Question: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Summarize the latest patch notes and changes based on "
                 "these results."
@@ -310,6 +312,8 @@ class PatchNotesService:
             content = (
                 f"**{game_name}** — Recent Patch Notes:\n\n{content}"
             )
+            # Web snippets go straight to chat here: strip beacons / mass pings.
+            content = sanitize_model_output(content)
 
             # 6. Cache + log
             await self._set_cache(cache_key, {

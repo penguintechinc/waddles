@@ -19,6 +19,7 @@ import httpx
 import pytest
 
 from ai_fakes import FakeConfig
+from flask_core.ai_guard import UNTRUSTED_DATA_NOTICE
 from config import Config, _env_flag
 from services.ai_provider import (
     AIProvider,
@@ -149,7 +150,11 @@ class TestOllamaPayload:
 
         body = seen[0]
         assert body["model"] == "text-model"
-        assert body["prompt"] == "be brief\n\nthe question"
+        # regression: sec-llm01-hardening -- a real system/user split (Ollama `system`), not
+        # the instructions glued onto the prompt; the untrusted-data notice always rides along.
+        assert body["prompt"] == "the question"
+        assert body["system"].startswith("be brief\n\n")
+        assert UNTRUSTED_DATA_NOTICE in body["system"]
         assert body["stream"] is False
         assert body["think"] is False
         assert body["options"] == {"temperature": 0.3, "num_predict": 77}

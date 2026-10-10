@@ -244,3 +244,14 @@ def test_validation():
 | Response Time (p95) | <2000ms | TBD |
 | Concurrent Requests | 10 | TBD |
 | Error Rate | <1% | TBD |
+
+## Prompt-Injection Hardening Tests
+
+```bash
+cd action/interactive/ai_interaction_module
+python3 -m pytest tests/test_injection_hardening.py -v
+```
+
+Runs the real Ollama and WaddleAI providers and `AIService` over an in-memory `httpx` transport with
+a real in-process OTel sink: tool-call refusal, reply sanitising, PII redaction on the wire body,
+and delimiter / label hardening.

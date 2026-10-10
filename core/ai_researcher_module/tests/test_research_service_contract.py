@@ -80,8 +80,10 @@ class TestResearch:
         assert first.blocked_reason is None
         assert len(h.wire) == 1  # the 2nd call was a cache hit
         assert second.was_cached is True and second.tokens_used == 0
-        assert "Research the following topic: penguin migration" in h.wire[0]["prompt"]
-        assert h.wire[0]["prompt"].startswith("You are a helpful research assistant.")
+        assert "Research the following topic:\n<user_input>\npenguin migration\n</user_input>" in (
+            h.wire[0]["prompt"]
+        )
+        assert h.wire[0]["system"].startswith("You are a helpful research assistant.")
         assert h.wire[0]["think"] is False
         assert "format" not in h.wire[0]  # text-only model: never structured output
         assert h.wire[0]["options"]["num_predict"] == Config.OLLAMA_MAX_TOKENS
@@ -182,8 +184,10 @@ class TestAsk:
 
         assert result.success is True
         assert result.content == "A grounded answer."
-        assert "Question: when is raid night" in h.wire[0]["prompt"]
-        assert "1. The community raid night is Friday." in h.wire[0]["prompt"]
+        assert "Question:\n<user_input>\nwhen is raid night\n</user_input>" in h.wire[0]["prompt"]
+        # recalled memories are rendered as delimited, labelled data (not a bare numbered list)
+        assert '<retrieved_data source="community_memory">' in h.wire[0]["prompt"]
+        assert "text: The community raid night is Friday." in h.wire[0]["prompt"]
 
     async def test_ask_blocks_injection_before_any_model_call(
         self, monkeypatch: pytest.MonkeyPatch
