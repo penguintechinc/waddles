@@ -133,7 +133,7 @@ async fn build_hub_handle_client(cli: &config::CliConfig) -> Option<Arc<hub_clie
 /// (`spine::ProcessDeps::identity_wiring`) over the stage's EXISTING read-only
 /// DB reader connection (`waddles_bundle_reader`, the one the grant loader
 /// already uses -- no new role/password/privilege; it reads the PII-free
-/// `community_member_identities` view, alembic 0048), the optional hub-api
+/// `community_member_identities` view, alembic 0051), the optional hub-api
 /// handle resolver, and the `BUNDLE_IDENTITY_CAPABILITY_FLAG` gate (default OFF).
 fn build_identity_wiring(
     reader: sea_orm::DatabaseConnection,
@@ -762,7 +762,7 @@ async fn try_build_db_wiring(
 /// (issue #726, `spine::ProcessDeps::reputation_wiring`): connects to the
 /// shared `waddles` Postgres as the least-privilege
 /// `waddles_bundle_reputation` role (`bundle_host_reputation::connect`,
-/// alembic 0046), spawns the membership-snapshot refresh task that feeds the
+/// alembic 0049), spawns the membership-snapshot refresh task that feeds the
 /// gate's production `SnapshotMembership` (the SAME `Arc` the gate was built
 /// with -- `grant_gate::build_production_gate`'s `membership` param), and
 /// gates every call on `BUNDLE_REPUTATION_CAPABILITY_FLAG` (default OFF).
@@ -829,7 +829,7 @@ async fn try_build_reputation_wiring(
 /// Builds the `economy` bundle host capability's production wiring (issue
 /// #714, `spine::ProcessDeps::economy_wiring`): connects to the shared
 /// `waddles` Postgres as the least-privilege `waddles_economy_runtime` role
-/// (`bundle_host_economy::connect`, alembic 0047), spawns the
+/// (`bundle_host_economy::connect`, alembic 0050), spawns the
 /// membership-snapshot refresh task that feeds the gate's production
 /// `SnapshotMembership` (the SAME `Arc` the gate was built with --
 /// `grant_gate::build_production_gate`'s `membership` param), and gates every

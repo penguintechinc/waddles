@@ -63,7 +63,7 @@ penguin-libs grows one.
 
 | Item | Value |
 |---|---|
-| Schema | alembic `0046_bundle_reputation_store` (DDL in `scripts/db/bundle_reputation_store.sql`) |
+| Schema | alembic `0049_bundle_reputation_store` (DDL in `scripts/db/bundle_reputation_store.sql`) |
 | Role | `waddles_bundle_reputation`: DML on `bundle_reputation_scores`, SELECT/INSERT on `bundle_reputation_adjustments`, column SELECT on `community_members`/`communities`. Created NOLOGIN unless `DB_REPUTATION_PASSWORD` is set when migrating |
 | svc_process env | `BUNDLE_REPUTATION_{HOST,PORT,NAME,USER}`, `BUNDLE_REPUTATION_PASSWORD`, `BUNDLE_REPUTATION_MEMBERSHIP_REFRESH_S` |
 | Flag | `waddles.bundle-reputation-capability` (default OFF) |
@@ -120,7 +120,7 @@ paths answer the same `quota_exceeded` code. Only APPLIED movements count.
 
 | Item | Value |
 |---|---|
-| Schema | alembic `0047_bundle_economy_store` (DDL in `scripts/db/bundle_economy_store.sql`) |
+| Schema | alembic `0050_bundle_economy_store` (DDL in `scripts/db/bundle_economy_store.sql`) |
 | Role | `waddles_economy_runtime`: SELECT on `economy_balances` with COLUMN-scoped INSERT (`tenant_id, community_id, user_uuid` only: a new row can only start at 0, INSERT cannot mint) and COLUMN-scoped UPDATE (`balance, updated_at` only: no re-keying), no DELETE; SELECT/INSERT on `economy_ledger` (append-only); column SELECT on `community_members`/`communities`. Created NOLOGIN unless `DB_ECONOMY_PASSWORD` is set when migrating |
 | svc_process env | `BUNDLE_ECONOMY_{HOST,PORT,NAME,USER}`, `BUNDLE_ECONOMY_PASSWORD`, `BUNDLE_ECONOMY_MEMBERSHIP_REFRESH_S`. Unset password or failed connect: every call is `not_implemented`, membership snapshot stays empty |
 | Flag | `waddles.bundle-economy-capability` (default OFF; OFF is `feature_disabled` after the gate) |
@@ -176,7 +176,7 @@ stop; there is no code path that substitutes the tokenized pseudonym for a UUID.
 
 | Item | Value |
 |---|---|
-| Schema | alembic `0048_bundle_identity_resolve` (DDL in `scripts/db/bundle_identity_resolve.sql`): appends `tenant_id` and `is_active_member` to the existing PII-free `community_member_identities` view. No new table, role, password or privilege |
+| Schema | alembic `0051_bundle_identity_resolve` (DDL in `scripts/db/bundle_identity_resolve.sql`): appends `tenant_id` and `is_active_member` to the existing PII-free `community_member_identities` view. No new table, role, password or privilege |
 | DB account | the stage's existing read-only `waddles_bundle_reader` connection (the grant loader's `DB_READER_PASSWORD` account); no `BUNDLE_IDENTITY_*` secret exists. Not configured: every call is `not_implemented` |
 | hub-api | free-text handles use a second, single-scope `hub_client` (`identity:handle:resolve`) built from the existing `HUB_API_GRPC_ENDPOINT`/`SERVICE_JWT_*` env. Unset/unreachable at startup: handle mentions are `unavailable` until restart (actor and `<@id>` mentions are unaffected) |
 | Scope | multi-tenant (changelog-consumer) path only; the legacy env-only single-bundle path runs at the `(0, 0)` fail-closed scope where every community-scoped capability refuses `invalid_args` |

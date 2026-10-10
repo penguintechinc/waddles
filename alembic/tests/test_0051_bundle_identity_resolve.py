@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0048_bundle_identity_resolve (bundle `identity` capability).
+"""Real-Postgres tests for 0051_bundle_identity_resolve (bundle `identity` capability).
 
 Runs the actual Alembic chain to `head` in an ephemeral container (see
 `pg_docker.py`) and asserts the widened `community_member_identities` view:
@@ -27,7 +27,7 @@ requires_docker = pytest.mark.skipif(
 )
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1] / "versions" / "0048_bundle_identity_resolve.py"
+    Path(__file__).resolve().parents[1] / "versions" / "0051_bundle_identity_resolve.py"
 )
 _READER = "waddles_bundle_reader"
 _VIEW = "community_member_identities"
@@ -65,10 +65,10 @@ def _load_migration():  # type: ignore[no-untyped-def]
 
 
 class TestMigrationMetadata:
-    def test_chains_off_0047_economy_store(self) -> None:
+    def test_chains_off_0050_economy_store(self) -> None:
         migration = _load_migration()
-        assert migration.revision == "0048_bundle_identity_resolve"
-        assert migration.down_revision == "0047_bundle_economy_store"
+        assert migration.revision == "0051_bundle_identity_resolve"
+        assert migration.down_revision == "0050_bundle_economy_store"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
         assert len(_load_migration().revision) <= 32
@@ -104,7 +104,7 @@ class TestMigrationMetadata:
 def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0048-identity") as db:
+    with migrated_postgres("0051-identity") as db:
         yield db
 
 
@@ -291,7 +291,7 @@ class TestDowngradeRoundTrip:
         import sys
 
         repo_root = Path(__file__).resolve().parents[2]
-        with migrated_postgres("0048-roundtrip") as db:
+        with migrated_postgres("0051-roundtrip") as db:
             env = {**os.environ, "DATABASE_URL": db.dsn}
             env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
 
@@ -314,7 +314,7 @@ class TestDowngradeRoundTrip:
                     return [r[0] for r in cur.fetchall()]
 
             assert view_columns() == _EXPECTED_COLUMNS
-            alembic("downgrade", "0047_bundle_economy_store")
+            alembic("downgrade", "0050_bundle_economy_store")
             assert view_columns() == _EXPECTED_COLUMNS[:5]
             with _cursor(db) as cur:
                 assert _priv(cur, _VIEW, "SELECT") is True, (

@@ -18,7 +18,7 @@ community-scoped currency store with atomic debit/credit:
   capability stays unwired/fail-closed in that deployment), so a missing
   secret never breaks the migration chain.
 - Re-states the nullable `community_members.user_uuid` identity column
-  idempotently (IF NOT EXISTS; 0045_identity_resolution and 0046 already add
+  idempotently (IF NOT EXISTS; 0045_identity_resolution and 0049 already add
   it, in either order) so the DDL file stands alone. hub-api's IdentityService
   (#429, 0045) populates it; NULL rows never match, so the capability is
   fail-closed for any member without a resolved identity.
@@ -32,8 +32,8 @@ Chain note: this repo's live schema chain is the Alembic one;
 brand-new database, so a new SQL-only file there would never reach an
 existing deployment.
 
-Revision ID: 0047_bundle_economy_store
-Revises: 0046_bundle_reputation_store
+Revision ID: 0050_bundle_economy_store
+Revises: 0049_bundle_reputation_store
 Create Date: 2026-10-09
 """
 
@@ -45,8 +45,8 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0047_bundle_economy_store"
-down_revision = "0046_bundle_reputation_store"
+revision = "0050_bundle_economy_store"
+down_revision = "0049_bundle_reputation_store"
 branch_labels = None
 depends_on = None
 
@@ -59,7 +59,7 @@ _SQL_PATH = (
 
 #: Created/refreshed BEFORE the DDL file's grants block so its guarded GRANTs
 #: find the role. The password reaches SQL only through a session GUC bound by
-#: a parameterized query (same pattern as 0030/0032/0046) -- never interpolated.
+#: a parameterized query (same pattern as 0030/0032/0049) -- never interpolated.
 _ROLE_SQL = f"""
 DO $$
 DECLARE

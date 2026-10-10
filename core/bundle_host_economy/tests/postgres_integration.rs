@@ -4,7 +4,7 @@
 //! membership predicate and the `waddles_economy_runtime` role's privilege
 //! boundary can only be proven by a real server. The schema under test is the
 //! EXACT shipped DDL -- `scripts/db/bundle_economy_store.sql`, which alembic
-//! 0047 also executes -- applied on top of hand-written minimal prerequisites
+//! 0050 also executes -- applied on top of hand-written minimal prerequisites
 //! (`tenants`, `communities`, `community_members`; the full legacy baseline
 //! needs the whole docker stack, see `alembic/tests/pg_docker.py`).
 //!
@@ -136,7 +136,7 @@ async fn fixture() -> Fixture {
     )
     .await;
     // The role must exist BEFORE the shipped DDL so its grants block fires
-    // (same ordering alembic 0047 guarantees).
+    // (same ordering alembic 0050 guarantees).
     exec(
         &su,
         &format!(

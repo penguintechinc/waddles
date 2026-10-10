@@ -91,7 +91,7 @@ CREATE TABLE app_catalog (
 );
 -- 0043_hub_users_identity_uuid creates a view over community_members (a
 -- legacy config/postgres table, same minimal-bootstrap convention): only the
--- columns the view projects/joins on. 0046_bundle_reputation_store also ALTERs
+-- columns the view projects/joins on. 0049_bundle_reputation_store also ALTERs
 -- this table -- is_active/left_at/removed_at are the columns it, its grants
 -- and its tests touch.
 CREATE TABLE community_members (

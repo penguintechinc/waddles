@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0046_bundle_reputation_store (issue #726).
+"""Real-Postgres tests for 0049_bundle_reputation_store (issue #726).
 
 Runs the actual Alembic chain to `head` in an ephemeral container (see
 `pg_docker.py`) and asserts the schema, the fail-closed identity column, and
@@ -22,7 +22,7 @@ requires_docker = pytest.mark.skipif(
 )
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1] / "versions" / "0046_bundle_reputation_store.py"
+    Path(__file__).resolve().parents[1] / "versions" / "0049_bundle_reputation_store.py"
 )
 _ROLE = "waddles_bundle_reputation"
 
@@ -38,7 +38,7 @@ def _load_migration():  # type: ignore[no-untyped-def]
 class TestMigrationMetadata:
     def test_chains_off_0045(self) -> None:
         migration = _load_migration()
-        assert migration.revision == "0046_bundle_reputation_store"
+        assert migration.revision == "0049_bundle_reputation_store"
         assert migration.down_revision == "0045_identity_resolution"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
@@ -52,7 +52,7 @@ class TestMigrationMetadata:
 def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0046-reputation") as db:
+    with migrated_postgres("0049-reputation") as db:
         yield db
 
 

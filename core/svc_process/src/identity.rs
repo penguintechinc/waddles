@@ -50,7 +50,7 @@
 //! community is `NotAMember`, so the call is also not a cross-community oracle.
 //!
 //! The read path is the existing PII-free data-plane view
-//! `community_member_identities` (alembic 0043/0045/0048) under the read-only
+//! `community_member_identities` (alembic 0043/0045/0051) under the read-only
 //! `waddles_bundle_reader` role the stage already holds for the grant tables --
 //! no new role, password or privilege.
 
@@ -584,7 +584,7 @@ const CONFIRM_SQL: &str = "SELECT is_active_member AS is_active \
 
 /// Production [`MemberDirectory`]: reads the PII-free
 /// `community_member_identities` view over the read-only
-/// `waddles_bundle_reader` connection (alembic 0048). Every query binds
+/// `waddles_bundle_reader` connection (alembic 0051). Every query binds
 /// `(tenant_id, community_id)` from the host-derived [`IdentityScope`].
 pub struct PgMemberDirectory {
     db: DatabaseConnection,

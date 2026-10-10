@@ -19,8 +19,8 @@ The DDL lives in `scripts/db/bundle_identity_resolve.sql` (copied into the
 migrations image, and `include_str!`'d by the Rust end-to-end test) so the
 shipped schema and the tested schema cannot drift.
 
-Revision ID: 0048_bundle_identity_resolve
-Revises: 0047_bundle_economy_store
+Revision ID: 0051_bundle_identity_resolve
+Revises: 0050_bundle_economy_store
 Create Date: 2026-10-09
 """
 
@@ -30,8 +30,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0048_bundle_identity_resolve"
-down_revision = "0047_bundle_economy_store"
+revision = "0051_bundle_identity_resolve"
+down_revision = "0050_bundle_economy_store"
 branch_labels = None
 depends_on = None
 

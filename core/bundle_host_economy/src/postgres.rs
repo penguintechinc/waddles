@@ -1,6 +1,6 @@
 //! Postgres-backed [`EconomyStore`], the membership-snapshot loader and the
 //! connection factory (all under the least-privilege `waddles_economy_runtime`
-//! role, alembic 0047).
+//! role, alembic 0050).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -252,7 +252,7 @@ pub struct CliConfig {
     /// Production wiring for the bundle `reputation` host capability
     /// (issue #726, `bundle_host_reputation::connect`) -- the least-privilege
     /// `waddles_bundle_reputation` role (`alembic/versions/
-    /// 0046_bundle_reputation_store.py`): DML on the two reputation tables +
+    /// 0049_bundle_reputation_store.py`): DML on the two reputation tables +
     /// column-scoped membership SELECT, nothing else. Distinct from both
     /// `BUNDLE_DB_*` (app_core/app_community DML) and `DB_READER_*`
     /// (read-only loader).
@@ -284,7 +284,7 @@ pub struct CliConfig {
     /// Production wiring for the bundle `economy` host capability (issue
     /// #714, `bundle_host_economy::connect`) -- the least-privilege
     /// `waddles_economy_runtime` role (`alembic/versions/
-    /// 0047_bundle_economy_store.py`): DML on `economy_balances` + append-only
+    /// 0050_bundle_economy_store.py`): DML on `economy_balances` + append-only
     /// `economy_ledger` + column-scoped membership SELECT, nothing else.
     /// Distinct from `BUNDLE_DB_*`, `BUNDLE_REPUTATION_*` and `DB_READER_*`.
     #[arg(long, env = "BUNDLE_ECONOMY_HOST", default_value = "localhost")]
