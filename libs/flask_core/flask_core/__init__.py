@@ -23,6 +23,7 @@ from .platform_version import get_platform_version, platform_version_compatible
 __version__ = get_platform_version()
 
 from .database import AsyncDAL, db_operation, init_database, install_db_resilience
+from .db_errors import describe_db_error, is_db_driver_error, log_db_error
 from .bundle_runtime import (
     BundleContext,
     BundleRuntimeError,
@@ -165,6 +166,7 @@ from .validation import (
     validator,
     ValidationError
 )
+from .validation_errors import describe_validation_errors
 from .sanitization import (
     sanitize_html,
     sanitize_input,
@@ -227,6 +229,10 @@ __all__ = [
     "db_operation",
     "init_database",
     "install_db_resilience",
+    # Redaction-safe DB error logging (never logs driver messages / bound values)
+    "describe_db_error",
+    "is_db_driver_error",
+    "log_db_error",
     # Bundle runtime (DAL + tenant/community context for stateful App Bundles)
     "BundleContext",
     "BundleRuntimeError",
@@ -355,6 +361,7 @@ __all__ = [
     "validate_query",
     "validate_form",
     "validate_data",
+    "describe_validation_errors",
     "PaginationParams",
     "CommunityIdRequired",
     "UsernameRequired",

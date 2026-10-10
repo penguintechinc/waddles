@@ -14730,7 +14730,7 @@ paths:
     get:
       description: '
 
-        Backs `!sr status` (`core/svc_action/bundles/social_music_action.py`).
+        Backs `!sr status` (`core/svc_action/builtin_handlers/social_music_action.py`).
 
         Deliberately does NOT check `music_policy.song_requests_allowed` --
 

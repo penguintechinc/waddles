@@ -25,7 +25,7 @@ remains the ONLY functioning process stage today: the Rust build is a
 generic DB-driven WASM bundle executor/loader (`src/bundle_loader.rs`,
 `src/spine.rs`) with NO business-logic bundles compiled yet -- `bundles/
 rust/` contains only `example` and `ping` test bundles, none of this
-module's 16 real `bundles/*_process.py` bundles (bot, community_*,
+module's 16 built-in `builtin_handlers/*_process.py` handlers (bot, community_*,
 inventory, marketing_engagement, social_*, echo) have a Rust/WASM
 equivalent. Do not remove this module or its Helm Deployment
 (`k8s/helm/waddlebot/templates/svc-process.yaml`) until the Rust bundles

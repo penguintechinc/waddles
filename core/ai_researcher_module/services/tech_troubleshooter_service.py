@@ -20,6 +20,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from flask_core import describe_db_error
+
 logger = logging.getLogger(__name__)
 
 TECH_FIX_SYSTEM_PROMPT = (
@@ -229,7 +231,7 @@ class TechTroubleshooterService:
             )
 
         except Exception as exc:
-            logger.error("Tech fix failed: %s", exc)
+            logger.error("Tech fix failed: %s", describe_db_error(exc))
             return TechTroubleshooterResult(
                 success=False,
                 content="An internal error occurred during troubleshooting.",
@@ -338,7 +340,7 @@ class TechTroubleshooterService:
             )
 
         except Exception as exc:
-            logger.error("Quick troubleshoot failed: %s", exc)
+            logger.error("Quick troubleshoot failed: %s", describe_db_error(exc))
             return TechTroubleshooterResult(
                 success=False,
                 content="An internal error occurred during troubleshooting.",
@@ -395,7 +397,7 @@ class TechTroubleshooterService:
             ttl = getattr(self.config, 'TECH_CACHE_TTL', 14400)
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as exc:
-            logger.warning("Cache set failed: %s", exc)
+            logger.warning("Cache set failed: %s", describe_db_error(exc))
 
     async def _log_search(
         self,
@@ -421,4 +423,4 @@ class TechTroubleshooterService:
                  safety_flagged, result_count, was_cached, processing_time_ms],
             )
         except Exception as exc:
-            logger.warning("Failed to log search: %s", exc)
+            logger.warning("Failed to log search: %s", describe_db_error(exc))

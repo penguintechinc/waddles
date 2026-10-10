@@ -343,6 +343,8 @@ mod tests {
             cli,
             db_password: Secret::new("x"),
             cache_password: None,
+            image_bucket_access_key_id: None,
+            image_bucket_secret_access_key: None,
         };
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
         AppState::new(config, prometheus::Registry::new(), db)

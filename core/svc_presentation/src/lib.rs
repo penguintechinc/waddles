@@ -15,7 +15,9 @@
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod flags;
 pub mod http;
+pub mod images;
 pub mod overlay;
 pub mod telemetry;
 
@@ -66,6 +68,14 @@ where
 
     let state = http::AppState::new(config.clone(), prom_registry, db);
 
+    // Hourly purge of expired caption history (flag-gated inside the task).
+    let retention_task = overlay::caption_store::spawn_retention_task(
+        state.caption_store.clone(),
+        state.captions_flag.clone(),
+        overlay::caption_store::RETENTION,
+        overlay::caption_store::PURGE_INTERVAL,
+    );
+
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
 
@@ -79,10 +89,12 @@ where
     let metrics_server = axum::serve(metrics_listener, http::metrics_router(state))
         .with_graceful_shutdown(metrics_shutdown);
 
-    tokio::try_join!(
+    let served = tokio::try_join!(
         async { http_server.await.map_err(anyhow::Error::from) },
         async { metrics_server.await.map_err(anyhow::Error::from) },
-    )?;
+    );
+    retention_task.abort();
+    served?;
 
     Ok(())
 }

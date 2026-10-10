@@ -9,12 +9,14 @@
 //! [`router::with_push_guard`], consuming [`hub::PresentationHub`]
 //! directly rather than any route in this module.
 
+pub mod caption_store;
 pub mod hub;
 pub mod push_trust;
 pub mod render;
 pub mod router;
 pub mod view_store;
 
+pub use caption_store::{CaptionStore, SeaOrmCaptionStore};
 pub use hub::PresentationHub;
 pub use push_trust::AppPushTrustSource;
 pub use view_store::SeaOrmViewCredentialStore;

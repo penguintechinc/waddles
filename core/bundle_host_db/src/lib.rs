@@ -42,6 +42,7 @@ mod limits;
 mod metrics;
 pub mod schema;
 pub mod scope;
+mod typed;
 
 use std::time::Instant;
 
