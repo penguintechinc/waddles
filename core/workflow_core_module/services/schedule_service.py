@@ -95,7 +95,8 @@ def _failure_detail(exc: BaseException) -> str:
     """
     if isinstance(exc, ScheduleServiceException):
         return exc.message
-    return describe_db_error(exc)
+    detail: str = describe_db_error(exc)  # flask_core ships no py.typed -> Any under --strict
+    return detail
 
 
 class ScheduleService:
