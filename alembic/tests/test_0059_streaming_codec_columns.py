@@ -1,4 +1,4 @@
-"""`0056_streaming_codec_columns` -- mocked-SQL assertions, a Rust-entity drift guard, and a real-Postgres round trip.
+"""`0059_streaming_codec_columns` -- mocked-SQL assertions, a Rust-entity drift guard, and a real-Postgres round trip.
 
 Three layers, cheapest first:
 
@@ -36,7 +36,7 @@ requires_docker = pytest.mark.skipif(
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MIGRATION_PATH = (
-    _REPO_ROOT / "alembic" / "versions" / "0056_streaming_codec_columns.py"
+    _REPO_ROOT / "alembic" / "versions" / "0059_streaming_codec_columns.py"
 )
 _ENTITY_DIR = _REPO_ROOT / "core" / "svc_streaming" / "src" / "db" / "entities"
 _SQL_079 = _REPO_ROOT / "config" / "postgres" / "migrations" / "079_svc_streaming.sql"
@@ -51,7 +51,7 @@ _ADDED_COLUMNS = {
 def _load_migration() -> ModuleType:
     """Import the migration module by path (alembic version files are not a package)."""
     spec = importlib.util.spec_from_file_location(
-        "migration_0056_streaming_codec_columns", _MIGRATION_PATH
+        "migration_0059_streaming_codec_columns", _MIGRATION_PATH
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -72,8 +72,8 @@ class TestMigrationMetadata:
     def test_chains_off_the_current_head(self) -> None:
         """down_revision must be the head this was written against (re-point on renumber)."""
         migration = _load_migration()
-        assert migration.revision == "0056_streaming_codec_columns"
-        assert migration.down_revision == "0052_bundle_identity_resolve"
+        assert migration.revision == "0059_streaming_codec_columns"
+        assert migration.down_revision == "0058_provider_connections"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
         """`alembic_version.version_num` is VARCHAR(32); a longer id errors on real Postgres."""
@@ -193,7 +193,7 @@ def pg_db() -> Iterator[PgTestDatabase]:
     """A bare Postgres 17 with the real 079 DDL applied and two pre-existing rows."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with empty_postgres("0056-streaming-codec") as db:
+    with empty_postgres("0059-streaming-codec") as db:
         conn = psycopg2.connect(db.dsn)
         conn.autocommit = True
         with conn.cursor() as cur:

@@ -22,7 +22,7 @@ pub struct Model {
     pub transcode_bitrate_kbps: i32,
     /// Video codec family used when transcoding (`h264`/`h265`/`av1`,
     /// `crate::pipeline::codec::VideoFamily`). Meaningful only with
-    /// `transcode_enabled`; added by alembic `0056_streaming_codec_columns`.
+    /// `transcode_enabled`; added by alembic `0059_streaming_codec_columns`.
     pub video_codec: String,
     /// Audio handling (`copy`/`aac`/`opus`,
     /// `crate::pipeline::codec::AudioChoice`).

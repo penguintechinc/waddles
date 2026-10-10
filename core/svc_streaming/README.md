@@ -37,7 +37,7 @@ The output codec is chosen in the database and the API, not hard-coded:
 | `streaming_targets` | `protocol` | `rtmp` (also `rtmps://` URLs) `srt` | `rtmp` |
 | `streaming_targets` | `video_codec`, `audio_codec` | as above, or `NULL` = inherit | `NULL` |
 
-(Alembic `0056_streaming_codec_columns`; API: `POST/PUT .../configs`,
+(Alembic `0059_streaming_codec_columns`; API: `POST/PUT .../configs`,
 `POST .../targets`.) The config's codec is the **default encode**: HLS and
 every target without an override use it. An RTMP target with no video
 override uses H.264 (the only codec FLV carries); an SRT target inherits the
