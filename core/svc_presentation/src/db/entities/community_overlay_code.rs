@@ -1,7 +1,7 @@
 //! SeaORM entity over the hub-owned `communities` table, projecting only the
 //! two columns [`crate::overlay::code`] needs to map an unguessable overlay
 //! code to a community: `id` and `overlay_code`
-//! (`alembic/versions/0056_communities_overlay_code.py`).
+//! (`alembic/versions/0057_communities_overlay_code.py`).
 //!
 //! Kept separate from [`super::community`] (`id`/`tenant_id`) on purpose:
 //! SeaORM selects exactly the declared columns, so each lookup asks the

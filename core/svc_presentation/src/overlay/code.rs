@@ -4,7 +4,7 @@
 //! sequential integer id enumerated every community's overlay. They now live at
 //! `/{overlay_code}/{surface}`, where `overlay_code` is a per-community random
 //! 64-bit value rendered as 16 lowercase hex characters
-//! (`communities.overlay_code`, alembic `0056_communities_overlay_code`).
+//! (`communities.overlay_code`, alembic `0057_communities_overlay_code`).
 //!
 //! The code is **only a public path handle**. [`OverlayCodeResolver`] turns it
 //! into the real `community_id` once, at the edge (the guards in

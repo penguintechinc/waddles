@@ -71,7 +71,7 @@ depends on it.)
 Overlay URLs are `/{overlay_code}/{surface}[/live|/live/ws|/push]`, where
 `overlay_code` is the community's **random 64-bit value as 16 lowercase hex
 characters** (`communities.overlay_code`, alembic
-`0056_communities_overlay_code`; CSPRNG-generated, `UNIQUE NOT NULL`, new
+`0057_communities_overlay_code`; CSPRNG-generated, `UNIQUE NOT NULL`, new
 communities get one from the column `DEFAULT`). It replaced the sequential
 integer id (`/overlay/{community_id}/...`), which made every overlay trivially
 enumerable.
@@ -157,7 +157,7 @@ output stays escaped and leak-free. Only the exact value `false` disables it.
 Besides this service's own tables, the service reads (read-only)
 `communities (id, tenant_id)` -- the community -> tenant mapping --
 `communities (id, overlay_code)` -- the overlay code -> community lookup every
-overlay route performs (alembic `0056`; the migration does not issue the GRANT
+overlay route performs (alembic `0057`; the migration does not issue the GRANT
 because per-service role names are provisioned outside Alembic) -- and
 `presentation_config` (theme). A deployment that moves to a dedicated
 `svc-presentation-rw` role must grant `SELECT` on `communities`

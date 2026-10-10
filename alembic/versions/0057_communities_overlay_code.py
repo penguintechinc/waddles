@@ -37,15 +37,15 @@ Operational note: the svc-presentation database role needs `SELECT` on
 This revision does not issue the GRANT because the per-service role names are
 provisioned outside Alembic.
 
-Revision ID: 0056_communities_overlay_code
-Revises: 0052_bundle_identity_resolve
+Revision ID: 0057_communities_overlay_code
+Revises: 0056_economy_idempotency
 Create Date: 2026-10-10
 """
 
 from alembic import op
 
-revision = "0056_communities_overlay_code"
-down_revision = "0052_bundle_identity_resolve"
+revision = "0057_communities_overlay_code"
+down_revision = "0056_economy_idempotency"
 branch_labels = None
 depends_on = None
 

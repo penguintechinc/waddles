@@ -1,5 +1,5 @@
 //! Real-Postgres check of `SeaOrmOverlayCodeResolver` against alembic
-//! `0056_communities_overlay_code`'s schema -- the only test that proves the
+//! `0057_communities_overlay_code`'s schema -- the only test that proves the
 //! SeaORM entity's Rust types agree with the SQL column types (sqlx decodes
 //! strictly: an INT4 `id` read into the wrong width, or a `VARCHAR(16)` into
 //! a non-string, is a runtime error that `MockDatabase` can never surface) and
@@ -8,7 +8,7 @@
 //!
 //! `#[ignore]`d by default because it needs a live database (CI has no
 //! Postgres service for this crate); run it explicitly against a THROWAWAY
-//! database whose `communities` table has migration 0056 applied and holds at
+//! database whose `communities` table has migration 0057 applied and holds at
 //! least one community:
 //!
 //! ```text
@@ -28,7 +28,7 @@ fn env(name: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "needs OVERLAY_CODE_TEST_DATABASE_URL (a throwaway Postgres with alembic 0056 applied)"]
+#[ignore = "needs OVERLAY_CODE_TEST_DATABASE_URL (a throwaway Postgres with alembic 0057 applied)"]
 async fn resolver_round_trips_every_community_against_the_real_schema() {
     let db = Database::connect(env("OVERLAY_CODE_TEST_DATABASE_URL"))
         .await

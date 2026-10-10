@@ -29,7 +29,7 @@
 //!   maps a verified credential's `community_id` to its tenant for
 //!   display-name resolution.
 //! - `communities` again, projected to `id`/`overlay_code` (alembic
-//!   `0056_communities_overlay_code`) -- backs
+//!   `0057_communities_overlay_code`) -- backs
 //!   [`crate::overlay::code::SeaOrmOverlayCodeResolver`], which maps the
 //!   unguessable overlay code in a URL to the real community id.
 

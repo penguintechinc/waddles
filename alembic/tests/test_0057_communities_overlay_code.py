@@ -1,4 +1,4 @@
-"""Tests for 0056_communities_overlay_code (`communities.overlay_code`).
+"""Tests for 0057_communities_overlay_code (`communities.overlay_code`).
 
 The column is the unguessable public handle in svc-presentation overlay URLs
 (`/{overlay_code}/{surface}`), replacing the enumerable integer community id.
@@ -52,7 +52,7 @@ def _load(path: Path) -> ModuleType:
 
 @pytest.fixture
 def migration() -> ModuleType:
-    return _load(_VERSIONS / "0056_communities_overlay_code.py")
+    return _load(_VERSIONS / "0057_communities_overlay_code.py")
 
 
 def _captured_sql(fn_name: str, migration: ModuleType) -> str:
@@ -63,8 +63,8 @@ def _captured_sql(fn_name: str, migration: ModuleType) -> str:
 
 class TestMigrationMetadata:
     def test_revision_ids(self, migration: ModuleType) -> None:
-        assert migration.revision == "0056_communities_overlay_code"
-        assert migration.down_revision == "0052_bundle_identity_resolve"
+        assert migration.revision == "0057_communities_overlay_code"
+        assert migration.down_revision == "0056_economy_idempotency"
 
     def test_revision_id_fits_alembic_version_num_varchar32(
         self, migration: ModuleType
@@ -83,8 +83,8 @@ class TestMigrationMetadata:
             if module.down_revision is not None:
                 down_revisions.append(module.down_revision)
         heads = revisions - set(down_revisions)
-        assert heads == {"0056_communities_overlay_code"}
-        assert down_revisions.count("0052_bundle_identity_resolve") == 1
+        assert heads == {"0057_communities_overlay_code"}
+        assert down_revisions.count("0056_economy_idempotency") == 1
 
 
 class TestEmittedSql:
@@ -150,7 +150,7 @@ def overlay_code_db() -> Iterator[PgTestDatabase]:
     """One bare Postgres 17 container; each test rebuilds its own `communities` table."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    container = "waddles-migtest-0056-overlay-code"
+    container = "waddles-migtest-0057-overlay-code"
     port = _free_port()
     db = PgTestDatabase(
         host="127.0.0.1",
