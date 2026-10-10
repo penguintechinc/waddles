@@ -18,9 +18,10 @@ depends on it.)
 
 ```text
  action-stage adapter / bundle
-        | POST /overlay/{community}/{surface}/push   (PUSH machine JWT)
+        | POST /{overlay_code}/{surface}/push   (PUSH machine JWT)
         v
- overlay_auth PUSH guard --> credential.community_id (verified)
+ PUSH guard: overlay_code --> community_id (communities.overlay_code),
+             then overlay_auth::authorize_push --> credential.community_id (verified)
         |
         |  community_id --> communities.tenant_id + presentation_config theme
         |                   (CommunityContextStore, 60s TTL cache)
@@ -40,7 +41,7 @@ depends on it.)
  GET .../live (SSE)  /  GET .../live/ws (websocket)   (VIEW key)
         |
         v
- GET /overlay/{community}/{surface}?key=...   (the OBS browser-source page)
+ GET /{overlay_code}/{surface}?key=...   (the OBS browser-source page)
         EventSource -> renders the frame as escaped HTML
 ```
 
@@ -65,9 +66,54 @@ depends on it.)
   | Community lookup DB error | Push still published with no tenant (all `Unknown User`) and the default theme; `ERROR` logged; `pushes_total outcome="degraded"` |
   | `image` / `caption` posted to the generic route | `400` (they own dedicated routes; reaching the generic one is a routing regression) |
 
+### Overlay URLs: the unguessable overlay code
+
+Overlay URLs are `/{overlay_code}/{surface}[/live|/live/ws|/push]`, where
+`overlay_code` is the community's **random 64-bit value as 16 lowercase hex
+characters** (`communities.overlay_code`, alembic
+`0056_communities_overlay_code`; CSPRNG-generated, `UNIQUE NOT NULL`, new
+communities get one from the column `DEFAULT`). It replaced the sequential
+integer id (`/overlay/{community_id}/...`), which made every overlay trivially
+enumerable.
+
+```text
+https://<host:port>/a1b2c3d4e5f60718/chat?key=<VIEW key>
+                    \______________/ \__/ \________/
+                     overlay_code   surface  VIEW key (still required)
+```
+
+- **The code is only a public path handle.** The guards
+  (`src/overlay/router.rs`) resolve it to the real `community_id` once, at the
+  edge (`src/overlay/code.rs`, read-only `communities` lookup); every
+  credential, scope, hub channel, tenant lookup and metric stays keyed by that
+  id. The code never appears in logs, spans or metric labels, and the
+  integer id never appears in any URL or response (`ConnectedFrame.community`
+  and the push responses carry the code).
+- **Defense in depth, not a replacement.** The VIEW `?key=` (browser routes) and
+  the PUSH machine JWT scoped to the resolved community are enforced exactly as
+  before; an unguessable URL that leaks still needs them.
+- **Check order** (any failure stops the request): resolve the code (`404` if
+  it is not exactly `[0-9a-f]{16}` or names no community -- an old integer URL
+  such as `/42/chat` or `/overlay/42/chat` lands here, as does a reserved word
+  like `/health/chat`) -> VIEW `?key=` present (`400`) -> credential valid *for
+  that community* (`401`/`403`). A resolver/database failure is a `500`.
+- **The route parameter cannot be regex-constrained in axum**, so the first
+  segment is a plain capture and the guard is the constraint. `/health` and
+  `/readyz` are literal one-segment routes that win on specificity;
+  `/overlay/captions/{key}` and `/ws/captions/{id}` have literal first
+  segments; none of those words is 16 hex characters, so the capture can never
+  serve them (`tests/routing.rs`).
+- **Cache and rotation.** Found mappings are cached `OVERLAY_CODE_CACHE_TTL_SECONDS`
+  (default 30s; absent codes at most 5s; bounded, with random-code probing
+  unable to evict real mappings). That TTL is also the rotation latency: when a
+  code is regenerated (follow-up endpoint) the old URL stops resolving on each
+  replica within one TTL; an already-open stream stays up until it reconnects.
+  Metrics: `svc_presentation_overlay_code_lookups_total{outcome}` and
+  `svc_presentation_overlay_code_lookup_duration_seconds`.
+
 ### Browser pages
 
-`GET /overlay/{community}/{surface}?key=<VIEW key>` serves one static,
+`GET /{overlay_code}/{surface}?key=<VIEW key>` serves one static,
 self-contained page (`src/http/templates/overlay.html`) that opens an
 `EventSource` on the sibling `.../live` URL and renders the stream.
 Optional query params: `max` (chat lines), `ttl` (chat line seconds),
@@ -86,7 +132,7 @@ Optional query params: `max` (chat lines), `ttl` (chat line seconds),
 | `image` | no (404) | fail-loud stub pending the P9 image surface |
 | `caption` | no (404) | has its own page: `/overlay/captions/{key}` |
 
-Page hardening: the document is static (no community id, key or pushed text is
+Page hardening: the document is static (no overlay code, key or pushed text is
 interpolated); its one inline script is allowed by a **`sha256-` CSP hash**
 (no `'unsafe-inline'` scripts); the script has a single `innerHTML` sink fed
 only by `safeHtml()` (which re-escapes any raw `< > " '`, so a server
@@ -108,10 +154,16 @@ output stays escaped and leak-free. Only the exact value `false` disables it.
 
 ### Required database grants
 
-Besides this service's own tables, the push path reads (read-only)
-`communities (id, tenant_id)` -- the community -> tenant mapping -- and
+Besides this service's own tables, the service reads (read-only)
+`communities (id, tenant_id)` -- the community -> tenant mapping --
+`communities (id, overlay_code)` -- the overlay code -> community lookup every
+overlay route performs (alembic `0056`; the migration does not issue the GRANT
+because per-service role names are provisioned outside Alembic) -- and
 `presentation_config` (theme). A deployment that moves to a dedicated
-`svc-presentation-rw` role must grant `SELECT` on both.
+`svc-presentation-rw` role must grant `SELECT` on `communities`
+(`id, tenant_id, overlay_code`) and `presentation_config`. A role missing the
+`overlay_code` grant fails every overlay request with a `500` (logged
+`overlay code lookup failed`), never a silent 404.
 
 ## Scope history
 
@@ -135,7 +187,7 @@ live until the parity cutover.
 |---|---|---|
 | `GET /overlay/captions/{key}?community_id=N` | VIEW key (path) validated *for that community* | Same URL as Python -- existing OBS sources keep working. Static page, no data embedded |
 | `GET /ws/captions/{community_id}?key=` | VIEW key (`?key=`) | Same URL as Python. Replays the last 5 min / 10 captions, then streams live |
-| `POST /overlay/{community}/caption/push` | PUSH machine JWT scoped to the community | **Replaces** `POST /api/v1/internal/captions`: no static `X-Service-Key`, community from the credential never the body, body is `OverlayPush{caption: ...}` |
+| `POST /{overlay_code}/caption/push` | PUSH machine JWT scoped to the community | **Replaces** `POST /api/v1/internal/captions`: no static `X-Service-Key`, community from the credential never the body, body is `OverlayPush{caption: ...}` |
 
 PII: pushes carry a tokenized `user` UUID plus an already-detokenized
 `display_name`; only the UUID is stored (`caption_events.user_ref`), the
@@ -175,6 +227,7 @@ Python caption path and drop the deprecated `caption_events.username` column.
 | `SERVICE_JWT_SA_TOKEN_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Projected SA token the bootstrap reads |
 | `HUB_API_GRPC_CA_FILE` | *(empty = system roots)* | PEM CA that signed hub-api's gRPC cert |
 | `PII_DETOKENIZATION_ENABLED` | *(unset = on)* | `false` = explicit operator escape hatch (see Detokenization at startup) |
+| `OVERLAY_CODE_CACHE_TTL_SECONDS` | `30` | Overlay code -> community cache TTL; also the worst-case delay before a rotated code stops resolving. `0` = no cache |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`/`_PROTOCOL`/`_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | unset | Standard OTLP env config; unset endpoint = tracing-only (no OTLP export attempted) |
 
 All secrets are env-only, never accepted as a CLI flag (`src/config.rs`).
@@ -187,8 +240,11 @@ machine JWTs verified against `PUSH_JWKS_URL` (`overlay_auth`,
 
 - `core/overlay_schema` -- the `Surface` enum, `OverlayPush` wire shape,
   `OverlayEnvelope` SSE/websocket frame.
-- `core/overlay_auth` -- `require_view_credential`/`require_push_credential`
-  axum guards; this crate supplies the concrete
+- `core/overlay_auth` -- `validate_view_token`/`authorize_push` (the VIEW/PUSH
+  checks `src/overlay/router.rs`'s code-resolving guards apply once the
+  overlay code is resolved to a community; its numeric-path
+  `require_view_credential`/`require_push_credential` guards are not used
+  here); this crate supplies the concrete
   `ViewCredentialStore`/`PushTrustSource` implementations
   (`src/overlay/view_store.rs`, `src/overlay/push_trust.rs`).
 - `core/service_auth` -- `JwksTrustBundle`/`TrustBundle` (consumed directly

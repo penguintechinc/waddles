@@ -1,4 +1,4 @@
-//! Integration tests for P6's `POST /overlay/{community}/image/push`
+//! Integration tests for P6's `POST /{overlay_code}/image/push`
 //! handler -- exercised through the real axum `Router`/`Multipart`
 //! extractor against fake `ImageStore`/`AssetStore` backends (the two
 //! genuinely-external dependencies, SeaweedFS + Postgres), not the handler
@@ -186,7 +186,7 @@ fn push_credential(community_id: i64) -> PushCredential {
 
 fn upload_router(state: AppState) -> Router {
     Router::new()
-        .route("/overlay/{community}/image/push", post(upload_image))
+        .route("/{overlay_code}/image/push", post(upload_image))
         .with_state(state)
 }
 
@@ -210,7 +210,7 @@ async fn spoofed_content_type_with_html_payload_is_rejected_with_400() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/overlay/42/image/push")
+                .uri("/a1b2c3d4e5f60718/image/push")
                 .header(
                     "content-type",
                     format!("multipart/form-data; boundary={boundary}"),
@@ -239,7 +239,7 @@ async fn happy_path_upload_stores_the_object_and_the_metadata_row() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/overlay/42/image/push")
+                .uri("/a1b2c3d4e5f60718/image/push")
                 .header(
                     "content-type",
                     format!("multipart/form-data; boundary={boundary}"),
@@ -282,7 +282,7 @@ async fn non_image_content_type_is_rejected_with_400() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/overlay/42/image/push")
+                .uri("/a1b2c3d4e5f60718/image/push")
                 .header(
                     "content-type",
                     format!("multipart/form-data; boundary={boundary}"),
@@ -323,7 +323,7 @@ async fn oversized_upload_is_rejected_with_400() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/overlay/42/image/push")
+                .uri("/a1b2c3d4e5f60718/image/push")
                 .header(
                     "content-type",
                     format!("multipart/form-data; boundary={boundary}"),
@@ -352,7 +352,7 @@ async fn flag_disabled_rejects_with_403_before_touching_any_store() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/overlay/42/image/push")
+                .uri("/a1b2c3d4e5f60718/image/push")
                 .header(
                     "content-type",
                     format!("multipart/form-data; boundary={boundary}"),
@@ -381,7 +381,7 @@ async fn missing_image_store_surfaces_a_clear_500_not_a_panic() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/overlay/42/image/push")
+                .uri("/a1b2c3d4e5f60718/image/push")
                 .header(
                     "content-type",
                     format!("multipart/form-data; boundary={boundary}"),
@@ -426,7 +426,7 @@ async fn display_param_fields_are_parsed_and_stored_and_unknown_fields_are_ignor
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/overlay/42/image/push")
+                .uri("/a1b2c3d4e5f60718/image/push")
                 .header(
                     "content-type",
                     format!("multipart/form-data; boundary={boundary}"),
@@ -464,7 +464,7 @@ async fn image_store_put_failure_surfaces_a_clear_500() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/overlay/42/image/push")
+                .uri("/a1b2c3d4e5f60718/image/push")
                 .header(
                     "content-type",
                     format!("multipart/form-data; boundary={boundary}"),

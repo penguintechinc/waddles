@@ -1,4 +1,4 @@
-//! The browser overlay page: `GET /overlay/{community}/{surface}?key=...`,
+//! The browser overlay page: `GET /{overlay_code}/{surface}?key=...`,
 //! the URL an OBS browser source loads. One static, self-contained HTML
 //! document serves every page-capable surface; it opens an `EventSource` on
 //! the sibling `.../live` route (same `?key=`) and renders the sanitized
@@ -92,10 +92,11 @@ fn build_csp(page: &str) -> Option<String> {
 
 static PAGE_CSP: LazyLock<Option<String>> = LazyLock::new(|| build_csp(OVERLAY_PAGE));
 
-/// `GET /overlay/{community}/{surface}` -- serves the overlay page once the
+/// `GET /{overlay_code}/{surface}` -- serves the overlay page once the
 /// VIEW guard (mounted around this route in [`crate::http::router`]) has
-/// validated `?key=` for this community. The path segments are only used to
-/// pick 404 vs. page; nothing from them is echoed into the response.
+/// resolved the overlay code and validated `?key=` for that community. The
+/// path segments are only used to pick 404 vs. page; nothing from them is
+/// echoed into the response.
 #[tracing::instrument(name = "overlay.page", skip_all)]
 pub async fn page(Path(params): Path<OverlayRouteParams>) -> Result<Response, ApiError> {
     let surface = Surface::ALL
@@ -152,7 +153,7 @@ mod tests {
 
     fn path(surface: &str) -> Path<OverlayRouteParams> {
         Path(OverlayRouteParams {
-            community: "42".to_string(),
+            overlay_code: "a1b2c3d4e5f60718".to_string(),
             surface: surface.to_string(),
         })
     }
@@ -352,6 +353,28 @@ mod tests {
         assert!(script.contains("finiteNumber(frame.current)"));
         assert!(script.contains("finiteNumber(frame.target)"));
         assert!(script.contains("formatAmount(frame.amount)"));
+    }
+
+    /// The script derives the surface from the `/{overlay_code}/{surface}` URL
+    /// it was loaded at (and builds `.../live` from that same path), so it
+    /// must understand the 16-hex overlay code and nothing of the retired
+    /// `/overlay/<integer>/` scheme.
+    #[test]
+    fn the_script_parses_the_overlay_code_url_not_an_integer_id() {
+        let script = strip_block_comments(inline_script(OVERLAY_PAGE).unwrap());
+        assert!(
+            script.contains(r"/\/([0-9a-f]{16})\/([a-z_]+)\/?$/.exec(window.location.pathname)"),
+            "the URL pattern must require a 16-hex overlay code"
+        );
+        assert!(
+            !script.contains("/overlay/"),
+            "retired URL scheme in the page"
+        );
+        assert!(
+            !script.contains("[0-9]+"),
+            "an integer community id is not a URL part"
+        );
+        assert!(script.contains(r"window.location.pathname.replace(/\/+$/, '') + '/live'"));
     }
 
     #[test]

@@ -374,7 +374,7 @@ pub fn register_caption_metrics(registry: &prometheus::Registry) -> CaptionMetri
     }
 }
 
-/// Metrics for the generic overlay push route (`POST /overlay/{community}/
+/// Metrics for the generic overlay push route (`POST /{overlay_code}/
 /// {surface}/push`): the end-to-end resolve + render + publish path.
 /// Labels are closed sets only (`surface`, `outcome`) -- never a community id,
 /// user reference or push text. Histogram first, per
@@ -425,6 +425,56 @@ pub fn register_push_metrics(registry: &prometheus::Registry) -> PushMetrics {
     }
 }
 
+/// Metrics for the overlay-code -> community lookup every overlay route
+/// performs ([`crate::overlay::code`]). Labels are closed sets only -- never
+/// the code itself (a capability-like URL secret) or a community id.
+#[derive(Clone)]
+pub struct OverlayCodeMetrics {
+    /// Lookups, labeled `outcome` = `malformed` (not `[0-9a-f]{16}`; rejected
+    /// without touching the cache or database), `cache_hit` (a live cached
+    /// mapping), `db_found`, `db_absent` (well-formed but no such community --
+    /// a stale or guessed code), or `db_error` (the lookup itself failed).
+    pub lookups_total: prometheus::IntCounterVec,
+    /// Database lookup latency (cache misses only).
+    pub lookup_duration_seconds: prometheus::Histogram,
+}
+
+/// Registers [`OverlayCodeMetrics`] against `registry`. Must be called
+/// exactly once per registry.
+pub fn register_overlay_code_metrics(registry: &prometheus::Registry) -> OverlayCodeMetrics {
+    let lookups_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_overlay_code_lookups_total",
+            "Overlay code lookups, labeled by outcome \
+             (malformed/cache_hit/db_found/db_absent/db_error)",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(lookups_total.clone()))
+        .expect("register svc_presentation_overlay_code_lookups_total");
+
+    let lookup_duration_seconds = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_overlay_code_lookup_duration_seconds",
+            "Database latency of an overlay code -> community lookup (cache misses only)",
+        )
+        .buckets(vec![
+            0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+        ]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(lookup_duration_seconds.clone()))
+        .expect("register svc_presentation_overlay_code_lookup_duration_seconds");
+
+    OverlayCodeMetrics {
+        lookups_total,
+        lookup_duration_seconds,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +518,17 @@ mod tests {
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_presentation_overlay_pushes_total"));
         assert!(rendered.contains("svc_presentation_overlay_push_duration_seconds"));
+    }
+
+    #[test]
+    fn register_overlay_code_metrics_exposes_the_counter_and_histogram() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_overlay_code_metrics(&registry);
+        metrics.lookups_total.with_label_values(&["db_found"]).inc();
+        metrics.lookup_duration_seconds.observe(0.003);
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_overlay_code_lookups_total"));
+        assert!(rendered.contains("svc_presentation_overlay_code_lookup_duration_seconds"));
     }
 
     #[test]

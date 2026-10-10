@@ -47,6 +47,12 @@
 //! either credential -- see [`view::require_view_credential`] and
 //! [`push::require_push_credential`] for the Axum middleware shape each
 //! wires in.
+//!
+//! The two middleware functions parse a numeric `{community}` path segment.
+//! A service that addresses communities some other way (svc-presentation maps
+//! an unguessable overlay code to the id first) resolves the id itself and
+//! calls the checks they are built from: [`view::validate_view_token`] and
+//! [`push::authorize_push`] -- the same verification, no re-implementation.
 
 pub mod error;
 pub mod push;
@@ -55,7 +61,8 @@ pub mod view;
 
 pub use error::OverlayAuthError;
 pub use push::{
-    push_scope, require_push_credential, PushCredential, PushTrustSource, OVERLAY_PUSH_SCOPE_PREFIX,
+    authorize_push, push_scope, require_push_credential, PushCredential, PushTrustSource,
+    OVERLAY_PUSH_SCOPE_PREFIX,
 };
 pub use token::{generate_view_token, hash_token};
 pub use view::{

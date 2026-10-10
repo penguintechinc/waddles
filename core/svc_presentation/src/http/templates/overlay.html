@@ -185,7 +185,7 @@ function formatAmount(amount) {
 }
 
 var params = new URLSearchParams(window.location.search);
-var match = /\/overlay\/([0-9]+)\/([a-z_]+)\/?$/.exec(window.location.pathname);
+var match = /\/([0-9a-f]{16})\/([a-z_]+)\/?$/.exec(window.location.pathname);
 var surface = match ? match[2] : null;
 
 /* ---- per-surface renderers: each takes one sanitized frame ---- */
