@@ -2775,6 +2775,14 @@ serviceJwt:
         # ResolveDisplayNames call would 403 even with a working connection.
         - "identity:displayname:read"
         - "egress:connect"
+    # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
+    # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
+    # pseudonyms or calls egress, so exactly one scope.
+    svc-presentation:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-presentation"
+      serviceAccount: svc-presentation
+      allowedScopes:
+        - "identity:displayname:read"
     # svc-ingest isn't in this Rust-data-plane identities map yet (still
     # legacy/Python) but is one of egressProxy.allowedCallerServices --
     # add its identity+`egress:connect` scope here once it mints machine

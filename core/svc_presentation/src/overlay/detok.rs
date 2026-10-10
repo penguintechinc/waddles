@@ -228,7 +228,8 @@ impl DetokScope {
 pub struct DetokMetrics {
     /// Resolve round-trips, labeled `outcome` = `ok` (every token
     /// resolved), `partial` (some unresolved), `unavailable` (hub-api
-    /// error, timeout, or an unusable scope).
+    /// error, timeout, or an unusable scope), `disabled` (the operator
+    /// switched detokenization off; nothing was asked of hub-api).
     pub resolutions_total: IntCounterVec,
     /// Wall-clock duration of the hub-api resolve round-trip.
     pub resolve_duration_seconds: Histogram,
@@ -356,6 +357,41 @@ pub struct OverlayDetokenizer {
     resolver: Arc<dyn DisplayNameResolver>,
     metrics: Option<DetokMetrics>,
     timeout: Duration,
+    /// `true` only for the operator escape hatch ([`Self::disabled`]):
+    /// resolution is skipped entirely and every token renders as the
+    /// neutral label.
+    disabled: bool,
+}
+
+/// The [`DisplayNameResolver`] of a process that never had a hub-api
+/// connection configured: every call fails with
+/// [`egress_detokenizer::DetokenizeError::ResolutionUnavailable`], so each
+/// push logs an `ERROR`, bumps the `unavailable` outcome, and renders the
+/// neutral label -- loud, and still never a leaked token. Production startup
+/// never leaves a service in this state (it either connects a hub client or
+/// is explicitly [`OverlayDetokenizer::disabled`]); this is what a bare
+/// `AppState::new` holds until one of those replaces it.
+pub struct UnconfiguredResolver;
+
+impl DisplayNameResolver for UnconfiguredResolver {
+    fn resolve_many<'a>(
+        &'a self,
+        _tenant_id: &'a str,
+        _tokens: Vec<String>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<HashMap<String, String>, egress_detokenizer::DetokenizeError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Err(egress_detokenizer::DetokenizeError::ResolutionUnavailable(
+                "hub-api display-name resolution is not configured".to_string(),
+            ))
+        })
+    }
 }
 
 impl OverlayDetokenizer {
@@ -366,7 +402,30 @@ impl OverlayDetokenizer {
             resolver,
             metrics: None,
             timeout: DEFAULT_RESOLVE_TIMEOUT,
+            disabled: false,
         }
+    }
+
+    /// A detokenizer with no hub-api connection configured: see
+    /// [`UnconfiguredResolver`] -- fails loud on every push, never leaks.
+    pub fn unconfigured() -> Self {
+        Self::new(Arc::new(UnconfiguredResolver))
+    }
+
+    /// The explicit operator escape hatch (`PII_DETOKENIZATION_ENABLED=false`):
+    /// never calls hub-api; every `{user:<uuid>}` and every `user` field
+    /// renders as [`NEUTRAL_LABEL`]. Output is still HTML-escaped and leak-free
+    /// -- only name resolution is off.
+    pub fn disabled() -> Self {
+        Self {
+            disabled: true,
+            ..Self::unconfigured()
+        }
+    }
+
+    /// `true` for a [`Self::disabled`] detokenizer.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
     }
 
     /// Production constructor: resolves through hub-api's
@@ -418,6 +477,15 @@ impl OverlayDetokenizer {
             tokens.truncate(MAX_TOKENS_PER_PUSH);
         }
         tracing::Span::current().record("token_count", tokens.len());
+
+        if self.disabled {
+            tracing::debug!(
+                token_count = tokens.len(),
+                "overlay detokenization is disabled by the operator; rendering the neutral label"
+            );
+            self.record_outcome("disabled", tokens.len(), None);
+            return ResolvedNames::default();
+        }
 
         if scope.tenant_id.trim().is_empty() {
             // Fail closed: never ask hub-api to resolve without a tenant.
@@ -1252,10 +1320,13 @@ mod tests {
     async fn every_rendered_field_is_resolved_escaped_and_leak_free() {
         for surface in sanitized_surfaces() {
             let (d, _) = detokenizer(FakeResolver::with(&[(USER_A, "Al<i>ce"), (USER_B, "Bob")]));
-            let frame = d
+            let rendered = d
                 .render(&scope(), surface, &hostile_push(surface), &theme())
-                .await
-                .unwrap_or_else(|e| panic!("{surface} should render: {e}"));
+                .await;
+            let frame = match rendered {
+                Ok(frame) => frame,
+                Err(e) => panic!("{surface} should render: {e}"),
+            };
             let json = rendered_json(&frame);
             assert!(
                 !json.contains("<script"),
@@ -1304,6 +1375,66 @@ mod tests {
             );
             assert!(!json.contains("{user:"), "{surface}: {json}");
         }
+    }
+
+    /// regression: an unconfigured detokenizer (no hub-api connection) is
+    /// loud (an ERROR + the `unavailable` outcome per push) and leak-free,
+    /// never a silent "worked".
+    #[tokio::test]
+    async fn an_unconfigured_detokenizer_fails_loud_and_leaks_nothing() {
+        let registry = prometheus::Registry::new();
+        let d = OverlayDetokenizer::unconfigured().with_metrics(register_detok_metrics(&registry));
+        assert!(!d.is_disabled());
+        for surface in sanitized_surfaces() {
+            let frame = match d
+                .render(&scope(), surface, &hostile_push(surface), &theme())
+                .await
+            {
+                Ok(frame) => frame,
+                Err(e) => panic!("{surface} should render: {e}"),
+            };
+            let json = rendered_json(&frame);
+            assert!(!json.contains("<script"), "{surface}: {json}");
+            assert!(
+                !json.contains(USER_A) && !json.contains(USER_B),
+                "{surface}: {json}"
+            );
+            assert!(!json.contains("{user:"), "{surface}: {json}");
+        }
+        let rendered = crate::telemetry::render_metrics(&registry).unwrap();
+        assert!(
+            rendered.contains(r#"outcome="unavailable""#),
+            "an unconfigured resolver must count as unavailable: {rendered}"
+        );
+    }
+
+    /// The operator escape hatch never touches hub-api, still escapes, and
+    /// is counted under its own outcome.
+    #[tokio::test]
+    async fn a_disabled_detokenizer_never_calls_hub_api_but_still_sanitizes() {
+        let resolver = Arc::new(FakeResolver::with(&[(USER_A, "Alice")]));
+        let registry = prometheus::Registry::new();
+        let d = OverlayDetokenizer {
+            disabled: true,
+            ..OverlayDetokenizer::new(resolver.clone())
+        }
+        .with_metrics(register_detok_metrics(&registry));
+        assert!(d.is_disabled());
+        assert!(OverlayDetokenizer::disabled().is_disabled());
+
+        let push = hostile_push(Surface::Chat);
+        let frame = match d.render(&scope(), Surface::Chat, &push, &theme()).await {
+            Ok(frame) => frame,
+            Err(e) => panic!("chat should render: {e}"),
+        };
+        let json = rendered_json(&frame);
+        assert_eq!(resolver.call_count(), 0, "disabled must not call hub-api");
+        assert!(!json.contains("Alice"), "{json}");
+        assert!(!json.contains("<script"), "{json}");
+        assert!(!json.contains(USER_A) && !json.contains(USER_B), "{json}");
+        assert!(json.contains(NEUTRAL_LABEL), "{json}");
+        let rendered = crate::telemetry::render_metrics(&registry).unwrap();
+        assert!(rendered.contains(r#"outcome="disabled""#), "{rendered}");
     }
 
     #[test]

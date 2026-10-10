@@ -374,6 +374,57 @@ pub fn register_caption_metrics(registry: &prometheus::Registry) -> CaptionMetri
     }
 }
 
+/// Metrics for the generic overlay push route (`POST /overlay/{community}/
+/// {surface}/push`): the end-to-end resolve + render + publish path.
+/// Labels are closed sets only (`surface`, `outcome`) -- never a community id,
+/// user reference or push text. Histogram first, per
+/// `rules/critical-rules.md` Observability.
+#[derive(Clone)]
+pub struct PushMetrics {
+    /// Pushes handled, labeled `surface` and `outcome` = `published`
+    /// (rendered and fanned out), `rejected` (the surface's renderer refused
+    /// the push -- a caller error), or `degraded` (published, but the
+    /// community context was unavailable so every user rendered as the
+    /// neutral label).
+    pub pushes_total: prometheus::IntCounterVec,
+    /// End-to-end push handling time: community-context lookup, display-name
+    /// resolution, render, publish.
+    pub push_duration_seconds: prometheus::HistogramVec,
+}
+
+/// Registers [`PushMetrics`] against `registry`. Must be called exactly once
+/// per `registry` -- see [`crate::http::AppState::new`].
+pub fn register_push_metrics(registry: &prometheus::Registry) -> PushMetrics {
+    let pushes_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_overlay_pushes_total",
+            "Overlay pushes handled, labeled by surface and outcome (published/rejected/degraded)",
+        ),
+        &["surface", "outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(pushes_total.clone()))
+        .expect("register svc_presentation_overlay_pushes_total");
+
+    let push_duration_seconds = prometheus::HistogramVec::new(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_overlay_push_duration_seconds",
+            "End-to-end overlay push handling time (context lookup, detokenize, render, publish), by surface",
+        ),
+        &["surface"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(push_duration_seconds.clone()))
+        .expect("register svc_presentation_overlay_push_duration_seconds");
+
+    PushMetrics {
+        pushes_total,
+        push_duration_seconds,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +451,23 @@ mod tests {
         assert!(rendered.contains("svc_presentation_up 1"));
         assert!(rendered.contains("svc_presentation_http_requests_total"));
         assert!(rendered.contains("svc_presentation_http_request_duration_seconds"));
+    }
+
+    #[test]
+    fn register_push_metrics_exposes_the_counter_and_histogram() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_push_metrics(&registry);
+        metrics
+            .pushes_total
+            .with_label_values(&["chat", "published"])
+            .inc();
+        metrics
+            .push_duration_seconds
+            .with_label_values(&["chat"])
+            .observe(0.002);
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_overlay_pushes_total"));
+        assert!(rendered.contains("svc_presentation_overlay_push_duration_seconds"));
     }
 
     #[test]

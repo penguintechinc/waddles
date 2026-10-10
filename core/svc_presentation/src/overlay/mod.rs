@@ -8,8 +8,14 @@
 //! (websocket), `POST .../push` -- behind [`router::with_view_guard`]/
 //! [`router::with_push_guard`], consuming [`hub::PresentationHub`]
 //! directly rather than any route in this module.
+//!
+//! The push route renders before it publishes: [`community_ctx`] supplies the
+//! credential-derived tenant + theme, [`detok::OverlayDetokenizer`] resolves
+//! and HTML-escapes the push through the per-surface [`render`]ers, and only
+//! the sanitized [`render::RenderedFrame`] is fanned out.
 
 pub mod caption_store;
+pub mod community_ctx;
 pub mod detok;
 pub mod hub;
 pub mod push_trust;
@@ -18,6 +24,7 @@ pub mod router;
 pub mod view_store;
 
 pub use caption_store::{CaptionStore, SeaOrmCaptionStore};
+pub use community_ctx::{CommunityContextStore, SeaOrmCommunityContextStore};
 pub use hub::PresentationHub;
 pub use push_trust::AppPushTrustSource;
 pub use view_store::SeaOrmViewCredentialStore;

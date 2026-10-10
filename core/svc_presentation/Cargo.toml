@@ -120,6 +120,11 @@ async-trait = "=0.1.89"
 # hashes bytes already uses (`core/overlay_auth`, `core/bundle_executor`,
 # ...).
 sha2 = "=0.10.9"
+# Base64 of the overlay page's inline-script SHA-256 for its CSP `sha256-`
+# source (`http::overlay_page`). Already in this crate's resolved graph
+# (axum/tonic/object_store use 0.22.1), so declaring it adds a dependency
+# edge, not a package.
+base64 = "=0.22.1"
 # `object_store::signer::Signer::signed_url` returns a `url::Url` --
 # already resolved at this exact version transitively (`core/svc_streaming`,
 # `core/bundle_active_set`); declared directly so `crate::images::render`'s

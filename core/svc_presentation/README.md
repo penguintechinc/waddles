@@ -10,20 +10,115 @@ top of this skeleton; both builds coexist in-tree during the transition
 (see `src/lib.rs` module doc, same precedent as `core/svc_streaming`
 issue #287).
 
-## P1 Scope (this scaffold)
+## Live Overlay Pipeline (push -> render -> fan-out -> browser)
 
-Config, telemetry (tracing + OTel + Prometheus), the database connection,
-SeaORM entities for this service's three tables, and the `overlay_auth`
-VIEW/PUSH axum guards mounted on route-less sub-routers. **No render,
-live-channel, or push handlers exist yet** -- `/overlay/*` 404s today,
-honestly, rather than serving a stub. See `src/overlay/router.rs`'s module
-doc for the exact extension points later chunks add routes to:
+The built-in, native-renderer path. (The WASM presentation-host capability
+for bundle-authored overlays is a separate, future build -- nothing here
+depends on it.)
 
-| Chunk | Adds | Extension point |
+```text
+ action-stage adapter / bundle
+        | POST /overlay/{community}/{surface}/push   (PUSH machine JWT)
+        v
+ overlay_auth PUSH guard --> credential.community_id (verified)
+        |
+        |  community_id --> communities.tenant_id + presentation_config theme
+        |                   (CommunityContextStore, 60s TTL cache)
+        v
+ OverlayDetokenizer::render_with_metrics
+        |   1. resolve every {user:<uuid>} / user field -> hub-api display names
+        |      (one batched, tenant-scoped ResolveDisplayNames call)
+        |   2. per-surface renderer: HTML-escape every free-text field,
+        |      substitute names, validate image_url
+        v
+ RenderedFrame  (flat JSON, tagged by content_type)  -- nothing raw survives
+        |
+        v
+ AppState::frame_hub : PresentationHub<RenderedFrame>
+        |  per (community, surface) broadcast channel
+        v
+ GET .../live (SSE)  /  GET .../live/ws (websocket)   (VIEW key)
+        |
+        v
+ GET /overlay/{community}/{surface}?key=...   (the OBS browser-source page)
+        EventSource -> renders the frame as escaped HTML
+```
+
+- **Render before publish.** The push handler never forwards the caller's
+  body. `AppState::frame_hub` only ever carries `RenderedFrame`s, and the
+  `/live` routes only subscribe to it, so a browser cannot receive a raw
+  `{user:<uuid>}`, a user UUID or unescaped markup through this service. The
+  type system enforces it: the hub the live routes read is
+  `PresentationHub<RenderedFrame>`, not `PresentationHub<OverlayPush>`.
+  (`AppState::hub`, the raw `OverlayPush` hub, is owned by the caption
+  pipeline alone.)
+- **Tenant comes from the verified community.** A PUSH JWT proves only
+  `community_id`; the tenant hub-api scopes name resolution by is derived from
+  it (`communities.tenant_id`), never from a request body or path.
+- **Failure modes** (all loud, none leak):
+
+  | Condition | Result |
+  |---|---|
+  | Renderer rejects the push (empty, missing field, bad `image_url`) | `400` to the pusher, nothing published, `outcome="rejected"` |
+  | Unknown community | `404`, nothing published |
+  | hub-api down / circuit open / timeout | Push still published; every user renders `Unknown User`; `ERROR` logged; `detok ... outcome="unavailable"` |
+  | Community lookup DB error | Push still published with no tenant (all `Unknown User`) and the default theme; `ERROR` logged; `pushes_total outcome="degraded"` |
+  | `image` / `caption` posted to the generic route | `400` (they own dedicated routes; reaching the generic one is a routing regression) |
+
+### Browser pages
+
+`GET /overlay/{community}/{surface}?key=<VIEW key>` serves one static,
+self-contained page (`src/http/templates/overlay.html`) that opens an
+`EventSource` on the sibling `.../live` URL and renders the stream.
+Optional query params: `max` (chat lines), `ttl` (chat line seconds),
+`duration` (alert ms), `speed` (crawler seconds).
+
+| Surface | Browser page | Rendering |
 |---|---|---|
-| P2 | `GET /overlay/{community}/{surface}` render | `src/overlay/router.rs::view_guarded_router` |
-| P3 | `GET /overlay/{community}/{surface}/live` SSE/websocket | `src/overlay/router.rs::view_guarded_router` |
-| P4 | `POST /overlay/{community}/{surface}/push` | `src/overlay/router.rs::push_guarded_router` |
+| `alert_box` | yes | queued cards: type, resolved name, amount, message |
+| `chat` | yes | rolling lines: platform, resolved author, text |
+| `goals` | yes | label, `current / target unit`, progress bar |
+| `ticker` | yes | static bottom tape |
+| `crawler` | yes | scrolling bottom tape |
+| `full_screen` | yes | title / body / validated `image_url`; `clear` hides |
+| `media` | yes | same, corner card |
+| `music` | no (404) | poll-driven Music Station; no push-derived text |
+| `image` | no (404) | fail-loud stub pending the P9 image surface |
+| `caption` | no (404) | has its own page: `/overlay/captions/{key}` |
+
+Page hardening: the document is static (no community id, key or pushed text is
+interpolated); its one inline script is allowed by a **`sha256-` CSP hash**
+(no `'unsafe-inline'` scripts); the script has a single `innerHTML` sink fed
+only by `safeHtml()` (which re-escapes any raw `< > " '`, so a server
+regression degrades to visible text, never markup); `image_url` reaches
+`img.src` only after an `http(s)` check; `Cache-Control: no-store` and
+`Referrer-Policy: no-referrer` because the URL carries the VIEW key.
+`tests/overlay_render.rs` drives the real router + guards end to end, and
+`src/http/overlay_page.rs`'s tests pin the sink discipline.
+
+### Detokenization at startup
+
+Detokenization is **on by default and fail-loud**: with `HUB_API_GRPC_ENDPOINT`
+or `SERVICE_JWT_TOKEN_ENDPOINT` unset, or hub-api unreachable at startup, the
+process exits non-zero rather than serving `Unknown User` to every viewer.
+`PII_DETOKENIZATION_ENABLED=false` is the explicit, loudly logged operator
+escape hatch (dev / air-gapped / alpha with no hub-api gRPC yet): no hub client
+is created, no name is ever resolved, every user renders `Unknown User`, and
+output stays escaped and leak-free. Only the exact value `false` disables it.
+
+### Required database grants
+
+Besides this service's own tables, the push path reads (read-only)
+`communities (id, tenant_id)` -- the community -> tenant mapping -- and
+`presentation_config` (theme). A deployment that moves to a dedicated
+`svc-presentation-rw` role must grant `SELECT` on both.
+
+## Scope history
+
+P1 delivered config, telemetry, the database connection, the SeaORM
+entities and the `overlay_auth` guards; P2-P4 added the per-surface
+renderers, the live SSE/websocket channel and the push route; P6/P9 the image
+upload/render path. The live pipeline above is what ties them together.
 
 ## Captions (port of `core/browser_source_core_module`)
 
@@ -58,7 +153,7 @@ Python caption path and drop the deprecated `caption_events.username` column.
 
 | Port | Protocol | Purpose |
 |---|---|---|
-| 8207 | HTTP | Control plane: `/health`, `/readyz`; overlay-auth-guarded sub-routers (route-less until P2-P4) |
+| 8207 | HTTP | Control plane: `/health`, `/readyz`; overlay page, `.../live`, `.../live/ws`, `.../push`; image upload; captions |
 | 9090 | HTTP | Prometheus `/metrics` (secondary scrape surface, separate listener) |
 
 ## Environment
@@ -75,6 +170,11 @@ Python caption path and drop the deprecated `caption_events.username` column.
 | `PUSH_JWKS_URL` | `http://hub-api/.well-known/jwks.json` | hub-api's JWKS endpoint -- verifies PUSH credentials |
 | `PUSH_AUDIENCE` | `waddlebot-internal` | Expected `aud` claim on a PUSH credential |
 | `PUSH_TRUSTED_ISSUER` | `hub-api` | Expected `iss` claim on a PUSH credential |
+| `HUB_API_GRPC_ENDPOINT` | *(required unless detok disabled)* | hub-api internal gRPC, e.g. `https://waddlebot-hub-api-v3:50204` -- overlay display-name resolution |
+| `SERVICE_JWT_TOKEN_ENDPOINT` | *(required unless detok disabled)* | hub-api machine-JWT bootstrap (`POST /internal/service-token`) |
+| `SERVICE_JWT_SA_TOKEN_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Projected SA token the bootstrap reads |
+| `HUB_API_GRPC_CA_FILE` | *(empty = system roots)* | PEM CA that signed hub-api's gRPC cert |
+| `PII_DETOKENIZATION_ENABLED` | *(unset = on)* | `false` = explicit operator escape hatch (see Detokenization at startup) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`/`_PROTOCOL`/`_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | unset | Standard OTLP env config; unset endpoint = tracing-only (no OTLP export attempted) |
 
 All secrets are env-only, never accepted as a CLI flag (`src/config.rs`).
@@ -132,12 +232,28 @@ sink of the same outbound pass `core/egress_detokenizer` runs for chat.
 - **No PII in logs/metrics:** nothing logs a UUID, token, name or push text
   (`detokenize_resolving` is deliberately not used -- it logs unresolved
   token values). `ResolvedNames`'s `Debug` prints the entry count only.
-- **Metrics:** `svc_presentation_overlay_detok_resolutions_total{outcome}`,
-  `..._detok_resolve_duration_seconds`, `..._detok_unresolved_tokens_total`
-  (`register_detok_metrics`); trace span `overlay.detok.resolve`.
+- **Metrics:** `svc_presentation_overlay_detok_resolutions_total{outcome}`
+  (`ok`/`partial`/`unavailable`/`disabled`), `..._detok_resolve_duration_seconds`,
+  `..._detok_unresolved_tokens_total` (`register_detok_metrics`); trace span
+  `overlay.detok.resolve`. The push route adds
+  `svc_presentation_overlay_pushes_total{surface,outcome}`
+  (`published`/`rejected`/`degraded`), `..._push_duration_seconds{surface}`,
+  and the per-surface `..._renders_total`/`..._render_duration_seconds`.
 - **Clients must treat these strings as HTML**, not `textContent`: the
   legacy Python `render.py` page used `textContent` and would show `&lt;`
-  literally for escaped output.
+  literally for escaped output. The shipped browser page does (see Browser
+  pages); the caption page is the one deliberate `textContent`-only client.
+
+### Known gaps
+
+- `caption` is not detokenization-aware: its renderer emits unescaped text for
+  its `textContent`-only page and still carries the `user` UUID and the
+  caller's `display_name`. It never reaches `frame_hub`, so the generic
+  live routes cannot leak it, but it needs a plain-text resolve-only variant.
+- Browser pages for `music` and `image`, and the overlay designer UI, are not
+  built here.
+- The WASM presentation host (bundle-authored overlay widgets) is a separate
+  future build; this README describes the built-in native-renderer path only.
 
 `OverlayDetokenizer::render`/`render_with_metrics` are the entry points a
 push route calls instead of `render::render` directly. **Not yet wired:** the
