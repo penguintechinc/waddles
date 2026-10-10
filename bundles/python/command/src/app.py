@@ -135,7 +135,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     Fails closed -- see module docstring.
     """
     payload = event.payload
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 def _normalize_name(token: str) -> str | None:

@@ -21,7 +21,11 @@ global:
   # Image tag to deploy (e.g., "latest", commit SHA, or version tag)
   imageTag: "latest"
 
-  # Image pull policy
+  # Image pull policy -- applied to EVERY workload container (hub-api, svc-*-rust,
+  # bundle-executor included; no template hardcodes a policy). IfNotPresent is correct
+  # given unique per-deploy global.imageTag values; and mandatory for locally-loaded images
+  # (kind e2e, alpha local builds), where Always forces a registry pull the node cannot
+  # satisfy. Override to Always per-env only for a mutable tag.
   imagePullPolicy: IfNotPresent
 
   # Secrets for pulling from private registries (if needed)
@@ -2828,6 +2832,13 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "identity:ephemeral:mint"
+        # bundle `identity` host capability (stage-next) -- svc-process resolves
+        # a free-text @handle mention through IdentityService.ResolveHandle
+        # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES) with a second,
+        # single-scope hub_client. Without this entry hub-api's token endpoint
+        # rejects the scope and handle mentions are `unavailable` (fail-closed);
+        # the actor and <@id> mentions never call hub-api.
+        - "identity:handle:resolve"
         # feature/egress-proxy-service -- required to call core/egress_proxy
         # for any bundle net.http/CONNECT egress.
         - "egress:connect"

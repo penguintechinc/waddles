@@ -45,9 +45,9 @@ spec:
       containers:
       - name: svc-presentation
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.presentation.rust.imageRepository | default "svc-presentation-rust") "imageTag" .Values.global.imageTag) }}"
-        # Always -- per-commit tag pushed to the local registry; same node-image-cache
-        # rationale as templates/svc-action-rust.yaml.
-        imagePullPolicy: Always
+        # Values-driven -- per-commit tag, so the old hardcoded Always is unnecessary (and
+        # fatal for locally-loaded images); see templates/svc-process-rust.yaml's comment.
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
         # Pinned to the Rust image's own `appuser` (uid 10001, Dockerfile.rust), not the
         # chart-wide uid 1000 -- same pattern as svc-action-rust/svc-streaming.
         securityContext:

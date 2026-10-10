@@ -130,6 +130,14 @@ impl QuotaLedger for InMemoryQuotaLedger {
                 *per_scope_daily_abs_max,
                 QuotaDenial::QuotaExceeded,
             ),
+            Quota::EconomyAmount {
+                per_scope_daily_abs_max,
+                ..
+            } => (
+                Duration::from_secs(24 * 60 * 60),
+                *per_scope_daily_abs_max,
+                QuotaDenial::QuotaExceeded,
+            ),
         };
 
         let mut windows = self.scope_windows.lock().expect("lock poisoned");

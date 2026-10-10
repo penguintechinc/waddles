@@ -274,6 +274,95 @@ components:
       - createdAt
       title: AuditEntryDTO
       type: object
+    AuditEventDTO:
+      description: One audit record, including the hashes an auditor needs to re-verify
+        it offline.
+      properties:
+        action:
+          title: Action
+          type: string
+        actor_kind:
+          title: Actor Kind
+          type: string
+        actor_uuid:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Actor Uuid
+        category:
+          title: Category
+          type: string
+        details:
+          additionalProperties: true
+          title: Details
+          type: object
+        event_id:
+          title: Event Id
+          type: string
+        hash_version:
+          title: Hash Version
+          type: string
+        occurred_at:
+          title: Occurred At
+          type: string
+        outcome:
+          title: Outcome
+          type: string
+        prev_hash:
+          title: Prev Hash
+          type: string
+        record_hash:
+          title: Record Hash
+          type: string
+        seq:
+          title: Seq
+          type: integer
+        target_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target Id
+        target_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target Type
+      required:
+      - seq
+      - event_id
+      - occurred_at
+      - actor_uuid
+      - actor_kind
+      - category
+      - action
+      - outcome
+      - target_type
+      - target_id
+      - details
+      - prev_hash
+      - record_hash
+      - hash_version
+      title: AuditEventDTO
+      type: object
+    AuditHeadDTO:
+      description: The newest record of a chain -- pin this off-box to make tail truncation
+        detectable.
+      properties:
+        occurred_at:
+          title: Occurred At
+          type: string
+        record_hash:
+          title: Record Hash
+          type: string
+        seq:
+          title: Seq
+          type: integer
+      required:
+      - seq
+      - record_hash
+      - occurred_at
+      title: AuditHeadDTO
+      type: object
     AvailabilityDTO:
       description: 'Response DTO: one `app_tenant_availability` row, joined to its
         `app_catalog` metadata.'
@@ -673,6 +762,26 @@ components:
       - category
       - count
       title: CategoryEntry
+      type: object
+    ChainBreakDTO:
+      description: The first inconsistency found by a verification.
+      properties:
+        detail:
+          title: Detail
+          type: string
+        reason:
+          title: Reason
+          type: string
+        seq:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Seq
+      required:
+      - seq
+      - reason
+      - detail
+      title: ChainBreakDTO
       type: object
     ChatChannel:
       description: One distinct chat channel with aggregate activity, for the channel
@@ -1492,6 +1601,55 @@ components:
       - version
       - timestamp
       title: DistributionMetaDTO
+      type: object
+    ExportManifestDTO:
+      description: What an offline verifier needs to check an export slice (``make
+        verify-audit-export``).
+      properties:
+        count:
+          title: Count
+          type: integer
+        exported_at:
+          title: Exported At
+          type: string
+        first_prev_hash:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: First Prev Hash
+        first_seq:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: First Seq
+        has_more:
+          title: Has More
+          type: boolean
+        last_hash:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Hash
+        last_seq:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Last Seq
+        next_after_seq:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Next After Seq
+      required:
+      - count
+      - first_seq
+      - last_seq
+      - first_prev_hash
+      - last_hash
+      - has_more
+      - next_after_seq
+      - exported_at
+      title: ExportManifestDTO
       type: object
     GlobalInstallDTO:
       description: 'Response DTO: one `app_global_installs` row.'
@@ -14360,6 +14518,276 @@ paths:
                 type: object
           description: Response DTO for `GET .../streams/<entityId>`.
       summary: Get details for a specific stream.
+  /api/v1/compliance/audit/events:
+    get:
+      description: ''
+      operationId: get_list_events
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET /events` -- newest-first page of the caller''s
+                  chain.'
+                properties:
+                  chain_id:
+                    title: Chain Id
+                    type: string
+                  events:
+                    items:
+                      $ref: '#/components/schemas/AuditEventDTO'
+                    title: Events
+                    type: array
+                  pagination:
+                    $ref: '#/components/schemas/PaginationDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - chain_id
+                - events
+                - pagination
+                title: AuditEventsResponse
+                type: object
+          description: '`GET /events` -- newest-first page of the caller''s chain.'
+      summary: '`GET /api/v1/compliance/audit/events` -- filter by category/action/outcome/actor/time.'
+  /api/v1/compliance/audit/export:
+    get:
+      description: '
+
+        Page with ``after_seq`` (the previous manifest''s ``next_after_seq``). The
+        export event is
+
+        recorded first; if that fails nothing is returned.'
+      operationId: get_export_chain
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET /export` -- an ascending slice of the chain plus
+                  its verification manifest.'
+                properties:
+                  chain_id:
+                    title: Chain Id
+                    type: string
+                  hash_version:
+                    title: Hash Version
+                    type: string
+                  manifest:
+                    $ref: '#/components/schemas/ExportManifestDTO'
+                  records:
+                    items:
+                      $ref: '#/components/schemas/AuditEventDTO'
+                    title: Records
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - chain_id
+                - hash_version
+                - records
+                - manifest
+                title: AuditExportResponse
+                type: object
+          description: '`GET /export` -- an ascending slice of the chain plus its
+            verification manifest.'
+      summary: '`GET /api/v1/compliance/audit/export` -- ascending slice + manifest
+        (Enterprise export).'
+  /api/v1/compliance/audit/head:
+    get:
+      description: ''
+      operationId: get_get_head
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET /head`; ``head`` is null for a chain with no records
+                  yet.'
+                properties:
+                  chain_id:
+                    title: Chain Id
+                    type: string
+                  hash_version:
+                    title: Hash Version
+                    type: string
+                  head:
+                    anyOf:
+                    - $ref: '#/components/schemas/AuditHeadDTO'
+                    - type: 'null'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - chain_id
+                - hash_version
+                - head
+                title: AuditHeadResponse
+                type: object
+          description: '`GET /head`; ``head`` is null for a chain with no records
+            yet.'
+      summary: '`GET /api/v1/compliance/audit/head` -- the anchor to pin outside the
+        database.'
+  /api/v1/compliance/audit/verify:
+    get:
+      description: '
+
+        Optional pins: ``expected_head_seq`` / ``expected_head_hash`` (from an earlier
+        ``/head``)
+
+        make tail truncation detectable; ``from_seq`` + ``anchor_hash`` resume a long
+        verification.'
+      operationId: get_verify_chain
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET /verify`: ``status`` is intact | empty | broken;
+                  only ``intact`` is ``ok``.'
+                properties:
+                  anchor_hash:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Anchor Hash
+                  chain_break:
+                    anyOf:
+                    - $ref: '#/components/schemas/ChainBreakDTO'
+                    - type: 'null'
+                  chain_id:
+                    title: Chain Id
+                    type: string
+                  complete:
+                    title: Complete
+                    type: boolean
+                  examined:
+                    title: Examined
+                    type: integer
+                  head_hash:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Head Hash
+                  head_seq:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Head Seq
+                  next_seq:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Next Seq
+                  ok:
+                    title: Ok
+                    type: boolean
+                  status:
+                    title: Status
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  verified_at:
+                    title: Verified At
+                    type: string
+                required:
+                - success
+                - chain_id
+                - status
+                - ok
+                - examined
+                - complete
+                - head_seq
+                - head_hash
+                - next_seq
+                - anchor_hash
+                - chain_break
+                - verified_at
+                title: AuditVerifyResponse
+                type: object
+          description: '`GET /verify`: ``status`` is intact | empty | broken; only
+            ``intact`` is ``ok``.'
+        '409':
+          content:
+            application/json:
+              schema:
+                description: '`GET /verify`: ``status`` is intact | empty | broken;
+                  only ``intact`` is ``ok``.'
+                properties:
+                  anchor_hash:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Anchor Hash
+                  chain_break:
+                    anyOf:
+                    - $ref: '#/components/schemas/ChainBreakDTO'
+                    - type: 'null'
+                  chain_id:
+                    title: Chain Id
+                    type: string
+                  complete:
+                    title: Complete
+                    type: boolean
+                  examined:
+                    title: Examined
+                    type: integer
+                  head_hash:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Head Hash
+                  head_seq:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Head Seq
+                  next_seq:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Next Seq
+                  ok:
+                    title: Ok
+                    type: boolean
+                  status:
+                    title: Status
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  verified_at:
+                    title: Verified At
+                    type: string
+                required:
+                - success
+                - chain_id
+                - status
+                - ok
+                - examined
+                - complete
+                - head_seq
+                - head_hash
+                - next_seq
+                - anchor_hash
+                - chain_break
+                - verified_at
+                title: AuditVerifyResponse
+                type: object
+          description: '`GET /verify`: ``status`` is intact | empty | broken; only
+            ``intact`` is ``ok``.'
+      summary: '`GET /api/v1/compliance/audit/verify` -- recompute the whole chain
+        (409 if tampered).'
   /api/v1/connections/callback/{provider}:
     get:
       description: '

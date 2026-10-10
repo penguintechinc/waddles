@@ -226,9 +226,116 @@ def test_silent_except_pragma_with_reason_suppresses(tmp_path: Path) -> None:
     assert "suppressed=1" in proc.stdout
 
 
-# --- denominator / scoping (shared by both source checks) ------------------------------------
+# --- badge-truthiness ------------------------------------------------------------------------
 
-@pytest.mark.parametrize("check", ["log-pii", "silent-except"])
+BADGE_VIOLATIONS = {
+    "bool_get": 'return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))',
+    "bool_name": "return bool(is_mod)",
+    "bool_subscript": 'payload["is_mod"] = bool(event.payload["is_mod"])',
+    "bool_broadcaster_name": "return bool(is_broadcaster)",
+    "or_chain": 'return payload.get("is_mod") or payload.get("is_broadcaster")',
+    "bare_if": 'if payload.get("is_mod"):\n        return True',
+    "not_operand": "return not is_mod",
+    "ternary": 'return 1 if payload["is_broadcaster"] else 0',
+    "while_test": "while is_mod:\n        break",
+    "comprehension_if": 'return [x for x in range(3) if payload.get("is_mod")]',
+    "nested_in_bool": 'return bool(str(payload.get("is_vip")))',
+    "vip": 'return bool(payload.get("is_vip"))',
+}
+
+
+@pytest.mark.parametrize("snippet", BADGE_VIOLATIONS.values(), ids=BADGE_VIOLATIONS.keys())
+def test_badge_truthiness_planted_violation_fails(tmp_path: Path, snippet: str) -> None:
+    """Every truthiness-coerced badge shape must make the gate exit non-zero and name the line."""
+    make_bundle_src(
+        tmp_path,
+        f"def gate(payload, event, is_mod, is_broadcaster):\n    {snippet}\n",
+    )
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "[badge-truthiness]" in proc.stderr
+    assert "bundles/python/demo/src/app.py:2" in proc.stderr
+    assert "FAIL" in proc.stdout
+
+
+def test_badge_truthiness_safe_shapes_pass(tmp_path: Path) -> None:
+    """The strict shapes the fixed bundles use must not fire (and must be counted as examined)."""
+    make_bundle_src(tmp_path, '''
+        def gate(payload, event):
+            is_mod = payload.get("is_mod")
+            is_broadcaster = payload.get("is_broadcaster")
+            if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
+                return False
+            if "is_mod" in event.payload:
+                payload["is_mod"] = event.payload["is_mod"] is True
+            if "is_broadcaster" not in payload and "is_mod" not in payload:
+                return None
+            ok = payload.get("is_mod") is True or payload.get("is_broadcaster") is True
+            return is_mod is True or is_broadcaster is True or ok
+        ''')
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "findings=0 -> PASS" in proc.stdout
+    assert "badge_reads_examined=0 " not in proc.stdout
+
+
+def test_badge_truthiness_ignores_unrelated_booleans(tmp_path: Path) -> None:
+    """`bool(...)`/truthiness over non-badge values is ordinary Python and must not fire."""
+    make_bundle_src(tmp_path, '''
+        def f(payload, is_owner, flag):
+            x = bool(payload.get("text")) or bool(flag)
+            if is_owner and not flag:
+                return x
+            return payload.get("is_mod") is True
+        ''')
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_badge_truthiness_pragma_with_reason_suppresses_and_is_reported(tmp_path: Path) -> None:
+    """A reasoned `# badge-ok:` is honoured and surfaced in the summary."""
+    make_bundle_src(tmp_path, '''
+        def gate(is_mod):
+            return bool(is_mod)  # badge-ok: value is a bool produced by our own parser
+        ''')
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "suppressed=1" in proc.stdout
+    assert "badge-ok: value is a bool produced by our own parser" in proc.stdout
+
+
+def test_badge_truthiness_pragma_without_reason_does_not_suppress(tmp_path: Path) -> None:
+    """An empty `# badge-ok:` is not a justification."""
+    make_bundle_src(tmp_path, '''
+        def gate(is_mod):
+            return bool(is_mod)  # badge-ok:
+        ''')
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 1
+
+
+def test_badge_truthiness_fails_the_original_pre_fix_shapes(tmp_path: Path) -> None:
+    """The three shapes that shipped in 40 bundles all fail in one multi-hit file."""
+    make_bundle_src(tmp_path, '''
+        def privileged(payload):
+            return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+
+        def privileged_event(event):
+            is_mod = event.payload.get("is_mod")
+            is_broadcaster = event.payload.get("is_broadcaster")
+            return bool(is_mod) or bool(is_broadcaster)
+
+        def forward(event, payload):
+            payload["is_mod"] = bool(event.payload["is_mod"])
+        ''')
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 1
+    assert proc.stderr.count("[badge-truthiness]") == 5
+
+
+# --- denominator / scoping (shared by the source checks) -------------------------------------
+
+@pytest.mark.parametrize("check", ["log-pii", "silent-except", "badge-truthiness"])
 def test_source_checks_empty_tree_is_a_failure_not_a_pass(tmp_path: Path, check: str) -> None:
     """A scan root with no bundle sources must FAIL (zero denominator), never report clean."""
     (tmp_path / "bundles").mkdir()
@@ -237,7 +344,7 @@ def test_source_checks_empty_tree_is_a_failure_not_a_pass(tmp_path: Path, check:
     assert "zero denominator" in proc.stderr
 
 
-@pytest.mark.parametrize("check", ["log-pii", "silent-except"])
+@pytest.mark.parametrize("check", ["log-pii", "silent-except", "badge-truthiness"])
 def test_source_checks_missing_bundles_dir_fails(tmp_path: Path, check: str) -> None:
     """A root with no `bundles/` directory at all must FAIL, not pass."""
     assert run(SOURCE_SCRIPT, "--check", check, root=tmp_path).returncode == 1
@@ -253,7 +360,7 @@ def test_source_check_zero_log_calls_is_a_failure(tmp_path: Path) -> None:
 
 def test_source_checks_ignore_tests_and_non_src_dirs(tmp_path: Path) -> None:
     """Violations in tests/, test_*.py, or outside a `src/` dir are not shipped code and must not fire."""
-    make_bundle_src(tmp_path, 'def ok(community):\n    log.info("x", community=community)\n    try:\n        pass\n    except ValueError:\n        pass\n')
+    make_bundle_src(tmp_path, 'def ok(community, p):\n    log.info("x", community=community)\n    ok = p.get("is_mod") is True\n    try:\n        pass\n    except ValueError:\n        pass\n')
     bad = 'def bad(rest):\n    log.info("x", rest=rest)\n    try:\n        pass\n    except Exception:\n        pass\n'
     make_bundle_src(tmp_path, bad, rel="bundles/python/demo/tests/test_app.py")
     make_bundle_src(tmp_path, bad, rel="bundles/python/demo/src/test_helpers.py")
@@ -353,7 +460,12 @@ def test_real_tree_passes_all_three_gates_with_nonzero_denominators() -> None:
     """The committed tree is clean, and the gates actually examined something (not a vacuous pass)."""
     source = run(SOURCE_SCRIPT)
     assert source.returncode == 0, source.stdout + source.stderr
-    for token in ("files_scanned=", "log_calls_examined=", "except_handlers_examined="):
+    for token in (
+        "files_scanned=",
+        "log_calls_examined=",
+        "except_handlers_examined=",
+        "badge_reads_examined=",
+    ):
         assert token in source.stdout
         assert f"{token}0 " not in source.stdout
     manifest = run(MANIFEST_SCRIPT)

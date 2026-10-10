@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-heist"
-version = "1.0.0"
+version = "1.0.1"
 description = "kv-only `!heist <amount>` timed group gamble (join a pool, one collective roll pays out or busts; lazy resolution). Concept inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot heist -- original implementation, no code/text reused."
 requires-python = ">=3.13"
 dependencies = []

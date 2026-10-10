@@ -44,8 +44,8 @@ relay of the text `transform()` built.
 
 | Condition | Behavior |
 |---|---|
-| `kv` backend error | ERROR `wheel.kv_failure` (failing call + backend reason), chat reply "Something went wrong updating the wheel storage - please try again." |
-| Corrupt stored options (non-UTF-8, non-JSON, not an array of strings) | Same loud error path -- the blob is **never silently reset** to `[]` (a later `add` would otherwise destroy the evidence). |
+| `kv` backend error | ERROR `wheel.kv_failure` with a static `op` (`kv_get`/`kv_set`) and the failure's **class name** only -- never the host's free-form message -- then the chat reply "Something went wrong updating the wheel storage - please try again." |
+| Corrupt stored options (non-UTF-8, non-JSON, not an array of strings) | Same loud error path (`op` = `options_decode`/`options_shape`, class name only -- the stored blob is made of user-typed option text and is never echoed) -- the blob is **never silently reset** to `[]` (a later `add` would otherwise destroy the evidence). |
 | Missing `channel_id` / `text` on `dispatch` | `ValueError`. |
 
 ## Permissions (V2 structured)
@@ -56,7 +56,8 @@ relay of the text `transform()` built.
 | `flags.read` | Gates the command behind its `waddles.command-wheel` feature flag. |
 
 No `db`, no egress. Mod gate: `add`/`remove`/`reset` require a real `is_mod` or `is_broadcaster`
-`True`; when **neither** badge field is present as a `bool` (e.g. the Discord normalizer today) the
+boolean `True` (a string badge such as `"false"` is **not** truthy here -- 1.0.3 fixed a bypass where
+`bool("false")` let non-moderators mutate the wheel); when **neither** badge field is present as a `bool` (e.g. the Discord normalizer today) the
 caller is **denied** (fail closed), with a DEBUG `wheel.role_info_unavailable` log.
 
 ## Feature flag
@@ -76,7 +77,10 @@ Logs carry only a **static** command name (`spin`/`add`/`remove`/`list`/`reset`,
 `unknown` for anything else), option *counts*, `platform` and `community` -- never option text, the
 typed sub-command token, or `event.actor`. (The matched-command field used to echo the
 lower-cased typed token for unrecognized sub-commands; the PII-free-log regression suite in
-`tests/test_backfill.py` caught it and `_LOGGED_TOKENS` now guards it.) The bundle stores no
+`tests/test_backfill.py` caught it and `_LOGGED_TOKENS` now guards it.) The ERROR line for a
+storage failure carries only `op` and the exception class name (1.0.3; it used to carry the
+exception text). `tests/test_regressions.py` drives a full session plus failure cases with a
+sentinel string and asserts the exact per-message field allowlist. The bundle stores no
 per-caller state at all.
 
 ## Files

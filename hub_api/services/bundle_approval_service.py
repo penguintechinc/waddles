@@ -556,7 +556,8 @@ async def uninstall_globally(install_dal: AsyncDB, *, app_id: str, revoked_by: i
             .values(revoked_at=now, revoked_by=revoked_by)
         )
 
-    await bundle_audit.record(
+    deferred_audit = bundle_audit.DeferredAudit()
+    await deferred_audit.record(
         install_dal,
         actor_id=revoked_by,
         action="app_uninstalled_globally",
@@ -575,7 +576,7 @@ async def uninstall_globally(install_dal: AsyncDB, *, app_id: str, revoked_by: i
                 install_dal, tenant_id=tenant_id, app_id=app_id, updated_by=revoked_by
             )
         except Exception:  # noqa: BLE001 -- one tenant's failure must not abort the rest of the cascade
-            await bundle_audit.record(
+            await deferred_audit.record(
                 install_dal,
                 actor_id=revoked_by,
                 action="app_uninstall_cascade_failed",
@@ -583,6 +584,8 @@ async def uninstall_globally(install_dal: AsyncDB, *, app_id: str, revoked_by: i
                 target_id=app_id,
                 details={"tenant_id": tenant_id},
             )
+    # The cascade above must run even if an audit write failed; surface that failure now (loud).
+    deferred_audit.raise_if_failed()
     logger.info("bundle install: revoked globally", extra={"app_id": app_id})
     return (await install_dal(install_dal.app_global_installs.id == current_id).select()).first()
 
@@ -968,7 +971,8 @@ async def activate_tenant_wide(
         manifest=manifest,
         approval_source=approval_source,
     )
-    await bundle_audit.record(
+    deferred_audit = bundle_audit.DeferredAudit()
+    await deferred_audit.record(
         install_dal,
         actor_id=activated_by,
         action="app_activated_tenant_wide",
@@ -1002,6 +1006,7 @@ async def activate_tenant_wide(
             if valkey_client is None:
                 await client.aclose()
 
+    deferred_audit.raise_if_failed()
     return (await install_dal(install_dal.app_install_approvals.id == new_id).select()).first()
 
 
@@ -1094,7 +1099,8 @@ async def activate_for_community(
         manifest=manifest,
         approval_source=approval_source,
     )
-    await bundle_audit.record(
+    deferred_audit = bundle_audit.DeferredAudit()
+    await deferred_audit.record(
         install_dal,
         actor_id=activated_by,
         action="app_activated_for_community",
@@ -1143,6 +1149,7 @@ async def activate_for_community(
             if valkey_client is None:
                 await client.aclose()
 
+    deferred_audit.raise_if_failed()
     return (await install_dal(install_dal.app_install_approvals.id == new_id).select()).first()
 
 

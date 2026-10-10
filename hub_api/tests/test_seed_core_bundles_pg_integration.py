@@ -68,6 +68,15 @@ async def pg_dal(pg_db: PgTestDatabase) -> AsyncIterator[Any]:
             "ALTER TABLE app_catalog ADD COLUMN IF NOT EXISTS is_default BOOLEAN",
             "ALTER TABLE app_catalog ADD COLUMN IF NOT EXISTS platform_compatibility JSONB",
             "ALTER TABLE app_catalog ADD COLUMN IF NOT EXISTS status TEXT",
+            # `audit_log` is a legacy-baseline table (000_create_base_schema.sql) that pg_docker's
+            # minimal bootstrap never creates. `bundle_audit.record` used to swallow the resulting
+            # "table not found" (`except: pass`), which masked this gap; the seeder's audit rows are
+            # now fail-loud (GRC #3), so the harness must have the table production has.
+            "CREATE TABLE IF NOT EXISTS audit_log ("
+            "id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES hub_users(id) ON DELETE SET NULL, "
+            "action VARCHAR(100) NOT NULL, target_type VARCHAR(50), target_id VARCHAR(255), "
+            "details JSONB DEFAULT '{}', ip_address VARCHAR(45), user_agent TEXT, "
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         ):
             await conn.execute(text(ddl))
     await dal.reflect()

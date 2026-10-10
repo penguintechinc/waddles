@@ -116,14 +116,19 @@ CREATE TABLE app_catalog (
 );
 -- 0043_hub_users_identity_uuid creates a view over community_members (a
 -- legacy config/postgres table, same minimal-bootstrap convention): only the
--- columns the view projects/joins on.
+-- columns the view projects/joins on. 0050_bundle_reputation_store also ALTERs
+-- this table -- is_active/left_at/removed_at are the columns it, its grants
+-- and its tests touch.
 CREATE TABLE community_members (
     id SERIAL PRIMARY KEY,
     community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
     user_id VARCHAR(255),
     platform VARCHAR(50),
     platform_user_id VARCHAR(255),
-    display_name VARCHAR(255)
+    display_name VARCHAR(255),
+    is_active BOOLEAN DEFAULT true,
+    left_at TIMESTAMP,
+    removed_at TIMESTAMP
 );
 -- 0039_event_sync_enabled is the first Alembic migration to FK into
 -- calendar_events -- a legacy table owned by config/postgres/migrations/

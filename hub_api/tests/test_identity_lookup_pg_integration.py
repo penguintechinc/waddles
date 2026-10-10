@@ -43,6 +43,7 @@ from services.identity_resolution_service import (  # noqa: E402
     MAX_DISPLAY_NAME_LEN,
     AmbiguousHandleError,
     HandleNotFoundError,
+    IdentityRequest,
     IdentityResolutionError,
     IdentityValidationError,
     ParsedTarget,
@@ -50,6 +51,7 @@ from services.identity_resolution_service import (  # noqa: E402
     _clean_display_name,
     parse_target,
     resolve_display_names,
+    resolve_identities,
     resolve_identity,
     resolve_target,
 )
@@ -296,6 +298,40 @@ async def test_handle_collision_pseudonym_vs_linked_user_fails_loud(adal: AsyncD
     await _member(adal, c, platform="twitch", puid="tw-2")
     with pytest.raises(AmbiguousHandleError):
         await resolve_target(adal, "acme", "twitch", "sam")
+
+
+@pg_only
+async def test_tokenizer_handle_placeholder_pseudonyms_never_make_a_handle_ambiguous(
+    adal: AsyncDAL,
+) -> None:
+    """A tokenizer `handle:<name>` placeholder pseudonym is a token, never an identity.
+
+    svc-process's inbound tokenizer mints one for every free-text `@mention` (it needs an opaque
+    token to put in the text). That row must neither make a real member's handle ambiguous nor make
+    a name that only ever appeared in a mention resolve to a non-member -- yet it must still
+    detokenize.
+    """
+    t = await _tenant(adal, "acme")
+    c = await _community(adal, t)
+    real = await _member(adal, c, platform="twitch", puid="tw-77", display="Bobby")
+    assert real is not None
+    placeholder = (
+        await resolve_identities(adal, [IdentityRequest("acme", "twitch", "handle:bobby", "Bobby")])
+    )[0].uuid
+    assert placeholder != uuid.UUID(real)
+
+    # The real member still resolves (not AmbiguousHandleError) ...
+    got = await resolve_target(adal, "acme", "twitch", "@bobby")
+    assert got.uuid == uuid.UUID(real)
+
+    # ... a handle that exists ONLY as a placeholder is not an identity ...
+    await resolve_identities(adal, [IdentityRequest("acme", "twitch", "handle:ghost", "ghost")])
+    with pytest.raises(HandleNotFoundError):
+        await resolve_target(adal, "acme", "twitch", "@ghost")
+
+    # ... and the placeholder still detokenizes to the name that was typed.
+    names = await resolve_display_names(adal, "acme", [str(placeholder)])
+    assert [(n.uuid, n.display_name) for n in names.names] == [(str(placeholder), "Bobby")]
 
 
 @pg_only
@@ -595,6 +631,9 @@ async def test_reader_role_cannot_read_raw_handles_or_run_the_lookups(
     finally:
         conn.rollback()
         conn.close()
+    # 0048 added the status/reason columns and the bundle-identity migration appended
+    # the two non-PII columns the bundle `identity` capability needs (`tenant_id`,
+    # `is_active_member`); still no handle/name/username/email column.
     assert columns == {
         "community_id",
         "platform",
@@ -603,6 +642,8 @@ async def test_reader_role_cannot_read_raw_handles_or_run_the_lookups(
         "user_uuid",
         "user_uuid_status",
         "user_uuid_unavailable_reason",
+        "tenant_id",
+        "is_active_member",
     }
     assert HANDLE_SECRET not in str(rows) and NAME_SECRET not in str(rows)
 

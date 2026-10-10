@@ -68,9 +68,9 @@ spec:
       containers:
       - name: svc-action-rust
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcAction.imageRepository | default "svc-action-rust") "imageTag" .Values.global.imageTag) }}"
-        # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same line
-        # for the node-image-cache rationale (identical here).
-        imagePullPolicy: Always
+        # Values-driven -- see templates/svc-process-rust.yaml's comment on this same line
+        # for why the old hardcoded Always was removed (identical here).
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
         # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_action/
         # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
         # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
