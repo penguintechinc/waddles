@@ -389,10 +389,13 @@ impl InvocationIdentity {
     /// idempotency key is derived from. `None` when the invocation has no event
     /// id (or its counter is poisoned): the caller must refuse the call.
     ///
-    /// Ordinals count the invocation's mutations of each kind in call order, so
-    /// a redelivered event whose bundle repeats the same calls reproduces the
-    /// same keys -- and a second identical call in ONE invocation is a distinct
-    /// operation with its own key, not a replay.
+    /// Ordinals count the invocation's well-formed mutation ATTEMPTS of each kind
+    /// in call order -- claimed by the caller before the gate can refuse the
+    /// call, so a refusal that is not reproduced on a redelivery cannot shift
+    /// the ordinals of later calls. A redelivered event whose bundle repeats the
+    /// same calls therefore reproduces the same keys, and a second identical
+    /// call in ONE invocation is a distinct operation with its own key, not a
+    /// replay.
     pub fn reserve_mutation(&self, kind: &'static str) -> Option<(&str, u32)> {
         let event_id = self.event_id.as_deref()?;
         let mut seq = self.mutation_seq.lock().ok()?;

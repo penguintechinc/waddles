@@ -1115,9 +1115,10 @@ async fn the_gate_runs_before_the_actor_binding() {
     assert_eq!(f.directory.lookups(), 0);
 }
 
-/// A call refused for the wrong payer claims no idempotency ordinal.
+/// An attempt keeps its POSITIONAL ordinal even when it is refused, so what
+/// follows is keyed the same on every delivery of the event.
 #[tokio::test]
-async fn a_rejected_theft_attempt_does_not_consume_a_key_ordinal() {
+async fn a_refused_attempt_still_occupies_its_ordinal() {
     let f = fixture();
     assert_eq!(
         code_of(&f, "economy.wager", wager_args(f.bob, 1, 0)).await,
@@ -1127,7 +1128,55 @@ async fn a_rejected_theft_attempt_does_not_consume_a_key_ordinal() {
         .handle(eco_call("economy.wager", wager_args(f.alice, 1, 0)))
         .await
         .unwrap();
-    assert_eq!(f.store.keys(), vec![key(EVENT_ID, "wager", 0)]);
+    assert_eq!(f.store.keys(), vec![key(EVENT_ID, "wager", 1)]);
+}
+
+/// Regression (found in adversarial review): a gate denial that a redelivery
+/// does NOT reproduce (an in-memory quota reset by the restart that caused the
+/// redelivery, a grant or membership that changed) must not shift the ordinals
+/// of the calls after it -- otherwise a later call would inherit another call's
+/// key on the replay and apply a second time.
+#[tokio::test]
+async fn a_gate_denial_not_reproduced_on_redelivery_does_not_shift_later_keys() {
+    // First delivery: max_bet 50 refuses the 51 stake; the 10 stake applies.
+    let first = fixture();
+    assert_eq!(
+        code_of(&first, "economy.wager", wager_args(first.alice, 51, 0)).await,
+        "amount_out_of_bounds"
+    );
+    first
+        .caps
+        .handle(eco_call("economy.wager", wager_args(first.alice, 10, 25)))
+        .await
+        .unwrap();
+    // Redelivery: the declared bound was raised meanwhile, so the 51 now passes.
+    let replay = fixture_with(
+        grants(&[
+            ("economy.read", serde_json::json!({})),
+            ("economy.wager", serde_json::json!({"max_bet": 100})),
+            ("economy.transfer", serde_json::json!({"max_amount": 200})),
+        ]),
+        true,
+        true,
+        Some(("main", COMMUNITY_ID)),
+    );
+    replay
+        .caps
+        .handle(eco_call("economy.wager", wager_args(replay.alice, 51, 0)))
+        .await
+        .unwrap();
+    replay
+        .caps
+        .handle(eco_call("economy.wager", wager_args(replay.alice, 10, 25)))
+        .await
+        .unwrap();
+    // The 10/25 wager is :1 on BOTH deliveries, so the store dedupes it; it did
+    // not slide to :0 (the key the 51 stake claims) on the first run.
+    assert_eq!(first.store.keys(), vec![key(EVENT_ID, "wager", 1)]);
+    assert_eq!(
+        replay.store.keys(),
+        vec![key(EVENT_ID, "wager", 0), key(EVENT_ID, "wager", 1)]
+    );
 }
 
 /// Fail-closed: no way to bind an actor (or to key the call) means the money

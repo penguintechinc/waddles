@@ -230,6 +230,13 @@ class FakeEconomyHost:
     and every movement appends a `ledger` row. Every refusal raises the
     same-named `Error_*` variant the generated binding would, wrapped in an
     `Err`-shaped exception, so a bundle's error handling is exercised for real.
+
+    **Actor binding.** The real host only moves the money of the account that
+    triggered the invocation: a wager's `user` and a transfer's `from_user` must
+    equal `actor` (the user `identity.resolve_actor()` returns), else
+    `Error_Denied("actor_mismatch")`; with `actor` unset (`None`, an unlinked
+    account) every money mover is `Error_Denied("not_linked")`. Reads are not
+    bound. Set `actor` before exercising `wager`/`transfer`.
     """
 
     members: set[str] = field(default_factory=set)
@@ -239,6 +246,7 @@ class FakeEconomyHost:
     max_bet_cap: int = 1_000
     max_amount_cap: int = 1_000
     payout_multiple: int = 100
+    actor: str | None = None
 
     def _check(self, *users: str) -> None:
         if not self.granted:
@@ -246,6 +254,13 @@ class FakeEconomyHost:
         for user in users:
             if user not in self.members:
                 raise _FakeWitError(_Error_NotAMember())
+
+    def _bind(self, payer: str) -> None:
+        """Refuse a money mover whose payer is not the invocation's actor."""
+        if self.actor is None:
+            raise _FakeWitError(_Error_Denied("not_linked"))
+        if payer != self.actor:
+            raise _FakeWitError(_Error_Denied("actor_mismatch"))
 
     def balance(self, user: str) -> int:
         """Return `user`'s balance (0 for a member who holds nothing)."""
@@ -258,8 +273,9 @@ class FakeEconomyHost:
         return min(self.max_bet_cap, self.balances.get(user, 0))
 
     def wager(self, user: str, stake: int, payout: int) -> int:
-        """Atomically debit `stake`, credit `payout`; enforce cap, funds and payout multiple."""
+        """Atomically debit `stake`, credit `payout`; enforce actor, cap, funds, payout bound."""
         self._check(user)
+        self._bind(user)
         if stake < 1:
             raise _FakeWitError(_Error_Invalid("stake must be >= 1"))
         if stake > self.max_bet_cap:
@@ -274,8 +290,9 @@ class FakeEconomyHost:
         return self.balances[user]
 
     def transfer(self, from_user: str, to_user: str, amount: int) -> None:
-        """Atomically move `amount` between two distinct members."""
+        """Atomically move `amount` from the actor to another distinct member."""
         self._check(from_user, to_user)
+        self._bind(from_user)
         if from_user == to_user or amount < 1:
             raise _FakeWitError(_Error_Invalid("bad transfer"))
         if amount > self.max_amount_cap:

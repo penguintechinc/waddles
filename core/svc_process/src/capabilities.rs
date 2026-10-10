@@ -666,8 +666,10 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// ([`Self::bind_actor`]: derived host-side from the event, never from an
     /// argument), else `actor_mismatch`; a bundle can spend only the funds of
     /// whoever triggered it; (6) an **idempotency key** derived from the event
-    /// id and the mutation's ordinal ([`InvocationIdentity::reserve_mutation`]),
-    /// so a retried or replayed call credits once; (7) the store, which
+    /// id and the mutation's ordinal, so a retried or replayed call credits
+    /// once -- the ordinal ([`InvocationIdentity::reserve_mutation`]) is claimed
+    /// right after argument parsing, before the gate, so it is the call's
+    /// position and no refusal can shift the calls after it; (7) the store, which
     /// re-verifies membership and enforces the per-call cap -- computed HERE
     /// from the grant's declared bound clamped to the catalog ceiling, never
     /// from guest input -- and the durable per-user/per-scope rolling-24h caps
@@ -737,6 +739,28 @@ impl<K: KvBackend> StageCapabilities<K> {
             ));
         }
 
+        // A well-formed money mover claims its ordinal NOW, before the gate (or
+        // anything else) can refuse it: the ordinal is the call's POSITION among
+        // the invocation's wager/transfer attempts, so a gate denial that is not
+        // reproduced on a redelivery (an in-memory quota that reset with the
+        // process, a grant or membership that changed) cannot shift the ordinals
+        // of the calls after it -- which would hand a later call another call's
+        // key and let it apply twice. `None` when the invocation has no event id;
+        // that is refused (after the gate) below.
+        let claim: Option<(&'static str, Option<(String, u32)>)> = match op {
+            Op::Wager(..) => Some("wager"),
+            Op::Transfer(_) => Some("transfer"),
+            Op::Balance | Op::MaxBet | Op::Leaderboard(_) => None,
+        }
+        .map(|kind| {
+            let slot = self
+                .invocation_identity
+                .as_deref()
+                .and_then(|inv| inv.reserve_mutation(kind))
+                .map(|(event_id, ordinal)| (event_id.to_string(), ordinal));
+            (kind, slot)
+        });
+
         // `max_bet` describes the WAGER capability's own limit, so it is
         // authorized under `economy.wager` (carrying no amount: it is rate
         // limited, not metered); balance/leaderboard are `economy.read`.
@@ -787,27 +811,18 @@ impl<K: KvBackend> StageCapabilities<K> {
         // the mutation is refused loudly rather than run unbound/unkeyed.
         let mut reservation: Option<(&InvocationIdentity, &'static str, u32)> = None;
         let mut idempotency: Option<IdempotencyKey> = None;
-        if let Op::Wager(..) | Op::Transfer(_) = op {
-            let kind = if matches!(op, Op::Wager(..)) {
-                "wager"
-            } else {
-                "transfer"
-            };
+        if let Some((kind, claimed)) = claim {
             self.bind_actor(kind, user).await?;
-            let Some(invocation) = self.invocation_identity.as_deref() else {
-                return Err(denied(
-                    "not_implemented",
-                    "this invocation carries no triggering-event facts to key an economy mutation to",
-                ));
-            };
-            let Some((event_id, ordinal)) = invocation.reserve_mutation(kind) else {
+            let (Some(invocation), Some((event_id, ordinal))) =
+                (self.invocation_identity.as_deref(), claimed)
+            else {
                 return Err(denied(
                     "not_implemented",
                     "this invocation carries no replay-stable event id; economy mutations cannot be made idempotent",
                 ));
             };
             idempotency = Some(
-                IdempotencyKey::for_event(event_id, kind, ordinal)
+                IdempotencyKey::for_event(&event_id, kind, ordinal)
                     .map_err(economy_error_to_host)?,
             );
             reservation = Some((invocation, kind, ordinal));

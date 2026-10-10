@@ -11,6 +11,23 @@ bounds amounts with the economy's own quotas and the community-declared
 ``max_bet``/``max_amount``, and moves money in single atomic statements that
 can never overdraw a balance.
 
+**Only the invocation's own actor's money moves.** The account whose funds a
+call moves -- :func:`wager`'s ``user``, :func:`transfer`'s ``from_user`` -- must
+be the account that triggered the invocation (the user
+``waddle_sdk.identity.resolve_actor()`` returns); anything else raises
+:class:`DeniedError` with ``code == "actor_mismatch"`` and writes nothing. A
+bundle can pay the actor's money TO any member, never pull another member's.
+The total a user's wagers may PAY OUT per day is capped (the mint cap is on the
+payout, not the stake): :class:`DeniedError` ``quota_exceeded``.
+
+**Idempotent per event.** The host keys every ``wager``/``transfer`` by the
+event being handled plus the call's ordinal, so an event the platform
+redelivers credits ONCE (the replayed call returns the original result and
+moves nothing). A replay whose parameters differ from the original raises
+:class:`DeniedError` ``idempotency_conflict`` and is never applied. After a
+:class:`BackendError` -- the one outcome that may or may not have committed --
+retry the SAME call; it presents the same key and applies at most once.
+
 **Eager import (componentize-py).** componentize-py only wizens a WIT
 host-import submodule that something imports at Python MODULE-LOAD time (see
 ``_component_entry.py`` and the project note on eager wizening): a capability
@@ -70,7 +87,10 @@ class DeniedError(EconomyError):
     """The host gate denied the call; ``code`` is the gate's stable denial code.
 
     e.g. ``not_granted``, ``amount_out_of_bounds``, ``quota_exceeded``,
-    ``rate_limited``, ``instance_denied``.
+    ``rate_limited``, ``instance_denied`` -- and the money-safety refusals
+    ``actor_mismatch`` (the payer is not the invocation's actor),
+    ``idempotency_conflict`` (a replay's parameters differ from the original)
+    and ``not_linked`` (the actor has no resolved community identity).
     """
 
     def __init__(self, message: str, code: str) -> None:
@@ -172,9 +192,11 @@ async def balance(user: str) -> int:
 async def wager(user: str, stake: int, payout: int) -> int:
     """Atomically debit ``stake`` and credit ``payout`` (0 for a loss); return the NEW balance.
 
-    The bundle decides the game outcome; the host bounds it: ``1 <= stake <=
-    max_bet``, the user must hold ``stake``, and ``payout <= stake *
-    MAX_PAYOUT_MULTIPLE``. Raises one of this module's :class:`EconomyError`
+    The bundle decides the game outcome; the host bounds it: ``user`` must be
+    the invocation's actor, ``1 <= stake <= max_bet``, the user must hold
+    ``stake``, ``payout <= stake * MAX_PAYOUT_MULTIPLE``, and the payout counts
+    against the daily mint cap. Replaying the same event returns the original
+    balance and credits once. Raises one of this module's :class:`EconomyError`
     subclasses on any refusal -- notably :class:`InsufficientFundsError`,
     :class:`OverCapError` and :class:`DeniedError`.
     """
@@ -193,7 +215,12 @@ async def wager(user: str, stake: int, payout: int) -> int:
 
 
 async def transfer(from_user: str, to_user: str, amount: int) -> None:
-    """Atomically move ``amount`` from ``from_user`` to ``to_user`` (distinct members)."""
+    """Atomically move ``amount`` from ``from_user`` to ``to_user`` (distinct members).
+
+    ``from_user`` must be the invocation's actor (``DeniedError`` ``actor_mismatch``
+    otherwise); ``to_user`` may be any member. Replaying the same event moves
+    nothing a second time.
+    """
     sender = validate_user(from_user)
     recipient = validate_user(to_user)
     if sender == recipient:
