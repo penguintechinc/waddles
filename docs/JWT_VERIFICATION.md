@@ -37,7 +37,7 @@ correct secret is still refused.
 | `iss` / `aud` present but not the verifier's expected value | `bad_issuer` / `bad_audience` |
 | Any of `sub iss aud iat exp scope tenant` missing | `missing_claim` |
 | `sub` / `tenant` empty or not a string, or `scope` not a string | `invalid_claim` |
-| `exp` passed / `iat` or `nbf` in the future beyond 30 s skew | `expired` / `immature` |
+| `exp` passed (strict, no skew) / `iat` or `nbf` in the future beyond 30 s skew | `expired` / `immature` |
 | Verifier has no secret configured (empty / unset) | `no_key` (logged CRITICAL) |
 
 `scope` may be the empty string (no scopes granted) but the claim must be present.

@@ -259,6 +259,13 @@ class TestTimeValidation:
         token = _sign(_payload(iat=past - timedelta(hours=1), exp=past))
         assert verify_jwt_token(token, SECRET) is None
 
+    def test_expiry_is_strict_not_widened_by_the_iat_skew_allowance(self) -> None:
+        """Skew applies to iat/nbf only: a token that expired 5 s ago is expired, not 'within leeway'."""
+        now = datetime.now(timezone.utc)
+        just_expired = now - timedelta(seconds=5)
+        token = _sign(_payload(iat=now - timedelta(hours=1), exp=just_expired))
+        assert verify_jwt_token(token, SECRET) is None
+
     def test_exp_comparison_is_utc_correct(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """regression: the old naive-local-time compare mis-judged expiry by the UTC offset."""
         import time

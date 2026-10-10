@@ -24,6 +24,7 @@ import time
 
 from .jwt_hardening import (
     OUTCOME_OK,
+    REASON_EXPIRED,
     REASON_INVALID_CLAIM,
     REASON_NO_KEY,
     VERIFIER_PLATFORM_HS256,
@@ -66,8 +67,9 @@ if not is_valid_kid(DEFAULT_JWT_KID):
 #: may be the empty string (no scopes granted) but must be present.
 REQUIRED_JWT_CLAIMS = ("sub", "iss", "aud", "iat", "exp", "scope", "tenant")
 
-#: Allowed `iat`/`exp`/`nbf` clock skew between the minting and verifying pod --
-#: matches `service_jwt.CLOCK_SKEW_SECONDS`.
+#: Allowed `iat`/`nbf` clock skew between the minting and verifying pod -- matches
+#: `service_jwt.CLOCK_SKEW_SECONDS`. NOT applied to `exp`: expiry stays strict to the
+#: second, exactly as before this change (see `_verify_platform_token`).
 JWT_CLOCK_SKEW_SECONDS = 30
 
 #: Slug of the platform's default tenant (`tenants.slug = 'global'`, seeded by
@@ -374,6 +376,11 @@ def _verify_platform_token(
         )
     except jwt.PyJWTError as exc:
         raise JwtRejection(classify_decode_error(exc), alg=header.alg) from exc
+
+    # PyJWT applies `leeway` to `exp` too; expiry must not be widened by this
+    # change (iat/nbf need the skew allowance, exp does not), so re-check strictly.
+    if payload['exp'] <= time.time():
+        raise JwtRejection(REASON_EXPIRED, alg=header.alg)
 
     # PyJWT's `require` only proves the claim is present and non-null; the
     # identity-bearing ones must also be the right shape. An empty `sub`/`tenant`
