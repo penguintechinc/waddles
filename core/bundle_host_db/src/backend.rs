@@ -647,6 +647,15 @@ impl PostgresBackend {
     ) -> Result<Row, DbError> {
         reject_write_on_cross_community_table(schema)?;
         validate_column_values(schema, &column_values)?;
+        // An empty map would render `SET , version = ...` -- a Postgres
+        // syntax error that surfaced as a `backend` failure (ERROR log + a
+        // "db unavailable or misconfigured" signal) for what is plain bad
+        // guest input. Reject it up front as the validation error it is.
+        if column_values.is_empty() {
+            return Err(DbError::InvalidValue(
+                "update requires at least one column value".to_string(),
+            ));
+        }
         let row_uuid = Uuid::parse_str(row_id)
             .map_err(|_| DbError::InvalidValue("row_id is not a valid UUID".to_string()))?;
         let expected_version_i64 = i64::try_from(expected_version)
@@ -1265,5 +1274,1504 @@ mod tests {
             !sql.contains("DROP"),
             "tenant value must never appear in SQL text"
         );
+    }
+
+    // The tests below drive `PostgresBackend`'s real statement flow through
+    // SeaORM's `MockDatabase` (scripted rows + a recorded statement log), so
+    // the scope-enforcement, quota, and error-mapping branches are covered
+    // with no Docker. `tests/postgres_integration.rs` still proves the same
+    // flow against a real server (roles, RLS policy, advisory lock).
+
+    use std::collections::BTreeMap;
+
+    use crate::limits::STATEMENT_TIMEOUT_MS;
+    use sea_orm::{DbErr, MockDatabase, MockExecResult};
+
+    type MockRow = BTreeMap<String, Value>;
+
+    const ROW_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const SCOPE_PROLOGUE_SQL: &str = "SELECT set_config('waddles.tenant_id', $1, true), \
+         set_config('waddles.community_id', $2, true), \
+         set_config('waddles.app_id', $3, true)";
+    const LOCK_SQL: &str = "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))";
+
+    /// One scripted result row from `(column, value)` pairs.
+    fn mock_row(cells: Vec<(&str, Value)>) -> MockRow {
+        cells
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+            .collect()
+    }
+
+    fn no_rows() -> Vec<MockRow> {
+        Vec::new()
+    }
+
+    fn uuid_cell() -> Value {
+        Value::Uuid(Some(
+            Uuid::parse_str(ROW_ID).expect("ROW_ID is a valid UUID"),
+        ))
+    }
+
+    fn text(v: &str) -> Value {
+        Value::String(Some(v.to_string()))
+    }
+
+    fn big(v: i64) -> Value {
+        Value::BigInt(Some(v))
+    }
+
+    fn exec_result(rows_affected: u64) -> MockExecResult {
+        MockExecResult {
+            last_insert_id: 0,
+            rows_affected,
+        }
+    }
+
+    fn exec_ok(n: usize) -> Vec<MockExecResult> {
+        vec![exec_result(0); n]
+    }
+
+    fn boom() -> DbErr {
+        DbErr::Custom("boom".to_string())
+    }
+
+    fn mock_db() -> MockDatabase {
+        MockDatabase::new(SeaDbBackend::Postgres)
+    }
+
+    fn scoped() -> DbScope {
+        DbScope::new("acme", Some("main".to_string()), "waddles.bot.a")
+    }
+
+    fn tenant_wide() -> DbScope {
+        DbScope::new("acme", None, "waddles.bot.a")
+    }
+
+    /// A backend over a scripted mock connection, plus a handle to read back
+    /// every statement it sent.
+    struct Harness {
+        backend: PostgresBackend,
+        conn: DatabaseConnection,
+    }
+
+    impl Harness {
+        fn new(db: MockDatabase) -> Self {
+            let conn = db.into_connection();
+            Self {
+                backend: PostgresBackend::new(conn.clone()),
+                conn,
+            }
+        }
+
+        fn with_row_cap(db: MockDatabase, cap: i64) -> Self {
+            let conn = db.into_connection();
+            Self {
+                backend: PostgresBackend::new(conn.clone()).with_row_cap_for_test(cap),
+                conn,
+            }
+        }
+
+        /// Every statement sent, in order (`BEGIN` ... `COMMIT`/`ROLLBACK`).
+        fn statements(self) -> Vec<Statement> {
+            self.conn
+                .into_transaction_log()
+                .into_iter()
+                .flat_map(|txn| txn.statements().to_vec())
+                .collect()
+        }
+    }
+
+    fn bound(stmt: &Statement) -> Vec<Value> {
+        stmt.values
+            .as_ref()
+            .map_or_else(Vec::new, |values| values.0.clone())
+    }
+
+    /// Asserts the transaction opened with both scope mechanisms: the
+    /// statement timeout and the three `set_config` GUCs bound from `scope`.
+    fn assert_prologue(stmts: &[Statement], scope: &DbScope) {
+        assert_eq!(stmts[0].sql, "BEGIN");
+        assert_eq!(
+            stmts[1].sql,
+            format!("SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")
+        );
+        assert_eq!(stmts[2].sql, SCOPE_PROLOGUE_SQL);
+        assert_eq!(
+            bound(&stmts[2]),
+            vec![
+                text(&scope.tenant),
+                Value::String(scope.community.clone()),
+                text(&scope.app_id)
+            ]
+        );
+    }
+
+    fn assert_rolled_back(stmts: &[Statement]) {
+        assert_eq!(stmts.last().map(|s| s.sql.as_str()), Some("ROLLBACK"));
+        assert!(stmts.iter().all(|s| s.sql != "COMMIT"));
+    }
+
+    fn wide_schema() -> TableSchema {
+        let col = |name: &str, sql_type: ColumnType| ColumnDef {
+            name: name.to_string(),
+            sql_type,
+            nullable: true,
+            is_user_ref: false,
+        };
+        TableSchema::validated(
+            AppSchema::Community,
+            "wide_tbl",
+            vec![
+                col("flag", ColumnType::Bool),
+                col("small", ColumnType::Int4),
+                col("big", ColumnType::Int8),
+                col("note", ColumnType::Text),
+                col("seen_at", ColumnType::Timestamptz),
+                col("doc", ColumnType::Jsonb),
+                col("other_id", ColumnType::Uuid),
+            ],
+        )
+        .expect("wide_schema is valid")
+    }
+
+    fn wide_row(cells: Vec<(&str, Value)>) -> MockRow {
+        let mut all = vec![("row_id", uuid_cell()), ("version", big(3))];
+        all.extend(cells);
+        mock_row(all)
+    }
+
+    fn count_row(n: i64) -> Vec<MockRow> {
+        vec![mock_row(vec![("n", big(n))])]
+    }
+
+    fn insert_returning_row() -> Vec<MockRow> {
+        vec![mock_row(vec![("row_id", uuid_cell()), ("version", big(1))])]
+    }
+
+    #[tokio::test]
+    async fn insert_sends_the_full_scoped_transaction_and_binds_scope_from_the_invocation() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(3))
+                .append_query_results([count_row(0), insert_returning_row()]),
+        );
+        let scope = scoped();
+        let cols = vec![
+            ("score".to_string(), DbValue::Int(7)),
+            ("note".to_string(), DbValue::Text("hi".to_string())),
+        ];
+
+        let row = h
+            .backend
+            .insert(&schema_with_user_ref(), &scope, cols.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            row,
+            Row {
+                row_id: ROW_ID.to_string(),
+                version: 1,
+                columns: cols
+            }
+        );
+
+        let stmts = h.statements();
+        assert_eq!(
+            stmts.len(),
+            7,
+            "BEGIN, 2 scope stmts, lock, count, insert, COMMIT"
+        );
+        assert_prologue(&stmts, &scope);
+        assert_eq!(stmts[3].sql, LOCK_SQL);
+        assert_eq!(bound(&stmts[3]), vec![text("acme:main:waddles.bot.a")]);
+        assert_eq!(
+            stmts[4].sql,
+            "SELECT COUNT(*) AS n FROM \"app_core\".\"fishing_core\" \
+             WHERE tenant_id = $1 AND community_id = $2"
+        );
+        assert_eq!(bound(&stmts[4]), vec![text("acme"), text("main")]);
+        assert_eq!(
+            stmts[5].sql,
+            "INSERT INTO \"app_core\".\"fishing_core\" \
+             (\"score\", \"note\", \"tenant_id\", \"community_id\") \
+             VALUES ($1, $2, $3, $4) RETURNING row_id, version"
+        );
+        assert_eq!(
+            bound(&stmts[5]),
+            vec![big(7), text("hi"), text("acme"), text("main")]
+        );
+        assert_eq!(stmts[6].sql, "COMMIT");
+    }
+
+    #[tokio::test]
+    async fn insert_without_a_community_scopes_to_tenant_wide_rows_only() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(3))
+                .append_query_results([count_row(0), insert_returning_row()]),
+        );
+        let scope = tenant_wide();
+
+        h.backend
+            .insert(
+                &schema_with_user_ref(),
+                &scope,
+                vec![("score".to_string(), DbValue::Int(1))],
+            )
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert_prologue(&stmts, &scope);
+        assert_eq!(bound(&stmts[3]), vec![text("acme::waddles.bot.a")]);
+        assert_eq!(
+            stmts[4].sql,
+            "SELECT COUNT(*) AS n FROM \"app_core\".\"fishing_core\" \
+             WHERE tenant_id = $1 AND community_id IS NULL"
+        );
+        assert_eq!(bound(&stmts[4]), vec![text("acme")]);
+        assert_eq!(
+            bound(&stmts[5]),
+            vec![big(1), text("acme"), Value::String(None)],
+            "a tenant-wide row is written with a NULL community"
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_keeps_a_sql_shaped_guest_value_out_of_the_sql_text() {
+        let evil = "x'); DROP TABLE app_core.fishing_core; --";
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(3))
+                .append_query_results([count_row(0), insert_returning_row()]),
+        );
+
+        h.backend
+            .insert(
+                &schema_with_user_ref(),
+                &scoped(),
+                vec![("note".to_string(), DbValue::Text(evil.to_string()))],
+            )
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert!(stmts.iter().all(|s| !s.sql.contains("DROP")));
+        assert!(bound(&stmts[5]).contains(&text(evil)));
+    }
+
+    #[tokio::test]
+    async fn insert_refuses_a_guest_supplied_scope_or_platform_column_before_any_io() {
+        for name in [
+            "tenant_id",
+            "community_id",
+            "row_id",
+            "version",
+            "created_at",
+        ] {
+            let h = Harness::new(mock_db());
+            let err = h
+                .backend
+                .insert(
+                    &schema_with_user_ref(),
+                    &scoped(),
+                    vec![(name.to_string(), DbValue::Text("evil".to_string()))],
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "invalid_column", "column {name}");
+            assert!(h.statements().is_empty(), "{name} reached the database");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_write_refuses_a_cross_community_read_table_before_any_io() {
+        let schema = schema_with_user_ref().with_cross_community_read();
+        let scope = scoped();
+        let cols = vec![("score".to_string(), DbValue::Int(1))];
+
+        let h = Harness::new(mock_db());
+        let err = h
+            .backend
+            .insert(&schema, &scope, cols.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_column");
+        assert!(h.statements().is_empty());
+
+        let h = Harness::new(mock_db());
+        let err = h
+            .backend
+            .update(&schema, &scope, ROW_ID, 1, cols)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_column");
+        assert!(h.statements().is_empty());
+
+        let h = Harness::new(mock_db());
+        let err = h
+            .backend
+            .delete(&schema, &scope, ROW_ID, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_column");
+        assert!(h.statements().is_empty());
+    }
+
+    #[tokio::test]
+    async fn insert_rejects_an_invalid_value_before_any_io() {
+        let h = Harness::new(mock_db());
+        let err = h
+            .backend
+            .insert(
+                &schema_with_user_ref(),
+                &scoped(),
+                vec![("score".to_string(), DbValue::Text("not an int".to_string()))],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_value");
+        assert!(h.statements().is_empty());
+    }
+
+    #[tokio::test]
+    async fn insert_at_the_row_cap_is_rejected_and_rolled_back_without_inserting() {
+        let h = Harness::with_row_cap(
+            mock_db()
+                .append_exec_results(exec_ok(3))
+                .append_query_results([count_row(2)]),
+            2,
+        );
+
+        let err = h
+            .backend
+            .insert(&schema_with_user_ref(), &scoped(), vec![])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DbError::QuotaExceeded("row count would exceed the per-app cap (2)".to_string())
+        );
+
+        let stmts = h.statements();
+        assert!(stmts.iter().all(|s| !s.sql.starts_with("INSERT")));
+        assert_rolled_back(&stmts);
+    }
+
+    #[tokio::test]
+    async fn insert_one_row_below_the_cap_is_admitted() {
+        let h = Harness::with_row_cap(
+            mock_db()
+                .append_exec_results(exec_ok(3))
+                .append_query_results([count_row(1), insert_returning_row()]),
+            2,
+        );
+
+        let row = h
+            .backend
+            .insert(&schema_with_user_ref(), &scoped(), vec![])
+            .await
+            .unwrap();
+        assert_eq!(row.version, 1);
+    }
+
+    #[tokio::test]
+    async fn the_default_row_cap_is_the_documented_per_app_ceiling() {
+        let conn = mock_db().into_connection();
+        assert_eq!(PostgresBackend::new(conn).row_cap, MAX_ROWS_PER_APP);
+
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(3))
+                .append_query_results([count_row(MAX_ROWS_PER_APP)]),
+        );
+        let err = h
+            .backend
+            .insert(&schema_with_user_ref(), &scoped(), vec![])
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "quota_exceeded");
+    }
+
+    #[tokio::test]
+    async fn insert_maps_every_backend_failure_to_a_rolled_back_backend_error() {
+        let scenarios: Vec<(&str, MockDatabase)> = vec![
+            (
+                "SET LOCAL statement_timeout fails",
+                mock_db().append_exec_errors([boom()]),
+            ),
+            (
+                "set_config fails",
+                mock_db()
+                    .append_exec_results(exec_ok(1))
+                    .append_exec_errors([boom()]),
+            ),
+            (
+                "advisory lock fails",
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_exec_errors([boom()]),
+            ),
+            (
+                "COUNT query fails",
+                mock_db()
+                    .append_exec_results(exec_ok(3))
+                    .append_query_errors([boom()]),
+            ),
+            (
+                "COUNT returns no row",
+                mock_db()
+                    .append_exec_results(exec_ok(3))
+                    .append_query_results([no_rows()]),
+            ),
+            (
+                "COUNT row has no n column",
+                mock_db()
+                    .append_exec_results(exec_ok(3))
+                    .append_query_results([vec![mock_row(vec![("other", big(0))])]]),
+            ),
+            (
+                "INSERT fails",
+                mock_db()
+                    .append_exec_results(exec_ok(3))
+                    .append_query_results([count_row(0)])
+                    .append_query_errors([boom()]),
+            ),
+            (
+                "INSERT returns no row",
+                mock_db()
+                    .append_exec_results(exec_ok(3))
+                    .append_query_results([count_row(0), no_rows()]),
+            ),
+            (
+                "INSERT row lacks row_id",
+                mock_db()
+                    .append_exec_results(exec_ok(3))
+                    .append_query_results([
+                        count_row(0),
+                        vec![mock_row(vec![("version", big(1))])],
+                    ]),
+            ),
+            (
+                "INSERT row lacks version",
+                mock_db()
+                    .append_exec_results(exec_ok(3))
+                    .append_query_results([
+                        count_row(0),
+                        vec![mock_row(vec![("row_id", uuid_cell())])],
+                    ]),
+            ),
+        ];
+
+        for (label, db) in scenarios {
+            let h = Harness::new(db);
+            let err = h
+                .backend
+                .insert(&schema_with_user_ref(), &scoped(), vec![])
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "backend", "{label}: {err:?}");
+            assert_rolled_back(&h.statements());
+        }
+    }
+
+    #[tokio::test]
+    async fn get_reads_back_every_declared_column_type() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![wide_row(vec![
+                    ("flag", Value::Bool(Some(true))),
+                    ("small", Value::Int(Some(5))),
+                    ("big", big(9_000_000_000)),
+                    ("note", text("hi")),
+                    ("seen_at", text("2026-01-01T00:00:00Z")),
+                    ("doc", text("{\"a\":1}")),
+                    ("other_id", uuid_cell()),
+                ])]]),
+        );
+
+        let row = h
+            .backend
+            .get(&wide_schema(), &scoped(), ROW_ID)
+            .await
+            .unwrap();
+
+        assert_eq!(row.row_id, ROW_ID);
+        assert_eq!(row.version, 3);
+        assert_eq!(
+            row.columns,
+            vec![
+                ("flag".to_string(), DbValue::Bool(true)),
+                ("small".to_string(), DbValue::Int(5)),
+                ("big".to_string(), DbValue::Int(9_000_000_000)),
+                ("note".to_string(), DbValue::Text("hi".to_string())),
+                (
+                    "seen_at".to_string(),
+                    DbValue::Text("2026-01-01T00:00:00Z".to_string())
+                ),
+                ("doc".to_string(), DbValue::Text("{\"a\":1}".to_string())),
+                ("other_id".to_string(), DbValue::Text(ROW_ID.to_string())),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_maps_sql_null_in_every_column_type_to_db_null() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![wide_row(vec![
+                    ("flag", Value::Bool(None)),
+                    ("small", Value::Int(None)),
+                    ("big", Value::BigInt(None)),
+                    ("note", Value::String(None)),
+                    ("seen_at", Value::String(None)),
+                    ("doc", Value::String(None)),
+                    ("other_id", Value::Uuid(None)),
+                ])]]),
+        );
+
+        let row = h
+            .backend
+            .get(&wide_schema(), &scoped(), ROW_ID)
+            .await
+            .unwrap();
+        assert_eq!(row.columns.len(), 7);
+        assert!(row.columns.iter().all(|(_, v)| *v == DbValue::Null));
+    }
+
+    #[tokio::test]
+    async fn get_filters_by_row_id_and_the_invocation_scope() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![mock_row(vec![
+                    ("row_id", uuid_cell()),
+                    ("version", big(4)),
+                    ("user_ref", Value::Uuid(None)),
+                    ("score", big(1)),
+                    ("note", Value::String(None)),
+                ])]]),
+        );
+        let scope = scoped();
+
+        h.backend
+            .get(&schema_with_user_ref(), &scope, ROW_ID)
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert_prologue(&stmts, &scope);
+        assert_eq!(
+            stmts[3].sql,
+            "SELECT \"row_id\", \"version\", \"user_ref\", \"score\", \"note\" \
+             FROM \"app_core\".\"fishing_core\" \
+             WHERE row_id = $1 AND tenant_id = $2 AND community_id = $3"
+        );
+        assert_eq!(
+            bound(&stmts[3]),
+            vec![uuid_cell(), text("acme"), text("main")]
+        );
+        assert_eq!(stmts[4].sql, "COMMIT");
+    }
+
+    #[tokio::test]
+    async fn get_on_a_cross_community_table_drops_only_the_tenant_predicate() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![mock_row(vec![
+                    ("row_id", uuid_cell()),
+                    ("version", big(1)),
+                    ("user_ref", Value::Uuid(None)),
+                    ("score", big(1)),
+                    ("note", Value::String(None)),
+                ])]]),
+        );
+
+        h.backend
+            .get(
+                &schema_with_user_ref().with_cross_community_read(),
+                &scoped(),
+                ROW_ID,
+            )
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert!(stmts[3].sql.ends_with("WHERE row_id = $1 AND TRUE"));
+        assert_eq!(bound(&stmts[3]), vec![uuid_cell()]);
+    }
+
+    #[tokio::test]
+    async fn get_rejects_a_non_uuid_row_id_before_any_io() {
+        let h = Harness::new(mock_db());
+        let err = h
+            .backend
+            .get(&schema_with_user_ref(), &scoped(), "1 OR 1=1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_value");
+        assert!(h.statements().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_of_a_row_outside_the_scope_is_not_found_and_never_commits() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([no_rows()]),
+        );
+        let err = h
+            .backend
+            .get(&schema_with_user_ref(), &scoped(), ROW_ID)
+            .await
+            .unwrap_err();
+        assert_eq!(err, DbError::NotFound);
+        assert_rolled_back(&h.statements());
+    }
+
+    /// The mock driver reports a missing/mistyped *nullable* declared column
+    /// as SQL NULL (unlike sqlx), so only the always-required `version`
+    /// column is exercised for a decode failure here.
+    #[tokio::test]
+    async fn get_maps_backend_and_decode_failures_to_backend_errors() {
+        let scenarios: Vec<(&str, MockDatabase)> = vec![
+            ("SET LOCAL fails", mock_db().append_exec_errors([boom()])),
+            (
+                "set_config fails",
+                mock_db()
+                    .append_exec_results(exec_ok(1))
+                    .append_exec_errors([boom()]),
+            ),
+            (
+                "SELECT fails",
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_errors([boom()]),
+            ),
+            (
+                "row lacks version",
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_results([vec![mock_row(vec![
+                        ("row_id", uuid_cell()),
+                        ("user_ref", Value::Uuid(None)),
+                        ("score", big(1)),
+                        ("note", Value::String(None)),
+                    ])]]),
+            ),
+        ];
+
+        for (label, db) in scenarios {
+            let h = Harness::new(db);
+            let err = h
+                .backend
+                .get(&schema_with_user_ref(), &scoped(), ROW_ID)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "backend", "{label}: {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn update_is_version_checked_and_scoped_in_one_statement() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![mock_row(vec![("version", big(5))])]]),
+        );
+        let scope = scoped();
+        let cols = vec![
+            ("score".to_string(), DbValue::Int(9)),
+            ("note".to_string(), DbValue::Text("n".to_string())),
+        ];
+
+        let row = h
+            .backend
+            .update(&schema_with_user_ref(), &scope, ROW_ID, 4, cols.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            row,
+            Row {
+                row_id: ROW_ID.to_string(),
+                version: 5,
+                columns: cols
+            }
+        );
+
+        let stmts = h.statements();
+        assert_eq!(stmts.len(), 5);
+        assert_prologue(&stmts, &scope);
+        assert_eq!(
+            stmts[3].sql,
+            "UPDATE \"app_core\".\"fishing_core\" SET \"score\" = $1, \"note\" = $2, \
+             version = version + 1, updated_at = now() \
+             WHERE row_id = $3 AND version = $4 AND tenant_id = $5 AND community_id = $6 \
+             RETURNING version"
+        );
+        assert_eq!(
+            bound(&stmts[3]),
+            vec![
+                big(9),
+                text("n"),
+                uuid_cell(),
+                big(4),
+                text("acme"),
+                text("main")
+            ]
+        );
+        assert_eq!(stmts[4].sql, "COMMIT");
+    }
+
+    #[tokio::test]
+    async fn update_without_a_community_matches_only_tenant_wide_rows() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![mock_row(vec![("version", big(2))])]]),
+        );
+
+        h.backend
+            .update(
+                &schema_with_user_ref(),
+                &tenant_wide(),
+                ROW_ID,
+                1,
+                vec![("score".to_string(), DbValue::Int(1))],
+            )
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert!(stmts[3]
+            .sql
+            .ends_with("AND tenant_id = $4 AND community_id IS NULL RETURNING version"));
+        assert_eq!(
+            bound(&stmts[3]),
+            vec![big(1), uuid_cell(), big(1), text("acme")]
+        );
+    }
+
+    #[tokio::test]
+    async fn update_of_a_stale_version_is_a_conflict_but_a_missing_row_is_not_found() {
+        let probe = |exists: Vec<MockRow>| {
+            Harness::new(
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_results([no_rows(), exists]),
+            )
+        };
+        let cols = || vec![("score".to_string(), DbValue::Int(1))];
+
+        let h = probe(vec![mock_row(vec![("present", Value::Int(Some(1)))])]);
+        let err = h
+            .backend
+            .update(&schema_with_user_ref(), &scoped(), ROW_ID, 1, cols())
+            .await
+            .unwrap_err();
+        assert_eq!(err, DbError::Conflict);
+        let stmts = h.statements();
+        assert_eq!(
+            stmts[4].sql,
+            "SELECT 1 AS present FROM \"app_core\".\"fishing_core\" \
+             WHERE row_id = $1 AND tenant_id = $2 AND community_id = $3"
+        );
+        assert_eq!(
+            bound(&stmts[4]),
+            vec![uuid_cell(), text("acme"), text("main")],
+            "the existence probe is scoped too"
+        );
+        assert_eq!(stmts[5].sql, "COMMIT");
+
+        let h = probe(no_rows());
+        let err = h
+            .backend
+            .update(&schema_with_user_ref(), &scoped(), ROW_ID, 1, cols())
+            .await
+            .unwrap_err();
+        assert_eq!(err, DbError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_malformed_input_before_any_io() {
+        let schema = schema_with_user_ref();
+        let scope = scoped();
+        let one_col = || vec![("score".to_string(), DbValue::Int(1))];
+
+        let cases: Vec<(&str, Result<Row, DbError>)> = vec![
+            (
+                "no columns",
+                Harness::new(mock_db())
+                    .backend
+                    .update(&schema, &scope, ROW_ID, 1, vec![])
+                    .await,
+            ),
+            (
+                "row_id not a uuid",
+                Harness::new(mock_db())
+                    .backend
+                    .update(&schema, &scope, "nope", 1, one_col())
+                    .await,
+            ),
+            (
+                "expected_version beyond i64",
+                Harness::new(mock_db())
+                    .backend
+                    .update(&schema, &scope, ROW_ID, u64::MAX, one_col())
+                    .await,
+            ),
+            (
+                "platform column",
+                Harness::new(mock_db())
+                    .backend
+                    .update(
+                        &schema,
+                        &scope,
+                        ROW_ID,
+                        1,
+                        vec![("tenant_id".to_string(), DbValue::Text("x".to_string()))],
+                    )
+                    .await,
+            ),
+        ];
+        for (label, result) in cases {
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err.code(), "invalid_value" | "invalid_column"),
+                "{label}: {err:?}"
+            );
+        }
+
+        // regression: an empty column map used to render `SET , version = ...`,
+        // a Postgres syntax error reported as an unhealthy-backend failure.
+        let h = Harness::new(mock_db());
+        let err = h
+            .backend
+            .update(&schema, &scope, ROW_ID, 1, vec![])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DbError::InvalidValue("update requires at least one column value".to_string())
+        );
+        assert!(h.statements().is_empty(), "must not open a transaction");
+    }
+
+    #[tokio::test]
+    async fn update_maps_every_backend_failure_to_a_backend_error() {
+        let cols = || vec![("score".to_string(), DbValue::Int(1))];
+        let scenarios: Vec<(&str, MockDatabase)> = vec![
+            ("SET LOCAL fails", mock_db().append_exec_errors([boom()])),
+            (
+                "set_config fails",
+                mock_db()
+                    .append_exec_results(exec_ok(1))
+                    .append_exec_errors([boom()]),
+            ),
+            (
+                "UPDATE fails",
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_errors([boom()]),
+            ),
+            (
+                "existence probe fails",
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_results([no_rows()])
+                    .append_query_errors([boom()]),
+            ),
+            (
+                "UPDATE row lacks version",
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_results([vec![mock_row(vec![("other", big(1))])]]),
+            ),
+        ];
+
+        for (label, db) in scenarios {
+            let h = Harness::new(db);
+            let err = h
+                .backend
+                .update(&schema_with_user_ref(), &scoped(), ROW_ID, 1, cols())
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "backend", "{label}: {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_is_version_checked_and_scoped_in_one_statement() {
+        let h = Harness::new(mock_db().append_exec_results([
+            exec_result(0),
+            exec_result(0),
+            exec_result(1),
+        ]));
+        let scope = scoped();
+
+        h.backend
+            .delete(&schema_with_user_ref(), &scope, ROW_ID, 6)
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert_eq!(stmts.len(), 5);
+        assert_prologue(&stmts, &scope);
+        assert_eq!(
+            stmts[3].sql,
+            "DELETE FROM \"app_core\".\"fishing_core\" \
+             WHERE row_id = $1 AND version = $2 AND tenant_id = $3 AND community_id = $4"
+        );
+        assert_eq!(
+            bound(&stmts[3]),
+            vec![uuid_cell(), big(6), text("acme"), text("main")]
+        );
+        assert_eq!(stmts[4].sql, "COMMIT");
+    }
+
+    #[tokio::test]
+    async fn delete_without_a_community_matches_only_tenant_wide_rows() {
+        let h = Harness::new(mock_db().append_exec_results([
+            exec_result(0),
+            exec_result(0),
+            exec_result(1),
+        ]));
+
+        h.backend
+            .delete(&schema_with_user_ref(), &tenant_wide(), ROW_ID, 1)
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert!(stmts[3]
+            .sql
+            .ends_with("AND tenant_id = $3 AND community_id IS NULL"));
+        assert_eq!(bound(&stmts[3]), vec![uuid_cell(), big(1), text("acme")]);
+    }
+
+    #[tokio::test]
+    async fn delete_of_a_stale_version_is_a_conflict_but_a_missing_row_is_not_found() {
+        let probe = |exists: Vec<MockRow>| {
+            Harness::new(
+                mock_db()
+                    .append_exec_results([exec_result(0), exec_result(0), exec_result(0)])
+                    .append_query_results([exists]),
+            )
+        };
+
+        let h = probe(vec![mock_row(vec![("present", Value::Int(Some(1)))])]);
+        let err = h
+            .backend
+            .delete(&schema_with_user_ref(), &scoped(), ROW_ID, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err, DbError::Conflict);
+        let stmts = h.statements();
+        assert_eq!(
+            bound(&stmts[4]),
+            vec![uuid_cell(), text("acme"), text("main")]
+        );
+        assert_eq!(stmts[5].sql, "COMMIT");
+
+        let h = probe(no_rows());
+        let err = h
+            .backend
+            .delete(&schema_with_user_ref(), &scoped(), ROW_ID, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err, DbError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_malformed_input_before_any_io() {
+        let schema = schema_with_user_ref();
+        let scope = scoped();
+
+        let h = Harness::new(mock_db());
+        let err = h
+            .backend
+            .delete(&schema, &scope, "not-a-uuid", 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_value");
+        assert!(h.statements().is_empty());
+
+        let h = Harness::new(mock_db());
+        let err = h
+            .backend
+            .delete(&schema, &scope, ROW_ID, u64::MAX)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DbError::InvalidValue("expected_version out of range".to_string())
+        );
+        assert!(h.statements().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_maps_every_backend_failure_to_a_backend_error() {
+        let scenarios: Vec<(&str, MockDatabase)> = vec![
+            ("SET LOCAL fails", mock_db().append_exec_errors([boom()])),
+            (
+                "set_config fails",
+                mock_db()
+                    .append_exec_results(exec_ok(1))
+                    .append_exec_errors([boom()]),
+            ),
+            (
+                "DELETE fails",
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_exec_errors([boom()]),
+            ),
+            (
+                "existence probe fails",
+                mock_db()
+                    .append_exec_results([exec_result(0), exec_result(0), exec_result(0)])
+                    .append_query_errors([boom()]),
+            ),
+        ];
+
+        for (label, db) in scenarios {
+            let h = Harness::new(db);
+            let err = h
+                .backend
+                .delete(&schema_with_user_ref(), &scoped(), ROW_ID, 1)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "backend", "{label}: {err:?}");
+        }
+    }
+
+    fn list_row(row_id: Value, version: i64, score: i64) -> MockRow {
+        mock_row(vec![
+            ("row_id", row_id),
+            ("version", big(version)),
+            ("user_ref", Value::Uuid(None)),
+            ("score", big(score)),
+            ("note", Value::String(None)),
+        ])
+    }
+
+    #[tokio::test]
+    async fn query_lists_scoped_rows_in_the_default_stable_order() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![
+                    list_row(uuid_cell(), 1, 10),
+                    list_row(uuid_cell(), 2, 20),
+                ]]),
+        );
+        let scope = scoped();
+
+        let rows = h
+            .backend
+            .query(&schema_with_user_ref(), &scope, 25, 5, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].version, 2);
+        assert_eq!(
+            rows[0].columns,
+            vec![
+                ("user_ref".to_string(), DbValue::Null),
+                ("score".to_string(), DbValue::Int(10)),
+                ("note".to_string(), DbValue::Null),
+            ]
+        );
+
+        let stmts = h.statements();
+        assert_prologue(&stmts, &scope);
+        assert_eq!(
+            stmts[3].sql,
+            "SELECT \"row_id\", \"version\", \"user_ref\", \"score\", \"note\" \
+             FROM \"app_core\".\"fishing_core\" \
+             WHERE tenant_id = $1 AND community_id = $2 \
+             ORDER BY row_id ASC LIMIT $3 OFFSET $4"
+        );
+        assert_eq!(
+            bound(&stmts[3]),
+            vec![text("acme"), text("main"), big(25), big(5)]
+        );
+        assert_eq!(stmts[4].sql, "COMMIT");
+    }
+
+    #[tokio::test]
+    async fn query_clamps_a_guest_page_size_to_the_host_ceiling() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([no_rows()]),
+        );
+
+        let rows = h
+            .backend
+            .query(&schema_with_user_ref(), &scoped(), u32::MAX, 0, None)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+
+        let stmts = h.statements();
+        assert_eq!(
+            bound(&stmts[3]),
+            vec![
+                text("acme"),
+                text("main"),
+                big(i64::from(MAX_QUERY_LIMIT)),
+                big(0)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn query_without_a_community_binds_only_the_tenant() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([no_rows()]),
+        );
+
+        h.backend
+            .query(&schema_with_user_ref(), &tenant_wide(), 10, 0, None)
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert!(stmts[3].sql.contains(
+            "WHERE tenant_id = $1 AND community_id IS NULL ORDER BY row_id ASC LIMIT $2 OFFSET $3"
+        ));
+        assert_eq!(bound(&stmts[3]), vec![text("acme"), big(10), big(0)]);
+    }
+
+    #[tokio::test]
+    async fn query_on_a_cross_community_table_drops_only_the_tenant_predicate() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([no_rows()]),
+        );
+
+        h.backend
+            .query(
+                &schema_with_user_ref().with_cross_community_read(),
+                &scoped(),
+                10,
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert!(stmts[3]
+            .sql
+            .contains("WHERE TRUE ORDER BY row_id ASC LIMIT $1 OFFSET $2"));
+        assert_eq!(bound(&stmts[3]), vec![big(10), big(0)]);
+    }
+
+    #[tokio::test]
+    async fn query_renders_each_order_by_choice() {
+        let cases = [
+            (Some(OrderBy::Random), "ORDER BY random() LIMIT"),
+            (
+                Some(OrderBy::Column {
+                    name: "score".to_string(),
+                    descending: true,
+                }),
+                "ORDER BY \"score\" DESC LIMIT",
+            ),
+            (
+                Some(OrderBy::Column {
+                    name: "created_at".to_string(),
+                    descending: false,
+                }),
+                "ORDER BY \"created_at\" ASC LIMIT",
+            ),
+        ];
+        for (order_by, expected) in cases {
+            let h = Harness::new(
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_results([no_rows()]),
+            );
+            h.backend
+                .query(&schema_with_user_ref(), &scoped(), 1, 0, order_by)
+                .await
+                .unwrap();
+            let stmts = h.statements();
+            assert!(stmts[3].sql.contains(expected), "{}", stmts[3].sql);
+        }
+    }
+
+    #[tokio::test]
+    async fn query_rejects_a_bad_order_by_column_before_any_io() {
+        for name in ["tenant_id", "community_id", "ghost", "score; DROP TABLE x"] {
+            let h = Harness::new(mock_db());
+            let err = h
+                .backend
+                .query(
+                    &schema_with_user_ref(),
+                    &scoped(),
+                    10,
+                    0,
+                    Some(OrderBy::Column {
+                        name: name.to_string(),
+                        descending: false,
+                    }),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "invalid_column", "{name}");
+            assert!(h.statements().is_empty(), "{name} reached the database");
+        }
+    }
+
+    #[tokio::test]
+    async fn query_maps_backend_and_decode_failures_to_backend_errors() {
+        let scenarios: Vec<(&str, MockDatabase)> = vec![
+            ("SET LOCAL fails", mock_db().append_exec_errors([boom()])),
+            (
+                "set_config fails",
+                mock_db()
+                    .append_exec_results(exec_ok(1))
+                    .append_exec_errors([boom()]),
+            ),
+            (
+                "SELECT fails",
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_errors([boom()]),
+            ),
+            (
+                "row lacks row_id",
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_results([vec![mock_row(vec![
+                        ("version", big(1)),
+                        ("user_ref", Value::Uuid(None)),
+                        ("score", big(1)),
+                        ("note", Value::String(None)),
+                    ])]]),
+            ),
+            (
+                "row lacks version",
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_results([vec![mock_row(vec![
+                        ("row_id", uuid_cell()),
+                        ("user_ref", Value::Uuid(None)),
+                        ("score", big(1)),
+                        ("note", Value::String(None)),
+                    ])]]),
+            ),
+        ];
+
+        for (label, db) in scenarios {
+            let h = Harness::new(db);
+            let err = h
+                .backend
+                .query(&schema_with_user_ref(), &scoped(), 10, 0, None)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "backend", "{label}: {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_trait_object_dispatches_every_op_to_the_postgres_backend() {
+        // Execs per op: insert 3 (2 scope + lock), get 2, update 2, delete 3
+        // (2 scope + the DELETE, which reports 1 row affected), query 2.
+        let execs = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0].map(exec_result);
+        let h = Harness::new(mock_db().append_exec_results(execs).append_query_results([
+            count_row(0),
+            insert_returning_row(),
+            vec![list_row(uuid_cell(), 1, 1)],
+            vec![mock_row(vec![("version", big(2))])],
+            vec![list_row(uuid_cell(), 2, 1)],
+        ]));
+        let backend: &dyn DbBackend = &h.backend;
+        let (schema, scope) = (schema_with_user_ref(), scoped());
+        let cols = || vec![("score".to_string(), DbValue::Int(1))];
+
+        backend.insert(&schema, &scope, cols()).await.unwrap();
+        assert_eq!(
+            backend.get(&schema, &scope, ROW_ID).await.unwrap().version,
+            1
+        );
+        backend
+            .update(&schema, &scope, ROW_ID, 1, cols())
+            .await
+            .unwrap();
+        backend.delete(&schema, &scope, ROW_ID, 1).await.unwrap();
+        assert_eq!(
+            backend
+                .query(&schema, &scope, 10, 0, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn db_value_converts_to_the_matching_bound_sea_value() {
+        assert_eq!(db_value_to_sea_value(&DbValue::Null), Value::String(None));
+        assert_eq!(
+            db_value_to_sea_value(&DbValue::Bool(true)),
+            Value::Bool(Some(true))
+        );
+        assert_eq!(db_value_to_sea_value(&DbValue::Int(-3)), big(-3));
+        assert_eq!(
+            db_value_to_sea_value(&DbValue::Float(1.5)),
+            Value::Double(Some(1.5))
+        );
+        assert_eq!(db_value_to_sea_value(&DbValue::Text("t".into())), text("t"));
+        assert_eq!(
+            db_value_to_sea_value(&DbValue::Bytes(vec![1, 2])),
+            Value::Bytes(Some(vec![1, 2]))
+        );
+    }
+
+    #[test]
+    fn every_db_error_has_a_stable_code_and_message() {
+        let cases = [
+            (
+                DbError::NoTable,
+                "no_table",
+                "no table provisioned for this app",
+            ),
+            (
+                DbError::InvalidColumn("c".into()),
+                "invalid_column",
+                "invalid column: c",
+            ),
+            (
+                DbError::InvalidValue("v".into()),
+                "invalid_value",
+                "invalid value: v",
+            ),
+            (DbError::NotFound, "not_found", "row not found"),
+            (DbError::Conflict, "conflict", "version conflict"),
+            (
+                DbError::QuotaExceeded("q".into()),
+                "quota_exceeded",
+                "quota exceeded: q",
+            ),
+            (DbError::Timeout, "timeout", "operation timed out"),
+            (DbError::Backend("b".into()), "backend", "backend error: b"),
+        ];
+        for (err, code, message) in cases {
+            assert_eq!(err.code(), code);
+            assert_eq!(err.to_string(), message);
+        }
+    }
+
+    fn typed_schema(sql_type: ColumnType) -> TableSchema {
+        TableSchema::validated(
+            AppSchema::Core,
+            "typed",
+            vec![ColumnDef {
+                name: "c".to_string(),
+                sql_type,
+                nullable: true,
+                is_user_ref: false,
+            }],
+        )
+        .expect("typed schema is valid")
+    }
+
+    #[test]
+    fn validate_column_value_enforces_each_declared_column_type() {
+        let ok = |t, v: DbValue| validate_column_value(&typed_schema(t), "c", &v);
+        let code = |t, v: DbValue| {
+            validate_column_value(&typed_schema(t), "c", &v)
+                .unwrap_err()
+                .code()
+        };
+
+        assert!(ok(ColumnType::Uuid, DbValue::Text(Uuid::new_v4().to_string())).is_ok());
+        assert_eq!(
+            code(ColumnType::Uuid, DbValue::Text("nope".into())),
+            "invalid_value"
+        );
+
+        assert!(ok(ColumnType::Int4, DbValue::Int(i64::from(i32::MAX))).is_ok());
+        assert_eq!(
+            code(ColumnType::Int4, DbValue::Int(i64::from(i32::MAX) + 1)),
+            "invalid_value"
+        );
+        assert!(ok(ColumnType::Int8, DbValue::Int(i64::MIN)).is_ok());
+        assert!(ok(ColumnType::Bool, DbValue::Bool(false)).is_ok());
+        assert!(ok(ColumnType::Timestamptz, DbValue::Text("2026-01-01".into())).is_ok());
+        assert!(ok(ColumnType::Text, DbValue::Text("a".repeat(MAX_TEXT_BYTES))).is_ok());
+        assert!(ok(ColumnType::Text, DbValue::Null).is_ok());
+
+        assert!(ok(ColumnType::Jsonb, DbValue::Text("{\"k\":[1,2]}".into())).is_ok());
+        assert_eq!(
+            code(ColumnType::Jsonb, DbValue::Text("{not json".into())),
+            "invalid_value"
+        );
+        assert_eq!(
+            code(
+                ColumnType::Jsonb,
+                DbValue::Text(format!("\"{}\"", "a".repeat(MAX_JSONB_BYTES)))
+            ),
+            "quota_exceeded"
+        );
+    }
+
+    #[test]
+    fn validate_column_value_rejects_a_value_of_the_wrong_kind() {
+        for (t, v) in [
+            (ColumnType::Bool, DbValue::Int(1)),
+            (ColumnType::Int8, DbValue::Text("1".into())),
+            (ColumnType::Text, DbValue::Bool(true)),
+            (ColumnType::Uuid, DbValue::Int(1)),
+            (ColumnType::Jsonb, DbValue::Bytes(vec![1])),
+        ] {
+            let err = validate_column_value(&typed_schema(t), "c", &v).unwrap_err();
+            assert_eq!(err.code(), "invalid_value", "{t:?} / {v:?}");
+        }
+    }
+
+    #[test]
+    fn validate_column_values_stops_at_the_first_bad_entry() {
+        let schema = schema_with_user_ref();
+        assert!(validate_column_values(&schema, &[]).is_ok());
+        assert!(validate_column_values(&schema, &[("score".to_string(), DbValue::Int(1))]).is_ok());
+
+        let err = validate_column_values(
+            &schema,
+            &[
+                ("score".to_string(), DbValue::Int(1)),
+                ("ghost".to_string(), DbValue::Int(1)),
+                ("note".to_string(), DbValue::Bool(true)),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid_column");
+    }
+
+    #[tokio::test]
+    async fn with_call_deadline_passes_results_and_errors_through() {
+        let ok = with_call_deadline(async { Ok::<_, DbError>(7) }).await;
+        assert_eq!(ok, Ok(7));
+
+        let err = with_call_deadline(async { Err::<(), _>(DbError::Conflict) }).await;
+        assert_eq!(err, Err(DbError::Conflict));
+    }
+
+    /// Virtual time: the deadline elapses instantly instead of really
+    /// sleeping `CALL_DEADLINE`.
+    #[tokio::test(start_paused = true)]
+    async fn with_call_deadline_times_out_a_call_that_never_finishes() {
+        let result = with_call_deadline(std::future::pending::<Result<(), DbError>>()).await;
+        assert_eq!(result, Err(DbError::Timeout));
     }
 }
