@@ -19,6 +19,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from services import ban_suppression
 from services.errors import bad_request, not_found
 
 VALID_LINK_PLATFORMS = ("discord", "twitch", "slack")
@@ -212,3 +213,7 @@ async def identity_link_callback(
         linked_at=datetime.now(UTC),
         last_used=datetime.now(UTC),
     )
+    # Ban-evasion suppression: a banned person may join a community first and link the banned
+    # platform account afterwards -- re-apply any matching restriction to this user's
+    # memberships now that the platform id is known (see `services/ban_suppression.py`).
+    await ban_suppression.reapply_for_hub_user_async(async_dal, dal, hub_user_id=hub_user_id)

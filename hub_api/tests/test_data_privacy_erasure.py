@@ -423,42 +423,104 @@ class TestChatMessageErasure:
         assert _user_row(db, user_id).email == f"deleted_{user_id}@deleted.waddlebot"
 
 
-class TestCommunityMemberErasure:
-    """Art. 17 gap: erasure never nulled `community_members` PII (name, avatar, bio, ...)."""
+def _community(db: Any, *, tenant_id: int = 1, member_count: int = 0) -> int:
+    """Insert a `communities` row (tenant 1 is the seeded `acme` tenant)."""
+    community_id = db.dal.communities.insert(
+        name=f"c-{_now().timestamp()}", tenant_id=tenant_id, member_count=member_count
+    )
+    db.dal.commit()
+    return int(community_id)
 
-    async def test_every_pii_column_is_nulled_on_every_hub_keyed_member_row(self, db: Any) -> None:
+
+def _member_exists(db: Any, member_id: int) -> bool:
+    return _member_row(db, member_id) is not None
+
+
+def _seed_reputation(
+    db: Any,
+    *,
+    user_id: int,
+    community_id: int = 1,
+    platform: str = "twitch",
+    platform_user_id: str | None = None,
+    user_uuid: str | None = None,
+) -> None:
+    """Give the subject a row in every reputation / pseudonym store erasure must clear."""
+    dal = db.dal
+    dal.reputation_events.insert(
+        community_id=community_id,
+        hub_user_id=user_id,
+        platform=platform,
+        platform_user_id=platform_user_id or f"p{user_id}",
+        event_type="chatMessage",
+        score_change=1,
+        score_before=600,
+        score_after=601,
+        reason="free text reason sentinel",
+        created_at=_now(),
+    )
+    dal.reputation_tenant.insert(
+        tenant_id=1, hub_user_id=user_id, score=777, total_events=3, created_at=_now()
+    )
+    if user_uuid is not None:
+        dal.bundle_reputation_scores.insert(
+            tenant_id=1, community_id=community_id, user_uuid=user_uuid, balance=50
+        )
+        dal.bundle_reputation_adjustments.insert(
+            app_id="rep-app",
+            tenant_id=1,
+            community_id=community_id,
+            target_user_uuid=user_uuid,
+            scope="community",
+            delta=5,
+            reason_code="chat",
+            occurred_at=_now(),
+        )
+    dal.commit()
+
+
+def _rep_counts(db: Any, *, user_id: int, user_uuid: str | None = None) -> dict[str, int]:
+    dal = db.dal
+    counts = {
+        "reputation_events": dal(dal.reputation_events.hub_user_id == user_id).count(),
+        "reputation_tenant": dal(dal.reputation_tenant.hub_user_id == user_id).count(),
+        "identities": dal(dal.hub_user_identities.hub_user_id == user_id).count(),
+    }
+    if user_uuid is not None:
+        counts["bundle_scores"] = dal(dal.bundle_reputation_scores.user_uuid == user_uuid).count()
+        counts["bundle_ledger"] = dal(
+            dal.bundle_reputation_adjustments.target_user_uuid == user_uuid
+        ).count()
+    dal.commit()
+    return counts
+
+
+class TestMembershipDeletion:
+    """Suppression-only retention: memberships (PII AND reputation) are DELETED, not kept."""
+
+    async def test_every_hub_keyed_member_row_is_deleted_in_every_community(self, db: Any) -> None:
         user_id = _user(db, name="member")
         rows = [
             _member(db, community_id=1, user_id=user_id, platform_user_id="d-111"),
             _member(db, community_id=2, user_id=user_id, platform_user_id="d-222"),
         ]
-        for member_id in rows:
-            assert _member_pii(db, member_id)["platform_user_id"] is not None  # seeded
+        assert all(_member_exists(db, m) for m in rows)  # seeded
 
         await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="member@example.com")
 
-        for member_id in rows:
-            assert _member_pii(db, member_id) == dict.fromkeys(MEMBER_PII_FIELDS)
+        assert [_member_exists(db, m) for m in rows] == [False, False]
 
-    def test_pii_column_set_is_exactly_the_documented_one(self) -> None:
-        assert privacy.COMMUNITY_MEMBER_PII_COLUMNS == MEMBER_PII_FIELDS
-
-    async def test_the_row_survives_with_its_non_pii_fields(self, db: Any) -> None:
-        """Rows are anonymized, never deleted: FK integrity + the retained reputation signal."""
+    async def test_the_retained_reputation_is_gone_with_the_row(self, db: Any) -> None:
+        """#783 kept `reputation=742` + `role` on the nulled row; that tombstone is removed."""
         user_id = _user(db, name="kept")
         member_id = _member(db, community_id=7, user_id=user_id, platform_user_id="d-9")
-        before = _member_row(db, member_id)
+        assert _member_row(db, member_id).reputation == 742
 
         await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="kept@example.com")
 
-        row = _member_row(db, member_id)
-        assert row is not None
-        assert (row.community_id, row.user_id, row.platform) == (7, str(user_id), "discord")
-        assert (row.reputation, row.role, row.is_active) == (742, "moderator", True)
-        assert row.joined_at == before.joined_at
-        assert row.updated_at is not None  # stamped by the erasure
+        assert _member_row(db, member_id) is None
 
-    async def test_platform_keyed_row_for_a_linked_identity_is_nulled(self, db: Any) -> None:
+    async def test_platform_keyed_row_for_a_linked_identity_is_deleted(self, db: Any) -> None:
         """Rows the reputation service creates carry no hub link -- found via the identity."""
         user_id = _user(db, name="linked")
         _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-555")
@@ -468,9 +530,7 @@ class TestCommunityMemberErasure:
 
         await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="linked@example.com")
 
-        assert _member_pii(db, orphan) == dict.fromkeys(MEMBER_PII_FIELDS)
-        row = _member_row(db, orphan)
-        assert (row.reputation, row.role) == (742, "moderator")
+        assert not _member_exists(db, orphan)
 
     async def test_platform_keyed_row_is_matched_on_platform_and_id_together(self, db: Any) -> None:
         user_id = _user(db, name="exact")
@@ -499,7 +559,7 @@ class TestCommunityMemberErasure:
 
         _assert_member_intact(db, stranger)
         [row] = _ledger(db, user_id)
-        assert row.deletion_scope["community_members_anonymized"] == 0
+        assert row.deletion_scope["community_members"] == 0
 
     async def test_a_row_linked_to_another_hub_user_is_never_touched(self, db: Any) -> None:
         """Same platform account string, but the row names a different hub user: not ours."""
@@ -529,9 +589,7 @@ class TestCommunityMemberErasure:
         for member_id in (theirs, lookalike, platform_only):
             _assert_member_intact(db, member_id)
 
-    async def test_ledger_counts_the_anonymized_members_separately_from_deletes(
-        self, db: Any
-    ) -> None:
+    async def test_ledger_counts_the_deleted_members_as_deletes(self, db: Any) -> None:
         user_id = _user(db, name="counted2")
         _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-1")
         _member(db, community_id=1, user_id=user_id, platform_user_id="d-1")
@@ -541,12 +599,15 @@ class TestCommunityMemberErasure:
         await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="counted2@example.com")
 
         [row] = _ledger(db, user_id)
+        scope = dict(row.deletion_scope)
         assert row.status == "completed"
-        assert row.deletion_scope["community_members_anonymized"] == 3
-        assert privacy._rows_deleted(dict(row.deletion_scope)) == sum(
+        assert scope["community_members"] == 3
+        assert scope["hub_user_identities"] == 1
+        assert "community_members_anonymized" not in scope
+        assert privacy._rows_deleted(scope) == sum(
             v
-            for k, v in row.deletion_scope.items()
-            if k not in {"hub_users_anonymized", "community_members_anonymized"}
+            for k, v in scope.items()
+            if k not in {"hub_users_anonymized", "suppression_records_written"}
         )
 
     async def test_erasure_with_no_member_rows_completes_with_a_zero_count(self, db: Any) -> None:
@@ -556,9 +617,10 @@ class TestCommunityMemberErasure:
 
         [row] = _ledger(db, user_id)
         assert row.status == "completed"
-        assert row.deletion_scope["community_members_anonymized"] == 0
+        assert row.deletion_scope["community_members"] == 0
+        assert row.deletion_scope["suppression_records_written"] == 0
 
-    async def test_self_service_route_nulls_member_pii(self, app: Quart, db: Any) -> None:
+    async def test_self_service_route_deletes_memberships(self, app: Quart, db: Any) -> None:
         user_id = _user(db, name="viaroute3")
         member_id = _member(db, community_id=1, user_id=user_id, platform_user_id="d-r")
         headers = {"Authorization": f"Bearer {make_user_token(user_id=user_id)}"}
@@ -566,34 +628,35 @@ class TestCommunityMemberErasure:
         response = await app.test_client().delete("/api/v1/user/me/data", headers=headers, json={})
 
         assert response.status_code == 200
-        assert _member_pii(db, member_id) == dict.fromkeys(MEMBER_PII_FIELDS)
+        assert not _member_exists(db, member_id)
 
-    async def test_an_unbound_pii_column_fails_loud_instead_of_leaving_pii_behind(
-        self, db: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A pydal `update()` silently DROPS unknown fields -- the guard must raise instead."""
-        user_id = _user(db, name="drift")
-        _seed_footprint(db, user_id)
-        member_id = _member(db, community_id=1, user_id=user_id, platform_user_id="d-x")
-        before = _footprint(db, user_id)
-        monkeypatch.setattr(
-            privacy,
-            "COMMUNITY_MEMBER_PII_COLUMNS",
-            (*privacy.COMMUNITY_MEMBER_PII_COLUMNS, "no_such_column"),
-        )
+    async def test_member_count_drops_by_the_active_rows_removed(self, db: Any) -> None:
+        community_id = _community(db, member_count=5)
+        user_id = _user(db, name="counter")
+        _member(db, community_id=community_id, user_id=user_id)  # active
+        inactive = _member(db, community_id=community_id, user_id=user_id, platform_user_id="d-i")
+        db.dal(db.dal.community_members.id == inactive).update(is_active=False)
+        db.dal.commit()
 
-        with pytest.raises(RuntimeError, match="refusing a partial erasure"):
-            await privacy.anonymize_user_data(
-                db, db.dal, user_id=user_id, email="drift@example.com"
-            )
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="counter@example.com")
 
-        assert _footprint(db, user_id) == before  # the deletes that ran first were rolled back
-        _assert_member_intact(db, member_id)
-        assert _user_row(db, user_id).email == "drift@example.com"
-        assert [r.status for r in _ledger(db, user_id)] == ["failed"]
+        count = db.dal(db.dal.communities.id == community_id).select().first().member_count
+        db.dal.commit()
+        assert count == 4  # only the ACTIVE row was counted in `member_count`
 
-    async def test_debug_logs_never_contain_member_pii(
-        self, db: Any, caplog: pytest.LogCaptureFixture
+    async def test_member_count_never_goes_negative(self, db: Any) -> None:
+        community_id = _community(db, member_count=0)
+        user_id = _user(db, name="floor")
+        _member(db, community_id=community_id, user_id=user_id)
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="floor@example.com")
+
+        count = db.dal(db.dal.communities.id == community_id).select().first().member_count
+        db.dal.commit()
+        assert count == 0
+
+    async def test_logs_and_spans_never_contain_member_pii_or_platform_ids(
+        self, db: Any, caplog: pytest.LogCaptureFixture, otel: OtelSink
     ) -> None:
         user_id = _user(db, name="logquiet")
         _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-secret-id")
@@ -605,7 +668,8 @@ class TestCommunityMemberErasure:
             )
 
         text = "\n".join(r.getMessage() + repr(r.__dict__) for r in caplog.records)
-        assert "dsar.erasure_community_members" in text  # the step really logged
+        text += repr([(s.name, dict(s.attributes or {})) for s in otel.spans.get_finished_spans()])
+        assert "dsar.erasure_completed" in text  # the flow really logged
         for secret in (
             MEMBER_DISPLAY,
             MEMBER_AVATAR,
@@ -617,11 +681,11 @@ class TestCommunityMemberErasure:
         ):
             assert secret not in text
 
-    async def test_member_anonymization_is_reported_but_not_counted_as_a_delete(
+    async def test_member_deletion_is_counted_as_a_delete_in_telemetry(
         self, db: Any, otel: OtelSink
     ) -> None:
         user_id = _user(db, name="observed2")
-        _seed_footprint(db, user_id)  # 8 deletable rows
+        _seed_footprint(db, user_id)  # 8 deletable rows (+2 memberships below)
         _member(db, community_id=1, user_id=user_id, platform_user_id="d-o1")
         _member(db, community_id=2, user_id=user_id, platform_user_id="d-o2")
 
@@ -631,28 +695,197 @@ class TestCommunityMemberErasure:
 
         [span] = otel.spans.get_finished_spans()
         [rows] = otel.points("waddles_hub_dsar_erasure_rows")
-        assert span.attributes["rows_deleted"] == 8
-        assert span.attributes["community_members_anonymized"] == 2
-        assert (rows.count, rows.sum) == (1, 8)
+        assert span.attributes["rows_deleted"] == 10
+        assert span.attributes["community_members_deleted"] == 2
+        assert span.attributes["suppression_records_written"] == 0
+        assert (rows.count, rows.sum) == (1, 10)
+
+
+class TestReputationAndIdentityDeletion:
+    """Every reputation store, the pseudonym mapping and the identity anchors go too."""
+
+    async def test_every_reputation_store_is_cleared_for_the_subject(self, db: Any) -> None:
+        uid = "11111111-1111-1111-1111-111111111111"
+        user_id = _user(db, name="reputed")
+        db.dal(db.dal.hub_users.id == user_id).update(uuid=uid)
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-rep")
+        _seed_reputation(db, user_id=user_id, platform_user_id="t-rep", user_uuid=uid)
+        before = _rep_counts(db, user_id=user_id, user_uuid=uid)
+        assert all(v == 1 for v in before.values()), before
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="reputed@example.com")
+
+        assert _rep_counts(db, user_id=user_id, user_uuid=uid) == dict.fromkeys(before, 0)
+
+    async def test_platform_keyed_reputation_events_without_a_hub_link_are_cleared(
+        self, db: Any
+    ) -> None:
+        user_id = _user(db, name="evt")
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-evt")
+        db.dal.reputation_events.insert(
+            community_id=1,
+            hub_user_id=None,
+            platform="twitch",
+            platform_user_id="t-evt",
+            event_type="chatMessage",
+            score_before=600,
+            score_after=601,
+            created_at=_now(),
+        )
+        stranger = db.dal.reputation_events.insert(
+            community_id=1,
+            hub_user_id=None,
+            platform="twitch",
+            platform_user_id="t-other",
+            event_type="chatMessage",
+            score_before=600,
+            score_after=601,
+            created_at=_now(),
+        )
+        db.dal.commit()
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="evt@example.com")
+
+        remaining = [r.platform_user_id for r in db.dal(db.dal.reputation_events.id > 0).select()]
+        db.dal.commit()
+        assert remaining == ["t-other"]
+        assert stranger
+
+    async def test_bundle_reputation_is_cleared_for_member_and_pseudonym_uuids(
+        self, db: Any
+    ) -> None:
+        member_uuid = "22222222-2222-2222-2222-222222222222"
+        pseudo_uuid = "33333333-3333-3333-3333-333333333333"
+        bystander_uuid = "44444444-4444-4444-4444-444444444444"
+        user_id = _user(db, name="bundle")
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-b")
+        member_id = _member(db, community_id=1, user_id=user_id)
+        db.dal(db.dal.community_members.id == member_id).update(user_uuid=member_uuid)
+        db.dal.ephemeral_pseudonyms.insert(
+            pseudonym=pseudo_uuid,
+            tenant_id=1,
+            platform="twitch",
+            platform_user_id="t-b",
+            handle="Handle Sentinel",
+            created_at=_now(),
+        )
+        for value in (member_uuid, pseudo_uuid, bystander_uuid):
+            db.dal.bundle_reputation_scores.insert(
+                tenant_id=1, community_id=1, user_uuid=value, balance=9
+            )
+            db.dal.bundle_reputation_adjustments.insert(
+                app_id="a",
+                tenant_id=1,
+                community_id=1,
+                target_user_uuid=value,
+                scope="community",
+                delta=1,
+                reason_code="x",
+                occurred_at=_now(),
+            )
+        db.dal.commit()
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="bundle@example.com")
+
+        scores = sorted(
+            r.user_uuid for r in db.dal(db.dal.bundle_reputation_scores.id > 0).select()
+        )
+        ledger = sorted(
+            r.target_user_uuid for r in db.dal(db.dal.bundle_reputation_adjustments.id > 0).select()
+        )
+        db.dal.commit()
+        assert scores == [bystander_uuid] == ledger
+
+    async def test_the_pseudonym_mapping_and_its_raw_handle_are_deleted(self, db: Any) -> None:
+        user_id = _user(db, name="pseudo")
+        _link_identity(db, user_id=user_id, platform="discord", platform_user_id="d-p")
+        for tenant_id in (1, 2):
+            db.dal.ephemeral_pseudonyms.insert(
+                pseudonym=f"5555555{tenant_id}-5555-5555-5555-555555555555",
+                tenant_id=tenant_id,
+                platform="discord",
+                platform_user_id="d-p",
+                handle="Handle Sentinel",
+                created_at=_now(),
+            )
+        db.dal.ephemeral_pseudonyms.insert(
+            pseudonym="66666666-6666-6666-6666-666666666666",
+            tenant_id=1,
+            platform="discord",
+            platform_user_id="d-someone-else",
+            handle="Bystander",
+            created_at=_now(),
+        )
+        db.dal.commit()
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="pseudo@example.com")
+
+        left = [
+            r.platform_user_id for r in db.dal(db.dal.ephemeral_pseudonyms.tenant_id > 0).select()
+        ]
+        db.dal.commit()
+        assert left == ["d-someone-else"]  # both tenants' mappings for the subject are gone
+        [row] = _ledger(db, user_id)
+        assert row.deletion_scope["ephemeral_pseudonyms"] == 2
+
+    async def test_identity_links_are_deleted_so_there_is_no_account_reclaim_anchor(
+        self, db: Any
+    ) -> None:
+        """#783 kept `hub_user_identities` as the "permanent identity anchor" for reclaim."""
+        user_id = _user(db, name="anchor")
+        other = _user(db, name="anchor-other")
+        _link_identity(db, user_id=user_id, platform="discord", platform_user_id="d-a")
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-a")
+        _link_identity(db, user_id=other, platform="discord", platform_user_id="d-other")
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="anchor@example.com")
+
+        assert _rep_counts(db, user_id=user_id)["identities"] == 0
+        assert _rep_counts(db, user_id=other)["identities"] == 1
+        [row] = _ledger(db, user_id)
+        assert row.deletion_scope["hub_user_identities"] == 2
+
+    async def test_another_users_reputation_is_untouched(self, db: Any) -> None:
+        victim = _user(db, name="vrep")
+        bystander = _user(db, name="brep")
+        _seed_reputation(db, user_id=victim)
+        _seed_reputation(db, user_id=bystander)
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=victim, email="vrep@example.com")
+
+        assert _rep_counts(db, user_id=bystander)["reputation_events"] == 1
+        assert _rep_counts(db, user_id=bystander)["reputation_tenant"] == 1
 
 
 class TestMemberErasureAtomicity:
-    """The `community_members` step is part of the SAME all-or-nothing transaction."""
+    """Membership + reputation deletion is part of the SAME all-or-nothing transaction."""
 
     @pytest.fixture
-    def block_member_update(self, db: Any) -> Iterator[None]:
-        """Make the `community_members` UPDATE fail -- AFTER the deletes before it have run."""
+    def block_member_delete(self, db: Any) -> Iterator[None]:
+        """Make the `community_members` DELETE fail -- AFTER the deletes before it have run."""
         _install_trigger(
             db,
             "block_members",
-            "CREATE TRIGGER block_members BEFORE UPDATE ON community_members "
+            "CREATE TRIGGER block_members BEFORE DELETE ON community_members "
             f"BEGIN SELECT RAISE(ABORT, '{TRIGGER_MESSAGE}'); END",
         )
         yield
         _drop_trigger(db, "block_members")
 
-    async def test_member_update_failure_rolls_back_every_delete(
-        self, db: Any, block_member_update: None
+    @pytest.fixture
+    def block_identity_delete(self, db: Any) -> Iterator[None]:
+        """Make the LAST new delete (identity anchors) fail -- after memberships + reputation."""
+        _install_trigger(
+            db,
+            "block_identities",
+            "CREATE TRIGGER block_identities BEFORE DELETE ON hub_user_identities "
+            f"BEGIN SELECT RAISE(ABORT, '{TRIGGER_MESSAGE}'); END",
+        )
+        yield
+        _drop_trigger(db, "block_identities")
+
+    async def test_member_delete_failure_rolls_back_every_earlier_delete(
+        self, db: Any, block_member_delete: None
     ) -> None:
         user_id = _user(db, name="memberhalf")
         _seed_footprint(db, user_id)
@@ -671,7 +904,25 @@ class TestMemberErasureAtomicity:
         assert (row.email, row.is_active) == ("memberhalf@example.com", True)
         assert [r.status for r in _ledger(db, user_id)] == ["failed"]
 
-    async def test_anonymization_failure_rolls_back_the_member_nulling(
+    async def test_identity_delete_failure_rolls_back_memberships_and_reputation(
+        self, db: Any, block_identity_delete: None
+    ) -> None:
+        user_id = _user(db, name="idhalf")
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-h")
+        member_id = _member(db, community_id=1, user_id=user_id, platform_user_id="d-h")
+        _seed_reputation(db, user_id=user_id, platform_user_id="t-h")
+        before = _rep_counts(db, user_id=user_id)
+
+        with pytest.raises(Exception, match=TRIGGER_MESSAGE):
+            await privacy.anonymize_user_data(
+                db, db.dal, user_id=user_id, email="idhalf@example.com"
+            )
+
+        assert _rep_counts(db, user_id=user_id) == before
+        _assert_member_intact(db, member_id)
+        assert [r.status for r in _ledger(db, user_id)] == ["failed"]
+
+    async def test_anonymization_failure_rolls_back_the_member_deletion(
         self, db: Any, block_anonymization: None
     ) -> None:
         user_id = _user(db, name="memberlate")
@@ -685,7 +936,7 @@ class TestMemberErasureAtomicity:
         _assert_member_intact(db, member_id)
         assert _member_row(db, member_id).platform_user_id == "d-l"
 
-    async def test_ledger_write_failure_rolls_back_the_member_nulling(
+    async def test_ledger_write_failure_rolls_back_the_member_deletion(
         self, db: Any, block_completion_ledger: None
     ) -> None:
         """No erasure without its proof, and no half-erased membership either."""
@@ -701,7 +952,7 @@ class TestMemberErasureAtomicity:
         assert [r.status for r in _ledger(db, user_id)] == ["failed"]
 
     async def test_a_failed_erasure_can_be_retried_to_completion_including_members(
-        self, db: Any, block_member_update: None
+        self, db: Any, block_member_delete: None
     ) -> None:
         user_id = _user(db, name="memberretry")
         member_id = _member(db, community_id=1, user_id=user_id, platform_user_id="d-t")
@@ -715,7 +966,7 @@ class TestMemberErasureAtomicity:
             db, db.dal, user_id=user_id, email="memberretry@example.com"
         )
 
-        assert _member_pii(db, member_id) == dict.fromkeys(MEMBER_PII_FIELDS)
+        assert not _member_exists(db, member_id)
         assert [r.status for r in _ledger(db, user_id)] == ["failed", "completed"]
 
     async def test_success_still_commits_exactly_once_with_member_rows(
@@ -725,6 +976,7 @@ class TestMemberErasureAtomicity:
         _member(db, community_id=1, user_id=user_id, platform_user_id="d-c")
         _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-c")
         _member(db, community_id=2, user_id=None, platform="twitch", platform_user_id="t-c")
+        _seed_reputation(db, user_id=user_id, platform_user_id="t-c")
         commits: list[int] = []
         real_commit = db.dal.commit
         monkeypatch.setattr(db.dal, "commit", lambda: (commits.append(1), real_commit())[1])
@@ -810,8 +1062,11 @@ class TestRetention:
         assert self._evidence_counts(db, user_id) == before
 
     def test_erasure_never_references_a_retained_table(self) -> None:
-        source = inspect.getsource(privacy._sync_erase) + inspect.getsource(
-            privacy._erase_community_member_pii
+        source = (
+            inspect.getsource(privacy._sync_erase)
+            + inspect.getsource(privacy._delete_memberships)
+            + inspect.getsource(privacy._delete_reputation_and_identity)
+            + inspect.getsource(privacy._collect_erasure_scope)
         )
         for table in privacy.ERASURE_RETAINED_TABLES:
             if table == "data_deletion_requests":

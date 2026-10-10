@@ -28,6 +28,7 @@ from urllib.parse import urlencode
 import httpx
 
 from config import HubAPIConfig
+from services import ban_suppression
 from services.auth_service import SessionUser, create_session_token
 from services.errors import bad_request, conflict
 
@@ -328,6 +329,10 @@ async def _find_or_create_user_from_oauth(
         avatar_url=user_data.get("avatar_url"),
         linked_at=datetime.now(UTC),
     )
+    # The global-community membership above was created before this identity existed, so
+    # re-check suppression now that the platform id is known (ban-evasion: an erased, banned
+    # user signing up again with the same platform account).
+    await ban_suppression.reapply_for_hub_user_async(async_dal, dal, hub_user_id=user.id)
     return user
 
 
@@ -480,6 +485,9 @@ async def link_callback(
         linked_at=datetime.now(UTC),
         last_used=datetime.now(UTC),
     )
+    # A banned person may join a community first and link the banned platform account later:
+    # re-apply any matching suppression to this user's memberships now that the id is known.
+    await ban_suppression.reapply_for_hub_user_async(async_dal, dal, hub_user_id=user_id)
 
 
 async def unlink_account(async_dal: Any, dal: Any, *, user_id: int, platform: str) -> None:

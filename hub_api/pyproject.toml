@@ -159,6 +159,10 @@ convention = "google"
 # SSO test suite: embedded SAML/XML payload strings and long assertion messages read better
 # unwrapped (same rationale as the per-file test ignores above).
 "tests/sso/*" = ["E501"]
+# Ban-suppression suite re-imports the shared erasure fixtures (`db`, `module_db`, `otel`,
+# `block_anonymization`) from `tests/test_data_privacy_erasure.py`; a pytest fixture used as a
+# test parameter is, to ruff, a redefinition of the imported name.
+"tests/test_ban_suppression.py" = ["F811"]
 # Marketplace-catalog port group: `CatalogEntry`/`ModuleEntry`/`ModuleDetail`/
 # `ModuleSubscription`/etc DTO fields are deliberately camelCase to byte-match
 # `catalogService.js`'s `formatCatalogEntry`/`moduleService.js`'s `formatModule`
