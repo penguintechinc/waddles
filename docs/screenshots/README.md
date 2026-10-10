@@ -4,40 +4,36 @@ This directory contains screenshots of the Waddles admin interface and features.
 
 ## Capturing Screenshots
 
-### Option 1: Manual Screenshots
-
-1. Start Waddles with docker-compose:
-   ```bash
-   docker-compose up -d
-   ```
-
-2. Access the admin portal at http://localhost:8060
-   - Note: You may need to expose port 8060 in docker-compose.yml first
-
-3. Login with the local dev admin credentials (`INITIAL_ADMIN_EMAIL` /
-   `INITIAL_ADMIN_PASSWORD` in `docker-compose.yml`, overridable via `.env`;
-   no built-in default in production -- see `docs/hub_module/USAGE.md`)
-
-4. Take screenshots of key pages and save them here
-
-### Option 2: Automated with Puppeteer
-
-Run the automated screenshot capture script:
+`make screenshots` regenerates the whole set (unauthenticated + authenticated)
+with a pinned Playwright (`tests/screenshots/`, playwright 1.63.0, lockfile
+committed). Never hand-update a subset.
 
 ```bash
-# Install dependencies
-npm install
-
-# Run the script (requires hub to be running and port 8060 exposed)
-node scripts/capture-screenshots.cjs
+# 1. Running hub-webui + database (Kubernetes/Helm local alpha; no Docker Compose)
+# 2. Seed: admin login account + UI content (communities 9001-9004, members,
+#    leaderboard, overlays, chat, bundle activations from app_catalog)
+export POSTGRES_PASSWORD=...  ADMIN_EMAIL=...  ADMIN_PASSWORD=...
+make seed-mock-data            # SEED_ARGS=--docker to exec into a postgres container
+# 3. Capture
+export BASE_URL=http://localhost:8060        # default; point at any hub-webui
+export SCREENSHOT_EMAIL="$ADMIN_EMAIL" SCREENSHOT_PASSWORD="$ADMIN_PASSWORD"
+make screenshots
 ```
 
-Or use the Docker-based version that works with the internal network:
+| Env | Default | Purpose |
+|---|---|---|
+| `BASE_URL` | `http://localhost:8060` | hub-webui to capture |
+| `SCREENSHOT_EMAIL` / `SCREENSHOT_PASSWORD` | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | login (never hardcoded) |
+| `COMMUNITY_ID` / `TENANT_SLUG` | `9001` / `default` | seeded community and tenant |
+| `OUT_DIR` | `docs/screenshots` | output (files overwritten by page name) |
+| `STRICT_EMPTY=1` | off | fail on suspected empty-state pages (default: warn) |
 
-```bash
-chmod +x scripts/capture-screenshots-docker.sh
-./scripts/capture-screenshots-docker.sh
-```
+- Fails (non-zero) on login failure, redirect to `/login`, HTTP >= 400, rendered
+  error text, or zero captures; prints counts examined.
+- Playwright scratch `/tmp/playwright-waddles` is removed on exit, pass or fail.
+- Page inventory: `tests/screenshots/pages.cjs`. After capture, review every image
+  per the `capturing-marketing-screenshots` skill (error banners, empty states).
+- Do not run against shared alpha; use a local or CI stack.
 
 ## Screenshots Needed
 
