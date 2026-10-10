@@ -63,7 +63,7 @@ roles_mod = load_service_roles_module()
 CATALOG = roles_mod.load_catalog()
 PASSWORDS_ENV = roles_mod.PASSWORDS_ENV
 PRIVS = ("SELECT", "INSERT", "UPDATE", "DELETE")
-PRIOR_REVISION = "0049_sso_connections"
+PRIOR_REVISION = "0054_tenant_external_kms"
 
 
 def _connect(db: PgTestDatabase, user: str, password: str) -> Any:

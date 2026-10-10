@@ -43,7 +43,7 @@ tables added by later migrations).
 NOT restore the repo-known passwords -- re-enabling them would re-open H-1.
 
 Revision ID: 0055_per_service_db_roles
-Revises: 0049_sso_connections
+Revises: 0054_tenant_external_kms
 Create Date: 2026-10-10
 """
 
@@ -58,7 +58,7 @@ from types import ModuleType
 from alembic import op
 
 revision = "0055_per_service_db_roles"
-down_revision = "0049_sso_connections"
+down_revision = "0054_tenant_external_kms"
 branch_labels = None
 depends_on = None
 
