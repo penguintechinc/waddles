@@ -14,8 +14,13 @@ import time
 from dataclasses import dataclass, field
 
 import httpx
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
+
+# SECURITY (PII in logs): httpx logs every request URL at INFO ("HTTP Request: GET <url>"),
+# and a SearXNG URL embeds the user's research question as its `q=` query string.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @dataclass(slots=True)
@@ -115,15 +120,15 @@ class SearXNGService:
                 data = resp.json()
             except httpx.HTTPStatusError as exc:
                 logger.error(
-                    "SearXNG HTTP error: %s %s",
-                    exc.response.status_code, exc.request.url,
+                    "SearXNG HTTP error: status=%s (request URL omitted: it embeds the query)",
+                    exc.response.status_code,
                 )
                 return SearXNGResponse(
                     results=[], query=query, total_results=0,
                     search_time_ms=int((time.perf_counter() - start_time) * 1000),
                 )
             except Exception as exc:
-                logger.error("SearXNG request failed: %s", exc)
+                logger.error("SearXNG request failed: %s", describe_db_error(exc))
                 return SearXNGResponse(
                     results=[], query=query, total_results=0,
                     search_time_ms=int((time.perf_counter() - start_time) * 1000),

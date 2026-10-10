@@ -54,7 +54,7 @@ FEATURE_MUSIC_YOUTUBE_LABELS = "waddles.social.music.youtube_labels"
 music_queue_bp = Blueprint("v1_community_music_queue", __name__, url_prefix="/api/v1/admin")
 
 #: Service-to-service only -- a chat command (`!sr`/`!songrequest`,
-#: `core/svc_action/bundles/social_music_action.py`) has no user JWT to
+#: `core/svc_action/builtin_handlers/social_music_action.py`) has no user JWT to
 #: present, so it can't call `music_queue_bp`'s own admin-scoped enqueue
 #: route above. Mirrors `core/reputation_module`'s `POST /api/v1/internal/
 #: events` pattern (`X-Service-Key`, no tenant/JWT) -- see
@@ -680,7 +680,7 @@ async def internal_set_music_policy() -> Any:
 async def internal_music_status() -> Any:
     """`GET /api/v1/internal/music/status?community_id=<id>` -- service-to-service only.
 
-    Backs `!sr status` (`core/svc_action/bundles/social_music_action.py`).
+    Backs `!sr status` (`core/svc_action/builtin_handlers/social_music_action.py`).
     Deliberately does NOT check `music_policy.song_requests_allowed` --
     that's a separate per-community admin toggle from the PostHog
     `waddles.social.music` feature flag this endpoint's caller already

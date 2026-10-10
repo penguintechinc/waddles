@@ -2,7 +2,7 @@
 `poll_options`/`poll_votes` tables (migration 028, same tables `hub_api/blueprints/v1/
 community_polls.py`'s REST API reads/writes).
 
-Ported from `core/svc_process/bundles/community_polls_process.py` (the bot_process
+Ported from `core/svc_process/builtin_handlers/community_polls_process.py` (the bot_process
 monolith's `!poll create/vote/close/list/view`) onto `waddle_sdk.command`'s standard
 grammar and `waddle_sdk.db`'s structured facade -- see `sdk/waddle-sdk/AUTHORING.md` SS1
 for the grammar and `waddle_sdk/db.py`'s own module docstring for the structured
@@ -149,7 +149,7 @@ def _is_privileged(payload: dict[str, Any]) -> bool:
 
 def _parse_quoted_args(args: str) -> list[str]:
     """Parse quoted arguments from a command line string -- byte-for-byte port of the
-    source file's own `_parse_quoted_args` (`core/svc_process/bundles/
+    source file's own `_parse_quoted_args` (`core/svc_process/builtin_handlers/
     community_polls_process.py`).
 
     Example: '"title" "opt1" "opt2"' -> ['title', 'opt1', 'opt2']

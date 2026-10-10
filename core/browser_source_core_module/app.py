@@ -1,4 +1,12 @@
-"""Browser source for OBS - Quart Application."""
+"""Browser source for OBS - Quart Application.
+
+MIGRATION NOTE: the caption overlay in this module (``/overlay/captions/<key>``,
+``/ws/captions/<community_id>``, ``/api/v1/internal/captions`` and the gRPC
+``SendCaption``) has a Rust port in ``core/svc_presentation`` (flag
+``waddles.core.overlay-captions``, migration 102). This copy stays live until
+that flag is switched on at the parity cutover, after which the caption path
+here is to be deleted -- see ``core/svc_presentation/README.md``.
+"""
 import asyncio
 import json
 import logging

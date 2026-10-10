@@ -29,7 +29,7 @@ import statistics
 import json
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'libs'))
-from flask_core import setup_aaa_logging  # noqa: E402
+from flask_core import describe_db_error, setup_aaa_logging  # noqa: E402
 
 logger = setup_aaa_logging('ai_researcher_bot_detection', '1.0.0')
 
@@ -169,9 +169,9 @@ class BotDetectionService:
 
         except Exception as e:
             logger.error(
-                f"Failed to analyze users: {e}",
+                f"Failed to analyze users: {describe_db_error(e)}",
                 community=community_id,
-                error=str(e)
+                error=describe_db_error(e)
             )
             raise
 
@@ -250,10 +250,10 @@ class BotDetectionService:
 
         except Exception as e:
             logger.error(
-                f"Failed to analyze user: {e}",
+                f"Failed to analyze user: {describe_db_error(e)}",
                 community=community_id,
                 user=user_id,
-                error=str(e)
+                error=describe_db_error(e)
             )
             raise
 
@@ -405,9 +405,9 @@ class BotDetectionService:
 
         except Exception as e:
             logger.error(
-                f"Failed to save bot detection results: {e}",
+                f"Failed to save bot detection results: {describe_db_error(e)}",
                 community=community_id,
-                error=str(e)
+                error=describe_db_error(e)
             )
             raise
 
@@ -472,9 +472,9 @@ class BotDetectionService:
 
         except Exception as e:
             logger.error(
-                f"Failed to get at-risk users: {e}",
+                f"Failed to get at-risk users: {describe_db_error(e)}",
                 community=community_id,
-                error=str(e)
+                error=describe_db_error(e)
             )
             raise
 

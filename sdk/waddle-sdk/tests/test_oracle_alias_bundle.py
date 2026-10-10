@@ -1,9 +1,9 @@
 """ORACLE proof (spec Sec18 R1, D7 G3): the real alias bundle, through this facade.
 
-The unmodified, currently-merged `core/svc_process/bundles/
+The unmodified, currently-merged `core/svc_process/builtin_handlers/
 social_alias_process.py` -- migrated to `penguin_dal` natively under M1.5 and
 already green in its own suite
-(`core/svc_process/tests/test_bundles_social_alias_process.py`) -- driven
+(`core/svc_process/tests/test_builtin_social_alias_process.py`) -- driven
 end to end through this SDK's `penguin_dal`-compatible facade and
 `flask_core` compatibility shims, exactly the way a compiled component would
 see it once `waddle-sdk` is installed in `flask_core`'s place at build time
@@ -44,7 +44,7 @@ already a `NotImplementedError` stub before the structured `db` rewrite).
 
 Two dependency-boundary stubs, neither touching the facade under test:
 
-- `bundles.bot_process` (a SIBLING bundle `_cmd_set_alias`'s `_known_commands()`
+- `builtin_handlers.bot_process` (a SIBLING bundle `_cmd_set_alias`'s `_known_commands()`
   hard-imports for its command vocabulary) is replaced with a minimal fake
   exposing `_BOT_COMMANDS`/`_FEATURE_MODULES` -- `bot_process`'s own runtime
   dependency chain (`services.command_alias_store` -> `config.Config` ->
@@ -101,7 +101,7 @@ def _event(text: str, *, actor: str | None = "penguin") -> PlatformEvent:
 
 @pytest.fixture
 def alias_bundle(monkeypatch: pytest.MonkeyPatch):
-    """Import the real `bundles.social_alias_process` with `flask_core` shimmed to this SDK."""
+    """Import real `builtin_handlers.social_alias_process`, `flask_core` shimmed to this SDK."""
     if not SVC_PROCESS_ROOT.is_dir():
         pytest.skip(f"core/svc_process not found at {SVC_PROCESS_ROOT} -- requires a full checkout")
 
@@ -110,26 +110,26 @@ def alias_bundle(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "flask_core.feature_flags", waddle_feature_flags)
     monkeypatch.setitem(sys.modules, "flask_core.stream_pipeline", waddle_stream_pipeline)
 
-    fake_bot_process = types.ModuleType("bundles.bot_process")
+    fake_bot_process = types.ModuleType("builtin_handlers.bot_process")
     fake_bot_process._BOT_COMMANDS = frozenset({"ping", "hello"})  # type: ignore[attr-defined]
     fake_bot_process._FEATURE_MODULES = {}  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "bundles.bot_process", fake_bot_process)
+    monkeypatch.setitem(sys.modules, "builtin_handlers.bot_process", fake_bot_process)
 
     monkeypatch.syspath_prepend(str(SVC_PROCESS_ROOT))
     for name in list(sys.modules):
         if (
-            name == "bundles"
-            or name.startswith("bundles.")
+            name == "builtin_handlers"
+            or name.startswith("builtin_handlers.")
             or name == "services"
             or name.startswith("services.")
         ):
-            if name != "bundles.bot_process":
+            if name != "builtin_handlers.bot_process":
                 monkeypatch.delitem(sys.modules, name, raising=False)
 
     reset_bundle_dal_for_tests()
     set_bundle_dal(AsyncDB())
 
-    import bundles.social_alias_process as social_alias_process
+    import builtin_handlers.social_alias_process as social_alias_process
 
     yield social_alias_process
 

@@ -2,7 +2,8 @@
 
 The Waddles overlay/presentation service: OBS browser-source overlays
 (full-screen/media/crawler/music, plus the #458 widget palette --
-alert_box/chat/goals/ticker/image), per-community theme/styling config.
+alert_box/chat/goals/ticker/image, and the live `caption` surface), per-community
+theme/styling config.
 Replaces the Python + Quart alpha (`app.py`, `blueprints/`, `services/` in
 this same directory) once P2-P9 land the render/live/push/hub routes on
 top of this skeleton; both builds coexist in-tree during the transition
@@ -23,6 +24,35 @@ doc for the exact extension points later chunks add routes to:
 | P2 | `GET /overlay/{community}/{surface}` render | `src/overlay/router.rs::view_guarded_router` |
 | P3 | `GET /overlay/{community}/{surface}/live` SSE/websocket | `src/overlay/router.rs::view_guarded_router` |
 | P4 | `POST /overlay/{community}/{surface}/push` | `src/overlay/router.rs::push_guarded_router` |
+
+## Captions (port of `core/browser_source_core_module`)
+
+The closed-caption overlay -- the Python `browser_source_core_module`'s
+`/overlay/captions/<key>` page, `/ws/captions/<community_id>` websocket and
+`POST /api/v1/internal/captions` ingest -- is ported here
+(`src/http/captions.rs`, `src/overlay/render/caption.rs`,
+`src/overlay/caption_store.rs`, migration `102_caption_events_rust_port.sql`).
+It ships **dark**: every caption route is gated on the PostHog flag
+`waddles.core.overlay-captions` (OFF by default), so the Python path stays
+live until the parity cutover.
+
+| Route | Auth | Notes |
+|---|---|---|
+| `GET /overlay/captions/{key}?community_id=N` | VIEW key (path) validated *for that community* | Same URL as Python -- existing OBS sources keep working. Static page, no data embedded |
+| `GET /ws/captions/{community_id}?key=` | VIEW key (`?key=`) | Same URL as Python. Replays the last 5 min / 10 captions, then streams live |
+| `POST /overlay/{community}/caption/push` | PUSH machine JWT scoped to the community | **Replaces** `POST /api/v1/internal/captions`: no static `X-Service-Key`, community from the credential never the body, body is `OverlayPush{caption: ...}` |
+
+PII: pushes carry a tokenized `user` UUID plus an already-detokenized
+`display_name`; only the UUID is stored (`caption_events.user_ref`), the
+display name is forwarded to live viewers and never persisted or logged, so
+replayed history has no attribution name. Retention is 7 days (hourly purge,
+flag-gated).
+
+**Cutover checklist (parity work, not done here):** repoint ingress for
+`/overlay/captions/*` and `/ws/captions/*` and every caller of the legacy
+`/api/v1/internal/captions` / gRPC `SendCaption` at this service (callers must
+now send a PUSH JWT and the `caption` payload); flip the flag; then delete the
+Python caption path and drop the deprecated `caption_events.username` column.
 
 ## Ports
 

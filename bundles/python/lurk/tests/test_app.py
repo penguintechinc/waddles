@@ -773,3 +773,442 @@ def test_colon_key_is_rejected_before_any_host_call() -> None:
 
     with pytest.raises(InvalidKvKeyError, match="characters outside"):
         _run(kv.get(f"lurk:state:comm-1:{'x' * 10}"))
+
+
+# -- PII-free logs -- regression: gh-674 (bundle-logs-must-be-pii-free) ---------
+
+_SENTINEL = "SENTINELpii9f3a"
+
+#: Strict per-message allowlist: a log line may carry ONLY these fields. A new field (e.g. a
+#: raw `text=`/`arg=`/`actor=`) fails here instead of silently shipping user input to telemetry.
+_ALLOWED_LOG_FIELDS: dict[str, frozenset[str]] = {
+    "lurk.transform matched": frozenset({"command"}),
+    "lurk.dispatch relayed": frozenset({"platform", "command"}),
+    "lurk.dispatch config applied": frozenset({"command"}),
+    "lurk.config_denied": frozenset({"command", "role_signal"}),
+    "lurk.enable_ai_denied": frozenset({"tier"}),
+    "lurk.ai_requested_but_pending": frozenset({"community"}),
+    "lurk.template_corrupt": frozenset({"community"}),
+    "lurk.state_corrupt": frozenset({"community"}),
+    "lurk.kv_error": frozenset({"op", "error"}),
+    "lurk.missing_community": frozenset({"command"}),
+}
+
+
+def _assert_logs_pii_free(host: _FakeHost, *, minimum_lines: int) -> set[str]:
+    """Every captured log line is allow-listed field-by-field and free of the sentinel.
+
+    Asserts a non-empty denominator first -- a check that examined zero log lines proves nothing.
+    Returns the set of distinct messages seen so callers can prove each branch was exercised.
+    """
+    assert len(host.log_calls) >= minimum_lines
+    for _lvl, message, fields_json in host.log_calls:
+        assert _SENTINEL not in message
+        assert _SENTINEL not in fields_json
+        assert message in _ALLOWED_LOG_FIELDS, f"unexpected log message {message!r}"
+        assert set(json.loads(fields_json)) <= _ALLOWED_LOG_FIELDS[message]
+    return {message for _lvl, message, _f in host.log_calls}
+
+
+def test_transform_logs_never_carry_user_input(fake_host: _FakeHost) -> None:
+    # regression: gh-674
+    for text in (
+        "!lurk",
+        "!unlurk",
+        f"!lurk set {_SENTINEL} $(username)",
+        f"!lurk bogus {_SENTINEL}",
+        f"!lurk enable ai {_SENTINEL}",
+        "!lurk enable ai",
+        "!lurk disable ai",
+        "!lurk reset",
+    ):
+        event = _sample_event(text, is_mod=True)
+        event.actor = _SENTINEL
+        assert _run(transform(event)) is not None
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=8)
+    assert seen == {"lurk.transform matched"}
+
+
+def test_dispatch_logs_never_carry_user_input_on_any_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # regression: gh-674 -- every dispatch branch, with a sentinel as BOTH the actor and (for
+    # `set`) the message text; the stored kv KEYS must not contain the raw actor either.
+    host = _FakeHost(tier="enterprise")
+    _install(monkeypatch, host)
+
+    def go(command: str, *, arg: str | None = None, role: bool | None = None) -> None:
+        envelope = _sample_envelope("twitch", command, actor=_SENTINEL, arg=arg, is_mod=role)
+        _run(dispatch(envelope, {}, http_client=None))
+
+    go("lurk")
+    go("unlurk")
+    go("unlurk")  # no longer lurking
+    go("config_set_message", arg=f"{_SENTINEL} $(username)", role=True)
+    go("config_set_message", arg=f"{_SENTINEL} $(nope)", role=True)  # rejected template
+    go("config_enable_ai", role=True)
+    go("lurk")  # ai toggle on -> "pending" DEBUG line
+    go("config_disable_ai", role=True)
+    go("config_reset", role=True)
+    go("config_reset")  # denied, no role signal
+    go("usage")
+    host.tier = "free"
+    go("config_enable_ai", role=True)  # license-denied
+    host.store[_message_key("comm-1")] = b"\xff\xfe"
+    go("lurk")  # corrupt template
+    host.store[_expected_state_key("comm-1", _SENTINEL)] = b"garbage"
+    go("unlurk")  # corrupt state
+
+    seen = _assert_logs_pii_free(host, minimum_lines=12)
+    assert seen == {
+        "lurk.dispatch relayed",
+        "lurk.dispatch config applied",
+        "lurk.config_denied",
+        "lurk.enable_ai_denied",
+        "lurk.ai_requested_but_pending",
+        "lurk.template_corrupt",
+        "lurk.state_corrupt",
+    }
+    assert all(_SENTINEL not in key for _op, key, *_rest in host.kv_calls)
+
+
+def test_failure_paths_never_log_user_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    # regression: gh-674 -- a kv failure whose own exception text echoes user-ish data must still
+    # log only the classified error-case NAME, and the empty-community guard only the command.
+    host = _FakeHost()
+    _install(monkeypatch, host, kv_set_raises=RuntimeError(f"backend detail {_SENTINEL}"))
+    with pytest.raises(RuntimeError) as excinfo:
+        _run(dispatch(_sample_envelope("twitch", "lurk", actor=_SENTINEL), {}, http_client=None))
+    assert _SENTINEL not in str(excinfo.value)
+
+    with pytest.raises(ValueError):
+        _run(
+            dispatch(
+                _sample_envelope("twitch", "lurk", actor=_SENTINEL, community=""),
+                {},
+                http_client=None,
+            )
+        )
+
+    seen = _assert_logs_pii_free(host, minimum_lines=2)
+    assert seen == {"lurk.kv_error", "lurk.missing_community"}
+    (kv_error,) = [json.loads(f) for _lvl, m, f in host.log_calls if m == "lurk.kv_error"]
+    assert kv_error == {"op": "set", "error": "RuntimeError"}
+
+
+# -- mod gate: every config command fails closed, before any kv/license access --------
+
+_CONFIG_COMMANDS = [
+    pytest.param("config_set_message", "hi $(username)", id="set"),
+    pytest.param("config_enable_ai", None, id="enable-ai"),
+    pytest.param("config_disable_ai", None, id="disable-ai"),
+    pytest.param("config_reset", None, id="reset"),
+]
+
+
+@pytest.mark.parametrize(("command", "arg"), _CONFIG_COMMANDS)
+@pytest.mark.parametrize(
+    "role",
+    [
+        pytest.param({}, id="no-signal-at-all"),
+        pytest.param({"is_mod": False}, id="mod-false"),
+        pytest.param({"is_broadcaster": False}, id="broadcaster-false"),
+        pytest.param({"is_mod": False, "is_broadcaster": False}, id="both-false"),
+    ],
+)
+def test_every_config_command_is_denied_without_any_kv_or_license_access(
+    command: str, arg: str | None, role: dict[str, bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _FakeHost(tier="enterprise")
+    _install(monkeypatch, host)
+    tier_calls: list[int] = []
+    flags = sys.modules["wit_world"].imports.flags
+    flags.tier = lambda: tier_calls.append(1) or "enterprise"
+
+    result = _run(
+        dispatch(_sample_envelope("twitch", command, arg=arg, **role), {}, http_client=None)
+    )
+
+    assert result.detail == f"{command}:denied"
+    assert (
+        json.loads(host.relay_calls[-1][1])["text"]
+        == "only moderators/broadcasters can configure !lurk"
+    )
+    assert host.kv_calls == []
+    assert tier_calls == []
+
+
+@pytest.mark.parametrize(("command", "arg"), _CONFIG_COMMANDS)
+@pytest.mark.parametrize(
+    "role",
+    [{"is_mod": True}, {"is_broadcaster": True}, {"is_mod": True, "is_broadcaster": True}],
+)
+def test_either_badge_alone_opens_every_config_command(
+    command: str, arg: str | None, role: dict[str, bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _FakeHost(tier="enterprise")
+    _install(monkeypatch, host)
+    result = _run(
+        dispatch(_sample_envelope("twitch", command, arg=arg, **role), {}, http_client=None)
+    )
+    assert result.detail == command
+
+
+def test_present_but_null_badge_fields_are_denied(fake_host: _FakeHost) -> None:
+    envelope = _sample_envelope("twitch", "config_reset")
+    envelope.event.payload["is_mod"] = None
+    envelope.event.payload["is_broadcaster"] = None
+    result = _run(dispatch(envelope, {}, http_client=None))
+    assert result.detail == "config_reset:denied"
+    assert fake_host.kv_calls == []
+
+
+def test_lurk_and_unlurk_never_need_a_role(fake_host: _FakeHost) -> None:
+    for command in ("lurk", "unlurk"):
+        result = _run(dispatch(_sample_envelope("discord", command), {}, http_client=None))
+        assert result.detail == command
+
+
+# -- transform(): grammar boundaries -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_command"),
+    [
+        ("!lurk ENABLE AI", "config_enable_ai"),
+        ("!lurk Disable Ai", "config_disable_ai"),
+        ("!lurk RESET", "config_reset"),
+        ("!lurk enable", "usage"),
+        ("!lurk disable", "usage"),
+        ("!lurk enable ai please", "usage"),
+        ("!lurk resetnow", "usage"),
+        ("!lurk setx hi", "usage"),
+        ("!lurk   ", "lurk"),
+    ],
+)
+def test_transform_subcommand_boundaries(
+    text: str, expected_command: str, fake_host: _FakeHost
+) -> None:
+    result = _run(transform(_sample_event(text)))
+    assert result is not None
+    assert result.payload["command"] == expected_command
+
+
+def test_transform_forwards_only_command_channel_arg_and_badges(fake_host: _FakeHost) -> None:
+    event = _sample_event("!lurk set hi", is_mod=True)
+    event.payload["email"] = "x@example.com"
+    result = _run(transform(event))
+    assert result is not None
+    assert set(result.payload) == {"command", "channel_id", "arg", "is_mod"}
+
+
+def test_flag_is_checked_by_key_and_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, bool]] = []
+
+    def _enabled(key: str, default_value: bool) -> bool:
+        seen.append((key, default_value))
+        return False
+
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
+        flags=types.SimpleNamespace(enabled=_enabled)
+    )
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+    assert _run(transform(_sample_event("!lurk"))) is None
+    assert seen == [("waddles.command-lurk", False)]
+
+
+# -- kv failure on every op of every command: fail loud, never silent -----------------
+
+
+def _kv_error_scenarios() -> list[Any]:
+    return [
+        pytest.param("lurk", None, "set", "free", None, id="lurk-set"),
+        pytest.param("lurk", None, "get", "free", None, id="lurk-ai-flag-get"),
+        pytest.param("unlurk", None, "get", "free", None, id="unlurk-get"),
+        pytest.param("unlurk", None, "delete", "free", b"1700000000000", id="unlurk-delete"),
+        pytest.param("unlurk", None, "delete", "free", b"garbage", id="corrupt-state-delete"),
+        pytest.param("config_set_message", "hi", "set", "free", None, id="set-message"),
+        pytest.param("config_enable_ai", None, "set", "enterprise", None, id="enable-ai"),
+        pytest.param("config_disable_ai", None, "delete", "free", None, id="disable-ai"),
+        pytest.param("config_reset", None, "delete", "free", None, id="reset"),
+    ]
+
+
+@pytest.mark.parametrize(("command", "arg", "op", "tier", "state"), _kv_error_scenarios())
+def test_every_kv_op_failure_replies_logs_error_and_raises(
+    command: str,
+    arg: str | None,
+    op: str,
+    tier: str,
+    state: bytes | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _FakeHost(tier=tier)
+    _install(monkeypatch, host, **{f"kv_{op}_raises": _KvError()})
+    if state is not None:
+        host.store[_expected_state_key("comm-1", "viewer-1")] = state
+    is_mod = command.startswith("config_") or None
+
+    with pytest.raises(RuntimeError, match=f"lurk kv {op} failed: _ErrorBackend"):
+        _run(
+            dispatch(
+                _sample_envelope("twitch", command, arg=arg, is_mod=is_mod), {}, http_client=None
+            )
+        )
+
+    # Exactly one relay: the error reply -- never a success message ahead of/after the failure.
+    assert len(host.relay_calls) == 1
+    assert "temporarily unavailable" in json.loads(host.relay_calls[0][1])["text"]
+    errors = [(lvl, json.loads(f)) for lvl, m, f in host.log_calls if m == "lurk.kv_error"]
+    assert errors == [(0, {"op": op, "error": "_ErrorBackend"})]
+
+
+def test_failed_lurk_set_stores_no_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    host = _FakeHost()
+    _install(monkeypatch, host, kv_set_raises=_KvError())
+    with pytest.raises(RuntimeError):
+        _run(dispatch(_sample_envelope("twitch", "lurk"), {}, http_client=None))
+    assert host.store == {}
+
+
+def test_community_id_with_a_reserved_character_fails_loud_not_silent(
+    fake_host: _FakeHost,
+) -> None:
+    """A `:` in the community id would build a host-rejected key -- must raise, never no-op."""
+    with pytest.raises(RuntimeError, match="lurk kv set failed: InvalidKvKeyError"):
+        _run(
+            dispatch(
+                _sample_envelope("twitch", "lurk", community="bad:community"), {}, http_client=None
+            )
+        )
+    assert "temporarily unavailable" in json.loads(fake_host.relay_calls[-1][1])["text"]
+
+
+def test_relay_failure_propagates_and_is_not_logged_as_relayed(
+    fake_host: _FakeHost,
+) -> None:
+    def _boom(provider: str, msg: str) -> None:
+        raise RuntimeError("relay down")
+
+    sys.modules["wit_world"].imports.relay = types.SimpleNamespace(push=_boom)
+    with pytest.raises(RuntimeError, match="relay down"):
+        _run(dispatch(_sample_envelope("twitch", "lurk"), {}, http_client=None))
+    assert not any(m == "lurk.dispatch relayed" for _lvl, m, _f in fake_host.log_calls)
+
+
+# -- corrupt stored state: ERROR-logged (loud), self-healing, never a crash -------------
+
+
+@pytest.mark.parametrize("payload", [b"\xff\xfe", b"\x80abc", b"ok\xc3("])
+def test_every_corrupt_template_is_error_logged_and_falls_back_to_default(
+    payload: bytes, fake_host: _FakeHost
+) -> None:
+    fake_host.store[_message_key("comm-1")] = payload
+    _run(dispatch(_sample_envelope("twitch", "lurk"), {}, http_client=None))
+    assert json.loads(fake_host.relay_calls[-1][1])["text"] == "viewer-1 is now lurking \U0001f440"
+    corrupt = [
+        (lvl, json.loads(f)) for lvl, m, f in fake_host.log_calls if m == "lurk.template_corrupt"
+    ]
+    assert corrupt == [(0, {"community": "comm-1"})]  # Level.ERROR
+
+
+@pytest.mark.parametrize("payload", [b"", b"12abc", b"\xff", b"1.5", b" ", b"NaN"])
+def test_every_corrupt_state_is_error_logged_cleared_and_reads_as_not_lurking(
+    payload: bytes, fake_host: _FakeHost
+) -> None:
+    key = _expected_state_key("comm-1", "viewer-1")
+    fake_host.store[key] = payload
+    _run(dispatch(_sample_envelope("twitch", "unlurk"), {}, http_client=None))
+    assert json.loads(fake_host.relay_calls[-1][1])["text"] == NOT_LURKING_REPLY
+    assert key not in fake_host.store
+    corrupt = [
+        (lvl, json.loads(f)) for lvl, m, f in fake_host.log_calls if m == "lurk.state_corrupt"
+    ]
+    assert corrupt == [(0, {"community": "comm-1"})]
+
+
+def test_a_future_start_timestamp_clamps_to_zero_elapsed(fake_host: _FakeHost) -> None:
+    """Clock skew (start in the future) must never render a negative or absurd duration."""
+    key = _expected_state_key("comm-1", "viewer-1")
+    fake_host.store[key] = str(fake_host.now_ms + 3_600_000).encode()
+    _run(dispatch(_sample_envelope("twitch", "unlurk"), {}, http_client=None))
+    assert (
+        json.loads(fake_host.relay_calls[-1][1])["text"]
+        == "Welcome back, viewer-1! You lurked for 0s."
+    )
+
+
+# -- ai toggle: the v1 fallback is announced, never silent -- regression: gh-610 ----------
+
+
+def test_ai_pending_fallback_is_announced_at_debug_with_community_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # regression: gh-610 -- AI responses are not built yet; the template fallback must stay
+    # visible in telemetry (DEBUG, community only) rather than be a silent stub.
+    host = _FakeHost(tier="enterprise")
+    _install(monkeypatch, host)
+    host.store[_ai_key("comm-1")] = b"1"
+    _run(dispatch(_sample_envelope("twitch", "lurk"), {}, http_client=None))
+    pending = [
+        (lvl, json.loads(f)) for lvl, m, f in host.log_calls if m == "lurk.ai_requested_but_pending"
+    ]
+    assert pending == [(3, {"community": "comm-1"})]  # Level.DEBUG
+
+
+# -- scoping, TTLs, identity edges --------------------------------------------------------
+
+
+def test_config_under_the_tenant_wide_sentinel_is_isolated_from_a_community(
+    fake_host: _FakeHost,
+) -> None:
+    _run(
+        dispatch(
+            _sample_envelope(
+                "twitch",
+                "config_set_message",
+                community=None,
+                arg="tenant $(username)",
+                is_mod=True,
+            ),
+            {},
+            http_client=None,
+        )
+    )
+    assert fake_host.store[_message_key(TENANT_WIDE_SENTINEL)] == b"tenant $(username)"
+    _run(dispatch(_sample_envelope("twitch", "lurk", community="comm-1"), {}, http_client=None))
+    assert json.loads(fake_host.relay_calls[-1][1])["text"] == "viewer-1 is now lurking \U0001f440"
+
+
+def test_config_keys_are_durable_and_lurk_state_expires(fake_host: _FakeHost) -> None:
+    _run(dispatch(_sample_envelope("twitch", "lurk"), {}, http_client=None))
+    _run(
+        dispatch(
+            _sample_envelope("twitch", "config_set_message", arg="hi $(username)", is_mod=True),
+            {},
+            http_client=None,
+        )
+    )
+    ttls = {call[1]: call[3] for call in fake_host.kv_calls if call[0] == "set"}
+    assert ttls[_expected_state_key("comm-1", "viewer-1")] == 24 * 60 * 60
+    assert ttls[_message_key("comm-1")] == 0
+
+
+def test_missing_actor_still_replies_without_crashing(fake_host: _FakeHost) -> None:
+    result = _run(dispatch(_sample_envelope("twitch", "lurk", actor=None), {}, http_client=None))
+    assert result.detail == "lurk"
+    assert json.loads(fake_host.relay_calls[-1][1])["text"] == "someone is now lurking \U0001f440"
+    assert _expected_state_key("comm-1", None) in fake_host.store
+
+
+def test_template_length_boundary_is_inclusive_at_the_cap(fake_host: _FakeHost) -> None:
+    assert _validate_template("x" * 200) is None
+    assert _validate_template("x" * 201) is not None
+
+
+def test_dispatch_result_reports_provider_and_detail(fake_host: _FakeHost) -> None:
+    result = _run(dispatch(_sample_envelope("discord", "usage"), {}, http_client=None))
+    assert (result.transport, result.detail) == ("discord", "usage")
+    assert result.sub_type is None
+    assert result.http_status is None

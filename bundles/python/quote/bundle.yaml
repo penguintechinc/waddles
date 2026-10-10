@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.example.quote
 name: Quote Book Bundle (Python)
-# 1.0.0: strangler extraction of core/svc_process/bundles/social_quote_process.py's
+# 1.0.0: strangler extraction of core/svc_process/builtin_handlers/social_quote_process.py's
 # `!quote` command into its own componentize-py bundle -- feature/bundle-quote.
 # BUILD-ONLY / INERT: ships flag-OFF and is not yet wired into the strangler
 # cut-over (bot_process._FEATURE_MODULES still owns `quote` live traffic until

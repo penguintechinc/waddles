@@ -25,6 +25,7 @@ from typing import Optional, Any
 from dataclasses import dataclass, field
 
 from config import Config
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ class AIProviderService:
                         f"Loaded SSL cert: {self.config.OLLAMA_CERT_PATH}"
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to load SSL cert: {e}")
+                    logger.warning(f"Failed to load SSL cert: {describe_db_error(e)}")
 
             return context
         else:
@@ -229,8 +230,7 @@ class AIProviderService:
                 processing_time = int((time.perf_counter() - start_time) * 1000)
                 logger.error(
                     f"Generation failed: provider={self.provider.value}, "
-                    f"error={e}, time={processing_time}ms",
-                    exc_info=True
+                    f"error={describe_db_error(e)}, time={processing_time}ms"
                 )
                 raise
 
@@ -304,7 +304,7 @@ class AIProviderService:
                     return False
 
         except Exception as e:
-            logger.error(f"Health check failed: {e}")
+            logger.error(f"Health check failed: {describe_db_error(e)}")
             return False
 
     # ========================================================================
@@ -363,7 +363,7 @@ class AIProviderService:
             logger.error(f"Ollama HTTP error: {e.response.status_code}")
             raise
         except Exception as e:
-            logger.error(f"Ollama generation error: {e}", exc_info=True)
+            logger.error(f"Ollama generation error: {describe_db_error(e)}")
             raise
 
     async def _embed_ollama(self, text: str) -> list[float]:
@@ -388,7 +388,7 @@ class AIProviderService:
             return data.get('embedding', [])
 
         except Exception as e:
-            logger.error(f"Ollama embedding error: {e}", exc_info=True)
+            logger.error(f"Ollama embedding error: {describe_db_error(e)}")
             raise
 
     async def _health_check_ollama(self) -> bool:
@@ -405,7 +405,7 @@ class AIProviderService:
             logger.error(f"Cannot connect to Ollama at {self.base_url}")
             return False
         except Exception as e:
-            logger.error(f"Ollama health check failed: {e}")
+            logger.error(f"Ollama health check failed: {describe_db_error(e)}")
             return False
 
     # ========================================================================

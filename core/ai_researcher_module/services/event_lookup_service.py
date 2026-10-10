@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from flask_core import describe_db_error
+
 logger = logging.getLogger(__name__)
 
 EVENT_SEARCH_SYSTEM_PROMPT = (
@@ -232,7 +234,7 @@ class EventLookupService:
             )
 
         except Exception as exc:
-            logger.error("Event search failed: %s", exc)
+            logger.error("Event search failed: %s", describe_db_error(exc))
             return EventLookupResult(
                 success=False,
                 content="An internal error occurred during event search.",
@@ -377,7 +379,7 @@ class EventLookupService:
             )
 
         except Exception as exc:
-            logger.error("Tournament search failed: %s", exc)
+            logger.error("Tournament search failed: %s", describe_db_error(exc))
             return EventLookupResult(
                 success=False,
                 content="An internal error occurred during tournament search.",
@@ -416,7 +418,7 @@ class EventLookupService:
             ttl = getattr(self.config, 'EVENT_CACHE_TTL', 1800)
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as exc:
-            logger.warning("Cache set failed: %s", exc)
+            logger.warning("Cache set failed: %s", describe_db_error(exc))
 
     async def _log_search(
         self,
@@ -446,4 +448,4 @@ class EventLookupService:
                  was_cached, processing_time_ms],
             )
         except Exception as exc:
-            logger.warning("Failed to log event search: %s", exc)
+            logger.warning("Failed to log event search: %s", describe_db_error(exc))

@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from flask_core import describe_db_error
+
 logger = logging.getLogger(__name__)
 
 PRICE_SEARCH_SYSTEM_PROMPT = (
@@ -222,7 +224,7 @@ class PriceTrackerService:
             )
 
         except Exception as exc:
-            logger.error("Price search failed: %s", exc)
+            logger.error("Price search failed: %s", describe_db_error(exc))
             return PriceTrackerResult(
                 success=False,
                 content="An internal error occurred during price search.",
@@ -356,7 +358,7 @@ class PriceTrackerService:
             )
 
         except Exception as exc:
-            logger.error("Deals search failed: %s", exc)
+            logger.error("Deals search failed: %s", describe_db_error(exc))
             return PriceTrackerResult(
                 success=False,
                 content="An internal error occurred during deals search.",
@@ -394,7 +396,7 @@ class PriceTrackerService:
             ttl = getattr(self.config, 'PRICE_CACHE_TTL', 900)
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as exc:
-            logger.warning("Cache set failed: %s", exc)
+            logger.warning("Cache set failed: %s", describe_db_error(exc))
 
     async def _log_search(
         self,
@@ -420,4 +422,4 @@ class PriceTrackerService:
                  result_count, was_cached, processing_time_ms],
             )
         except Exception as exc:
-            logger.warning("Failed to log search: %s", exc)
+            logger.warning("Failed to log search: %s", describe_db_error(exc))

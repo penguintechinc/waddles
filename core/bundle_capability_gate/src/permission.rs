@@ -219,6 +219,16 @@ pub enum PermissionFamily {
     /// network. See [`crate::instance_policy`].
     NetHttpPrivateIp,
     ChatSend,
+    /// `chat.delete:<platform>` -- delete a chat message on a platform
+    /// (provider-framework Step 0, issue #719). `Dangerous`: a
+    /// destructive moderation-class action on third-party content.
+    ChatDelete,
+    /// `dm.send:<platform>` -- send a direct message to a platform user
+    /// (provider-framework Step 0, issue #719). `Dangerous` and the
+    /// highest-risk outbound family: reaches a user outside any public
+    /// channel (spam/phishing/harassment vector) and is PII-adjacent
+    /// (addresses a specific platform identity).
+    DmSend,
     Moderation,
     OverlayMedia,
     AiGenerate,
@@ -268,6 +278,8 @@ impl PermissionFamily {
         Self::NetHttpPublicIp,
         Self::NetHttpPrivateIp,
         Self::ChatSend,
+        Self::ChatDelete,
+        Self::DmSend,
         Self::Moderation,
         Self::OverlayMedia,
         Self::AiGenerate,
@@ -297,6 +309,8 @@ impl PermissionFamily {
             Self::NetHttpPublicIp => "net.http.public-ip",
             Self::NetHttpPrivateIp => "net.http.private-ip",
             Self::ChatSend => "chat.send",
+            Self::ChatDelete => "chat.delete",
+            Self::DmSend => "dm.send",
             Self::Moderation => "moderation",
             Self::OverlayMedia => "overlay.media",
             Self::AiGenerate => "ai.generate",
@@ -328,6 +342,8 @@ impl PermissionFamily {
                 | Self::NetHttpPublicIp
                 | Self::NetHttpPrivateIp
                 | Self::ChatSend
+                | Self::ChatDelete
+                | Self::DmSend
                 | Self::Moderation
         )
     }
@@ -428,6 +444,29 @@ impl PermissionFamily {
                 capability_kind: CapabilityKind::Relay,
                 default_quota: Quota::Descriptive("existing relay rate limits (UsageBatcher)"),
                 notes: "Action-stage only; outbound text is placeholder-only (spec SS10.4)",
+            },
+            Self::ChatDelete => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Moderation,
+                default_quota: Quota::Descriptive(
+                    "confirmed per-op (host waits for the platform); targets only the \
+                     triggering event's own channel; UsageBatcher is metering only",
+                ),
+                notes: "Destructive moderation-class action; op `chat.delete` of the \
+                        provider-framework outbound schema (issue #719)",
+            },
+            Self::DmSend => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "enforced in svc_action: 10/min per (tenant, community, app) + 3/min per \
+                     recipient; target must be a member of the triggering event's guild \
+                     (UsageBatcher is metering only)",
+                ),
+                notes: "Highest-risk outbound family: reaches a user outside any public \
+                        channel, PII-adjacent; op `dm.send` (issue #719)",
             },
             Self::Moderation => CatalogEntry {
                 family: *self,
@@ -590,6 +629,8 @@ pub enum PermissionId {
     NetHttpPublicIp(String),
     NetHttpPrivateIp(String),
     ChatSend(String),
+    ChatDelete(String),
+    DmSend(String),
     Moderation(String),
     OverlayMedia,
     AiGenerate,
@@ -647,6 +688,8 @@ impl PermissionId {
             Self::NetHttpPublicIp(_) => PermissionFamily::NetHttpPublicIp,
             Self::NetHttpPrivateIp(_) => PermissionFamily::NetHttpPrivateIp,
             Self::ChatSend(_) => PermissionFamily::ChatSend,
+            Self::ChatDelete(_) => PermissionFamily::ChatDelete,
+            Self::DmSend(_) => PermissionFamily::DmSend,
             Self::Moderation(_) => PermissionFamily::Moderation,
             Self::OverlayMedia => PermissionFamily::OverlayMedia,
             Self::AiGenerate => PermissionFamily::AiGenerate,
@@ -683,6 +726,8 @@ impl PermissionId {
             Self::NetHttpPublicIp(ip) => format!("net.http.public-ip:{ip}"),
             Self::NetHttpPrivateIp(value) => format!("net.http.private-ip:{value}"),
             Self::ChatSend(platform) => format!("chat.send:{platform}"),
+            Self::ChatDelete(platform) => format!("chat.delete:{platform}"),
+            Self::DmSend(platform) => format!("dm.send:{platform}"),
             Self::Moderation(platform) => format!("moderation.{platform}"),
             other => other.family().id_prefix().to_string(),
         }
@@ -776,6 +821,14 @@ impl PermissionId {
             Self::validate_platform(platform)?;
             return Ok(Self::ChatSend(platform.to_string()));
         }
+        if let Some(platform) = raw.strip_prefix("chat.delete:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::ChatDelete(platform.to_string()));
+        }
+        if let Some(platform) = raw.strip_prefix("dm.send:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::DmSend(platform.to_string()));
+        }
         if let Some(platform) = raw.strip_prefix("moderation.") {
             Self::validate_platform(platform)?;
             return Ok(Self::Moderation(platform.to_string()));
@@ -789,9 +842,13 @@ impl PermissionId {
                 },
             });
         }
-        if raw == "chat.send" {
+        if raw == "chat.send" || raw == "chat.delete" || raw == "dm.send" {
             return Err(ParsePermissionIdError::MissingParam {
-                family: "chat.send",
+                family: match raw {
+                    "chat.send" => "chat.send",
+                    "chat.delete" => "chat.delete",
+                    _ => "dm.send",
+                },
             });
         }
 
@@ -963,6 +1020,37 @@ mod tests {
     fn parse_accepts_a_private_ipv6_ula_within_the_prefix_bound() {
         assert!(PermissionId::parse("net.http.private-ip:fd12:3456:789a::/64").is_ok());
         assert!(PermissionId::parse("net.http.private-ip:fd12:3456:789a::/48").is_err());
+    }
+
+    #[test]
+    fn chat_delete_and_dm_send_are_dangerous_parameterized_and_round_trip() {
+        for (raw, family) in [
+            ("chat.delete:discord", PermissionFamily::ChatDelete),
+            ("dm.send:twitch", PermissionFamily::DmSend),
+        ] {
+            let id = PermissionId::parse(raw).unwrap();
+            assert_eq!(id.canonical_id(), raw);
+            assert_eq!(id.family(), family);
+            assert_eq!(id.risk(), Risk::Dangerous);
+            assert!(family.is_parameterized());
+            assert!(PermissionFamily::ALL.contains(&family));
+        }
+    }
+
+    #[test]
+    fn chat_delete_and_dm_send_reject_bare_and_unknown_platform() {
+        for raw in ["chat.delete", "dm.send"] {
+            assert!(matches!(
+                PermissionId::parse(raw),
+                Err(ParsePermissionIdError::MissingParam { .. })
+            ));
+        }
+        for raw in ["chat.delete:myspace", "dm.send:myspace"] {
+            assert!(matches!(
+                PermissionId::parse(raw),
+                Err(ParsePermissionIdError::UnsupportedPlatform(_))
+            ));
+        }
     }
 
     #[test]

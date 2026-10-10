@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from mem0 import Memory
 
 from config import Config
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +54,7 @@ class Mem0Service:
         except Exception as e:
             logger.error(
                 f"Failed to initialize mem0 service for "
-                f"community {self.community_id}: {e}",
-                exc_info=True
+                f"community {self.community_id}: {describe_db_error(e)}"
             )
             raise
 
@@ -185,8 +185,7 @@ class Mem0Service:
         except Exception as e:
             logger.error(
                 f"Failed to add messages to memory for "
-                f"community {self.community_id}: {e}",
-                exc_info=True
+                f"community {self.community_id}: {describe_db_error(e)}"
             )
             raise
 
@@ -245,8 +244,7 @@ class Mem0Service:
 
         except Exception as e:
             logger.error(
-                f"Failed to add memory for community {self.community_id}: {e}",
-                exc_info=True
+                f"Failed to add memory for community {self.community_id}: {describe_db_error(e)}"
             )
             raise
 
@@ -295,8 +293,7 @@ class Mem0Service:
         except Exception as e:
             logger.error(
                 f"Failed to search memories for "
-                f"community {self.community_id}: {e}",
-                exc_info=True
+                f"community {self.community_id}: {describe_db_error(e)}"
             )
             raise
 
@@ -340,8 +337,7 @@ class Mem0Service:
         except Exception as e:
             logger.error(
                 f"Failed to get all memories for "
-                f"community {self.community_id}: {e}",
-                exc_info=True
+                f"community {self.community_id}: {describe_db_error(e)}"
             )
             raise
 
@@ -381,8 +377,7 @@ class Mem0Service:
         except Exception as e:
             logger.error(
                 f"Failed to delete memory {memory_id} for "
-                f"community {self.community_id}: {e}",
-                exc_info=True
+                f"community {self.community_id}: {describe_db_error(e)}"
             )
             return False
 
@@ -451,8 +446,7 @@ class Mem0Service:
         except Exception as e:
             logger.error(
                 f"Failed to get community context for "
-                f"community {self.community_id}: {e}",
-                exc_info=True
+                f"community {self.community_id}: {describe_db_error(e)}"
             )
             # Return empty context on error
             return {
@@ -462,7 +456,7 @@ class Mem0Service:
                 "context_summary": {
                     "memory_count": 0,
                     "has_context": False,
-                    "error": str(e)
+                    "error": describe_db_error(e)
                 }
             }
 
@@ -490,6 +484,6 @@ class Mem0Service:
 
         except Exception as e:
             logger.error(
-                f"Health check failed for community {self.community_id}: {e}"
+                f"Health check failed for community {self.community_id}: {describe_db_error(e)}"
             )
             return False

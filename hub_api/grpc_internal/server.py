@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 import grpc
 from flask_core.service_jwt import ServiceJwtIssuer
@@ -71,7 +72,9 @@ def _load_server_credentials() -> grpc.ServerCredentials:
     return grpc.ssl_server_credentials([(private_key, cert_chain)])
 
 
-async def build_internal_grpc_server(*, issuer: ServiceJwtIssuer) -> grpc.aio.Server:
+async def build_internal_grpc_server(
+    *, issuer: ServiceJwtIssuer, async_dal: Any = None
+) -> grpc.aio.Server:
     """Builds (but does not start) the internal gRPC server.
 
     Interceptor chain: deadline enforcement -> auth -> rate limiting ->
@@ -93,7 +96,7 @@ async def build_internal_grpc_server(*, issuer: ServiceJwtIssuer) -> grpc.aio.Se
             ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
         ],
     )
-    identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(), server)
+    identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(async_dal), server)
     key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(), server)
 
     bind_addr = f"0.0.0.0:{os.environ['GRPC_PORT']}"  # noqa: S104 - internal ClusterIP-only listener, see NetworkPolicy
@@ -102,9 +105,11 @@ async def build_internal_grpc_server(*, issuer: ServiceJwtIssuer) -> grpc.aio.Se
     return server
 
 
-async def start_internal_grpc_server(*, issuer: ServiceJwtIssuer) -> grpc.aio.Server:
+async def start_internal_grpc_server(
+    *, issuer: ServiceJwtIssuer, async_dal: Any = None
+) -> grpc.aio.Server:
     """Builds and starts the server -- called from `app.py`'s `before_serving`."""
-    server = await build_internal_grpc_server(issuer=issuer)
+    server = await build_internal_grpc_server(issuer=issuer, async_dal=async_dal)
     await server.start()
     logger.info("hub_api.grpc_internal.started")
     return server

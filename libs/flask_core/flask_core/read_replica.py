@@ -22,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 import time
 
+from .db_errors import log_db_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,7 +122,7 @@ class ReadReplicaManager:
             port = parsed.port or 5432
             return ReplicaConfig(host=host, port=port)
         except Exception as e:
-            logger.error(f"Failed to parse connection string: {e}")
+            log_db_error(logger, "Failed to parse connection string", e)
             raise
 
     async def start_health_checks(self) -> None:
@@ -160,7 +162,7 @@ class ReadReplicaManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in health check loop: {e}")
+                log_db_error(logger, "Error in health check loop", e)
 
     async def _check_replica_health(self, replica_id: str, config: ReplicaConfig) -> None:
         """Check health of a single replica"""
@@ -203,7 +205,7 @@ class ReadReplicaManager:
                         return status, lag_seconds
 
             except Exception as e:
-                logger.error(f"Health check failed for {replica_id}: {e}")
+                log_db_error(logger, f"Health check failed for {replica_id}", e)
                 return ReplicaStatus.UNHEALTHY, None
 
         try:
@@ -229,7 +231,7 @@ class ReadReplicaManager:
             )
 
         except Exception as e:
-            logger.error(f"Unexpected error checking replica {replica_id}: {e}")
+            log_db_error(logger, f"Unexpected error checking replica {replica_id}", e)
             self.metrics[replica_id].status = ReplicaStatus.UNKNOWN
 
     def get_best_replica(self) -> Optional[ReplicaConfig]:
@@ -373,7 +375,7 @@ class ReadReplicaRouter:
         try:
             return await dal.select_async(query, *args, **kwargs)
         except Exception as e:
-            logger.error(f"Replica select failed, retrying on primary: {e}")
+            log_db_error(logger, "Replica select failed, retrying on primary", e)
             return await self.dal_primary.select_async(query, *args, **kwargs)
 
     async def insert_async(self, table, **fields):
@@ -403,7 +405,7 @@ class ReadReplicaRouter:
         try:
             return await dal.count_async(query)
         except Exception as e:
-            logger.error(f"Replica count failed, retrying on primary: {e}")
+            log_db_error(logger, "Replica count failed, retrying on primary", e)
             return await self.dal_primary.count_async(query)
 
 

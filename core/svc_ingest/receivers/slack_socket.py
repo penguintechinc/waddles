@@ -57,9 +57,9 @@ from waddle_transports.signing import SecretResolutionError, resolve_secret
 logger = logging.getLogger(__name__)
 
 #: The `consumes` tag every ingest bundle wanting a raw Slack event
-#: declares (a future `bundles/slack_gateway_manifest.py`'s own
+#: declares (a future `builtin_handlers/slack_gateway_manifest.py`'s own
 #: `stages.ingest.consumes` -- not part of this PR's scope, see
-#: `bundles/slack_ingest.py`'s own docstring for the documented gap) --
+#: `builtin_handlers/slack_ingest.py`'s own docstring for the documented gap) --
 #: this receiver's half of that contract.
 CONSUMES_TAG = "slack.message"
 
@@ -205,7 +205,7 @@ class SlackSocketReceiver(Transport):  # type: ignore[misc]
     ) -> dict[str, Any] | None:
         """Build the normalized dict queued for one `events_api` event, or `None` to drop it.
 
-        Consumed downstream by `bundles/slack_ingest.py`'s `normalize()` --
+        Consumed downstream by `builtin_handlers/slack_ingest.py`'s `normalize()` --
         field names here are this receiver's own contract with that
         entrypoint, matching `receivers/discord_gateway.py`'s own
         precedent (no repo-wide "raw platform event" schema exists yet).
