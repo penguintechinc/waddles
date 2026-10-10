@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0049_per_service_db_roles (security findings H-1 and H-3).
+"""Real-Postgres tests for 0055_per_service_db_roles (security findings H-1 and H-3).
 
 # regression: H-1 repo-known DB passwords (*_dev_changeme) live on a shared database
 # regression: H-3 every workload connected as the shared database superuser
@@ -63,7 +63,7 @@ roles_mod = load_service_roles_module()
 CATALOG = roles_mod.load_catalog()
 PASSWORDS_ENV = roles_mod.PASSWORDS_ENV
 PRIVS = ("SELECT", "INSERT", "UPDATE", "DELETE")
-PRIOR_REVISION = "0048_identity_forged_uuid"
+PRIOR_REVISION = "0049_sso_connections"
 
 
 def _connect(db: PgTestDatabase, user: str, password: str) -> Any:
@@ -173,7 +173,7 @@ def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
     passwords = throwaway_service_role_passwords()
-    with empty_postgres("0049-roles") as db:
+    with empty_postgres("0055-roles") as db:
         alembic_cli(
             "upgrade",
             "head",
@@ -688,9 +688,9 @@ def test_downgrade_then_upgrade_round_trips(pg_db: PgTestDatabase) -> None:
 
 @requires_docker
 def test_missing_service_role_passwords_fail_the_migration_loudly() -> None:
-    """No password JSON and no dev opt-in => 0049 raises; nothing half-provisioned."""
-    with empty_postgres("0049-nopw") as db:
-        bootstrap_minimal_schema("0049-nopw", db)
+    """No password JSON and no dev opt-in => 0055 raises; nothing half-provisioned."""
+    with empty_postgres("0055-nopw") as db:
+        bootstrap_minimal_schema("0055-nopw", db)
         with pytest.raises(RuntimeError, match="missing a password"):
             alembic_cli("upgrade", "head", dsn=db.dsn, env_overrides={PASSWORDS_ENV: ""})
         with _admin_cursor(db) as cur:
@@ -708,7 +708,7 @@ def test_missing_service_role_passwords_fail_the_migration_loudly() -> None:
 @requires_docker
 def test_dev_opt_in_is_local_only() -> None:
     """The docker-compose opt-in keeps dev logins working and is refused on a shared tier."""
-    with empty_postgres("0049-dev") as db:
+    with empty_postgres("0055-dev") as db:
         dev_env = {PASSWORDS_ENV: "", "WADDLES_DEV_DB_ROLE_PW_SUFFIX": "_dev_changeme"}
         for tier in ("alpha", "beta", "gamma", "production"):
             with pytest.raises(RuntimeError, match="must never reach a shared database"):

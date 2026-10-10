@@ -4,7 +4,7 @@
 -- SECURITY (H-1, CWE-798): this file contains NO passwords. Roles are created
 -- NOLOGIN with no password -- they carry the designed GRANTs/RLS policies that
 -- the per-service LOGIN roles in config/postgres/service-roles.yaml inherit
--- (alembic/versions/0049_per_service_db_roles.py), but cannot authenticate.
+-- (alembic/versions/0055_per_service_db_roles.py), but cannot authenticate.
 -- The ONLY way a role created here gets a password is the explicit local/dev
 -- opt-in below; it can never fire in alpha/beta/gamma/production because
 -- alembic/env.py refuses to stage it there.

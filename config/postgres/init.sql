@@ -8,7 +8,7 @@
 -- postgres.yaml) and NO container image, chart, or migration copies this file
 -- (asserted by alembic/tests/test_repo_credentials_guard.py). On any shared
 -- database these roles are stripped of LOGIN + password by
--- alembic/versions/0049_per_service_db_roles.py. Never run this file against
+-- alembic/versions/0055_per_service_db_roles.py. Never run this file against
 -- alpha/beta/gamma/production, and never reuse any value from it there.
 -- ============================================================================
 

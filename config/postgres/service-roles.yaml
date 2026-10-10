@@ -8,7 +8,7 @@
 #
 # Rendered to SQL by scripts/db/service_roles.py, which is the ONLY place that writes
 # these GRANTs:
-#   * alembic/versions/0049_per_service_db_roles.py   -- creates the roles in the chain
+#   * alembic/versions/0055_per_service_db_roles.py   -- creates the roles in the chain
 #   * migrations/run-alembic.sh                       -- re-asserts them on EVERY migrate
 #                                                        Job run (password rotation, new
 #                                                        tables, drift repair)

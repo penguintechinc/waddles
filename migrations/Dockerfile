@@ -27,7 +27,7 @@ COPY config/postgres/migrations/ config/postgres/migrations/
 # migrations generate GRANT/REVOKE statements from at migration-run time.
 COPY config/postgres/rbac-matrix.yaml config/postgres/rbac-matrix.yaml
 # Per-service LOGIN role catalog (H-1 / H-3) -- rendered by scripts/db/service_roles.py
-# from 0049_per_service_db_roles and migrations/run-alembic.sh's every-run reconcile.
+# from 0055_per_service_db_roles and migrations/run-alembic.sh's every-run reconcile.
 COPY config/postgres/service-roles.yaml config/postgres/service-roles.yaml
 COPY scripts/db/ scripts/db/
 

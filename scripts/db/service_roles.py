@@ -4,7 +4,7 @@ Security findings H-1 (repo-known DB passwords) and H-3 (one shared DB superuser
 every workload). The single place that turns `config/postgres/service-roles.yaml` into
 live roles/grants, imported by:
 
-* `alembic/versions/0049_per_service_db_roles.py` -- provisions the roles inside the
+* `alembic/versions/0055_per_service_db_roles.py` -- provisions the roles inside the
   migration chain (and neutralizes the repo-credentialed legacy roles);
 * `migrations/run-alembic.sh` -- re-asserts the exact catalog on EVERY db-migrate Job
   run (`python3 scripts/db/service_roles.py reconcile --strict`), which is how password

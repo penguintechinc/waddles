@@ -99,7 +99,7 @@ services:
       # scoped mod_*/hub_admin roles (031_scoped_database_users.sql) are created
       # NOLOGIN everywhere else; this suffix gives them `<role><suffix>` logins so the
       # compose stack's DATABASE_URLs below keep working, and derives the
-      # per-service role passwords (alembic 0049). alembic/env.py REFUSES it when
+      # per-service role passwords (alembic 0055). alembic/env.py REFUSES it when
       # WADDLES_DEPLOYMENT_TIER is alpha/beta/gamma/production -- never copy these two
       # lines into any shared environment.
       WADDLES_DEV_DB_ROLE_PW_SUFFIX: ${WADDLES_DEV_DB_ROLE_PW_SUFFIX:-_dev_changeme}
