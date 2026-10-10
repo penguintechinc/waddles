@@ -19,19 +19,21 @@ from typing import Any
 import grpc
 import pytest
 from flask_core.database import AsyncDAL
-from waddles.hub.internal.v1 import identity_pb2, identity_pb2_grpc
 
 _ALEMBIC_TESTS_DIR = Path(__file__).resolve().parents[2] / "alembic" / "tests"
 if str(_ALEMBIC_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_ALEMBIC_TESTS_DIR))
+_PB_ROOT = Path(__file__).resolve().parents[1] / "grpc_internal" / "pb"
+if str(_PB_ROOT) not in sys.path:  # generated waddles.* stubs, same as grpc_internal/__init__
+    sys.path.insert(0, str(_PB_ROOT))
 
 from pg_docker import (  # noqa: E402  # type: ignore[import-not-found]
     DOCKER_AVAILABLE,
     PgTestDatabase,
     migrated_postgres,
 )
+from waddles.hub.internal.v1 import identity_pb2  # noqa: E402
 
-from grpc_internal.servicers import IdentityServicer  # noqa: E402
 from services.identity_resolution_service import (  # noqa: E402
     IdentityRequest,
     IdentityResolutionError,
@@ -40,6 +42,7 @@ from services.identity_resolution_service import (  # noqa: E402
     resolve_identities,
     resolve_identity,
 )
+from tests._identity_grpc import AuthedIdentityStub, serving  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
@@ -147,6 +150,13 @@ async def test_unlinked_identity_gets_stable_per_tenant_pseudonym(adal: AsyncDAL
     stored = await _one(
         adal, "SELECT handle FROM ephemeral_pseudonyms WHERE pseudonym = %s::uuid", [a]
     )
+    # The membership trigger never copies community display names into the PII table:
+    # a handle only arrives via a platform-asserted mint (hardening, alembic 0047).
+    assert stored is None
+    await resolve_identities(adal, [IdentityRequest("t1", "twitch", "tw-9", SECRET_HANDLE)])
+    stored = await _one(
+        adal, "SELECT handle FROM ephemeral_pseudonyms WHERE pseudonym = %s::uuid", [a]
+    )
     assert stored == SECRET_HANDLE  # handle lives only in the PII-boundary table
 
 
@@ -235,14 +245,18 @@ async def test_resolve_identities_batch_idempotent_dedup_and_slug_or_id(adal: As
     assert [r.uuid for r in again] == [r.uuid for r in first]
 
 
-async def test_resolve_identity_returns_linked_hub_uuid(adal: AsyncDAL) -> None:
-    await _tenant(adal, "acme")
+async def test_resolve_identity_returns_linked_hub_uuid_inside_member_tenant(
+    adal: AsyncDAL,
+) -> None:
+    t = await _tenant(adal, "acme")
+    c = await _community(adal, t)
     uid, hub_uuid = await _hub_user(adal)
     await adal.executesql_async(
         "INSERT INTO hub_user_identities (hub_user_id, platform, platform_user_id) "
         "VALUES (%s, 'discord', '77')",
         [uid],
     )
+    await _member(adal, c, platform="discord", puid="77")  # membership in acme
     assert await resolve_identity(adal, "acme", "discord", "77") == uuid.UUID(hub_uuid)
 
 
@@ -305,15 +319,9 @@ async def test_logs_carry_no_pii(adal: AsyncDAL, caplog: pytest.LogCaptureFixtur
 
 @pytest.fixture
 async def grpc_addr(adal: AsyncDAL) -> AsyncIterator[str]:
-    """In-process grpc.aio server wired with the real IdentityServicer + real DAL."""
-    server = grpc.aio.server()
-    identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(adal), server)
-    port = server.add_insecure_port("127.0.0.1:0")
-    await server.start()
-    try:
-        yield f"127.0.0.1:{port}"
-    finally:
-        await server.stop(grace=None)
+    """In-process server: real IdentityServicer + real DAL behind the REAL interceptor chain."""
+    async with serving(adal) as addr:
+        yield addr
 
 
 def _req(tenant: str, puid: str) -> identity_pb2.MintEphemeralPseudonymsRequest:
@@ -329,7 +337,7 @@ def _req(tenant: str, puid: str) -> identity_pb2.MintEphemeralPseudonymsRequest:
 async def test_grpc_mint_real_path(adal: AsyncDAL, grpc_addr: str) -> None:
     await _tenant(adal, "acme")
     async with grpc.aio.insecure_channel(grpc_addr) as ch:
-        stub = identity_pb2_grpc.IdentityServiceStub(ch)
+        stub = AuthedIdentityStub(ch)
         r1 = await stub.MintEphemeralPseudonyms(_req("acme", "9"), timeout=5)
         r2 = await stub.MintEphemeralPseudonyms(_req("acme", "9"), timeout=5)
         assert r1.pseudonyms[0].platform_user_id == "9"
@@ -350,15 +358,8 @@ async def test_grpc_mint_real_path(adal: AsyncDAL, grpc_addr: str) -> None:
 
 
 async def test_grpc_mint_without_dal_is_unavailable_not_default() -> None:
-    server = grpc.aio.server()
-    identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(), server)
-    port = server.add_insecure_port("127.0.0.1:0")
-    await server.start()
-    try:
-        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch:
-            stub = identity_pb2_grpc.IdentityServiceStub(ch)
-            with pytest.raises(grpc.aio.AioRpcError) as exc:
-                await stub.MintEphemeralPseudonyms(_req("acme", "1"), timeout=5)
-            assert exc.value.code() == grpc.StatusCode.UNAVAILABLE
-    finally:
-        await server.stop(grace=None)
+    async with serving(None) as addr, grpc.aio.insecure_channel(addr) as ch:
+        stub = AuthedIdentityStub(ch)
+        with pytest.raises(grpc.aio.AioRpcError) as exc:
+            await stub.MintEphemeralPseudonyms(_req("acme", "1"), timeout=5)
+        assert exc.value.code() == grpc.StatusCode.UNAVAILABLE

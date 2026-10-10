@@ -16,10 +16,24 @@ Round 2 adds the two lookups that complete the boundary:
 - :func:`resolve_display_names` -- UUIDs back to display names, for the
   egress detokenizer only. Misses are reported as unresolved, never
   fabricated; names are sanitized and tenant-scoped.
+
+Security hardening (identity review) adds:
+
+- :func:`authorize_tenant` -- the tenant a gRPC caller may act on comes from its
+  VALIDATED token claim, never from the request body alone: a tenant-bound token
+  is confined to its own tenant (mismatch and unknown tenants both raise
+  :class:`TenantAccessDeniedError`, no existence oracle); only the operator-plane
+  ``system`` tenant may name another tenant, and every such use is counted.
+- :func:`erase_pseudonym_handles` -- the GDPR erasure path for the one raw handle
+  store (``ephemeral_pseudonyms.handle``).
+- :func:`collect_uuid_unavailability` / :func:`run_uuid_availability_monitor` -- the
+  metric for community members whose ``user_uuid`` could not be derived, so a
+  trigger-side fail-closed NULL is observable rather than only a ``RAISE WARNING``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -29,7 +43,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from flask_core.service_jwt import SYSTEM_TENANT
 from opentelemetry import metrics, trace
+from opentelemetry.metrics import CallbackOptions, Observation
 
 logger = logging.getLogger(__name__)
 _tracer = trace.get_tracer("hub_api.identity")
@@ -52,6 +68,33 @@ _op_latency = _meter.create_histogram(
 )
 _display_lookups = _meter.create_counter(
     "hub_api.identity.display_name_lookups", description="Display-name lookups by hit/miss"
+)
+_tenant_authz = _meter.create_counter(
+    "hub_api.identity.tenant_authorizations",
+    description="Tenant-scope decisions on internal identity RPCs by op and result",
+)
+_erasures = _meter.create_counter(
+    "hub_api.identity.pseudonym_erasures", description="GDPR pseudonym erasures by mode"
+)
+
+#: Why a community member's ``user_uuid`` is NULL ("unavailable"), as written by the
+#: membership trigger (alembic 0047). Kept in step with the table's CHECK constraint.
+UNAVAILABLE_REASONS = ("uuid_collision", "dangling_user_id", "unresolvable", "no_tenant")
+_unavailable_counts: dict[str, int] = {}
+
+
+def _observe_unavailable(_options: CallbackOptions) -> list[Observation]:
+    """Gauge callback: members currently without a derivable ``user_uuid``, per reason."""
+    return [
+        Observation(_unavailable_counts.get(reason, 0), {"reason": reason})
+        for reason in UNAVAILABLE_REASONS
+    ]
+
+
+_meter.create_observable_gauge(
+    "hub_api.identity.members_uuid_unavailable",
+    callbacks=[_observe_unavailable],
+    description="Community members whose user_uuid could not be derived, by reason",
 )
 
 MAX_BATCH = 100
@@ -86,6 +129,10 @@ class HandleNotFoundError(IdentityResolutionError):
 
 class AmbiguousHandleError(IdentityResolutionError):
     """The handle matches more than one identity -- never guessed (FAILED_PRECONDITION)."""
+
+
+class TenantAccessDeniedError(IdentityResolutionError):
+    """The caller's token is not entitled to the requested tenant (maps to PERMISSION_DENIED)."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -500,3 +547,161 @@ async def resolve_display_names(
         },
     )
     return result
+
+
+async def authorize_tenant(
+    async_dal: Any, caller_tenant: str, requested_ref: str, *, op: str, caller: str = ""
+) -> str:
+    """Return the tenant reference a caller may act on, from its VALIDATED token claim.
+
+    ``caller_tenant`` is the ``tenant`` claim of an already-verified machine JWT (never
+    request input). A tenant-bound token is confined to that tenant: an empty
+    ``requested_ref`` defaults to it, a matching one (id or slug) is accepted, and any
+    other tenant -- existing or not -- raises :class:`TenantAccessDeniedError` with the
+    same constant message (no tenant-existence oracle). The operator-plane ``system``
+    tenant may name any tenant but must name one explicitly; each such use is counted
+    (``result=system``) so cross-tenant operator access is observable. An absent claim
+    is denied. The requested reference is never logged (caller input).
+    """
+    claim = caller_tenant.strip() if isinstance(caller_tenant, str) else ""
+
+    async def work() -> str:
+        if not claim:
+            _tenant_authz.add(1, {"op": op, "result": "no_claim"})
+            raise TenantAccessDeniedError("tenant access denied")
+        if claim == SYSTEM_TENANT:
+            _validate_tenant_ref(requested_ref)
+            _tenant_authz.add(1, {"op": op, "result": "system"})
+            logger.debug(
+                "operator-plane tenant access",
+                extra={"action": "identity_tenant_authz", "op": op, "caller": caller[:128]},
+            )
+            return requested_ref
+        if requested_ref:
+            _validate_tenant_ref(requested_ref)
+        try:
+            bound_pk = await _tenant_pk(async_dal, claim)
+            requested_pk = await _tenant_pk(async_dal, requested_ref) if requested_ref else bound_pk
+        except TenantNotFoundError as exc:
+            _tenant_authz.add(1, {"op": op, "result": "denied"})
+            logger.warning(
+                "tenant-bound token named an unknown tenant",
+                extra={"action": "identity_tenant_authz", "op": op, "caller": caller[:128]},
+            )
+            raise TenantAccessDeniedError("tenant access denied") from exc
+        if requested_pk != bound_pk:
+            _tenant_authz.add(1, {"op": op, "result": "denied"})
+            logger.warning(
+                "tenant-bound token denied cross-tenant request",
+                extra={"action": "identity_tenant_authz", "op": op, "caller": caller[:128]},
+            )
+            raise TenantAccessDeniedError("tenant access denied")
+        _tenant_authz.add(1, {"op": op, "result": "allowed"})
+        return str(bound_pk)
+
+    return await _observed("authorize_tenant", 1, work)
+
+
+async def erase_pseudonym_handles(
+    async_dal: Any,
+    platform: str,
+    platform_user_id: str,
+    *,
+    tenant_id: str | None = None,
+    delete_mapping: bool = False,
+) -> int:
+    """GDPR erasure for ``ephemeral_pseudonyms.handle`` -- the one raw-handle store.
+
+    Wipes the stored handle of every pseudonym minted for the platform account (all
+    tenants when ``tenant_id`` is ``None``). The pseudonym UUID is kept by default so
+    data already keyed on it stays consistent -- with the handle gone it names no one
+    and the display-name / handle-lookup paths report it unresolved. ``delete_mapping``
+    additionally removes the (platform, platform_user_id) -> pseudonym row, severing
+    the account from the UUID for good (a later mint starts a fresh pseudonym). Returns
+    the number of rows affected; the action is recorded in ``identity_resolution_events``
+    (no PII). Operator/DSAR path only -- deliberately not exposed on the gRPC surface.
+    """
+    if not _PLATFORM_RE.match(platform):
+        raise IdentityValidationError("platform invalid")
+    if not platform_user_id or len(platform_user_id) > 255 or _CONTROL_RE.search(platform_user_id):
+        raise IdentityValidationError("platform_user_id invalid")
+
+    async def work() -> int:
+        tenant_pk = await _tenant_pk(async_dal, tenant_id) if tenant_id else None
+        rows = await async_dal.executesql_async(
+            "SELECT erase_ephemeral_pseudonym_handles(%s, %s, %s, %s)",
+            [platform, platform_user_id, tenant_pk, delete_mapping],
+        )
+        if not rows or rows[0][0] is None:
+            raise IdentityResolutionError("erasure returned no count")
+        return int(rows[0][0])
+
+    affected = await _observed("erase_pseudonym_handles", 1, work)
+    mode = "delete_mapping" if delete_mapping else "handle_only"
+    _erasures.add(affected, {"mode": mode})
+    logger.info(
+        "pseudonym erasure applied",
+        extra={
+            "action": "identity_erase_pseudonym",
+            "mode": mode,
+            "affected": affected,
+            "result": "ok",
+        },
+    )
+    return affected
+
+
+async def collect_uuid_unavailability(async_dal: Any) -> dict[str, int]:
+    """Count community members whose ``user_uuid`` is NULL, by reason, and publish the gauge.
+
+    The membership trigger fails closed (NULL) when a uuid cannot be derived or collides
+    inside a community, recording the reason on the row; this surfaces those rows as the
+    ``hub_api.identity.members_uuid_unavailable`` gauge and a WARNING when the picture
+    changes, so "unavailable" is a visible state rather than a silent one.
+    """
+    rows = await async_dal.executesql_async(
+        "SELECT user_uuid_unavailable_reason, count(*) FROM community_members "
+        "WHERE user_uuid IS NULL AND user_uuid_unavailable_reason IS NOT NULL GROUP BY 1"
+    )
+    counts = {str(r[0]): int(r[1]) for r in rows or []}
+    changed = counts != {k: v for k, v in _unavailable_counts.items() if v}
+    _unavailable_counts.clear()
+    _unavailable_counts.update(counts)
+    if counts and changed:
+        logger.warning(
+            "community members have no derivable user_uuid (fail-closed: unavailable)",
+            extra={"action": "identity_uuid_unavailable", "counts": counts},
+        )
+    else:
+        logger.debug(
+            "user_uuid availability collected",
+            extra={"action": "identity_uuid_unavailable", "counts": counts},
+        )
+    return counts
+
+
+async def run_uuid_availability_monitor(
+    async_dal: Any,
+    interval_seconds: float = 60.0,
+    *,
+    is_ready: Callable[[], bool] | None = None,
+) -> None:
+    """Refresh :func:`collect_uuid_unavailability` forever; a failed pass never stops the loop.
+
+    Started once from hub-api startup. ``is_ready`` (schema bootstrap finished) gates each
+    pass so a fresh/behind schema is not logged as a failure. A collection error is logged
+    with its traceback and retried on the next tick -- telemetry failure is never a request
+    failure.
+    """
+    while True:
+        try:
+            if is_ready is None or is_ready():
+                await collect_uuid_unavailability(async_dal)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "user_uuid availability collection failed",
+                extra={"action": "identity_uuid_unavailable", "result": "error"},
+            )
+        await asyncio.sleep(interval_seconds)

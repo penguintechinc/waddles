@@ -32,6 +32,7 @@ def issuer() -> ServiceJwtIssuer:
         k8s_namespace="waddlebot",
         k8s_service_account="svc-process",
         allowed_scopes=frozenset({SCOPE}),
+        tenant="system",
     )
     signing_key = SigningKey(
         kid="test-kid", private_key=private_key, public_key=private_key.public_key()
@@ -120,6 +121,7 @@ async def test_wrong_scope_rejected(issuer: ServiceJwtIssuer, server_address: st
         k8s_namespace="waddlebot",
         k8s_service_account="svc-process",
         allowed_scopes=frozenset({"identity:displayname:read"}),
+        tenant="system",
     )
     wrong_scope_token = issuer.issue(SPIFFE_ID, "identity:displayname:read")
     with pytest.raises(grpc.aio.AioRpcError) as exc_info:
@@ -136,6 +138,49 @@ async def test_valid_token_reaches_servicer_unavailable_without_dal(
     with pytest.raises(grpc.aio.AioRpcError) as exc_info:
         await _mint_call(server_address, token=token)
     assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_token_without_tenant_claim_rejected(
+    issuer: ServiceJwtIssuer, server_address: str
+) -> None:
+    """A validly signed, correctly scoped token with NO tenant claim -> PERMISSION_DENIED.
+
+    Every internal token is tenant-bound by its issuer; the interceptor refuses one that
+    is not before any servicer runs (so no DAL is needed to see the rejection).
+    """
+    issuer.identities[SPIFFE_ID] = ServiceIdentity(
+        service_id=SPIFFE_ID,
+        k8s_namespace="waddlebot",
+        k8s_service_account="svc-process",
+        allowed_scopes=frozenset({SCOPE}),
+        tenant="",
+    )
+    tenantless = issuer.issue(SPIFFE_ID, SCOPE)
+    with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+        await _mint_call(server_address, token=tenantless)
+    assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+    assert exc_info.value.details() == "tenant claim required"
+
+
+@pytest.mark.asyncio
+async def test_servicer_reached_without_verified_claims_fails_closed() -> None:
+    """A servicer wired WITHOUT the interceptor chain never falls back to the body tenant.
+
+    Without `AuthInterceptor` no claims are stored, so the identity RPCs must abort
+    UNAUTHENTICATED rather than trust `tenant_id` from the request -- the regression the
+    old interceptor-bypassing test servers could never catch.
+    """
+    server = grpc.aio.server()
+    identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    try:
+        with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+            await _mint_call(f"127.0.0.1:{port}", token=None)
+        assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+    finally:
+        await server.stop(grace=None)
 
 
 @pytest.mark.asyncio
