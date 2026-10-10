@@ -62,10 +62,16 @@ CREATE TABLE tenants (
 CREATE TABLE communities (
     id SERIAL PRIMARY KEY,
     name TEXT,
-    tenant_id INTEGER  -- 0045 trigger reads it (legacy NOT NULL column)
+    tenant_id INTEGER,  -- 0045 trigger reads it (legacy NOT NULL column)
+    -- identity_resolution_service's "current member" predicate reads these two
+    -- (config/postgres/migrations/000_create_base_schema.sql)
+    is_active BOOLEAN DEFAULT TRUE,
+    deleted_at TIMESTAMP
 );
 CREATE TABLE hub_users (
     id SERIAL PRIMARY KEY,
+    -- identity_resolution_service never returns a deactivated (erased) hub user
+    is_active BOOLEAN DEFAULT TRUE,
     -- a PII column outside 0043's column-scoped reader grant (uuid, id), so
     -- `SELECT *` as waddles_bundle_reader is still denied (test_0032).
     username TEXT,
@@ -98,7 +104,12 @@ CREATE TABLE community_members (
     user_id VARCHAR(255),
     platform VARCHAR(50),
     platform_user_id VARCHAR(255),
-    display_name VARCHAR(255)
+    display_name VARCHAR(255),
+    -- identity_resolution_service's "current member" predicate (not left, not removed):
+    -- 000_create_base_schema.sql (is_active, left_at) + 0012_schema_drift_columns (removed_at)
+    is_active BOOLEAN DEFAULT TRUE,
+    left_at TIMESTAMP,
+    removed_at TIMESTAMP
 );
 -- 0039_event_sync_enabled is the first Alembic migration to FK into
 -- calendar_events -- a legacy table owned by config/postgres/migrations/

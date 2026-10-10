@@ -153,7 +153,13 @@ class IdentityServicer(identity_pb2_grpc.IdentityServiceServicer):  # type: igno
         request: identity_pb2.ResolveHandleRequest,
         context: grpc.aio.ServicerContext[Any, Any],
     ) -> identity_pb2.ResolveHandleResponse:
-        """Resolve one raw handle/mention to a UUID; the handle never leaves hub-api."""
+        """Resolve one raw handle/mention to a UUID; the handle never leaves hub-api.
+
+        Only a verified login (never a display name / nickname) of a CURRENT tenant member
+        resolves; a mention never mints for a non-member. Every refusal -- unknown, not a
+        member, display-name-only, ambiguous -- is a loud NOT_FOUND / FAILED_PRECONDITION,
+        and `HandleUnverifiedError` / `TargetNotMemberError` map to NOT_FOUND like any miss.
+        """
         claim_tenant, caller = await self._caller(context)
         dal = await self._require_dal(context)
         try:
