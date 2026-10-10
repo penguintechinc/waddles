@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Standard provider/connection framework (hub-api), Twitch first: per-community connection API (`/api/v1/communities/{id}/provider-connections`, install descriptors at `/api/v1/connection-providers`), provider adapter interface + registry, Twitch adapter (bot account, channel resolution, refresh), AES-256-GCM encrypted per-community token store with refresh-under-lock, and machine-JWT data-plane routes (`/api/v1/internal/provider-connections`, `.../resolve`) so `svc-ingest` can resolve connections dynamically instead of static env. Scope `connections:admin`, flag `waddles.integrations.provider_connections` (Professional, default OFF). Migration `0056_provider_connections`. See `docs/PROVIDER_CONNECTIONS.md`.
 - Enterprise SSO for hub-api: SAML 2.0 and OpenID Connect (Enterprise tier, `waddles.auth.sso_saml`) and Google OAuth2 (Professional tier, `waddles.auth.sso_google`). Per-tenant connections with admin API, JIT provisioning keyed on (connection, subject) with no email adoption, PKCE + nonce + local ID-token validation, signature-wrapping/replay/XXE-hardened SAML SP, SSRF-guarded IdP HTTP, AES-256-GCM secret storage, login-CSRF binder cookie, OTel metrics/traces. Migration `0049_sso_connections`; auto-provisioned `SSO_ENCRYPTION_KEY` (alpha/local) that never fails the chart elsewhere. See `docs/SSO.md`.
 - Enterprise tamper-evident audit logging (GRC audit finding #3): append-only per-tenant SHA-256 hash chain
   (`audit_events`, migration `0053_audit_events_hash_chain`), `GET /api/v1/compliance/audit/{events,head,verify,export}`,
@@ -18,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `flask_core.authz.AuthzDecision`: `require_scope` publishes its verdict as `request.authz_decision`
 
 ### Changed
+- `platform_integrations_crypto` raises `PlatformCredentialKeyError` (a subclass of `PlatformCredentialCryptoError`) for an unset/malformed key, so callers can tell a configuration fault from a tampered ciphertext
 - `compliance.audit_logs` now requires scope `compliance.audit:admin` (was `compliance.audit:read`, which every session's
   `*:read` wildcard satisfied); the tenant-owner scope bundle grants it
 - `bundle_audit.record` is fail-loud: a failed `audit_log` insert raises `AuditWriteError` instead of being swallowed

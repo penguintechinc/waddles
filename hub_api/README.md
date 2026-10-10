@@ -24,6 +24,7 @@ hub_api/
       user_management.py       v1 `superadmin users` group (M1): platform user CRUD
       compliance_audit.py      v1 `compliance audit` group: Enterprise read/verify/export of the audit chain
       sso.py                    v1 enterprise SSO: public login flows (SAML/OIDC/Google) + tenant-admin connection CRUD
+      provider_connections.py    v1 provider connections: per-community CRUD + data-plane list/resolve (machine JWT)
     v2/
       platform.py          example v2 group: tenant -> scope -> DTO chain, exposes BLUEPRINTS
   routers/
@@ -42,6 +43,7 @@ hub_api/
     sso_service.py           enterprise SSO orchestration: entitlement-gated connection CRUD, login start/complete, JIT provisioning
     sso_oidc.py / sso_saml.py  protocol layers: OIDC code+PKCE with local ID-token validation; SAML 2.0 SP (XSW/replay/XXE defences)
     sso_http.py / sso_state.py / sso_crypto.py / sso_settings.py / sso_telemetry.py / sso_types.py  SSRF-guarded IdP HTTP, Redis single-use state, AES-GCM secrets, operator settings, OTel + PII-safe logging, shared types
+    provider_connections/   standard provider/connection framework: adapter contract, Twitch adapter, registry, vault, store, service
     current_user.py         resolve the caller's user id from the bearer JWT
     audit_chain.py          tamper-evident audit hash chain: canonical form, seal, verify (stdlib only)
     audit_events.py         audit vocabulary, PII-free event validation, request classification
@@ -127,6 +129,22 @@ Full deployment, configuration, security model and troubleshooting guide:
 IdPs -- only the IdP socket and Redis are replaced) plus a real-Postgres migration test in
 `alembic/tests/test_0049_sso_connections.py`; run with
 `python3 -m pytest tests/sso -q --cov=services --cov=blueprints.v1.sso`.
+
+## Provider connections (Twitch first)
+
+One adapter interface, one connection API and one encrypted per-community token store for every
+external platform. Builds on the three-layer connection tables from migration 0035 (adds
+`0056_provider_connections`: per-link `resource_metadata` / `expires_at` / `status_reason`, per-grant
+`enabled`). Gated by scope `connections:admin`, flag `waddles.integrations.provider_connections`
+(default OFF) and the Professional tier. Tokens are AES-256-GCM ciphertext under
+`CREDENTIAL_ENCRYPTION_KEY` and are decrypted only at the point of use; the data plane
+(`svc-ingest`) gets a fresh access token through machine-JWT-authenticated `/api/v1/internal/...`
+routes. Full guide, API, security model, data-plane contract and "adding a provider" checklist:
+[`docs/PROVIDER_CONNECTIONS.md`](../docs/PROVIDER_CONNECTIONS.md). Tests: `tests/provider_connections/`
+(only the Twitch socket is faked) plus real-Postgres tests in `tests/provider_connections/
+test_pg_integration.py` and `alembic/tests/test_0056_provider_connections.py`; run with
+`python3 -m pytest tests/provider_connections -q --cov=services.provider_connections
+--cov=blueprints.v1.provider_connections --cov-branch`.
 
 ## OpenAPI (two documents, per backend.md)
 

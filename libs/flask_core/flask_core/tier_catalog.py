@@ -93,7 +93,7 @@ def required_level(tier: str) -> int:
     """
     return TIER_LEVELS.get(normalize_tier(tier), UNKNOWN_REQUIRED_LEVEL)
 
-#: ``flag -> min_tier`` for every non-free Feature contract (23 as of the
+#: ``flag -> min_tier`` for every non-free Feature contract (24 as of the
 #: eight-module catalog). Keep alphabetical by flag within each tier so a
 #: drift-test failure diff is easy to read.
 _FEATURE_MIN_TIERS: dict[str, str] = {
@@ -109,6 +109,7 @@ _FEATURE_MIN_TIERS: dict[str, str] = {
     "waddles.community.raffles": TIER_PROFESSIONAL,
     "waddles.community.virtual_stages": TIER_PROFESSIONAL,
     "waddles.event.ticketing": TIER_PROFESSIONAL,
+    "waddles.integrations.provider_connections": TIER_PROFESSIONAL,
     "waddles.marketing.publishing": TIER_PROFESSIONAL,
     "waddles.marketing.scheduling": TIER_PROFESSIONAL,
     "waddles.streaming.broadcast": TIER_PROFESSIONAL,

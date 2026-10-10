@@ -48,6 +48,14 @@ DEFAULT_TENANT_SLUG = "global"
 #: bundle below; global admins already hold it via the `*:admin` wildcard.
 SCOPE_SSO_ADMIN = "auth.sso:admin"
 
+#: OIDC scope guarding administration of provider connections (Twitch bot + channel today;
+#: Discord/Slack/... next) -- hub-api `blueprints/v1/provider_connections.py`. Declared by the
+#: `integrations.provider_connections` feature contract (`core_platform_module.features`).
+#: Granted to the tenant `admin` bundle below; global admins hold it via `*:admin`. Not
+#: `connections:read`: every session carries the `*:read` wildcard, so a read scope here would
+#: be satisfied by any logged-in user.
+SCOPE_CONNECTIONS_ADMIN = "connections:admin"
+
 # TODO(tenancy-migration, tracking: v3.0.x Task 0.4): tokens minted before
 # this cutoff predate the mandatory `tenant` claim and are treated as
 # DEFAULT_TENANT_SLUG by verify_jwt_token() below. create_jwt_token() has
@@ -567,6 +575,7 @@ SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
             'tenant:read', 'tenant:write', 'tenant:admin', 'tenant:delete',
             'community:create', 'community:delete', 'billing:read', 'billing:write',
             'settings:write', 'compliance.audit:admin', SCOPE_SSO_ADMIN,
+            SCOPE_CONNECTIONS_ADMIN,
         ],
         'maintainer': [
             'tenant:read', 'tenant:write', 'community:create',

@@ -2,7 +2,7 @@
 Core/Platform Module -- Feature contracts + default App bindings
 ====================================================================
 
-Declares the 15 Core/platform capability Features spanning the six
+Declares the 16 Core/platform capability Features spanning the six
 namespaces added to :data:`flask_core.app_manifest.KNOWN_MODULES` alongside
 the 4 product Modules (see that module's docstring): ``analytics``,
 ``video_proxy``, ``auth``, ``compliance``, ``integrations``, ``tenancy``.
@@ -34,6 +34,7 @@ TestCatalogMatchesContracts`` fails on any drift.
 | ``compliance.audit_export``             | enterprise   | ``waddles.compliance.audit_export``             |
 | ``compliance.external_kms``             | enterprise   | ``waddles.compliance.external_kms``             |
 | ``integrations.waddleai``               | enterprise   | ``waddles.integrations.waddleai``               |
+| ``integrations.provider_connections``   | professional | ``waddles.integrations.provider_connections``   |
 | ``tenancy.multi_tenant``                | enterprise   | ``waddles.tenancy.multi_tenant``                |
 
 Each Feature gets exactly one shipped default App (``provider="builtin"``,
@@ -203,6 +204,19 @@ _FEATURE_DEFS: Tuple[Dict[str, Any], ...] = (
         "requires_scopes": frozenset({"integrations.waddleai:write"}),
         "min_tier": "enterprise",
         "flag": "waddles.integrations.waddleai",
+    },
+    {
+        # Standard provider/connection framework (Twitch bot + channel first). Scope is `:admin`,
+        # not `:read`: every session carries the `*:read` wildcard, so a read scope would be
+        # satisfied by any logged-in user. The tenant-owner bundle lists it explicitly
+        # (flask_core.auth.SCOPE_BUNDLES); hub-api additionally requires the caller to administer
+        # the specific community (services.community_authz.authorize_community).
+        "id": "integrations.provider_connections",
+        "version": 1,
+        "module": "integrations",
+        "requires_scopes": frozenset({"connections:admin"}),
+        "min_tier": "professional",
+        "flag": "waddles.integrations.provider_connections",
     },
     {
         "id": "tenancy.multi_tenant",
@@ -376,6 +390,17 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
         "is_default": True,
     },
     {
+        "app_id": "waddles.integrations.provider_connections.default",
+        "name": "Provider Connections (default)",
+        "version": "1.0.0",
+        "feature": "waddles.integrations.provider_connections",
+        "module": "integrations",
+        "provider": "builtin",
+        "surfaces": ("action",),
+        "permissions": ("connections:admin",),
+        "is_default": True,
+    },
+    {
         "app_id": "waddles.tenancy.multi_tenant.default",
         "name": "Multi-Tenant Management (default)",
         "version": "1.0.0",
@@ -390,12 +415,12 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
 
 
 def build_contracts() -> Tuple[FeatureContract, ...]:
-    """Parse and validate the 15 Core/platform Feature contracts, without registering them."""
+    """Parse and validate the 16 Core/platform Feature contracts, without registering them."""
     return tuple(parse_feature_contract(raw) for raw in _FEATURE_DEFS)
 
 
 def build_default_apps() -> Tuple[AppManifest, ...]:
-    """Parse and validate the 15 Core/platform default App manifests, without registering them."""
+    """Parse and validate the 16 Core/platform default App manifests, without registering them."""
     return tuple(parse_manifest(raw) for raw in _DEFAULT_APP_DEFS)
 
 
@@ -405,7 +430,7 @@ def register_all(
     app_registry: Optional[AppRegistry] = None,
 ) -> Tuple[Tuple[FeatureContract, ...], Tuple[AppManifest, ...]]:
     """
-    Parse, validate and register all 15 Core/platform Features and their
+    Parse, validate and register all 16 Core/platform Features and their
     shipped default Apps.
 
     Defaults to the process-wide singletons

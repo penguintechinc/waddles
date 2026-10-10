@@ -2880,6 +2880,13 @@ def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("refresh_token", "text"),
         Field("status", "string", length=20, notnull=True, default="active"),
         Field("installed_by_user_id", "integer"),
+        # migration 0056_provider_connections -- provider/connection framework columns.
+        # `resource_metadata` (not `metadata`: reserved on SQLAlchemy models) holds the
+        # adapter-validated, never-secret facts about the link; `expires_at` drives
+        # refresh-before-use; `status_reason` is a fixed machine code, never provider text.
+        Field("resource_metadata", "json"),
+        Field("expires_at", "datetime"),
+        Field("status_reason", "string", length=40),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         migrate=migrate,
@@ -2890,6 +2897,8 @@ def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("community_id", "integer", notnull=True),
         Field("connection_id", "bigint", notnull=True),
         Field("status", "string", length=20, notnull=True, default="pending"),
+        # migration 0056 -- per-community on/off switch (DB default TRUE).
+        Field("enabled", "boolean", notnull=True, default=True),
         Field("requested_by_user_id", "integer"),
         Field("approved_by_user_id", "integer"),
         Field("created_at", "datetime"),
