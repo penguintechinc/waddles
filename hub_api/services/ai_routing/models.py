@@ -15,6 +15,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from flask_core.ai_guard import RetrievedItem
+from flask_core.ai_tool_authz import AuthorizedToolCall, ToolCallRequest, ToolRegistry
+
 #: Model-selection tiers, in fallback-ladder order (spec §2): premium-local
 #: falls back to BYOK falls back to free-local, which is always reachable.
 Tier = Literal["free", "premium", "byok"]
@@ -45,6 +48,16 @@ class AIRequest:
     Likewise `byok_provider=None` means "use `ai_model_config.
     byok_provider`" -- set only to call a specific provider even though
     the community has keys on file for more than one.
+
+    Prompt-injection posture (OWASP LLM01): `prompt` is the invoking user's own instruction.
+    Anything the SERVER retrieved on their behalf (documents, chat history, memories, web
+    results) goes in `untrusted_context`, never concatenated into `prompt` -- the clients render
+    it as a labelled, delimited, defanged block next to a standing system notice, drop items
+    that trip the injection scan, and the router treats such a request as TAINTED (side-effecting
+    tools are refused). `system_prompt` is server-owned standing instructions and is never
+    settable through the REST DTO. `tools` is the server-side registry of tools this request may
+    execute if the model asks for them; `None` (the default) exposes none, so every
+    model-requested tool call is denied.
     """
 
     prompt: str
@@ -55,6 +68,9 @@ class AIRequest:
     byok_provider: ByokProvider | None = None
     invocation: Invocation = "interactive"
     wants_json: bool = False
+    system_prompt: str | None = None
+    untrusted_context: tuple[RetrievedItem, ...] = ()
+    tools: ToolRegistry | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -72,6 +88,13 @@ class AIResponse:
     #: True only when the provider was actually put in JSON mode for this call
     #: and the returned `text` was validated as JSON. False = plain text.
     json_mode: bool = False
+    #: Tool calls the model asked for, exactly as asked -- UNAUTHORISED. Set by the provider
+    #: clients; `router.route_completion()` always empties it (authorising or raising), so a
+    #: caller of the router never sees a raw model-chosen call.
+    requested_tool_calls: tuple[ToolCallRequest, ...] = ()
+    #: Tool calls that passed server-side re-authorisation against the invoking user's tenant and
+    #: scopes. The only tool-call shape an executor may act on.
+    tool_calls: tuple[AuthorizedToolCall, ...] = ()
 
     @property
     def total_tokens(self) -> int:
