@@ -12,15 +12,23 @@
 //! build failure downgrades to tracing-only (stdout) and is logged, not
 //! propagated.
 
+pub mod stream;
+pub mod trace_context;
+
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+
+/// Upper bound on the final span flush at shutdown -- see
+/// [`TelemetryGuard::shutdown`].
+const TRACER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Holds OTel provider handles that must be flushed/shut down at process
 /// exit. Dropping this guard (or calling [`TelemetryGuard::shutdown`])
@@ -35,7 +43,11 @@ impl TelemetryGuard {
     /// never propagated -- shutdown must not be able to fail the caller.
     pub fn shutdown(&mut self) {
         if let Some(provider) = self.tracer_provider.take() {
-            if let Err(err) = provider.shutdown() {
+            // Bounded: with a dead collector the final batch flush can only
+            // time out, so cap how long process exit may wait on it. (The
+            // SDK's meter provider ignores a caller timeout and applies its
+            // own fixed 5s bound.)
+            if let Err(err) = provider.shutdown_with_timeout(TRACER_SHUTDOWN_TIMEOUT) {
                 eprintln!("otel tracer provider shutdown error: {err}");
             }
         }
@@ -135,6 +147,13 @@ pub fn init(default_service_name: &str) -> (TelemetryGuard, prometheus::Registry
     if let Some(provider) = &meter_provider {
         global::set_meter_provider(provider.clone());
     }
+    // W3C Trace Context (`traceparent`/`tracestate`) is always installed,
+    // even with no exporter: it costs nothing and keeps cross-service
+    // propagation a config-only change (see `trace_context`).
+    global::set_text_map_propagator(TraceContextPropagator::new());
+    // Instruments created before the provider above is installed are
+    // permanently no-ops, so build the process-wide stream instruments now.
+    let _ = stream::StreamMetrics::shared();
 
     let fmt_layer = tracing_subscriber::fmt::layer().json();
     let registry = tracing_subscriber::registry()

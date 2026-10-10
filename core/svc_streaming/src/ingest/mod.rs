@@ -28,6 +28,13 @@ pub struct IngestSession {
     pub kind: IngestKind,
     pub key: String,
     pub stream: Box<dyn AsyncRead + Send + Unpin>,
+    /// The listener's connection/request span, captured with
+    /// `tracing::Span::current()` when the session was accepted. The
+    /// orchestrator parents its per-session span to it, so one trace covers
+    /// the whole ingest -> pipeline -> egress path even though the session
+    /// crosses an `mpsc` channel and a `tokio::spawn` boundary (which carry
+    /// no tracing context on their own).
+    pub span: tracing::Span,
 }
 
 /// Renders the session with the routing key as its fingerprint, never the
@@ -66,6 +73,7 @@ mod tests {
             kind: IngestKind::Rtmp,
             key: "sk_abc123".to_string(),
             stream: Box::new(tokio::io::empty()),
+            span: tracing::Span::none(),
         };
         let rendered = format!("{session:?}");
         assert!(rendered.contains("IngestSession"));
