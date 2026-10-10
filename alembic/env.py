@@ -1,5 +1,6 @@
 """Alembic environment configuration for WaddleBot migrations."""
 
+import importlib.util
 import os
 import sys
 import types
@@ -51,6 +52,32 @@ def include_name(name, type_, parent_names):
     return True
 
 
+def _load_service_roles():
+    """Load scripts/db/service_roles.py by path (the migration image ships it beside alembic/)."""
+    path = os.path.join(os.path.dirname(__file__), '..', 'scripts', 'db', 'service_roles.py')
+    spec = importlib.util.spec_from_file_location('waddles_service_roles_env', path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _stage_dev_role_password_suffix(connection) -> None:
+    """Bridge WADDLES_DEV_DB_ROLE_PW_SUFFIX into the session GUC legacy SQL 031 reads.
+
+    SECURITY (H-1): the suffix lets docker-compose's db-migrations derive `<role><suffix>`
+    dev passwords. `dev_suffix_from_env` raises when WADDLES_DEPLOYMENT_TIER is
+    alpha/beta/gamma/production, so this can never take effect on a shared database.
+    Always sets the GUC (to '' when unset) so a stale value never leaks across runs.
+    """
+    roles = _load_service_roles()
+    suffix = roles.dev_suffix_from_env()
+    connection.execute(
+        text("SELECT set_config(:k, :v, false)"),
+        {"k": roles.DEV_SUFFIX_GUC, "v": suffix},
+    )
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
     url = config.get_main_option("sqlalchemy.url")
@@ -81,6 +108,7 @@ def run_migrations_online() -> None:
         # Acquire PostgreSQL advisory lock to prevent concurrent migrations
         connection.execute(text("SELECT pg_advisory_lock(20250001)"))
         try:
+            _stage_dev_role_password_suffix(connection)
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,

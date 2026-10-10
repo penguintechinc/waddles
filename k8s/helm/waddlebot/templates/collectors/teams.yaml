@@ -40,6 +40,10 @@ spec:
             - secretRef:
                 name: {{ include "waddlebot.fullname" . }}-secrets
           env:
+            # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_legacy_teams_collector;
+            # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+            # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_legacy_teams_collector") | nindent 12 }}
             - name: PORT
               value: "8008"
             - name: MODULE_NAME

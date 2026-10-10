@@ -217,7 +217,10 @@ class TestPrivileges:
         finally:
             conn.close()
         grantees = {g for _, g in grants}
-        assert grantees <= {"hub_api", "migration_runner"}, grantees
+        # `waddles_hub_api` is hub-api's per-service LOGIN role (0055_per_service_db_roles,
+        # a member of the `hub_api` group): the same principal under its own credential,
+        # so it legitimately holds the hub_api privileges. No data-plane role may.
+        assert grantees <= {"hub_api", "migration_runner", "waddles_hub_api"}, grantees
         assert {t for t, _ in grants} == {"sso_connections", "sso_identities"}
         assert "PUBLIC" not in grantees
 

@@ -93,10 +93,13 @@ spec:
             configMapKeyRef:
               name: waddlebot-config
               key: POSTGRES_USER
+        # H-1/H-3 -- the database OWNER credential is read from its own Secret
+        # (<release>-db-admin / infrastructure.postgresql.admin.existingSecret), never
+        # from waddlebot-secrets, which every other workload envFrom's.
         - name: POSTGRES_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: waddlebot-secrets
+              name: {{ include "waddlebot.db.adminSecretName" . }}
               key: POSTGRES_PASSWORD
         - name: POSTGRES_DB
           valueFrom:
