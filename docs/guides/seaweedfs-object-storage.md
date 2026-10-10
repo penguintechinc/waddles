@@ -86,6 +86,17 @@ Outside alpha/local, the chart's `infrastructure.seaweedfs.encryption` fails Hel
 
 Alpha/local is the only tier allowed to leave `encryption.secretName` unset (documented default in `values-alpha.yaml`) — never disable `infrastructure.seaweedfs.encryption.enabled` to work around a missing key in beta/gamma/production.
 
+### Customer-managed KMS (Enterprise, on top of the baseline)
+
+SSE-S3 above is the baseline every tier gets with zero configuration. Enterprise operators can additionally
+encrypt objects under **their own AWS KMS / Google Cloud KMS key** (SSE-KMS) with `kms.objectStorage` in the
+chart values (`mode: off | kms | drain`). It is layered on the baseline -- `WEED_S3_SSE_KEK` stays wired and the
+chart refuses to render without it -- the bucket-init hook switches the bucket default to `aws:kms`, and hub-api
+switches its own uploads to SSE-KMS only while the Enterprise entitlement holds (otherwise it refuses, never
+silently writes `AES256`). Provider credentials come from an existing Secret; SeaweedFS ships no native Azure
+Key Vault provider. Full setup, the `drain` exit ramp and the caveats (licence boundary, key-cache revocation
+lag): [External KMS / BYOK](external-kms-byok.md).
+
 ## Least-Privilege Identities
 
 SeaweedFS's S3 gateway takes a static `identities.json` (rendered at container start from `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`) rather than MinIO's separate root/IAM-policy model. The chart currently provisions a single `waddlebot` identity with `Read, Write, List, Tagging, Admin` — the same blast radius as the old MinIO root credential. Splitting this into per-consumer identities (e.g. a read-only identity for the bundle executor's poller, a write-only identity for upload paths) is tracked as follow-up work once a consumer actually needs it; don't add a second identity speculatively.

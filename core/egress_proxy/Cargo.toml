@@ -102,6 +102,15 @@ egress-assertion = { path = "../egress_assertion", version = "=0.1.0" }
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
 tower = { version = "=0.5.3", features = ["util"] }
+# Test-only: `service_auth::test_support::Capture` (an in-memory OTel metric
+# exporter) proves the assertion verifier reports into the same
+# `waddles_jwt_verifications_total{verifier,alg,outcome}` stream as the
+# Python verifiers. The `test-support` feature is never on in the binary.
+service_auth = { path = "../service_auth", version = "=0.1.0", features = ["test-support"] }
+# Test-only: hand-builds hostile JOSE headers (`jku`, `crit`, `alg: none`)
+# the typed signer can never produce. Already in the lockfile transitively
+# via jsonwebtoken (same exact version).
+base64 = "=0.22.1"
 
 [profile.release]
 opt-level = 3
