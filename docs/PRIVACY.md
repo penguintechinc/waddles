@@ -138,6 +138,8 @@ The platform identity (Discord snowflake, Twitch ID) acts as the **permanent ide
 
 ### Deletion Audit Trail
 
+> Enterprise tenants additionally get erasure and DSAR-export requests recorded in the tamper-evident audit chain (actor is a `hub_users.uuid`, never a name or e-mail) -- see [Enterprise Audit Logging](compliance/audit-logging.md). The rights themselves are available in every tier.
+
 Every deletion attempt is recorded in `data_deletion_requests`. This table stores no PII values — only metadata:
 
 | Column | Description |

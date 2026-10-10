@@ -167,7 +167,7 @@ class ListFilters:
 
 async def default_gate(tenant_slug: str) -> bool:
     """Two-gate entitlement check for the audit-log feature (PostHog flag AND Enterprise tier)."""
-    return await feature_enabled(FEATURE_AUDIT_LOGS, tenant=tenant_slug)
+    return bool(await feature_enabled(FEATURE_AUDIT_LOGS, tenant=tenant_slug))
 
 
 def _db_uuid(column: Any, value: str | None) -> Any:
@@ -195,7 +195,7 @@ def _describe(exc: BaseException) -> str:
     """Loggable cause: authored text for our own errors, the value-free summary for the rest."""
     if isinstance(exc, AuditError):
         return f"{type(exc).__name__}: {exc}"
-    return describe_db_error(exc)
+    return str(describe_db_error(exc))
 
 
 def report_write_failure(
@@ -481,7 +481,7 @@ class AuditService:
                 # constraint violation (fail loudly): re-read the head on a fresh connection.
                 current = await self._head_seq(table, chain_id)
                 if current is not None and current >= attempted_seq > 0:
-                    await asyncio.sleep(random.uniform(0.002, 0.02) * attempt)  # noqa: S311 - jitter, not security
+                    await asyncio.sleep(random.uniform(0.002, 0.02) * attempt)  # noqa: S311 - retry jitter, not security  # nosec B311
                     continue
                 raise AuditWriteError("audit insert violated a database constraint") from exc
         raise _AppendExhaustedError(MAX_APPEND_ATTEMPTS)

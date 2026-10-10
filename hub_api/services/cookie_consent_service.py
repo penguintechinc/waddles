@@ -36,6 +36,7 @@ from uuid import uuid4
 
 from quart import Request
 
+from services.audit_service import report_write_failure
 from services.errors import not_found
 
 #: Matches `routes/cookieConsent.js`'s cookie name verbatim -- the
@@ -323,9 +324,13 @@ async def log_audit_event(
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> None:
-    """Best-effort audit log write -- a logging failure must never break the main flow.
+    """Write one `cookie_audit_log` row (the consent-proof trail); raises if it cannot be written.
 
-    Matches Node's own `.catch(() => {})` on `logAuditEvent()`.
+    This was best-effort (Node's `.catch(() => {})`, ported as `except: pass`): a consent
+    grant/withdrawal could be saved with no proof it ever happened and no signal that the proof
+    was lost. GRC audit finding #3 made audit-write failures loud: the failure is logged at ERROR
+    (type + value-free cause + traceback), counted, and raised as `AuditWriteError`. The consent
+    change itself has already been committed by the caller, so a retry is idempotent.
     """
     try:
         await async_dal.insert_async(
@@ -341,8 +346,14 @@ async def log_audit_event(
             user_agent=user_agent,
             created_at=datetime.now(UTC),
         )
-    except Exception:  # noqa: BLE001, S110 - audit logging failure must not break the main flow
-        pass
+    except Exception as exc:
+        raise report_write_failure(
+            category="privacy",
+            action="cookie_consent_audit",
+            chain_id=None,
+            attempts=1,
+            exc=exc,
+        ) from exc
 
 
 @dataclass(slots=True, frozen=True)

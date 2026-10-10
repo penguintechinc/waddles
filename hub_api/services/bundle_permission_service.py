@@ -416,6 +416,9 @@ async def restrict_tenant_permissions(
                     permission_ids=remaining,
                 )
 
+    # A failed audit write must not skip a later community's cache invalidation (a revoked
+    # permission has to take effect everywhere): collect the first failure, raise after the loop.
+    deferred_audit = bundle_audit.DeferredAudit()
     for community_id, new_version in cascade_versions.items():
         await _publish_invalidation(
             tenant_id=tenant_id,
@@ -425,7 +428,7 @@ async def restrict_tenant_permissions(
             grant_version=new_version,
             valkey_client=valkey_client,
         )
-        await bundle_audit.record(
+        await deferred_audit.record(
             install_dal,
             actor_id=restricted_by,
             action="community_permission_revoked_by_tenant_restriction",
@@ -438,6 +441,7 @@ async def restrict_tenant_permissions(
                 "grant_version": new_version,
             },
         )
+    deferred_audit.raise_if_failed()
     await bundle_audit.record(
         install_dal,
         actor_id=restricted_by,

@@ -16,3 +16,8 @@ from pathlib import Path
 _HUB_API_DIR = Path(__file__).resolve().parent
 if str(_HUB_API_DIR) not in sys.path:
     sys.path.insert(0, str(_HUB_API_DIR))
+
+#: Fixtures for the tamper-evident audit-log tests (`tests/audit_support.py`): registered as a
+#: plugin so test modules use `audit_dal` / `audit_service` / `gate` by name, without importing
+#: fixtures into their own namespace.
+pytest_plugins = ["tests.audit_support"]

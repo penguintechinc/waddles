@@ -135,7 +135,7 @@ class AuditAction(StrEnum):
     USER_CREATED = "user.created"
     USER_UPDATED = "user.updated"
     USER_DELETED = "user.deleted"
-    USER_PASSWORD_RESET = "user.password_reset"  # noqa: S105 - an action name, not a credential
+    USER_PASSWORD_RESET = "user.password_reset"  # noqa: S105 - an action name, not a credential  # nosec B105
     PRIVACY_DSAR_EXPORT = "privacy.dsar_export"
     PRIVACY_ERASURE_REQUESTED = "privacy.erasure_requested"
     LICENSE_SUBSCRIPTION_CHANGED = "license.subscription_changed"
@@ -467,9 +467,9 @@ def classify_request(facts: RequestFacts) -> Classification | None:
     if facts.rule.startswith(UNAUDITED_RULE_PREFIXES):
         return None
     method = facts.method.upper()
-    if facts.denied and facts.authenticated:
-        return Classification(AuditCategory.AUTHZ, AuditAction.AUTHZ_DENIED, AuditOutcome.DENIED)
-    if facts.status_code == 403 and facts.authenticated and not facts.scope_checked:
+    if facts.authenticated and (facts.denied or facts.status_code == 403):
+        # A scope-check refusal, or any other authenticated 403 (tenant mismatch, community
+        # membership, inline authz after the scope check passed) -- all are authz decisions.
         return Classification(AuditCategory.AUTHZ, AuditAction.AUTHZ_DENIED, AuditOutcome.DENIED)
     semantic = SEMANTIC_ROUTES.get((method, facts.rule))
     if semantic is not None:

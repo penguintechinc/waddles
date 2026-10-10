@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Enterprise tamper-evident audit logging (GRC audit finding #3): append-only per-tenant SHA-256 hash chain
+  (`audit_events`, migration `0048_audit_events_hash_chain`), `GET /api/v1/compliance/audit/{events,head,verify,export}`,
+  `make verify-audit-chain` / `make verify-audit-export`, new Enterprise feature `waddles.compliance.audit_export`
+  (see `docs/compliance/audit-logging.md`)
+- Audit coverage for authz denials, tenant/role changes, DSAR/erasure, logins (password, OAuth/SSO, passkey, refresh),
+  admin actions and license/subscription changes via an app-wide hook (`hub_api/services/audit_http.py`)
+- `flask_core.authz.AuthzDecision`: `require_scope` publishes its verdict as `request.authz_decision`
+
+### Changed
+- `compliance.audit_logs` now requires scope `compliance.audit:admin` (was `compliance.audit:read`, which every session's
+  `*:read` wildcard satisfied); the tenant-owner scope bundle grants it
+- `bundle_audit.record` is fail-loud: a failed `audit_log` insert raises `AuditWriteError` instead of being swallowed
+
+### Fixed
+- Removed the `except Exception: pass` that silently dropped audit-log write failures (`bundle_audit.record`), and the two
+  sibling swallows on the consent-proof trail (`cookie_consent_service.log_audit_event`) and the failed-deletion record
+  (`data_privacy_service`); all now go through `audit_service.report_write_failure`
+- Legacy `audit_log` bundle-lifecycle rows were never written on real Postgres: the insert passed a tz-aware `datetime`
+  for a plain `TIMESTAMP` column, asyncpg rejected it, and the swallowed error hid it. The value now matches the column
+- Bundle flows with required follow-on work (global uninstall cascade, tenant un-availability cascade, tenant-wide/community
+  activation signing + Valkey provisioning, tenant permission restriction invalidations) finish that work before an audit
+  failure is raised (`bundle_audit.DeferredAudit`), so fail-loud cannot leave the platform half-changed
+
 ## [2.2.0] - 2026-04-10
 
 ### Added

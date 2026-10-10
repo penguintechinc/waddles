@@ -22,6 +22,7 @@ hub_api/
       passkey.py             v1 `user passkey` group (M1): WebAuthn credential management
       profile.py              v1 `user profile` group (M1): self-service profile + avatar
       user_management.py       v1 `superadmin users` group (M1): platform user CRUD
+      compliance_audit.py      v1 `compliance audit` group: Enterprise read/verify/export of the audit chain
     v2/
       platform.py          example v2 group: tenant -> scope -> DTO chain, exposes BLUEPRINTS
   routers/
@@ -38,6 +39,11 @@ hub_api/
     storage_service.py       S3-compatible avatar object storage (no local-disk fallback)
     user_management_service.py  superadmin user CRUD
     current_user.py         resolve the caller's user id from the bearer JWT
+    audit_chain.py          tamper-evident audit hash chain: canonical form, seal, verify (stdlib only)
+    audit_events.py         audit vocabulary, PII-free event validation, request classification
+    audit_service.py        append / list / verify the chain (entitlement-gated, fail-loud, OTel)
+    audit_http.py           after_request hook + session-issuance hook (HTTP audit coverage)
+    bundle_audit.py         bundle-lifecycle audit helper: legacy `audit_log` row + chain bridge
     dto_response.py         jsonify_dto() -- workaround for a quart-schema/pydantic-core crash
     errors.py              ApiError + bad_request()/unauthorized()/etc factories
   openapi/
@@ -89,6 +95,25 @@ Most tests use `sqlite:memory` (pydal). The M1 group's own tests
 **file** instead, `pool_size=1` -- see `PORTING.md`'s async_dal testing
 gotcha for why `sqlite:memory` breaks once a route calls
 `async_dal.select_async`/`insert_async`/etc.
+
+## Enterprise audit logging (tamper-evident)
+
+Security-relevant events (authz denials, tenant/role changes, DSAR/erasure, logins incl. SSO and
+passkey, admin actions, license changes) are appended to a per-tenant **SHA-256 hash chain**
+(`audit_events`, alembic `0048_audit_events_hash_chain`): altering, removing, inserting or
+re-ordering any record is detected by re-verification. Recording and reading are an **Enterprise**
+feature (flags `waddles.compliance.audit_logs` / `audit_export`, default OFF); the legacy
+`audit_log` basic trail and the statutory DSAR/erasure rights are never gated. A failed audit write
+is never swallowed -- it logs at ERROR with a traceback, bumps `waddles.audit.write_failures`, and
+fails the request (entitled tenants only).
+
+```bash
+make verify-audit-chain                   # recompute every chain from the DB (exit 1 = tampering)
+make verify-audit-export EXPORT="a.json"  # verify a downloaded export offline, no server needed
+```
+
+API: `GET /api/v1/compliance/audit/{events,head,verify,export}` (scope `compliance.audit:admin`).
+Full design, threat model and operating guide: [`docs/compliance/audit-logging.md`](../docs/compliance/audit-logging.md).
 
 ## OpenAPI (two documents, per backend.md)
 

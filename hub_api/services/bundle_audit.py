@@ -24,6 +24,7 @@ install) could vanish with no trace whatsoever. It is now **fail-loud**:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -43,6 +44,23 @@ from services.audit_service import (
     get_audit_service,
     report_write_failure,
 )
+
+
+def _legacy_created_at(install_dal: AsyncDB) -> datetime:
+    """`now()` in the form the legacy ``audit_log.created_at`` column accepts.
+
+    The baseline column is a plain ``TIMESTAMP`` (no time zone). asyncpg refuses a tz-aware value
+    for it (``can't subtract offset-naive and offset-aware datetimes``), so every legacy insert
+    on real Postgres failed -- and the old ``except: pass`` hid that for as long as this helper
+    existed, leaving the bundle-lifecycle trail silently empty in production. Pass UTC in
+    whichever form the reflected column wants.
+    """
+    now = datetime.now(UTC)
+    table = install_dal.metadata.tables.get("audit_log")
+    column = table.c.get("created_at") if table is not None else None
+    if column is not None and getattr(column.type, "timezone", False):
+        return now
+    return now.replace(tzinfo=None)
 
 
 def _tenant_id_for_chain(tenant_id: int | None, details: dict[str, Any] | None) -> int | None:
@@ -87,7 +105,7 @@ async def record(
             target_type=target_type,
             target_id=target_id,
             details=details or {},
-            created_at=datetime.now(UTC),
+            created_at=_legacy_created_at(install_dal),
         )
     except Exception as exc:
         raise report_write_failure(
@@ -119,4 +137,42 @@ async def record(
     await get_audit_service(install_dal).record(event)
 
 
-__all__ = ["AuditWriteError", "record"]
+async def try_record(install_dal: AsyncDB, **kwargs: Any) -> AuditWriteError | None:
+    """Like :func:`record` but RETURNS the :class:`AuditWriteError` instead of raising it.
+
+    For call sites with required follow-on work (a cascade, a Valkey invalidation, a signed
+    sidecar upload) that must still run even when the audit write fails, so a failed audit cannot
+    leave the platform half-changed. The failure is already logged at ERROR and counted when this
+    returns; the caller must surface it afterwards (use :class:`DeferredAudit`).
+    """
+    try:
+        await record(install_dal, **kwargs)
+    except AuditWriteError as exc:
+        return exc
+    return None
+
+
+@dataclass(slots=True)
+class DeferredAudit:
+    """Run a flow's audit writes without letting a failure skip the rest of the flow.
+
+    ``await deferred.record(...)`` writes (loudly logging any failure) and remembers the first
+    error; call :meth:`raise_if_failed` once the follow-on work is done. Nothing is swallowed --
+    the error is raised, just after the work that must not be skipped.
+    """
+
+    error: AuditWriteError | None = None
+
+    async def record(self, install_dal: AsyncDB, **kwargs: Any) -> None:
+        """Write one audit event now; keep the first failure for :meth:`raise_if_failed`."""
+        failure = await try_record(install_dal, **kwargs)
+        if self.error is None:
+            self.error = failure
+
+    def raise_if_failed(self) -> None:
+        """Raise the first remembered :class:`AuditWriteError`, if any."""
+        if self.error is not None:
+            raise self.error
+
+
+__all__ = ["AuditWriteError", "DeferredAudit", "record", "try_record"]
