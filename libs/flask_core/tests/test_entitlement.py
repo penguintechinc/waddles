@@ -426,7 +426,7 @@ def test_penguin_license_gate_from_env_uses_real_dependency_when_available(
 ) -> None:
     sentinel_client = MagicMock()
     monkeypatch.setattr(entitlement_module, "_PENGUIN_LICENSING_AVAILABLE", True)
-    monkeypatch.setattr(entitlement_module, "get_license_client", lambda: sentinel_client)
+    monkeypatch.setattr(entitlement_module, "get_waddles_license_client", lambda: sentinel_client)
     gate = PenguinLicenseGate.from_env()
     assert gate._client is sentinel_client
 
