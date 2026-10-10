@@ -1706,4 +1706,34 @@ mod tests {
         let err = bundle.refresh().await.unwrap_err();
         assert!(matches!(err, ServiceAuthError::InvalidToken(m) if m.contains("empty key")));
     }
+
+    /// A complete, fixed-time claim payload for the direct `parse_claims` tests.
+    fn fixed_payload(iat: u64) -> Value {
+        json!({
+            "iss": "hub-api", "aud": AUD, "sub": "spiffe://penguintech.io/alpha/svc-process",
+            "scope": SCOPE, "iat": iat, "nbf": iat, "exp": iat + 900, "jti": "jti-1",
+        })
+    }
+
+    #[test]
+    fn iat_skew_boundary_is_inclusive_and_exact() {
+        let now = 1_000_000_u64;
+        assert!(
+            parse_claims(&fixed_payload(now + CLOCK_SKEW_SECONDS), AUD, now).is_ok(),
+            "iat exactly at the skew edge verifies"
+        );
+        assert!(parse_claims(&fixed_payload(now), AUD, now).is_ok());
+        assert!(parse_claims(&fixed_payload(0), AUD, now).is_ok());
+        assert_eq!(
+            parse_claims(&fixed_payload(now + CLOCK_SKEW_SECONDS + 1), AUD, now).unwrap_err(),
+            REASON_IMMATURE
+        );
+    }
+
+    #[test]
+    fn skew_and_ttl_constants_match_the_python_contract() {
+        assert_eq!(CLOCK_SKEW_SECONDS, 30);
+        assert_eq!(MAX_TOKEN_TTL_SECONDS, 3600);
+        assert_eq!(SERVICE_JWT_ALGORITHM, "EdDSA");
+    }
 }

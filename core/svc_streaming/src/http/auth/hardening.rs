@@ -972,16 +972,28 @@ mod tests {
     /// vocabulary and one metric contract.
     #[test]
     fn production_code_is_identical_to_the_service_auth_original() {
-        const ORIGINAL: &str = include_str!("../../../../service_auth/src/jwt_hardening.rs");
-        const MIRROR: &str = include_str!("hardening.rs");
+        // Read at run time (not `include_str!`) so a crate copied out of the
+        // repo still COMPILES; the test then fails loudly, never skips.
+        let original_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../service_auth/src/jwt_hardening.rs"
+        );
+        let original = std::fs::read_to_string(original_path).unwrap_or_else(|e| {
+            panic!("cannot read the service_auth original {original_path}: {e}")
+        });
+        let mirror = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/http/auth/hardening.rs"
+        ))
+        .expect("read the mirror");
 
-        fn production_body(source: &'static str) -> &'static str {
+        fn production_body(source: &str) -> &str {
             let start = source.find("use std::fmt;").expect("production code start");
             let end = source.find("#[cfg(test)]").expect("test scaffolding start");
             &source[start..end]
         }
 
-        assert!(!production_body(ORIGINAL).is_empty());
-        assert_eq!(production_body(ORIGINAL), production_body(MIRROR));
+        assert!(!production_body(&original).is_empty());
+        assert_eq!(production_body(&original), production_body(&mirror));
     }
 }

@@ -705,6 +705,21 @@ mod tests {
     }
 
     #[test]
+    fn limits_are_pinned_to_the_documented_values() {
+        // The size/kid caps and the metric names are part of the cross-language
+        // contract (`docs/JWT_VERIFICATION.md`); a silent change must fail here.
+        assert_eq!(MAX_HEADER_SEGMENT_CHARS, 16_384);
+        assert_eq!(MAX_KID_LEN, 64);
+        assert_eq!(METRIC_VERIFICATIONS, "waddles_jwt_verifications_total");
+        assert_eq!(METRIC_DURATION, "waddles_jwt_verification_seconds");
+        assert_eq!(
+            FORBIDDEN_HEADER_PARAMS,
+            ["jku", "jwk", "x5u", "x5c", "crit"]
+        );
+        assert_eq!(KNOWN_ALG_LABELS.len(), 14);
+    }
+
+    #[test]
     fn rejection_display_is_the_reason_only() {
         let rejection = JwtRejection::new(REASON_BAD_KID, "eddsa");
         assert_eq!(rejection.to_string(), "bad_kid");

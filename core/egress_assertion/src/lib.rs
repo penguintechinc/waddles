@@ -349,8 +349,20 @@ pub fn verify_with_key(
     let data = jsonwebtoken::decode::<WireAssertion>(token, decoding_key, &validation)
         .map_err(|e| AssertionError::Rejected(classify_decode_error(e.kind())))?;
     let claims = data.claims.into_assertion()?;
+    check_time_claims(&claims, max_ttl_secs, now_secs())?;
+    Ok(claims)
+}
 
-    if claims.iat > now_secs().saturating_add(ASSERTION_CLOCK_SKEW_SECONDS) {
+/// The time rules `jsonwebtoken` does not apply: `iat` not in the future
+/// beyond [`ASSERTION_CLOCK_SKEW_SECONDS`], and `exp - iat` within
+/// `max_ttl_secs` (both bounds inclusive). Pure over `now` so the boundaries
+/// are testable without a clock.
+fn check_time_claims(
+    claims: &EgressAssertion,
+    max_ttl_secs: u64,
+    now: u64,
+) -> Result<(), AssertionError> {
+    if claims.iat > now.saturating_add(ASSERTION_CLOCK_SKEW_SECONDS) {
         return Err(AssertionError::Rejected(reason::IMMATURE));
     }
     let ttl = claims.exp.saturating_sub(claims.iat);
@@ -360,7 +372,7 @@ pub fn verify_with_key(
             max: max_ttl_secs,
         });
     }
-    Ok(claims)
+    Ok(())
 }
 
 /// Normalizes an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) down to its
@@ -1203,5 +1215,50 @@ mod tests {
         ] {
             assert_eq!(classify_decode_error(&kind), expected, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn time_claim_boundaries_are_inclusive_and_exact() {
+        let now = 1_000_000_u64;
+        let at = |iat: u64, exp: u64| EgressAssertion {
+            iat,
+            exp,
+            ..base_assertion()
+        };
+        // iat exactly at the skew edge, ttl exactly at the ceiling: both pass.
+        check_time_claims(
+            &at(
+                now + ASSERTION_CLOCK_SKEW_SECONDS,
+                now + ASSERTION_CLOCK_SKEW_SECONDS + 10,
+            ),
+            60,
+            now,
+        )
+        .expect("iat at the skew edge");
+        check_time_claims(&at(now, now + 60), 60, now).expect("ttl at the ceiling");
+        // One past each bound: both fail, each with its own error.
+        assert!(matches!(
+            check_time_claims(
+                &at(now + ASSERTION_CLOCK_SKEW_SECONDS + 1, now + 100),
+                60,
+                now
+            ),
+            Err(AssertionError::Rejected(reason::IMMATURE))
+        ));
+        assert!(matches!(
+            check_time_claims(&at(now, now + 61), 60, now),
+            Err(AssertionError::TtlTooLong {
+                actual: 61,
+                max: 60
+            })
+        ));
+        // exp before iat is a zero ttl (saturating), never an underflow panic.
+        check_time_claims(&at(now, now - 1), 60, now).expect("exp < iat is not a ttl overflow");
+    }
+
+    #[test]
+    fn constants_match_the_documented_contract() {
+        assert_eq!(ASSERTION_CLOCK_SKEW_SECONDS, 5);
+        assert_eq!(ASSERTION_MAX_TTL_SECONDS, 60);
     }
 }
