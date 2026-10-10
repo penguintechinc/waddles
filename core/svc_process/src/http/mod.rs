@@ -155,6 +155,8 @@ mod tests {
             envelope_binding_keys: None,
             db_reader_password: None,
             bundle_db_password: None,
+            bundle_reputation_password: None,
+            bundle_economy_password: None,
         };
         AppState::new(
             config,

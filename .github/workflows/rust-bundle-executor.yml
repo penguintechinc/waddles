@@ -5,12 +5,16 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_executor/**'
+      - 'wit/waddle-bundle/**'
+      - 'sdk/waddle-sdk/src/**'
       - '.github/workflows/rust-bundle-executor.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_executor/**'
+      - 'wit/waddle-bundle/**'
+      - 'sdk/waddle-sdk/src/**'
   workflow_dispatch:
 
 permissions:

@@ -7,7 +7,10 @@ on:
       - 'core/svc_process/**'
       - 'core/bundle_host_kv/**'
       - 'core/bundle_capability_gate/**'
+      - 'core/bundle_host_reputation/**'
+      - 'core/bundle_host_economy/**'
       - 'core/hub_client/**'
+      - 'scripts/db/bundle_identity_resolve.sql'
       - '.github/workflows/rust-svc-process.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
@@ -16,7 +19,10 @@ on:
       - 'core/svc_process/**'
       - 'core/bundle_host_kv/**'
       - 'core/bundle_capability_gate/**'
+      - 'core/bundle_host_reputation/**'
+      - 'core/bundle_host_economy/**'
       - 'core/hub_client/**'
+      - 'scripts/db/bundle_identity_resolve.sql'
   workflow_dispatch:
 
 permissions:

@@ -8,6 +8,9 @@
 pub mod bridge;
 pub mod connector_imports;
 pub mod imports;
+pub mod stage_next_economy;
+pub mod stage_next_identity;
+pub mod stage_next_imports;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
