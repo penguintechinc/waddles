@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
 
 from flask_core.service_jwt import (
     DEFAULT_TOKEN_TTL_SECONDS,
@@ -97,18 +96,16 @@ async def issue_service_token() -> tuple[Response, int]:
         return jsonify({"error": "unauthorized"}), 401
 
     try:
-        token = issuer.issue(matched.service_id, scope, ttl_seconds=DEFAULT_TOKEN_TTL_SECONDS)
+        token, claims = issuer.issue_with_claims(
+            matched.service_id, scope, ttl_seconds=DEFAULT_TOKEN_TTL_SECONDS
+        )
     except BootstrapRejected:
         return jsonify({"error": "unauthorized"}), 401
 
     # security.md audit logging -- record the issuance (who, what scope,
     # which token by `jti`, when it expires) without ever logging the
-    # token itself. `jwt.decode` re-parse is unnecessary here: `issue()`
-    # doesn't hand back the claims it minted, but every field logged is
-    # already known to this call site except `jti`/`exp`, which the issuer
-    # doesn't currently return either -- log what's known rather than
-    # re-decoding the token just to extract `jti`.
-    claims = _unverified_claims(token)
+    # token itself. The claims come straight from what the issuer just
+    # signed (`issue_with_claims`), never from re-decoding the token.
     logger = current_app.config.get("logger")
     if logger is not None:
         logger.audit(
@@ -123,18 +120,6 @@ async def issue_service_token() -> tuple[Response, int]:
         )
 
     return jsonify({"token": token, "expires_in": DEFAULT_TOKEN_TTL_SECONDS}), 200
-
-
-def _unverified_claims(token: str) -> dict[str, Any]:
-    """Pull `jti`/`exp` for the audit log without re-verifying the token.
-
-    Safe here specifically because `token` was *just minted* by `issuer.
-    issue()` on this same request -- there is no untrusted input to
-    validate, only this process's own freshly-signed payload to read back.
-    """
-    import jwt as pyjwt
-
-    return pyjwt.decode(token, options={"verify_signature": False})
 
 
 @service_jwt_bp.route("/service-jwks.json", methods=["GET"])

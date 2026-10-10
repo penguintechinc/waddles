@@ -51,7 +51,25 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from quart import current_app, g, jsonify, request
 
+from .jwt_hardening import (
+    OUTCOME_OK,
+    REASON_BAD_ISSUER,
+    REASON_INVALID,
+    REASON_SCOPE_DENIED,
+    REASON_UNKNOWN_KID,
+    VERIFIER_SERVICE_EDDSA,
+    JwtRejection,
+    classify_decode_error,
+    inspect_header,
+    log_rejection,
+    record_verification,
+)
+
 logger = logging.getLogger(__name__)
+
+#: The ONE algorithm the machine-JWT verifier accepts and the issuer signs with
+#: (RFC 8725 one-alg-per-verifier). Ed25519 per RFC 8037.
+SERVICE_JWT_ALGORITHM = "EdDSA"
 
 #: Reserved SPIFFE trust domain (penguintech.md SPIFFE Identity) -- every
 #: `sub` this module issues or verifies lives under it, today via hub-api
@@ -132,44 +150,73 @@ class ServiceJwtVerifier:
     def verify(self, token: str, *, required_scope: str) -> dict[str, Any]:
         """Validate signature, `iss`, `aud`, `exp` (with clock skew) and `scope`.
 
-        Raises `UnknownKeyId` for an unrecognized `kid` and
+        Raises `UnknownKeyId` for an unrecognized or absent `kid` and
         `InvalidServiceToken` for every other validation failure --
         callers should treat both as an authn/authz failure (401/403),
         never leak which check failed to the caller.
+
+        H-2 Phase 0: the header is vetted before any key lookup -- `alg`
+        must be exactly `SERVICE_JWT_ALGORITHM` (so `alg: none`, an HMAC
+        token "signed" with the public key, or any other algorithm is
+        refused outright), `jku`/`jwk`/`x5u`/`x5c`/`crit` are refused, and a
+        `kid` outside the pinned charset never reaches the trust bundle.
+        Every call emits `waddles_jwt_verifications_total` with
+        `verifier=service_eddsa`.
         """
+        started = time.perf_counter()
+        alg: str | None = None
+        outcome = REASON_INVALID  # what an unexpected escape is counted as
         try:
-            header = jwt.get_unverified_header(token)
-        except jwt.InvalidTokenError as exc:
-            raise InvalidServiceToken("malformed token header") from exc
-        kid = header.get("kid")
-        public_key = self.trust_bundle.get_public_key(kid) if kid else None
-        if public_key is None:
-            raise UnknownKeyId(f"unknown kid {kid!r}")
-        try:
-            payload = jwt.decode(
-                token,
-                public_key,
-                algorithms=["EdDSA"],
-                audience=self.audience,
-                leeway=CLOCK_SKEW_SECONDS,
-                # `nbf` is mandatory (security review MEDIUM finding) --
-                # PyJWT validates `nbf <= now` automatically once present,
-                # honoring the same `leeway` clock-skew bound applied to
-                # `exp`/`iat` above; `require` additionally rejects any
-                # token minted without one (an older issuer or a forged
-                # token that omits it), rather than silently accepting it.
-                options={
-                    "require": ["exp", "iat", "nbf", "iss", "aud", "sub", "scope", "jti"],
-                    "verify_iss": False,
-                },
+            try:
+                header = inspect_header(
+                    token, allowed_algs=(SERVICE_JWT_ALGORITHM,), validate_kid=True
+                )
+            except JwtRejection as rejection:
+                alg, outcome = rejection.alg, rejection.reason
+                raise InvalidServiceToken(f"rejected token header ({outcome})") from rejection
+            alg = header.alg
+            kid = header.kid
+            public_key = self.trust_bundle.get_public_key(kid) if kid else None
+            if public_key is None:
+                outcome = REASON_UNKNOWN_KID
+                raise UnknownKeyId("unknown or absent kid")
+            try:
+                payload = jwt.decode(
+                    token,
+                    public_key,
+                    algorithms=[SERVICE_JWT_ALGORITHM],
+                    audience=self.audience,
+                    leeway=CLOCK_SKEW_SECONDS,
+                    # `nbf` is mandatory (security review MEDIUM finding) --
+                    # PyJWT validates `nbf <= now` automatically once present,
+                    # honoring the same `leeway` clock-skew bound applied to
+                    # `exp`/`iat` above; `require` additionally rejects any
+                    # token minted without one (an older issuer or a forged
+                    # token that omits it), rather than silently accepting it.
+                    options={
+                        "require": ["exp", "iat", "nbf", "iss", "aud", "sub", "scope", "jti"],
+                        "verify_iss": False,
+                    },
+                )
+            except jwt.PyJWTError as exc:
+                outcome = classify_decode_error(exc)
+                raise InvalidServiceToken(str(exc)) from exc
+            if payload.get("iss") not in self.trusted_issuers:
+                outcome = REASON_BAD_ISSUER
+                raise InvalidServiceToken(f"untrusted issuer {payload.get('iss')!r}")
+            if payload.get("scope") != required_scope:
+                outcome = REASON_SCOPE_DENIED
+                raise InvalidServiceToken(
+                    f"scope {payload.get('scope')!r} != required {required_scope!r}"
+                )
+            outcome = OUTCOME_OK
+            return payload
+        finally:
+            record_verification(
+                verifier=VERIFIER_SERVICE_EDDSA, alg=alg, outcome=outcome, started=started
             )
-        except jwt.InvalidTokenError as exc:
-            raise InvalidServiceToken(str(exc)) from exc
-        if payload.get("iss") not in self.trusted_issuers:
-            raise InvalidServiceToken(f"untrusted issuer {payload.get('iss')!r}")
-        if payload.get("scope") != required_scope:
-            raise InvalidServiceToken(f"scope {payload.get('scope')!r} != required {required_scope!r}")
-        return payload
+            if outcome != OUTCOME_OK:
+                log_rejection(verifier=VERIFIER_SERVICE_EDDSA, reason=outcome, alg=alg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +281,17 @@ class ServiceJwtIssuer:
         doesn't carry `scope`, and `ServiceJwtError` if `ttl_seconds`
         exceeds the 1h platform ceiling.
         """
+        return self.issue_with_claims(service_id, scope, ttl_seconds=ttl_seconds)[0]
+
+    def issue_with_claims(
+        self, service_id: str, scope: str, *, ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS
+    ) -> tuple[str, dict[str, Any]]:
+        """Mint a JWT like `issue()` and also return the exact claims that were signed.
+
+        Lets the token endpoint audit-log `jti`/`exp`/`tenant` straight from what it just
+        minted, instead of re-decoding its own output with signature verification
+        disabled (an unverified decode is a footgun this codebase no longer carries).
+        """
         if ttl_seconds > MAX_TOKEN_TTL_SECONDS:
             raise ServiceJwtError(f"ttl_seconds {ttl_seconds} exceeds {MAX_TOKEN_TTL_SECONDS}s ceiling")
         identity = self.identities.get(service_id)
@@ -243,7 +301,7 @@ class ServiceJwtIssuer:
         if key.private_key is None:
             raise ServiceJwtError(f"active key {self.active_kid!r} has no private key loaded")
         now = int(time.time())
-        payload = {
+        payload: dict[str, Any] = {
             "iss": ISSUER,
             "aud": self.audience,
             "sub": service_id,
@@ -268,7 +326,10 @@ class ServiceJwtIssuer:
         # ever created (and immediately discarded) an extra copy of the
         # private key material in memory, widening its exposure window for
         # no benefit.
-        return jwt.encode(payload, key.private_key, algorithm="EdDSA", headers={"kid": key.kid})
+        token = jwt.encode(
+            payload, key.private_key, algorithm=SERVICE_JWT_ALGORITHM, headers={"kid": key.kid}
+        )
+        return token, dict(payload)
 
     def get_public_key(self, kid: str) -> Ed25519PublicKey | None:
         """Implements `TrustBundleSource` -- hub-api verifies its own JWKS today."""

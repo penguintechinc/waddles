@@ -92,15 +92,21 @@ Content-Type: application/json
 
 **Purpose**: User session management and browser-based authentication
 
-**Token Structure**:
+**Token Structure** (header carries `alg: HS256` and `kid`; every claim in the first row is
+mandatory and a token missing any of them is rejected):
 ```json
 {
-  "sub": "user_12345",
-  "username": "streamername",
-  "email": "user@example.com",
-  "roles": ["community_owner", "moderator"],
+  "sub": "12345",
+  "iss": "waddlebot",
+  "aud": "waddlebot-services",
   "iat": 1702310400,
   "exp": 1702396800,
+  "scope": "community:read tenant:read",
+  "tenant": "global",
+  "teams": [],
+  "username": "streamername",
+  "email": "user@example.com",
+  "roles": ["viewer"],
   "type": "access"
 }
 ```
@@ -115,6 +121,8 @@ token = create_jwt_token(
     email="user@example.com",
     roles=["community_owner", "moderator"],
     secret_key=os.getenv('JWT_SECRET'),
+    tenant='global',            # mandatory -- there is no untenanted token
+    scope='community:read',
     expiration_hours=24
 )
 ```
@@ -133,7 +141,11 @@ else:
 ```
 
 **Security Features**:
-- HMAC-SHA256 signing algorithm
+- HMAC-SHA256 signing algorithm, pinned: one algorithm per verifier, `alg: none` and every other
+  algorithm rejected, `jku`/`jwk`/`x5u`/`x5c`/`crit` headers rejected (RFC 8725) -- see
+  [JWT Verification](JWT_VERIFICATION.md)
+- `iss`, `aud`, `sub`, `iat`, `exp`, `scope` and `tenant` enforced on every verification; no
+  default-tenant fallback
 - Short expiration windows (1-24 hours)
 - Refresh token rotation with grace periods
 - Automatic revocation on logout

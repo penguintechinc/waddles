@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admin actions and license/subscription changes via an app-wide hook (`hub_api/services/audit_http.py`)
 - `flask_core.authz.AuthzDecision`: `require_scope` publishes its verdict as `request.authz_decision`
 
+### Security
+- JWT verification hardening, H-2 Phase 0 + MED-5 (`docs/JWT_VERIFICATION.md`): one algorithm per verifier
+  (`HS256` platform, `EdDSA` service, asymmetric allow-list for OIDC ID tokens), `alg: none` and
+  `jku`/`jwk`/`x5u`/`x5c`/`crit` headers rejected, `kid` charset pinned; `iss`/`aud` now ENFORCED (previously a
+  token without them still verified) and `sub iss aud iat exp scope tenant` are mandatory; the
+  `TENANT_CLAIM_MIGRATION_CUTOFF` default-tenant fallback is removed (a token with no `tenant` is rejected);
+  an empty signing secret is refused at mint and at verify. Minted HS256 tokens carry a `kid` header
+  (`JWT_KID`, default `hs256-v1`). New metrics `waddles_jwt_verifications_total{verifier,alg,outcome}` and
+  `waddles_jwt_verification_seconds`. Minting stays HS256 (asymmetric cutover is a later phase).
+  `/internal/service-token` no longer decodes its own token with signature verification disabled
+  (`ServiceJwtIssuer.issue_with_claims`).
+
 ### Changed
 - `compliance.audit_logs` now requires scope `compliance.audit:admin` (was `compliance.audit:read`, which every session's
   `*:read` wildcard satisfied); the tenant-owner scope bundle grants it

@@ -115,10 +115,11 @@ async def resolve_tenant_context(payload: dict[str, Any], dal: Any) -> TenantCon
     """
     Build a `TenantContext` from a verified JWT payload's `tenant` claim.
 
-    `verify_jwt_token` has already applied the migration-window default-
-    tenant fallback (see auth.py), so `payload["tenant"]` is always present
-    by the time this runs; a still-missing claim is a hard 403, never a
-    second silent default.
+    `verify_jwt_token` rejects any token without a non-empty `tenant` claim
+    (the legacy default-tenant fallback is gone -- H-2 Phase 0), so
+    `payload["tenant"]` is always present for a verified payload; a payload
+    that still lacks it (a caller passing an unverified dict) is a hard 403,
+    never a silent default.
 
     This is the near-universal per-request chokepoint (`tenant_middleware`
     and `install_community_scoped_auth` both call it on almost every
