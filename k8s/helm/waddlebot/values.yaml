@@ -2870,3 +2870,44 @@ autoProvisionedKeys:
     secretName: "waddlebot-ots-encryption-key"
     secretKey: "ONE_TIME_SECRET_ENCRYPTION_KEY"
     externalSecret: false
+
+# Enterprise SSO (SAML 2.0 / OIDC -- Enterprise tier, Google OAuth2 -- Professional tier).
+# Backend: hub_api/services/sso_*.py, migration 0049_sso_connections. Entitlement is
+# enforced in code by the two-gate feature check (flags `waddles.auth.sso_saml` /
+# `waddles.auth.sso_google`, both default OFF), so this subtree only provisions the
+# plumbing -- a deployment that never uses SSO needs nothing here.
+#
+# templates/sso.yaml owns the encryption-key Secret; templates/_sso.tpl renders the hub-api
+# env block (a single include in templates/hub-api.yaml). Unlike every key in
+# `autoProvisionedKeys` above, a missing SSO key NEVER fails the release outside
+# alpha/local: SSO is entitlement-gated, so an unentitled deployment must still install.
+# hub-api's `secretKeyRef` is `optional: true` and SSO then fails loudly at request time
+# (503 `SSO_UNAVAILABLE`, log code `sso_key_missing`) instead of the chart failing.
+sso:
+  # false -> render nothing and inject no SSO env into hub-api.
+  enabled: true
+  # SSO_ENCRYPTION_KEY: 64 lowercase hex chars (256-bit). HKDF-derives (a) the AES-256-GCM
+  # key protecting stored OIDC/Google client secrets and (b) the HMAC key binding each
+  # login flow to the browser that started it. Generated once (alpha/local only), kept
+  # across upgrades, never rotated automatically -- rotating invalidates stored secrets.
+  encryptionKey:
+    secretName: "waddlebot-sso-encryption-key"
+    secretKey: "SSO_ENCRYPTION_KEY"
+    # true -> an ExternalSecret/SealedSecret controller owns this Secret; the chart
+    # neither generates nor requires it.
+    externalSecret: false
+  # Hostnames of IdPs that legitimately resolve to private/loopback addresses (an on-prem
+  # Keycloak/ADFS). Operator-controlled allowlist for the SSRF guard (SSO_ALLOWED_PRIVATE_HOSTS);
+  # a tenant admin cannot add to it. Everything not listed must resolve to a public address
+  # and be reached over https.
+  allowedPrivateHosts: []
+  # Single-use login-flow state lifetime (60-3600 s) and tolerated IdP clock skew (0-300 s).
+  stateTtlSeconds: 600
+  clockSkewSeconds: 120
+  # Optional operator-provided shared Google OAuth client so Professional tenants can offer
+  # "Sign in with Google" without registering their own client. Empty `existingSecret` ->
+  # tenants must bring their own client id/secret. Never inline the values here.
+  google:
+    existingSecret: ""
+    clientIdKey: "SSO_GOOGLE_CLIENT_ID"
+    clientSecretKey: "SSO_GOOGLE_CLIENT_SECRET"
