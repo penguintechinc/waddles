@@ -10,8 +10,8 @@ merged in #618), same pattern as `slots`/`fish`'s own `app.py`.
 
 **No real chat timeout/ban.** An "out" outcome is flavor text and a stat increment ONLY. This
 bundle never calls a moderation/timeout/ban API on any platform -- it has no such capability
-(`permissions` in `bundle.yaml` is `storage.kv` only; `relay.push` only ever delivers a chat
-message). Actually removing a user from chat needs mod-scope capabilities this bundle does not
+(`permissions` in `bundle.yaml` are `storage.kv` + `flags.read` only; `relay.push` only ever
+delivers a chat message). Actually removing a user from chat needs mod-scope capabilities this bundle does not
 request. See `src/app.py`'s own module docstring for the full rationale.
 
 **No real-money/currency ties**, same rule as `slots`: no wallet, balance, transfer, or
@@ -72,6 +72,52 @@ no `!roulette leaderboard` command is declared, and nothing here is a stand-in s
 Also out of scope: any real moderation/timeout/ban action (see module docstring), and any
 wallet/points-economy integration -- neither partially stubbed.
 
+## Examples
+
+```text
+viewer> !roulette
+bot>    🔫 viewer spins the cylinder and pulls the trigger... *click* -- lucky! Try your luck again sometime. (pull #1)
+viewer> !roulette
+bot>    🔫 slow down, viewer! try again in 30s.
+viewer> !roulette list
+bot>    Pulls: 1. Survived: 1. Out: 0 (100% survival rate).
+mod>    !roulette set cooldown 10
+bot>    roulette cooldown set to 10s
+```
+
+## Permissions (V2 structured)
+
+| Id | Why |
+|---|---|
+| `storage.kv` | Persists per-community roulette tallies and the cooldown timestamps/config. |
+| `flags.read` | Gates the command behind its `waddles.command-roulette` feature flag. |
+
+No `db` (`data.tables: []`), no egress, no moderation capability (see "No real chat timeout/ban").
+Mod gate: `set cooldown` requires a real `is_mod` or `is_broadcaster` `True`; **absent** badge
+fields (e.g. the Discord normalizer today) are **denied** (fail closed) with zero `kv` access.
+Everything else is open to any caller.
+
+## Platforms
+
+`consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!roulette"]`; replies
+go back to the event's own origin platform + channel. A `community` context is required (no
+tenant-wide fallback): without one `dispatch` logs `roulette.missing_community` and raises
+`ValueError`.
+
+## Failure semantics (fail loud)
+
+| Condition | Behavior |
+|---|---|
+| `kv` backend error | ERROR `roulette.kv_error` (`op` + exception type only), chat reply "the chamber is jammed, try again shortly.", `RuntimeError("roulette kv <op> failed: <Type>")`. |
+| Corrupt cooldown config / cooldown timestamp / a counter | ERROR `roulette.*_corrupt` (community only) and treated as the default / no cooldown / `0` -- logged loudly, never silent. |
+| Missing `channel_id` / unknown command | `ValueError`. |
+
+## Logging / PII
+
+Logs carry only `command`, `op`, `community`, `role_signal`, `platform` and exception type names --
+never typed arguments, grammar text or `event.actor`. Regression:
+`tests/test_backfill.py::test_no_log_line_in_any_flow_contains_typed_text_or_the_raw_actor`.
+
 ## Feature flag
 
 Gated behind `waddles.command-roulette`, defaulted OFF (`critical-rules.md` Feature Flags &
@@ -103,17 +149,15 @@ docker run --rm --user "$(id -u):$(id -g)" \
 
 ```bash
 cd bundles/python/roulette
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e ../../../sdk/waddle-sdk
-pip install pytest==8.3.3 pytest-cov==6.0.0 mypy==1.14.1 ruff==0.14.1
-pytest --cov=src --cov-report=term-missing
-mypy --strict src
-ruff check .
+python3.13 -m venv .venv && . .venv/bin/activate
+pip install pytest==8.3.3 pytest-cov==5.0.0
+pytest --cov=src --cov-branch --cov-report=term-missing   # 100% line + branch
 ```
+
+`tests/conftest.py` puts `src/` and `sdk/waddle-sdk/src` on `sys.path`, so no package install is
+needed. `test_app.py` covers grammar/game logic; `test_backfill.py` adds the mod-gate matrix,
+cooldown bounds/TTL semantics, PII-free-log regression, flag fail-closed and `_entry_wiring`.
 
 ## Activation
 
-**Not yet registered** in `bundles/core-bundles.yaml` or wired into
-`bundles/Dockerfile.core-bundles` -- deliberately held back for a batched catalog registration
-pass covering multiple new bundles at once (`slots`/`fish` are in the same state). The bundle is
-otherwise complete and buildable; the catalog entry/Dockerfile stage is the only remaining step.
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.roulette`).

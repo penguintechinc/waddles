@@ -76,10 +76,22 @@ pub struct PushCredential {
 }
 
 /// Path params for the PUSH route (`/overlay/{community}/{surface}/push`).
+///
+/// `surface` is `#[serde(default)]`: a PUSH route may use a *literal*
+/// segment in the `{surface}` position instead of a capture (svc-
+/// presentation's `POST /overlay/{community}/image/push` upload route and
+/// `POST /overlay/{community}/caption/push` ingest route), in which case
+/// axum supplies only the `community` path param. Without the default,
+/// serde fails the whole extraction with "missing field `surface`" and
+/// the guard answers 400 to every request on such a route -- including
+/// ones carrying a perfectly valid credential. The guard never reads
+/// `surface` (the scope is keyed on `community_id` alone), so an empty
+/// value is harmless.
 #[derive(Debug, Deserialize)]
 pub struct PushPathParams {
     pub community: String,
     #[allow(dead_code)]
+    #[serde(default)]
     pub surface: String,
 }
 
@@ -303,6 +315,62 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let response = test_router(source).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    /// regression: p696-route-shadow -- a PUSH route that spells the
+    /// surface as a literal segment (no `{surface}` capture) must still
+    /// be guardable: the guard must verify the credential and let the
+    /// request through, not 400 on a "missing field `surface`" path
+    /// extraction failure.
+    #[tokio::test]
+    async fn middleware_allows_a_literal_surface_route_with_a_valid_token() {
+        use tower::ServiceExt;
+
+        let source = std::sync::Arc::new(trust_source());
+        let router = axum::Router::new()
+            .route(
+                "/overlay/{community}/image/push",
+                axum::routing::post(|| async { "uploaded" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                source,
+                require_push_credential::<std::sync::Arc<FakeTrustSource>>,
+            ));
+        let token = sign(&claims_for(42));
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/overlay/42/image/push")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// The literal-surface route still enforces per-community scoping.
+    #[tokio::test]
+    async fn middleware_rejects_a_literal_surface_route_token_for_another_community() {
+        use tower::ServiceExt;
+
+        let source = std::sync::Arc::new(trust_source());
+        let router = axum::Router::new()
+            .route(
+                "/overlay/{community}/image/push",
+                axum::routing::post(|| async { "uploaded" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                source,
+                require_push_credential::<std::sync::Arc<FakeTrustSource>>,
+            ));
+        let token = sign(&claims_for(42));
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/overlay/91/image/push")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
     }
 

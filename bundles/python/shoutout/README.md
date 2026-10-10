@@ -51,14 +51,68 @@ chat-invoked command is `!so` while `SubModuleGate`'s kv-namespace string is `"s
 ## State (kv, community-scoped only)
 
 All state goes through `waddle_sdk.community_kv`, keyed by `community_id` -- never global or
-tenant-wide.
+tenant-wide (each key below is stored as `c.<community_id>.<key>`). Keys are `.`-separated, never
+`:` -- the real `kv` host rejects `:` (gh-631); the gate's separator was fixed from
+`submodule:<cmd>:<sub>` to `submodule.<cmd>.<sub>` and the test suite asserts every key it touches
+passes `waddle_sdk.kv.validate_key`.
 
 | Key | Scope | TTL | Purpose |
 |---|---|---|---|
 | `shoutout.config.template` | per-community | none | Configured shoutout template (`$(username)` placeholder). |
 | `shoutout.auto.list` | per-community | none | JSON array of SHA-256 pseudonyms on the auto-shoutout list. |
-| `submodule:shoutout:auto` | per-community | none | `auto` sub-module enabled flag (`waddle_sdk.sub_modules.SubModuleGate`). |
-| `submodule:shoutout:ai` | per-community | none | `ai` sub-module enabled flag (same gate). |
+| `submodule.shoutout.auto` | per-community | none | `auto` sub-module enabled flag (`waddle_sdk.sub_modules.SubModuleGate`). |
+| `submodule.shoutout.ai` | per-community | none | `ai` sub-module enabled flag (same gate). |
+
+## Examples
+
+```text
+mod>    !so set Go check out $(username) -- they were just streaming!
+bot>    shoutout template updated
+mod>    !so penguin
+bot>    Go check out penguin -- they were just streaming!
+viewer> !so penguin
+bot>    only moderators/broadcasters can use !so
+mod>    !so enable auto
+bot>    shoutout auto sub-module enabled
+mod>    !so auto add penguin
+bot>    added penguin to the auto-shoutout list
+mod>    !so auto list
+bot>    the auto-shoutout list has 1 user(s)
+```
+
+Targets: optional leading `@`, 1-32 chars of letters/digits/`_`/`-`/`.`. Templates: up to 500
+chars, only the `$(username)` placeholder (unknown placeholders are rejected). The auto list holds
+up to 200 entries.
+
+## Permissions (V2 structured)
+
+| Id | Why |
+|---|---|
+| `storage.kv` | Persists the per-community shoutout template and auto-shoutout list (plus the `auto`/`ai` sub-module flags). |
+| `flags.read` | Gates the command behind its `waddles.command-shoutout` feature flag (and reads the license tier for `enable ai`). |
+
+No `db` (`data.tables: []`) and no egress. See `bundle.yaml` / `hub-manifest.yaml`.
+
+## Platforms
+
+`consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!so"]`; replies go
+back to the event's own origin platform + channel. A `community` context is required: without one
+`dispatch` logs `shoutout.missing_community` and raises `ValueError` (no tenant-wide fallback).
+
+## Failure semantics (fail loud)
+
+| Condition | Behavior |
+|---|---|
+| `kv` backend error on template/list reads+writes | ERROR `shoutout.kv_error` (`op` + exception type only), chat reply "shoutout is temporarily unavailable", `RuntimeError`. |
+| Corrupt auto-shoutout list (non-UTF-8 / non-JSON / not an array of strings) | ERROR `shoutout.state_corrupt`, chat reply "storage is corrupted", `RuntimeError` -- the blob is never silently reset. |
+| Corrupt template bytes | ERROR `shoutout.template_corrupt`, falls back to `DEFAULT_TEMPLATE` (a lone config value, not a registry). |
+| `SubModuleGate` kv error | Propagates raw (not wrapped) -- a backend error is never read as "sub-module off". |
+
+## Logging / PII
+
+Logs carry only `command`, `op`, `community`, `sub_module`, `role_signal` and exception type names
+-- never a target username, template text, grammar text or `event.actor`. Regression:
+`tests/test_backfill.py::test_no_log_line_in_any_flow_contains_a_target_template_or_actor`.
 
 ## Feature flag
 
@@ -73,7 +127,7 @@ Gated behind `waddles.command-shoutout`, defaulted OFF -- checked in `transform(
 | `hub-manifest.yaml` | hub-api install-pipeline manifest (separate schema consumer, see its own header comment) |
 | `src/app.py` | `transform`/`dispatch` -- the full command set |
 | `src/_entry_wiring.py` | Static `bundle_compiler`-shaped entry wiring (see `pyping`'s own) |
-| `tests/` | Host-native pytest suite (fake `wit_world`, no wasmtime) -- 94 tests, 100% `src/app.py` coverage |
+| `tests/` | Host-native pytest suite (fake `wit_world`, no wasmtime) -- `test_app.py` (grammar/CRUD) + `test_backfill.py` (mod-gate matrix, PII, gh-626/gh-631 regressions); 100% line + branch |
 
 ## Build
 
@@ -86,9 +140,8 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
       waddle_sdk._component_entry -o /tmp/shoutout.wasm"
 ```
 
-Confirmed building a real `.wasm` component today. **Not yet wired into
-`bundles/Dockerfile.core-bundles` or `bundles/core-bundles.yaml`** -- catalog registration is a
-batched step done separately (see this bundle's PR description).
+Confirmed building a real `.wasm` component. Registered in `bundles/core-bundles.yaml`
+(`waddles.core.example.shoutout`).
 
 ## Test
 

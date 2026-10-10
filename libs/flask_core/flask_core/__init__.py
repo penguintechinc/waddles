@@ -174,6 +174,7 @@ from .validation import (
     validator,
     ValidationError
 )
+from .validation_errors import describe_validation_errors
 from .sanitization import (
     sanitize_html,
     sanitize_input,
@@ -375,6 +376,7 @@ __all__ = [
     "validate_query",
     "validate_form",
     "validate_data",
+    "describe_validation_errors",
     "PaginationParams",
     "CommunityIdRequired",
     "UsernameRequired",

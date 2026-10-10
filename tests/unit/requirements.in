@@ -1,0 +1,8 @@
+# Test-only dependencies for tests/unit (installed by
+# scripts/ci/install-unit-test-deps.sh, hash-pinned).
+#
+# defusedxml: the XXE regression tests (test_caldav_xxe.py,
+# test_youtube_webhook_xxe.py) import the production parser's exception types,
+# and the code under test (libs/calendar_sync Apple provider, youtube_live_module
+# webhook handler) imports defusedxml at module load.
+defusedxml==0.7.1

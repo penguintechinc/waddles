@@ -2,7 +2,7 @@
 //! `penguin-connector-{twitch,discord}` -> `penguin_spine::PlatformEvent`.
 //! Byte-exact ports of the Python predecessor's own normalizers (spec
 //! S4.1: "normalizers absorbed as code") --
-//! `core/svc_ingest/bundles/twitch_ingest.py`/`discord_ingest.py` for the
+//! `core/svc_ingest/builtin_handlers/twitch_ingest.py`/`discord_ingest.py` for the
 //! `PlatformEvent` field shape, and `core/svc_ingest/receivers/
 //! twitch_irc.py`'s `_parse_tags`/`_parse_badges`/self-message-skip for
 //! the Twitch IRCv3 tag decoding `penguin-connector-twitch` deliberately

@@ -1,6 +1,6 @@
 """Raid auto-shoutout decision -- should an inbound Twitch raid trigger the shoutout App?
 
-gh #316's auto-shoutout half: `core/svc_ingest/bundles/twitch_eventsub_ingest.py`
+gh #316's auto-shoutout half: `core/svc_ingest/builtin_handlers/twitch_eventsub_ingest.py`
 already normalizes a Twitch EventSub `channel.raid` notification into a
 `PlatformEvent` (`event.payload['user_login']`/`['user_id']` is the
 RAIDING channel -- the `from_broadcaster_*` fields in Twitch's own
@@ -12,7 +12,7 @@ module decides, from the target community's own `shoutout_config` row
 raid should auto-trigger a shoutout -- `runner.py::_maybe_shoutout_raid`
 is the only caller, enqueuing a fresh action-stage envelope for
 `waddles.bot.shoutout.default` when `.emit` is `True`. Never touches the
-shoutout SEND path itself (`core/svc_action/bundles/
+shoutout SEND path itself (`core/svc_action/builtin_handlers/
 twitch_shoutout_action.py` owns that, unchanged by this module).
 
 Async, Redis-first, `flask_core.AsyncDAL.execute()` (`$1`/`$2`...
@@ -37,7 +37,7 @@ exists; `auto_shoutout_mode == 'disabled'` IS the enable/disable gate):
     `platform_username` match).
   - `'all_creators'` -> always emit.
   - `'role_based'` -> treated as `'all_creators'` FOR NOW -- a raid event
-    carries no badge/role data (same documented gap `bundles/
+    carries no badge/role data (same documented gap `builtin_handlers/
     social_shoutout_process.py`'s own module docstring calls out for
     `vip`/`subscriber`), so there is nothing to evaluate a role against
     yet. Revisit once role data reaches the pipeline.
@@ -80,14 +80,14 @@ class _ExecutableDal(Protocol):
 
 
 #: The only `PlatformEvent.event_type` this module ever acts on --
-#: matches `core/svc_ingest/bundles/twitch_eventsub_ingest.py`'s own
+#: matches `core/svc_ingest/builtin_handlers/twitch_eventsub_ingest.py`'s own
 #: `KNOWN_EVENT_TYPES` entry for raids.
 RAID_EVENT_TYPE = "channel.raid"
 
 #: `app_catalog.app_id` a `True` decision is enqueued to -- same constant
-#: value as `bundles/social_shoutout_process.py`'s own `_SHOUTOUT_APP_ID`
-#: (not imported -- that module is a process-stage bundle, this is a
-#: plain service; both target the same App Bundle SDK default App).
+#: value as `builtin_handlers/social_shoutout_process.py`'s own `_SHOUTOUT_APP_ID`
+#: (not imported -- that module is a built-in process-stage handler, this
+#: is a plain service; both target the same default App).
 SHOUTOUT_APP_ID = "waddles.bot.shoutout.default"
 
 #: Auto-shoutout modes that always emit (subject only to the
@@ -252,7 +252,7 @@ def _extract_raider_login(event: PlatformEvent) -> str | None:
     populated from the same `from_broadcaster_*` EventSub fields by
     `eventsub.py::build_raw_event`/`twitch_eventsub_ingest.py::normalize`).
     Normalized (leading `@` stripped, lowercased) -- same convention
-    `bundles/social_shoutout_process.py::_normalize_login` uses for the
+    `builtin_handlers/social_shoutout_process.py::_normalize_login` uses for the
     manual `!so`/`!vso` path.
     """
     raw = event.payload.get("user_login") or event.payload.get("user_id") or event.actor

@@ -9,6 +9,10 @@ hypercorn>=0.16.0
 httpx>=0.27.0,<0.28.0
 aiohttp>=3.10.0,<4.0.0
 
+# XML parsing of untrusted YouTube PubSubHubbub Atom bodies
+# (youtube_live_module webhook_handler): XXE / entity-expansion protection.
+defusedxml==0.7.1
+
 # Twitch IRC Bot (TwitchIO)
 # Capped <3.0.0: v3 is a breaking rewrite of the commands.Bot API used by
 # trigger/receiver/twitch_module/services/twitch_bot.py; not required by any
