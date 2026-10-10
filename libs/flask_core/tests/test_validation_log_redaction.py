@@ -45,6 +45,8 @@ from pydantic import (
 )
 from quart import Quart
 
+import flask_core.validation as validation_module
+import flask_core.validation_errors as validation_errors_module
 from flask_core.validation import (
     validate_data,
     validate_form,
@@ -378,6 +380,96 @@ class TestHandlerExceptionLogs:
         assert len(debug) == 1
         assert "Traceback (most recent call last):" in debug[0]
         assert "File " in debug[0]
+
+
+class TestLeakDetectorCanFail:
+    """Mutation check: a leaking implementation must make the e2e assertions fail.
+
+    Each test swaps one redaction point for a deliberately leaking stand-in (via
+    monkeypatch -- no source is touched) and drives the real request path; the
+    shared `_assert_no_sentinel` must then raise. A detector that cannot fail
+    would silently pass the regression tests above.
+    """
+
+    @staticmethod
+    def _pre_fix_errors_line(
+        exc: ValidationError, model: type[BaseModel] | None = None
+    ) -> str:
+        """Render what the pre-fix ``f"Validation errors: {errors}"`` logged (field/message/type)."""
+        return str(
+            [
+                {
+                    "field": ".".join(str(p) for p in e["loc"]),
+                    "message": e["msg"],
+                    "type": e["type"],
+                }
+                for e in exc.errors()
+            ]
+        )
+
+    @pytest.mark.parametrize("kind", ["json", "query", "form"])
+    async def test_pre_fix_errors_rendering_is_caught(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: str,
+    ) -> None:
+        """The pre-fix rendering leaks client keys/messages and the detector flags it."""
+        monkeypatch.setattr(
+            validation_module, "describe_validation_errors", self._pre_fix_errors_line
+        )
+        caplog.set_level(logging.DEBUG)
+        await _send(_app(kind, strict=False), kind)
+        with pytest.raises(AssertionError, match="leaked client value"):
+            _assert_no_sentinel(caplog)
+
+    async def test_raw_input_rendering_is_caught(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Logging Pydantic's raw ``errors()`` (with ``input``) is flagged too."""
+
+        def leaky(exc: ValidationError, model: type[BaseModel] | None = None) -> str:
+            return repr(exc.errors())
+
+        monkeypatch.setattr(validation_module, "describe_validation_errors", leaky)
+        caplog.set_level(logging.DEBUG)
+        await _send(_app("json", strict=True), "json")
+        with pytest.raises(AssertionError, match="leaked client value"):
+            _assert_no_sentinel(caplog)
+
+    async def test_unmasked_locations_are_caught(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If ``loc`` masking regresses to raw segments, client-chosen keys leak and are flagged."""
+
+        def raw_loc(loc: tuple[int | str, ...], declared: frozenset[str]) -> str:
+            return ".".join(str(p) for p in loc)
+
+        monkeypatch.setattr(validation_errors_module, "_render_loc", raw_loc)
+        caplog.set_level(logging.DEBUG)
+        await _send(_app("json", strict=True), "json")
+        with pytest.raises(AssertionError, match="leaked client value"):
+            _assert_no_sentinel(caplog)
+
+    async def test_str_of_handler_exception_is_caught(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pre-fix ``error={str(e)}`` line for a handler exception is flagged."""
+
+        def leaky_log(
+            log: logging.Logger, operation: str, exc: BaseException, **_: Any
+        ) -> None:
+            log.error("%s error=%s", operation, str(exc))
+
+        async def boom(data: Any) -> dict[str, str]:
+            raise ValueError(f"cannot process {SENTINEL}")
+
+        monkeypatch.setattr(validation_module, "log_db_error", leaky_log)
+        caplog.set_level(logging.DEBUG)
+        resp = await _mount("json", Passes, boom).test_client().post("/r", json={})
+        assert resp.status_code == 400
+        with pytest.raises(AssertionError, match="leaked client value"):
+            _assert_no_sentinel(caplog)
 
 
 class TestDescribeValidationErrors:
