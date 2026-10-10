@@ -64,7 +64,7 @@ def _captured_sql(fn_name: str, migration: ModuleType) -> str:
 class TestMigrationMetadata:
     def test_revision_ids(self, migration: ModuleType) -> None:
         assert migration.revision == "0056_communities_overlay_code"
-        assert migration.down_revision == "0047_builtin_handler_paths"
+        assert migration.down_revision == "0052_bundle_identity_resolve"
 
     def test_revision_id_fits_alembic_version_num_varchar32(
         self, migration: ModuleType
@@ -84,7 +84,7 @@ class TestMigrationMetadata:
                 down_revisions.append(module.down_revision)
         heads = revisions - set(down_revisions)
         assert heads == {"0056_communities_overlay_code"}
-        assert down_revisions.count("0047_builtin_handler_paths") == 1
+        assert down_revisions.count("0052_bundle_identity_resolve") == 1
 
 
 class TestEmittedSql:

@@ -38,14 +38,14 @@ This revision does not issue the GRANT because the per-service role names are
 provisioned outside Alembic.
 
 Revision ID: 0056_communities_overlay_code
-Revises: 0047_builtin_handler_paths
+Revises: 0052_bundle_identity_resolve
 Create Date: 2026-10-10
 """
 
 from alembic import op
 
 revision = "0056_communities_overlay_code"
-down_revision = "0047_builtin_handler_paths"
+down_revision = "0052_bundle_identity_resolve"
 branch_labels = None
 depends_on = None
 
