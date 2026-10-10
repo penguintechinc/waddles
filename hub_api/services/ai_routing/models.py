@@ -31,6 +31,14 @@ OnInsufficientBalance = Literal["block", "fallback_free"]
 class AIRequest:
     """One normalized completion request -- provider-agnostic, tier-agnostic.
 
+    `wants_json=True` asks for structured (JSON) output, but it is a REQUEST,
+    not a guarantee: only a model whose tier is configured `supports_json`
+    (`clients.OllamaConfig`) is sent Ollama's `format: json`; a text-only
+    model (the free-tier default) is sent a plain-text prompt instead. Callers
+    MUST check `AIResponse.json_mode` to learn which one they got -- the
+    router's fallback ladder can land on a text-only tier even when the
+    requested tier is JSON-capable.
+
     `requested_tier=None` means "use the community's configured default"
     (`ai_model_config.preferred_tier`) -- callers only set it to force a
     specific tier (e.g. an explicit "use my premium model" UI action).
@@ -46,6 +54,7 @@ class AIRequest:
     model_hint: str | None = None
     byok_provider: ByokProvider | None = None
     invocation: Invocation = "interactive"
+    wants_json: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -60,6 +69,9 @@ class AIResponse:
     output_tokens: int
     billed_tokens: int = 0
     fallback_reason: str | None = None
+    #: True only when the provider was actually put in JSON mode for this call
+    #: and the returned `text` was validated as JSON. False = plain text.
+    json_mode: bool = False
 
     @property
     def total_tokens(self) -> int:

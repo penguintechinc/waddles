@@ -533,6 +533,23 @@ independently take the "generate" branch -- that's expected, not a bug). Real
 keep/idempotency is exercised by `lookup` against the live cluster during an actual
 `helm install`/`helm upgrade`, i.e. it is proven at deploy time, not template time.
 
+### Enterprise SSO key (`sso.*`, `templates/sso.yaml`)
+
+hub-api's enterprise SSO (SAML 2.0 / OIDC / Google; see `docs/SSO.md`) needs one more symmetric
+key, `SSO_ENCRYPTION_KEY` (64 lowercase hex chars) in Secret `waddlebot-sso-encryption-key`. It follows the
+same keep/generate mechanism as `tenantKek`/`oneTimeSecret` above -- `lookup` + `randBytes`, generated
+in `alpha`/`local` only, `helm.sh/resource-policy: keep`, never rotated by the chart -- with one
+deliberate difference: **a miss in beta/gamma/production does NOT fail the release.** SSO is
+entitlement-gated, so a deployment that never enables it must still install. hub-api consumes the key
+through an `optional: true` `secretKeyRef` (one `include "waddlebot.sso.hubApiEnv"` in
+`templates/hub-api.yaml`; the env block lives in `templates/_sso.tpl`), and SSO fails loudly at request
+time (HTTP 503 `SSO_UNAVAILABLE`) until the Secret exists. Enable SSO outside alpha/local by
+pre-creating the Secret, or by pointing an ExternalSecret at it and setting
+`sso.encryptionKey.externalSecret=true`. Other values: `sso.allowedPrivateHosts` (operator allowlist for
+on-prem IdPs behind the SSRF guard), `sso.stateTtlSeconds`, `sso.clockSkewSeconds`, and
+`sso.google.existingSecret` (optional shared Google OAuth client -- never inline the values).
+Tests: `tests/test_sso_render.py`.
+
 ## Enterprise external KMS / BYOK (`kms:`, default OFF)
 
 Customer-managed encryption keys, **on top of** the platform-managed at-rest baseline (never a substitute).

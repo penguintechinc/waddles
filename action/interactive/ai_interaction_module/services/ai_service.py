@@ -8,12 +8,19 @@ Unified AI service supporting multiple providers:
 """
 
 import logging
+import time
 from typing import Optional, Dict, Any, Protocol
 from dataclasses import dataclass
+
+from flask_core.ai_telemetry import AITelemetry
 
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+# Spans + duration/error metrics for every chat-reply generation (PII-free; no-op
+# unless an OTel provider is configured via the standard OTLP env vars).
+telemetry = AITelemetry("waddles.ai_interaction.ai_service")
 
 
 class AIProvider(Protocol):
@@ -113,17 +120,38 @@ class AIService:
         Returns:
             Generated response text or None if generation failed
         """
-        try:
-            response = await self.provider.generate_response(
-                message_content, message_type, user_id, platform, context
+        provider_label = type(self.provider).__name__.removesuffix("Provider").lower()
+        model_label = str(getattr(self.provider, "model", "unknown"))
+        started = time.perf_counter()
+
+        def _record(error_code: Optional[str] = None) -> None:
+            telemetry.record_call(
+                provider=provider_label,
+                model=model_label,
+                mode="text",
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                error_code=error_code,
             )
 
+        try:
+            with telemetry.span(
+                provider=provider_label, model=model_label, mode="text"
+            ):
+                response = await self.provider.generate_response(
+                    message_content, message_type, user_id, platform, context
+                )
+
             if not response:
+                # The provider already logged why (blank/timeout/HTTP error);
+                # the canned reply is a deliberate, counted degradation.
+                _record(error_code="no_reply")
                 return self._get_fallback_response(message_type, context)
 
+            _record()
             return response
 
         except Exception as e:
+            _record(error_code=type(e).__name__)
             logger.error(f"Error generating response: {e}", exc_info=True)
             return self._get_fallback_response(message_type, context)
 

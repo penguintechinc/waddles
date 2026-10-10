@@ -145,6 +145,15 @@ convention = "google"
 # assert as blueprints/v2/platform.py above (`get_tenant_context` always
 # non-None on the success path for Scenario 2/4 routes).
 "blueprints/v1/analytics.py" = ["S101"]
+# Enterprise SSO (SAML/OIDC/Google, migration 0049) -- request/response DTO
+# field names are camelCase to match every other v1 blueprint's JSON contract
+# with `frontend/src/services/api.js`; S101 is the standard tenant_middleware
+# postcondition assert. No per-class suppression exists for N815, hence the
+# file-level entry (same as blueprints/v1/auth.py above).
+"blueprints/v1/sso.py" = ["N815", "S101"]
+# SSO test suite: embedded SAML/XML payload strings and long assertion messages read better
+# unwrapped (same rationale as the per-file test ignores above).
+"tests/sso/*" = ["E501"]
 # Marketplace-catalog port group: `CatalogEntry`/`ModuleEntry`/`ModuleDetail`/
 # `ModuleSubscription`/etc DTO fields are deliberately camelCase to byte-match
 # `catalogService.js`'s `formatCatalogEntry`/`moduleService.js`'s `formatModule`
@@ -276,8 +285,8 @@ module = ["flask_core.*", "pydal.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
 
-# boto3/botocore/webauthn ship no py.typed marker either -- same boundary
+# boto3/botocore/webauthn/defusedxml (SAML XML parsing, services/sso_saml.py) ship no py.typed marker either -- same boundary
 # override, third-party-import only, not a relaxation of hub-api's own bar.
 [[tool.mypy.overrides]]
-module = ["boto3.*", "botocore.*", "webauthn.*"]
+module = ["boto3.*", "botocore.*", "webauthn.*", "defusedxml.*"]
 ignore_missing_imports = true

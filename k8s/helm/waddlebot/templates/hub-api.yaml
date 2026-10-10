@@ -201,6 +201,9 @@ spec:
             secretKeyRef:
               name: {{ .Values.autoProvisionedKeys.oneTimeSecret.secretName }}
               key: {{ .Values.autoProvisionedKeys.oneTimeSecret.secretKey }}
+        # Enterprise SSO (hub_api/services/sso_*.py) -- encryption key (optional: SSO is
+        # entitlement-gated), tuning, SSRF allowlist, shared Google client. See templates/_sso.tpl.
+        {{- include "waddlebot.sso.hubApiEnv" . | nindent 8 }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- hub-api itself
         # calls hub_api/services/valkey_admin_client.py::build_client() (via

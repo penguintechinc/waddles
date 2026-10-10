@@ -105,6 +105,16 @@ from services.schema import (
     bind_token_billing_tables,
 )
 
+# Env-gated real-Ollama fixtures (skip unless WADDLE_TEST_OLLAMA_URL is set) -- shared support
+# in <repo>/tests/support; see docs/testing/ollama-realpath.md. Additive re-export only.
+from tests.ollama_support import (  # noqa: E402,F401
+    json_model,
+    ollama_url,
+    safety_model,
+    single_flight,
+    text_model,
+)
+
 #: Matches flask_core.tenancy/authz's own os.getenv("SECRET_KEY", ...) fallback.
 SECRET_KEY = "change-me-in-production"
 

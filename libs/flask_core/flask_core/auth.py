@@ -41,6 +41,13 @@ DEFAULT_JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "waddlebot-services")
 #: security.md Tenant Isolation.
 DEFAULT_TENANT_SLUG = "global"
 
+#: OIDC scope guarding tenant-admin management of enterprise SSO connections
+#: (SAML 2.0 / OIDC / Google). Declared by the `auth.sso_saml` /
+#: `auth.sso_google` feature contracts (`core_platform_module.features`) and
+#: enforced by `hub_api/blueprints/v1/sso.py`. Granted to the tenant `admin`
+#: bundle below; global admins already hold it via the `*:admin` wildcard.
+SCOPE_SSO_ADMIN = "auth.sso:admin"
+
 # TODO(tenancy-migration, tracking: v3.0.x Task 0.4): tokens minted before
 # this cutoff predate the mandatory `tenant` claim and are treated as
 # DEFAULT_TENANT_SLUG by verify_jwt_token() below. create_jwt_token() has
@@ -556,7 +563,7 @@ SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
         'admin': [
             'tenant:read', 'tenant:write', 'tenant:admin', 'tenant:delete',
             'community:create', 'community:delete', 'billing:read', 'billing:write',
-            'settings:write',
+            'settings:write', SCOPE_SSO_ADMIN,
         ],
         'maintainer': [
             'tenant:read', 'tenant:write', 'community:create',
