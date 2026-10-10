@@ -17,12 +17,32 @@ on -- it is the floor every fallback path lands on.
 kill-switch (`WADDLES_AI_ENABLED`, `config.py`) checked before all of the
 above -- ONE-WAY (can only turn AI off), never a substitute for the
 flag/license gates this module already enforces.
+
+Prompt-injection / tool-call hardening (OWASP LLM01): the router is the single choke point where
+a model's output meets the platform, so it -- not the provider clients and not the model --
+decides what survives. Every tool call a provider response asks for is re-authorised against the
+INVOKING user's tenant and scopes (`flask_core.ai_tool_authz`, fail-closed, all-or-nothing)
+BEFORE any premium debit and without ever falling back to another tier: a denial is a 403
+`AI_TOOL_CALL_DENIED`, never a quiet downgrade that would hide the attempt. Requests that carried
+server-retrieved untrusted context are TAINTED (side-effecting tools refused) and their output is
+sanitised (remote-image beacons, active HTML, mass mentions) before it is returned.
 """
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass, replace
 from typing import Any
 
+from flask_core.ai_guard import sanitize_model_output, scan_for_injection
+from flask_core.ai_guard import telemetry as guard_telemetry
+from flask_core.ai_tool_authz import (
+    EMPTY_REGISTRY,
+    InvocationContext,
+    ToolCallDenied,
+    ToolRegistry,
+    authorize_tool_calls,
+)
 from flask_core.feature_flags import feature_enabled
 
 from services import token_ledger
@@ -34,14 +54,18 @@ from services.ai_routing.clients import (
     premium_ollama_config,
 )
 from services.ai_routing.errors import (
+    TOOL_CALL_DENIED_CODE,
     ai_disabled_by_deployment,
     ai_routing_disabled,
+    ai_tool_call_denied,
     byok_key_missing,
     insufficient_balance,
     not_entitled,
 )
 from services.ai_routing.models import AIRequest, AIResponse, ByokProvider, Tier
 from services.errors import ApiError
+
+logger = logging.getLogger(__name__)
 
 #: Base capability gate -- covers the whole endpoint, including free tier
 #: (general.md: every feature behind its own flag, defaulted OFF).
@@ -83,6 +107,36 @@ async def _byok_entitled(async_dal: Any, dal: Any, *, tenant: str, community_id:
     return await _is_enterprise_tier(async_dal, dal, community_id=community_id)
 
 
+@dataclass(slots=True, frozen=True)
+class _ToolGuard:
+    """Who invoked, and which tools may run: what a model's tool calls are re-checked against."""
+
+    ctx: InvocationContext
+    registry: ToolRegistry
+
+
+async def _enforce_tool_calls(response: AIResponse, guard: _ToolGuard) -> AIResponse:
+    """Re-authorise every tool call `response` asks for, or raise -- never pass one through raw.
+
+    Runs right after the provider call and BEFORE any metering, so a refused response is never
+    billed to the community. Returns the response with `requested_tool_calls` emptied and
+    `tool_calls` holding only calls that passed (tenant/community/user bound from the verified
+    invocation, never from the model).
+    """
+    if not response.requested_tool_calls:
+        return response
+    try:
+        authorised = await authorize_tool_calls(
+            guard.ctx,
+            response.requested_tool_calls,
+            guard.registry,
+            flag_check=feature_enabled,
+        )
+    except ToolCallDenied as exc:
+        raise ai_tool_call_denied(exc.reason) from exc
+    return replace(response, requested_tool_calls=(), tool_calls=authorised)
+
+
 async def _run_premium(
     async_dal: Any,
     dal: Any,
@@ -91,10 +145,11 @@ async def _run_premium(
     actor_user_id: int | None,
     ai_request: AIRequest,
     idempotency_key: str,
+    guard: _ToolGuard,
 ) -> AIResponse:
     """Call the premium Ollama endpoint, then meter it -- assumes balance was already confirmed."""
     client = OllamaClient(premium_ollama_config())
-    response = await client.generate(ai_request, tier="premium")
+    response = await _enforce_tool_calls(await client.generate(ai_request, tier="premium"), guard)
     debit = await token_ledger.debit_tokens(
         async_dal,
         dal,
@@ -115,6 +170,7 @@ async def _run_premium(
             output_tokens=response.output_tokens,
             billed_tokens=response.total_tokens,
             json_mode=response.json_mode,
+            tool_calls=response.tool_calls,
         )
     # Balance dropped between the pre-check and this debit (concurrent
     # spend) -- compute already happened; bill 0 and say so explicitly
@@ -130,11 +186,18 @@ async def _run_premium(
         billed_tokens=0,
         fallback_reason="metering_failed_insufficient_balance",
         json_mode=response.json_mode,
+        tool_calls=response.tool_calls,
     )
 
 
 async def _run_byok(
-    async_dal: Any, dal: Any, *, provider: ByokProvider, community_id: int, ai_request: AIRequest
+    async_dal: Any,
+    dal: Any,
+    *,
+    provider: ByokProvider,
+    community_id: int,
+    ai_request: AIRequest,
+    guard: _ToolGuard,
 ) -> AIResponse:
     api_key = await config_service.get_active_byok_key_plaintext(
         async_dal, dal, community_id=community_id, provider=provider
@@ -142,12 +205,14 @@ async def _run_byok(
     if api_key is None:
         raise byok_key_missing(f"No active {provider} key configured for this community")
     client = byok_client_for(provider)
-    return await client.generate(api_key, ai_request)
+    return await _enforce_tool_calls(await client.generate(api_key, ai_request), guard)
 
 
-async def _run_free(ai_request: AIRequest, *, fallback_reason: str | None) -> AIResponse:
+async def _run_free(
+    ai_request: AIRequest, *, fallback_reason: str | None, guard: _ToolGuard
+) -> AIResponse:
     client = OllamaClient(free_ollama_config())
-    response = await client.generate(ai_request, tier="free")
+    response = await _enforce_tool_calls(await client.generate(ai_request, tier="free"), guard)
     if fallback_reason is None:
         return response
     return AIResponse(
@@ -160,6 +225,7 @@ async def _run_free(ai_request: AIRequest, *, fallback_reason: str | None) -> AI
         billed_tokens=0,
         fallback_reason=fallback_reason,
         json_mode=response.json_mode,
+        tool_calls=response.tool_calls,
     )
 
 
@@ -173,6 +239,7 @@ async def route_completion(
     ai_request: AIRequest,
     idempotency_key: str,
     ai_enabled: bool = True,
+    granted_scopes: frozenset[str] = frozenset(),
 ) -> AIResponse:
     """Route one completion request through the free/premium/BYOK ladder. Real dispatch throughout.
 
@@ -192,6 +259,14 @@ async def route_completion(
     call -- a deploy with `ai_enabled=False` never touches the community's
     AI config row and never attempts an outbound Ollama/OpenAI/Anthropic
     call.
+
+    `granted_scopes` is the invoking user's verified OIDC scope set (from the
+    JWT the blueprint already validated). It is the ONLY authority a
+    model-requested tool call is checked against, together with `tenant` and
+    `community_id` -- an empty set (the default) authorises nothing. Raises
+    `ToolCallDeniedError` (403 `AI_TOOL_CALL_DENIED`) when the model asks for
+    a tool call the user's tenant/scopes do not permit; that error is never
+    downgraded to a tier fallback, ambient or not.
     """
     if not ai_enabled:
         raise ai_disabled_by_deployment()
@@ -199,6 +274,57 @@ async def route_completion(
     if not await feature_enabled(FEATURE_AI_ROUTING, tenant=tenant, community=community_id):
         raise ai_routing_disabled()
 
+    tainted = bool(ai_request.untrusted_context)
+    guard = _ToolGuard(
+        ctx=InvocationContext(
+            tenant=tenant,
+            community_id=community_id,
+            user_id=actor_user_id,
+            granted_scopes=granted_scopes,
+            tainted=tainted,
+        ),
+        registry=ai_request.tools if ai_request.tools is not None else EMPTY_REGISTRY,
+    )
+    signals = scan_for_injection(ai_request.prompt)
+    if signals.flagged:
+        guard_telemetry.record_injection_signals(
+            source="user_prompt", categories=signals.categories
+        )
+        logger.info(
+            "ai_user_prompt_injection_signals categories=%s tainted=%s",
+            ",".join(sorted(signals.categories)),
+            tainted,
+        )
+
+    response = await _route(
+        async_dal,
+        dal,
+        tenant=tenant,
+        community_id=community_id,
+        actor_user_id=actor_user_id,
+        ai_request=ai_request,
+        idempotency_key=idempotency_key,
+        guard=guard,
+    )
+    if tainted:
+        # Retrieved content could have steered the answer: strip exfiltration channels
+        # (remote-image beacons, active HTML, mass mentions) before it reaches a user.
+        response = replace(response, text=sanitize_model_output(response.text))
+    return response
+
+
+async def _route(
+    async_dal: Any,
+    dal: Any,
+    *,
+    tenant: str,
+    community_id: int,
+    actor_user_id: int | None,
+    ai_request: AIRequest,
+    idempotency_key: str,
+    guard: _ToolGuard,
+) -> AIResponse:
+    """Tier selection, fallback ladder and metering -- the gates already passed in the caller."""
     config = await config_service.get_ai_config(async_dal, dal, community_id=community_id)
     tier: Tier = ai_request.requested_tier or config.preferred_tier
     ambient = ai_request.invocation == "ambient"
@@ -221,6 +347,7 @@ async def route_completion(
                     actor_user_id=actor_user_id,
                     ai_request=ai_request,
                     idempotency_key=idempotency_key,
+                    guard=guard,
                 )
             if ambient or config.on_insufficient_balance == "fallback_free":
                 tier, fallback_reason = "free", "insufficient_balance"
@@ -242,8 +369,13 @@ async def route_completion(
                     provider=provider,
                     community_id=community_id,
                     ai_request=ai_request,
+                    guard=guard,
                 )
-            except ApiError:
+            except ApiError as exc:
+                if exc.code == TOOL_CALL_DENIED_CODE:
+                    # Never downgrade a refused tool call into a quiet free-tier answer: the
+                    # attempt must surface (403 -> audit trail), not be papered over.
+                    raise
                 # Covers both "no active key on file" (`_run_byok` itself)
                 # and a real provider-call failure (`clients.py`'s
                 # `provider_error()`, bad-request-401 or connection
@@ -262,4 +394,4 @@ async def route_completion(
                 raise not_entitled("BYOK requires an Enterprise plan")
             raise byok_key_missing("No BYOK provider configured for this community")
 
-    return await _run_free(ai_request, fallback_reason=fallback_reason)
+    return await _run_free(ai_request, fallback_reason=fallback_reason, guard=guard)

@@ -38,16 +38,17 @@ from typing import Any, cast
 from uuid import uuid4
 
 from flask_core.api_utils import error_response
+from flask_core.authz import AuthzDecision
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services.ai_routing import config_service
-from services.ai_routing.errors import ai_disabled_by_deployment
+from services.ai_routing.errors import ToolCallDeniedError, ai_disabled_by_deployment
 from services.ai_routing.models import AIRequest
 from services.ai_routing.router import route_completion
 from services.community_access import require_community_admin, require_community_member
-from services.current_user import get_current_user_id
+from services.current_user import get_current_scopes, get_current_user_id
 from services.errors import ApiError
 
 ai_config_bp = Blueprint("v1_ai_config", __name__, url_prefix="/api/v1/admin")
@@ -85,6 +86,24 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
 
 def _iso(value: Any) -> str | None:
     return value.isoformat() if value else None
+
+
+def _publish_tool_denial(exc: ApiError, user_id: int | None) -> None:
+    """Hand a refused model tool call to the audit hook as a denied authz decision.
+
+    `services.audit_http` records every authenticated 403 as `authz.denied`; publishing the
+    decision (the same `request.authz_decision` channel `require_scope` uses) adds the closed-
+    vocabulary reason code to that tamper-evident record. Nothing the model said -- tool name,
+    arguments -- is in it.
+    """
+    if not isinstance(exc, ToolCallDeniedError):
+        return
+    request.authz_decision = AuthzDecision(  # type: ignore[attr-defined]
+        required_scopes=(),
+        allowed=False,
+        reason=f"ai_tool_call_denied:{exc.reason}",
+        subject=None if user_id is None else str(user_id),
+    )
 
 
 async def _require_admin(community_id: int) -> int:
@@ -355,6 +374,7 @@ async def create_completion(
     if not _ai_enabled():
         return _err(ai_disabled_by_deployment())
     async_dal, dal = _dal()
+    user_id: int | None = None
     try:
         user_id = await _require_member(community_id)
         ctx = get_tenant_context(request)
@@ -392,8 +412,12 @@ async def create_completion(
             # is exercised on every real call path, not just its direct
             # unit tests (`test_ai_routing_router.py`).
             ai_enabled=_ai_enabled(),
+            # The invoking user's verified scopes -- the only authority a model-requested tool
+            # call is re-checked against (tenant comes from `ctx`, never from the request body).
+            granted_scopes=get_current_scopes(request),
         )
     except ApiError as exc:
+        _publish_tool_denial(exc, user_id)
         return _err(exc)
 
     return CompletionResponseDTO(
