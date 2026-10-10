@@ -287,6 +287,93 @@ pub fn register_image_metrics(registry: &prometheus::Registry) -> ImageMetrics {
     }
 }
 
+/// Caption-overlay metrics: ingest outcome counter, ingest-latency and
+/// caption-size histograms, history-replay size histogram, and a websocket
+/// handshake outcome counter -- histograms for load/latency first per
+/// `rules/critical-rules.md` Observability. Live viewer count and
+/// connection lifetime are already recorded per surface (`caption`) by
+/// `crate::overlay::hub`.
+///
+/// Labels are closed sets only (`outcome`); never a community id, user
+/// reference, or any caption text.
+#[derive(Clone)]
+pub struct CaptionMetrics {
+    pub ingest_total: prometheus::IntCounterVec,
+    pub ingest_duration_seconds: prometheus::Histogram,
+    pub text_chars: prometheus::Histogram,
+    pub history_replayed: prometheus::Histogram,
+    pub ws_connections_total: prometheus::IntCounterVec,
+}
+
+/// Registers [`CaptionMetrics`] against `registry`. Must be called exactly
+/// once per `registry` -- see [`crate::http::AppState::new`].
+pub fn register_caption_metrics(registry: &prometheus::Registry) -> CaptionMetrics {
+    let ingest_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_caption_ingest_total",
+            "Caption pushes handled, labeled by outcome (ok/ok_not_persisted/rejected/disabled)",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(ingest_total.clone()))
+        .expect("register svc_presentation_caption_ingest_total");
+
+    let ingest_duration_seconds = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+        "svc_presentation_caption_ingest_duration_seconds",
+        "End-to-end caption ingest handling time (validate, publish, persist)",
+    ))
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(ingest_duration_seconds.clone()))
+        .expect("register svc_presentation_caption_ingest_duration_seconds");
+
+    let text_chars = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_caption_text_chars",
+            "Length in characters of the original text of accepted captions",
+        )
+        .buckets(vec![10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(text_chars.clone()))
+        .expect("register svc_presentation_caption_text_chars");
+
+    let history_replayed = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_caption_history_replayed",
+            "Captions replayed to a websocket client on connect",
+        )
+        .buckets(vec![0.0, 1.0, 2.0, 3.0, 5.0, 10.0]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(history_replayed.clone()))
+        .expect("register svc_presentation_caption_history_replayed");
+
+    let ws_connections_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_caption_ws_connections_total",
+            "Caption websocket handshakes, labeled by outcome (accepted/denied/disabled)",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(ws_connections_total.clone()))
+        .expect("register svc_presentation_caption_ws_connections_total");
+
+    CaptionMetrics {
+        ingest_total,
+        ingest_duration_seconds,
+        text_chars,
+        history_replayed,
+        ws_connections_total,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +422,31 @@ mod tests {
         assert!(rendered.contains("svc_presentation_image_uploads_total"));
         assert!(rendered.contains("svc_presentation_image_upload_bytes"));
         assert!(rendered.contains("svc_presentation_image_sign_latency_seconds"));
+    }
+
+    #[test]
+    fn register_caption_metrics_produces_a_non_empty_exposition() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_caption_metrics(&registry);
+        metrics.ingest_total.with_label_values(&["ok"]).inc();
+        metrics.ingest_duration_seconds.observe(0.002);
+        metrics.text_chars.observe(42.0);
+        metrics.history_replayed.observe(3.0);
+        metrics
+            .ws_connections_total
+            .with_label_values(&["accepted"])
+            .inc();
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        for series in [
+            "svc_presentation_caption_ingest_total",
+            "svc_presentation_caption_ingest_duration_seconds",
+            "svc_presentation_caption_text_chars",
+            "svc_presentation_caption_history_replayed",
+            "svc_presentation_caption_ws_connections_total",
+        ] {
+            assert!(rendered.contains(series), "missing {series}");
+        }
     }
 
     #[test]

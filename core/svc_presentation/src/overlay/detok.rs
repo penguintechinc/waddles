@@ -1226,8 +1226,20 @@ mod tests {
                 kind: Some(PushKind::Clear),
                 ..Default::default()
             },
-            Surface::Image => OverlayPush::default(),
+            Surface::Image | Surface::Caption => OverlayPush::default(),
         }
+    }
+
+    /// Every surface whose renderer sanitizes its output through
+    /// [`sanitize_text`]. Excluded on purpose: `image` (fail-loud stub, no
+    /// output) and `caption` (its renderer deliberately emits UNescaped
+    /// text for a `textContent`-only sink and is not detok-aware yet --
+    /// tracked in the PR description as a follow-up).
+    fn sanitized_surfaces() -> impl Iterator<Item = Surface> {
+        Surface::ALL
+            .iter()
+            .copied()
+            .filter(|s| !matches!(s, Surface::Image | Surface::Caption))
     }
 
     /// regression: every text-bearing surface resolves tokens AND escapes
@@ -1238,13 +1250,10 @@ mod tests {
     /// neutral label even though hub-api knew the name).
     #[tokio::test]
     async fn every_rendered_field_is_resolved_escaped_and_leak_free() {
-        for surface in Surface::ALL {
-            if *surface == Surface::Image {
-                continue; // fail-loud stub, nothing rendered
-            }
+        for surface in sanitized_surfaces() {
             let (d, _) = detokenizer(FakeResolver::with(&[(USER_A, "Al<i>ce"), (USER_B, "Bob")]));
             let frame = d
-                .render(&scope(), *surface, &hostile_push(*surface), &theme())
+                .render(&scope(), surface, &hostile_push(surface), &theme())
                 .await
                 .unwrap_or_else(|e| panic!("{surface} should render: {e}"));
             let json = rendered_json(&frame);
@@ -1281,13 +1290,10 @@ mod tests {
 
     #[tokio::test]
     async fn every_rendered_field_is_leak_free_when_nothing_resolves() {
-        for surface in Surface::ALL {
-            if *surface == Surface::Image {
-                continue;
-            }
+        for surface in sanitized_surfaces() {
             let (d, _) = detokenizer(FakeResolver::failing());
             let frame = d
-                .render(&scope(), *surface, &hostile_push(*surface), &theme())
+                .render(&scope(), surface, &hostile_push(surface), &theme())
                 .await
                 .unwrap();
             let json = rendered_json(&frame);

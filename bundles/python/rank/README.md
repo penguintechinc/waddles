@@ -62,6 +62,61 @@ lives only inside the hub/API server). `!rank`/`!rank <user>` CAN show a real na
 live chat event's own actor/typed-target text is only ever echoed back into that same reply,
 never persisted. See `src/app.py`'s module docstring for the full rationale.
 
+## Examples
+
+```text
+viewer> !rank
+bot>    viewer is level 1 (0 XP).
+mod>    !rank add 150 viewer
+bot>    Added 150 XP to viewer. Now level 2 (150 XP).
+viewer> !rank top
+bot>    Top rank: 1. player-3f2a9c1e: level 2 (150 XP)
+viewer> !rank add 5 viewer
+bot>    only moderators/broadcasters can adjust rank XP
+```
+
+## Permissions (V2 structured)
+
+| Id | Why |
+|---|---|
+| `storage.kv` | Persists the per-user `rank.rowid.<pseudonym> -> row_id` lookup index. |
+| `flags.read` | Gates the command behind its `waddles.command-rank` feature flag. |
+
+`data.tables: [rank_progress]` additionally grants the `db` capability (derived by
+`bundle_approval_service._derive_capabilities`; no separate permission id). No egress. Mod gate:
+`add`/`sub` require a real `is_mod` or `is_broadcaster` `True`; **absent** badge fields (e.g. the
+Discord normalizer today) are **denied** (fail closed) with zero `kv`/`db` access.
+
+## Platforms
+
+`consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!rank"]`; replies go
+back to the event's own origin platform + channel. A `community` context is required (no
+tenant-wide fallback): without one `dispatch` logs `rank.missing_community` and raises
+`ValueError`.
+
+## Failure semantics (fail loud)
+
+Any `kv`/`db` backend failure logs `rank.backend_error` at **ERROR** with only
+`{op, error: <exception type>}`, replies `rank is temporarily unavailable, try again shortly.`, and
+raises `RuntimeError("rank <op> failed: <Type>")`. A kv index pointing at a missing row is
+`index_stale` (never silently re-created, which would orphan/duplicate the user's row). An
+`add`/`sub` that loses the optimistic-concurrency race 5 times in a row fails loud as
+`db_update_retry`.
+
+## Logging / PII
+
+Logs carry only `command`, `op`, `role_signal` and exception type names -- never a typed target,
+amount, grammar text or `event.actor`. Regression:
+`tests/test_backfill.py::test_no_log_line_in_any_flow_contains_a_typed_target_or_the_raw_actor`.
+
+## Known limitation: self vs. target identity normalization
+
+`!rank add|sub|<user>` hash the **lower-cased, `@`-stripped typed name**, while bare `!rank`
+hashes the caller's **raw `event.actor`**. They agree when the platform actor is already
+lower-case (Twitch logins) but a mixed-case actor (`Alice`) will not see XP a mod granted via
+`!rank add 150 Alice` (stored under `alice`). Resolved once the PII-tokenization pipeline (#429)
+supplies opaque actor tokens; until then prefer lower-case actors.
+
 ## Feature flag
 
 Gated behind `waddles.command-rank`, defaulted OFF (`critical-rules.md` Feature Flags & License
@@ -105,26 +160,21 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
       waddle_sdk._component_entry -o /tmp/rank.wasm"
 ```
 
-Confirmed building a valid wasm component from this branch (see PR description for the exact
-size/output). **Not wired into `bundles/Dockerfile.core-bundles` or `bundles/core-bundles.yaml`**
-by this PR, per its own scope -- that is a separate activation/batching step.
+Confirmed building a valid wasm component.
 
 ## Test
 
 ```bash
 cd bundles/python/rank
 python3.13 -m venv .venv && . .venv/bin/activate
-pip install -e ../../../sdk/waddle-sdk
-pip install pytest==8.3.3 pytest-cov mypy==1.14.1 ruff==0.14.1
-pytest --cov=src --cov-branch --cov-report=term-missing
-mypy --strict src
-ruff check .
+pip install pytest==8.3.3 pytest-cov==5.0.0
+pytest --cov=src --cov-branch --cov-report=term-missing   # 100% line + branch
 ```
 
-See PR description for the current test count and coverage percentage.
+`tests/conftest.py` puts `src/` and `sdk/waddle-sdk/src` on `sys.path`, so no package install is
+needed. `test_app.py` covers grammar/CRUD/level math; `test_backfill.py` adds the mod-gate matrix,
+amount-parsing edges, PII-free-log regression, flag fail-closed and `_entry_wiring` checks.
 
 ## Activation
 
-**Not added to `bundles/core-bundles.yaml`** by this PR, per its own scope (batched registration
-is a separate step, same convention `loyalty`'s own README documents). `bundles/
-Dockerfile.core-bundles` is likewise untouched here.
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.rank`, batch 3).

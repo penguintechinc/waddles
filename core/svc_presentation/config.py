@@ -95,7 +95,7 @@ class Config:
     #: queue*`) -- same `SERVICE_API_KEY` env var name/header convention
     #: every other internal service-to-service caller in this repo already
     #: uses (`core/svc_process/services/reputation_gate_client.py`,
-    #: `core/svc_action/bundles/social_music_action.py`,
+    #: `core/svc_action/builtin_handlers/social_music_action.py`,
     #: `core/*_module/config.py`). Empty string means "not yet
     #: provisioned" -- `services/queue_reader.py::MusicQueueReader` refuses
     #: to call hub-api at all in that state (fails closed, logs a startup

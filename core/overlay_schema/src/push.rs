@@ -65,6 +65,12 @@ pub struct OverlayPush {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub goal: Option<GoalPayload>,
 
+    /// `caption` -- one live closed-caption line (a chat message plus its
+    /// optional translation). Same PII rule as [`Self::chat_message`]:
+    /// `user` is a tenant-tokenized UUID reference only.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub caption: Option<CaptionPayload>,
+
     /// Escape hatch for a bundle-registered widget's own declared
     /// data-binding fields (#458 "Data binding") -- never populated by any
     /// of the 9 built-in surfaces above. The host validates size (and, once
@@ -127,6 +133,44 @@ pub struct ChatMessagePayload {
     /// Already HTML-escaped at construction time -- an overlay client
     /// renders this directly, never re-escapes or trusts it un-escaped.
     pub text: String,
+}
+
+/// `caption`'s payload -- one closed-caption line, the Rust port of the
+/// Python `browser_source_core_module`'s `POST /api/v1/internal/captions`
+/// body (`username`/`original_message`/`translated_message`/
+/// `detected_language`/`target_language`/`confidence`).
+///
+/// Field mapping from the legacy body: `username` is replaced by the
+/// `user`/`display_name` pair (a raw username never crosses this boundary
+/// -- `critical-rules.md` PII Tokenization); `original_message`/
+/// `translated_message`/`detected_language`/`target_language` are renamed
+/// `original`/`translated`/`detected_lang`/`target_lang` to match the
+/// overlay client's existing wire keys; `community_id` is gone (the
+/// verified credential, never the body, names the community).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CaptionPayload {
+    /// Tenant-tokenized UUID reference ONLY -- see
+    /// [`ChatMessagePayload::user`]'s doc for the full rule.
+    pub user: String,
+    /// Already server-side-detokenized display name (never a raw
+    /// username); rendered by the overlay client as text, never markup.
+    pub display_name: String,
+    /// The platform the message originated on (`twitch`/`discord`/...).
+    pub platform: String,
+    /// The message as originally written.
+    pub original: String,
+    /// The translated message, if translation ran.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub translated: Option<String>,
+    /// ISO 639-1-style code of the detected source language.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub detected_lang: Option<String>,
+    /// ISO 639-1-style code of the target (translation) language.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub target_lang: Option<String>,
+    /// Language-detection confidence, `0.0..=1.0`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub confidence: Option<f64>,
 }
 
 /// `goals`' payload -- one goal bar's current state (#458's "Widgets":
@@ -230,10 +274,55 @@ mod tests {
                 target: 100.0,
                 unit: Some("followers".to_string()),
             }),
+            caption: Some(CaptionPayload {
+                user: "uuid".to_string(),
+                display_name: "Name".to_string(),
+                platform: "twitch".to_string(),
+                original: "hola".to_string(),
+                translated: Some("hello".to_string()),
+                detected_lang: Some("es".to_string()),
+                target_lang: Some("en".to_string()),
+                confidence: Some(0.93),
+            }),
             extra: Some(serde_json::json!({"custom": true})),
         };
         let json = serde_json::to_string(&push).unwrap();
         let back: OverlayPush = serde_json::from_str(&json).unwrap();
         assert_eq!(back, push);
+    }
+
+    #[test]
+    fn caption_never_serializes_a_raw_username_field() {
+        let push = OverlayPush {
+            caption: Some(CaptionPayload {
+                user: "11111111-1111-1111-1111-111111111111".to_string(),
+                display_name: "Display Name".to_string(),
+                platform: "twitch".to_string(),
+                original: "hello".to_string(),
+                translated: None,
+                detected_lang: None,
+                target_lang: None,
+                confidence: None,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&push).unwrap();
+        assert!(!json.contains("\"username\""));
+        assert!(json.contains("\"user\":\"11111111-1111-1111-1111-111111111111\""));
+        // Unset optionals are omitted, not serialized as null.
+        assert!(!json.contains("translated"));
+        assert!(!json.contains("confidence"));
+    }
+
+    #[test]
+    fn caption_deserializes_with_only_the_required_fields() {
+        let push: OverlayPush = serde_json::from_str(
+            r#"{"caption":{"user":"u","display_name":"n","platform":"discord","original":"hi"}}"#,
+        )
+        .unwrap();
+        let caption = push.caption.unwrap();
+        assert_eq!(caption.original, "hi");
+        assert!(caption.translated.is_none());
+        assert!(caption.confidence.is_none());
     }
 }
