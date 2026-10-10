@@ -129,7 +129,8 @@ class TestNotReversibleWithoutTheKey:
             "sha256(id)": hashlib.sha256(self.PUID.encode()).hexdigest(),
             "sha256(tenant|id)": hashlib.sha256(f"5|{self.PUID}".encode()).hexdigest(),
             "sha256(platform|id)": hashlib.sha256(f"discord|{self.PUID}".encode()).hexdigest(),
-            "sha1(id)": hashlib.sha1(self.PUID.encode(), usedforsecurity=False).hexdigest(),
+            "sha512(id)": hashlib.sha512(self.PUID.encode()).hexdigest()[:64],
+            "blake2b(id)": hashlib.blake2b(self.PUID.encode(), digest_size=32).hexdigest(),
             "hmac(empty key)": stdlib_hmac.new(b"", self.PUID.encode(), hashlib.sha256).hexdigest(),
             "hmac(tenant as key)": stdlib_hmac.new(
                 b"5", self.PUID.encode(), hashlib.sha256

@@ -28,13 +28,14 @@ Hub-api-only privileges (explicit empty rows for every other role in
 `config/postgres/rbac-matrix.yaml`): the key never leaves hub-api, so no other service
 can compute or test a code either.
 
-Chain note: ``down_revision`` is the release head when written
-(``0054_tenant_external_kms``). Several open PRs also append (0055-0058); renumber and
-re-point at the then-current head right before merging
+Chain note: ``down_revision`` is the tail of the open-PR migration chain when written
+(``0059_streaming_codec_columns``, #799; 0055-0059 are #785, #787, #798, #800, #799 in
+that order, so this revision is red on the single-head check until they land). Re-point
+at the then-current head right before merging
 (``bash scripts/ci/check-alembic-single-head.sh``).
 
-Revision ID: 0059_suppression_records
-Revises: 0054_tenant_external_kms
+Revision ID: 0060_suppression_records
+Revises: 0059_streaming_codec_columns
 Create Date: 2026-10-10
 """
 
@@ -47,8 +48,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0059_suppression_records"
-down_revision = "0054_tenant_external_kms"
+revision = "0060_suppression_records"
+down_revision = "0059_streaming_codec_columns"
 branch_labels = None
 depends_on = None
 
@@ -57,9 +58,9 @@ _MATRIX_TABLES = frozenset({"suppression_records"})
 
 
 def _load_matrix_module():  # type: ignore[no-untyped-def]
-    spec = importlib.util.spec_from_file_location("waddles_rbac_matrix_0059", _MATRIX_MODULE_PATH)
+    spec = importlib.util.spec_from_file_location("waddles_rbac_matrix_0060", _MATRIX_MODULE_PATH)
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    sys.modules["waddles_rbac_matrix_0059"] = module
+    sys.modules["waddles_rbac_matrix_0060"] = module
     spec.loader.exec_module(module)  # type: ignore[union-attr]
     return module
 

@@ -24,7 +24,7 @@ _Decision owner: DPO. Status: pending._
 | Purpose | Prevent evasion of a community ban by erase-and-return |
 | Recipients | None outside `hub-api`; the key is held only by `hub-api`; no other service role can read the table |
 | Retention | Until lifted or expired; optional operator ceiling `suppression.maxRetentionDays` (unset by default) |
-| Systems | `hub-api` (Postgres `suppression_records`, migration 0059); Helm chart `suppression:` values |
+| Systems | `hub-api` (Postgres `suppression_records`, migration 0060); Helm chart `suppression:` values |
 
 Data flow:
 

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Ban-evasion suppression (GDPR Art. 6(1)(f), counsel to verify): an erased user with an ACTIVE ban leaves one per-tenant keyed
-  one-way code (`suppression_records`, migration `0059_suppression_records`; HMAC-SHA256 under an HKDF key derived per tenant
+  one-way code (`suppression_records`, migration `0060_suppression_records`; HMAC-SHA256 under an HKDF key derived per tenant
   from the platform tenant KEK, closed `ban`/`auto_ban` enum, expiry) and a returning banned user is re-caught at join approval,
   OAuth signup and identity link. Operator tooling `make suppression-check|lift|purge|stats`; chart `suppression.maxRetentionDays`;
   draft `docs/compliance/suppression-LIA.md` / `suppression-DPIA.md`

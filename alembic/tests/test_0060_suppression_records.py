@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0059_suppression_records (ban-evasion suppression list).
+"""Real-Postgres tests for 0060_suppression_records (ban-evasion suppression list).
 
 Proves the migration lands on a real Postgres 17 (`pg_docker.migrated_postgres`, which replays
 0020 through head), round-trips upgrade -> downgrade -> upgrade, and enforces the properties the
@@ -25,7 +25,7 @@ requires_docker = pytest.mark.skipif(
 
 HMAC = "ab" * 32
 #: The revision this migration chains off -- the round-trip downgrades to exactly it, never past it.
-PREVIOUS_REVISION = "0054_tenant_external_kms"
+PREVIOUS_REVISION = "0059_streaming_codec_columns"
 
 
 def _connect(db: PgTestDatabase) -> psycopg2.extensions.connection:
@@ -62,7 +62,7 @@ def pg_db() -> Iterator[PgTestDatabase]:
     """One real Postgres 17 container migrated to head, shared by the non-round-trip tests."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0059-suppression-records") as db:
+    with migrated_postgres("0060-suppression-records") as db:
         yield db
 
 
@@ -270,7 +270,7 @@ class TestPrivileges:
 @requires_docker
 class TestRoundTrip:
     def test_downgrade_then_upgrade(self) -> None:
-        with migrated_postgres("0059-suppression-roundtrip") as db:
+        with migrated_postgres("0060-suppression-roundtrip") as db:
             alembic_cli("downgrade", PREVIOUS_REVISION, dsn=db.dsn)
             conn = _connect(db)
             try:
