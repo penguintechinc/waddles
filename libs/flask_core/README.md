@@ -13,6 +13,9 @@ Shared utilities and components for all WaddleBot Flask/Quart modules.
 - **Redacted error logging** (`db_errors.py`): DB failures are logged as operation +
   exception type + SQLSTATE/driver code + a fixed category label -- never the driver
   message (see [Database error logging](#database-error-logging))
+- **Redacted validation logging** (`validation_errors.py`): validation failures are logged as
+  error count + declared field locations + error types -- never the client's `input`/`msg`
+  (see [Validation error logging](#validation-error-logging))
 
 ### Authentication (`auth.py`)
 - **Flask-Security-Too** integration for user management
@@ -123,6 +126,38 @@ except Exception as exc:
 Note: re-raised driver errors that reach Quart's own `Exception on request` handler are
 logged by Quart, outside flask_core -- catch/translate them at the service boundary if
 that log stream is in scope for PII controls.
+
+### Request validation
+
+`flask_core.validation` provides `validate_json` / `validate_query` / `validate_form`
+(Pydantic) decorators and `validate_data` for programmatic use.
+
+#### Validation error logging
+
+**SECURITY (PII in logs):** a Pydantic `ValidationError` entry carries the client's `input`,
+and its `msg`/`ctx` and `loc` can echo it too (a custom `ValueError(f"bad {v}")`, a UUID parse
+error naming the bad character, an `extra_forbidden` error whose `loc` is a client-chosen key).
+The decorators therefore **never log the raw errors**. They log through
+`flask_core.validation_errors.describe_validation_errors`:
+
+```
+WARNING flask_core.validation AUTHZ validation_failed endpoint=signup model=Signup \
+        errors=3 fields=age:int_parsing,meta.<key>:int_parsing,<key>:extra_forbidden
+```
+
+| Emitted | Never emitted |
+|---|---|
+| error count | `input` value |
+| field location, only if a declared field name/alias of the model | `msg`, `ctx`, `url` |
+| list index / dict key / extra key -> `[]` / `<key>` placeholder | client-chosen key names, index numbers |
+| Pydantic error type (regex-validated token) | anything failing validation (`unknown`) |
+
+Exceptions raised *inside* a decorated endpoint also reach the decorators' `except Exception`;
+those are logged type-only (plus SQLSTATE/category for DB driver errors) via
+`flask_core.db_errors.log_db_error`, with a frames-only traceback at DEBUG -- never `str(e)`.
+The 400 response body is unchanged (it goes back to the same client that sent the data).
+Use `describe_validation_errors(exc, Model)` instead of `logger.error(f"... {exc.errors()}")`
+in service code.
 
 ### Authentication
 
