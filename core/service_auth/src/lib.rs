@@ -246,7 +246,9 @@ async fn verify_checked(
     // explicitly; `leeway` above bounds it against issuer/verifier clock
     // skew the same way it already bounds `exp`.
     validation.validate_nbf = true;
-    validation.set_required_spec_claims(&["exp", "nbf", "iss", "aud", "sub"]);
+    // `sub` is left to `parse_claims`, which tells a missing `sub` from a
+    // mistyped one (the library would call both "missing").
+    validation.set_required_spec_claims(&["exp", "nbf", "iss", "aud"]);
 
     let data = jsonwebtoken::decode::<Value>(token, &key, &validation)
         .map_err(|e| Failure::reason(classify_decode_error(e.kind()), "eddsa"))?;
