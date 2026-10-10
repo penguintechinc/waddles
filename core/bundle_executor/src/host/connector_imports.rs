@@ -39,50 +39,43 @@ use tracing::{debug, warn};
 use crate::engine::connector_world::waddle::bundle::{clock, flags, http, log};
 use crate::engine::connector_world::waddle::connector::identity;
 use crate::error::ExecutorError;
+use crate::host::http_wire;
 use crate::host::imports::call;
 use crate::host::ExecState;
 use penguin_bundle_host::wire::CapabilityKind;
 
 impl http::Host for ExecState {
+    /// Same wire as the `stage` world's `http::Host::send`
+    /// (`crate::host::imports`): both go through [`http_wire`], the single
+    /// shared encoder/decoder for the `http`/`send` host-call.
     async fn send(&mut self, req: http::Request) -> Result<http::Response, http::Error> {
-        let args = serde_json::json!({
-            "method": req.method,
-            "url": req.url,
-            "headers": req.headers.iter().map(|h| serde_json::json!({"name": h.name, "value": h.value})).collect::<Vec<_>>(),
-            "body": req.body,
-            "secret_refs": req.secret_refs,
-        });
+        let args = http_wire::encode_request(
+            &req.method,
+            &req.url,
+            req.headers
+                .iter()
+                .map(|h| (h.name.as_str(), h.value.as_str())),
+            req.body.as_deref(),
+            &req.secret_refs,
+        )
+        .map_err(http::Error::Transport)?;
         match call(self, CapabilityKind::Http, "send", args).await {
-            Ok(value) => serde_json::from_value::<ConnectorHttpResponseWire>(value)
-                .map(Into::into)
-                .map_err(|e| http::Error::Transport(format!("malformed host-result: {e}"))),
+            Ok(value) => http_wire::decode_response(value)
+                .map(|w| http::Response {
+                    status: w.status,
+                    headers: w
+                        .headers
+                        .into_iter()
+                        .map(|(name, value)| http::Header { name, value })
+                        .collect(),
+                    body: w.body,
+                    truncated: w.truncated,
+                })
+                .map_err(|e| {
+                    warn!(error = %e, "connector http.send: malformed host-result");
+                    http::Error::Transport(format!("malformed host-result: {e}"))
+                }),
             Err(e) => Err(connector_http_error_from(e)),
-        }
-    }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ConnectorHttpResponseWire {
-    status: u16,
-    #[serde(default)]
-    headers: Vec<(String, String)>,
-    #[serde(default)]
-    body: Vec<u8>,
-    #[serde(default)]
-    truncated: bool,
-}
-
-impl From<ConnectorHttpResponseWire> for http::Response {
-    fn from(w: ConnectorHttpResponseWire) -> Self {
-        http::Response {
-            status: w.status,
-            headers: w
-                .headers
-                .into_iter()
-                .map(|(name, value)| http::Header { name, value })
-                .collect(),
-            body: w.body,
-            truncated: w.truncated,
         }
     }
 }
@@ -350,5 +343,86 @@ mod identity_tests {
             connector_identity_error_from(err),
             identity::Error::Backend(m) if m == "oops"
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::host::imports::tests::{one_shot_bridge_capturing, state_with};
+
+    /// The `connector` world's `http.send` shares the `stage` world's wire
+    /// ([`http_wire`]): the request body goes out as `body_base64` (never the
+    /// legacy `body` byte array the guard silently ignored), and a response
+    /// in the exact shape the guard emits -- `{name, value}` headers plus
+    /// `body_base64` -- decodes instead of failing "malformed host-result".
+    #[tokio::test]
+    async fn connector_http_send_uses_the_shared_guard_wire() {
+        let (bridge, args_rx) = one_shot_bridge_capturing(Ok(serde_json::json!({
+            "status": 202,
+            "headers": [{"name": "x-a", "value": "1"}, {"name": "x-a", "value": "2"}],
+            "body_base64": "AP8=",
+            "truncated": true
+        })));
+        let mut state = state_with(bridge);
+        let resp = http::Host::send(
+            &mut state,
+            http::Request {
+                method: "POST".to_string(),
+                url: "https://example.test/c".to_string(),
+                headers: vec![http::Header {
+                    name: "content-type".to_string(),
+                    value: "application/json".to_string(),
+                }],
+                body: Some(vec![0x00, 0xff, 0x10, b'h', b'i']),
+                secret_refs: vec![("?key".to_string(), "weather-key".to_string())],
+            },
+        )
+        .await
+        .expect("send ok");
+
+        let args = args_rx.await.expect("stage saw the host-call");
+        assert_eq!(args["body_base64"], "AP8QaGk=");
+        assert!(args.get("body").is_none(), "legacy `body` key sent: {args}");
+        assert_eq!(
+            args["secret_refs"],
+            serde_json::json!([["?key", "weather-key"]])
+        );
+
+        assert_eq!(resp.status, 202);
+        assert_eq!(resp.body, vec![0x00, 0xff]);
+        assert!(resp.truncated);
+        assert_eq!(
+            resp.headers
+                .iter()
+                .map(|h| (h.name.as_str(), h.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("x-a", "1"), ("x-a", "2")]
+        );
+    }
+
+    /// A result off the wire contract is a loud `Transport` error here too.
+    #[tokio::test]
+    async fn connector_http_send_rejects_a_malformed_result() {
+        let (bridge, _args) = one_shot_bridge_capturing(Ok(serde_json::json!({
+            "status": 200, "headers": [], "body": [1, 2, 3], "truncated": false
+        })));
+        let mut state = state_with(bridge);
+        let result = http::Host::send(
+            &mut state,
+            http::Request {
+                method: "GET".to_string(),
+                url: "https://example.test/".to_string(),
+                headers: vec![],
+                body: None,
+                secret_refs: vec![],
+            },
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(http::Error::Transport(m)) if m.starts_with("malformed host-result")),
+            "{result:?}"
+        );
     }
 }

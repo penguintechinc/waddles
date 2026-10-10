@@ -7,6 +7,7 @@
 
 pub mod bridge;
 pub mod connector_imports;
+pub(crate) mod http_wire;
 pub mod imports;
 
 use std::sync::atomic::{AtomicBool, Ordering};

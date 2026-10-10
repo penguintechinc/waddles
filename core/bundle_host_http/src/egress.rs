@@ -26,6 +26,40 @@
 //! **§8.5 scope reminder:** this module governs bundle-initiated `http.send`
 //! calls only. Each stage's own connections to Postgres/Valkey/the bucket/
 //! hub-api/OTLP are operator configuration, never routed through this guard.
+//!
+//! **Secret refs: header slots and `?query` slots.** A bundle's
+//! `secret-refs` name a *slot* and a symbolic reference; the host resolves
+//! the reference (grant-map, then [`CredentialBroker`]) and injects the value,
+//! which therefore never enters the WASM component. A plain slot name is a
+//! **header** (`Authorization`): attached on the secret-bound host's hops. A
+//! slot name prefixed `?` (`?key`) is a **query-parameter** ref for APIs that
+//! authenticate by query string (e.g. WeatherAPI's `?key=`): the host appends
+//! `key=<value>` to the URL, replacing any same-named parameter the bundle
+//! sent. The query form is stricter than the header form because a URL is
+//! echoed far more widely than a header:
+//!
+//! - injected **only** on the first hop, on a granted `net.http.fqdn` host
+//!   (never an IP-literal grant, never widened by `secret_granted_hosts`) --
+//!   **every redirect hop drops it**, and any same-named parameter a
+//!   redirect's `Location` carries is stripped too;
+//! - written only into the per-hop [`TransportRequest::url`], never into the
+//!   guard's own redirect-chain URL, so everything the guard logs/joins is
+//!   structurally secret-free;
+//! - a [`SecretRedactor`] scrubs every resolved secret (raw and both URL
+//!   encodings) from transport error strings (`reqwest`'s `Display` embeds the
+//!   full URL), response headers (e.g. a pagination `Link`) and response
+//!   bodies; `TransportRequest`'s `Debug` and every log line print only the
+//!   query-less URL; the transport additionally strips the query from the
+//!   URL inside any `reqwest::Error` it classifies;
+//! - an ungranted, unresolvable or empty `?`-ref fails the whole call
+//!   (`secret_not_granted`/`secret_unresolved`) before any network activity
+//!   -- never a silent unauthenticated request.
+//!
+//! This is the single choke point for every consumer: `svc_process`,
+//! `svc_action` (a thin shim over this module) and `egress_proxy` (which
+//! shares this crate's IP policy and only ever sees the CONNECT authority of
+//! an `https://` call, never its path or query) all go through
+//! [`EgressGuard::send`], so there is exactly one injection+redaction path.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -43,6 +77,7 @@ pub use egress_assertion::{
 use futures_util::StreamExt;
 use penguin_bundle_host::wire::HostResultError;
 use serde::Deserialize;
+use tracing::debug;
 
 fn denied(code: &str, message: impl Into<String>) -> HostResultError {
     HostResultError {
@@ -205,10 +240,25 @@ pub struct EgressLimits {
 
 /// One `http.send` request as decoded from a bundle's host-call `args`
 /// (this crate's own JSON-wire convention for the WIT `http::request`
-/// record of spec §6.5). `body`/response `body` are base64 rather than a
-/// JSON byte array or lossy UTF-8, to stay byte-exact with the WIT
+/// record of spec §6.5). The request body (`body_base64`) and the response
+/// body (`body_base64` in [`EgressGuard::send`]'s result) are base64 rather
+/// than a JSON byte array or lossy UTF-8, to stay byte-exact with the WIT
 /// `list<u8>` without a JSON array of small integers.
+///
+/// **The other half of this wire is `core/bundle_executor`'s
+/// `host::http_wire`** (the only producer of these `args` and the only
+/// consumer of [`EgressGuard::send`]'s result for guest calls); it cannot be
+/// linked here (this crate's `reqwest` is banned from that binary), so
+/// `tests/executor_wire_e2e.rs` drives the real executor against the real
+/// guard to keep the two in lockstep.
+///
+/// `deny_unknown_fields`: a key this guard does not know is rejected
+/// `invalid_args` instead of ignored. That is what turns wire drift into a
+/// loud failure -- the original defect was an executor sending the body as
+/// `body` (a byte array) while this struct reads `body_base64`, which serde
+/// silently ignored, so every request went out with no body at all.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HttpSendArgs {
     method: String,
     url: String,
@@ -216,14 +266,313 @@ struct HttpSendArgs {
     headers: Vec<HttpHeaderArg>,
     #[serde(default)]
     body_base64: Option<String>,
-    /// Header name -> secret reference name (spec §8.3/§6.5's
-    /// `secret-refs: list<tuple<string, string>>`, represented here as a
-    /// JSON object since header names are unique per request).
-    #[serde(default)]
-    secret_refs: HashMap<String, String>,
+    /// Secret slot -> secret reference name (spec §8.3/§6.5's
+    /// `secret-refs: list<tuple<string, string>>`). A slot is either a
+    /// plain header name (the resolved value is injected as that header) or
+    /// `?<param>` (the resolved value is injected as that URL query
+    /// parameter) -- see [`SecretSlot`]. Accepted on the wire as a JSON
+    /// object *or* as a list of `[slot, ref]` pairs
+    /// ([`deserialize_secret_refs`]).
+    #[serde(default, deserialize_with = "deserialize_secret_refs")]
+    secret_refs: Vec<(String, String)>,
+}
+
+/// Decodes `HttpSendArgs::secret_refs` from either wire shape: a JSON object
+/// (`{"Authorization": "TOKEN_REF"}`, this crate's original convention and
+/// what every in-crate caller/test sends) or a JSON array of two-element
+/// pairs (`[["Authorization", "TOKEN_REF"]]`) -- the shape
+/// `core/bundle_executor`'s `http::Host::send` actually serializes the WIT
+/// `list<tuple<string, string>>` into, which a map-only decoder rejected
+/// outright (`invalid type: sequence, expected a map`), making *every*
+/// guest-originated `http.send` fail `invalid_args` before any secret
+/// handling ran. Order is preserved for the list form; the object form is
+/// key-sorted (`serde_json::Map` is a `BTreeMap` here).
+fn deserialize_secret_refs<'de, D>(deserializer: D) -> Result<Vec<(String, String)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Pairs(Vec<(String, String)>),
+        Map(std::collections::BTreeMap<String, String>),
+    }
+    Ok(match Wire::deserialize(deserializer)? {
+        Wire::Pairs(pairs) => pairs,
+        Wire::Map(map) => map.into_iter().collect(),
+    })
+}
+
+/// Leading character that marks a `secret_refs` slot as a **query-parameter
+/// secret ref** (`?key`) rather than a header name. `?` is not a legal HTTP
+/// header-name (RFC 9110 `token`) character, so the two namespaces can
+/// never collide -- a plain name keeps meaning "header", unchanged.
+const QUERY_SECRET_PREFIX: char = '?';
+
+/// Longest accepted query-parameter name in a `?<param>` secret slot.
+const MAX_QUERY_SECRET_NAME_LEN: usize = 64;
+
+/// One decoded `secret_refs` slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretSlot<'a> {
+    /// Inject the resolved value as this HTTP header (original behavior).
+    Header(&'a str),
+    /// Inject the resolved value as `?<name>=<value>` in the request URL's
+    /// query, host-side, on the secret-bound FQDN's first hop only
+    /// ([`inject_query_secrets`]).
+    QueryParam(&'a str),
+}
+
+impl<'a> SecretSlot<'a> {
+    /// Classifies one slot name. A `?`-prefixed slot must be followed by a
+    /// conservative parameter name (`[A-Za-z0-9._-]`, 1..=64 chars) so a
+    /// bundle can never smuggle `&`/`=`/`#`/whitespace into the query it
+    /// asks the host to build -- anything else is `invalid_args`.
+    fn parse(slot: &'a str) -> Result<Self, HostResultError> {
+        match slot.strip_prefix(QUERY_SECRET_PREFIX) {
+            None => Ok(Self::Header(slot)),
+            Some(name)
+                if !name.is_empty()
+                    && name.len() <= MAX_QUERY_SECRET_NAME_LEN
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) =>
+            {
+                Ok(Self::QueryParam(name))
+            }
+            Some(_) => Err(denied(
+                "invalid_args",
+                "secret_refs query slot must be '?' followed by 1-64 of [A-Za-z0-9._-]",
+            )),
+        }
+    }
+}
+
+/// Replacement text for every scrubbed secret occurrence.
+const REDACTED: &str = "[REDACTED]";
+
+/// Host-side scrubber for the secret values resolved for one `http.send`
+/// call. The resolved value of a `?<param>` secret ref lives in the outbound
+/// URL, and `reqwest`'s error `Display` embeds the full request URL
+/// (`error sending request for url (https://host/path?key=<secret>)`) -- so
+/// every string that could carry it back out (a transport error message, a
+/// response header such as a pagination `Link`/`Location`, a response body
+/// that echoes the request) passes through here before it can reach a log, a
+/// span, a metric label, or the guest component. Each secret is matched in
+/// its raw form and in both URL-encodings it can take inside a URL (the
+/// `application/x-www-form-urlencoded` form the host itself writes into the
+/// query, and strict RFC 3986 percent-encoding), longest needle first.
+struct SecretRedactor {
+    needles: Vec<String>,
+}
+
+impl SecretRedactor {
+    /// Builds a redactor for `values` (empty values are ignored -- they
+    /// would match everywhere).
+    fn new<'a>(values: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut needles: Vec<String> = Vec::new();
+        for value in values {
+            if value.is_empty() {
+                continue;
+            }
+            for variant in [
+                value.to_string(),
+                percent_encode_rfc3986(value),
+                form_encode_query_value(value),
+            ] {
+                if !variant.is_empty() && !needles.contains(&variant) {
+                    needles.push(variant);
+                }
+            }
+        }
+        needles.sort_by_key(|n| std::cmp::Reverse(n.len()));
+        Self { needles }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.needles.is_empty()
+    }
+
+    /// Replaces every secret occurrence in `text`.
+    fn scrub_str(&self, text: &str) -> String {
+        let mut out = text.to_string();
+        for needle in &self.needles {
+            if out.contains(needle.as_str()) {
+                out = out.replace(needle.as_str(), REDACTED);
+            }
+        }
+        out
+    }
+
+    /// Replaces every secret occurrence in `bytes`.
+    fn scrub_bytes(&self, bytes: Vec<u8>) -> Vec<u8> {
+        let mut out = bytes;
+        for needle in &self.needles {
+            let needle = needle.as_bytes();
+            if out.windows(needle.len()).any(|w| w == needle) {
+                out = replace_bytes(&out, needle, REDACTED.as_bytes());
+            }
+        }
+        out
+    }
+
+    /// Scrubs a transport error's message. The code is unchanged.
+    fn scrub_error(&self, err: HostResultError) -> HostResultError {
+        if self.is_empty() {
+            return err;
+        }
+        HostResultError {
+            code: err.code,
+            message: self.scrub_str(&err.message),
+        }
+    }
+
+    /// Scrubs a transport response's header values and body so a server
+    /// that reflects the request URL (or a pagination `Link`) can never hand
+    /// the guest component a secret the host injected.
+    fn scrub_response(&self, resp: TransportResponse) -> TransportResponse {
+        if self.is_empty() {
+            return resp;
+        }
+        TransportResponse {
+            status: resp.status,
+            headers: resp
+                .headers
+                .into_iter()
+                .map(|(name, value)| (name, self.scrub_str(&value)))
+                .collect(),
+            body: self.scrub_bytes(resp.body),
+            truncated: resp.truncated,
+        }
+    }
+}
+
+/// Replaces every non-overlapping occurrence of `needle` in `haystack`.
+fn replace_bytes(haystack: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(haystack.len());
+    let mut i = 0;
+    while i < haystack.len() {
+        if haystack[i..].starts_with(needle) {
+            out.extend_from_slice(with);
+            i += needle.len();
+        } else {
+            out.push(haystack[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Strict RFC 3986 percent-encoding (everything but the unreserved set
+/// `A-Za-z0-9-._~`).
+fn percent_encode_rfc3986(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The exact encoding `Url::query_pairs_mut().append_pair` writes for a
+/// query value (`application/x-www-form-urlencoded`), obtained from the same
+/// `url` implementation that builds the outbound request so it can never
+/// drift from what actually appears in the URL. Falls back to the raw value
+/// (which the caller also scrubs) in the impossible case the constant scratch
+/// URL fails to parse.
+fn form_encode_query_value(value: &str) -> String {
+    reqwest::Url::parse_with_params("https://redact.invalid/", [("k", value)])
+        .ok()
+        .and_then(|u| {
+            u.query()
+                .and_then(|q| q.strip_prefix("k="))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| value.to_string())
+}
+
+/// Appends each `(param, value)` secret to `url`'s query as
+/// `param=<form-encoded value>`. A pre-existing same-named parameter in the
+/// bundle-supplied URL is dropped first (the host's value always wins, and a
+/// bundle can't pre-seed a duplicate for a server that reads the first
+/// one); every other existing byte of the query is preserved verbatim
+/// unless a same-named parameter forced a re-serialization.
+fn inject_query_secrets(url: &mut reqwest::Url, secrets: &[(String, String)]) {
+    let conflicts = url
+        .query_pairs()
+        .any(|(k, _)| secrets.iter().any(|(name, _)| name.as_str() == k));
+    if conflicts {
+        let kept: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(k, _)| !secrets.iter().any(|(name, _)| name.as_str() == k))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        pairs.extend_pairs(kept);
+    }
+    let mut pairs = url.query_pairs_mut();
+    for (name, value) in secrets {
+        pairs.append_pair(name, value);
+    }
+}
+
+/// Removes every query parameter named like an injected secret from a
+/// redirect target -- the secret is only ever sent on the first hop, to the
+/// bound host, and a redirect's `Location` (server-chosen) never gets to
+/// carry the parameter onward, whatever value it names.
+fn strip_query_secret_params(url: &mut reqwest::Url, secrets: &[(String, String)]) {
+    if !url
+        .query_pairs()
+        .any(|(k, _)| secrets.iter().any(|(name, _)| name.as_str() == k))
+    {
+        return;
+    }
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| !secrets.iter().any(|(name, _)| name.as_str() == k))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if kept.is_empty() {
+        url.set_query(None);
+    } else {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        pairs.extend_pairs(kept);
+    }
+}
+
+/// Drops everything from `url` that is unsafe to log or echo in an error:
+/// the whole query (host-injected secret *and* bundle-supplied parameters,
+/// which may carry user-identifying data), the fragment, and any userinfo.
+fn strip_url_for_log(url: &mut reqwest::Url) {
+    url.set_query(None);
+    url.set_fragment(None);
+    // `set_username`/`set_password` only fail for cannot-be-a-base URLs,
+    // which carry no userinfo to strip in the first place.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+}
+
+/// `url` with its query/fragment/userinfo removed ([`strip_url_for_log`]) --
+/// the only form of a request URL that may appear in a log line, span or
+/// `Debug` output. Unparseable input yields a fixed placeholder, never the
+/// raw string.
+fn redact_url_for_log(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut parsed) => {
+            strip_url_for_log(&mut parsed);
+            parsed.to_string()
+        }
+        Err(_) => "<unparseable-url>".to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HttpHeaderArg {
     name: String,
     value: String,
@@ -438,9 +787,26 @@ impl EgressGuard {
         // read from the process environment. A symbolic name outside the
         // granted set is refused before any environment lookup happens at
         // all.
+        //
+        // **Query-parameter refs** (`?key`, [`SecretSlot::QueryParam`]) go
+        // through the *identical* grant-map + broker resolution -- the only
+        // difference is where the resolved value is injected -- and fail
+        // loud the same way: an ungranted/unresolvable/empty `?`-ref aborts
+        // the whole call here, before any network activity, so a request is
+        // never silently sent without the credential it was meant to carry.
         let granted = row.as_ref().map(|r| &r.granted_secret_refs);
         let mut secret_headers: Vec<(String, String)> = Vec::with_capacity(req.secret_refs.len());
-        for (header_name, secret_ref) in &req.secret_refs {
+        let mut query_secrets: Vec<(String, String)> = Vec::new();
+        for (slot_name, secret_ref) in &req.secret_refs {
+            let slot = SecretSlot::parse(slot_name)?;
+            if let SecretSlot::QueryParam(param) = slot {
+                if query_secrets.iter().any(|(name, _)| name == param) {
+                    return Err(denied(
+                        "invalid_args",
+                        "secret_refs names the same query parameter twice",
+                    ));
+                }
+            }
             let env_var_name = granted
                 .and_then(|g| g.get(secret_ref))
                 .ok_or_else(|| {
@@ -459,8 +825,29 @@ impl EgressGuard {
             // any guest-visible state.
             let handle = SecretHandle::from_granted_env_var(env_var_name);
             let value = self.credential_broker.resolve(&handle)?;
-            secret_headers.push((header_name.clone(), value));
+            match slot {
+                SecretSlot::Header(header_name) => {
+                    secret_headers.push((header_name.to_string(), value));
+                }
+                SecretSlot::QueryParam(param) => {
+                    if value.is_empty() {
+                        return Err(denied(
+                            "secret_unresolved",
+                            format!("granted env var {env_var_name:?} resolved to an empty value"),
+                        ));
+                    }
+                    query_secrets.push((param.to_string(), value));
+                }
+            }
         }
+        // Every resolved secret value (header and query alike) is scrubbed
+        // out of anything this call hands back -- see [`SecretRedactor`].
+        let redactor = SecretRedactor::new(
+            secret_headers
+                .iter()
+                .map(|(_, v)| v.as_str())
+                .chain(query_secrets.iter().map(|(_, v)| v.as_str())),
+        );
 
         // The host `secret_headers` is bound to -- captured once, at hop 0,
         // from the bundle's own originally-requested URL (the host it
@@ -547,6 +934,19 @@ impl EgressGuard {
                 }
             }
             let category = matched.category;
+            // A query-parameter secret is only ever injected on the
+            // secret-bound **FQDN** (the granted `net.http.fqdn:<host>`):
+            // an IP-literal grant (`public-ip`/`private-ip`, HIGH-risk
+            // families) never receives one. Refused loudly before any DNS or
+            // network activity rather than silently sending unauthenticated.
+            if hop == 0 && !query_secrets.is_empty() && category != EgressCategory::Fqdn {
+                return Err(denied(
+                    "secret_query_requires_fqdn",
+                    format!(
+                        "{host} is not a net.http.fqdn grant; query-parameter secret refs may only be injected on a granted FQDN"
+                    ),
+                ));
+            }
             let addrs = self
                 .resolver
                 .lookup(host.clone(), port)
@@ -632,21 +1032,63 @@ impl EgressGuard {
                 let assertion = signer.sign(app_id, &host, port, category.into())?;
                 req_headers.push((PROXY_ASSERTION_HEADER.to_string(), assertion));
             }
+            // Query-parameter secrets ride on the FIRST hop only -- hop 0 is
+            // by construction the bundle's own originally-requested URL on
+            // the secret-bound FQDN. They are written into this per-hop
+            // transport URL only; `req.url` (the redirect chain's own URL,
+            // everything that is ever logged or joined against a `Location`)
+            // never contains the secret, so every redirect hop is
+            // structurally secret-free.
+            let inject_query_secrets_now = hop == 0 && !query_secrets.is_empty();
+            let transport_url = if inject_query_secrets_now {
+                let mut with_secrets = url.clone();
+                inject_query_secrets(&mut with_secrets, &query_secrets);
+                with_secrets.to_string()
+            } else {
+                req.url.clone()
+            };
+            debug!(
+                app_id = %app_id,
+                hop,
+                host = %host,
+                url = %redact_url_for_log(&req.url),
+                header_secrets = secret_headers.len(),
+                query_secret_params = ?query_secrets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                query_secret_injected = inject_query_secrets_now,
+                "bundle_host_http.egress.send"
+            );
             let transport_req = TransportRequest {
                 method: method.clone(),
-                url: req.url.clone(),
+                url: transport_url,
                 pinned_addr,
                 headers: req_headers,
                 body: body.clone(),
             };
-            let response = self
+            let response = match self
                 .transport
                 .send(
                     transport_req,
                     self.limits.timeout,
                     self.limits.max_response_bytes,
                 )
-                .await?;
+                .await
+            {
+                Ok(response) => redactor.scrub_response(response),
+                Err(err) => {
+                    // Transport errors (reqwest's embeds the full request
+                    // URL, query included) are scrubbed of every resolved
+                    // secret before they can reach a log or the guest.
+                    let err = redactor.scrub_error(err);
+                    debug!(
+                        app_id = %app_id,
+                        hop,
+                        host = %host,
+                        error_code = %err.code,
+                        "bundle_host_http.egress.transport_error"
+                    );
+                    return Err(err);
+                }
+            };
 
             if (300..400).contains(&response.status) {
                 if hop >= self.limits.max_redirects {
@@ -658,9 +1100,13 @@ impl EgressGuard {
                     .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                     .map(|(_, v)| v.clone())
                     .ok_or_else(|| denied("redirect_off_allowlist", "redirect missing Location"))?;
-                let next = url.join(&location).map_err(|_| {
+                let mut next = url.join(&location).map_err(|_| {
                     denied("redirect_off_allowlist", "redirect Location does not parse")
                 })?;
+                // Never let a redirect carry a secret-named query parameter
+                // onward (to the same host or any other) -- see
+                // `strip_query_secret_params`.
+                strip_query_secret_params(&mut next, &query_secrets);
                 req.url = next.to_string();
                 hop += 1;
                 continue;
@@ -1669,13 +2115,39 @@ impl TokenBucket {
 /// §8.2 steps 1-7) before building this -- a [`HttpTransport`] impl trusts
 /// `pinned_addr` completely and must connect to exactly that address for
 /// `url`'s host, never re-resolving.
-#[derive(Debug, Clone)]
+///
+/// **`url` and `headers` may carry resolved secrets** (a `?<param>` secret
+/// ref's value is part of `url`'s query; a header secret ref is in
+/// `headers`), so `Debug` is hand-written to print only the redacted
+/// scheme/host/path ([`redact_url_for_log`]), the header *names* and the body
+/// length -- a `{:?}` of this struct in a log line or panic message can never
+/// leak a credential.
+#[derive(Clone)]
 pub struct TransportRequest {
     pub method: String,
     pub url: String,
     pub pinned_addr: SocketAddr,
     pub headers: Vec<(String, String)>,
     pub body: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for TransportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransportRequest")
+            .field("method", &self.method)
+            .field("url", &redact_url_for_log(&self.url))
+            .field("pinned_addr", &self.pinned_addr)
+            .field(
+                "header_names",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field("body_len", &self.body.as_ref().map(Vec::len))
+            .finish()
+    }
 }
 
 /// A transport's response, already size-capped (spec §8.2 step 11) by the
@@ -1848,7 +2320,7 @@ impl HttpTransport for ReqwestTransport {
                 builder = builder.body(body);
             }
 
-            let response = builder.send().await.map_err(|e| classify_send_error(&e))?;
+            let response = builder.send().await.map_err(classify_send_error)?;
             let status = response.status().as_u16();
             let headers: Vec<(String, String)> = response
                 .headers()
@@ -1860,7 +2332,7 @@ impl HttpTransport for ReqwestTransport {
             let mut truncated = false;
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| classify_send_error(&e))?;
+                let chunk = chunk.map_err(classify_send_error)?;
                 if body.len() + chunk.len() > max_response_bytes {
                     let remaining = max_response_bytes.saturating_sub(body.len());
                     body.extend_from_slice(&chunk[..remaining]);
@@ -1886,7 +2358,20 @@ impl HttpTransport for ReqwestTransport {
 /// typed "certificate verification failed" variant) -- documented
 /// best-effort, never load-bearing for the SSRF property itself (that is
 /// enforced entirely before this function is ever reached).
-fn classify_send_error(err: &reqwest::Error) -> HostResultError {
+///
+/// **The request URL is stripped of its query/fragment/userinfo first**
+/// ([`strip_url_for_log`]): `reqwest::Error`'s `Display` embeds the full URL
+/// (`error sending request for url (https://host/path?key=<secret>)`), and
+/// the query of a `?<param>` secret ref carries a host-injected credential
+/// (while bundle-supplied parameters may carry user-identifying data). This
+/// is the transport-level layer; [`EgressGuard::send_checked`] additionally
+/// scrubs the exact resolved secret values from whatever any
+/// [`HttpTransport`] returns.
+fn classify_send_error(mut err: reqwest::Error) -> HostResultError {
+    if let Some(url) = err.url_mut() {
+        strip_url_for_log(url);
+    }
+    let err = &err;
     if err.is_timeout() {
         return denied("timeout", err.to_string());
     }
@@ -4323,5 +4808,1087 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    // -- Query-parameter secret refs (`?key`): resolved host-side and
+    // injected on the secret-bound FQDN's first hop only, dropped on every
+    // redirect hop, and scrubbed from every log line, transport error and
+    // response that could carry the value back out. The value never enters
+    // the guest. --
+
+    const QS_APP: &str = "waddles.a.b.c";
+    const QS_WEATHER: &str = "api.weatherapi.com";
+    const QS_SECRET: &str = "wk_live_9f8e7d6c5b4a3210";
+    const QS_HEADER_SECRET: &str = "hdr-token-abc123";
+
+    /// [`CredentialBroker`] over a fixed `granted env var name -> value`
+    /// table -- no process-environment mutation, so these tests can run in
+    /// parallel with every other test in the module.
+    struct TableBroker(HashMap<String, String>);
+
+    impl CredentialBroker for TableBroker {
+        fn resolve(&self, handle: &SecretHandle) -> Result<String, HostResultError> {
+            self.0.get(&handle.0).cloned().ok_or_else(|| {
+                denied(
+                    "secret_unresolved",
+                    format!("granted env var {:?} is not configured", handle.0),
+                )
+            })
+        }
+    }
+
+    /// A [`FakeTransport`] answering `sequence` in send order (the fixture's
+    /// own queue is a LIFO stack, so this reverses it once, here).
+    fn fake_transport(
+        sequence: Vec<Result<TransportResponse, HostResultError>>,
+    ) -> Arc<FakeTransport> {
+        let transport = FakeTransport::default();
+        for response in sequence.into_iter().rev() {
+            transport.responses.lock().unwrap().push(response);
+        }
+        Arc::new(transport)
+    }
+
+    fn redirect_to(location: &str) -> Result<TransportResponse, HostResultError> {
+        Ok(TransportResponse {
+            status: 302,
+            headers: vec![("location".to_string(), location.to_string())],
+            body: vec![],
+            truncated: false,
+        })
+    }
+
+    /// A guard whose bundle holds GET grants on `hosts` and these secret
+    /// grants: `KEY_REF` (value `key_value`, the query secret), `TOKEN_REF`
+    /// (`QS_HEADER_SECRET`, a header secret), `EMPTY_REF` (resolves to the
+    /// empty string) and `UNSET_REF` (granted, but the broker has no value).
+    /// DNS is stubbed to one fixed public address.
+    fn qs_guard(transport: &Arc<FakeTransport>, hosts: &[&str], key_value: &str) -> EgressGuard {
+        let egress = hosts
+            .iter()
+            .map(|h| (h.to_string(), vec!["GET".to_string()]))
+            .collect();
+        let grants = HashMap::from([
+            ("KEY_REF".to_string(), "QS_KEY_ENV".to_string()),
+            ("TOKEN_REF".to_string(), "QS_TOKEN_ENV".to_string()),
+            ("EMPTY_REF".to_string(), "QS_EMPTY_ENV".to_string()),
+            ("UNSET_REF".to_string(), "QS_UNSET_ENV".to_string()),
+        ]);
+        let broker = TableBroker(HashMap::from([
+            ("QS_KEY_ENV".to_string(), key_value.to_string()),
+            ("QS_TOKEN_ENV".to_string(), QS_HEADER_SECRET.to_string()),
+            ("QS_EMPTY_ENV".to_string(), String::new()),
+        ]));
+        EgressGuard::new(
+            Arc::clone(transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row_and_secrets(QS_APP, egress, grants),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_credential_broker(Arc::new(broker) as Arc<dyn CredentialBroker>)
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>)
+    }
+
+    fn sent_urls(transport: &FakeTransport) -> Vec<String> {
+        transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.url.clone())
+            .collect()
+    }
+
+    fn weather_args(url: &str, secret_refs: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"method": "GET", "url": url, "secret_refs": secret_refs})
+    }
+
+    #[tokio::test]
+    async fn query_secret_ref_is_injected_into_the_url_on_the_bound_fqdn() {
+        let transport = fake_transport(vec![Ok(ok_response())]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        let guest_args = weather_args(
+            "https://api.weatherapi.com/v1/current.json?q=London",
+            serde_json::json!({"?key": "KEY_REF"}),
+        );
+        // The guest only ever names the symbolic ref -- never the value.
+        assert!(!guest_args.to_string().contains(QS_SECRET));
+
+        guard
+            .send(QS_APP, &guest_args)
+            .await
+            .expect("send succeeds");
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url,
+            format!("https://api.weatherapi.com/v1/current.json?q=London&key={QS_SECRET}")
+        );
+        assert!(
+            requests[0].headers.is_empty(),
+            "a ?-ref is a query parameter, never also a header"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_secret_ref_creates_the_query_when_the_url_has_none() {
+        let transport = fake_transport(vec![Ok(ok_response())]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("send succeeds");
+        assert_eq!(
+            sent_urls(&transport),
+            vec![format!(
+                "https://api.weatherapi.com/v1/current.json?key={QS_SECRET}"
+            )]
+        );
+    }
+
+    /// The host's value always wins: a bundle-supplied parameter of the same
+    /// name (a dummy, or a duplicate meant to confuse a first-wins server) is
+    /// removed, leaving exactly one `key=`.
+    #[tokio::test]
+    async fn query_secret_ref_replaces_a_bundle_supplied_same_named_parameter() {
+        let transport = fake_transport(vec![Ok(ok_response())]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json?key=guess&q=London&key=other",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("send succeeds");
+        let url = reqwest::Url::parse(&sent_urls(&transport)[0]).unwrap();
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("q".to_string(), "London".to_string()),
+                ("key".to_string(), QS_SECRET.to_string())
+            ]
+        );
+    }
+
+    /// A secret containing URL metacharacters round-trips as exactly one
+    /// parameter value -- it can never terminate the parameter or smuggle in
+    /// extra ones.
+    #[tokio::test]
+    async fn query_secret_value_is_url_encoded_and_cannot_inject_extra_parameters() {
+        let nasty = "p@ss w/rd&admin=1#frag+é";
+        let transport = fake_transport(vec![Ok(ok_response())]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], nasty);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json?q=London",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("send succeeds");
+        let url = reqwest::Url::parse(&sent_urls(&transport)[0]).unwrap();
+        assert!(
+            url.fragment().is_none(),
+            "the secret must not open a fragment"
+        );
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("q".to_string(), "London".to_string()),
+                ("key".to_string(), nasty.to_string())
+            ]
+        );
+    }
+
+    /// A header-only call is byte-for-byte what it was before `?` refs
+    /// existed: the bundle's URL is untouched and the header is injected.
+    #[tokio::test]
+    async fn header_secret_refs_still_work_and_leave_the_url_untouched() {
+        let transport = fake_transport(vec![Ok(ok_response())]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        let url = "https://api.weatherapi.com/v1/current.json?q=Lon%20don";
+        guard
+            .send(
+                QS_APP,
+                &weather_args(url, serde_json::json!({"Authorization": "TOKEN_REF"})),
+            )
+            .await
+            .expect("send succeeds");
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests[0].url, url);
+        assert!(requests[0]
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == QS_HEADER_SECRET));
+    }
+
+    /// Header and query refs in one call each land in their own slot, and
+    /// neither value leaks into the other.
+    #[tokio::test]
+    async fn header_and_query_secret_refs_coexist_in_one_call() {
+        let transport = fake_transport(vec![Ok(ok_response())]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json",
+                    serde_json::json!({"Authorization": "TOKEN_REF", "?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("send succeeds");
+        let requests = transport.requests.lock().unwrap();
+        assert!(requests[0].url.contains(&format!("key={QS_SECRET}")));
+        assert!(!requests[0].url.contains(QS_HEADER_SECRET));
+        assert!(requests[0]
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == QS_HEADER_SECRET));
+        assert!(!requests[0]
+            .headers
+            .iter()
+            .any(|(_, v)| v.contains(QS_SECRET)));
+    }
+
+    /// Regression: `core/bundle_executor` serializes the WIT
+    /// `list<tuple<string, string>>` as an array of `[slot, ref]` pairs, and
+    /// the previous map-only decoder rejected that shape with `invalid_args`
+    /// -- so no guest-originated call ever reached the secret code at all.
+    #[tokio::test]
+    async fn secret_refs_accepts_the_executors_pair_list_wire_shape() {
+        let transport = fake_transport(vec![Ok(ok_response())]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json",
+                    serde_json::json!([["Authorization", "TOKEN_REF"], ["?key", "KEY_REF"]]),
+                ),
+            )
+            .await
+            .expect("pair-list shape is accepted");
+        // ... and an empty list (a call with no secrets at all) too.
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json",
+                    serde_json::json!([]),
+                ),
+            )
+            .await
+            .expect("empty pair list is accepted");
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].url.contains(&format!("key={QS_SECRET}")));
+        assert!(requests[0]
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == QS_HEADER_SECRET));
+        assert_eq!(
+            requests[1].url,
+            "https://api.weatherapi.com/v1/current.json"
+        );
+    }
+
+    // -- The executor <-> guard `http.send` JSON wire (the request body and
+    // the response headers/body). `core/bundle_host_http/tests/
+    // executor_wire_e2e.rs` drives the real executor against this guard;
+    // these pin the guard's half at unit level. --
+
+    /// A hermetic guard holding `GET`/`POST` grants on `api.example.test`,
+    /// DNS stubbed to one fixed public address, sending through `transport`.
+    fn wire_guard(transport: &Arc<FakeTransport>) -> EgressGuard {
+        EgressGuard::new(
+            Arc::clone(transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row(
+                QS_APP,
+                vec![(
+                    "api.example.test".to_string(),
+                    vec!["GET".to_string(), "POST".to_string()],
+                )],
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>)
+    }
+
+    /// Regression (mismatch b): the executor used to send the body as a
+    /// `body` byte array, which this guard ignored -- every request body was
+    /// dropped. The wire's body is `body_base64`; it must arrive at the
+    /// transport byte-exact, including bytes that are not valid UTF-8, and an
+    /// empty body (`""`) must stay distinct from no body (key absent).
+    #[tokio::test]
+    async fn request_body_base64_reaches_the_transport_byte_exact() {
+        let transport = fake_transport(vec![Ok(ok_response()), Ok(ok_response())]);
+        let guard = wire_guard(&transport);
+        let body = [0x00_u8, 0xff, 0x10, b'h', b'i'];
+        guard
+            .send(
+                QS_APP,
+                &serde_json::json!({
+                    "method": "POST",
+                    "url": "https://api.example.test/hook",
+                    "headers": [{"name": "content-type", "value": "application/octet-stream"}],
+                    "body_base64": base64::engine::general_purpose::STANDARD.encode(body),
+                    "secret_refs": [],
+                }),
+            )
+            .await
+            .expect("send succeeds");
+        guard
+            .send(
+                QS_APP,
+                &serde_json::json!({
+                    "method": "POST", "url": "https://api.example.test/hook", "body_base64": "",
+                }),
+            )
+            .await
+            .expect("empty body succeeds");
+        guard
+            .send(
+                QS_APP,
+                &serde_json::json!({"method": "GET", "url": "https://api.example.test/"}),
+            )
+            .await
+            .expect("no body succeeds");
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests[0].body.as_deref(), Some(&body[..]));
+        assert_eq!(requests[1].body.as_deref(), Some(&[][..]));
+        assert_eq!(requests[2].body, None);
+    }
+
+    /// Regression (mismatch b, fail-loud half): a request carrying the old
+    /// executor-only `body` array -- or any other key this guard does not
+    /// decode -- is refused `invalid_args` before any network activity,
+    /// instead of being sent with its body silently discarded.
+    #[tokio::test]
+    async fn unknown_or_legacy_request_keys_are_rejected_not_silently_dropped() {
+        let transport = fake_transport(vec![]);
+        let guard = wire_guard(&transport);
+        for (label, args) in [
+            (
+                "legacy byte-array body",
+                serde_json::json!({
+                    "method": "POST", "url": "https://api.example.test/hook", "body": [1, 2, 3],
+                }),
+            ),
+            (
+                "unknown top-level key",
+                serde_json::json!({
+                    "method": "GET", "url": "https://api.example.test/", "bogus": true,
+                }),
+            ),
+            (
+                "unknown header key",
+                serde_json::json!({
+                    "method": "GET", "url": "https://api.example.test/",
+                    "headers": [{"name": "x", "value": "y", "extra": 1}],
+                }),
+            ),
+        ] {
+            let err = guard
+                .send(QS_APP, &args)
+                .await
+                .expect_err("must be rejected");
+            assert_eq!(err.code, "invalid_args", "{label}: {err:?}");
+        }
+        assert!(
+            transport.requests.lock().unwrap().is_empty(),
+            "a malformed request must never reach the transport"
+        );
+    }
+
+    /// Mismatch (c): the success value's shape is the contract the executor
+    /// decodes -- exactly `status`, `headers` as `{name, value}` objects
+    /// (duplicates and order preserved), `body_base64`, `truncated`.
+    #[tokio::test]
+    async fn success_result_wire_shape_is_name_value_headers_and_base64_body() {
+        let transport = fake_transport(vec![Ok(TransportResponse {
+            status: 201,
+            headers: vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("set-cookie".to_string(), "a=1".to_string()),
+                ("set-cookie".to_string(), "b=2".to_string()),
+            ],
+            body: vec![0x00, 0xff, 0x10, b'h', b'i'],
+            truncated: true,
+        })]);
+        let guard = wire_guard(&transport);
+        let result = guard
+            .send(
+                QS_APP,
+                &serde_json::json!({"method": "GET", "url": "https://api.example.test/"}),
+            )
+            .await
+            .expect("send succeeds");
+        let mut keys: Vec<&str> = result
+            .as_object()
+            .expect("result is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["body_base64", "headers", "status", "truncated"]);
+        assert_eq!(result["status"], 201);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["body_base64"], "AP8QaGk=");
+        assert_eq!(
+            result["headers"],
+            serde_json::json!([
+                {"name": "content-type", "value": "application/json"},
+                {"name": "set-cookie", "value": "a=1"},
+                {"name": "set-cookie", "value": "b=2"},
+            ])
+        );
+    }
+
+    // -- Bound-host only; dropped on every redirect hop --
+
+    /// The core property: a redirect to another (allowlisted) host never
+    /// carries the key -- not the host-injected one, and not one the server
+    /// echoes back in `Location`.
+    #[tokio::test]
+    async fn query_secret_is_dropped_on_a_redirect_to_a_different_host() {
+        let transport = fake_transport(vec![
+            redirect_to("https://host-b.example.com/next?key=echoed-by-server&x=1"),
+            Ok(ok_response()),
+        ]);
+        let guard = qs_guard(&transport, &[QS_WEATHER, "host-b.example.com"], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json?q=London",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("redirect followed to a terminal response");
+        let urls = sent_urls(&transport);
+        assert_eq!(urls.len(), 2);
+        assert!(
+            urls[0].contains(&format!("key={QS_SECRET}")),
+            "hop 0 is the bound host"
+        );
+        assert_eq!(urls[1], "https://host-b.example.com/next?x=1");
+        assert!(!urls[1].contains(QS_SECRET));
+    }
+
+    /// Stricter than the header rule on purpose: even a redirect that stays
+    /// on the bound host does not re-send the key (the spec is "drop on ANY
+    /// redirect hop").
+    #[tokio::test]
+    async fn query_secret_is_dropped_on_a_same_host_redirect_too() {
+        let transport = fake_transport(vec![
+            redirect_to("/v1/current.json?q=London&key=server-chosen"),
+            Ok(ok_response()),
+        ]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/old.json?q=London",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("redirect followed to a terminal response");
+        let urls = sent_urls(&transport);
+        assert_eq!(
+            urls[1],
+            "https://api.weatherapi.com/v1/current.json?q=London"
+        );
+    }
+
+    /// A redirect target reflecting the secret under a *different* parameter
+    /// name (so the name-based strip can't see it) is still neutralized: the
+    /// response scrub redacts the value before the `Location` is followed.
+    #[tokio::test]
+    async fn a_redirect_location_echoing_the_secret_under_another_name_is_scrubbed() {
+        let transport = fake_transport(vec![
+            redirect_to(&format!(
+                "https://host-b.example.com/next?token={QS_SECRET}&x=1"
+            )),
+            Ok(ok_response()),
+        ]);
+        let guard = qs_guard(&transport, &[QS_WEATHER, "host-b.example.com"], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("redirect followed to a terminal response");
+        let urls = sent_urls(&transport);
+        assert!(!urls[1].contains(QS_SECRET), "hop 1 URL was {}", urls[1]);
+    }
+
+    /// `secret_granted_hosts` widens the *header* secret to another host; it
+    /// must never widen a query secret.
+    #[tokio::test]
+    async fn secret_granted_hosts_never_widens_a_query_secret() {
+        let transport = fake_transport(vec![
+            redirect_to("https://host-b.example.com/next"),
+            Ok(ok_response()),
+        ]);
+        let mut row = EgressRuleRow::from_legacy_patterns(
+            vec![
+                (QS_WEATHER.to_string(), vec!["GET".to_string()]),
+                ("host-b.example.com".to_string(), vec!["GET".to_string()]),
+            ],
+            None,
+            HashMap::from([("KEY_REF".to_string(), "QS_KEY_ENV".to_string())]),
+        );
+        row.secret_granted_hosts
+            .insert("host-b.example.com".to_string());
+        let catalog = TestCatalog::new();
+        catalog.insert(QS_APP, row);
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_credential_broker(Arc::new(TableBroker(HashMap::from([(
+            "QS_KEY_ENV".to_string(),
+            QS_SECRET.to_string(),
+        )]))) as Arc<dyn CredentialBroker>)
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("redirect followed");
+        let urls = sent_urls(&transport);
+        assert_eq!(urls[1], "https://host-b.example.com/next");
+    }
+
+    /// Only a `net.http.fqdn` grant may receive a query secret -- an
+    /// IP-literal grant is refused loudly and nothing is sent.
+    #[tokio::test]
+    async fn query_secret_is_refused_on_an_ip_literal_grant() {
+        let transport = fake_transport(vec![Ok(ok_response())]);
+        let guard = qs_guard(&transport, &["93.184.216.34"], QS_SECRET);
+        let err = guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://93.184.216.34/v1/current.json",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "secret_query_requires_fqdn");
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    // -- Fail loud: never a silent unauthenticated call --
+
+    #[tokio::test]
+    async fn an_unresolvable_query_secret_ref_fails_loud_and_sends_nothing() {
+        for (secret_ref, expected_code) in [
+            ("UNSET_REF", "secret_unresolved"),
+            ("EMPTY_REF", "secret_unresolved"),
+            ("NEVER_GRANTED_REF", "secret_not_granted"),
+        ] {
+            let transport = fake_transport(vec![Ok(ok_response())]);
+            let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+            let err = guard
+                .send(
+                    QS_APP,
+                    &weather_args(
+                        "https://api.weatherapi.com/v1/current.json?q=London",
+                        serde_json::json!({"?key": secret_ref}),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, expected_code, "ref {secret_ref}");
+            assert!(
+                transport.requests.lock().unwrap().is_empty(),
+                "ref {secret_ref}: nothing may be sent without the credential"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_query_secret_slots_are_invalid_args() {
+        let too_long = format!("?{}", "a".repeat(MAX_QUERY_SECRET_NAME_LEN + 1));
+        for slot in [
+            "?",
+            "?a&b",
+            "?a=b",
+            "?a b",
+            "?a#b",
+            "?a/b",
+            "?é",
+            too_long.as_str(),
+        ] {
+            let transport = fake_transport(vec![Ok(ok_response())]);
+            let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+            let err = guard
+                .send(
+                    QS_APP,
+                    &weather_args(
+                        "https://api.weatherapi.com/v1/current.json",
+                        serde_json::json!([[slot, "KEY_REF"]]),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "invalid_args", "slot {slot:?}");
+            assert!(transport.requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_same_query_parameter_named_twice_is_invalid_args() {
+        let transport = fake_transport(vec![Ok(ok_response())]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        let err = guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json",
+                    serde_json::json!([["?key", "KEY_REF"], ["?key", "KEY_REF"]]),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    // -- Redaction: transport errors, responses, Debug, logs --
+
+    /// A transport error embedding the full request URL (what `reqwest`'s
+    /// `Display` does) comes back with the secret scrubbed -- in its raw
+    /// form and in both URL encodings, with the error code untouched.
+    #[tokio::test]
+    async fn a_transport_error_embedding_the_query_secret_is_scrubbed() {
+        let nasty = "p@ss w/rd&x=1";
+        let form = form_encode_query_value(nasty);
+        let rfc = percent_encode_rfc3986(nasty);
+        assert_ne!(form, rfc, "fixture must exercise both encodings");
+        let leaky = format!(
+            "error sending request for url (https://api.weatherapi.com/v1/current.json?q=London&key={form}) raw={nasty} rfc={rfc}"
+        );
+        let transport = fake_transport(vec![Err(denied("transport", leaky))]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], nasty);
+        let err = guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json?q=London",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "transport");
+        for variant in [nasty, form.as_str(), rfc.as_str()] {
+            assert!(
+                !err.message.contains(variant),
+                "{variant:?} leaked into {:?}",
+                err.message
+            );
+        }
+        assert!(err.message.contains(REDACTED));
+    }
+
+    /// Precondition for the next two tests: an *unredacted* `reqwest` error
+    /// for a failed connect really does embed the secret-bearing URL, so a
+    /// passing "no secret in the error" assertion below is a meaningful one.
+    async fn raw_reqwest_connect_error(url: &str, addr: SocketAddr) -> reqwest::Error {
+        reqwest::Client::builder()
+            .resolve("secret-host.example", addr)
+            .timeout(Duration::from_millis(300))
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap_err()
+    }
+
+    /// A loopback address nothing listens on: connect is refused at once, no
+    /// network involved.
+    async fn closed_local_addr() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        addr
+    }
+
+    #[tokio::test]
+    async fn real_reqwest_transport_errors_never_contain_the_query_secret() {
+        let addr = closed_local_addr().await;
+        let url = format!("http://secret-host.example/v1/current.json?q=London&key={QS_SECRET}");
+        let raw = raw_reqwest_connect_error(&url, addr).await;
+        assert!(
+            raw.to_string().contains(QS_SECRET),
+            "precondition: reqwest's own Display embeds the URL (got {raw})"
+        );
+
+        let err = ReqwestTransport::new()
+            .send(
+                TransportRequest {
+                    method: "GET".to_string(),
+                    url: url.clone(),
+                    pinned_addr: addr,
+                    headers: vec![],
+                    body: None,
+                },
+                Duration::from_millis(300),
+                1024,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            !err.message.contains(QS_SECRET) && !err.message.contains("key="),
+            "transport error leaked the query: {:?}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("London"),
+            "bundle-supplied query parameters are stripped from errors too: {:?}",
+            err.message
+        );
+    }
+
+    /// End to end through the real [`ReqwestTransport`]: an induced transport
+    /// failure (nothing is listening / routable at the pinned address) never
+    /// surfaces the secret to the caller of `EgressGuard::send`.
+    #[tokio::test]
+    async fn an_induced_transport_error_through_the_guard_never_contains_the_secret() {
+        let mut limits = default_limits();
+        limits.timeout = Duration::from_millis(300);
+        // TEST-NET-1 (RFC 5737): unroutable, so the connect fails or times
+        // out without touching a real host.
+        let guard = EgressGuard::new(
+            Arc::new(ReqwestTransport::new()),
+            limits,
+            catalog_with_row_and_secrets(
+                QS_APP,
+                vec![(QS_WEATHER.to_string(), vec!["GET".to_string()])],
+                HashMap::from([("KEY_REF".to_string(), "QS_KEY_ENV".to_string())]),
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_credential_broker(Arc::new(TableBroker(HashMap::from([(
+            "QS_KEY_ENV".to_string(),
+            QS_SECRET.to_string(),
+        )]))) as Arc<dyn CredentialBroker>)
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "192.0.2.1:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>);
+        let err = guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json?q=London",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            ["timeout", "transport", "tls_verification_failed"].contains(&err.code.as_str()),
+            "expected a transport-class failure, got {}: {}",
+            err.code,
+            err.message
+        );
+        assert!(
+            !err.message.contains(QS_SECRET),
+            "secret leaked into {:?}",
+            err.message
+        );
+    }
+
+    /// A server that reflects the request URL -- or hands back a pagination
+    /// `Link` -- cannot give the guest a secret the host injected.
+    #[tokio::test]
+    async fn response_headers_and_body_echoing_the_query_secret_are_scrubbed() {
+        let echoed = format!("https://api.weatherapi.com/v1/current.json?q=London&key={QS_SECRET}");
+        let transport = fake_transport(vec![Ok(TransportResponse {
+            status: 200,
+            headers: vec![(
+                "link".to_string(),
+                format!("<{echoed}&page=2>; rel=\"next\""),
+            )],
+            body: format!("{{\"request\":\"{echoed}\"}}").into_bytes(),
+            truncated: false,
+        })]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        let value = guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json?q=London",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("send succeeds");
+        let body = base64::engine::general_purpose::STANDARD
+            .decode(value["body_base64"].as_str().unwrap())
+            .unwrap();
+        let rendered = format!("{value}{}", String::from_utf8_lossy(&body));
+        assert!(
+            !rendered.contains(QS_SECRET),
+            "secret reached the guest: {rendered}"
+        );
+        assert!(String::from_utf8_lossy(&body).contains(REDACTED));
+        assert!(value["headers"][0]["value"]
+            .as_str()
+            .unwrap()
+            .contains(REDACTED));
+    }
+
+    #[test]
+    fn transport_request_debug_never_prints_a_secret() {
+        let req = TransportRequest {
+            method: "GET".to_string(),
+            url: format!("https://api.weatherapi.com/v1/current.json?q=London&key={QS_SECRET}"),
+            pinned_addr: "93.184.216.34:443".parse().unwrap(),
+            headers: vec![("Authorization".to_string(), QS_HEADER_SECRET.to_string())],
+            body: Some(vec![1, 2, 3]),
+        };
+        let rendered = format!("{req:?} {req:#?}");
+        assert!(!rendered.contains(QS_SECRET), "{rendered}");
+        assert!(!rendered.contains(QS_HEADER_SECRET), "{rendered}");
+        assert!(!rendered.contains("London"), "{rendered}");
+        assert!(rendered.contains("api.weatherapi.com/v1/current.json"));
+        assert!(rendered.contains("Authorization"));
+    }
+
+    /// Minimal in-test `tracing` subscriber recording every event's fields,
+    /// so the "no secret in any log line" property is asserted against what
+    /// the guard really emits (no `tracing-subscriber` dependency needed).
+    struct CaptureSubscriber {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct FieldCollector<'a>(&'a mut String);
+
+    impl tracing::field::Visit for FieldCollector<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write;
+            let _ = write!(self.0, "{}={value:?} ", field.name());
+        }
+    }
+
+    impl tracing::Subscriber for CaptureSubscriber {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut line = String::new();
+            event.record(&mut FieldCollector(&mut line));
+            self.events.lock().unwrap().push(line);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Every log line the guard emits -- on a successful call, a redirect,
+    /// and a failing transport -- is free of the secret, and the capture
+    /// really did record events (a zero-event capture would prove nothing).
+    #[tokio::test]
+    async fn guard_log_output_never_contains_the_query_secret() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        // `Dispatch::new` registers with tracing's process-wide callsite
+        // registry. Holding a second live dispatcher keeps each callsite's
+        // cached interest computed across *all* dispatchers; with only one
+        // registered, a concurrently running test thread (which has no
+        // subscriber) can be the first to hit a callsite, cache
+        // `Interest::never` for it, and silently blind this capture.
+        let _spare = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let capture = tracing::Dispatch::new(CaptureSubscriber {
+            events: Arc::clone(&events),
+        });
+        let _guard = tracing::dispatcher::set_default(&capture);
+
+        // Success + redirect hop.
+        let transport = fake_transport(vec![
+            redirect_to("https://host-b.example.com/next?x=1"),
+            Ok(ok_response()),
+        ]);
+        let guard = qs_guard(&transport, &[QS_WEATHER, "host-b.example.com"], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json?q=London",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("send succeeds");
+
+        // Failing transport whose own message embeds the secret.
+        let leaky = format!("error sending request for url (https://x/?key={QS_SECRET})");
+        let transport = fake_transport(vec![Err(denied("transport", leaky))]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json?q=London",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+
+        let events = events.lock().unwrap();
+        assert!(
+            events.len() >= 3,
+            "expected >=3 captured log events (2 hops + 1 error + 1 hop), got {}",
+            events.len()
+        );
+        for line in events.iter() {
+            assert!(!line.contains(QS_SECRET), "secret in log line: {line}");
+            assert!(
+                !line.contains("London"),
+                "query leaked into log line: {line}"
+            );
+        }
+        assert!(
+            events
+                .iter()
+                .any(|l| l.contains("query_secret_injected=true")),
+            "the injection decision is observable at DEBUG: {events:?}"
+        );
+    }
+
+    // -- Unit coverage for the helpers --
+
+    #[test]
+    fn redact_url_for_log_drops_query_fragment_and_userinfo() {
+        assert_eq!(
+            redact_url_for_log("https://user:pw@api.weatherapi.com/v1/x.json?key=abc&q=1#f"),
+            "https://api.weatherapi.com/v1/x.json"
+        );
+        assert_eq!(
+            redact_url_for_log("not a url ?key=abc"),
+            "<unparseable-url>"
+        );
+    }
+
+    #[test]
+    fn redactor_matches_raw_form_encoded_and_rfc3986_variants_longest_first() {
+        let redactor = SecretRedactor::new(["a b*~"]);
+        let text = format!(
+            "{} | {} | {}",
+            "a b*~",
+            form_encode_query_value("a b*~"),
+            percent_encode_rfc3986("a b*~")
+        );
+        let scrubbed = redactor.scrub_str(&text);
+        assert_eq!(scrubbed, format!("{REDACTED} | {REDACTED} | {REDACTED}"));
+        assert_eq!(
+            redactor.scrub_bytes(text.into_bytes()),
+            scrubbed.into_bytes()
+        );
+    }
+
+    #[test]
+    fn redactor_ignores_empty_values_and_is_a_no_op_without_secrets() {
+        let redactor = SecretRedactor::new([""]);
+        assert!(redactor.is_empty());
+        let err = denied("transport", "nothing to scrub here");
+        assert_eq!(redactor.scrub_error(err).message, "nothing to scrub here");
+    }
+
+    #[test]
+    fn inject_query_secrets_preserves_existing_query_bytes_when_no_name_conflicts() {
+        let mut url = reqwest::Url::parse("https://h.example/p?q=a%20b&z=%2F").unwrap();
+        inject_query_secrets(&mut url, &[("key".to_string(), "v".to_string())]);
+        assert_eq!(url.as_str(), "https://h.example/p?q=a%20b&z=%2F&key=v");
+    }
+
+    #[test]
+    fn strip_query_secret_params_removes_only_the_named_parameters() {
+        let secrets = [("key".to_string(), "v".to_string())];
+        let mut url = reqwest::Url::parse("https://h.example/p?a=1&key=x&b=2").unwrap();
+        strip_query_secret_params(&mut url, &secrets);
+        assert_eq!(url.as_str(), "https://h.example/p?a=1&b=2");
+        let mut only = reqwest::Url::parse("https://h.example/p?key=x").unwrap();
+        strip_query_secret_params(&mut only, &secrets);
+        assert_eq!(only.as_str(), "https://h.example/p");
+        let mut untouched = reqwest::Url::parse("https://h.example/p?a=%20").unwrap();
+        strip_query_secret_params(&mut untouched, &secrets);
+        assert_eq!(untouched.as_str(), "https://h.example/p?a=%20");
+    }
+
+    #[test]
+    fn secret_slot_parse_classifies_headers_and_query_params() {
+        assert_eq!(
+            SecretSlot::parse("Authorization").unwrap(),
+            SecretSlot::Header("Authorization")
+        );
+        assert_eq!(
+            SecretSlot::parse("?key").unwrap(),
+            SecretSlot::QueryParam("key")
+        );
+        assert_eq!(
+            SecretSlot::parse("?api_key-2.v").unwrap(),
+            SecretSlot::QueryParam("api_key-2.v")
+        );
+        assert!(SecretSlot::parse("?").is_err());
     }
 }
