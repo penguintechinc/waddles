@@ -109,6 +109,9 @@ def _resolve_target(raw: str, platform: str) -> str | None:
     try:
         return str(uuid.UUID(token))
     except ValueError:
+        # Not a UUID (free-text name or malformed): the caller answers with an explicit
+        # "can't look up by name" reply. Platform only -- the typed token is never logged.
+        log.debug("lastseen.target_not_uuid", platform=platform)
         return None
 
 

@@ -190,6 +190,8 @@ def _resolve_amount(raw: str | None, *, default: int | None) -> tuple[int | None
     try:
         value = int(raw.strip())
     except ValueError:
+        # Answered with an explicit error reply; the typed text is never logged (PII-free).
+        log.debug("dailycounter.amount_not_integer")
         return None, "that isn't a whole number"
     if not (_S64_MIN <= value <= _S64_MAX):
         return None, "that number is out of range"
