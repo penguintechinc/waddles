@@ -53,7 +53,7 @@ Users are presented with a cookie consent banner on first visit. The choice is r
 - `cookie_consent` table: stores `user_id`, consent type, and timestamp
 - `cookie_audit_log` table: immutable audit record of every consent event (granted, revoked, updated)
 
-Both tables are **hard deleted** as part of the GDPR data deletion flow (see below) — a user's consent history is itself PII.
+Both tables are **retained** by the GDPR data deletion flow (see *What Is Retained* below): the controller must be able to *demonstrate* that consent was obtained (GDPR Art. 5(2) accountability), so the consent record and its change log outlive the data subject's other data.
 
 ### "Do Not Track" / Preferences
 
@@ -67,7 +67,7 @@ Users can request deletion of their personal data via **Account Settings → Dat
 
 ### What Gets Deleted
 
-The deletion runs as a single database transaction:
+The deletion runs as a single, **all-or-nothing** database transaction (`services/data_privacy_service.py::anonymize_user_data`, shared by self-service and the Enterprise admin console):
 
 | Table | Action |
 |-------|--------|
@@ -77,9 +77,13 @@ The deletion runs as a single database transaction:
 | `user_passkeys` | Hard delete |
 | `activity_message_events` | Hard delete |
 | `activity_watch_sessions` | Hard delete |
-| `cookie_consent` | Hard delete |
-| `cookie_audit_log` | Hard delete |
+| `hub_chat_messages` | Hard delete (rows the user *sent*, every community) |
 | `hub_users` | **Anonymized in-place** (see below) |
+| `data_deletion_requests` | Completion row inserted (see *Deletion Audit Trail*) |
+
+**Atomicity.** Every delete, the `hub_users` anonymization and the `completed` ledger row are issued in one executor job and committed once. If any statement fails, everything is rolled back — the account is left exactly as it was, never half-erased — a separate `failed` ledger row records the attempt, and the original error is returned (a `500`; the request can simply be retried). Erasure never ends in a state where the data is gone but the proof of erasure is missing, or vice versa.
+
+**Export/erasure symmetry.** Everything the Art. 15 export discloses from the message/activity tables (`message_activity`, `watch_activity`, `chat_messages`) is removed by Art. 17 erasure. `hub_chat_messages` was previously exported but not erased (GRC finding #1, fixed).
 
 ### Anonymize In-Place: Why Not Hard Delete `hub_users`?
 
@@ -102,7 +106,12 @@ The retained row contains no PII: the email is a non-identifiable placeholder, a
 
 ### What Is Retained (and Why)
 
-Three categories of data are deliberately **not** deleted, each with a distinct legal basis under GDPR Article 6:
+Four categories of data are deliberately **not** deleted, each with a distinct legal basis under GDPR Article 6 or accountability duty under Article 5(2):
+
+#### 0. Consent and audit logs — `cookie_consent`, `cookie_audit_log`, `audit_log`, `data_deletion_requests`
+*Legal basis: Legal obligation / accountability (Article 6(1)(c), Article 5(2))*
+
+Consent records, the consent change log, the platform audit trail and the deletion-request ledger are **never** deleted by erasure. They are the controller's proof that consent was lawfully obtained and that the erasure request was honoured; deleting them would destroy the evidence the regulator can demand. They hold identifiers and technical metadata (user id, consent choices, IP, user agent) but not the profile, credentials, or message content that erasure removes. This is pinned in code (`ERASURE_RETAINED_TABLES`) and by regression tests (`hub_api/tests/test_data_privacy_erasure.py::TestRetention`).
 
 #### 1. `hub_user_identities` — Platform Account Links
 *Legal basis: User's own legitimate interest (Article 6(1)(f)) — account reclaim*
@@ -146,10 +155,35 @@ Every deletion attempt is recorded in `data_deletion_requests`. This table store
 | `requested_at` | Timestamp of request |
 | `completed_at` | Timestamp of completion |
 | `status` | `pending`, `completed`, or `failed` |
-| `deletion_scope` | JSONB: row counts deleted per table (no field values) |
-| `error_detail` | Failure reason if status = `failed` |
+| `deletion_scope` | JSONB: row counts deleted per table (no field values), including `chat_messages` |
+| `error_detail` | Failure category if status = `failed` — exception type / SQLSTATE only, never the driver message (which can echo row values) |
 
 Superadmins can view `{ requested_at, completed_at, status }` at `GET /api/v1/superadmin/users/:userId/deletion-request` for support inquiries. No PII is returned.
+
+### Admin / Bulk DSAR Console (Enterprise)
+
+Self-service data-subject rights (`GET`/`DELETE /api/v1/user/me/data`, above) are available in **every** tier — statutory rights are never tier-gated, and that path is unchanged. On top of it, a **tenant admin** on an Enterprise plan can run the same operations for a *caller-supplied* user, singly or in bulk. Feature contract `compliance.bulk_dsar` (Enterprise, flag `waddles.compliance.bulk_dsar`); the gate is the two-gate entitlement check (PostHog flag **and** license tier) and **fails closed** — either gate off or unreachable is a `402`.
+
+| Method | Path (under `/api/v1/tenant/<slug>/privacy`) | Action |
+|--------|----------------------------------------------|--------|
+| `GET` | `/users/<id>/export` | Access export (GDPR Art. 15/20) |
+| `POST` | `/users/<id>/erase` `{"confirm": true}` | Erasure — same anonymize-in-place core as self-service |
+| `PUT` | `/users/<id>/do-not-sell` | CCPA/CPRA Do-Not-Sell opt-out |
+| `POST` | `/bulk` `{"action", "userIds", "confirm"}` | Any of the three over many users |
+
+Bulk requests return `200` with a per-user `status` (`completed`, `already_done`, `not_found`, `conflict`, `failed`, `audit_unavailable`) — one user's failure never aborts the rest. Caps per request: 100 users (25 for `export`, which returns data inline).
+
+**Guardrails** (all enforced in `hub_api/services/admin_data_privacy_service.py`):
+
+1. **Authz order** — tenant (from the JWT, never a request field) → `tenant:admin` scope → URL slug must equal the JWT tenant → Enterprise gate.
+2. **Tenant fence** — the target must belong to the admin's own tenant (an active `tenant_admins` row, or membership of a community owned by that tenant). Anything else is `404`, never `403`, so the console is not a cross-tenant user-existence oracle.
+3. **Tenant-scoped export** — message/watch activity and chat rows are limited to the admin's tenant's communities; another tenant's rows are never disclosed.
+4. **Erasure rails** — `hub_users` is one global identity row, so an erase is refused (`conflict`) if the target is also a tenant admin or non-global community member of *another* tenant, is a platform super-admin, or is the acting admin (use self-service). Global-community membership is tenant-neutral and does not block. Erasure additionally requires `confirm: true`.
+5. **Mandatory audit, fail-closed** — every attempt writes an `audit_log` row **before** any data is touched; if that write fails the action is not performed (`503`, `audit_unavailable`). Rows are PII-free.
+
+`audit_log` row shape: `user_id` = acting admin; `action` = `dsar.export` / `dsar.erase` / `dsar.do_not_sell`; `target_type` = `user`; `target_id` = target `hub_users.id`; `details` = `{tenant_id, tenant_slug, bulk_id, outcome, ...}` where `outcome` is `attempted` → `completed` / `already_done` / `failed`, or `denied_not_in_tenant` / `denied_self` / `denied_super_admin` / `denied_shared_identity` for refused attempts (also audited). Exports add per-source `row_counts`; failures add `error_type` only.
+
+**Do-Not-Sell** is stored where the opt-out already lives, `cookie_consent.preferences.doNotSell`, and is **one-way** (opt-out only, forces `marketing` off; mirrored into the subject-visible `cookie_audit_log` as `ADMIN_DO_NOT_SELL`). Withdrawing an opt-out is the subject's own consent decision. A user with no consent record gets a new privacy-maximal one (`consent_method = admin_dsar`). Known pre-existing limitation: a later self-service category-preferences `PUT` rewrites the whole `preferences` object without `doNotSell` (documented in `cookie_consent_service.update_preferences`).
 
 ---
 

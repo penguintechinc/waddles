@@ -1129,6 +1129,47 @@ def bind_privacy_tables(dal: Any, *, migrate: bool = False) -> None:
     )
 
 
+def _define_audit_log(dal: Any, *, migrate: bool) -> None:
+    """Define `audit_log` once per DAL -- shared by the platform + admin-DSAR bindings.
+
+    Column provenance: `config/postgres/migrations/000_create_base_schema.sql`
+    (`audit_log`). Guarded on existence so whichever group binds first
+    (`bind_platform_tables()` at app startup, `bind_admin_privacy_tables()`
+    from the DSAR console's request hook, or either alone in a test) wins
+    without a duplicate-define error.
+    """
+    if "audit_log" in dal.tables:
+        return
+    dal.define_table(
+        "audit_log",
+        Field("user_id", "integer"),
+        Field("action", "string", length=100, notnull=True),
+        Field("target_type", "string", length=50),
+        Field("target_id", "string", length=255),
+        Field("details", "json"),
+        Field("ip_address", "string", length=45),
+        Field("user_agent", "text"),
+        Field("created_at", "datetime"),
+        migrate=migrate,
+    )
+
+
+def bind_admin_privacy_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind every table the Enterprise tenant-admin DSAR console reads/writes.
+
+    The console (`services/admin_data_privacy_service.py`) composes the
+    self-service Privacy group's tables (`bind_privacy_tables()`, which
+    itself builds on `bind_auth_tables()`'s `hub_users`/`tenant_admins`/
+    `communities`/`community_members`) with `audit_log` for its mandatory
+    audit trail. Idempotent; called from the console blueprint's
+    `before_request` hook for the same reason `bind_privacy_tables()` is
+    (see that function's docstring).
+    """
+    bind_auth_tables(dal, migrate=migrate)
+    bind_privacy_tables(dal, migrate=migrate)
+    _define_audit_log(dal, migrate=migrate)
+
+
 def bind_platform_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define every table the M3 Platform-admin/Public group queries.
 
@@ -1195,18 +1236,7 @@ def bind_platform_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
-    dal.define_table(
-        "audit_log",
-        Field("user_id", "integer"),
-        Field("action", "string", length=100, notnull=True),
-        Field("target_type", "string", length=50),
-        Field("target_id", "string", length=255),
-        Field("details", "json"),
-        Field("ip_address", "string", length=45),
-        Field("user_agent", "text"),
-        Field("created_at", "datetime"),
-        migrate=migrate,
-    )
+    _define_audit_log(dal, migrate=migrate)
 
     # Also bound by `bind_streaming_tables()` above (identical field list --
     # both groups ported it from the same real `004_add_missing_tables.sql`
