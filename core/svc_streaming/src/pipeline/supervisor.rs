@@ -6,6 +6,30 @@
 //! `docs/plans/2026-09-11-svc-streaming-pipeline-matrix.md` §6 for the
 //! supervision/observability contract this module implements.
 //!
+//! **Teardown (never shells out, never blocks a runtime worker).** Every
+//! attempt ends through one path -- `teardown_attempt`:
+//!
+//! 1. *Graceful quit = EOF on stdin.* ffmpeg's stdin **is** the media pipe
+//!    (`-i pipe:0`), so the old `q\n` "quit" command was just more media
+//!    bytes ffmpeg could never interpret. Dropping our write end delivers
+//!    EOF instead, which makes ffmpeg drain, write its muxer trailers and
+//!    exit on its own.
+//! 2. *Escalation* (stop requests only): grace -> `SIGTERM` to the whole
+//!    process group -> grace -> `SIGKILL`, delivered by direct `killpg`
+//!    syscalls ([`crate::pipeline::process_group`]) because the runtime
+//!    image has no `kill` binary. A failed delivery is logged, counted and
+//!    (for `SIGKILL`) retried against the direct child -- never ignored.
+//! 3. *Sweep + reap.* The group is `SIGKILL`ed once more while the leader's
+//!    PID is still reserved (so leaked helpers die), then the leader is
+//!    reaped with a bounded non-blocking poll, and the stderr event thread
+//!    is joined off the async workers with a bound. A child that cannot be
+//!    reaped is handed to a detached blocking reaper and the pipeline is
+//!    marked `Failed` rather than respawned.
+//!
+//! Every wait above is bounded ([`SupervisorConfig::stop_deadline`]), so one
+//! pipeline's stuck teardown cannot wedge `stop()`, a runtime worker, or the
+//! service's `/health`.
+//!
 //! **Progress parsing choice:** `ffmpeg-sidecar`'s built-in
 //! `FfmpegChild::iter()` event stream (parsed from ffmpeg's default
 //! stderr stats line) is used, not a hand-rolled `-progress pipe:2
@@ -30,7 +54,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use ffmpeg_sidecar::command::FfmpegCommand;
@@ -45,7 +69,21 @@ use crate::pipeline::model::{
     OutputSpec, PipelineEngine, PipelineError, PipelineHandle, PipelineId, PipelineSpec,
     PipelineState, PipelineStatus,
 };
+use crate::pipeline::process_group::{self, Delivery, GroupSignal};
 use crate::store::{SecretRef, SecretResolver};
+
+/// How often [`wait_for_exit`] re-checks child liveness between event-channel
+/// reads. Short enough that a clean exit is noticed within a frame or two.
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Locks a std mutex, recovering the guard if a panicking holder poisoned it.
+/// The guarded data here (progress counters, an optional pipe handle) has no
+/// cross-field invariant a mid-update panic could break, and refusing to lock
+/// would turn one panic into a wedged pipeline -- the failure mode this module
+/// exists to prevent.
+fn lock<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Tunable timings for the ffmpeg lifecycle (spec §6). [`Default`] matches
 /// the spec's production defaults; tests inject a config with millisecond-
@@ -60,10 +98,26 @@ pub struct SupervisorConfig {
     pub max_restarts: u32,
     /// No `Progress` event for this long while running -> forced restart.
     pub stall_timeout: Duration,
-    /// Grace period after `q\n` before escalating to SIGTERM.
+    /// Grace period after closing ffmpeg's stdin (EOF on the `pipe:0` media
+    /// input -- the graceful-quit signal) before escalating to SIGTERM.
     pub stop_grace_timeout: Duration,
     /// Grace period after SIGTERM before escalating to SIGKILL.
     pub term_grace_timeout: Duration,
+    /// Upper bound on each post-SIGKILL step -- waiting for the exit, reaping
+    /// the leader, and joining the stderr event thread. SIGKILL cannot be
+    /// ignored, so this only expires for a process stuck in uninterruptible
+    /// kernel sleep; the teardown then fails loudly instead of hanging.
+    pub reap_timeout: Duration,
+}
+
+impl SupervisorConfig {
+    /// Worst-case wall time of one pipeline teardown: both grace periods
+    /// expire, then the post-SIGKILL exit wait, the reap and the event-thread
+    /// join each consume their full [`Self::reap_timeout`]. [`FfmpegSupervisor::stop`]
+    /// bounds its wait on the monitor task by this value.
+    pub fn stop_deadline(&self) -> Duration {
+        self.stop_grace_timeout + self.term_grace_timeout + self.reap_timeout * 3
+    }
 }
 
 impl Default for SupervisorConfig {
@@ -75,6 +129,7 @@ impl Default for SupervisorConfig {
             stall_timeout: Duration::from_secs(10),
             stop_grace_timeout: Duration::from_secs(3),
             term_grace_timeout: Duration::from_secs(3),
+            reap_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -114,8 +169,9 @@ impl PipelineProgress {
 /// `FfmpegChild::take_stdin()` permanently takes ownership of the stdin
 /// channel (unlike `send_stdin_command`/`quit`, which only borrow it via
 /// take-then-replace) -- so exactly one owner of the channel must exist.
-/// The supervisor's own graceful-stop sequence (`q\n`) shares this exact
-/// handle with listeners rather than competing for a second one.
+/// The supervisor's graceful stop closes this same slot (dropping the write
+/// end delivers EOF on `pipe:0`) rather than competing for a second handle;
+/// writes after that fail fast with `InvalidSpec` instead of blocking.
 #[derive(Clone)]
 pub struct StdinHandle {
     slot: Arc<Slot>,
@@ -126,7 +182,7 @@ impl StdinHandle {
     /// hood (`std::process::ChildStdin`) -- callers on an async ingest
     /// path should wrap sustained writes in `tokio::task::spawn_blocking`.
     pub fn write(&self, bytes: &[u8]) -> Result<(), PipelineError> {
-        let mut guard = self.slot.stdin.lock().unwrap();
+        let mut guard = lock(&self.slot.stdin);
         match guard.as_mut() {
             Some(stdin) => stdin.write_all(bytes).map_err(|err| {
                 PipelineError::Other(anyhow::anyhow!("ffmpeg stdin write failed: {err}"))
@@ -166,6 +222,8 @@ struct Metrics {
     active_pipelines: Gauge<i64>,
     restarts_total: Counter<u64>,
     output_failures_total: Counter<u64>,
+    teardown_duration_ms: Histogram<u64>,
+    teardown_failures_total: Counter<u64>,
 }
 
 impl Metrics {
@@ -199,6 +257,17 @@ impl Metrics {
             output_failures_total: meter
                 .u64_counter("output_failures_total")
                 .with_description("Terminal pipeline/output failures, labeled by pipeline_id/kind/reason")
+                .build(),
+            teardown_duration_ms: meter
+                .u64_histogram("teardown_duration_ms")
+                .with_description("Wall time of one ffmpeg attempt teardown (sweep + reap + event-thread join)")
+                .with_unit("ms")
+                .build(),
+            teardown_failures_total: meter
+                .u64_counter("teardown_failures_total")
+                .with_description(
+                    "Teardown steps that failed or timed out, labeled by stage (signal/reap/join/stop_deadline) and signal",
+                )
                 .build(),
         }
     }
@@ -268,7 +337,7 @@ impl FfmpegSupervisor {
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Some(stdout) = slot.stdout.lock().unwrap().take() {
+            if let Some(stdout) = lock(&slot.stdout).take() {
                 return Ok(stdout);
             }
             if Instant::now() >= deadline {
@@ -285,7 +354,7 @@ impl FfmpegSupervisor {
     /// module docs for why this is separate from the trait's `status()`.
     pub async fn progress(&self, id: PipelineId) -> Result<PipelineProgress, PipelineError> {
         let slot = self.get_slot(id).await?;
-        let progress = slot.state.lock().unwrap().progress.clone();
+        let progress = lock(&slot.state).progress.clone();
         Ok(progress)
     }
 
@@ -455,7 +524,7 @@ impl PipelineEngine for FfmpegSupervisor {
         if !slot.has_process {
             self.registry.write().await.remove(&id);
             self.bump_active(-1);
-            slot.state.lock().unwrap().progress.state = PipelineState::Stopped;
+            lock(&slot.state).progress.state = PipelineState::Stopped;
             return Ok(());
         }
 
@@ -463,16 +532,27 @@ impl PipelineEngine for FfmpegSupervisor {
         slot.stop_notify.notify_one();
 
         let handle = slot.monitor.lock().await.take();
-        if let Some(handle) = handle {
-            // The monitor task performs the full q\n -> SIGTERM -> SIGKILL
-            // sequence itself (it owns the child) and decrements
-            // active_pipelines on the way out; bound the wait so a truly
-            // stuck task can't hang stop() forever.
-            let overall_timeout = self.config.stop_grace_timeout
-                + self.config.term_grace_timeout
-                + Duration::from_secs(5);
-            if tokio::time::timeout(overall_timeout, handle).await.is_err() {
-                tracing::warn!(pipeline_id = %id, "monitor task did not finish within the stop timeout");
+        if let Some(mut handle) = handle {
+            // The monitor task performs the full EOF -> SIGTERM -> SIGKILL
+            // -> sweep -> reap sequence itself (it owns the child) and
+            // decrements active_pipelines on the way out. Every step inside
+            // it is individually bounded, so this deadline is a backstop that
+            // should never fire; if it does, the failure is loud (error log +
+            // counter), the registry entry is still dropped, and the task is
+            // left to finish detached rather than aborted mid-teardown (an
+            // abort could orphan the very child it is trying to reap).
+            let deadline = self.config.stop_deadline();
+            match tokio::time::timeout(deadline, &mut handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join_err)) => {
+                    tracing::error!(pipeline_id = %id, error = %join_err, "pipeline monitor task ended abnormally during stop");
+                }
+                Err(_) => {
+                    tracing::error!(pipeline_id = %id, ?deadline, "pipeline monitor task did not finish within the stop deadline -- deregistering anyway");
+                    self.metrics
+                        .teardown_failures_total
+                        .add(1, &[KeyValue::new("stage", "stop_deadline")]);
+                }
             }
         }
 
@@ -482,7 +562,7 @@ impl PipelineEngine for FfmpegSupervisor {
 
     async fn status(&self, id: PipelineId) -> Result<PipelineStatus, PipelineError> {
         let slot = self.get_slot(id).await?;
-        let progress = slot.state.lock().unwrap().progress.clone();
+        let progress = lock(&slot.state).progress.clone();
         let mut detail = format!(
             "frame={} fps={:.1} bitrate_kbps={:.0} speed={:.2}x uptime_s={} restarts={}",
             progress.frame,
@@ -577,7 +657,7 @@ async fn run_pipeline(
         // reaches every process ffmpeg forks (e.g. filter helper
         // processes), not just the direct child -- otherwise an orphaned
         // grandchild can keep the stdout/stderr pipes open and the
-        // supervisor never observes EOF. See `terminate_process_group`.
+        // supervisor never observes EOF. See `process_group::signal_group`.
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(cmd.as_inner_mut(), 0);
         let spawn_result = attempt_span.in_scope(|| cmd.spawn());
@@ -593,7 +673,7 @@ async fn run_pipeline(
                     ],
                 );
                 restarts += 1;
-                slot.state.lock().unwrap().progress.restarts = restarts;
+                lock(&slot.state).progress.restarts = restarts;
                 if restarts > config.max_restarts {
                     set_state(
                         &slot,
@@ -607,7 +687,7 @@ async fn run_pipeline(
                     PipelineState::Degraded,
                     Some(format!("spawn failed: {err}")),
                 );
-                tokio::time::sleep(backoff).await;
+                backoff_sleep(&slot, backoff).await;
                 backoff = (backoff * 2).min(config.backoff_max);
                 continue 'outer;
             }
@@ -618,11 +698,11 @@ async fn run_pipeline(
         // parsing) sees it already gone and leaves it alone.
         if needs_stdout {
             if let Some(stdout) = child.take_stdout() {
-                *slot.stdout.lock().unwrap() = Some(stdout);
+                *lock(&slot.stdout) = Some(stdout);
             }
         }
         if let Some(stdin) = child.take_stdin() {
-            *slot.stdin.lock().unwrap() = Some(stdin);
+            *lock(&slot.stdin) = Some(stdin);
         } else {
             tracing::warn!(pipeline_id = %id, "ffmpeg child has no stdin channel");
         }
@@ -666,7 +746,7 @@ async fn run_pipeline(
             tokio::select! {
                 _ = slot.stop_notify.notified() => {
                     if slot.stopping.load(Ordering::SeqCst) {
-                        graceful_stop(id, &mut child, &mut rx, &slot, &config).await;
+                        graceful_stop(id, &mut child, &mut rx, &slot, &config, &metrics).await;
                         break 'attempt;
                     }
                 }
@@ -681,7 +761,7 @@ async fn run_pipeline(
                             }
                             metrics.encode_speed.record(p.speed as f64, &pid_kv);
                             metrics.output_bitrate_kbps.record(p.bitrate_kbps as f64, &pid_kv);
-                            let mut s = slot.state.lock().unwrap();
+                            let mut s = lock(&slot.state);
                             s.progress.state = PipelineState::Running;
                             s.progress.frame = p.frame;
                             s.progress.fps = p.fps;
@@ -707,24 +787,42 @@ async fn run_pipeline(
                             KeyValue::new("reason", "stall"),
                         ],
                     );
-                    terminate_process_group(&mut child, "KILL");
+                    // `teardown_attempt` below SIGKILLs the whole group.
                     break 'attempt;
                 }
             }
         }
 
-        if let Some(t) = iter_thread {
-            let _ = t.join();
-        }
-        let _ = child.wait();
+        let teardown_clean =
+            teardown_attempt(id, child, rx, iter_thread, &slot, &config, &metrics).await;
 
         if slot.stopping.load(Ordering::SeqCst) {
             set_state(&slot, PipelineState::Stopped, None);
             break 'outer;
         }
+        if !teardown_clean {
+            // A child that survived SIGKILL (uninterruptible kernel sleep) is
+            // a hazard; respawning on top of it would stack a second ffmpeg
+            // on the same outputs. Fail loudly and leave the slot for an
+            // operator / an explicit stop() + restart.
+            metrics.output_failures_total.add(
+                1,
+                &[
+                    KeyValue::new("pipeline_id", id.to_string()),
+                    KeyValue::new("kind", "process"),
+                    KeyValue::new("reason", "teardown_unclean"),
+                ],
+            );
+            set_state(
+                &slot,
+                PipelineState::Failed,
+                Some("ffmpeg process could not be reaped after SIGKILL".into()),
+            );
+            break 'outer;
+        }
 
         restarts += 1;
-        slot.state.lock().unwrap().progress.restarts = restarts;
+        lock(&slot.state).progress.restarts = restarts;
         metrics.restarts_total.add(
             1,
             &[
@@ -753,7 +851,7 @@ async fn run_pipeline(
             PipelineState::Degraded,
             Some(format!("restarting (attempt {restarts})")),
         );
-        tokio::time::sleep(backoff).await;
+        backoff_sleep(&slot, backoff).await;
         backoff = (backoff * 2).min(config.backoff_max);
     }
 
@@ -762,90 +860,271 @@ async fn run_pipeline(
 }
 
 fn set_state(slot: &Slot, state: PipelineState, error: Option<String>) {
-    let mut s = slot.state.lock().unwrap();
+    let mut s = lock(&slot.state);
     s.progress.state = state;
     if let Some(err) = error {
         s.progress.last_error = Some(err);
     }
 }
 
-/// Graceful stop sequence (spec §6): `q\n` on stdin -> grace period ->
-/// SIGTERM -> grace period -> SIGKILL. Reuses the SAME `rx` channel the
-/// caller's monitor loop already reads from (rather than a second signal)
-/// to learn when the process has actually exited.
+/// Sleeps for `delay` (a restart backoff) but wakes immediately when a stop
+/// is requested, so `stop()` never waits out a 30s backoff behind a pipeline
+/// that is between ffmpeg attempts.
+async fn backoff_sleep(slot: &Slot, delay: Duration) {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => {}
+        _ = slot.stop_notify.notified() => {}
+    }
+}
+
+/// Graceful stop sequence (spec §6): EOF on stdin -> grace period ->
+/// SIGTERM to the process group -> grace period -> SIGKILL to the group.
+///
+/// stdin is ffmpeg's `pipe:0` *media* input, so a `q` written there is just
+/// more (invalid) media bytes -- the only quit signal that cannot collide
+/// with the data is closing the pipe, which ffmpeg sees as end of input and
+/// answers by draining, writing muxer trailers and exiting. Exit is detected
+/// by polling `waitid(WNOWAIT)` (not by stderr EOF, which a leaked helper
+/// can delay indefinitely) while still draining `rx` so the stderr event
+/// thread never parks on a full channel and stalls ffmpeg's own shutdown.
+/// The caller ([`teardown_attempt`]) does the final sweep and reap.
 async fn graceful_stop(
     id: PipelineId,
     child: &mut ffmpeg_sidecar::child::FfmpegChild,
     rx: &mut mpsc::Receiver<MonitorEvent>,
     slot: &Slot,
     config: &SupervisorConfig,
+    metrics: &Metrics,
 ) {
     set_state(slot, PipelineState::Stopping, None);
-    {
-        let mut guard = slot.stdin.lock().unwrap();
-        if let Some(stdin) = guard.as_mut() {
-            let _ = stdin.write_all(b"q\n");
-            let _ = stdin.flush();
-        }
-    }
-    if wait_for_stream_end(rx, config.stop_grace_timeout).await {
+    close_stdin(id, slot);
+    if wait_for_exit(id, child, rx, config.stop_grace_timeout).await {
+        tracing::debug!(pipeline_id = %id, "ffmpeg exited after stdin EOF");
         return;
     }
-    tracing::warn!(pipeline_id = %id, "graceful stop grace period elapsed, sending SIGTERM");
-    terminate_process_group(child, "TERM");
-    if wait_for_stream_end(rx, config.term_grace_timeout).await {
+    tracing::warn!(pipeline_id = %id, "stdin-EOF grace period elapsed, sending SIGTERM to the process group");
+    deliver_signal(id, child, GroupSignal::Term, metrics);
+    if wait_for_exit(id, child, rx, config.term_grace_timeout).await {
         return;
     }
-    tracing::warn!(pipeline_id = %id, "SIGTERM grace period elapsed, sending SIGKILL");
-    terminate_process_group(child, "KILL");
-    let _ = wait_for_stream_end(rx, Duration::from_secs(5)).await;
+    tracing::warn!(pipeline_id = %id, "SIGTERM grace period elapsed, sending SIGKILL to the process group");
+    deliver_signal(id, child, GroupSignal::Kill, metrics);
+    if !wait_for_exit(id, child, rx, config.reap_timeout).await {
+        tracing::error!(pipeline_id = %id, timeout = ?config.reap_timeout, "ffmpeg still alive after SIGKILL");
+    }
 }
 
-async fn wait_for_stream_end(rx: &mut mpsc::Receiver<MonitorEvent>, timeout: Duration) -> bool {
+/// Closes the pipeline's ffmpeg stdin by dropping our write end (EOF for
+/// `-i pipe:0`). Never blocks: an ingest writer parked inside `write_all`
+/// holds this mutex, and waiting for it on an async worker is exactly the
+/// kind of wedge teardown must not have -- in that case EOF is skipped and
+/// the signal ladder (which unblocks the writer with `EPIPE`) takes over.
+fn close_stdin(id: PipelineId, slot: &Slot) {
+    match slot.stdin.try_lock() {
+        Ok(mut guard) => {
+            if guard.take().is_some() {
+                tracing::debug!(pipeline_id = %id, "closed ffmpeg stdin (EOF = end of media input)");
+            }
+        }
+        Err(TryLockError::Poisoned(poisoned)) => {
+            drop(poisoned.into_inner().take());
+        }
+        Err(TryLockError::WouldBlock) => {
+            tracing::warn!(pipeline_id = %id, "ffmpeg stdin busy with an in-flight ingest write -- skipping EOF, escalating via signals");
+        }
+    }
+}
+
+/// Polls until `child` has exited (without reaping it) or `timeout`
+/// elapses, returning whether it exited. Keeps draining `rx` meanwhile.
+async fn wait_for_exit(
+    id: PipelineId,
+    child: &mut ffmpeg_sidecar::child::FfmpegChild,
+    rx: &mut mpsc::Receiver<MonitorEvent>,
+    timeout: Duration,
+) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut events_open = true;
     loop {
+        match process_group::has_exited(child.as_inner_mut()) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(pipeline_id = %id, error = %err, "could not query ffmpeg exit status -- escalating");
+                return false;
+            }
+        }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return false;
         }
-        match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Some(MonitorEvent::StreamEnded)) | Ok(None) => return true,
-            Ok(Some(_)) => continue,
-            Err(_) => return false,
+        let tick = remaining.min(EXIT_POLL_INTERVAL);
+        if events_open {
+            if let Ok(None) = tokio::time::timeout(tick, rx.recv()).await {
+                events_open = false;
+            }
+        } else {
+            tokio::time::sleep(tick).await;
         }
     }
 }
 
-/// Signals `child`'s entire process **group**, not just the directly
-/// tracked PID. `run_pipeline` spawns every ffmpeg child into its own
-/// fresh process group (`process_group(0)`, PGID == the child's PID)
-/// specifically so this can target `-PGID` -- if ffmpeg (or, in testing,
-/// a multi-process fake binary) forks helper processes, a plain
-/// `child.kill()` only reaches the direct child, leaving descendants to
-/// hold the stdout/stderr pipes open as orphans and the supervisor never
-/// observing EOF.
-///
-/// No `nix`/`libc` dependency declared for this crate -- shelling out to
-/// the `kill` utility (present in the `debian:bookworm-slim` runtime
-/// image) avoids adding one just for signal delivery. Production targets
-/// are Linux containers only (see `client.md` Platform Targets -- this is
-/// a backend service, not a cross-platform client).
-#[cfg(unix)]
-fn terminate_process_group(child: &mut ffmpeg_sidecar::child::FfmpegChild, signal: &str) {
-    let pid = child.as_inner().id();
-    // `--` is mandatory here: without it, `kill` parses the negative-PID
-    // (process-group) argument `-<pid>` as an unrecognized option instead
-    // of a target, silently signalling nothing while still exiting 0.
-    let _ = std::process::Command::new("kill")
-        .args([format!("-{signal}"), "--".to_string(), format!("-{pid}")])
-        .status();
+/// Delivers `signal` to `child`'s whole process group and reports the
+/// outcome -- a failed delivery is an error log + counter, never silently
+/// dropped (the old shell-out ignored its exit status). If a `SIGKILL`
+/// cannot be delivered to the group, falls back to killing the direct child
+/// so the failure mode degrades to "orphaned helpers" rather than "ffmpeg
+/// survives teardown".
+fn deliver_signal(
+    id: PipelineId,
+    child: &mut ffmpeg_sidecar::child::FfmpegChild,
+    signal: GroupSignal,
+    metrics: &Metrics,
+) {
+    match process_group::signal_group(child.as_inner_mut(), signal) {
+        Ok(Delivery::Delivered) => {
+            tracing::debug!(pipeline_id = %id, signal = signal.name(), "signal delivered to ffmpeg process group");
+        }
+        Ok(Delivery::AlreadyGone) => {
+            tracing::debug!(pipeline_id = %id, signal = signal.name(), "ffmpeg process group already gone");
+        }
+        Err(err) => {
+            tracing::error!(pipeline_id = %id, signal = signal.name(), error = %err, "failed to signal ffmpeg process group");
+            metrics.teardown_failures_total.add(
+                1,
+                &[
+                    KeyValue::new("stage", "signal"),
+                    KeyValue::new("signal", signal.name()),
+                ],
+            );
+            if signal == GroupSignal::Kill {
+                if let Err(kill_err) = child.kill() {
+                    tracing::error!(pipeline_id = %id, error = %kill_err, "fallback direct kill of the ffmpeg child also failed");
+                }
+            }
+        }
+    }
 }
 
-#[cfg(not(unix))]
-fn terminate_process_group(child: &mut ffmpeg_sidecar::child::FfmpegChild, _signal: &str) {
-    // No portable process-group signalling outside unix -- fall back to
-    // killing just the tracked child.
-    let _ = child.kill();
+/// Ends one ffmpeg attempt. Runs after *every* attempt (stop request,
+/// stderr EOF, stall) and returns `true` only if the leader was reaped.
+///
+/// 1. drop `rx` so the stderr event thread's `blocking_send` fails fast
+///    instead of parking on a full channel (the old code joined that thread
+///    with the receiver still alive and un-drained);
+/// 2. close stdin;
+/// 3. `SIGKILL` the whole group **before** reaping -- the leader's PID (the
+///    group ID) stays reserved until reaped, so leaked helpers die and the
+///    signal can never hit a recycled group;
+/// 4. reap with a bounded non-blocking poll (never `Child::wait()` on a
+///    runtime worker);
+/// 5. join the event thread off the workers, bounded.
+///
+/// A child that is still unreaped after `reap_timeout` is moved to a
+/// detached blocking reaper so it cannot linger as a zombie, and the failure
+/// is counted -- teardown never hangs and never reports success it did not
+/// verify.
+async fn teardown_attempt(
+    id: PipelineId,
+    mut child: ffmpeg_sidecar::child::FfmpegChild,
+    rx: mpsc::Receiver<MonitorEvent>,
+    event_thread: Option<std::thread::JoinHandle<()>>,
+    slot: &Slot,
+    config: &SupervisorConfig,
+    metrics: &Metrics,
+) -> bool {
+    let started = Instant::now();
+    drop(rx);
+    close_stdin(id, slot);
+    deliver_signal(id, &mut child, GroupSignal::Kill, metrics);
+
+    let outcome = process_group::reap(child.as_inner_mut(), config.reap_timeout).await;
+    let reaped = settle_reap(id, outcome, child, config.reap_timeout, metrics);
+
+    join_event_thread(id, event_thread, config.reap_timeout, metrics).await;
+    metrics
+        .teardown_duration_ms
+        .record(started.elapsed().as_millis() as u64, &[]);
+    reaped
+}
+
+/// Turns the outcome of the bounded reap into the teardown verdict. `true`
+/// only if the leader was actually collected; anything else is counted,
+/// logged at error level, and the still-unreaped child is handed to a
+/// detached blocking reaper so it cannot linger as a zombie.
+fn settle_reap(
+    id: PipelineId,
+    outcome: std::io::Result<Option<std::process::ExitStatus>>,
+    child: ffmpeg_sidecar::child::FfmpegChild,
+    timeout: Duration,
+    metrics: &Metrics,
+) -> bool {
+    match outcome {
+        Ok(Some(status)) => {
+            tracing::debug!(pipeline_id = %id, %status, "ffmpeg reaped");
+            true
+        }
+        Ok(None) => {
+            tracing::error!(pipeline_id = %id, ?timeout, "ffmpeg not reaped within the timeout after SIGKILL -- handing it to a detached reaper");
+            metrics
+                .teardown_failures_total
+                .add(1, &[KeyValue::new("stage", "reap")]);
+            detach_reaper(id, child);
+            false
+        }
+        Err(err) => {
+            tracing::error!(pipeline_id = %id, error = %err, "waiting on the ffmpeg child failed -- handing it to a detached reaper");
+            metrics
+                .teardown_failures_total
+                .add(1, &[KeyValue::new("stage", "reap")]);
+            detach_reaper(id, child);
+            false
+        }
+    }
+}
+
+/// Moves an un-reapable child to the blocking pool, where a blocking
+/// `wait()` is harmless, so it is collected whenever the kernel finally
+/// releases it instead of lingering as a zombie.
+fn detach_reaper(id: PipelineId, mut child: ffmpeg_sidecar::child::FfmpegChild) {
+    drop(tokio::task::spawn_blocking(move || match child.wait() {
+        Ok(status) => {
+            tracing::warn!(pipeline_id = %id, %status, "detached reaper finally collected the ffmpeg child");
+        }
+        Err(err) => {
+            tracing::error!(pipeline_id = %id, error = %err, "detached reaper failed to collect the ffmpeg child");
+        }
+    }));
+}
+
+/// Joins the stderr event thread on the blocking pool with a bound, so a
+/// pipe held open by an escaped helper can park one pool thread but never an
+/// async worker or the teardown itself.
+async fn join_event_thread(
+    id: PipelineId,
+    thread: Option<std::thread::JoinHandle<()>>,
+    timeout: Duration,
+    metrics: &Metrics,
+) {
+    let Some(thread) = thread else {
+        return;
+    };
+    let joiner = tokio::task::spawn_blocking(move || thread.join());
+    match tokio::time::timeout(timeout, joiner).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(_panic))) => {
+            tracing::error!(pipeline_id = %id, "ffmpeg event thread panicked");
+        }
+        Ok(Err(join_err)) => {
+            tracing::error!(pipeline_id = %id, error = %join_err, "joining the ffmpeg event thread failed");
+        }
+        Err(_) => {
+            tracing::error!(pipeline_id = %id, ?timeout, "ffmpeg event thread did not exit in time (pipe held open?) -- leaving it detached");
+            metrics
+                .teardown_failures_total
+                .add(1, &[KeyValue::new("stage", "join")]);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1081,5 +1360,233 @@ mod tests {
             stub.status(Uuid::nil()).await,
             Err(PipelineError::Unimplemented("PipelineEngine::status"))
         ));
+    }
+
+    // ---- teardown helpers (real child processes, no mocks) ----
+
+    /// A fresh `Slot` with no process, for exercising `close_stdin`.
+    fn test_slot() -> Slot {
+        Slot {
+            state: StdMutex::new(SlotState {
+                progress: PipelineProgress::starting(),
+            }),
+            stdin: StdMutex::new(None),
+            stdout: StdMutex::new(None),
+            stdout_taken: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
+            stop_notify: Notify::new(),
+            monitor: TokioMutex::new(None),
+            has_process: true,
+        }
+    }
+
+    /// Writes an executable script that `exec`s a long `sleep` and returns
+    /// its path. Arguments (ffmpeg-sidecar prepends some) are ignored.
+    #[cfg(unix)]
+    fn sleeper_script() -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = std::env::temp_dir().join(format!(
+            "svc-streaming-unit-sleeper-{}-{}.sh",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::fs::write(&path, "#!/bin/sh\nexec sleep 300\n").expect("write sleeper");
+        let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        path
+    }
+
+    /// Spawns the sleeper through `FfmpegCommand`, optionally as its own
+    /// process-group leader (the way `run_pipeline` always does).
+    #[cfg(unix)]
+    fn spawn_sleeper(group_leader: bool) -> ffmpeg_sidecar::child::FfmpegChild {
+        let mut cmd = FfmpegCommand::new_with_path(sleeper_script());
+        if group_leader {
+            std::os::unix::process::CommandExt::process_group(cmd.as_inner_mut(), 0);
+        }
+        cmd.spawn().expect("spawn sleeper")
+    }
+
+    #[cfg(unix)]
+    async fn wait_until_reaped_by_kernel(pid: u32) {
+        for _ in 0..300 {
+            if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("pid {pid} was never reaped");
+    }
+
+    #[cfg(unix)]
+    fn kill_pid(pid: u32) {
+        let raw = i32::try_from(pid).expect("pid fits i32");
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(raw),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .expect("SIGKILL delivered");
+    }
+
+    /// A failed group-signal delivery is surfaced (not ignored like the old
+    /// shell-out) and a failed SIGKILL falls back to killing the direct
+    /// child. The child here is NOT a group leader, so `signal_group`
+    /// refuses with `NotGroupLeader` rather than risk this test process's
+    /// own group.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_group_signal_is_surfaced_and_sigkill_falls_back_to_the_direct_child() {
+        let metrics = Metrics::new();
+        let id = Uuid::new_v4();
+        let mut child = spawn_sleeper(false);
+
+        deliver_signal(id, &mut child, GroupSignal::Term, &metrics);
+        assert!(
+            child.as_inner_mut().try_wait().expect("try_wait").is_none(),
+            "a refused SIGTERM has no fallback and must leave the child alone"
+        );
+
+        deliver_signal(id, &mut child, GroupSignal::Kill, &metrics);
+        let status = process_group::reap(child.as_inner_mut(), Duration::from_secs(3))
+            .await
+            .expect("try_wait")
+            .expect("fallback direct kill must terminate the child");
+        assert!(!status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deliver_signal_to_a_group_leader_kills_it() {
+        let metrics = Metrics::new();
+        let mut child = spawn_sleeper(true);
+        deliver_signal(Uuid::new_v4(), &mut child, GroupSignal::Kill, &metrics);
+        process_group::reap(child.as_inner_mut(), Duration::from_secs(3))
+            .await
+            .expect("try_wait")
+            .expect("group SIGKILL must terminate the leader");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn close_stdin_drops_the_pipe_skips_when_busy_and_recovers_from_poison() {
+        let id = Uuid::new_v4();
+        let mut cat = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn cat");
+
+        // Normal case: the write end is dropped -> cat sees EOF and exits.
+        let slot = test_slot();
+        *lock(&slot.stdin) = cat.stdin.take();
+        close_stdin(id, &slot);
+        assert!(lock(&slot.stdin).is_none(), "stdin must be taken");
+        assert!(cat.wait().expect("cat exits on EOF").success());
+
+        // Busy case: an in-flight ingest write holds the lock -> skipped,
+        // never blocked on, and the handle stays in place.
+        let mut cat2 = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn cat");
+        let busy = test_slot();
+        *lock(&busy.stdin) = cat2.stdin.take();
+        {
+            let _writer_holds_lock = lock(&busy.stdin);
+            close_stdin(id, &busy);
+        }
+        assert!(lock(&busy.stdin).is_some(), "busy stdin must be left alone");
+        close_stdin(id, &busy); // lock free now -> closes
+        assert!(cat2.wait().expect("cat exits on EOF").success());
+
+        // Poisoned case: a panicking holder must not wedge teardown.
+        let mut cat3 = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn cat");
+        let poisoned = Arc::new(test_slot());
+        *lock(&poisoned.stdin) = cat3.stdin.take();
+        let poisoner = Arc::clone(&poisoned);
+        let panicked = std::thread::spawn(move || {
+            let _guard = poisoner.stdin.lock().expect("lock");
+            panic!("poison the stdin mutex");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert!(poisoned.stdin.is_poisoned());
+        close_stdin(id, &poisoned);
+        assert!(lock(&poisoned.stdin).is_none());
+        assert!(cat3.wait().expect("cat exits on EOF").success());
+    }
+
+    /// An unreaped child is never reported as a clean teardown: it is
+    /// counted and handed to a detached blocking reaper that collects it as
+    /// soon as the kernel lets go -- here, once the test finally kills it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreaped_child_is_not_a_clean_teardown_and_gets_a_detached_reaper() {
+        let metrics = Metrics::new();
+        let id = Uuid::new_v4();
+
+        let mut child = spawn_sleeper(true);
+        let pid = child.as_inner_mut().id();
+        let clean = settle_reap(id, Ok(None), child, Duration::from_millis(1), &metrics);
+        assert!(!clean, "a still-running child must not be reported clean");
+        assert!(
+            std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "child still alive while the kernel has not released it"
+        );
+        kill_pid(pid);
+        wait_until_reaped_by_kernel(pid).await;
+
+        let mut child = spawn_sleeper(true);
+        let pid = child.as_inner_mut().id();
+        let clean = settle_reap(
+            id,
+            Err(std::io::Error::other("waitpid exploded")),
+            child,
+            Duration::from_millis(1),
+            &metrics,
+        );
+        assert!(!clean, "a wait error must not be reported clean");
+        kill_pid(pid);
+        wait_until_reaped_by_kernel(pid).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn settle_reap_reports_clean_only_for_a_collected_exit_status() {
+        let metrics = Metrics::new();
+        let mut child = spawn_sleeper(true);
+        child.kill().expect("kill");
+        let status = child.wait().expect("wait");
+        // Fresh (already-waited) child object stands in; settle_reap only
+        // inspects the outcome it is handed on the `Some(status)` path.
+        let clean = settle_reap(
+            Uuid::new_v4(),
+            Ok(Some(status)),
+            child,
+            Duration::from_secs(1),
+            &metrics,
+        );
+        assert!(clean);
+    }
+
+    #[test]
+    fn stop_deadline_covers_both_graces_and_three_bounded_post_kill_steps() {
+        let config = SupervisorConfig {
+            stop_grace_timeout: Duration::from_secs(1),
+            term_grace_timeout: Duration::from_secs(2),
+            reap_timeout: Duration::from_secs(3),
+            ..SupervisorConfig::default()
+        };
+        assert_eq!(config.stop_deadline(), Duration::from_secs(1 + 2 + 9));
+        assert_eq!(
+            SupervisorConfig::default().stop_deadline(),
+            Duration::from_secs(3 + 3 + 15)
+        );
     }
 }

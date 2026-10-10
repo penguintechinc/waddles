@@ -207,7 +207,15 @@ pub fn build_argv(spec: &PipelineSpec, paths: &Paths) -> Result<Vec<String>, Pip
     }
     let use_filter_complex = ladder.len() >= 2;
 
-    let mut argv = input_args(input, paths)?;
+    // `-nostdin` is a *global* option placed first on purpose. ffmpeg-sidecar's
+    // `spawn()` appends a trailing `-n` ("never overwrite", after the output
+    // path -- where ffmpeg only warns "Trailing option(s) found" and ignores
+    // it) unless one of `-y`/`-n`/`-nostdin` is already present. It is also
+    // the honest statement of how this process is driven: stdin is either
+    // the `pipe:0` media input or unused, never an interactive console, and
+    // the supervisor ends ffmpeg by EOF/signal, not by keypress.
+    let mut argv: Vec<String> = vec!["-nostdin".into()];
+    argv.extend(input_args(input, paths)?);
 
     if use_filter_complex {
         argv.push("-filter_complex".into());

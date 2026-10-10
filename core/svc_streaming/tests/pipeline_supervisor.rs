@@ -1,13 +1,15 @@
 //! `FfmpegSupervisor` lifecycle integration tests against a fake `ffmpeg`
 //! binary (a tiny POSIX shell script standing in for the real thing) --
 //! start/status/stop, restart-on-crash with backoff, stall detection, and
-//! graceful-stop timeout escalation (`q\n` -> SIGTERM -> SIGKILL), per
-//! `docs/plans/2026-09-11-svc-streaming-pipeline-matrix.md` §6.
+//! graceful-stop timeout escalation (stdin EOF -> SIGTERM -> SIGKILL), per
+//! `docs/plans/2026-09-11-svc-streaming-pipeline-matrix.md` §6. The
+//! teardown-specific regression suite (process-group sweep, no `kill`
+//! binary, runtime never wedged) lives in `tests/pipeline_teardown*.rs`.
 //!
 //! Unix-only: the fake binaries are POSIX `sh` scripts and the stop-timeout
 //! tests rely on `TERM`/`KILL` signal semantics -- consistent with this
 //! service's Linux-container-only production target (see
-//! `pipeline::supervisor`'s `send_sigterm` doc comment).
+//! `pipeline::process_group`).
 
 #![cfg(unix)]
 
@@ -56,6 +58,7 @@ fn fast_config() -> SupervisorConfig {
         stall_timeout: Duration::from_millis(150),
         stop_grace_timeout: Duration::from_millis(80),
         term_grace_timeout: Duration::from_millis(80),
+        reap_timeout: Duration::from_millis(500),
     }
 }
 
@@ -115,9 +118,11 @@ where
 }
 
 /// Emits progress every 50ms on stderr in the background; the foreground
-/// blocks on stdin, exiting cleanly the moment it reads a `q` line (the
-/// supervisor's graceful-stop command) -- the common "healthy, responsive"
-/// fake ffmpeg used by the happy-path test.
+/// blocks on stdin, exiting cleanly the moment stdin reaches EOF (the
+/// supervisor's graceful-stop signal -- stdin is ffmpeg's `pipe:0` media
+/// input, so closing it is the only quit that cannot collide with the
+/// data) -- the common "healthy, responsive" fake ffmpeg used by the
+/// happy-path test. A `q` line also still exits it, for older callers.
 fn responsive_script() -> String {
     format!(
         r#"( while true; do echo '{PROGRESS_LINE}' >&2; sleep 0.05; done ) &
@@ -235,9 +240,9 @@ async fn stall_detection_forces_restart() {
     sup.stop(id).await.expect("stop succeeds");
 }
 
-/// A binary that ignores both the graceful-stop stdin command and SIGTERM
-/// -- `stop()` must still complete (via SIGKILL) within its bounded
-/// overall timeout instead of hanging forever.
+/// A binary that ignores both stdin EOF and SIGTERM -- `stop()` must still
+/// complete (via SIGKILL) within its bounded overall timeout instead of
+/// hanging forever.
 #[tokio::test]
 async fn stop_escalates_through_sigterm_to_sigkill_within_timeout() {
     let script = fake_ffmpeg(
@@ -245,8 +250,7 @@ async fn stop_escalates_through_sigterm_to_sigkill_within_timeout() {
         &format!("trap '' TERM\necho '{PROGRESS_LINE}' >&2\nwhile true; do sleep 1; done"),
     );
     let config = fast_config();
-    let overall_bound =
-        config.stop_grace_timeout + config.term_grace_timeout + Duration::from_secs(3);
+    let overall_bound = config.stop_deadline();
     let sup = supervisor(script, config);
     let id = Uuid::new_v4();
 

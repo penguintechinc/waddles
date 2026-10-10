@@ -48,7 +48,7 @@ Full model: `src/pipeline/model.rs`.
 | `WEBRTC_UDP_RANGE` | `40000-40100` | `"<start>-<end>"`, validated at startup |
 | `STREAM_DATA_DIR` | `/var/lib/svc-streaming` | Local recordings/segments root |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | |
-| `PUBLIC_BASE_URL` | `http://localhost:8208` | |
+| `PUBLIC_BASE_URL` | `http://localhost:8208` | Externally-reachable base URL for playback URLs / WebRTC ICE host. The Helm chart sets it from `pipeline.svcStreaming.publicBaseUrl`, or (alpha) derives `http://<node hostIP>:<httpPort>` at runtime via the downward API (`publicBaseUrlFromNodeIP`) -- never a hardcoded LAN IP |
 | `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER` | `localhost`/`5432`/`waddlebot`/`svc_streaming` | Per-service DB account |
 | `DB_PASSWORD` | *(required, env-only)* | Never a CLI flag |
 | `CACHE_HOST`/`CACHE_PORT` | `localhost`/`6379` | |
@@ -122,6 +122,57 @@ ladder bug, see `RECORD_PROFILE`'s doc comment).
 `Record` sharing a `-f tee` group writes a `.mp4` the upload watcher never
 scans (`pipeline::ffmpeg::tee_slave`); no graceful shutdown for RTMP/SRT
 listeners or the dispatch loop (dropped on process exit).
+
+## Teardown
+
+How an ffmpeg process ends -- on `stop()` (e.g. the RTMP/SRT publisher
+disconnected), on a stall, or on its own exit. One path, `teardown_attempt` in
+`src/pipeline/supervisor.rs`, built on `src/pipeline/process_group.rs`; no
+shell-outs, no blocking call on a tokio worker, every wait bounded.
+
+```
+publisher EOF -> Orchestrator::stop_pipeline -> FfmpegSupervisor::stop
+  1. close ffmpeg stdin           EOF on `-i pipe:0` = "input ended": ffmpeg drains,
+                                  writes muxer trailers (HLS ENDLIST), exits   [stop_grace_timeout]
+  2. SIGTERM -> process group     only if still alive                            [term_grace_timeout]
+  3. SIGKILL -> process group     only if still alive                            [reap_timeout]
+  4. sweep   SIGKILL -> group     always, BEFORE reaping (PGID still reserved), so leaked helpers die
+  5. reap leader (try_wait poll)  verified; failure -> error log + `teardown_failures_total`,
+                                  child handed to a detached blocking reaper, and (if not
+                                  stopping) pipeline `Failed` instead of respawning on top of it
+  6. join stderr event thread     on the blocking pool, bounded
+```
+
+* **Signals are direct syscalls** (`nix::killpg`, `waitid(WNOWAIT)`), not a
+  `kill` binary: the `debian:bookworm-slim` runtime image has none, which made
+  the previous shell-out a silent no-op (the 2026-10-10 alpha hang: ffmpeg
+  survived teardown, a tokio worker parked joining its stderr thread, `/health`
+  and `/readyz` timed out, liveness restarted the pod ~10s after the
+  disconnect). Delivery results are logged and counted, never ignored; a
+  failed SIGKILL to the group falls back to killing the direct child.
+* **No `q\n`.** stdin is the media pipe, so a quit command written there is
+  just more media. Closing it (EOF) is the only quit that cannot collide with
+  the data.
+* **Safe by construction:** `killpg` refuses pid <= 1, this service's own
+  group, and any child that is not its own group leader; exit is observed with
+  `waitid(WNOWAIT)` so the group can be swept before the PID is released.
+* **Bounded:** `SupervisorConfig::stop_deadline()` = `stop_grace` + `term_grace`
+  + 3 x `reap_timeout` (default 3s + 3s + 3 x 5s). `stop()` waits at most that
+  long, deregisters the pipeline regardless, and leaves a still-running
+  teardown to finish detached (it is bounded too). A restart backoff is
+  interrupted by `stop()` instead of being waited out.
+* **ffmpeg argv** carries a global `-nostdin` first. It is the honest
+  statement of how ffmpeg is driven (stdin is media or unused, never a
+  console) and stops `ffmpeg-sidecar::spawn()` from appending its own stray
+  trailing `-n` after the output path.
+
+Telemetry: `teardown_duration_ms` (histogram) and `teardown_failures_total
+{stage,signal}` (counter; non-zero = a teardown that did not finish cleanly).
+Regression tests: `tests/pipeline_teardown.rs` (process-group sweep, EOF quit,
+parked ingest writer, stall restarts, expired deadline) and
+`tests/pipeline_teardown_no_kill_binary.rs` (the production failure: empty
+`PATH`, single-worker runtime, publisher-disconnect `stop()` must kill and
+reap the whole group and never starve the runtime).
 
 ## Container
 

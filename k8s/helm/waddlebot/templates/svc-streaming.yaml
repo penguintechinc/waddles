@@ -114,6 +114,18 @@ spec:
         {{- if .Values.pipeline.svcStreaming.publicBaseUrl }}
         - name: PUBLIC_BASE_URL
           value: {{ .Values.pipeline.svcStreaming.publicBaseUrl | quote }}
+        {{- else if .Values.pipeline.svcStreaming.publicBaseUrlFromNodeIP }}
+        {{- if not .Values.pipeline.svcStreaming.nodePort.enabled }}
+        {{- fail "pipeline.svcStreaming.publicBaseUrlFromNodeIP requires pipeline.svcStreaming.nodePort.enabled=true (the URL is <node hostIP>:<nodePort.httpPort>); set an explicit publicBaseUrl otherwise" }}
+        {{- end }}
+        # No literal host in values: the node this pod landed on, via the downward API.
+        # $(NODE_HOST_IP) is kubelet env expansion -- NODE_HOST_IP must be declared first.
+        - name: NODE_HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: PUBLIC_BASE_URL
+          value: {{ printf "http://$(NODE_HOST_IP):%v" .Values.pipeline.svcStreaming.nodePort.httpPort | quote }}
         {{- end }}
         # Recordings land in SeaweedFS (S3-compatible, was MinIO) instead of pod-lifetime
         # emptyDir storage -- see infrastructure.seaweedfs and
