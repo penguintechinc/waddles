@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use bundle_host_db::{
     AppSchema, CapabilitySnapshot, ColumnDef, ColumnType, DbBackend, DbError, DbHost, DbScope,
-    DbValue, PostgresBackend, SchemaCache, TableSchema,
+    DbValue, OrderBy, PostgresBackend, Row, SchemaCache, TableSchema,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement, TransactionTrait};
 use testcontainers::core::logs::LogSource;
@@ -55,6 +55,9 @@ const POSTGRES_TAG: &str = "17.6-bookworm";
 const SUPERUSER_PASSWORD: &str = "postgres_test_superuser_pw";
 const RUNTIME_PASSWORD: &str = "waddles_bundle_runtime_test_pw";
 const RUNTIME_ROLE: &str = "waddles_bundle_runtime";
+/// The all-column-types table `typed_columns_round_trip_against_real_postgres`
+/// runs against -- see `apply_bundle_schema_ddl`.
+const TYPED_TABLE: &str = "typed_core";
 
 /// Starts one Postgres container and returns it alongside a superuser
 /// connection URL -- callers open additional connections (as the
@@ -154,7 +157,19 @@ async fn apply_bundle_schema_ddl(conn: &DatabaseConnection) {
             .unwrap_or_else(|e| panic!("setup statement failed ({sql:?}): {e}"));
     }
 
-    for (schema, table) in [("app_core", "fishing_core"), ("app_core", "other_app_core")] {
+    // `fishing_core`/`other_app_core` keep the original uuid/int/text shape
+    // the isolation scenarios were written against; `typed_core` carries
+    // every declared column type (uuid incl. `user_ref`, int4, timestamptz,
+    // jsonb, and a length-limited varchar like hub-api's `text(max_len)`
+    // DDL) -- what the type round-trip test needs.
+    const PLAIN_COLUMNS: &str = "user_ref uuid, score bigint, note text";
+    const TYPED_COLUMNS: &str = "user_ref uuid, other_ref uuid, small int4, score int8, \
+                                 flag boolean, note varchar(8), seen_at timestamptz, doc jsonb";
+    for (schema, table, columns) in [
+        ("app_core", "fishing_core", PLAIN_COLUMNS),
+        ("app_core", "other_app_core", PLAIN_COLUMNS),
+        ("app_core", TYPED_TABLE, TYPED_COLUMNS),
+    ] {
         let ddl = format!(
             "CREATE TABLE {schema}.{table} (
                 row_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -163,9 +178,7 @@ async fn apply_bundle_schema_ddl(conn: &DatabaseConnection) {
                 version bigint NOT NULL DEFAULT 1,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now(),
-                user_ref uuid,
-                score bigint,
-                note text
+                {columns}
             )"
         );
         conn.execute_unprepared(&ddl).await.expect("create table");
@@ -658,4 +671,443 @@ async fn db_host_wrapper_reaches_a_real_backend_for_every_op() {
         .expect("delete through DbHost");
     let after = host.get(&scope, &schemas, &snapshot, &row.row_id).await;
     assert_eq!(after.unwrap_err(), DbError::NotFound);
+}
+
+fn typed_core_schema() -> TableSchema {
+    let col = |name: &str, sql_type: ColumnType, is_user_ref: bool| ColumnDef {
+        name: name.to_string(),
+        sql_type,
+        nullable: true,
+        is_user_ref,
+    };
+    TableSchema::validated(
+        AppSchema::Core,
+        TYPED_TABLE,
+        vec![
+            col("user_ref", ColumnType::Uuid, true),
+            col("other_ref", ColumnType::Uuid, false),
+            col("small", ColumnType::Int4, false),
+            col("score", ColumnType::Int8, false),
+            col("flag", ColumnType::Bool, false),
+            col("note", ColumnType::Text, false),
+            col("seen_at", ColumnType::Timestamptz, false),
+            col("doc", ColumnType::Jsonb, false),
+        ],
+    )
+    .unwrap()
+}
+
+/// The declared-column value `name` in `row` (panics if absent -- a test bug).
+fn cell<'a>(row: &'a Row, name: &str) -> &'a DbValue {
+    row.columns
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
+        .unwrap_or_else(|| panic!("column {name:?} missing from {row:?}"))
+}
+
+fn text(s: &str) -> DbValue {
+    DbValue::Text(s.to_string())
+}
+
+/// `cell(row, name)` parsed as JSON -- jsonb round-trips *semantically*
+/// (Postgres normalizes whitespace/key order), never byte-for-byte.
+fn json_cell(row: &Row, name: &str) -> serde_json::Value {
+    match cell(row, name) {
+        DbValue::Text(s) => serde_json::from_str(s)
+            .unwrap_or_else(|e| panic!("{name:?} is not valid JSON ({e}): {s:?}")),
+        other => panic!("{name:?} should read back as text, got {other:?}"),
+    }
+}
+
+/// A single boolean computed by Postgres itself over the stored row --
+/// proves the column holds a real `uuid`/`timestamptz`/`jsonb`, not text.
+async fn pg_bool(conn: &DatabaseConnection, sql: String) -> bool {
+    conn.query_one_raw(Statement::from_string(conn.get_database_backend(), sql))
+        .await
+        .expect("assertion query")
+        .expect("assertion row")
+        .try_get::<bool>("", "ok")
+        .expect("assertion bool")
+}
+
+/// Regression for the bundle-DB typed-column bug: every `uuid` (incl.
+/// `user_ref`), `timestamptz`, and `jsonb` column used to fail against real
+/// Postgres ("column x is of type uuid but expression is of type text" on
+/// write; jsonb/timestamptz could not be decoded as `String` on read)
+/// because values were bound as `text`. The other integration tests here
+/// only touch bool/int/text columns, so nothing exercised the typed paths.
+/// One shared container/table (startup dominates wall time); each numbered
+/// step names the guarantee it proves.
+#[tokio::test(flavor = "multi_thread")]
+async fn typed_columns_round_trip_against_real_postgres() {
+    let (_container, superuser_url) = start().await;
+    let superuser_conn = connect_superuser(&superuser_url).await;
+    apply_bundle_schema_ddl(&superuser_conn).await;
+
+    let backend = PostgresBackend::new(
+        Database::connect(runtime_url(&superuser_url))
+            .await
+            .expect("runtime role connects"),
+    );
+    let schema = typed_core_schema();
+    let scope = DbScope::new(
+        "tenant-typed",
+        Some("main".to_string()),
+        "waddles.bot.typed",
+    );
+
+    // --- 1. insert: every typed column, incl. user_ref and a non-UTC offset ---
+    let user_ref = "3f2b8c1e-7a4d-4e0b-9c55-1d2e3f4a5b6c";
+    let inserted = backend
+        .insert(
+            &schema,
+            &scope,
+            vec![
+                ("user_ref".to_string(), text(user_ref)),
+                (
+                    "other_ref".to_string(),
+                    text("9A1B2C3D-4E5F-4A6B-8C7D-0E1F2A3B4C5D"),
+                ),
+                ("small".to_string(), DbValue::Int(-7)),
+                ("score".to_string(), DbValue::Int(9_000_000_000)),
+                ("flag".to_string(), DbValue::Bool(true)),
+                ("note".to_string(), text("hello")),
+                (
+                    "seen_at".to_string(),
+                    text("2026-01-02T03:04:05.123456+02:00"),
+                ),
+                (
+                    "doc".to_string(),
+                    text(r#"{"a": [1, 2], "b": {"c": null}}"#),
+                ),
+            ],
+        )
+        .await
+        .expect("insert with uuid/user_ref/timestamptz/jsonb columns");
+    assert_eq!(inserted.version, 1);
+
+    // --- 2. read: uuid canonical, timestamptz as RFC 3339 UTC, jsonb as JSON text ---
+    let fetched = backend
+        .get(&schema, &scope, &inserted.row_id)
+        .await
+        .expect("get decodes uuid/timestamptz/jsonb columns");
+    assert_eq!(cell(&fetched, "user_ref"), &text(user_ref));
+    assert_eq!(
+        cell(&fetched, "other_ref"),
+        &text("9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d"),
+        "a uuid reads back in canonical lowercase hyphenated form"
+    );
+    assert_eq!(cell(&fetched, "small"), &DbValue::Int(-7));
+    assert_eq!(cell(&fetched, "score"), &DbValue::Int(9_000_000_000));
+    assert_eq!(cell(&fetched, "flag"), &DbValue::Bool(true));
+    assert_eq!(cell(&fetched, "note"), &text("hello"));
+    assert_eq!(
+        cell(&fetched, "seen_at"),
+        &text("2026-01-02T01:04:05.123456Z"),
+        "+02:00 input must read back as the same instant in UTC, independent of session TimeZone"
+    );
+    assert_eq!(
+        json_cell(&fetched, "doc"),
+        serde_json::json!({"a": [1, 2], "b": {"c": null}})
+    );
+    // Postgres itself agrees the stored values are real typed values.
+    let row_id = &inserted.row_id;
+    assert!(
+        pg_bool(
+            &superuser_conn,
+            format!(
+                "SELECT (seen_at = TIMESTAMPTZ '2026-01-02 01:04:05.123456+00' \
+                    AND doc @> '{{\"b\":{{\"c\":null}}}}'::jsonb \
+                    AND doc #>> '{{a,1}}' = '2' \
+                    AND user_ref = '{user_ref}'::uuid) AS ok \
+                 FROM app_core.{TYPED_TABLE} WHERE row_id = '{row_id}'"
+            )
+        )
+        .await
+    );
+
+    // --- 3. every UUID spelling the host accepts is stored canonically ---
+    for spelling in [
+        "9a1b2c3d4e5f4a6b8c7d0e1f2a3b4c5d",
+        "{9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d}",
+        "urn:uuid:9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+    ] {
+        let row = backend
+            .insert(
+                &schema,
+                &scope,
+                vec![("other_ref".to_string(), text(spelling))],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("uuid spelling {spelling:?} rejected: {e:?}"));
+        let back = backend.get(&schema, &scope, &row.row_id).await.unwrap();
+        assert_eq!(
+            cell(&back, "other_ref"),
+            &text("9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d"),
+            "spelling {spelling:?}"
+        );
+    }
+
+    // --- 4. update: typed columns change, untouched ones are preserved ---
+    let new_user_ref = "00000000-0000-4000-8000-000000000001";
+    let updated = backend
+        .update(
+            &schema,
+            &scope,
+            &inserted.row_id,
+            inserted.version,
+            vec![
+                ("user_ref".to_string(), text(new_user_ref)),
+                ("seen_at".to_string(), text("2027-06-30T23:59:59Z")),
+                ("doc".to_string(), text(r#"[1, "x", {"k": true}]"#)),
+                ("small".to_string(), DbValue::Int(5)),
+            ],
+        )
+        .await
+        .expect("update uuid/user_ref/timestamptz/jsonb columns");
+    assert_eq!(updated.version, inserted.version + 1);
+    let after_update = backend
+        .get(&schema, &scope, &inserted.row_id)
+        .await
+        .unwrap();
+    assert_eq!(after_update.version, updated.version);
+    assert_eq!(cell(&after_update, "user_ref"), &text(new_user_ref));
+    assert_eq!(
+        cell(&after_update, "seen_at"),
+        &text("2027-06-30T23:59:59.000000Z")
+    );
+    assert_eq!(
+        json_cell(&after_update, "doc"),
+        serde_json::json!([1, "x", {"k": true}])
+    );
+    assert_eq!(cell(&after_update, "small"), &DbValue::Int(5));
+    assert_eq!(
+        cell(&after_update, "other_ref"),
+        cell(&fetched, "other_ref"),
+        "a column the update did not name must keep its value"
+    );
+    assert_eq!(cell(&after_update, "score"), cell(&fetched, "score"));
+    assert_eq!(cell(&after_update, "flag"), cell(&fetched, "flag"));
+
+    // A single-typed-column update (the minimal set clause) works too.
+    let doc_only = backend
+        .update(
+            &schema,
+            &scope,
+            &inserted.row_id,
+            updated.version,
+            vec![("doc".to_string(), text("\"just a string\""))],
+        )
+        .await
+        .expect("update of a single jsonb column");
+    let after_doc = backend
+        .get(&schema, &scope, &inserted.row_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        json_cell(&after_doc, "doc"),
+        serde_json::json!("just a string")
+    );
+    assert_eq!(cell(&after_doc, "user_ref"), &text(new_user_ref));
+
+    // --- 5. NULL in every column type: insert and update, read back as Null ---
+    let all_columns = [
+        "user_ref",
+        "other_ref",
+        "small",
+        "score",
+        "flag",
+        "note",
+        "seen_at",
+        "doc",
+    ];
+    let nulls = || -> Vec<(String, DbValue)> {
+        all_columns
+            .iter()
+            .map(|c| (c.to_string(), DbValue::Null))
+            .collect()
+    };
+    let null_row = backend
+        .insert(&schema, &scope, nulls())
+        .await
+        .expect("insert of an explicit NULL into every column type");
+    let back = backend
+        .get(&schema, &scope, &null_row.row_id)
+        .await
+        .unwrap();
+    assert!(
+        back.columns.iter().all(|(_, v)| *v == DbValue::Null),
+        "every column must read back NULL: {back:?}"
+    );
+    let nulled = backend
+        .update(&schema, &scope, &inserted.row_id, doc_only.version, nulls())
+        .await
+        .expect("update of every column type to NULL");
+    let back = backend
+        .get(&schema, &scope, &inserted.row_id)
+        .await
+        .unwrap();
+    assert_eq!(back.version, nulled.version);
+    assert!(
+        back.columns.iter().all(|(_, v)| *v == DbValue::Null),
+        "every column must read back NULL after the update: {back:?}"
+    );
+
+    // --- 6. query: typed columns decode, and ORDER BY sorts the stored type ---
+    let q_scope = DbScope::new("tenant-typed-q", None, "waddles.bot.typed");
+    // Insert order differs from chronological order; the middle row is only
+    // earliest once its -05:00 offset is applied (2026-01-01T04:00:00Z).
+    let instants = [
+        "2026-03-01T00:00:00Z",
+        "2025-12-31T23:00:00-05:00",
+        "2026-02-01T00:00:00+00:00",
+    ];
+    let mut q_ids = Vec::new();
+    for (i, instant) in instants.iter().enumerate() {
+        let row = backend
+            .insert(
+                &schema,
+                &q_scope,
+                vec![
+                    ("seen_at".to_string(), text(instant)),
+                    ("doc".to_string(), text(&format!("{{\"i\": {i}}}"))),
+                    (
+                        "user_ref".to_string(),
+                        text(&format!("00000000-0000-4000-8000-00000000000{i}")),
+                    ),
+                ],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("insert {instant:?}: {e:?}"));
+        q_ids.push(row.row_id);
+    }
+    let order_of =
+        |rows: &[Row]| -> Vec<String> { rows.iter().map(|r| r.row_id.clone()).collect() };
+    let by = |name: &str, descending: bool| {
+        Some(OrderBy::Column {
+            name: name.to_string(),
+            descending,
+        })
+    };
+    let asc = backend
+        .query(&schema, &q_scope, 10, 0, by("seen_at", false))
+        .await
+        .expect("query ordered by a timestamptz column");
+    assert_eq!(
+        order_of(&asc),
+        vec![q_ids[1].clone(), q_ids[2].clone(), q_ids[0].clone()],
+        "ascending by instant, not by insertion order"
+    );
+    assert_eq!(
+        cell(&asc[0], "seen_at"),
+        &text("2026-01-01T04:00:00.000000Z")
+    );
+    assert_eq!(json_cell(&asc[0], "doc"), serde_json::json!({"i": 1}));
+    assert_eq!(
+        cell(&asc[0], "user_ref"),
+        &text("00000000-0000-4000-8000-000000000001")
+    );
+    let desc = backend
+        .query(&schema, &q_scope, 10, 0, by("seen_at", true))
+        .await
+        .unwrap();
+    assert_eq!(
+        order_of(&desc),
+        vec![q_ids[0].clone(), q_ids[2].clone(), q_ids[1].clone()]
+    );
+    // Ordering by a uuid / jsonb column is valid SQL and keeps decoding.
+    for column in ["user_ref", "doc"] {
+        let rows = backend
+            .query(&schema, &q_scope, 10, 0, by(column, false))
+            .await
+            .unwrap_or_else(|e| panic!("query ordered by {column}: {e:?}"));
+        assert_eq!(rows.len(), 3, "order by {column}");
+    }
+    let default_order = backend.query(&schema, &q_scope, 10, 0, None).await.unwrap();
+    assert_eq!(default_order.len(), 3);
+
+    // --- 7. malformed values fail loud as invalid_value, never a partial write ---
+    let rows_before = row_count(&superuser_conn, "app_core", TYPED_TABLE).await;
+    let bad_values: Vec<(&str, DbValue)> = vec![
+        ("user_ref", text("not-a-uuid")),
+        ("other_ref", text("9a1b2c3d-4e5f-4a6b-8c7d")),
+        ("seen_at", text("not a timestamp")),
+        ("seen_at", text("now")),
+        ("seen_at", text("infinity")),
+        ("seen_at", text("2026-01-01")),
+        ("seen_at", text("2026-01-01T00:00:00")),
+        ("seen_at", text("2026-13-01T00:00:00Z")),
+        ("seen_at", text("2026-02-30T00:00:00Z")),
+        ("seen_at", text("2026-01-01T24:00:00Z")),
+        ("doc", text("{not json")),
+        // Valid JSON that Postgres jsonb refuses (NUL escape) -- caught by
+        // the SQLSTATE class-22 mapping, not the host-side parse.
+        ("doc", text(r#""a\u0000b""#)),
+        // Longer than the column's varchar(8) -- also SQLSTATE class 22.
+        ("note", text("far too long for the column")),
+        ("small", DbValue::Int(i64::from(i32::MAX) + 1)),
+        ("flag", DbValue::Int(1)),
+    ];
+    for (column, bad) in &bad_values {
+        let err = backend
+            .insert(&schema, &scope, vec![(column.to_string(), bad.clone())])
+            .await
+            .expect_err(&format!("insert of {bad:?} into {column} must fail"));
+        assert_eq!(
+            err.code(),
+            "invalid_value",
+            "insert {column}={bad:?} -> {err:?}"
+        );
+    }
+    assert_eq!(
+        row_count(&superuser_conn, "app_core", TYPED_TABLE).await,
+        rows_before,
+        "a rejected typed value must never leave a row behind"
+    );
+    // The same bad values on the update path leave the row untouched.
+    let victim = backend
+        .insert(&schema, &scope, vec![("note".to_string(), text("ok"))])
+        .await
+        .expect("a valid insert still works after the rejected ones");
+    for (column, bad) in &bad_values {
+        let err = backend
+            .update(
+                &schema,
+                &scope,
+                &victim.row_id,
+                victim.version,
+                vec![(column.to_string(), bad.clone())],
+            )
+            .await
+            .expect_err(&format!("update of {column} to {bad:?} must fail"));
+        assert_eq!(
+            err.code(),
+            "invalid_value",
+            "update {column}={bad:?} -> {err:?}"
+        );
+    }
+    let victim_back = backend.get(&schema, &scope, &victim.row_id).await.unwrap();
+    assert_eq!(
+        victim_back.version, victim.version,
+        "no rejected update may bump the version"
+    );
+    assert_eq!(cell(&victim_back, "note"), &text("ok"));
+
+    // --- 8. a non-finite timestamptz reads back loudly, never as NULL ---
+    let infinite_id = superuser_conn
+        .query_one_raw(Statement::from_string(
+            superuser_conn.get_database_backend(),
+            format!(
+                "INSERT INTO app_core.{TYPED_TABLE} (tenant_id, community_id, seen_at) \
+                 VALUES ('tenant-typed', 'main', 'infinity') RETURNING row_id::text AS id"
+            ),
+        ))
+        .await
+        .expect("superuser inserts an infinite timestamp")
+        .expect("returning row")
+        .try_get::<String>("", "id")
+        .expect("row id text");
+    let infinite = backend.get(&schema, &scope, &infinite_id).await.unwrap();
+    assert_eq!(cell(&infinite, "seen_at"), &text("infinity"));
 }
