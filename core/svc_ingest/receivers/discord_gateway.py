@@ -17,7 +17,7 @@ transport is a GENERIC raw-WebSocket client (its own module docstring:
 "does not speak Discord Gateway's ... own application-level protocol").
 Discord's real gateway protocol (opcodes, heartbeat/ACK, session resume)
 needs py-cord, so this is its own `Transport` subclass -- `TransportType.
-SOCKET`/`Direction.INBOUND` classification, exactly like `bundles/
+SOCKET`/`Direction.INBOUND` classification, exactly like `builtin_handlers/
 discord_send_action.py` owns its Discord-specific outbound logic instead
 of routing through the generic `http` transport's `rest_api` sub_type.
 
@@ -47,7 +47,7 @@ from waddle_transports.signing import SecretResolutionError, resolve_secret
 logger = logging.getLogger(__name__)
 
 #: The `consumes` tag every ingest bundle wanting a raw Discord message
-#: declares (`bundles/discord_gateway_manifest.py`'s own `stages.ingest.
+#: declares (`builtin_handlers/discord_gateway_manifest.py`'s own `stages.ingest.
 #: consumes`) -- this receiver's half of that contract.
 CONSUMES_TAG = "discord.message"
 
@@ -166,10 +166,10 @@ class DiscordGatewayReceiver(Transport):  # type: ignore[misc]
     def _build_raw_event(message: discord.Message) -> dict[str, Any]:
         """Build the normalized dict yielded by `receive()` for one inbound message.
 
-        Consumed downstream by `core/svc_ingest/bundles/discord_ingest.py`'s
+        Consumed downstream by `core/svc_ingest/builtin_handlers/discord_ingest.py`'s
         `normalize()` -- field names here are this receiver's own contract
         with that entrypoint, not a repo-wide "raw Discord event" schema
-        (none exists yet, matching `bundles/echo_ingest.py`'s own precedent
+        (none exists yet, matching `builtin_handlers/echo_ingest.py`'s own precedent
         of documenting its own minimal shape rather than inventing one).
 
         `guild_id` is carried for FUTURE use only -- fan-out

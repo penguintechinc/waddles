@@ -66,7 +66,7 @@ backstop. See the crate docs (`src/lib.rs`) for the lock order.
 | Item | Value |
 |---|---|
 | Tables | `economy_balances`, `economy_ledger` (append-only) |
-| DDL | `scripts/db/bundle_economy_store.sql` (alembic `0047`), `scripts/db/bundle_economy_idempotency.sql` (alembic `0049`: `idempotency_key`, shape CHECK, partial UNIQUE index) |
+| DDL | `scripts/db/bundle_economy_store.sql` (alembic `0050`), `scripts/db/bundle_economy_idempotency.sql` (alembic `0052`: `idempotency_key`, shape CHECK, partial UNIQUE index) |
 | Role | `waddles_economy_runtime`: column-scoped INSERT/UPDATE on balances, SELECT/INSERT (never UPDATE/DELETE) on the ledger, column SELECT on the membership tables |
 | Funding | this capability only MOVES balance; initial funding / earn flows are a separate privileged hub-side writer |
 

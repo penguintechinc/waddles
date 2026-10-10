@@ -1,6 +1,6 @@
 -- Bundle economy idempotency DDL (issue #714, #751 money-safety review) -- the
 -- single source of truth read by BOTH
--- `alembic/versions/0049_economy_idempotency.py` (production schema) and the
+-- `alembic/versions/0052_economy_idempotency.py` (production schema) and the
 -- Rust integration tests (`include_str!`, applied right after
 -- `bundle_economy_store.sql`), so the store's SQL is always tested against the
 -- exact DDL that ships. Idempotent (IF NOT EXISTS / guarded DO blocks).

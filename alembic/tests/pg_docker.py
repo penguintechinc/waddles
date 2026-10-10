@@ -82,12 +82,16 @@ CREATE TABLE hub_user_identities (
     platform_user_id VARCHAR(255) NOT NULL,
     platform_username VARCHAR(255)
 );
+-- `stages` (legacy SQL 071): 0047_builtin_handler_paths rewrites the per-stage
+-- `entrypoint` strings inside it, so the bootstrap table needs the column
+-- (same JSONB type/default as 071). Mirrored in pr-validation.yml's bootstrap.
 CREATE TABLE app_catalog (
-    app_id VARCHAR(255) PRIMARY KEY
+    app_id VARCHAR(255) PRIMARY KEY,
+    stages JSONB DEFAULT '{}'::jsonb
 );
 -- 0043_hub_users_identity_uuid creates a view over community_members (a
 -- legacy config/postgres table, same minimal-bootstrap convention): only the
--- columns the view projects/joins on. 0046_bundle_reputation_store also ALTERs
+-- columns the view projects/joins on. 0049_bundle_reputation_store also ALTERs
 -- this table -- is_active/left_at/removed_at are the columns it, its grants
 -- and its tests touch.
 CREATE TABLE community_members (

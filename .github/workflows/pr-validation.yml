@@ -296,12 +296,16 @@ jobs:
               platform_user_id VARCHAR(255) NOT NULL,
               platform_username VARCHAR(255)
           );
+          -- `stages` (legacy SQL 071): 0047_builtin_handler_paths rewrites the
+          -- per-stage `entrypoint` strings inside it. Mirrors pg_docker.py's
+          -- `_BOOTSTRAP_SQL` -- keep both in sync.
           CREATE TABLE app_catalog (
-              app_id VARCHAR(255) PRIMARY KEY
+              app_id VARCHAR(255) PRIMARY KEY,
+              stages JSONB DEFAULT '{}'::jsonb
           );
           -- 0043_hub_users_identity_uuid creates a view over community_members
           -- (legacy config/postgres table); only the columns the view uses.
-          -- 0046_bundle_reputation_store also column-grants on is_active/left_at/
+          -- 0049_bundle_reputation_store also column-grants on is_active/left_at/
           -- removed_at. Mirrors pg_docker.py's `_BOOTSTRAP_SQL` -- keep in sync.
           CREATE TABLE community_members (
               id SERIAL PRIMARY KEY,

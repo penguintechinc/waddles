@@ -69,7 +69,7 @@ from models.execution import (
     PortData,
 )
 from config import Config
-from flask_core import get_logger
+from flask_core import get_logger, describe_db_error
 
 logger = get_logger(__name__)
 
@@ -207,8 +207,11 @@ class NodeExecutor:
         except Exception as e:
             error_msg = f"Unexpected error executing node: {str(e)}"
             state.mark_failed(error_msg, "exception")
-            logger.exception(
-                f"Exception in node {node.node_id} ({node.node_type.value})",
+            # SECURITY (PII in logs): never logger.exception()/exc_info -- the exception
+            # text and traceback args can embed bound values (message content, usernames).
+            logger.error(
+                f"Exception in node {node.node_id} ({node.node_type.value}): "
+                f"{describe_db_error(e)}",
                 extra={
                     "workflow_id": context.workflow_id,
                     "execution_id": context.execution_id,
@@ -499,7 +502,7 @@ class NodeExecutor:
                 logger.warning(f"Unknown operator: {operator}")
                 return False
         except Exception as e:
-            logger.warning(f"Operator evaluation error: {e}")
+            logger.warning(f"Operator evaluation error: {describe_db_error(e)}")
             return False
 
     # ========================================================================

@@ -1,5 +1,5 @@
 -- Bundle `identity` host-capability read contract -- the single source of truth
--- read by BOTH `alembic/versions/0048_bundle_identity_resolve.py` (production
+-- read by BOTH `alembic/versions/0051_bundle_identity_resolve.py` (production
 -- schema) and `core/svc_process/tests/identity_pg_e2e.rs` (`include_str!`), so
 -- the SQL the stage runs is always tested against the exact DDL that ships.
 -- Idempotent; lives under `scripts/db/` because that directory is already
@@ -36,7 +36,7 @@
 -- (incl. `user_uuid`, `is_active`, `left_at`, `removed_at`).
 
 -- Stand-alone re-statement of the column 0045_identity_resolution owns (and
--- 0046/0047 also restate), so this file runs on its own for the Rust tests.
+-- 0049/0050 also restate), so this file runs on its own for the Rust tests.
 ALTER TABLE community_members ADD COLUMN IF NOT EXISTS user_uuid UUID;
 
 CREATE OR REPLACE VIEW community_member_identities AS

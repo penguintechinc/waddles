@@ -620,7 +620,7 @@ async def test_reader_role_cannot_read_raw_handles_or_run_the_lookups(
     finally:
         conn.rollback()
         conn.close()
-    # 0048 appended the two non-PII columns the bundle `identity` capability needs
+    # 0051 appended the two non-PII columns the bundle `identity` capability needs
     # (`tenant_id`, `is_active_member`); still no handle/name/username/email column.
     assert columns == {
         "community_id",

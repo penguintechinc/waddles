@@ -1,0 +1,38 @@
+# Scrapes the Prometheus /metrics surface (named port `metrics`, :9090) of every Waddles Rust service
+# that exposes one. Requires the prometheus-operator CRDs. Selector labels match what the Helm chart
+# stamps on its Services (templates/_helpers.tpl: app.kubernetes.io/name=waddlebot + component).
+# The metrics Services are ClusterIP; with default-deny CiliumNetworkPolicies the Prometheus namespace
+# also needs an allow to port 9090 (see README, "Scraping").
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: waddles-data-plane
+  namespace: waddlebot
+  labels:
+    app.kubernetes.io/name: waddlebot
+    app.kubernetes.io/part-of: waddles
+    app.kubernetes.io/component: observability
+spec:
+  namespaceSelector:
+    matchNames:
+      - waddlebot
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: waddlebot
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - svc-ingest-rust
+          - svc-process-rust
+          - svc-action-rust
+          - svc-presentation
+          - svc-streaming
+          - egress-proxy
+  targetLabels:
+    - app.kubernetes.io/component
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

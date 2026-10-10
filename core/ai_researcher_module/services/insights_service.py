@@ -20,6 +20,7 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
 from config import Config
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -213,8 +214,7 @@ class InsightsService:
 
         except Exception as e:
             logger.error(
-                f"Insight generation error: {e}",
-                exc_info=True,
+                f"Insight generation error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return InsightResult(
@@ -224,7 +224,7 @@ class InsightsService:
                 insight_type='error',
                 tokens_used=0,
                 processing_time_ms=int((time.time() - start_time) * 1000),
-                error=str(e)
+                error=describe_db_error(e)
             )
 
     async def _generate_single_insight(
@@ -280,7 +280,7 @@ class InsightsService:
 
         except Exception as e:
             logger.error(
-                f"Single insight generation error: {e}",
+                f"Single insight generation error: {describe_db_error(e)}",
                 extra={'community_id': community_id, 'insight_type': insight_type}
             )
             return None
@@ -346,7 +346,7 @@ class InsightsService:
             return "\n".join(context_parts)
 
         except Exception as e:
-            logger.error(f"Context building error: {e}")
+            logger.error(f"Context building error: {describe_db_error(e)}")
             return str(message_stats)
 
     async def _get_message_statistics(
@@ -395,7 +395,7 @@ class InsightsService:
             }
 
         except Exception as e:
-            logger.error(f"Message statistics error: {e}")
+            logger.error(f"Message statistics error: {describe_db_error(e)}")
             return None
 
     async def _extract_topics(
@@ -457,7 +457,7 @@ class InsightsService:
             return topics
 
         except Exception as e:
-            logger.error(f"Topic extraction error: {e}")
+            logger.error(f"Topic extraction error: {describe_db_error(e)}")
             return None
 
     async def _analyze_sentiment_distribution(
@@ -482,7 +482,7 @@ class InsightsService:
             # For now, return a placeholder
             return "Sentiment analysis pending - implement with NLP model"
         except Exception as e:
-            logger.error(f"Sentiment analysis error: {e}")
+            logger.error(f"Sentiment analysis error: {describe_db_error(e)}")
             return ""
 
     async def _store_insights(
@@ -533,7 +533,7 @@ class InsightsService:
             return None
 
         except Exception as e:
-            logger.error(f"Insight storage error: {e}")
+            logger.error(f"Insight storage error: {describe_db_error(e)}")
             return None
 
     def _parse_timeframe(self, timeframe: str) -> int:

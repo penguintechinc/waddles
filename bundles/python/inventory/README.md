@@ -10,12 +10,9 @@ concurrency transfer logic, and listing rendering are written fresh for this bun
 `bundles/csharp/superpenguin-roll`, which *is* a line-for-line port and carries the full verbatim
 MIT notice because it reuses original code.
 
-**DB-backed (depends on #623, not yet merged).** This bundle is built on top of
-`feature/db-capability-production` (merged into this branch directly, since #623 itself hasn't
-landed on `release/v3.0.X` yet) for the structured `db` capability (`insert`/`get`/`query`/
-`update`/`delete`). **This bundle cannot merge into `release/v3.0.X` until #623 lands there
-first** -- it is expected to rebase cleanly on top once #623 merges. Until then this PR stays
-draft. Mirrors `bundles/python/loyalty`'s (#630) own identical dependency note.
+**DB-backed.** Built on the structured `db` capability (`insert`/`get`/`query`/`update`/`delete`,
+#623) plus `kv`; merged into `release/v3.0.X` via #637 and registered in
+`bundles/core-bundles.yaml`. Mirrors `bundles/python/loyalty`'s own shape.
 
 ## Commands
 
@@ -32,6 +29,52 @@ Any other grammar-legal verb (`set`/`enable`/`disable`/`delete`/`list`/`reset`) 
 act on exactly 1 unit per invocation -- there is no `<amount>` token in this bundle's grammar
 (contrast `loyalty`'s `!points add <amount> <user>`); a mod wanting to grant more calls it
 multiple times.
+
+Known grammar-extension trade-off (same family `loyalty`/`love` document): a bare `!inv <word>` is a
+target-user lookup, so the two verbs whose *bare* form the shared grammar rejects --
+`!inv enable` / `!inv disable` -- fall through to "list the inventory of a user named `enable`"
+rather than a usage reply (harmless: "enable has no items."). Every other bare verb
+(`set`/`list`/`reset`/`delete`/`add`/`remove`) replies usage, and `!inv give` with a missing
+item/user is a usage error, never a lookup of a user literally named `give`.
+
+## Examples
+
+```text
+> !inv add sword alice                 (mod)
+Gave 1 sword to alice. They now have 1.
+> !inv alice
+alice's inventory: sword x1
+> !inv give sword bob                  (alice)
+alice gave 1 sword to bob.
+> !inv remove sword bob                (mod)
+Removed 1 sword from bob. They now have 0.
+> !inv add sword alice                 (regular viewer)
+only moderators/broadcasters can adjust inventories
+```
+
+## Permissions (V2, `bundle.yaml` / `hub-manifest.yaml`)
+
+| id | Why |
+|---|---|
+| `storage.kv` | Per-user `item -> row_id` directory (`inventory.dir.<pseudonym>`) -- the only way to list/lookup a user's rows, since the `db` interface has no column-equality query. |
+| `flags.read` | Reads the `waddles.command-inventory` feature flag that gates the command. |
+
+The `db` capability itself is granted by the manifest's `data.tables: [inventory_items]` (not by a
+`permissions` entry). No egress (`egress: []`).
+
+## Moderator gate (fail-closed)
+
+`add`/`remove` require `is_mod` **or** `is_broadcaster` on the normalized event
+(`_caller_role_signal()`), decided in `dispatch` **before any `kv`/`db` access**: neither field
+present (Discord today) => denied; present but falsy => denied; either true => allowed. Denial
+logs `inventory.grant_denied` (command + role-signal state only). `!inv`, `!inv <user>` and
+`!inv give` (a viewer trading their own items) never need a role.
+
+## Platforms
+
+Twitch and Discord `chat.message` events starting with `!inventory` or `!inv`
+(`stages.process.consumes`). Discord events carry no mod badge today, so `add`/`remove` are denied
+there until its normalizer supplies the fields.
 
 ## Data model (`db` + `kv`)
 
@@ -73,6 +116,37 @@ tokenization: raw PII lives only inside the hub/API server). `!inventory`/`!inv 
 have a live, chat-typed name available and echo it straight back into the reply -- never
 persisted.
 
+**`give` is not atomic.** It decrements the giver and then increments the recipient as two
+separate backend writes. If the recipient-side write fails, the bundle fails loud (error reply +
+`RuntimeError`, no success line) but the giver's unit has already been taken -- there is no
+rollback. Pinned by `test_give_recipient_side_failure_fails_loud_with_no_success_reply` so any
+future compensation logic is a deliberate change.
+
+**First-time grants are insert-then-index.** The `db` row is inserted *before* the `kv` directory
+entry is written. If the directory write fails the bundle fails loud, but the row already exists
+un-indexed -- a retry inserts a second row for the same `(user, item)`. Same shape `loyalty`
+documents; no orphan cleanup exists yet.
+
+## Failure behavior (fail-loud, never silent)
+
+| Condition | Behavior |
+|---|---|
+| Any `kv`/`db` call fails (`kv_get`, `kv_set`, `db_get`, `db_insert`, `db_update`, `db_delete`) | ERROR `inventory.backend_error` (`op` + the error class **name**), chat reply "inventory is temporarily unavailable, try again shortly.", then `RuntimeError`. Exactly one relay. |
+| Optimistic-concurrency conflicts | Retried up to 5 times with a fresh `db.get`; exhausted => loud `db_update_retry` failure. A conflict on the zero-row cleanup delete is a benign skip (INFO `inventory.cleanup_skipped`), never a failure. |
+| Corrupt per-user directory (not UTF-8, bad JSON, not a JSON object) | Loud `dir_decode` failure on **every** command that reads it; the corrupt bytes are never overwritten or silently reset. |
+| Directory points at a row `db.get` can no longer find | Loud `directory_stale` failure -- never silently re-created (that would orphan/duplicate the row). |
+| Non-numeric `quantity` column | Raises (never rendered as garbage). |
+| Missing `channel_id`, missing community (no tenant-wide fallback), unknown command, malformed forwarded payload | `ValueError`; missing community also logs ERROR `inventory.missing_community`. |
+| `relay.push` fails | Propagates; no success line is logged. |
+
+## Logging / PII
+
+Every log message has a strict field allowlist (command, platform, op/error class, a `db` row id,
+a fixed reason) -- **never** the raw message, item name, target, or `event.actor` (regression:
+gh-674; the suite drives every command and outcome with a sentinel string as actor, item and
+target, and asserts its absence plus the exact per-message field set). Per-user keys and the
+`actor_hash` column are SHA-256 pseudonyms, never raw names.
+
 ## Feature flag
 
 Gated behind `waddles.command-inventory`, defaulted OFF (`critical-rules.md` Feature Flags &
@@ -108,10 +182,9 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
       waddle_sdk._component_entry -o /tmp/inventory.wasm"
 ```
 
-Confirmed building a valid wasm component (`21MB`, `wasm32` component binary) from this branch.
-**Not yet wired into `bundles/Dockerfile.core-bundles`** -- same genericization-PR dependency
-`fish`/`loyalty`'s own READMEs document; this bundle's CI wasm build is blocked on that PR
-landing.
+In CI/release the wasm is built generically: `bundles/Dockerfile.core-bundles` runs
+`bundles/build_python_bundles.py`, which builds every `language: python` entry in
+`bundles/core-bundles.yaml` -- no per-bundle Dockerfile edit.
 
 ## Test
 
@@ -125,11 +198,9 @@ mypy --strict src
 ruff check .
 ```
 
-Current result: 101 tests, `src/app.py` at 100% statement+branch coverage, `ruff check .` and
-`mypy --strict src` both clean.
+Current result: 171 tests, `src/app.py` at 100% statement+branch coverage.
 
 ## Activation
 
-**Not yet added to `bundles/core-bundles.yaml`** -- batched registration, per this PR's own
-description (also gated on #623 landing first). `bundles/Dockerfile.core-bundles` is likewise
-untouched here.
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.inventory`, activation target
+`global`); dark until `waddles.command-inventory` is turned on.
