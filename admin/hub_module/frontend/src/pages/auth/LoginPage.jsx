@@ -3,7 +3,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { LoginPageBuilder } from '@penguintechinc/react-libs';
 import { useAuth } from '../../contexts/AuthContext';
 import { KeyIcon } from '@heroicons/react/24/outline';
-import { passkeyApi, publicApi } from '../../services/api';
+import { passkeyApi, publicApi, tenantApi } from '../../services/api';
+import { resolveBranding } from './tenantBranding';
 import { useState } from 'react';
 
 // Social login providers — all route through the backend OAuth proxy.
@@ -149,6 +150,26 @@ function LoginPage() {
   const { tenantSlug } = useParams();
   const { refreshUser, isAuthenticated } = useAuth();
   const [signupEnabled, setSignupEnabled] = useState(false);
+  const [tenantInfo, setTenantInfo] = useState(null);
+
+  // Tenant branding (whitelabel). Fails soft -- any error keeps stock branding.
+  useEffect(() => {
+    if (!tenantSlug) {
+      setTenantInfo(null);
+      return undefined;
+    }
+    let cancelled = false;
+    tenantApi.getLoginInfo(tenantSlug)
+      .then(({ data }) => {
+        if (!cancelled) setTenantInfo(data?.tenant ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setTenantInfo(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantSlug]);
 
   useEffect(() => {
     publicApi.getSignupSettings()
@@ -204,10 +225,8 @@ function LoginPage() {
         <LoginPageBuilder
           api={{ loginUrl: '/api/v1/auth/login' }}
           branding={{
-            appName: 'Welcome to Waddles',
-            logo: '/waddlebot-logo.png',
+            ...resolveBranding(tenantInfo, tenantSlug),
             logoHeight: 72,
-            tagline: tenantSlug ? `Signing into: ${tenantSlug}` : 'Access your communities',
             githubRepo: 'penguintechinc/waddlebot',
           }}
           onSuccess={handleSuccess}

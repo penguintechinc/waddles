@@ -2,7 +2,7 @@
 Core/Platform Module -- Feature contracts + default App bindings
 ====================================================================
 
-Declares the 14 Core/platform capability Features spanning the six
+Declares the 16 Core/platform capability Features spanning the six
 namespaces added to :data:`flask_core.app_manifest.KNOWN_MODULES` alongside
 the 4 product Modules (see that module's docstring): ``analytics``,
 ``video_proxy``, ``auth``, ``compliance``, ``integrations``, ``tenancy``.
@@ -27,6 +27,8 @@ edit here.
 | ``compliance.external_kms``             | enterprise   | ``waddles.compliance.external_kms``             |
 | ``integrations.waddleai``               | enterprise   | ``waddles.integrations.waddleai``               |
 | ``tenancy.multi_tenant``                | enterprise   | ``waddles.tenancy.multi_tenant``                |
+| ``compliance.bulk_dsar``                | enterprise   | ``waddles.compliance.bulk_dsar``                |
+| ``tenancy.whitelabel``                  | professional | ``waddles.tenancy.whitelabel``                  |
 
 Each Feature gets exactly one shipped default App (``provider="builtin"``,
 ``is_default=True``), mirroring :mod:`bot_module.features`'s shape. Most of
@@ -188,6 +190,22 @@ _FEATURE_DEFS: Tuple[Dict[str, Any], ...] = (
         "requires_scopes": frozenset({"tenancy.tenant:admin"}),
         "min_tier": "enterprise",
         "flag": "waddles.tenancy.multi_tenant",
+    },
+    {
+        "id": "compliance.bulk_dsar",
+        "version": 1,
+        "module": "compliance",
+        "requires_scopes": frozenset({"compliance.dsar:admin"}),
+        "min_tier": "enterprise",
+        "flag": "waddles.compliance.bulk_dsar",
+    },
+    {
+        "id": "tenancy.whitelabel",
+        "version": 1,
+        "module": "tenancy",
+        "requires_scopes": frozenset({"tenancy.whitelabel:admin"}),
+        "min_tier": "professional",
+        "flag": "waddles.tenancy.whitelabel",
     },
 )
 
@@ -352,16 +370,38 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
         "permissions": ("tenancy.tenant:admin",),
         "is_default": True,
     },
+    {
+        "app_id": "waddles.compliance.bulk_dsar.default",
+        "name": "Admin/Bulk DSAR Console (default)",
+        "version": "1.0.0",
+        "feature": "waddles.compliance.bulk_dsar",
+        "module": "compliance",
+        "provider": "builtin",
+        "surfaces": ("process",),
+        "permissions": ("compliance.dsar:admin",),
+        "is_default": True,
+    },
+    {
+        "app_id": "waddles.tenancy.whitelabel.default",
+        "name": "Tenant Whitelabel Branding (default)",
+        "version": "1.0.0",
+        "feature": "waddles.tenancy.whitelabel",
+        "module": "tenancy",
+        "provider": "builtin",
+        "surfaces": ("process",),
+        "permissions": ("tenancy.whitelabel:admin",),
+        "is_default": True,
+    },
 )
 
 
 def build_contracts() -> Tuple[FeatureContract, ...]:
-    """Parse and validate the 14 Core/platform Feature contracts, without registering them."""
+    """Parse and validate the 16 Core/platform Feature contracts, without registering them."""
     return tuple(parse_feature_contract(raw) for raw in _FEATURE_DEFS)
 
 
 def build_default_apps() -> Tuple[AppManifest, ...]:
-    """Parse and validate the 14 Core/platform default App manifests, without registering them."""
+    """Parse and validate the 16 Core/platform default App manifests, without registering them."""
     return tuple(parse_manifest(raw) for raw in _DEFAULT_APP_DEFS)
 
 
@@ -371,7 +411,7 @@ def register_all(
     app_registry: Optional[AppRegistry] = None,
 ) -> Tuple[Tuple[FeatureContract, ...], Tuple[AppManifest, ...]]:
     """
-    Parse, validate and register all 14 Core/platform Features and their
+    Parse, validate and register all 16 Core/platform Features and their
     shipped default Apps.
 
     Defaults to the process-wide singletons

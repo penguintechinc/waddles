@@ -12,8 +12,8 @@ Core/Platform, Community, Event, Streaming -- ``bot_module``,
 one-for-one) against a single, fresh, shared
 :class:`~flask_core.feature_registry.FeatureRegistry` /
 :class:`~flask_core.app_registry.AppRegistry` pair -- never the process
-singletons -- and asserts the whole catalog (53 Feature contracts: bot 4 +
-social 9 + marketing 3 + customer 5 + core_platform 14 + community 11 +
+singletons -- and asserts the whole catalog (55 Feature contracts: bot 4 +
+social 9 + marketing 3 + customer 5 + core_platform 16 + community 11 +
 event 2 + streaming 5) is internally coherent: no id/app_id collisions
 across Modules, every contract's flag and tier/module are well-formed, and
 every default App's permissions stay inside its own Feature's granted
@@ -23,9 +23,9 @@ test_community_features.py``, etc.) already cover each Module in
 isolation; this file is the one place that proves they compose without
 collision when loaded together, the way a real process startup would.
 
-Fail-on-purpose proof: ``test_total_registered_feature_count_is_53`` was
+Fail-on-purpose proof: ``test_total_registered_feature_count_is_55`` was
 verified to catch a regression by temporarily asserting ``== 99`` instead
-of ``== 53`` and confirming the test fails with the true count reported,
+of ``== 55`` and confirming the test fails with the true count reported,
 then reverting.
 """
 
@@ -67,12 +67,12 @@ EXPECTED_COUNTS = {
     "social": 9,
     "marketing": 3,
     "customer": 5,
-    "core_platform": 14,
+    "core_platform": 16,
     "community": 11,
     "event": 2,
     "streaming": 5,
 }
-TOTAL_EXPECTED = 53
+TOTAL_EXPECTED = 55
 assert sum(EXPECTED_COUNTS.values()) == TOTAL_EXPECTED  # keep the two constants honest
 
 
@@ -105,7 +105,7 @@ def _register_everything(
 
 
 class TestAllModulesRegisterCoherently:
-    def test_total_registered_feature_count_is_53(
+    def test_total_registered_feature_count_is_55(
         self, registries: tuple[FeatureRegistry, AppRegistry], capsys: pytest.CaptureFixture[str]
     ) -> None:
         feature_registry, app_registry = registries

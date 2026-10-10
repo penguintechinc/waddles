@@ -29,8 +29,9 @@ from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
+from services import branding_service
 from services import tenant_service as svc
-from services.errors import ApiError
+from services.errors import ApiError, payment_required
 from services.pagination import parse_limit
 from services.schema import bind_tenant_tables
 
@@ -333,6 +334,20 @@ async def update_tenant(
     async_dal, dal = _dal()
     try:
         tenant_id = _tenant_id(tenant_slug)
+        if data.logoUrl is not None or data.config is not None:
+            # Whitelabel gate (Professional, `tenancy.whitelabel`): saving a
+            # a new non-empty branding value (logo/theme/welcome message) needs
+            # entitlement; unrelated edits and clearing never do. Fail-closed 402.
+            current = await svc.get_tenant(async_dal, dal, tenant_id=tenant_id)
+            if branding_service.sets_branding(
+                current_logo_url=current.logo_url,
+                current_config=current.config,
+                new_logo_url=data.logoUrl,
+                new_config=data.config,
+            ) and not await branding_service.whitelabel_enabled(tenant_slug):
+                raise payment_required(
+                    "Custom tenant branding requires a Professional plan or higher"
+                )
         await svc.update_tenant(
             async_dal,
             dal,

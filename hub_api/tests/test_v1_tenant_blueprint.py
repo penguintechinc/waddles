@@ -23,12 +23,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.tenant import tenant_bp
+from services import branding_service
 from tests.conftest import TENANT_SLUG, make_user_token
 
 OTHER_TENANT_SLUG = "other-tenant"
@@ -158,7 +160,13 @@ class TestGetUpdateTenant:
         )
         assert response.status_code == 400
 
-    async def test_update_tenant_logo_and_config_only(self, client: Any) -> None:
+    async def test_update_tenant_logo_and_config_only(
+        self, client: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Branding (logo/theme) is Professional-tier whitelabel -- see
+        # `test_branding_whitelabel.py` for the gate itself; this test is about
+        # the update round-trip, so the entitled path is pinned here.
+        monkeypatch.setattr(branding_service, "feature_enabled", AsyncMock(return_value=True))
         response = await client.put(
             f"/api/v1/tenant/{TENANT_SLUG}",
             headers=_admin_headers(),

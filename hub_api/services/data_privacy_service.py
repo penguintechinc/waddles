@@ -11,8 +11,15 @@ BLUEPRINT exclusively from `services.current_user.get_current_user_id()`
 This is the single most important invariant for this group: DSAR export
 or deletion for another user is the textbook IDOR/BOLA case
 (security.md, `hub_api/PORTING.md` Auth pattern "self-service" row), and
-there is deliberately no code path anywhere in this port that accepts a
-caller-supplied user id for either operation.
+there is deliberately no SELF-SERVICE code path (`export_user_data()` /
+`request_data_deletion()`, `blueprints/v1/data_privacy.py`) that accepts a
+caller-supplied user id for either operation. The one exception is the
+Enterprise tenant-admin DSAR console (`admin_data_privacy_service.py`):
+it reuses `collect_user_data()` / `anonymize_user_data()` below with a
+caller-supplied id, but only after tenant-membership proof, the
+`compliance.bulk_dsar` gate, and a mandatory audit row -- see that
+module. Self-service stays ungated in every tier (critical-rules.md:
+statutory rights are never tier-gated).
 
 Every export source lists its columns explicitly (never `dal.<table>.
 ALL`) -- mirrors `admin/hub_module/backend/src/utils/userDataExport.js`'s
@@ -29,6 +36,7 @@ SQL helpers hardcode psycopg2's paramstyle.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
 
@@ -189,9 +197,29 @@ async def _export_passkeys(async_dal: Any, dal: Any, user_id: int) -> list[dict[
     ]
 
 
-async def _export_message_activity(async_dal: Any, dal: Any, user_id: int) -> list[dict[str, Any]]:
+def _community_scope(community_field: Any, community_ids: Collection[int] | None) -> Any:
+    """Return an extra query clause limiting rows to `community_ids`, or `None` for no limit.
+
+    `None` (the self-service default) means "every community" -- the data
+    subject is entitled to all of their own data. A tenant-admin export
+    passes the admin's own tenant's community ids so a community-keyed row
+    belonging to a DIFFERENT tenant is never disclosed to this tenant's
+    admin (security.md Tenant Isolation). An empty collection matches no rows.
+    """
+    if community_ids is None:
+        return None
+    return community_field.belongs(sorted(community_ids)) if community_ids else community_field < 0
+
+
+async def _export_message_activity(
+    async_dal: Any, dal: Any, user_id: int, community_ids: Collection[int] | None = None
+) -> list[dict[str, Any]]:
+    query = dal.activity_message_events.hub_user_id == user_id
+    scope = _community_scope(dal.activity_message_events.community_id, community_ids)
+    if scope is not None:
+        query &= scope
     rows = await async_dal.select_async(
-        dal(dal.activity_message_events.hub_user_id == user_id),
+        dal(query),
         dal.activity_message_events.community_id,
         dal.activity_message_events.platform,
         dal.activity_message_events.platform_username,
@@ -210,9 +238,15 @@ async def _export_message_activity(async_dal: Any, dal: Any, user_id: int) -> li
     ]
 
 
-async def _export_watch_activity(async_dal: Any, dal: Any, user_id: int) -> list[dict[str, Any]]:
+async def _export_watch_activity(
+    async_dal: Any, dal: Any, user_id: int, community_ids: Collection[int] | None = None
+) -> list[dict[str, Any]]:
+    query = dal.activity_watch_sessions.hub_user_id == user_id
+    scope = _community_scope(dal.activity_watch_sessions.community_id, community_ids)
+    if scope is not None:
+        query &= scope
     rows = await async_dal.select_async(
-        dal(dal.activity_watch_sessions.hub_user_id == user_id),
+        dal(query),
         dal.activity_watch_sessions.community_id,
         dal.activity_watch_sessions.platform,
         dal.activity_watch_sessions.platform_username,
@@ -237,9 +271,15 @@ async def _export_watch_activity(async_dal: Any, dal: Any, user_id: int) -> list
     ]
 
 
-async def _export_chat_messages(async_dal: Any, dal: Any, user_id: int) -> list[dict[str, Any]]:
+async def _export_chat_messages(
+    async_dal: Any, dal: Any, user_id: int, community_ids: Collection[int] | None = None
+) -> list[dict[str, Any]]:
+    query = dal.hub_chat_messages.sender_hub_user_id == user_id
+    scope = _community_scope(dal.hub_chat_messages.community_id, community_ids)
+    if scope is not None:
+        query &= scope
     rows = await async_dal.select_async(
-        dal(dal.hub_chat_messages.sender_hub_user_id == user_id),
+        dal(query),
         dal.hub_chat_messages.community_id,
         dal.hub_chat_messages.channel_name,
         dal.hub_chat_messages.sender_platform,
@@ -311,9 +351,21 @@ async def _export_deletion_requests(async_dal: Any, dal: Any, user_id: int) -> l
 
 
 async def collect_user_data(
-    async_dal: Any, dal: Any, *, user_id: int
+    async_dal: Any,
+    dal: Any,
+    *,
+    user_id: int,
+    community_ids: Collection[int] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, str]]]:
     """Gather every export source for `user_id`; a failing source is reported, not fatal.
+
+    `community_ids=None` (self-service) exports every community's rows;
+    the tenant-admin DSAR console (`admin_data_privacy_service.py`) passes
+    its own tenant's community ids so the three community-keyed sources
+    (message/watch activity, chat messages) never include another
+    tenant's rows. Account-level sources (profile, identities, sessions,
+    passkeys, consent, deletion requests) are the subject's own identity
+    record and are not community-scoped.
 
     Mirrors `userDataExport.js::collectUserData()` -- a partial export the
     subject can see is more useful than a 500, and silently omitting a
@@ -326,9 +378,9 @@ async def collect_user_data(
         ("linked_identities", _export_linked_identities(async_dal, dal, user_id)),
         ("sessions", _export_sessions(async_dal, dal, user_id)),
         ("passkeys", _export_passkeys(async_dal, dal, user_id)),
-        ("message_activity", _export_message_activity(async_dal, dal, user_id)),
-        ("watch_activity", _export_watch_activity(async_dal, dal, user_id)),
-        ("chat_messages", _export_chat_messages(async_dal, dal, user_id)),
+        ("message_activity", _export_message_activity(async_dal, dal, user_id, community_ids)),
+        ("watch_activity", _export_watch_activity(async_dal, dal, user_id, community_ids)),
+        ("chat_messages", _export_chat_messages(async_dal, dal, user_id, community_ids)),
         ("cookie_consent", _export_cookie_consent(async_dal, dal, user_id)),
         ("deletion_requests", _export_deletion_requests(async_dal, dal, user_id)),
     ]
@@ -388,6 +440,24 @@ async def request_data_deletion(
         if not await _verify_password(password, password_hash):
             raise unauthorized("Password confirmation failed")
 
+    await anonymize_user_data(async_dal, dal, user_id=user_id, email=email)
+    return False, True
+
+
+async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: str | None) -> None:
+    """Delete/anonymize every PII-bearing row for `user_id` and record the outcome.
+
+    The shared erasure core: `request_data_deletion()` (self-service, after
+    its password confirmation) and the tenant-admin DSAR console
+    (`admin_data_privacy_service.py`, after ITS authorization + audit
+    checks) both call this, so the two paths can never drift apart on what
+    "erased" means. It performs NO authorization of its own -- the caller
+    owns that, and MUST have already proven the caller may erase
+    `user_id`.
+
+    Always writes a `data_deletion_requests` row (success, or best-effort
+    "failed" followed by re-raising the original error).
+    """
     now = datetime.now(UTC)
     counts: dict[str, int] = {}
     try:
@@ -445,5 +515,3 @@ async def request_data_deletion(
         except Exception:  # noqa: BLE001, S110 - best-effort; must not mask the original error
             pass
         raise
-
-    return False, True

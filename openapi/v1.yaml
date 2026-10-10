@@ -1493,6 +1493,48 @@ components:
       - timestamp
       title: DistributionMetaDTO
       type: object
+    DsarResultDTO:
+      description: One target user's outcome. `data`/`incomplete` are populated for
+        a completed export only.
+      properties:
+        data:
+          anyOf:
+          - additionalProperties:
+              items:
+                additionalProperties: true
+                type: object
+              type: array
+            type: object
+          - type: 'null'
+          default: null
+          title: Data
+        detail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Detail
+        incomplete:
+          anyOf:
+          - items:
+              additionalProperties:
+                type: string
+              type: object
+            type: array
+          - type: 'null'
+          default: null
+          title: Incomplete
+        status:
+          title: Status
+          type: string
+        userId:
+          title: Userid
+          type: integer
+      required:
+      - userId
+      - status
+      title: DsarResultDTO
+      type: object
     GlobalInstallDTO:
       description: 'Response DTO: one `app_global_installs` row.'
       properties:
@@ -4368,6 +4410,10 @@ components:
         slug:
           title: Slug
           type: string
+        whitelabeled:
+          default: false
+          title: Whitelabeled
+          type: boolean
       required:
       - slug
       - displayName
@@ -19271,6 +19317,212 @@ paths:
                 type: object
           description: Response DTO for message-only endpoints.
       summary: Update tenant modules.
+  /api/v1/tenant/{tenant_slug}/privacy/bulk:
+    post:
+      description: ''
+      operationId: post_bulk_dsar
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for the bulk route. `userIds` is capped per
+                action by the service.
+              properties:
+                action:
+                  enum:
+                  - export
+                  - erase
+                  - do_not_sell
+                  title: Action
+                  type: string
+                confirm:
+                  default: false
+                  title: Confirm
+                  type: boolean
+                userIds:
+                  items:
+                    type: integer
+                  title: Userids
+                  type: array
+              required:
+              - action
+              - userIds
+              title: BulkDsarRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `POST /<slug>/privacy/bulk` -- always
+                  200 with per-user results.
+                properties:
+                  action:
+                    title: Action
+                    type: string
+                  failed:
+                    title: Failed
+                    type: integer
+                  requested:
+                    title: Requested
+                    type: integer
+                  results:
+                    items:
+                      $ref: '#/components/schemas/DsarResultDTO'
+                    title: Results
+                    type: array
+                  succeeded:
+                    title: Succeeded
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - action
+                - requested
+                - succeeded
+                - failed
+                title: BulkDsarResponse
+                type: object
+          description: Response DTO for `POST /<slug>/privacy/bulk` -- always 200
+            with per-user results.
+      summary: Run one DSAR action over many of the tenant's users -- per-user results,
+        not atomic.
+  /api/v1/tenant/{tenant_slug}/privacy/users/{user_id}/do-not-sell:
+    put:
+      description: ''
+      operationId: put_do_not_sell_user
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the single-user routes.
+                properties:
+                  action:
+                    title: Action
+                    type: string
+                  result:
+                    $ref: '#/components/schemas/DsarResultDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - action
+                - result
+                title: SingleDsarResponse
+                type: object
+          description: Response DTO for the single-user routes.
+      summary: Record a CCPA/CPRA Do-Not-Sell opt-out for `user_id` (one-way, idempotent).
+  /api/v1/tenant/{tenant_slug}/privacy/users/{user_id}/erase:
+    post:
+      description: ''
+      operationId: post_erase_user
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for the single-user erase route.
+              properties:
+                confirm:
+                  default: false
+                  title: Confirm
+                  type: boolean
+              title: EraseUserRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the single-user routes.
+                properties:
+                  action:
+                    title: Action
+                    type: string
+                  result:
+                    $ref: '#/components/schemas/DsarResultDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - action
+                - result
+                title: SingleDsarResponse
+                type: object
+          description: Response DTO for the single-user routes.
+      summary: Erase/anonymize `user_id` (GDPR Art. 17); needs `confirm=true`, refused
+        if shared.
+  /api/v1/tenant/{tenant_slug}/privacy/users/{user_id}/export:
+    get:
+      description: ''
+      operationId: get_export_user
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the single-user routes.
+                properties:
+                  action:
+                    title: Action
+                    type: string
+                  result:
+                    $ref: '#/components/schemas/DsarResultDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - action
+                - result
+                title: SingleDsarResponse
+                type: object
+          description: Response DTO for the single-user routes.
+      summary: Export `user_id`'s personal data held within the admin's own tenant
+        (GDPR Art. 15/20).
   /api/v1/tenant/{tenant_slug}/settings:
     get:
       description: ''
