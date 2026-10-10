@@ -19,6 +19,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+from flask_core.ai_guard import (
+    CATEGORY_EXFIL_BEACON,
+    SCAN_MAX_CHARS,
+    fold_for_scan,
+    neutralize_markup,
+    normalize_untrusted,
+    scan_for_injection,
+)
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -155,6 +164,19 @@ class SafetyLayer:
                 detected_topics=[],
             )
 
+        # The detectors only look at the first SCAN_MAX_CHARS characters; a longer prompt would
+        # be partly unscreened (filler followed by a payload). Fail closed instead of under-scanning.
+        if len(prompt) > SCAN_MAX_CHARS:
+            logger.warning(
+                f"AUDIT SafetyLayer blocked prompt: too long to screen ({len(prompt)} chars)"
+            )
+            return SafetyCheckResult(
+                is_safe=False,
+                blocked_reason="Prompt too long to screen",
+                detected_patterns=[],
+                detected_topics=[],
+            )
+
         # Check for injection patterns
         injection_safe, detected_patterns = self.check_injection(prompt)
 
@@ -201,10 +223,23 @@ class SafetyLayer:
         """
         detected_patterns: list[str] = []
 
+        # Match against the canonical folded view so zero-width / full-width /
+        # lookalike-letter / spacing obfuscation cannot slip past the patterns.
+        folded = fold_for_scan(text)
         for pattern in INJECTION_PATTERNS:
-            match = pattern.search(text)
+            match = pattern.search(folded)
             if match:
                 detected_patterns.append(match.group(0))
+
+        # Directive-shaped attacks the phrase list does not cover: role/tenant/scope
+        # escalation, exfiltration, tool abuse (closed-vocabulary category names are
+        # reported, never the text). The remote-image beacon category is an
+        # OUTPUT-side concern, so a user merely pasting a markdown image is not blocked.
+        for category in sorted(
+            scan_for_injection(text, ignore=frozenset({CATEGORY_EXFIL_BEACON})).categories
+        ):
+            if category not in detected_patterns:
+                detected_patterns.append(category)
 
         is_safe = len(detected_patterns) == 0
 
@@ -268,7 +303,9 @@ class SafetyLayer:
         Returns:
             Sanitized prompt with dangerous patterns removed
         """
-        sanitized = prompt
+        # Normalise first (so obfuscated variants are matched) and defang any
+        # delimiter / chat-template control tokens.
+        sanitized = neutralize_markup(normalize_untrusted(prompt))
 
         # Remove detected injection patterns
         for pattern in INJECTION_PATTERNS:

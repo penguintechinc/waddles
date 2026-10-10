@@ -28,6 +28,16 @@ a plain-text request and `AIResponse.json_mode` says which one the caller
 got. Every client fails LOUD on an empty completion (a reasoning model that
 burns its whole token budget "thinking" otherwise returns a successful,
 metered, blank answer).
+
+Prompt-injection posture (OWASP LLM01): every client builds its provider payload from
+`prompt.compose_prompt()` -- a real system/user split with server-retrieved context rendered as a
+delimited, defanged block -- and extracts any tool call the model asks for into
+`AIResponse.requested_tool_calls` (UNAUTHORISED; `router.route_completion()` re-authorises or
+refuses every one). No client ever sends tool definitions, so a tool call in a response is an
+anomaly, and a provider response that claims a tool turn it cannot parse is surfaced as a
+malformed call rather than read as "no tool calls". Egress redaction (`redact_pii`) covers the
+system turn, the user turn and the rendered context together, immediately before the request is
+built.
 """
 
 from __future__ import annotations
@@ -41,11 +51,13 @@ from typing import Any
 
 import httpx
 from flask_core.ai_telemetry import AITelemetry
+from flask_core.ai_tool_authz import extract_tool_calls
 from flask_core.db_errors import describe_db_error, format_sanitized_traceback
 
 from services.ai_routing.errors import invalid_byok_key, provider_error
 from services.ai_routing.models import AIRequest, AIResponse, ByokProvider, Tier
 from services.ai_routing.pii_redaction import redact_pii
+from services.ai_routing.prompt import compose_prompt
 from services.errors import ApiError
 
 logger = logging.getLogger(__name__)
@@ -70,6 +82,11 @@ def _env_flag(name: str, *, default: bool) -> bool:
     if value in _FALSE_VALUES:
         return False
     raise ValueError(f"{name}={raw!r} is not a boolean (use true/false/1/0/yes/no/on/off)")
+
+
+def _redact_self_hosted() -> bool:
+    """`AI_REDACT_PII_SELF_HOSTED` (default off): also redact prompts sent to self-hosted Ollama."""
+    return _env_flag("AI_REDACT_PII_SELF_HOSTED", default=False)
 
 
 def _describe_http_error(exc: httpx.HTTPError) -> str:
@@ -197,12 +214,17 @@ class OllamaClient:
     async def _generate(self, request: AIRequest, *, tier: Tier, json_mode: bool) -> AIResponse:
         """The un-instrumented call: build the payload, POST, validate and normalize the reply."""
         model = self._config.model
+        composed = compose_prompt(request)
+        redact = _redact_self_hosted()
+        user_turn = redact_pii(composed.user) if redact else composed.user
         payload: dict[str, Any] = {
             "model": model,
-            "prompt": request.prompt,
+            "prompt": user_turn,
             "stream": False,
             "options": {"temperature": request.temperature, "num_predict": request.max_tokens},
         }
+        if composed.system:
+            payload["system"] = redact_pii(composed.system) if redact else composed.system
         if self._config.disable_thinking:
             payload["think"] = False
         if json_mode:
@@ -218,7 +240,7 @@ class OllamaClient:
             tier,
             model,
             "json" if json_mode else "text",
-            len(request.prompt),
+            len(user_turn),
             request.max_tokens,
         )
         try:
@@ -245,15 +267,18 @@ class OllamaClient:
         data = self._parse_body(response, tier=tier)
         done_reason = data.get("done_reason")
         raw_text = data.get("response")
-        text = _require_completion_text(
-            raw_text if isinstance(raw_text, str) else "",
-            provider=f"Ollama ({tier})",
-            detail=(
-                f"model={model!r}, done_reason={done_reason!r}, "
-                f"thinking_present={bool(data.get('thinking'))}"
-            ),
-        )
-        if json_mode:
+        requested_calls = extract_tool_calls(data, provider="ollama")
+        text = raw_text if isinstance(raw_text, str) else ""
+        if not requested_calls:
+            text = _require_completion_text(
+                text,
+                provider=f"Ollama ({tier})",
+                detail=(
+                    f"model={model!r}, done_reason={done_reason!r}, "
+                    f"thinking_present={bool(data.get('thinking'))}"
+                ),
+            )
+        if json_mode and text:
             try:
                 json.loads(text)
             except ValueError as exc:
@@ -280,6 +305,7 @@ class OllamaClient:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             json_mode=json_mode,
+            requested_tool_calls=requested_calls,
         )
 
     @staticmethod
@@ -294,6 +320,17 @@ class OllamaClient:
         return data
 
 
+def _json_object(response: httpx.Response, *, provider: str) -> dict[str, Any]:
+    """Decode a BYOK provider body; anything but a JSON object is a loud `provider_error()`."""
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise provider_error(f"{provider} returned a non-JSON response body") from exc
+    if not isinstance(data, dict):
+        raise provider_error(f"{provider} returned an unexpected response shape")
+    return data
+
+
 class OpenAIClient:
     """Real OpenAI Chat Completions client -- BYOK tier, community's own key."""
 
@@ -306,15 +343,20 @@ class OpenAIClient:
     async def generate(self, api_key: str, request: AIRequest) -> AIResponse:
         """POST `/chat/completions`; normalize OpenAI's `usage.{prompt,completion}_tokens`.
 
-        `request.prompt` is redacted (`pii_redaction.redact_pii`) before it
-        leaves this process -- this call crosses to a third-party API
-        (the community's own OpenAI account), unlike the self-hosted Ollama
-        tiers.
+        The system and user turns (including any rendered retrieved context) are
+        redacted (`pii_redaction.redact_pii`) before they leave this process --
+        this call crosses to a third-party API (the community's own OpenAI
+        account), unlike the self-hosted Ollama tiers.
         """
         model = request.model_hint or os.environ.get("AI_BYOK_OPENAI_MODEL", "gpt-4o-mini")
+        composed = compose_prompt(request)
+        messages: list[dict[str, str]] = []
+        if composed.system:
+            messages.append({"role": "system", "content": redact_pii(composed.system)})
+        messages.append({"role": "user", "content": redact_pii(composed.user)})
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": redact_pii(request.prompt)}],
+            "messages": messages,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
         }
@@ -332,13 +374,16 @@ class OpenAIClient:
             # httpx's default str() omits request/response headers (never the api_key).
             raise provider_error(f"OpenAI request failed: {exc}") from exc
 
-        data = response.json()
+        data = _json_object(response, provider="OpenAI")
+        requested_calls = extract_tool_calls(data, provider="openai")
         choices = data.get("choices") or [{}]
-        text = _require_completion_text(
-            str((choices[0].get("message") or {}).get("content") or ""),
-            provider="OpenAI",
-            detail=f"model={model!r}, finish_reason={choices[0].get('finish_reason')!r}",
-        )
+        text = str((choices[0].get("message") or {}).get("content") or "")
+        if not requested_calls:
+            text = _require_completion_text(
+                text,
+                provider="OpenAI",
+                detail=f"model={model!r}, finish_reason={choices[0].get('finish_reason')!r}",
+            )
         usage = data.get("usage") or {}
         return AIResponse(
             text=text,
@@ -347,6 +392,7 @@ class OpenAIClient:
             tier_used="byok",
             input_tokens=int(usage.get("prompt_tokens", 0) or 0),
             output_tokens=int(usage.get("completion_tokens", 0) or 0),
+            requested_tool_calls=requested_calls,
         )
 
 
@@ -362,18 +408,22 @@ class AnthropicClient:
     async def generate(self, api_key: str, request: AIRequest) -> AIResponse:
         """POST `/messages`; normalize Anthropic's `usage.{input,output}_tokens`.
 
-        `request.prompt` is redacted (`pii_redaction.redact_pii`) before it
-        leaves this process -- see `OpenAIClient.generate`'s docstring for
-        why this tier redacts and the free/premium Ollama tiers don't.
+        The system and user turns are redacted (`pii_redaction.redact_pii`)
+        before they leave this process -- see `OpenAIClient.generate`'s
+        docstring for why this tier redacts and the free/premium Ollama tiers
+        don't.
         """
         model = request.model_hint or os.environ.get(
             "AI_BYOK_ANTHROPIC_MODEL", "claude-3-5-haiku-20241022"
         )
-        payload = {
+        composed = compose_prompt(request)
+        payload: dict[str, Any] = {
             "model": model,
             "max_tokens": request.max_tokens,
-            "messages": [{"role": "user", "content": redact_pii(request.prompt)}],
+            "messages": [{"role": "user", "content": redact_pii(composed.user)}],
         }
+        if composed.system:
+            payload["system"] = redact_pii(composed.system)
         try:
             async with httpx.AsyncClient(
                 base_url=self.BASE_URL, timeout=self._timeout_seconds
@@ -391,13 +441,18 @@ class AnthropicClient:
         except httpx.HTTPError as exc:
             raise provider_error(f"Anthropic request failed: {exc}") from exc
 
-        data = response.json()
+        data = _json_object(response, provider="Anthropic")
+        requested_calls = extract_tool_calls(data, provider="anthropic")
         content_blocks = data.get("content") or [{}]
-        text = _require_completion_text(
-            "".join(str(block.get("text", "")) for block in content_blocks),
-            provider="Anthropic",
-            detail=f"model={model!r}, stop_reason={data.get('stop_reason')!r}",
+        text = "".join(
+            str(block.get("text", "")) for block in content_blocks if isinstance(block, dict)
         )
+        if not requested_calls:
+            text = _require_completion_text(
+                text,
+                provider="Anthropic",
+                detail=f"model={model!r}, stop_reason={data.get('stop_reason')!r}",
+            )
         usage = data.get("usage") or {}
         return AIResponse(
             text=text,
@@ -406,6 +461,7 @@ class AnthropicClient:
             tier_used="byok",
             input_tokens=int(usage.get("input_tokens", 0) or 0),
             output_tokens=int(usage.get("output_tokens", 0) or 0),
+            requested_tool_calls=requested_calls,
         )
 
 

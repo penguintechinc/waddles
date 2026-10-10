@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from flask_core import describe_db_error
+from flask_core.ai_guard import render_search_results, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -178,16 +179,13 @@ class PriceTrackerService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'PRICE_SEARCH_SYSTEM_PROMPT',
                 PRICE_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Game: {game_name}\n\n"
+                f"Game: {wrap_untrusted(game_name, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Provide structured pricing comparison based on these results."
             )
@@ -312,16 +310,13 @@ class PriceTrackerService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'DEALS_SEARCH_SYSTEM_PROMPT',
                 DEALS_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Game/Query: {game_name}\n\n"
+                f"Game/Query: {wrap_untrusted(game_name, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "List the best current deals based on these results."
             )
