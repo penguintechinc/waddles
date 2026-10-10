@@ -738,6 +738,42 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.socials
+    version: "1.0.0"
+    language: python
+    source_dir: python/socials
+    manifest_path: socials.manifest.yaml
+    artifact_path: socials.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.discord
+    version: "1.0.0"
+    language: python
+    source_dir: python/discord
+    manifest_path: discord.manifest.yaml
+    artifact_path: discord.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.faq
+    version: "1.0.0"
+    language: python
+    source_dir: python/faq
+    manifest_path: faq.manifest.yaml
+    artifact_path: faq.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.birthday
+    version: "1.0.0"
+    language: python
+    source_dir: python/birthday
+    manifest_path: birthday.manifest.yaml
+    artifact_path: birthday.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
   - app_id: waddles.core.example.death
     version: "1.0.0"
     language: python
