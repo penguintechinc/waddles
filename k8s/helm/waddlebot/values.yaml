@@ -2440,6 +2440,16 @@ config:
   spectrumLobbies: ""
   # ENV baseline for flag waddles.spectrum-integration (default OFF; PostHog overrides when connected)
   spectrumIntegrationEnabled: false
+  # Spectrum org sync (gh #101) — comma-separated Spectrum community ids; each gets a roster + an
+  # events poller (snapshot-diffed in Valkey). Needs spectrumIntegrationEnabled AND spectrumOrgSyncEnabled.
+  spectrumOrgCommunities: ""
+  # ENV baseline for flag waddles.spectrum-org-sync (default OFF; PostHog overrides when connected)
+  spectrumOrgSyncEnabled: false
+  spectrumOrgPollIntervalS: 300
+  # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
+  spectrumRosterMaxDepartureRatio: 0.5
+  # Emit the whole current roster/event list as joined/created on the first poll (bootstrap only)
+  spectrumOrgEmitBacklog: false
 
 # Dependencies Configuration
 dependencies:
