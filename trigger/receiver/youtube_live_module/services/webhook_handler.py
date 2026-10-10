@@ -4,13 +4,25 @@ Webhook Handler Service
 
 Handles PubSubHubbub (WebSub) callbacks for YouTube channel notifications.
 Processes stream start/end events from YouTube's Atom feed updates.
+
+Security (XXE): the callback endpoint is a public, unauthenticated HTTP POST
+target, so the Atom body is attacker-controlled.  It is parsed ONLY through
+``defusedxml`` with DTDs, entity declarations and external references
+forbidden (blocks XXE file-read/SSRF and billion-laughs entity expansion).
+Never use the stdlib ``xml.etree.ElementTree`` parse functions here;
+``tests/unit/test_no_unsafe_xml.py`` enforces this.
 """
 
 import logging
 from typing import Dict, Optional
-from xml.etree import ElementTree as ET
+
+# Stdlib ElementTree is imported ONLY for the Element type annotation.
+# Parsing goes through defusedxml (SafeET) — see module docstring.
+from xml.etree.ElementTree import Element  # nosec B405
 
 import httpx
+from defusedxml import ElementTree as SafeET
+from defusedxml.common import DefusedXmlException
 
 from config import Config
 
@@ -98,7 +110,9 @@ class WebhookHandler:
             Dict with parsed event data
         """
         try:
-            root = ET.fromstring(body)
+            root = SafeET.fromstring(
+                body, forbid_dtd=True, forbid_entities=True, forbid_external=True
+            )
 
             # Get channel info from feed
             channel_id = None
@@ -128,8 +142,15 @@ class WebhookHandler:
                 'events_processed': len(events)
             }
 
-        except ET.ParseError as e:
+        except SafeET.ParseError as e:
             logger.error(f"Failed to parse notification XML: {e}")
+            return {'success': False, 'error': 'Invalid XML'}
+        except DefusedXmlException as e:
+            # Hostile payload (DTD / entity declaration / external reference).
+            # Log the class only: the message embeds attacker-chosen names.
+            logger.error(
+                f"Rejected unsafe XML in notification: {type(e).__name__}"
+            )
             return {'success': False, 'error': 'Invalid XML'}
         except Exception as e:
             logger.error(f"Error processing notification: {e}")
@@ -146,7 +167,7 @@ class WebhookHandler:
 
     def _parse_entry(
         self,
-        entry: ET.Element,
+        entry: Element,
         channel_id: Optional[str],
         channel_name: Optional[str]
     ) -> Optional[Dict]:

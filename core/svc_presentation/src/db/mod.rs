@@ -89,6 +89,8 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             cache_password: None,
+            image_bucket_access_key_id: None,
+            image_bucket_secret_access_key: None,
         }
     }
 
@@ -130,6 +132,8 @@ mod tests {
             cli,
             db_password: Secret::new("unused"),
             cache_password: None,
+            image_bucket_access_key_id: None,
+            image_bucket_secret_access_key: None,
         };
         let first = get_or_connect(&config).await.expect("connects");
         // Second call returns the cached connection rather than
