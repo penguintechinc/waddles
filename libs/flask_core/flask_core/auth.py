@@ -553,10 +553,13 @@ SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
         # admins), unaffected by this fix. Regression test:
         # `test_tenancy.py::TestScopeBundles::
         # test_tenant_bundle_never_grants_platform_only_users_admin_scope`.
+        # 'compliance.audit:admin' (enterprise audit-log read/verify/export) is listed
+        # explicitly: it is NOT reachable via the `*:read` every session carries, and a
+        # tenant owner may only ever see their OWN tenant's chain (tenant from the JWT).
         'admin': [
             'tenant:read', 'tenant:write', 'tenant:admin', 'tenant:delete',
             'community:create', 'community:delete', 'billing:read', 'billing:write',
-            'settings:write',
+            'settings:write', 'compliance.audit:admin',
         ],
         'maintainer': [
             'tenant:read', 'tenant:write', 'community:create',
