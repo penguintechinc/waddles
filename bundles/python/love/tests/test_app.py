@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import itertools
+import json
 import sys
 import types
 from typing import Any
@@ -669,3 +670,302 @@ def test_all_kv_keys_used_are_colon_free(fake_host: _Host, monkeypatch: pytest.M
     assert fake_host.store  # at least one key was actually written
     for key in fake_host.store:
         assert ":" not in key
+
+
+# -- PII-free logs -- regression: gh-674 (bundle-logs-must-be-pii-free) ----------
+
+_SENTINEL = "SENTINELpii9f3a"
+
+#: Strict per-message allowlist: a log line may carry ONLY these fields. A new field (e.g. a
+#: raw `target=`/`actor=`/`text=`) fails here instead of silently shipping user input to telemetry.
+_ALLOWED_LOG_FIELDS: dict[str, frozenset[str]] = {
+    "love.transform matched": frozenset({"command"}),
+    "love.dispatch relayed": frozenset({"platform", "command", "detail"}),
+    "love.kv_error": frozenset({"op", "error"}),
+    "love.best_corrupt": frozenset({"community"}),
+    "love.ships_corrupt": frozenset({"community"}),
+    "love.missing_community": frozenset({"command"}),
+}
+
+
+def _assert_logs_pii_free(host: _Host, *, minimum_lines: int) -> set[str]:
+    """Every captured log line is allow-listed field-by-field and free of the sentinel.
+
+    Asserts a non-empty denominator first -- a check that examined zero log lines proves nothing.
+    Returns the distinct messages seen so callers can prove each branch was exercised.
+    """
+    assert len(host.log_calls) >= minimum_lines
+    for _lvl, message, fields_json in host.log_calls:
+        assert _SENTINEL not in message
+        assert _SENTINEL not in fields_json
+        assert message in _ALLOWED_LOG_FIELDS, f"unexpected log message {message!r}"
+        assert set(json.loads(fields_json)) <= _ALLOWED_LOG_FIELDS[message]
+    return {message for _lvl, message, _f in host.log_calls}
+
+
+def test_transform_logs_never_carry_user_input(fake_host: _Host) -> None:
+    # regression: gh-674
+    for text in (
+        f"!love {_SENTINEL}",
+        f"!love {_SENTINEL} extra",
+        f"!love list {_SENTINEL}",
+        f"!love enable {_SENTINEL}",
+        f"!ship {_SENTINEL} other",
+        f"!ship {_SENTINEL}",
+        "!love",
+        "!love list",
+    ):
+        assert _run(transform(_sample_event(text, actor=_SENTINEL))) is not None
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=8)
+    assert seen == {"love.transform matched"}
+
+
+def test_dispatch_logs_never_carry_user_input_on_any_command(fake_host: _Host) -> None:
+    # regression: gh-674 -- sentinel as actor AND as every typed target, across every outcome.
+    def go(command: str, **kw: str) -> None:
+        envelope = _sample_envelope("twitch", command, actor=_SENTINEL, **kw)
+        _run(dispatch(envelope, {}, http_client=None))
+
+    go("pair_self", target=_SENTINEL)  # self-love (target == actor)
+    go("pair_self", target=f"{_SENTINEL}x")  # resolved
+    go("pair_self", target=f"!!!{_SENTINEL}")  # unknown target
+    go("ship", target_a=_SENTINEL, target_b="other")
+    go("ship", target_a=_SENTINEL, target_b=_SENTINEL)  # self
+    go("ship", target_a=f"!!!{_SENTINEL}", target_b="other")  # unknown a
+    go("ship", target_a="other", target_b=f"!!!{_SENTINEL}")  # unknown b
+    go("list")
+    go("usage")
+    pseudonym = _pseudonym(_SENTINEL)
+    fake_host.store[_scoped(_love_best_key(pseudonym))] = b"garbage"
+    go("list")  # corrupt best
+    fake_host.store[_scoped(_love_ships_key(pseudonym))] = b"garbage"
+    go("list")  # corrupt ships
+
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=9)
+    assert seen == {"love.dispatch relayed", "love.best_corrupt", "love.ships_corrupt"}
+    assert all(_SENTINEL not in key for key in fake_host.store)
+
+
+def test_failure_paths_never_log_user_input(fake_host: _Host) -> None:
+    # regression: gh-674 -- a kv failure whose own exception text echoes user-ish data must still
+    # log only the classified error-case NAME, and the missing-community guard only the command.
+    def boom(key: str, delta: int, ttl: int) -> int:
+        raise RuntimeError(f"backend detail {_SENTINEL}")
+
+    sys.modules["wit_world"].imports.kv.increment = boom
+    with pytest.raises(RuntimeError) as excinfo:
+        _run(
+            dispatch(
+                _sample_envelope("twitch", "pair_self", actor=_SENTINEL, target="bob"),
+                {},
+                http_client=None,
+            )
+        )
+    assert _SENTINEL not in str(excinfo.value)
+    with pytest.raises(ValueError):
+        _run(
+            dispatch(
+                _sample_envelope("twitch", "list", actor=_SENTINEL, community=None),
+                {},
+                http_client=None,
+            )
+        )
+
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=2)
+    assert seen == {"love.kv_error", "love.missing_community"}
+
+
+# -- corrupt store: ERROR-logged (loud) with the community id only -----------------------
+
+
+@pytest.mark.parametrize("payload", [b"", b"12abc", b"\xff\xfe", b"1.5", b" "])
+def test_every_corrupt_counter_shape_is_error_logged_and_reads_as_zero(
+    payload: bytes, fake_host: _Host
+) -> None:
+    fake_host.store[_scoped(_love_ships_key(_pseudonym("viewer-1")))] = payload
+    _run(dispatch(_sample_envelope("twitch", "list"), {}, http_client=None))
+    assert _NO_RECORD_YET in fake_host.relay_calls[-1][1]
+    corrupt = [
+        (lvl, json.loads(f)) for lvl, m, f in fake_host.log_calls if m == "love.ships_corrupt"
+    ]
+    assert corrupt == [(0, {"community": "comm-1"})]  # Level.ERROR
+
+
+def test_corrupt_best_is_error_logged_and_reads_as_zero(fake_host: _Host) -> None:
+    pseudonym = _pseudonym("viewer-1")
+    fake_host.store[_scoped(_love_ships_key(pseudonym))] = b"2"
+    fake_host.store[_scoped(_love_best_key(pseudonym))] = b"\xff"
+    _run(dispatch(_sample_envelope("twitch", "list"), {}, http_client=None))
+    assert "best match: 0%" in fake_host.relay_calls[-1][1]
+    corrupt = [
+        (lvl, json.loads(f)) for lvl, m, f in fake_host.log_calls if m == "love.best_corrupt"
+    ]
+    assert corrupt == [(0, {"community": "comm-1"})]
+
+
+def test_corrupt_best_is_replaced_by_the_next_pairing(
+    fake_host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt best reads as 0, so any real percent overwrites (self-heals) it."""
+    monkeypatch.setattr("app._compute_match", lambda a, b, day: (37, "flavor"))
+    best_key = _scoped(_love_best_key(_pseudonym("viewer-1")))
+    fake_host.store[best_key] = b"garbage"
+    _run(dispatch(_sample_envelope("twitch", "pair_self", target="bob"), {}, http_client=None))
+    assert fake_host.store[best_key] == b"37"
+
+
+# -- no silent fallback: kv failures leave state untouched, one error reply only ----------
+
+
+def _fail_kv_for(op: str, key_fragment: str | None = None) -> None:
+    """Make `wit_world.imports.kv.<op>` raise a WIT-shaped error (optionally for one key only)."""
+    kv_ns = sys.modules["wit_world"].imports.kv
+    original = getattr(kv_ns, op)
+
+    def _maybe_raise(key: str, *rest: Any) -> Any:
+        if key_fragment is None or key_fragment in key:
+            raise _KvError()
+        return original(key, *rest)
+
+    setattr(kv_ns, op, _maybe_raise)
+
+
+def test_pair_self_best_read_failure_fails_loud_with_one_reply(fake_host: _Host) -> None:
+    _fail_kv_for("get", ".love.best.")
+    with pytest.raises(RuntimeError, match="love kv get failed: _ErrorBackend"):
+        _run(dispatch(_sample_envelope("twitch", "pair_self", target="bob"), {}, http_client=None))
+    assert len(fake_host.relay_calls) == 1
+    assert "temporarily unavailable" in fake_host.relay_calls[0][1]
+    errors = [(lvl, json.loads(f)) for lvl, m, f in fake_host.log_calls if m == "love.kv_error"]
+    assert errors == [(0, {"op": "get", "error": "_ErrorBackend"})]
+
+
+def test_failed_increment_writes_no_best_and_relays_no_result(fake_host: _Host) -> None:
+    _fail_kv_for("increment")
+    with pytest.raises(RuntimeError, match="love kv increment failed"):
+        _run(dispatch(_sample_envelope("twitch", "pair_self", target="bob"), {}, http_client=None))
+    assert fake_host.store == {}
+    assert len(fake_host.relay_calls) == 1
+    assert "%" not in fake_host.relay_calls[0][1]
+
+
+def test_failed_best_write_leaves_the_previous_best_intact(
+    fake_host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    best_key = _scoped(_love_best_key(_pseudonym("viewer-1")))
+    fake_host.store[best_key] = b"10"
+    monkeypatch.setattr("app._compute_match", lambda a, b, day: (90, "flavor"))
+    _fail_kv_for("set")
+    with pytest.raises(RuntimeError, match="love kv set failed"):
+        _run(dispatch(_sample_envelope("twitch", "pair_self", target="bob"), {}, http_client=None))
+    assert fake_host.store[best_key] == b"10"
+
+
+def test_relay_failure_propagates_and_is_not_logged_as_relayed(fake_host: _Host) -> None:
+    def _boom(provider: str, msg: str) -> None:
+        raise RuntimeError("relay down")
+
+    sys.modules["wit_world"].imports.relay = types.SimpleNamespace(push=_boom)
+    with pytest.raises(RuntimeError, match="relay down"):
+        _run(
+            dispatch(
+                _sample_envelope("twitch", "ship", target_a="a", target_b="b"), {}, http_client=None
+            )
+        )
+    assert not any(m == "love.dispatch relayed" for _lvl, m, _f in fake_host.log_calls)
+
+
+def test_missing_community_logs_error_and_touches_no_state(fake_host: _Host) -> None:
+    with pytest.raises(ValueError, match="community"):
+        _run(dispatch(_sample_envelope("twitch", "list", community=None), {}, http_client=None))
+    assert fake_host.kv_calls == []
+    assert fake_host.relay_calls == []
+    errors = [
+        (lvl, json.loads(f)) for lvl, m, f in fake_host.log_calls if m == "love.missing_community"
+    ]
+    assert errors == [(0, {"command": "list"})]
+
+
+# -- state scoping and read-only commands --------------------------------------------------
+
+
+def test_ship_counts_never_leak_across_communities(
+    fake_host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app._compute_match", lambda a, b, day: (50, "flavor"))
+    _run(
+        dispatch(
+            _sample_envelope("twitch", "pair_self", community="comm-1", target="bob"),
+            {},
+            http_client=None,
+        )
+    )
+    _run(dispatch(_sample_envelope("twitch", "list", community="comm-2"), {}, http_client=None))
+    assert _NO_RECORD_YET in fake_host.relay_calls[-1][1]
+
+
+def test_list_is_read_only(fake_host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app._compute_match", lambda a, b, day: (50, "flavor"))
+    _run(dispatch(_sample_envelope("twitch", "pair_self", target="bob"), {}, http_client=None))
+    before = dict(fake_host.store)
+    fake_host.kv_calls.clear()
+    _run(dispatch(_sample_envelope("twitch", "list"), {}, http_client=None))
+    assert fake_host.store == before
+    assert {call[0] for call in fake_host.kv_calls} == {"get"}
+
+
+def test_missing_actor_pairs_as_someone_and_is_never_self(fake_host: _Host) -> None:
+    result = _run(
+        dispatch(
+            _sample_envelope("twitch", "pair_self", actor=None, target="someone"),
+            {},
+            http_client=None,
+        )
+    )
+    assert result.detail == "love:resolved"
+    # No actor identity exists, so a typed "someone" can never be detected as self-pairing.
+    assert "self-love is important" not in fake_host.relay_calls[-1][1]
+    assert _scoped(_love_ships_key(_pseudonym(None))) in fake_host.store
+
+
+@pytest.mark.parametrize("platform", ["twitch", "discord"])
+def test_replies_relay_to_the_events_own_platform(platform: str, fake_host: _Host) -> None:
+    result = _run(dispatch(_sample_envelope(platform, "usage"), {}, http_client=None))
+    assert result.transport == platform
+    assert fake_host.relay_calls[-1][0] == platform
+
+
+# -- transform(): payload shape + flag gate ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "keys"),
+    [
+        ("!love bob", {"command", "channel_id", "target"}),
+        ("!ship a b", {"command", "channel_id", "target_a", "target_b"}),
+        ("!love list", {"command", "channel_id"}),
+        ("!love", {"command", "channel_id"}),
+        ("!SHIP a b", {"command", "channel_id", "target_a", "target_b"}),
+        ("  !Love bob  ", {"command", "channel_id", "target"}),
+    ],
+)
+def test_transform_forwards_only_the_fields_dispatch_needs(
+    text: str, keys: set[str], fake_host: _Host
+) -> None:
+    result = _run(transform(_sample_event(text)))
+    assert result is not None
+    assert set(result.payload) == keys
+
+
+def test_flag_is_checked_by_key_and_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    host = _Host(monkeypatch)
+    seen: list[tuple[str, bool]] = []
+
+    def _enabled(key: str, default_value: bool) -> bool:
+        seen.append((key, default_value))
+        return False
+
+    sys.modules["wit_world"].imports.flags = types.SimpleNamespace(enabled=_enabled)
+    assert _run(transform(_sample_event("!love bob"))) is None
+    assert seen == [("waddles.command-love", False)]
+    assert host.kv_calls == []
