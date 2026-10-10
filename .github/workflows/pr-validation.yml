@@ -341,6 +341,9 @@ jobs:
       # waddles_bundle_reader with no usable password). This generic chain
       # smoke test has no chart/Secret involved, so it needs its own throwaway
       # value -- never a real credential, this DB is destroyed at job end.
+      # H-1/H-3 -- 0048_per_service_db_roles refuses to provision the per-service LOGIN roles
+      # without credentials (fail loud, never a silent skip). This generic chain smoke test has
+      # no chart/Secret, so it mints throwaway per-role passwords for this disposable DB.
       - name: alembic upgrade head from empty baseline
         if: steps.changes.outputs.any == 'true'
         env:
@@ -348,6 +351,8 @@ jobs:
           DB_READER_PASSWORD: ci-smoke-test-reader-pw
         run: |
           set -euo pipefail
+          WADDLES_DB_SERVICE_ROLE_PASSWORDS="$(python3 scripts/db/service_roles.py gen-passwords)"
+          export WADDLES_DB_SERVICE_ROLE_PASSWORDS
           python3 -m alembic stamp 0019_kick_app
 
           echo "== upgrade head =="
@@ -426,6 +431,10 @@ jobs:
           DB_READER_PASSWORD: ci-smoke-test-reader-pw
         run: |
           set -euo pipefail
+          # 0048 re-runs on the second upgrade (and its downgrade drops the roles) -- see the
+          # "empty baseline" step above for why the passwords are minted here.
+          WADDLES_DB_SERVICE_ROLE_PASSWORDS="$(python3 scripts/db/service_roles.py gen-passwords)"
+          export WADDLES_DB_SERVICE_ROLE_PASSWORDS
           base_rev="${PRIOR_BASE_REVISION}"
           # Redundant with the producing step's own check -- cheap, and this
           # step is the one that actually splices base_rev into an `alembic`
@@ -465,6 +474,19 @@ jobs:
           fi
 
           echo "::notice::alembic migration chain verified -- ${revision_count} revision(s) applied from ${base_rev} to head, round-tripped via downgrade/upgrade. Final revision: ${current_2}"
+
+
+      # H-1/H-3 -- per-service database accounts, proven on real Postgres: a TRUE fresh
+      # `alembic upgrade head` replay in throwaway containers (docker is preinstalled on
+      # ubuntu-latest), then the full privilege matrix, cross-service denial, RLS, the closed
+      # hub_admin escalation chain, rotation, downgrade round-trip and the dev opt-in guard
+      # (alembic/tests/test_0048_per_service_db_roles.py), plus the no-docker catalog/password/
+      # repo-credential guards. No `|| true`: a collected-zero state exits 5 and fails the step.
+      - name: Per-service DB role isolation (real Postgres)
+        if: steps.changes.outputs.any == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m pytest alembic/tests/test_service_roles_catalog.py alembic/tests/test_0048_per_service_db_roles.py -v -p no:cacheprovider
 
   marketplace-refunds:
     name: Marketplace refund authorization tests

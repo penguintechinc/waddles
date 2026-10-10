@@ -4,8 +4,15 @@
 
 ## Database Credentials
 
-### PostgreSQL
-- **Environment Variable**: `POSTGRES_PASSWORD`
+### PostgreSQL (owner) and per-service roles
+
+> **Per-service roles (H-1 / H-3):** workloads no longer use the owner credential. Each connects as its
+> own least-privilege role (`PW_<ROLE>` keys in `<release>-db-credentials`); the owner password lives in
+> `<release>-db-admin`. Rotation, burned-credential list, and upgrade steps:
+> [DATABASE_CREDENTIALS.md](DATABASE_CREDENTIALS.md). The repo-public `*_dev_changeme` / `dev123` values
+> are **burned** -- never reuse them.
+
+- **Environment Variable**: `POSTGRES_PASSWORD` (owner; `<release>-db-admin`)
 - **Default Value**: REMOVED (was: `waddlebot_secret`)
 - **Locations to Update**:
   - `.env` file (LOCAL ONLY - not in git)

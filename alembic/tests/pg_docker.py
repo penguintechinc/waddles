@@ -31,6 +31,8 @@ triggers/tables/grants.
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -39,7 +41,8 @@ import sys
 import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -50,6 +53,28 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _STAMP_REVISION = "0019_kick_app"
 
 DOCKER_AVAILABLE = shutil.which("docker") is not None
+
+_SERVICE_ROLES_PATH = REPO_ROOT / "scripts" / "db" / "service_roles.py"
+
+
+def load_service_roles_module():  # type: ignore[no-untyped-def]
+    """Import `scripts/db/service_roles.py` by path (shared with 0048 and run-alembic.sh)."""
+    spec = importlib.util.spec_from_file_location("waddles_service_roles_tests", _SERVICE_ROLES_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def throwaway_service_role_passwords() -> dict[str, str]:
+    """Random per-role passwords for a disposable test database -- never a real credential."""
+    roles = load_service_roles_module()
+    return dict(roles.generate_passwords(roles.load_catalog()))
+
+
+def _default_service_role_passwords_json() -> str:
+    return json.dumps(throwaway_service_role_passwords())
 
 _BOOTSTRAP_SQL = """
 CREATE TABLE tenants (
@@ -122,6 +147,9 @@ class PgTestDatabase:
     user: str
     password: str
     dbname: str
+    #: Per-service LOGIN role passwords this container was migrated with (role -> password),
+    #: so a test can authenticate AS a service role. Empty when the caller never migrated.
+    service_role_passwords: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def dsn(self) -> str:
@@ -170,8 +198,14 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
     """
     container = f"waddles-migtest-{name_suffix}"
     port = _free_port()
+    service_role_passwords = throwaway_service_role_passwords()
     db = PgTestDatabase(
-        host="127.0.0.1", port=port, user="waddlebot", password="testpass123", dbname="waddlebot"
+        host="127.0.0.1",
+        port=port,
+        user="waddlebot",
+        password="testpass123",
+        dbname="waddlebot",
+        service_role_passwords=service_role_passwords,
     )
     subprocess.run(  # noqa: S603 -- fixed argv, no shell
         ["docker", "rm", "-f", container], capture_output=True, check=False
@@ -208,6 +242,11 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
         # `os.environ` beforehand) override it, same as every other env var.
         migration_env = {**os.environ, "DATABASE_URL": db.dsn}
         migration_env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
+        # 0048_per_service_db_roles refuses to provision service roles without
+        # credentials (fail loud) -- supply a disposable per-role set.
+        migration_env.setdefault(
+            "WADDLES_DB_SERVICE_ROLE_PASSWORDS", json.dumps(service_role_passwords)
+        )
         subprocess.run(  # noqa: S603 -- fixed argv, no shell
             [sys.executable, "-m", "alembic", "stamp", _STAMP_REVISION],
             cwd=REPO_ROOT,
@@ -269,16 +308,40 @@ def empty_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
         )
 
 
-def alembic_cli(*args: str, dsn: str) -> subprocess.CompletedProcess[str]:
+def bootstrap_minimal_schema(name_suffix: str, db: PgTestDatabase) -> None:
+    """Load the minimal FK bootstrap into an `empty_postgres(name_suffix)` container + stamp.
+
+    Same shape `migrated_postgres` uses (and the CI alembic-migration-chain job): enough
+    legacy tables for migrations 0020+ without replaying the 96-file SQL baseline -- for
+    tests that only need to reach (or fail at) a late revision quickly.
+    """
+    subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        [
+            "docker", "exec", "-i", f"waddles-migtest-{name_suffix}",
+            "psql", "-U", db.user, "-d", db.dbname,
+        ],
+        input=_BOOTSTRAP_SQL,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    alembic_cli("stamp", _STAMP_REVISION, dsn=db.dsn)
+
+
+def alembic_cli(
+    *args: str, dsn: str, env_overrides: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run one `alembic` subcommand against `dsn`, repo root as cwd. Raises on nonzero exit.
 
     Same `DB_READER_PASSWORD` default as `migrated_postgres` above -- an
     `upgrade`/`downgrade` round-trip that crosses 0032_bundle_reader_role.py
     re-runs its (now fail-loud-on-empty) `upgrade()`, and most callers of this
-    helper don't stage their own value.
+    helper don't stage their own value. `WADDLES_DB_SERVICE_ROLE_PASSWORDS` (0048)
+    is defaulted the same way; pass `env_overrides` to stage specific values.
     """
-    env = {**os.environ, "DATABASE_URL": dsn}
+    env = {**os.environ, "DATABASE_URL": dsn, **(env_overrides or {})}
     env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
+    env.setdefault("WADDLES_DB_SERVICE_ROLE_PASSWORDS", _default_service_role_passwords_json())
     result = subprocess.run(  # noqa: S603 -- fixed argv, no shell
         [sys.executable, "-m", "alembic", *args],
         cwd=REPO_ROOT,

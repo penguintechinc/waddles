@@ -479,6 +479,17 @@ kubectl delete pvc -n waddlebot --all
 kubectl delete namespace waddlebot
 ```
 
+## Database accounts (per-service roles)
+
+No workload connects as the database owner/superuser. Every Deployment/Job/CronJob gets its own
+least-privilege Postgres role through `{{ include "waddlebot.dbEnv" (dict "root" . "role" "<role>") }}`;
+role names/grants live in `config/postgres/service-roles.yaml` and are mirrored in
+`infrastructure.postgresql.serviceRoles.roles`. Passwords are generated in alpha/local and **required**
+(`serviceRoles.existingSecret`, or `serviceRoles.passwords` from an out-of-git file) in beta/gamma/
+production. The owner credential is a separate Secret (`<release>-db-admin`) read only by Postgres and
+the db-migrate hook. See [`docs/DATABASE_CREDENTIALS.md`](../../../docs/DATABASE_CREDENTIALS.md) for rotation,
+the burned-credential list, and the upgrade path.
+
 ## Self-provisioned platform keys (feature/helm-auto-provision-keys)
 
 Deploys must never require a human to run a script before `helm install`/`helm upgrade`

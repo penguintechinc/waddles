@@ -148,4 +148,17 @@ with engine.begin() as conn:
 print(f"Reconciled {bundle_reader_role.ROLE} password and grants.")
 PY
 
+# ── Reconcile per-service LOGIN roles (H-1 / H-3) ────────────────────────────
+# config/postgres/service-roles.yaml is the single catalog of the least-privilege
+# role each chart workload connects as (never the database owner/superuser this
+# Job runs as). 0048_per_service_db_roles creates them once; this step re-asserts
+# the EXACT catalog on every migrate Job run so (a) a rotated password in the
+# Secret reaches Postgres, (b) tables added by later migrations are granted to the
+# roles that need them, and (c) out-of-band grant drift is repaired. --strict makes
+# a catalog table that does not exist FAIL the Job (never a silent skip); a missing
+# / weak WADDLES_DB_SERVICE_ROLE_PASSWORDS fails it too. Passwords are read from the
+# environment only -- never an argv, never echoed.
+echo "Reconciling per-service DB roles..."
+python3 /app/scripts/db/service_roles.py reconcile --strict
+
 echo "=== All migrations complete ==="

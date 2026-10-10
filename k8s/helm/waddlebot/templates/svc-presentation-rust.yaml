@@ -6,7 +6,8 @@
 # is a later step.
 #
 # Config surface (core/svc_presentation/src/config.rs):
-#   - DB_* : non-secret from the shared ConfigMap (envFrom); DB_PASSWORD from <release>-secrets.
+#   - DB_HOST/PORT/NAME : non-secret from the shared ConfigMap (envFrom); DB_USER/DB_PASSWORD :
+#     this workload's OWN least-privilege role (waddles_svc_presentation) via waddlebot.dbEnv (H-1/H-3).
 #   - PUSH_JWKS_URL/PUSH_AUDIENCE/PUSH_TRUSTED_ISSUER : overlay_auth PUSH guard verifies
 #     hub-api-issued machine JWTs against hub-api's service JWKS (no static shared secret,
 #     and no bundle-signing key is involved).
@@ -68,15 +69,14 @@ spec:
         - configMapRef:
             name: {{ include "waddlebot.fullname" . }}-config
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_presentation;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_presentation") | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.svcPresentation.port | quote }}
         - name: METRICS_PORT
           value: "9090"
-        - name: DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: DB_PASSWORD
         - name: PUSH_JWKS_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}/internal/service-jwks.json"
         - name: PUSH_AUDIENCE

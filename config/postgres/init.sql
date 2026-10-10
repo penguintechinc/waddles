@@ -1,3 +1,17 @@
+-- ============================================================================
+-- LOCAL DEVELOPMENT ONLY -- docker-compose's postgres initdb hook.
+--
+-- SECURITY (H-1, CWE-798): the `*_dev_changeme` / `dev123` passwords below are
+-- repo-public development credentials. This file is mounted ONLY by
+-- docker-compose.yml (infra-postgres -> /docker-entrypoint-initdb.d); the Helm
+-- chart ships its own credential-free init script (templates/infrastructure/
+-- postgres.yaml) and NO container image, chart, or migration copies this file
+-- (asserted by alembic/tests/test_repo_credentials_guard.py). On any shared
+-- database these roles are stripped of LOGIN + password by
+-- alembic/versions/0048_per_service_db_roles.py. Never run this file against
+-- alpha/beta/gamma/production, and never reuse any value from it there.
+-- ============================================================================
+
 -- Waddles Development Database Initialization
 -- This script sets up the basic database structure for development
 

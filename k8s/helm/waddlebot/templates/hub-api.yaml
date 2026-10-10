@@ -101,6 +101,10 @@ spec:
             name: {{ .Values.serviceJwt.signingSecretName }}
             optional: true
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
         # `flask_core.service_jwt.load_issuer_from_env` also reads
         # SERVICE_JWT_PUBLIC_KEY_<kid> for every still-valid-for-verification
         # rotation key -- these are public keys, safe to render directly

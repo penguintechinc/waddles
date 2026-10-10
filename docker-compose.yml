@@ -95,6 +95,17 @@ services:
       # locally via .env to change the dev login.
       INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-admin@localhost.local}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-WaddleDev-Local-Only-2026!}
+      # SECURITY (H-1): local/dev-only opt-in to repo-derived DB role passwords. The
+      # scoped mod_*/hub_admin roles (031_scoped_database_users.sql) are created
+      # NOLOGIN everywhere else; this suffix gives them `<role><suffix>` logins so the
+      # compose stack's DATABASE_URLs below keep working, and derives the
+      # per-service role passwords (alembic 0048). alembic/env.py REFUSES it when
+      # WADDLES_DEPLOYMENT_TIER is alpha/beta/gamma/production -- never copy these two
+      # lines into any shared environment.
+      WADDLES_DEV_DB_ROLE_PW_SUFFIX: ${WADDLES_DEV_DB_ROLE_PW_SUFFIX:-_dev_changeme}
+      WADDLES_DEPLOYMENT_TIER: dev
+      # 0032_bundle_reader_role refuses an empty password; dev-only throwaway.
+      DB_READER_PASSWORD: ${DB_READER_PASSWORD:-reader_dev_changeme}
     networks:
       - waddlebot-internal
     depends_on:

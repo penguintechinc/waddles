@@ -58,6 +58,10 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_action;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_action") | nindent 8 }}
         - name: MODULE_NAME
           value: "svc-action"
         - name: PIPELINE_STAGE
@@ -91,11 +95,6 @@ spec:
         # svc-action writes action_dispatch_log rows directly (core/svc_action/runner.py)
         # and sends outbound Discord messages via CANON-LIB (waddle_transports) using this
         # bot token -- same Secret keys hub-api/svc-ingest already read.
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: DATABASE_URL
         # fix/helm-platform-credentials -- sourced from the operator-managed
         # platform-credentials Secret, never the chart-rendered `-secrets`
         # Secret; optional so a community with no Discord bot configured

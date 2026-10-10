@@ -1,0 +1,322 @@
+# config/postgres/service-roles.yaml
+#
+# Normative catalog of the per-service Postgres LOGIN roles (security.md "Per-service
+# DB accounts"; findings H-1 / H-3). Every workload the Helm chart deploys connects as
+# exactly ONE role from this file, never as the database owner/superuser (`waddlebot`).
+# The owner credential is confined to the Postgres Deployment itself and the db-migrate
+# hook Job (DDL owner).
+#
+# Rendered to SQL by scripts/db/service_roles.py, which is the ONLY place that writes
+# these GRANTs:
+#   * alembic/versions/0048_per_service_db_roles.py   -- creates the roles in the chain
+#   * migrations/run-alembic.sh                       -- re-asserts them on EVERY migrate
+#                                                        Job run (password rotation, new
+#                                                        tables, drift repair)
+#
+# Credentials are NEVER stored here. Each role's password arrives at migration time via
+# the WADDLES_DB_SERVICE_ROLE_PASSWORDS env var (JSON object role -> password), sourced
+# in the chart from the auto-provisioned / existingSecret mechanism
+# (k8s/helm/waddlebot/templates/secrets.yaml, <release>-db-credentials). The role names
+# in k8s/helm/waddlebot/values.yaml
+# (infrastructure.postgresql.serviceRoles.roles) MUST equal this file's role names --
+# enforced by alembic/tests/test_service_roles_catalog.py.
+#
+# Schema of an entry under `roles:`
+#   description    one line, what the role is for
+#   workloads      chart workloads that connect as it (documentation + drift test)
+#   member_of      pre-existing NOLOGIN group roles whose grants it inherits
+#                  (RBAC-matrix roles, designed mod_* roles). Missing groups are skipped
+#                  (NOTICE) so the minimal CI chain still applies.
+#   public_dml     true => SELECT/INSERT/UPDATE/DELETE on every public BASE table +
+#                  sequence USAGE, MINUS `deny_tables` and the RBAC-matrix tables when
+#                  `exclude_matrix_tables` is true (that legacy profile also loses
+#                  `legacy_deny_tables`); `read_only_tables` keep SELECT only. Views are
+#                  deliberate privilege boundaries (connector_pii_*, tenant_platform_
+#                  credentials) and are NEVER covered by public_dml -- list them under
+#                  `views:` (SELECT only) or inherit them from a designed group.
+#   views          explicit {view: [SELECT]} grants.
+#   tables         explicit {table: [PRIVILEGES]} grants (strict roles). Sequences owned
+#                  by a table that is granted INSERT are granted USAGE/SELECT.
+#   columns        explicit {table: {PRIVILEGE: [columns]}} column-level grants.
+#   optional_tables  subset of `tables` allowed to be absent (a later migration owns them).
+#
+# Anything not granted here is denied. A role cannot CREATE objects (no CREATE on any
+# schema), cannot touch roles, and is NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
+# NOBYPASSRLS.
+version: 1
+
+# Roles the catalog may name in `member_of` but does not create (created by earlier
+# migrations; see rbac-matrix.yaml and 031_scoped_database_users.sql).
+external_groups:
+  - hub_api
+  - svc_ingest
+  - svc_process
+  - svc_action
+  - svc_streaming
+  - mod_core_reputation
+  - mod_router
+  - mod_trigger_discord
+  - mod_trigger_slack
+  - mod_trigger_twitch
+  - mod_trigger_kick
+  - mod_trigger_youtube
+  - mod_action_twitch
+  - mod_action_discord
+  - mod_action_slack
+  - mod_action_youtube
+  - mod_action_lambda
+  - mod_action_gcp
+  - mod_core_community
+  - mod_core_identity
+  - mod_core_ai_researcher
+  - mod_credential_manager
+  - mod_interactive_ai
+  - mod_interactive_alias
+  - mod_interactive_shoutout
+  - mod_interactive_quote
+  - mod_interactive_memories
+  - mod_interactive_inventory
+  - mod_interactive_spotify
+  - mod_interactive_ytmusic
+  - mod_interactive_calendar
+  - mod_interactive_loyalty
+
+# Tables a legacy-profile role may never touch directly: operator-plane secrets and the
+# migration bookkeeping tables. (RBAC-matrix tables are excluded separately.)
+legacy_deny_tables:
+  - platform_integrations      # FORCE RLS; credentials reach only via designed mod_* membership
+  - credential_access_log      # FORCE-style RLS audit log of credential reads
+  - module_db_accounts
+  - db_permission_templates
+
+# Always read-only for application roles: schema-state bookkeeping.
+read_only_tables:
+  - alembic_version
+  - schema_migrations
+
+roles:
+  # ---------------------------------------------------------------- control plane (v3)
+  waddles_hub_api:
+    description: hub-api control plane and the hub-api CLI Jobs (seeder, signing, syncs)
+    workloads: [hub-api-v3, core-bundle-seeder, bundle-signing-reconciler, bundle-signing-backfill, event-sync-reconcile, role-sync, odoo-sync]
+    member_of: [hub_api]
+    public_dml: true
+    exclude_matrix_tables: false
+    deny_tables: [platform_integrations, credential_access_log, module_db_accounts, db_permission_templates]
+    views:
+      marketplace_catalog: [SELECT]
+
+  # ------------------------------------------------------------ data plane (strict)
+  waddles_svc_ingest:
+    description: svc-ingest (no table access; owns no relational state)
+    workloads: [svc-ingest-rust, svc-ingest]
+    member_of: [svc_ingest]
+
+  waddles_svc_process:
+    description: svc-process (reads active-bundle state only via waddles_bundle_reader)
+    workloads: [svc-process-rust, svc-process]
+    member_of: [svc_process]
+
+  waddles_svc_core:
+    description: svc-core placeholder stage (no table access)
+    workloads: [svc-core]
+
+  waddles_svc_action:
+    description: svc-action dispatch audit log
+    workloads: [svc-action-rust, svc-action]
+    member_of: [svc_action]
+    tables:
+      action_dispatch_log: [SELECT, INSERT]
+      tenants: [SELECT]
+      communities: [SELECT]
+
+  waddles_svc_presentation:
+    description: svc-presentation overlays, captions, images
+    workloads: [svc-presentation-rust, svc-presentation]
+    tables:
+      overlay_surfaces: [SELECT]
+      presentation_config: [SELECT]
+      overlay_view_credentials: [SELECT]
+      overlay_images: [SELECT, INSERT]
+      caption_events: [SELECT, INSERT, DELETE]
+
+  waddles_svc_streaming:
+    description: svc-streaming ingest/egress configuration
+    workloads: [svc-streaming]
+    member_of: [svc_streaming]
+    tables:
+      streaming_configs: [SELECT, INSERT, UPDATE, DELETE]
+      streaming_targets: [SELECT, INSERT, UPDATE, DELETE]
+      tenants: [SELECT]
+      communities: [SELECT]
+      community_servers: [SELECT]
+
+  waddles_reputation:
+    description: reputation service (community_members score columns, reputation ledgers)
+    workloads: [reputation]
+    member_of: [mod_core_reputation]
+    tables:
+      community_members: [SELECT, INSERT, UPDATE]
+      community_reputation_config: [SELECT, INSERT, UPDATE]
+      reputation_events: [SELECT, INSERT]
+      reputation_tenant: [SELECT, INSERT, UPDATE]
+      reputation_global: [SELECT, INSERT, UPDATE]
+      communities: [SELECT]
+      community_servers: [SELECT]
+    optional_tables: [reputation_global]
+    columns:
+      hub_users:
+        SELECT: [id, username, avatar_url]
+
+  # ------------------------------------------------- legacy per-module pods (broad DML)
+  # Each legacy pod has its OWN credential and role (revocable / rotatable individually)
+  # and inherits `legacy_dml`-equivalent DML on the non-control-plane public tables. Row
+  # access to platform_integrations flows ONLY through the designed mod_* membership
+  # (031_rls_policies.sql policies), so a pod outside the credential-bearing set sees no
+  # credential rows. Narrowing each pod from public_dml to an explicit `tables:` list is
+  # tracked in docs/DATABASE_CREDENTIALS.md (Residual risk R1).
+  waddles_legacy_discord_collector:
+    description: legacy discord collector pod
+    workloads: [discord-collector]
+    member_of: [mod_trigger_discord]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_googlechat_collector:
+    description: legacy googlechat collector pod
+    workloads: [googlechat-collector]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_kick_collector:
+    description: legacy kick collector pod
+    workloads: [kick-collector]
+    member_of: [mod_trigger_kick]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_mattermost_collector:
+    description: legacy mattermost collector pod
+    workloads: [mattermost-collector]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_slack_collector:
+    description: legacy slack collector pod
+    workloads: [slack-collector]
+    member_of: [mod_trigger_slack]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_teams_collector:
+    description: legacy teams collector pod
+    workloads: [teams-collector]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_twitch_collector:
+    description: legacy twitch collector pod
+    workloads: [twitch-collector]
+    member_of: [mod_trigger_twitch]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_youtube_live_collector:
+    description: legacy youtube-live collector pod
+    workloads: [youtube-live-collector]
+    member_of: [mod_trigger_youtube]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_ai_researcher:
+    description: legacy ai-researcher pod
+    workloads: [ai-researcher]
+    member_of: [mod_core_ai_researcher]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_core_community:
+    description: legacy core-community pod
+    workloads: [core-community]
+    member_of: [mod_core_community]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_core_data:
+    description: legacy core-data pod
+    workloads: [core-data]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_core_identity:
+    description: legacy core-identity pod
+    workloads: [core-identity]
+    member_of: [mod_core_identity]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_hub:
+    description: legacy admin hub pod (templates/core/hub.yaml)
+    workloads: [hub-api]
+    member_of: [mod_credential_manager]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_marketplace:
+    description: legacy marketplace pod
+    workloads: [marketplace]
+    public_dml: true
+    exclude_matrix_tables: true
+    views:
+      marketplace_catalog: [SELECT]
+  waddles_legacy_router:
+    description: legacy router pod
+    workloads: [router]
+    member_of: [mod_router]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_interactive_ai:
+    description: legacy interactive-ai pod
+    workloads: [interactive-ai]
+    member_of: [mod_interactive_ai]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_interactive_gaming:
+    description: legacy interactive-gaming pod
+    workloads: [interactive-gaming]
+    member_of: [mod_interactive_inventory]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_interactive_media:
+    description: legacy interactive-media pod
+    workloads: [interactive-media]
+    member_of: [mod_interactive_spotify, mod_interactive_ytmusic]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_interactive_productivity:
+    description: legacy interactive-productivity pod
+    workloads: [interactive-productivity]
+    member_of: [mod_interactive_calendar]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_interactive_social:
+    description: legacy interactive-social pod
+    workloads: [interactive-social]
+    member_of: [mod_interactive_alias, mod_interactive_shoutout, mod_interactive_quote, mod_interactive_memories, mod_interactive_inventory]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_interactive_loyalty:
+    description: legacy interactive-loyalty pod
+    workloads: [interactive-loyalty]
+    member_of: [mod_interactive_loyalty]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_action_platforms:
+    description: legacy action-platforms pod
+    workloads: [action-platforms]
+    member_of: [mod_action_twitch, mod_action_discord, mod_action_slack, mod_action_youtube]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_action_serverless:
+    description: legacy action-serverless pod
+    workloads: [action-serverless]
+    member_of: [mod_action_lambda, mod_action_gcp]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_trigger_streaming:
+    description: legacy trigger-streaming pod
+    workloads: [trigger-streaming]
+    public_dml: true
+    exclude_matrix_tables: true
+  waddles_legacy_trigger_webhooks:
+    description: legacy trigger-webhooks pod
+    workloads: [trigger-webhooks]
+    public_dml: true
+    exclude_matrix_tables: true
