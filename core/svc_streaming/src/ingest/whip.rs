@@ -409,6 +409,7 @@ async fn create_session(
             kind: IngestKind::Whip,
             key: token.clone(),
             stream: Box::new(tokio::io::empty()),
+            span: tracing::Span::current(),
         })
         .is_err()
     {

@@ -16,7 +16,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::get;
@@ -147,7 +147,15 @@ impl AppState {
 /// least one request (the `up` gauge covers the window before that).
 async fn record_http_metrics(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let method = req.method().to_string();
-    let path = req.uri().path().to_string();
+    // The matched route template (`/whip/{token}`), never the raw path:
+    // WHIP/WHEP tokens ride in the path, so a raw-path label would publish
+    // credentials on the `/metrics` scrape surface *and* mint one series per
+    // token/scanner probe. Unrouted requests collapse into `unmatched`.
+    let path = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("unmatched", MatchedPath::as_str)
+        .to_string();
     let start = Instant::now();
     let response = next.run(req).await;
     let status = response.status().as_u16().to_string();
@@ -209,7 +217,13 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             record_http_metrics,
         ))
-        .layer(TraceLayer::new_for_http())
+        // `request_span` parents each request span to an incoming W3C
+        // `traceparent` and records the route template, not the raw URI
+        // (which can carry WHIP/WHEP tokens) -- see `telemetry::trace_context`.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(crate::telemetry::trace_context::request_span::<axum::body::Body>),
+        )
 }
 
 /// Builds the secondary Prometheus metrics router, bound to its own port

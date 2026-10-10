@@ -197,7 +197,10 @@ impl IngestListener for RtmpListener {
                             let active_keys = active_keys.clone();
                             let session_tx = tx.clone();
                             let metrics = self.metrics.clone();
-                            let span = tracing::info_span!("rtmp_connection", %peer_addr);
+                            // No peer address on the span: a publisher's IP is
+                            // personal data and must not reach the trace backend
+                            // (it stays in the local, sanitized log lines).
+                            let span = tracing::info_span!("rtmp_connection");
                             tokio::spawn(
                                 handle_connection(socket, peer_addr, auth, active_keys, session_tx, metrics)
                                     .instrument(span),
@@ -480,6 +483,7 @@ async fn handle_publish_requested(
         kind: IngestKind::Rtmp,
         key: stream_key.clone(),
         stream: Box::new(FlvByteStream::new(flv_rx)),
+        span: tracing::Span::current(),
     };
 
     if ctx.session_tx.send(ingest_session).await.is_err() {
