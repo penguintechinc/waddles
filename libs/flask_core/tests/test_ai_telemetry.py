@@ -163,3 +163,63 @@ def test_record_call_never_raises_even_if_an_instrument_dies(
         telemetry.record_call(provider="ollama", model="m", mode="text", duration_ms=1.0)
 
     assert "ai_telemetry_failed" in caplog.text
+
+
+def test_guard_signal_and_tool_decision_metrics_reach_the_sink() -> None:
+    sink = Sink()
+    sink.telemetry.record_injection_signals(
+        source="user_input", categories=frozenset({"tenant_switch", "exfiltration"})
+    )
+    sink.telemetry.record_guard_screen(
+        source="web_search",
+        categories=frozenset({"tool_abuse"}),
+        kept=3,
+        dropped=0,
+        duration_ms=0.4,
+    )
+    sink.telemetry.record_tool_decision(
+        allowed=False, reason="scope_denied", tool="a.b", duration_ms=1.5
+    )
+    sink.telemetry.record_tool_decision(allowed=True, reason="authorized", tool="a.b")
+
+    signals = sink.points("waddles.ai.guard.injection_signals")
+    items = sink.points("waddles.ai.guard.items")
+    decisions = sink.points("waddles.ai.tool_call.decisions")
+    durations = sink.points("waddles.ai.guard.duration")
+    print(f"guard telemetry: signals={len(signals)} items={len(items)} decisions={len(decisions)}")
+    assert {(p.attributes["source"], p.attributes["category"]) for p in signals} == {
+        ("user_input", "tenant_switch"),
+        ("user_input", "exfiltration"),
+        ("web_search", "tool_abuse"),
+    }
+    assert [(p.attributes["outcome"], p.value) for p in items] == [("kept", 3)]
+    assert {(p.attributes["decision"], p.attributes["reason"]) for p in decisions} == {
+        ("denied", "scope_denied"),
+        ("allowed", "authorized"),
+    }
+    assert {p.attributes["op"] for p in durations} == {"screen", "tool_authz"}
+
+
+def test_guard_recorders_never_raise_even_if_an_instrument_dies(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class Dead:
+        def add(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("dead exporter")
+
+        record = add
+
+    class Inst:
+        injection_signals = guard_items = tool_decisions = guard_duration = Dead()
+
+    telemetry = AITelemetry("test.dead.guard")
+    monkeypatch.setattr(telemetry, "instruments", lambda: Inst())
+
+    with caplog.at_level("WARNING"):
+        telemetry.record_injection_signals(source="s", categories=frozenset({"c"}))
+        telemetry.record_guard_screen(
+            source="s", categories=frozenset(), kept=1, dropped=1, duration_ms=1.0
+        )
+        telemetry.record_tool_decision(allowed=True, reason="authorized", tool="t")
+
+    assert caplog.text.count("ai_telemetry_failed") == 3
