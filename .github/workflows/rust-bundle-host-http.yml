@@ -1,0 +1,65 @@
+name: Rust bundle-host-http (lint + test)
+
+# Per-crate gate for core/bundle_host_http -- the shared `http` capability
+# egress guard (allowlist / DNS pinning / redirect re-check / rate limit /
+# secret-ref injection) that svc_action, svc_process and egress_proxy all
+# link. Until this workflow existed NO workflow built or tested the crate, so
+# a regression in the SSRF-hardening pipeline -- or in its `http.send` JSON
+# wire against the bundle executor -- could ride into a release branch unseen.
+# Mirrors rust-bundle-host-db.yml (path-filtered, reusable pipeline).
+#
+# `tests/executor_wire_e2e.rs` (the executor <-> guard `http.send` wire e2e)
+# needs NO extra CI setup, so it runs inside the reusable pipeline's plain
+# `cargo test --locked` / `cargo llvm-cov --locked` with no `--features` flag
+# and no Docker:
+#   - the WASI guest is a COMMITTED, pre-built component
+#     (`tests/fixtures/http_fixture.wasm`, pulled in with `include_bytes!`);
+#     nothing compiles a guest at test time, and regenerating it
+#     (cargo-component, see tests/fixtures/README.md) is a manual, rare step;
+#   - the real `bundle-executor` + wasmtime are a path dev-dependency, built
+#     by cargo like any other crate;
+#   - the network behind the guard is a scripted in-process transport, so no
+#     request leaves the runner.
+# The e2e therefore lives or dies with the crate's own gate: a drift in either
+# half of the wire fails `cargo test` here. Because the executor is part of
+# that contract, a change under core/bundle_executor/** re-runs this gate too.
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/bundle_host_http/**'
+      # Same-repo path dependency of the guard (signed egress-allowlist
+      # assertion wire format).
+      - 'core/egress_assertion/**'
+      # The other half of the `http.send` wire the e2e exercises.
+      - 'core/bundle_executor/**'
+      - '.github/workflows/rust-bundle-host-http.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/bundle_host_http/**'
+      - 'core/egress_assertion/**'
+      - 'core/bundle_executor/**'
+      # Self-test: a change to this workflow must prove it still gates.
+      - '.github/workflows/rust-bundle-host-http.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: bundle-host-http
+      working_directory: core/bundle_host_http
+      # No `extra_apt_packages`: the C toolchain + cmake that aws-lc-sys/ring
+      # (jsonwebtoken, rustls) need ship preinstalled on `ubuntu-latest`, and
+      # skipping the apt round-trip removes a known hang/flake surface.
