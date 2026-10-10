@@ -4,7 +4,8 @@ name: Loyalty Points Bundle (Python)
 # 1.0.0: initial DB-backed v1 -- !points (balance)/!points <user>/!points top/
 # !points add|sub <amount> <user>. See src/app.py's own module docstring for the full
 # data-model rationale (kv index + db ledger) and the leaderboard-display-name limitation.
-version: 1.0.2
+# 1.0.3: integrity: atomic first-grant claim (no lost/duplicate rows), bounded amounts + balance cap, accurate clamped replies, no junk rows from sub, normalized caller identity, strict boolean mod gate (fix/bundle-defects-wave).
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -77,6 +78,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.2"
-  min_version: "1.0.2"
+  tested_with: "1.0.3"
+  min_version: "1.0.3"
   max_version: null

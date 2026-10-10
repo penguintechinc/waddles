@@ -11,45 +11,36 @@ const COOKIE_CATEGORIES = [
     id: 'essential_cookies',
     name: 'Essential Cookies',
     required: true,
-    description: 'Essential cookies are required for the website to function. They enable core functionality like page navigation, security, and access control.',
+    description: 'Essential cookies are required for the website to function. They enable core functionality like keeping you signed in, security, and remembering your cookie choices.',
     examples: [
-      { name: 'session_token', purpose: 'User authentication and session management' },
-      { name: 'csrf_token', purpose: 'Protection against cross-site request forgery attacks' },
-      { name: 'user_id', purpose: 'User identification for personalized content' },
+      { name: 'wb_session', purpose: 'Keeps you signed in (HttpOnly, expires after 24 hours)' },
+      { name: 'waddlebot_consent_id', purpose: 'Links this browser to your saved cookie-consent record (12 months)' },
+      { name: 'wb_sso_bind', purpose: 'Secures a single sign-on login attempt (HttpOnly, only present while signing in)' },
     ],
   },
   {
     id: 'functional_cookies',
     name: 'Functional Cookies',
     required: false,
-    description: 'Functional cookies improve user experience by remembering preferences and settings across visits.',
-    examples: [
-      { name: 'theme_preference', purpose: 'Remember dark/light mode choice' },
-      { name: 'language', purpose: 'Store user language and locale preferences' },
-      { name: 'sidebar_collapsed', purpose: 'Remember UI layout preferences' },
-    ],
+    description: 'Functional cookies would remember preferences and settings across visits.',
+    examples: [],
+    noneNote: 'Waddles does not currently set any functional cookies.',
   },
   {
     id: 'analytics_cookies',
     name: 'Analytics Cookies',
     required: false,
-    description: 'Analytics cookies help us understand how users interact with our website, allowing us to improve features and performance.',
-    examples: [
-      { name: '_ga', purpose: 'Google Analytics - track page visits and user behavior' },
-      { name: '_gid', purpose: 'Google Analytics - identify unique users' },
-      { name: '_mixpanel', purpose: 'Mixpanel - usage tracking and event analytics' },
-    ],
+    description: 'Analytics cookies would help us understand how users interact with our website.',
+    examples: [],
+    noneNote: 'Waddles does not set analytics cookies and does not load third-party analytics scripts. Feature flags are evaluated on our servers (PostHog) using only your workspace (tenant) identifier; nothing is stored in your browser.',
   },
   {
     id: 'marketing_cookies',
     name: 'Marketing Cookies',
     required: false,
-    description: 'Marketing cookies enable personalized advertising and help us measure advertising campaign effectiveness.',
-    examples: [
-      { name: '_fbp', purpose: 'Facebook Pixel - track conversions and user behavior' },
-      { name: '_gcl', purpose: 'Google Ads - measure conversion actions' },
-      { name: '_hjid', purpose: 'Hotjar - user session recording and heatmaps' },
-    ],
+    description: 'Marketing cookies would enable personalized advertising and measure advertising campaigns.',
+    examples: [],
+    noneNote: 'Waddles does not set marketing or advertising cookies.',
   },
 ];
 
@@ -205,8 +196,11 @@ export default function CookiePreferencesModal() {
                 {/* Cookie Examples */}
                 <div className="bg-gray-50 rounded p-3 space-y-2">
                   <p className="text-xs font-semibold text-gray-700 uppercase">
-                    Example Cookies
+                    Cookies Set
                   </p>
+                  {category.examples.length === 0 && (
+                    <p className="text-xs text-gray-600">{category.noneNote}</p>
+                  )}
                   <ul className="space-y-1">
                     {category.examples.map((example, idx) => (
                       <li key={idx} className="text-xs text-gray-600">

@@ -45,6 +45,8 @@ from bootstrap import BootstrapState, BootstrapStatus, run_bootstrap_loop
 from config import HubAPIConfig
 from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_server
 from openapi.routes import register_openapi_docs
+from services.audit_http import AUDIT_SERVICE_CONFIG_KEY, install_audit_hooks
+from services.audit_service import get_audit_service
 from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
@@ -223,6 +225,12 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     register_blueprints(app)
     register_openapi_docs(app)
 
+    # GRC audit finding #3 -- one app-wide hook gives every scope-protected mutation, every
+    # authenticated 403, and the statutory privacy routes tamper-evident audit coverage
+    # (services/audit_http.py). Entitlement-gated per tenant inside the service; a no-op for
+    # tenants without the Enterprise audit feature.
+    install_audit_hooks(app)
+
     app.before_request(bridge_session_cookie_to_bearer)
 
     # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- bootstrap.py's schema
@@ -318,6 +326,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # rather than replacing it.
         install_dal = await build_install_dal(cfg.database_url, pool_size=cfg.db_pool_size)
         app.config["install_dal"] = install_dal
+        # Tamper-evident audit service on the same AsyncDB (migration 0053's `audit_events`).
+        # Published under the key `services/audit_http.py` reads; tests/test_audit_http.py
+        # pins that startup wires it, so a regression cannot silently disable auditing.
+        app.config[AUDIT_SERVICE_CONFIG_KEY] = get_audit_service(install_dal)
 
         # Enterprise external KMS / BYOK (services/envelope/runtime.py). Inert by
         # default: the provider registry is empty unless ENVELOPE_KMS_PROVIDERS is

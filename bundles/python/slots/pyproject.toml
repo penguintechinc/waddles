@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-slots"
-version = "1.0.2"
+version = "1.0.3"
 description = "`!slots` -> a weighted-random, per-community slot-machine minigame (spin/list/admin cooldown config), kv-only v1, points only (no real-money/currency ties). Net-new Waddles content. Uses the shared waddle_sdk.command grammar parser (#618)."
 requires-python = ">=3.13"
 dependencies = []

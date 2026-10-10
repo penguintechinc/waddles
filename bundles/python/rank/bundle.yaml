@@ -5,7 +5,8 @@ name: Chat Rank/Level Bundle (Python)
 # !rank add|sub <amount> <user>. See src/app.py's own module docstring for the full
 # data-model rationale (kv index + db ledger), the level formula, and the follow-up note on
 # automatic per-message XP accrual (not implemented here).
-version: 1.0.2
+# 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -78,6 +79,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.2"
-  min_version: "1.0.2"
+  tested_with: "1.0.3"
+  min_version: "1.0.3"
   max_version: null

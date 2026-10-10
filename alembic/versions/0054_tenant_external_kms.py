@@ -47,7 +47,7 @@ compromised data-plane credential cannot read even a wrapped DEK. On the key
 table hub_api gets `SELECT, INSERT, UPDATE` only (keys are retired, not deleted).
 
 Revision ID: 0054_tenant_external_kms
-Revises: 0049_sso_connections
+Revises: 0052_bundle_identity_resolve
 Create Date: 2026-10-09
 """
 
@@ -61,7 +61,7 @@ from pathlib import Path
 from alembic import op
 
 revision = "0054_tenant_external_kms"
-down_revision = "0049_sso_connections"
+down_revision = "0052_bundle_identity_resolve"
 branch_labels = None
 depends_on = None
 

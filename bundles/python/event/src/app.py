@@ -168,9 +168,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     payload = _parse(head, rest)
     payload["channel_id"] = event.payload.get("channel_id")
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
     log.info("event.transform matched", command=payload["command"])
 
     return PlatformEvent(
@@ -199,7 +199,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """`True`/`False` from the normalized badge fields, or `None` if absent (treated as denied)."""
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 def _actor_uuid(actor: str | None) -> str | None:

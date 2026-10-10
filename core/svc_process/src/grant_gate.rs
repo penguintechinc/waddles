@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use bundle_capability_gate::{
     CapabilityGate, GrantCache, GrantLoadError, GrantLoader, GrantScopeKey, GrantSet,
-    GrantedPermission, InMemoryMembership, InMemoryQuotaLedger,
+    GrantedPermission, InMemoryQuotaLedger,
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 
@@ -380,10 +380,18 @@ async fn poll_refresh_all<L: GrantLoader + 'static>(
 /// full process restart, the same degraded-but-serving posture every other
 /// optional dependency in this stage takes (`crate::lib::connect_kv`'s
 /// doc).
+///
+/// `membership` is the gate's `ReputationScoped` membership pre-filter.
+/// Production passes one process-wide [`bundle_capability_gate::
+/// SnapshotMembership`] (empty -- deny-everything -- until
+/// `bundle_host_reputation::run_membership_refresh` populates it, so an
+/// unwired reputation capability is fail-closed at the gate too); the SAME
+/// `Arc` must be handed to that refresh task.
 pub fn build_production_gate<L: GrantLoader + 'static>(
     loader: L,
     redis_client: Option<redis::Client>,
     poll_interval: Duration,
+    membership: Arc<dyn bundle_capability_gate::MembershipCheck>,
 ) -> Arc<CapabilityGate> {
     let cache = Arc::new(GrantCache::new(Arc::new(AlwaysGrantedLoader::new(loader))));
     if let Some(client) = redis_client {
@@ -400,7 +408,7 @@ pub fn build_production_gate<L: GrantLoader + 'static>(
     }
     Arc::new(CapabilityGate::new(
         cache,
-        Arc::new(InMemoryMembership::new()),
+        membership,
         Arc::new(InMemoryQuotaLedger::new()),
         Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
     ))
@@ -989,8 +997,12 @@ mod tests {
             AppScopedResource, HostInvokeScopeBuilder, PermissionId, ResourceRef, TenantTier,
         };
 
-        let gate =
-            build_production_gate(InMemoryGrantLoader::new(), None, Duration::from_secs(300));
+        let gate = build_production_gate(
+            InMemoryGrantLoader::new(),
+            None,
+            Duration::from_secs(300),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
+        );
         let scope = HostInvokeScopeBuilder::new()
             .tenant_id(7)
             .community_id(3)
@@ -1027,6 +1039,7 @@ mod tests {
             InMemoryGrantLoader::new(),
             Some(client),
             Duration::from_millis(1),
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
         );
         let scope = HostInvokeScopeBuilder::new()
             .tenant_id(7)

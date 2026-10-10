@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-winner"
-version = "1.0.0"
+version = "1.0.1"
 description = "Random Winner"
 requires-python = ">=3.13"
 dependencies = []

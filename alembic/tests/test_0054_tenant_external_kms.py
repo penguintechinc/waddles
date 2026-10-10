@@ -48,7 +48,7 @@ def _emitted(migration: ModuleType, fn: str) -> list[str]:
 def test_revision_metadata_and_a_single_alembic_head(migration: ModuleType) -> None:
     assert migration.revision == "0054_tenant_external_kms"
     assert len(migration.revision) <= 32  # alembic_version.version_num is VARCHAR(32)
-    assert migration.down_revision == "0049_sso_connections"
+    assert migration.down_revision == "0052_bundle_identity_resolve"
     config = Config(str(_REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(_ALEMBIC_DIR))
     script = ScriptDirectory.from_config(config)

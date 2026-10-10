@@ -113,12 +113,11 @@ spec:
         # (see those templates' own image lines); using the waddlebot.image helper here
         # would double-prefix alpha's already-registry-qualified repository value.
         image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
-        # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same
-        # line for the node-image-cache rationale (identical here). Proven stale in this
-        # exact deploy: the running pod was serving invoke.rs's UnimplementedBucketSource
-        # stub (LOAD_FAILED "object_store bucket GET not yet wired") a full image behind
-        # the registry's current BucketComponentSource-wired build.
-        imagePullPolicy: Always
+        # Values-driven -- see templates/svc-process-rust.yaml's comment on this same line
+        # for why the old hardcoded Always was removed (identical here). The stale-image
+        # case that motivated it (a same-tag `:alpha` push) is closed by the per-deploy
+        # global.imageTag fall-through above (bundleExecutor.image.tag left unset).
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
         # uid 10001 -- see file header assumption note (no Dockerfile exists for this crate
         # yet, so this mirrors the sibling Rust crates' own established convention).
         securityContext:

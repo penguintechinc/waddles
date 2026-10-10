@@ -6,7 +6,8 @@
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
         check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
-        test-seaweedfs-sse-kms
+        test-seaweedfs-sse-kms \
+        verify-audit-chain verify-audit-export
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -206,6 +207,22 @@ build-superpenguin-roll-bundle:
 # (needs docker + network, ~1-2 minutes), so this is its only run path.
 test-csharp-bundle-compile:
 	@cd core/bundle_compiler && cargo test --locked builds_csping_via_docker -- --ignored --nocapture
+
+# Tamper-evident audit log (GRC audit finding #3, docs/compliance/audit-logging.md).
+# verify-audit-chain: recompute every audit chain straight from the database (DATABASE_URL / DB_*
+# env, run from hub_api so `cli.*` resolves). Exits 1 on tampering, 2 if zero records were
+# examined (a check over nothing is not a pass; add ALLOW_EMPTY=1 for deployments with no
+# Enterprise tenant), 3 if it could not run. Pin heads with EXPECT="tenant:1=42:<hash>".
+verify-audit-chain:
+	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \
+		$(foreach e,$(EXPECT),--expect $(e))
+
+# verify-audit-export: verify downloaded export file(s) offline -- no server, DB or network.
+#   make verify-audit-export EXPORT="page1.json page2.json" [ANCHOR=<hash>] [HEAD_SEQ=42] [HEAD_HASH=<hash>]
+verify-audit-export:
+	@test -n "$(EXPORT)" || { echo "usage: make verify-audit-export EXPORT=\"page1.json [page2.json ...]\"" >&2; exit 2; }
+	@python3 scripts/verify_audit_export.py $(EXPORT) $(if $(ANCHOR),--anchor-hash $(ANCHOR)) \
+		$(if $(HEAD_SEQ),--expect-head-seq $(HEAD_SEQ)) $(if $(HEAD_HASH),--expect-head-hash $(HEAD_HASH))
 
 # Proves bundles/Dockerfile.core-bundles's two example-bundle artifacts (ping.wasm from the
 # rust-bundle-builder stage, pyping.wasm from the python-bundle-builder stage) are both

@@ -56,13 +56,14 @@ pub use grant::{
     InMemoryGrantLoader, InMemoryGrantSnapshot,
 };
 pub use instance_policy::{InMemoryInstancePolicySnapshot, InstanceAction, InstancePolicySnapshot};
-pub use membership::{InMemoryMembership, MembershipCheck};
+pub use membership::{InMemoryMembership, MemberRow, MembershipCheck, SnapshotMembership};
 pub use permission::{
     CapabilityKind, ParsePermissionIdError, PermissionFamily, PermissionId, Quota, Risk,
 };
 pub use quota::{InMemoryQuotaLedger, QuotaDenial, QuotaLedger};
 pub use resource::{
-    AppScopedResource, AuthorizedCall, ReputationTarget, ResolvedResource, ResourceRef, ScopeKind,
+    AppScopedResource, AuthorizedCall, EconomyTarget, ReputationTarget, ResolvedResource,
+    ResourceRef, ScopeKind,
 };
 pub use scope::{
     GrantScopeKey, HostInvokeScopeBuilder, InvokeScope, InvokeScopeBuildError, TenantTier,

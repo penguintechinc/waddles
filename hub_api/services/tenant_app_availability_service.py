@@ -150,7 +150,8 @@ async def unset_available(
         (install_dal.bundle_tenant_availability.tenant_id == tenant_id)
         & (install_dal.bundle_tenant_availability.app_id == app_id)
     ).update(available=False, updated_by=updated_by, updated_at=now)
-    await bundle_audit.record(
+    deferred_audit = bundle_audit.DeferredAudit()
+    await deferred_audit.record(
         install_dal,
         actor_id=updated_by,
         action="tenant_availability_disabled",
@@ -173,7 +174,7 @@ async def unset_available(
                 deactivated_by=updated_by,
             )
         except Exception:  # noqa: BLE001 -- one community's failure must not abort the rest of the cascade
-            await bundle_audit.record(
+            await deferred_audit.record(
                 install_dal,
                 actor_id=updated_by,
                 action="tenant_availability_cascade_deactivate_failed",
@@ -181,6 +182,8 @@ async def unset_available(
                 target_id=f"{tenant_id}:{app_id}",
                 details={"community_id": community_id},
             )
+    # The cascade must run to completion even if an audit write failed; surface it now (loud).
+    deferred_audit.raise_if_failed()
 
 
 async def list_availability(install_dal: AsyncDB, *, tenant_id: int) -> list[Any]:

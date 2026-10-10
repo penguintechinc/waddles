@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-cringe"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!cringe` -> a per-community kv-backed cringe counter. Mirrors bundles/python/count."
 requires-python = ">=3.13"
 dependencies = []

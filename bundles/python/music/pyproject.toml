@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-music"
-version = "1.0.2"
+version = "1.0.3"
 description = "`!sr`/`!songrequest` -> add to a per-community song-request queue; `!music`/`!queue` -> show/manage it (list/remove/next/skip/set max-per-user), kv-only. Inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot song-request feature -- original implementation, no code/text reused."
 requires-python = ">=3.13"
 dependencies = []

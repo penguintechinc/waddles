@@ -24,13 +24,38 @@ only extracts the ``scope`` claim.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Callable, FrozenSet
+from typing import Any, Callable, FrozenSet, Optional
 
 from .auth import verify_jwt_token
 from .secrets import require_secret_key
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True, frozen=True)
+class AuthzDecision:
+    """The verdict of one :func:`require_scope` check, published on ``request.authz_decision``.
+
+    Read after the handler by audit middleware (hub-api's ``audit_http``) so authorization
+    decisions -- denials above all -- reach the tamper-evident audit log without every route
+    having to remember to log them. ``subject`` is the verified token's ``sub`` (``None`` when
+    there was no valid token); ``granted`` is kept for in-process checks only and excluded from
+    ``repr`` so it can never be logged by accident.
+    """
+
+    required_scopes: tuple[str, ...]
+    allowed: bool
+    reason: str
+    subject: Optional[str] = None
+    granted: FrozenSet[str] = field(default=frozenset(), repr=False)
+
+
+def get_authz_decision(request: Any) -> Optional[AuthzDecision]:
+    """Return the :class:`AuthzDecision` ``require_scope`` published on ``request``, if any."""
+    decision = getattr(request, "authz_decision", None)
+    return decision if isinstance(decision, AuthzDecision) else None
 
 
 def _parse_scope_claim(raw_scope: Any) -> FrozenSet[str]:
@@ -116,6 +141,7 @@ def require_scope(*required_scopes: str) -> Callable:
 
             auth_header = request.headers.get("Authorization")
             if not auth_header or not auth_header.startswith("Bearer "):
+                request.authz_decision = AuthzDecision(required_scopes, False, "no_bearer")
                 logger.warning(
                     "require_scope: no bearer token",
                     extra={
@@ -130,6 +156,7 @@ def require_scope(*required_scopes: str) -> Callable:
             secret_key = require_secret_key()
             payload = verify_jwt_token(token, secret_key)
             if payload is None:
+                request.authz_decision = AuthzDecision(required_scopes, False, "invalid_token")
                 logger.warning(
                     "require_scope: invalid or expired token",
                     extra={
@@ -141,7 +168,12 @@ def require_scope(*required_scopes: str) -> Callable:
                 return error_response("Invalid or expired token", status_code=403)
 
             granted = _parse_scope_claim(payload.get("scope"))
+            subject = payload.get("sub")
+            subject = None if subject is None else str(subject)
             if not has_required_scopes(granted, required_scopes):
+                request.authz_decision = AuthzDecision(
+                    required_scopes, False, "insufficient_scope", subject, granted
+                )
                 logger.warning(
                     "require_scope: insufficient scope required=%s granted=%s",
                     required_scopes,
@@ -154,6 +186,7 @@ def require_scope(*required_scopes: str) -> Callable:
                 )
                 return error_response("Insufficient scope", status_code=403)
 
+            request.authz_decision = AuthzDecision(required_scopes, True, "ok", subject, granted)
             return await f(*args, **kwargs)
 
         return decorated_function

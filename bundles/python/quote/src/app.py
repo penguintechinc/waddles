@@ -121,7 +121,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     is_broadcaster = payload.get("is_broadcaster")
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         return None
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 def _resolve_command(parsed: ParsedCommand) -> tuple[str, str | None, str | None]:
@@ -196,9 +196,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     # Forward the normalized badge signal, if present -- see `count`/`rank`'s own identical
     # forwarding comment for why absence must reach `dispatch` as absence, not `False`.
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
 
     return PlatformEvent(
         platform=event.platform,
