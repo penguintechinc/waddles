@@ -151,6 +151,9 @@ convention = "google"
 # postcondition assert. No per-class suppression exists for N815, hence the
 # file-level entry (same as blueprints/v1/auth.py above).
 "blueprints/v1/sso.py" = ["N815", "S101"]
+# SSO test suite: embedded SAML/XML payload strings and long assertion messages read better
+# unwrapped (same rationale as the per-file test ignores above).
+"tests/sso/*" = ["E501"]
 # Marketplace-catalog port group: `CatalogEntry`/`ModuleEntry`/`ModuleDetail`/
 # `ModuleSubscription`/etc DTO fields are deliberately camelCase to byte-match
 # `catalogService.js`'s `formatCatalogEntry`/`moduleService.js`'s `formatModule`

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import re
 import secrets
 import zlib
@@ -63,6 +64,13 @@ from services.sso_types import (
     SsoConfigError,
     SsoProtocolError,
 )
+
+# signxml's `processor` logs the canonicalised XML it signs/verifies -- i.e. the entire
+# assertion, NameID and attributes included -- at DEBUG. With the platform's "over-log at
+# DEBUG when switched on" policy that would write user identity data to the log stream, so the
+# library's logger is pinned to INFO regardless of the root level (regression test:
+# `tests/sso/test_sso_regression.py::TestLogHygiene`).
+logging.getLogger("signxml").setLevel(logging.INFO)
 
 NS_SAMLP: Final = "urn:oasis:names:tc:SAML:2.0:protocol"
 NS_SAML: Final = "urn:oasis:names:tc:SAML:2.0:assertion"

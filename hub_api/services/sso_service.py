@@ -690,6 +690,8 @@ async def create_connection(
     data: ConnectionInput,
 ) -> SsoConnection:
     """Validate and store a new connection (disabled unless `data.enabled`)."""
+    if protocol not in VALID_PROTOCOLS:
+        raise bad_request(f"protocol must be one of {', '.join(VALID_PROTOCOLS)}")
     await _require_entitled(tenant.slug, protocol)
     validated = await _validate_input(ctx, protocol, data)
     table = _table(ctx, "sso_connections")
@@ -849,6 +851,10 @@ async def delete_connection(
     """Delete a connection (and, by FK cascade, every identity link it created)."""
     existing = await get_connection(ctx, tenant.id, public_id)
     table = _table(ctx, "sso_connections")
+    # The FK is ON DELETE CASCADE in Postgres; deleting the links explicitly keeps
+    # that guarantee on every backend (and makes the intent visible here).
+    identities = _table(ctx, "sso_identities")
+    await ctx.install_dal(identities.connection_id == existing.id).delete()
     await ctx.install_dal(table.id == existing.id).delete()
     connection_change_counter.add(1, {"protocol": existing.protocol, "operation": "delete"})
     logger.info(
@@ -1239,6 +1245,8 @@ async def _resolve_user(
         )
 
     now = datetime.now(UTC)
+    # pydal returns a `Reference` (an int subclass whose lazy attributes confuse
+    # SQLAlchemy's column coercion when handed to penguin-dal) -- normalise to a plain int.
     new_id = await ctx.async_dal.insert_async(
         ctx.dal.hub_users,
         email=identity.email,
@@ -1249,6 +1257,7 @@ async def _resolve_user(
         created_at=now,
         updated_at=now,
     )
+    new_id = int(new_id)
     table = _table(ctx, "sso_identities")
     try:
         await table.async_insert(

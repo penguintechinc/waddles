@@ -69,7 +69,14 @@ def sso_span(name: str, **attributes: str | int | bool) -> Iterator[Span]:
     opaque `public_id`, the protocol, and similar. Exception text is never
     recorded on the span: only the exception type name.
     """
-    with _tracer.start_as_current_span(name, attributes=dict(attributes)) as span:
+    # record_exception / set_status_on_exception are OFF: the SDK would otherwise attach the
+    # exception's message and stack (third-party text that can carry PII) to the span.
+    with _tracer.start_as_current_span(
+        name,
+        attributes=dict(attributes),
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
         try:
             yield span
         except BaseException as exc:

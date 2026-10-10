@@ -36,6 +36,7 @@ empty options list / generic failure on the public ones.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import cast
@@ -78,6 +79,7 @@ from services.sso_types import (
     REASON_NOT_ENTITLED,
     REASON_UNAVAILABLE,
     SCOPE_SSO_ADMIN,
+    LoginOutcome,
     SsoConfigError,
     SsoConnection,
     SsoError,
@@ -482,6 +484,27 @@ async def _finish_redirect(public_id: str, outcome_token: str, protocol: str) ->
     return response
 
 
+async def _complete_and_redirect(
+    public_id: str, start_completion: Callable[[], Awaitable[LoginOutcome]]
+) -> Response:
+    """Run a login completion and turn ANY outcome into a browser redirect.
+
+    A browser mid-login cannot do anything useful with a JSON error or a bare 500, so
+    every failure becomes `<frontend>/login?error=<fixed reason>`. Nothing is hidden by
+    this: `SsoError`s were already logged (type, code, safe message, frame-only traceback)
+    and counted by `services.sso_service.complete_*`; anything else is logged HERE with
+    its type and frames before the generic `sso_unavailable` redirect, never swallowed.
+    """
+    try:
+        outcome = await start_completion()
+        return await _finish_redirect(public_id, outcome.token, outcome.protocol)
+    except SsoError as exc:
+        return _login_error_redirect(exc.reason)
+    except Exception as exc:
+        log_sso_error(logger, "sso.callback.unexpected_failure", exc, connection=public_id)
+        return _login_error_redirect(REASON_UNAVAILABLE)
+
+
 @sso_public_bp.route("/<public_id>/callback", methods=["GET"])
 async def sso_oidc_callback(public_id: str) -> Response:
     """`GET /<id>/callback` -- OIDC / Google redirect URI."""
@@ -492,19 +515,13 @@ async def sso_oidc_callback(public_id: str) -> Response:
     state = request.args.get("state")
     if not code or not state:
         return _login_error_redirect(REASON_DENIED)
-    try:
-        outcome = await complete_oidc(
-            _ctx(),
-            public_id,
-            code=code,
-            state=state,
-            binder_cookie=request.cookies.get(BINDER_COOKIE),
-        )
-    except SsoError as exc:
-        return _login_error_redirect(exc.reason)
-    except ApiError:
-        return _login_error_redirect(REASON_UNAVAILABLE)
-    return await _finish_redirect(public_id, outcome.token, outcome.protocol)
+    binder_cookie = request.cookies.get(BINDER_COOKIE)
+    return await _complete_and_redirect(
+        public_id,
+        lambda: complete_oidc(
+            _ctx(), public_id, code=code, state=state, binder_cookie=binder_cookie
+        ),
+    )
 
 
 @sso_public_bp.route("/<public_id>/acs", methods=["POST"])
@@ -515,19 +532,17 @@ async def sso_saml_acs(public_id: str) -> Response:
     relay_state = form.get("RelayState", "")
     if not saml_response or not relay_state:
         return _login_error_redirect(REASON_DENIED)
-    try:
-        outcome = await complete_saml(
+    binder_cookie = request.cookies.get(BINDER_COOKIE)
+    return await _complete_and_redirect(
+        public_id,
+        lambda: complete_saml(
             _ctx(),
             public_id,
             saml_response=saml_response,
             relay_state=relay_state,
-            binder_cookie=request.cookies.get(BINDER_COOKIE),
-        )
-    except SsoError as exc:
-        return _login_error_redirect(exc.reason)
-    except ApiError:
-        return _login_error_redirect(REASON_UNAVAILABLE)
-    return await _finish_redirect(public_id, outcome.token, outcome.protocol)
+            binder_cookie=binder_cookie,
+        ),
+    )
 
 
 @sso_public_bp.route("/<public_id>/metadata", methods=["GET"])

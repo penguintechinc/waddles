@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Enterprise SSO for hub-api: SAML 2.0 and OpenID Connect (Enterprise tier, `waddles.auth.sso_saml`) and Google OAuth2 (Professional tier, `waddles.auth.sso_google`). Per-tenant connections with admin API, JIT provisioning keyed on (connection, subject) with no email adoption, PKCE + nonce + local ID-token validation, signature-wrapping/replay/XXE-hardened SAML SP, SSRF-guarded IdP HTTP, AES-256-GCM secret storage, login-CSRF binder cookie, OTel metrics/traces. Migration `0048_sso_connections`; auto-provisioned `SSO_ENCRYPTION_KEY` (alpha/local) that never fails the chart elsewhere. See `docs/SSO.md`.
+
 ## [2.2.0] - 2026-04-10
 
 ### Added

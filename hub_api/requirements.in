@@ -84,3 +84,10 @@ PyYAML>=6.0.2,<7.0.0
 # flask_core's own requirements.txt already locks (1.19.1) so the image
 # never carries two different alembic versions.
 alembic==1.19.1
+# Enterprise SSO (migration 0048, services/sso_saml.py) -- SAML 2.0 XML-DSig
+# verification. signxml is pure Python on top of lxml + cryptography (no native
+# libxmlsec1), returns the *signed* element so trust decisions can follow the
+# "see what is signed" rule, and enforces an algorithm allow-list. lxml is imported
+# directly (hardened parser), so it is listed here too rather than left transitive.
+signxml>=5.1.0,<6.0.0
+lxml>=6.1.0,<7.0.0
