@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from config import Config
 from flask_core import describe_db_error
+from flask_core.ai_guard import wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +264,11 @@ class InsightsService:
                 period_end
             )
 
-            user_prompt = f"Generate {insight_type} insights based on this data:\n\n{context_data}"
+            # The data block is derived from community chat: untrusted, delimit + bound it.
+            user_prompt = (
+                f"Generate {insight_type} insights based on this data:\n\n"
+                + wrap_untrusted(context_data, tag="retrieved_data", max_chars=20000)
+            )
 
             # Generate with AI
             response = await self.ai_provider.generate(
