@@ -10,6 +10,9 @@ Shared utilities and components for all WaddleBot Flask/Quart modules.
 - Read replica support for query distribution
 - Transaction management with context managers
 - Bulk operations support
+- **Redacted error logging** (`db_errors.py`): DB failures are logged as operation +
+  exception type + SQLSTATE/driver code + a fixed category label -- never the driver
+  message (see [Database error logging](#database-error-logging))
 
 ### Authentication (`auth.py`)
 - **Flask-Security-Too** integration for user management
@@ -72,6 +75,54 @@ user_id = await dal.insert_async(users, username='john', email='john@example.com
 rows = await dal.select_async(users.id == user_id)
 await dal.update_async(users.id == user_id, email='newemail@example.com')
 ```
+
+#### Database error logging
+
+**SECURITY (PII in logs):** a DB driver error's message routinely embeds the *bound
+values* of the failed statement (psycopg2 `DETAIL: Key (email)=(...) already exists`,
+`invalid input syntax for type uuid: "..."`, pydal's inlined INSERT text, SQLAlchemy's
+`[parameters: (...)]`). flask_core therefore **never logs the raw driver message** --
+not in the log line, not via `exc_info`/traceback rendering, not in `extra`.
+
+Every `AsyncDAL` operation, `db_operation()`, the `install_db_resilience()` teardown
+hook, `ReadReplicaManager`/`ReadReplicaRouter`, `ChannelShardManager` and the
+`async_endpoint` decorator log through `flask_core.db_errors` instead:
+
+```
+ERROR flask_core.database ExecuteSQL error: type=psycopg2.errors.UniqueViolation \
+      sqlstate=23505 category=unique_violation constraint=users_email_key table=users
+DEBUG flask_core.database ExecuteSQL error: sanitized traceback
+      (frames only -- file/line/function/source, no exception text)
+```
+
+| Emitted | Never emitted |
+|---|---|
+| operation label, exception type | exception message / `args` |
+| SQLSTATE (`pgcode`/`sqlstate`), sqlite error name, MySQL errno | SQL text, bound parameters |
+| fixed category label looked up from the SQLSTATE | `DETAIL`/`CONTEXT`/`LINE n:` echoes |
+| constraint/table/column names (regex-validated identifiers only) | anything failing validation (dropped) |
+
+The allowlist fails closed: inside DB wrappers even non-driver exceptions are logged
+type-only (pydal casts values before the driver sees them, so its own `ValueError` can
+echo one). The exception is still re-raised unchanged. Failures outside DB wrappers
+(`async_endpoint`, teardown) are redacted only when a DB driver error is in the cause
+chain; other errors keep their full message and traceback.
+
+Services should use the same helpers instead of `logger.error(f"... {e}")` around DB calls:
+
+```python
+from flask_core import log_db_error
+
+try:
+    await dal.executesql_async(sql, params)
+except Exception as exc:
+    log_db_error(logger, "load widgets failed", exc)
+    raise
+```
+
+Note: re-raised driver errors that reach Quart's own `Exception on request` handler are
+logged by Quart, outside flask_core -- catch/translate them at the service boundary if
+that log stream is in scope for PII controls.
 
 ### Authentication
 

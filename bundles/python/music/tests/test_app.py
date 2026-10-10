@@ -19,6 +19,7 @@ import pytest
 from waddle_sdk.command import ParsedCommand
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.kv import validate_key
 
 from app import (
     _MAX_PER_USER_CONFIG_KEY,
@@ -860,3 +861,447 @@ def test_seq_key_increments_independently_per_community(fake_host: _FakeHost) ->
     )
     assert int(fake_host.store[_scoped(_SEQ_KEY, "comm-1")].decode()) == 1
     assert int(fake_host.store[_scoped(_SEQ_KEY, "comm-2")].decode()) == 1
+
+
+# -- PII-free logs -- regression: gh-674 (bundle-logs-must-be-pii-free) -----------------
+
+_SENTINEL = "SENTINELpii9f3a"
+
+#: Strict per-message allowlist: a log line may carry ONLY these fields. A new field (e.g. a
+#: raw `text=`/`raw=`/`actor=`) fails here instead of silently shipping user input to telemetry
+#: (#674 was exactly `raw=parts[1]` on three of these lines).
+_ALLOWED_LOG_FIELDS: dict[str, frozenset[str]] = {
+    "music.transform matched": frozenset({"command"}),
+    "music.invalid_command": frozenset({"error_type"}),
+    "music.invalid_request_id": frozenset({"error_type"}),
+    "music.invalid_max_per_user": frozenset({"error_type"}),
+    "music.request_added": frozenset({"community"}),
+    "music.request_removed": frozenset({"community"}),
+    "music.advanced": frozenset({"community"}),
+    "music.permission_denied": frozenset({"command", "role_signal"}),
+    "music.max_per_user_config_corrupt": frozenset({"community"}),
+    "music.kv_error": frozenset({"op", "error"}),
+    "music.state_corrupt": frozenset({"reason"}),
+    "music.dispatch relayed": frozenset({"platform", "command"}),
+    "music.missing_community": frozenset({"command"}),
+}
+
+
+def _assert_logs_pii_free(host: _FakeHost, *, minimum_lines: int) -> set[str]:
+    """Every captured log line is allow-listed field-by-field and free of the sentinel.
+
+    Asserts a non-empty denominator first -- a check that examined zero log lines proves nothing.
+    Returns the distinct messages seen so callers can prove each branch was exercised.
+    """
+    assert len(host.log_calls) >= minimum_lines
+    for _lvl, message, fields_json in host.log_calls:
+        assert _SENTINEL not in message
+        assert _SENTINEL not in fields_json
+        assert message in _ALLOWED_LOG_FIELDS, f"unexpected log message {message!r}"
+        assert set(json.loads(fields_json)) <= _ALLOWED_LOG_FIELDS[message]
+    return {message for _lvl, message, _f in host.log_calls}
+
+
+def _go(
+    command: str,
+    *,
+    arg: str | None = None,
+    actor: str | None = "viewer-1",
+    role: bool | None = None,
+    community: str | None = "comm-1",
+) -> Any:
+    envelope = _sample_envelope(
+        "twitch", command, actor=actor, arg=arg, is_mod=role, community=community
+    )
+    return _run(dispatch(envelope, {}, http_client=None))
+
+
+def test_transform_logs_never_carry_user_input(fake_host: _FakeHost) -> None:
+    # regression: gh-674
+    for text in (
+        f"!sr {_SENTINEL}",
+        f"!songrequest {_SENTINEL} {_SENTINEL}",
+        f"!music remove {_SENTINEL}",
+        f"!music set {_SENTINEL}",
+        f"!music set max-per-user {_SENTINEL}",
+        f"!music next {_SENTINEL}",
+        f"!music bogus {_SENTINEL}",
+        f"!music enable {_SENTINEL}",
+        f"!queue list {_SENTINEL}",
+        "!music",
+        "!sr",
+    ):
+        event = _sample_event(text, is_mod=True, actor=_SENTINEL)
+        assert _run(transform(event)) is not None
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=11)
+    assert seen <= {"music.transform matched", "music.invalid_command"}
+    assert "music.transform matched" in seen
+
+
+def test_dispatch_logs_never_carry_user_input_on_any_command(fake_host: _FakeHost) -> None:
+    # regression: gh-674 -- sentinel as actor AND as every free-text argument. The sentinel also
+    # lives in the stored queue TEXT by design (it is the request), so only logs are checked.
+    _go("add", arg=f"song {_SENTINEL}", actor=_SENTINEL)
+    _go("add", arg=f"another {_SENTINEL}", actor=_SENTINEL)
+    _go("show", actor=_SENTINEL)
+    _go("remove", arg=_SENTINEL, actor=_SENTINEL)  # not an id -> invalid_request_id
+    _go("remove", arg="999", actor=_SENTINEL)  # unknown id
+    _go("remove", arg="1", actor=_SENTINEL)  # own request
+    _go("config_set", arg=f"max-per-user {_SENTINEL}", role=True)  # invalid_max_per_user
+    _go("config_set", arg="max-per-user 5", role=True)
+    _go("config_set", arg=f"bogus {_SENTINEL}", role=True)  # usage text only
+    _go("advance", role=True)
+    _go("config_set", arg="max-per-user 5", role=False)  # denied
+    _go("advance")  # denied, no role signal at all
+    _go("usage", actor=_SENTINEL)
+    fake_host.store[_scoped(_MAX_PER_USER_CONFIG_KEY)] = _SENTINEL.encode()
+    _go("add", arg="after corrupt config", actor=_SENTINEL)  # max_per_user_config_corrupt
+
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=12)
+    assert seen == {
+        "music.dispatch relayed",
+        "music.request_added",
+        "music.request_removed",
+        "music.advanced",
+        "music.permission_denied",
+        "music.invalid_request_id",
+        "music.invalid_max_per_user",
+        "music.max_per_user_config_corrupt",
+    }
+    assert all(_SENTINEL not in call[1] for call in fake_host.kv_calls)
+    queue = json.loads(fake_host.store[_scoped(_QUEUE_KEY)].decode())
+    assert all(_SENTINEL not in entry["requester_pseudonym"] for entry in queue)
+
+
+def test_failure_paths_never_log_user_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    # regression: gh-674 -- a kv failure whose own exception text echoes user-ish data, corrupt
+    # queue JSON containing user-ish bytes, and the missing-community guard.
+    host = _FakeHost()
+    _install(monkeypatch, host, kv_set_raises=RuntimeError(f"backend detail {_SENTINEL}"))
+    with pytest.raises(RuntimeError) as excinfo:
+        _go("add", arg=f"song {_SENTINEL}", actor=_SENTINEL)
+    assert _SENTINEL not in str(excinfo.value)
+
+    _install(monkeypatch, host)
+    host.store[_scoped(_QUEUE_KEY)] = ("{" + _SENTINEL).encode()
+    with pytest.raises(RuntimeError) as corrupt:
+        _go("show", actor=_SENTINEL)
+    assert _SENTINEL not in str(corrupt.value)
+    with pytest.raises(ValueError):
+        _go("show", actor=_SENTINEL, community=None)
+
+    seen = _assert_logs_pii_free(host, minimum_lines=3)
+    assert seen == {"music.kv_error", "music.state_corrupt", "music.missing_community"}
+    (kv_error,) = [json.loads(f) for _lvl, m, f in host.log_calls if m == "music.kv_error"]
+    assert kv_error == {"op": "set", "error": "RuntimeError"}
+
+
+# -- mod gate: config/advance fail closed, before any kv access -----------------------
+
+_NO_MOD_ROLE = [
+    pytest.param({}, id="no-signal-at-all"),
+    pytest.param({"is_mod": False}, id="mod-false"),
+    pytest.param({"is_broadcaster": False}, id="broadcaster-false"),
+    pytest.param({"is_mod": False, "is_broadcaster": False}, id="both-false"),
+]
+
+
+@pytest.mark.parametrize(("command", "arg"), [("config_set", "max-per-user 5"), ("advance", None)])
+@pytest.mark.parametrize("role", _NO_MOD_ROLE)
+def test_mod_only_commands_are_denied_without_any_kv_access(
+    command: str, arg: str | None, role: dict[str, bool], fake_host: _FakeHost
+) -> None:
+    result = _run(
+        dispatch(_sample_envelope("twitch", command, arg=arg, **role), {}, http_client=None)
+    )
+    assert result.detail == f"{command}:denied"
+    assert _reply_text(fake_host) == "only moderators/broadcasters can do that"
+    assert fake_host.kv_calls == []
+
+
+@pytest.mark.parametrize(("command", "arg"), [("config_set", "max-per-user 5"), ("advance", None)])
+@pytest.mark.parametrize(
+    "role",
+    [{"is_mod": True}, {"is_broadcaster": True}, {"is_mod": True, "is_broadcaster": True}],
+)
+def test_either_badge_alone_opens_the_mod_gate(
+    command: str, arg: str | None, role: dict[str, bool], fake_host: _FakeHost
+) -> None:
+    result = _run(
+        dispatch(_sample_envelope("twitch", command, arg=arg, **role), {}, http_client=None)
+    )
+    assert result.detail == command
+
+
+def test_present_but_null_badge_fields_are_denied(fake_host: _FakeHost) -> None:
+    envelope = _sample_envelope("twitch", "advance")
+    envelope.event.payload["is_mod"] = None
+    envelope.event.payload["is_broadcaster"] = None
+    assert _run(dispatch(envelope, {}, http_client=None)).detail == "advance:denied"
+    assert fake_host.kv_calls == []
+
+
+def test_a_denied_advance_leaves_the_queue_untouched(fake_host: _FakeHost) -> None:
+    _go("add", arg="keep me")
+    before = fake_host.store[_scoped(_QUEUE_KEY)]
+    _go("advance", role=False)
+    assert fake_host.store[_scoped(_QUEUE_KEY)] == before
+
+
+def test_removal_by_a_non_owner_needs_the_mod_signal_and_either_badge_works(
+    fake_host: _FakeHost,
+) -> None:
+    _go("add", arg="a song", actor="owner")
+    _go("remove", arg="1", actor="stranger", role=False)
+    assert _reply_text(fake_host) == "you can only remove your own requests"
+    envelope = _sample_envelope("twitch", "remove", arg="1", actor="stranger", is_broadcaster=True)
+    assert _run(dispatch(envelope, {}, http_client=None)).detail == "remove"
+    assert _reply_text(fake_host) == "removed request #1"
+
+
+def test_read_and_add_commands_never_need_a_role(fake_host: _FakeHost) -> None:
+    for command, arg in (("add", "song"), ("show", None)):
+        assert _go(command, arg=arg, role=False).detail == command
+
+
+# -- corrupt store: ERROR-logged and fail loud on every queue-reading command ---------------
+
+_CORRUPT_QUEUES = [
+    pytest.param(b"\xff\xfe", id="not-utf8"),
+    pytest.param(b"{", id="truncated-json"),
+    pytest.param(b'{"a": 1}', id="json-object"),
+    pytest.param(b"null", id="json-null"),
+    pytest.param(b'"str"', id="json-string"),
+    pytest.param(b"[1]", id="entry-not-an-object"),
+    pytest.param(b'[{"id": 1}]', id="entry-missing-fields"),
+    pytest.param(
+        b'[{"id": "x", "requester_pseudonym": "p", "text": "t", "ts": 1}]', id="id-not-int"
+    ),
+    pytest.param(
+        b'[{"id": 1, "requester_pseudonym": "p", "text": "t", "ts": "x"}]', id="ts-not-int"
+    ),
+    pytest.param(b'[{"id": 1, "requester_pseudonym": "p", "text": "t", "ts": null}]', id="ts-null"),
+]
+
+
+@pytest.mark.parametrize("payload", _CORRUPT_QUEUES)
+@pytest.mark.parametrize(
+    ("command", "arg", "role"),
+    [("show", None, None), ("add", "song", None), ("remove", "1", None), ("advance", None, True)],
+)
+def test_every_corrupt_queue_shape_fails_loud_and_is_never_overwritten(
+    payload: bytes, command: str, arg: str | None, role: bool | None, fake_host: _FakeHost
+) -> None:
+    fake_host.store[_scoped(_QUEUE_KEY)] = payload
+    with pytest.raises(RuntimeError, match="music corrupt state"):
+        _go(command, arg=arg, role=role)
+    assert len(fake_host.relay_calls) == 1
+    assert "corrupted" in _reply_text(fake_host)
+    corrupt = [
+        (lvl, set(json.loads(f))) for lvl, m, f in fake_host.log_calls if m == "music.state_corrupt"
+    ]
+    assert corrupt == [(0, {"reason"})]  # Level.ERROR
+    assert fake_host.store[_scoped(_QUEUE_KEY)] == payload
+
+
+def test_corrupt_max_per_user_config_is_error_logged_and_uses_the_default(
+    fake_host: _FakeHost,
+) -> None:
+    fake_host.store[_scoped(_MAX_PER_USER_CONFIG_KEY)] = b"\xff"
+    for i in range(DEFAULT_MAX_PER_USER):
+        _go("add", arg=f"song {i}")
+    _go("add", arg="too many")
+    assert f"the limit is {DEFAULT_MAX_PER_USER}" in _reply_text(fake_host)
+    corrupt = [
+        (lvl, json.loads(f))
+        for lvl, m, f in fake_host.log_calls
+        if m == "music.max_per_user_config_corrupt"
+    ]
+    assert corrupt and all(entry == (0, {"community": "comm-1"}) for entry in corrupt)
+
+
+def test_corrupt_sequence_counter_fails_loud(fake_host: _FakeHost) -> None:
+    fake_host.store[_scoped(_SEQ_KEY)] = b"not-a-number"
+    with pytest.raises(RuntimeError, match="music kv increment failed"):
+        _go("add", arg="song")
+    assert "temporarily unavailable" in _reply_text(fake_host)
+    assert _scoped(_QUEUE_KEY) not in fake_host.store
+
+
+# -- no silent fallback: failed writes leave state untouched ---------------------------------
+
+
+def _fail_kv_for(op: str) -> None:
+    """Make `wit_world.imports.kv.<op>` raise a WIT-shaped error."""
+
+    class _ErrorBackend:
+        """Stand-in for the generated WIT `Error_Backend` variant case class."""
+
+    class _KvError(Exception):
+        def __init__(self) -> None:
+            self.value = _ErrorBackend()
+
+    def _raise(*_args: Any) -> Any:
+        raise _KvError()
+
+    setattr(sys.modules["wit_world"].imports.kv, op, _raise)
+
+
+@pytest.mark.parametrize(
+    ("command", "arg", "role"),
+    [("remove", "1", True), ("advance", None, True)],
+)
+def test_failed_queue_save_leaves_the_queue_intact(
+    command: str, arg: str | None, role: bool, fake_host: _FakeHost
+) -> None:
+    _go("add", arg="keep me")
+    before = fake_host.store[_scoped(_QUEUE_KEY)]
+    _fail_kv_for("set")
+    with pytest.raises(RuntimeError, match="music kv set failed: _ErrorBackend"):
+        _go(command, arg=arg, role=role)
+    assert fake_host.store[_scoped(_QUEUE_KEY)] == before
+    assert "temporarily unavailable" in _reply_text(fake_host)
+
+
+def test_failed_config_write_leaves_the_previous_limit(fake_host: _FakeHost) -> None:
+    _go("config_set", arg="max-per-user 7", role=True)
+    _fail_kv_for("set")
+    with pytest.raises(RuntimeError, match="music kv set failed"):
+        _go("config_set", arg="max-per-user 2", role=True)
+    assert fake_host.store[_scoped(_MAX_PER_USER_CONFIG_KEY)] == b"7"
+
+
+@pytest.mark.parametrize(
+    ("command", "arg", "role"),
+    [("show", None, None), ("add", "song", None), ("remove", "1", None), ("advance", None, True)],
+)
+def test_every_queue_reading_command_fails_loud_on_a_kv_get_error(
+    command: str, arg: str | None, role: bool | None, fake_host: _FakeHost
+) -> None:
+    _fail_kv_for("get")
+    with pytest.raises(RuntimeError, match="music kv get failed: _ErrorBackend"):
+        _go(command, arg=arg, role=role)
+    assert len(fake_host.relay_calls) == 1
+    errors = [(lvl, json.loads(f)) for lvl, m, f in fake_host.log_calls if m == "music.kv_error"]
+    assert errors == [(0, {"op": "get", "error": "_ErrorBackend"})]
+
+
+def test_relay_failure_propagates_and_is_not_logged_as_relayed(fake_host: _FakeHost) -> None:
+    def _boom(provider: str, msg: str) -> None:
+        raise RuntimeError("relay down")
+
+    sys.modules["wit_world"].imports.relay = types.SimpleNamespace(push=_boom)
+    with pytest.raises(RuntimeError, match="relay down"):
+        _go("show")
+    assert not any(m == "music.dispatch relayed" for _lvl, m, _f in fake_host.log_calls)
+
+
+def test_missing_community_logs_error_and_touches_no_state(fake_host: _FakeHost) -> None:
+    with pytest.raises(ValueError, match="community"):
+        _go("add", arg="song", community=None)
+    assert fake_host.kv_calls == []
+    assert fake_host.relay_calls == []
+    errors = [
+        (lvl, json.loads(f)) for lvl, m, f in fake_host.log_calls if m == "music.missing_community"
+    ]
+    assert errors == [(0, {"command": "add"})]
+
+
+# -- queue semantics --------------------------------------------------------------------------
+
+
+def test_request_ids_are_never_reused_after_a_removal(fake_host: _FakeHost) -> None:
+    _go("add", arg="one", actor="a")
+    _go("add", arg="two", actor="b")
+    _go("remove", arg="1", actor="a")
+    _go("add", arg="three", actor="c")
+    queue = json.loads(fake_host.store[_scoped(_QUEUE_KEY)].decode())
+    assert [(entry["id"], entry["text"]) for entry in queue] == [(2, "two"), (3, "three")]
+
+
+def test_request_text_boundary_is_inclusive_at_the_cap(fake_host: _FakeHost) -> None:
+    _go("add", arg="x" * MAX_REQUEST_TEXT_LEN)
+    queue = json.loads(fake_host.store[_scoped(_QUEUE_KEY)].decode())
+    assert len(queue[0]["text"]) == MAX_REQUEST_TEXT_LEN
+
+
+def test_show_with_exactly_the_limit_has_no_remainder_note(fake_host: _FakeHost) -> None:
+    for i in range(SHOW_LIMIT):
+        _go("add", arg=f"song {i}", actor=f"user{i}")
+    _go("show")
+    assert "more)" not in _reply_text(fake_host)
+    _go("add", arg="one more", actor="extra")
+    _go("show")
+    assert _reply_text(fake_host).endswith("(+1 more)")
+
+
+@pytest.mark.parametrize("value", [MIN_MAX_PER_USER, MAX_MAX_PER_USER])
+def test_max_per_user_bounds_are_inclusive(value: int, fake_host: _FakeHost) -> None:
+    _go("config_set", arg=f"max-per-user {value}", role=True)
+    assert fake_host.store[_scoped(_MAX_PER_USER_CONFIG_KEY)] == str(value).encode()
+
+
+def test_advance_walks_the_whole_queue_in_order(fake_host: _FakeHost) -> None:
+    for text in ("first", "second", "third"):
+        _go("add", arg=text, actor=text)
+    for expected in ("first", "second", "third"):
+        _go("advance", role=True)
+        assert expected in _reply_text(fake_host)
+    _go("advance", role=True)
+    assert _reply_text(fake_host) == "the queue is empty."
+
+
+# -- transform(): payload shape + flag gate ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "keys"),
+    [
+        ("!sr some song", {"command", "channel_id", "arg"}),
+        ("!sr", {"command", "channel_id"}),
+        ("!music", {"command", "channel_id"}),
+        ("!music remove 3", {"command", "channel_id", "arg"}),
+        ("!music set max-per-user 4", {"command", "channel_id", "arg"}),
+        ("!music skip", {"command", "channel_id"}),
+        ("!QUEUE List", {"command", "channel_id"}),
+    ],
+)
+def test_transform_forwards_only_the_fields_dispatch_needs(
+    text: str, keys: set[str], fake_host: _FakeHost
+) -> None:
+    result = _run(transform(_sample_event(text)))
+    assert result is not None
+    assert set(result.payload) == keys
+
+
+def test_flag_is_checked_by_key_and_defaults_off(fake_host: _FakeHost) -> None:
+    seen: list[tuple[str, bool]] = []
+
+    def _enabled(key: str, default_value: bool) -> bool:
+        seen.append((key, default_value))
+        return False
+
+    sys.modules["wit_world"].imports.flags = types.SimpleNamespace(enabled=_enabled)
+    assert _run(transform(_sample_event("!sr a song"))) is None
+    assert seen == [("waddles.command-music", False)]
+    assert fake_host.kv_calls == []
+
+
+# -- kv key charset -- regression: gh-631 ---------------------------------------------------------
+
+
+def test_every_kv_key_the_bundle_touches_satisfies_the_host_charset(fake_host: _FakeHost) -> None:
+    # regression: gh-631 -- the host rejects any guest key outside ASCII alnum + `_`/`-`/`.`
+    # (notably `:`); music originally built `music:queue`-style keys. This suite's own kv fake is
+    # permissive, so check the keys directly.
+    _go("add", arg="song")
+    _go("config_set", arg="max-per-user 4", role=True)
+    _go("show")
+    _go("remove", arg="1")
+    keys = [call[1] for call in fake_host.kv_calls]
+    assert keys
+    for key in keys:
+        validate_key(key)
+        assert ":" not in key
+    for constant in (_QUEUE_KEY, _SEQ_KEY, _MAX_PER_USER_CONFIG_KEY):
+        validate_key(constant)

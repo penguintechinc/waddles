@@ -16,10 +16,12 @@ pub struct Header {
 
 /// A builder for the WIT `http` import's `request` record.
 ///
-/// `secret_refs` never carries a secret *value* -- only a header name to
+/// `secret_refs` never carries a secret *value* -- only a slot name to
 /// secret-reference-name mapping; the stage resolves the reference and
-/// injects the header, and the value never enters the guest (spec
-/// `interface http`'s `secret-refs` doc comment).
+/// injects the value, and the value never enters the guest (spec
+/// `interface http`'s `secret-refs` doc comment). A plain slot name is a
+/// header; a slot name prefixed with `?` (`"?key"`) is a URL query parameter
+/// the host appends (`key=VALUE`) on the first hop to the granted FQDN only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub method: String,
@@ -58,7 +60,9 @@ impl Request {
 
     /// Marks `header_name` to be filled in by the stage from the secret
     /// reference `secret_ref_name` -- the value is never present in this
-    /// struct or in guest memory.
+    /// struct or in guest memory. Pass `"?param"` as `header_name` to have
+    /// the stage inject the value as the URL query parameter `param`
+    /// instead (for APIs that authenticate by query string).
     pub fn secret_header(
         mut self,
         header_name: impl Into<String>,

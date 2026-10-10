@@ -16,7 +16,12 @@
 //!   `config/postgres/migrations/100_overlay_view_credentials.sql`) --
 //!   backs [`crate::overlay::view_store::SeaOrmViewCredentialStore`], the
 //!   concrete `overlay_auth::ViewCredentialStore` this service mounts.
+//! - `overlay_images` (migration 101,
+//!   `config/postgres/migrations/101_overlay_images.sql`) -- backs
+//!   [`crate::images::asset_store::SeaOrmImageAssetStore`] (P6 upload /
+//!   P9 render).
 
+pub mod overlay_image;
 pub mod overlay_surface;
 pub mod overlay_view_credential;
 pub mod presentation_config;
