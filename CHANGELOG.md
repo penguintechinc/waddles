@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Star Citizen Spectrum org sync (gh #101, Bar Citizen): svc-ingest now diffs a Spectrum community's member roster and event
+  list into change events -- `member_joined` / `member_left` / `member_roles_changed` and `org_event_created` / `_updated` /
+  `_cancelled` / `_removed` / `_rsvp_changed` -- under the new `spectrum.org` consume tag. Valkey-backed snapshots survive
+  restarts (downtime changes still detected), a shrink guard holds back RSI glitches instead of emitting mass departures,
+  rosters are fetched complete-or-fail, delivery is at-least-once. Behind a second flag `waddles.spectrum-org-sync`
+  (default OFF, needs `waddles.spectrum-integration` too); one-way inbound only. See `docs/integrations/spectrum.md`.
 - Enterprise SSO for hub-api: SAML 2.0 and OpenID Connect (Enterprise tier, `waddles.auth.sso_saml`) and Google OAuth2 (Professional tier, `waddles.auth.sso_google`). Per-tenant connections with admin API, JIT provisioning keyed on (connection, subject) with no email adoption, PKCE + nonce + local ID-token validation, signature-wrapping/replay/XXE-hardened SAML SP, SSRF-guarded IdP HTTP, AES-256-GCM secret storage, login-CSRF binder cookie, OTel metrics/traces. Migration `0049_sso_connections`; auto-provisioned `SSO_ENCRYPTION_KEY` (alpha/local) that never fails the chart elsewhere. See `docs/SSO.md`.
 - Enterprise tamper-evident audit logging (GRC audit finding #3): append-only per-tenant SHA-256 hash chain
   (`audit_events`, migration `0053_audit_events_hash_chain`), `GET /api/v1/compliance/audit/{events,head,verify,export}`,

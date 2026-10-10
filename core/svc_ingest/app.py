@@ -83,7 +83,7 @@ import asyncio
 import logging
 import sys
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 import httpx
@@ -122,9 +122,12 @@ from receivers.kick_pusher import CONSUMES_TAG as KICK_CONSUMES_TAG
 from receivers.kick_pusher import KickPusherReceiver
 from receivers.slack_socket import CONSUMES_TAG as SLACK_CONSUMES_TAG
 from receivers.slack_socket import SlackSocketReceiver
+from receivers.spectrum_org import KIND_EVENTS, KIND_ROSTER, RedisSnapshotStore
 from receivers.spectrum_poll import CONSUMES_TAG as SPECTRUM_CONSUMES_TAG
 from receivers.spectrum_poll import FLAG_KEY as SPECTRUM_FLAG_KEY
 from receivers.spectrum_poll import KIND_FORUM, KIND_LOBBY, SpectrumPollReceiver
+from receivers.spectrum_poll import ORG_CONSUMES_TAG as SPECTRUM_ORG_CONSUMES_TAG
+from receivers.spectrum_poll import ORG_SYNC_FLAG_KEY as SPECTRUM_ORG_SYNC_FLAG_KEY
 from receivers.twitch_irc import CONSUMES_TAG as TWITCH_CONSUMES_TAG
 from receivers.twitch_irc import TwitchIrcReceiver
 from receivers.youtube_live_poll import CONSUMES_TAG as YOUTUBE_CONSUMES_TAG
@@ -500,26 +503,56 @@ async def _spectrum_flag_enabled() -> bool:
     )
 
 
+async def _spectrum_org_flag_enabled() -> bool:
+    """Org sync runs only when BOTH `waddles.spectrum-integration` and `...-org-sync` are on.
+
+    The master flag stays the one quick kill-switch for everything Spectrum; the
+    second flag lets an operator run message ingest without roster/event tracking
+    (roster join/leave is the more privacy-sensitive half). ENV baseline for the
+    second flag: `FLAG_WADDLES_SPECTRUM_ORG_SYNC`, default OFF.
+    """
+    from flask_core.feature_flags import feature_enabled
+
+    if not await _spectrum_flag_enabled():
+        return False
+    return bool(
+        await feature_enabled(
+            SPECTRUM_ORG_SYNC_FLAG_KEY,
+            tenant=Config.RUNNER_TENANT_SLUG,
+            default=Config.spectrum_org_flag_baseline(),
+        )
+    )
+
+
 def _register_spectrum_receivers(
     supervisor: ReceiverSupervisor,
     *,
     redis_client: Any,
     registry: AppRegistry,
 ) -> None:
-    """Build + lease-guard + supervise one Spectrum poller per configured forum channel/lobby.
+    """Build + lease-guard + supervise one Spectrum poller per configured source.
 
+    Sources: each forum channel / lobby (message ingest), plus a `roster` and an
+    `events` poller per Spectrum community in `SPECTRUM_ORG_COMMUNITIES` (org
+    sync, snapshot-diffed against a Valkey-backed `RedisSnapshotStore`).
     One-way (Spectrum -> Waddles) only. Skipped with a loud WARN when sources are
     configured but the RSI session token is missing (never a silent no-op); skipped
     quietly (INFO) when nothing is configured. Flag evaluation happens inside each
     poller so PostHog can flip it at runtime without a restart.
     """
-    sources = [(KIND_FORUM, c) for c in Config.SPECTRUM_FORUM_CHANNELS] + [
-        (KIND_LOBBY, c) for c in Config.SPECTRUM_LOBBIES
-    ]
+    sources = (
+        [(KIND_FORUM, c) for c in Config.SPECTRUM_FORUM_CHANNELS]
+        + [(KIND_LOBBY, c) for c in Config.SPECTRUM_LOBBIES]
+        + [
+            (kind, c)
+            for c in Config.SPECTRUM_ORG_COMMUNITIES
+            for kind in (KIND_ROSTER, KIND_EVENTS)
+        ]
+    )
     if not sources:
         logger.system(
             "svc-ingest starting with no Spectrum receivers -- "
-            "SPECTRUM_FORUM_CHANNELS/SPECTRUM_LOBBIES not configured",
+            "SPECTRUM_FORUM_CHANNELS/SPECTRUM_LOBBIES/SPECTRUM_ORG_COMMUNITIES not configured",
             action="startup",
             result="SKIPPED",
         )
@@ -535,20 +568,34 @@ def _register_spectrum_receivers(
 
     replica_id = uuid.uuid4().hex
     leased_receivers = []
+    snapshot_store = RedisSnapshotStore(
+        redis_client,
+        prefix=f"waddles:t:{Config.RUNNER_TENANT_SLUG}:spectrum:snapshot",
+        ttl_s=Config.SPECTRUM_SNAPSHOT_TTL_S,
+    )
 
-    async def _on_spectrum_item(item: Mapping[str, Any]) -> None:
-        """Fan one normalized Spectrum item out to every consuming bundle (tenant-wide)."""
-        await fan_out_event(
-            item,
-            consumes_tag=SPECTRUM_CONSUMES_TAG,
-            tenant=Config.RUNNER_TENANT_SLUG,
-            community=None,
-            redis_client=redis_client,
-            registry=registry,
-        )
+    def _make_on_item(consumes_tag: str) -> Callable[[Mapping[str, Any]], Awaitable[None]]:
+        """Build the `on_item` callback that fans items out under `consumes_tag`."""
+
+        async def _on_spectrum_item(item: Mapping[str, Any]) -> None:
+            """Fan one raw Spectrum item out to every consuming bundle (tenant-wide)."""
+            await fan_out_event(
+                item,
+                consumes_tag=consumes_tag,
+                tenant=Config.RUNNER_TENANT_SLUG,
+                community=None,
+                redis_client=redis_client,
+                registry=registry,
+            )
+
+        return _on_spectrum_item
 
     for kind, source_id in sources:
-        spectrum_receiver = SpectrumPollReceiver(flag_check=_spectrum_flag_enabled)
+        org = kind in (KIND_ROSTER, KIND_EVENTS)
+        spectrum_receiver = SpectrumPollReceiver(
+            flag_check=_spectrum_org_flag_enabled if org else _spectrum_flag_enabled,
+            snapshot_store=snapshot_store if org else None,
+        )
         leased = LeasedReceiver(
             transport=spectrum_receiver,
             config={  # nosec B105 -- env var name, not a token value
@@ -556,11 +603,16 @@ def _register_spectrum_receivers(
                 "source_id": source_id,
                 "token_ref": Config.SPECTRUM_RSI_TOKEN_REF,
                 "api_base": Config.SPECTRUM_API_BASE or None,
-                "poll_interval_s": Config.SPECTRUM_POLL_INTERVAL_S,
+                "poll_interval_s": (
+                    Config.SPECTRUM_ORG_POLL_INTERVAL_S if org else Config.SPECTRUM_POLL_INTERVAL_S
+                ),
                 "max_consecutive_errors": Config.SPECTRUM_MAX_CONSECUTIVE_ERRORS,
-                "emit_backlog": Config.SPECTRUM_EMIT_BACKLOG,
+                "emit_backlog": (
+                    Config.SPECTRUM_ORG_EMIT_BACKLOG if org else Config.SPECTRUM_EMIT_BACKLOG
+                ),
+                "roster_max_departure_ratio": Config.SPECTRUM_ROSTER_MAX_DEPARTURE_RATIO,
             },
-            on_item=_on_spectrum_item,
+            on_item=_make_on_item(SPECTRUM_ORG_CONSUMES_TAG if org else SPECTRUM_CONSUMES_TAG),
             redis_client=redis_client,
             provider="spectrum",
             community=f"{kind}-{source_id}",
@@ -581,6 +633,7 @@ def _register_spectrum_receivers(
         action="startup",
         replica_id=replica_id,
         sources=len(sources),
+        org_communities=len(Config.SPECTRUM_ORG_COMMUNITIES),
     )
 
 

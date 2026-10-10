@@ -120,6 +120,13 @@ data:
   SPECTRUM_FORUM_CHANNELS: {{ .Values.config.spectrumForumChannels | default "" | quote }}
   SPECTRUM_LOBBIES: {{ .Values.config.spectrumLobbies | default "" | quote }}
   FLAG_WADDLES_SPECTRUM_INTEGRATION: {{ .Values.config.spectrumIntegrationEnabled | default false | quote }}
+  # Spectrum org sync (roster join/leave/role changes + event create/update/RSVP). Needs BOTH
+  # flags ON; baseline defaults OFF, PostHog overrides when connected.
+  SPECTRUM_ORG_COMMUNITIES: {{ .Values.config.spectrumOrgCommunities | default "" | quote }}
+  FLAG_WADDLES_SPECTRUM_ORG_SYNC: {{ .Values.config.spectrumOrgSyncEnabled | default false | quote }}
+  SPECTRUM_ORG_POLL_INTERVAL_S: {{ .Values.config.spectrumOrgPollIntervalS | default 300 | quote }}
+  SPECTRUM_ROSTER_MAX_DEPARTURE_RATIO: {{ .Values.config.spectrumRosterMaxDepartureRatio | default 0.5 | quote }}
+  SPECTRUM_ORG_EMIT_BACKLOG: {{ .Values.config.spectrumOrgEmitBacklog | default false | quote }}
 
   # Service Discovery URLs
   HUB_API_URL: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:8204"
