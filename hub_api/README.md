@@ -106,6 +106,15 @@ Gates are `flask_core.feature_flags.feature_enabled` (PostHog flag AND license t
 - **Admin/bulk DSAR console (Enterprise, `compliance.bulk_dsar`)** -- `blueprints/v1/admin_data_privacy.py` + `services/admin_data_privacy_service.py`, mounted at `/api/v1/tenant/<slug>/privacy/*`. The statutory self-service DSAR (`/api/v1/user/me/data`) stays ungated in every tier. See `docs/PRIVACY.md` "Admin / Bulk DSAR Console".
 - **Whitelabel branding (Professional, `tenancy.whitelabel`)** -- `services/branding_service.py`, applied in `GET /api/v1/auth/tenant/<slug>` and gated on write in `PUT /api/v1/tenant/<slug>`. See `docs/features/whitelabel-branding.md`.
 
+## Data-subject erasure (GDPR Art. 17)
+
+`services/data_privacy_service.py::anonymize_user_data` is the single erasure core, shared by self-service (`DELETE /api/v1/user/me/data`) and the Enterprise admin console.
+
+- **All-or-nothing** -- every delete, the `hub_users` anonymization and the `completed` `data_deletion_requests` row run as ONE executor job with ONE commit (rollback on any failure). `AsyncDAL.delete_async()` & co. commit per call, so they are deliberately not used here. A failed erasure leaves the account untouched, records a `failed` ledger row (exception type only) and re-raises.
+- **Erases `hub_chat_messages`** the user sent (previously exported, never deleted -- GRC#1).
+- **Telemetry (OTLP via the standard `OTEL_*` env vars)** -- span `hub.dsar.erase`, counter `waddles_hub_dsar_erasure_total{result}`, histograms `waddles_hub_dsar_erasure_duration_ms` / `waddles_hub_dsar_erasure_rows`. Labels/attributes carry no user id; failure spans carry the exception type only (never the driver message). A broken exporter is logged, never fails an erasure.
+- **Retains consent + audit evidence** (`cookie_consent`, `cookie_audit_log`, `audit_log`, `data_deletion_requests`; `ERASURE_RETAINED_TABLES`) for GDPR Art. 5(2). See `docs/PRIVACY.md` "Data Deletion". Regression tests: `tests/test_data_privacy_erasure.py`.
+
 ## API versions
 
 - `/api/v1/*` -- frozen, ported 1:1 from the Node contract

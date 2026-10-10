@@ -36,13 +36,35 @@ SQL helpers hardcode psycopg2's paramstyle.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from collections.abc import Collection
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 import bcrypt
+from flask_core.db_errors import describe_db_error, log_db_error
+from opentelemetry import trace
 
+from services.bundle_telemetry import get_meter, get_tracer
 from services.errors import bad_request, not_found, unauthorized
+
+logger = logging.getLogger(__name__)
+
+#: Tables erasure deliberately NEVER deletes from. GDPR Art. 5(2)
+#: (accountability) obliges the controller to be able to DEMONSTRATE that
+#: consent was obtained and that a deletion request was honoured, so the
+#: consent record, its change log, the platform audit trail and the
+#: deletion-request ledger outlive the data subject's own data. Pinned by
+#: `tests/test_data_privacy_erasure.py::TestRetention`; adding a delete
+#: against any of these is a compliance regression, not a cleanup.
+ERASURE_RETAINED_TABLES: tuple[str, ...] = (
+    "cookie_consent",
+    "cookie_audit_log",
+    "audit_log",
+    "data_deletion_requests",
+)
 
 
 def _iso(value: Any) -> str | None:
@@ -412,16 +434,11 @@ async def request_data_deletion(
     `user_id` MUST be the caller's own id -- see module docstring; there
     is no parameter here a caller could point at someone else's account.
 
-    Mirrors `requestDataDeletion()` step-for-step: password confirmation
-    only if the account has one, sequential deletes across every table
-    holding this user's PII, in-place anonymization of `hub_users` (the
-    row is KEPT for FK integrity, matching Node), then an always-written
-    audit record in `data_deletion_requests` (success or best-effort
-    failure), matching Node's "record failure, then re-raise the original
-    error" shape. Not wrapped in an explicit pydal transaction -- no
-    service in this codebase uses one yet (`AsyncDAL` exposes no
-    transaction primitive); this is the same commit model every other
-    write in this port already relies on, not a gap introduced here.
+    Mirrors `requestDataDeletion()`: password confirmation only if the
+    account has one, then `anonymize_user_data()` -- the all-or-nothing
+    erasure core (deletes across every table holding this user's PII,
+    in-place anonymization of `hub_users`, and the `data_deletion_requests`
+    audit record, in ONE database transaction).
     """
     rows = await async_dal.select_async(
         dal(dal.hub_users.id == user_id), dal.hub_users.email, dal.hub_users.password_hash
@@ -444,45 +461,99 @@ async def request_data_deletion(
     return False, True
 
 
-async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: str | None) -> None:
-    """Delete/anonymize every PII-bearing row for `user_id` and record the outcome.
+@dataclass(slots=True, frozen=True)
+class _ErasureInstruments:
+    """The OTel instruments erasure reports through (created lazily, once)."""
 
-    The shared erasure core: `request_data_deletion()` (self-service, after
-    its password confirmation) and the tenant-admin DSAR console
-    (`admin_data_privacy_service.py`, after ITS authorization + audit
-    checks) both call this, so the two paths can never drift apart on what
-    "erased" means. It performs NO authorization of its own -- the caller
-    owns that, and MUST have already proven the caller may erase
-    `user_id`.
+    total: Any
+    duration_ms: Any
+    rows_deleted: Any
 
-    Always writes a `data_deletion_requests` row (success, or best-effort
-    "failed" followed by re-raising the original error).
+
+_INSTRUMENTS: _ErasureInstruments | None = None
+
+
+def _instruments() -> _ErasureInstruments:
+    """Return the erasure counter/histograms, creating them on first use.
+
+    Lazy (not import-time) so a deployment's / test's MeterProvider is the one
+    instruments bind to. Labels are `result` only -- never a user id (PII).
     """
-    now = datetime.now(UTC)
-    counts: dict[str, int] = {}
-    try:
-        counts["profiles"] = await async_dal.delete_async(
-            dal.hub_user_profiles.hub_user_id == user_id
+    global _INSTRUMENTS
+    if _INSTRUMENTS is None:
+        meter = get_meter()
+        _INSTRUMENTS = _ErasureInstruments(
+            total=meter.create_counter(
+                "waddles_hub_dsar_erasure_total", description="Art. 17 erasures, by result"
+            ),
+            duration_ms=meter.create_histogram(
+                "waddles_hub_dsar_erasure_duration_ms",
+                unit="ms",
+                description="wall time of one all-or-nothing erasure transaction",
+            ),
+            rows_deleted=meter.create_histogram(
+                "waddles_hub_dsar_erasure_rows",
+                description="rows deleted by one erasure (excludes the in-place anonymization)",
+            ),
         )
-        counts["sessions"] = await async_dal.delete_async(dal.hub_sessions.user_id == user_id)
+    return _INSTRUMENTS
+
+
+def _rows_deleted(counts: dict[str, int]) -> int:
+    """Total rows hard-deleted (the in-place `hub_users` anonymization is not a delete)."""
+    return sum(v for k, v in counts.items() if k != "hub_users_anonymized")
+
+
+def _record_erasure_metrics(result: str, started: float, counts: dict[str, int] | None) -> None:
+    """Emit erasure metrics; a telemetry failure is logged, never raised into the request."""
+    try:
+        instruments = _instruments()
+        labels = {"result": result}
+        instruments.total.add(1, labels)
+        instruments.duration_ms.record((time.perf_counter() - started) * 1000.0, labels)
+        if counts is not None:
+            instruments.rows_deleted.record(_rows_deleted(counts), labels)
+    except Exception:  # noqa: BLE001 - telemetry must never fail an erasure
+        logger.exception("dsar.erasure_metrics_failed")
+
+
+def _sync_erase(dal: Any, *, user_id: int, email: str | None, now: datetime) -> dict[str, int]:
+    """Erase `user_id` in ONE transaction: every delete, the anonymization and the audit row.
+
+    Synchronous on purpose -- it MUST run as a single `run_in_executor()`
+    job so every statement lands on the same pool thread and therefore the
+    same thread-local pydal connection. `AsyncDAL.insert_async()` /
+    `update_async()` / `delete_async()` each COMMIT inside their own
+    executor job (#280), so composing them (what this function replaced)
+    left a mid-way failure with the earlier deletes already durable and
+    the account still un-anonymized: a half-erased subject, which is worse
+    than neither. Here nothing is committed until the final statement has
+    succeeded, and any failure rolls back everything (Art. 17 is
+    all-or-nothing). `AsyncDAL.transaction_async()`'s own docstring and
+    `services/community_loyalty.py` document this same pattern.
+
+    Does NOT touch `ERASURE_RETAINED_TABLES` (consent / audit retention,
+    Art. 5(2)). Returns the per-table row counts written to the audit row.
+    """
+    try:
+        counts: dict[str, int] = {}
+        counts["profiles"] = dal(dal.hub_user_profiles.hub_user_id == user_id).delete()
+        counts["sessions"] = dal(dal.hub_sessions.user_id == user_id).delete()
         # Node's own WHERE (`user_identifier = (SELECT email FROM hub_users
         # WHERE id = $1)`) never matches when email IS NULL -- SQL NULL
         # comparison, not an omission. Mirrored directly rather than
         # issuing a query that would silently match nothing anyway.
         counts["temp_passwords"] = (
-            await async_dal.delete_async(dal.hub_temp_passwords.user_identifier == email)
-            if email
-            else 0
+            dal(dal.hub_temp_passwords.user_identifier == email).delete() if email else 0
         )
-        counts["passkeys"] = await async_dal.delete_async(dal.user_passkeys.user_id == user_id)
-        counts["message_events"] = await async_dal.delete_async(
-            dal.activity_message_events.hub_user_id == user_id
-        )
-        counts["watch_sessions"] = await async_dal.delete_async(
-            dal.activity_watch_sessions.hub_user_id == user_id
-        )
-        await async_dal.update_async(
-            dal.hub_users.id == user_id,
+        counts["passkeys"] = dal(dal.user_passkeys.user_id == user_id).delete()
+        counts["message_events"] = dal(dal.activity_message_events.hub_user_id == user_id).delete()
+        counts["watch_sessions"] = dal(dal.activity_watch_sessions.hub_user_id == user_id).delete()
+        # GRC#1: Art. 17 erasure previously exported these (Art. 15) but never
+        # deleted them, leaving the subject's message bodies, platform username
+        # and avatar behind after a "completed" erasure.
+        counts["chat_messages"] = dal(dal.hub_chat_messages.sender_hub_user_id == user_id).delete()
+        dal(dal.hub_users.id == user_id).update(
             email=f"deleted_{user_id}@deleted.waddlebot",
             username=f"deleted_{user_id}",
             display_name=None,
@@ -494,24 +565,75 @@ async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: 
             updated_at=now,
         )
         counts["hub_users_anonymized"] = 1
-
-        await async_dal.insert_async(
-            dal.data_deletion_requests,
+        dal.data_deletion_requests.insert(
             hub_user_id=user_id,
             requested_at=now,
             completed_at=now,
             status="completed",
             deletion_scope=counts,
         )
+        dal.commit()
+        return counts
+    except Exception:
+        dal.rollback()
+        raise
+
+
+async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: str | None) -> None:
+    """Delete/anonymize every PII-bearing row for `user_id`, atomically, and record the outcome.
+
+    The shared erasure core: `request_data_deletion()` (self-service, after
+    its password confirmation) and the tenant-admin DSAR console
+    (`admin_data_privacy_service.py`, after ITS authorization + audit
+    checks) both call this, so the two paths can never drift apart on what
+    "erased" means. It performs NO authorization of its own -- the caller
+    owns that, and MUST have already proven the caller may erase
+    `user_id`.
+
+    All-or-nothing (see `_sync_erase()`): on failure the data subject's
+    rows are exactly as they were, a separate best-effort `"failed"` row is
+    written to `data_deletion_requests`, and the ORIGINAL error is
+    re-raised (a failure to record the failure never masks it). Consent
+    and audit logs are retained (`ERASURE_RETAINED_TABLES`).
+    """
+    now = datetime.now(UTC)
+    started = time.perf_counter()
+    loop = asyncio.get_running_loop()
+    logger.debug("dsar.erasure_started", extra={"hub_user_id": user_id, "has_email": bool(email)})
+    try:
+        # record_exception / set_status_on_exception OFF: the SDK would otherwise
+        # stamp the raw exception message (row values -> PII) on the span at exit.
+        with get_tracer().start_as_current_span(
+            "hub.dsar.erase", record_exception=False, set_status_on_exception=False
+        ) as span:
+            try:
+                counts = await loop.run_in_executor(
+                    async_dal.executor,
+                    lambda: _sync_erase(dal, user_id=user_id, email=email, now=now),
+                )
+            except Exception as exc:
+                # Value-free status text (exception type / SQLSTATE only).
+                span.set_status(trace.Status(trace.StatusCode.ERROR, describe_db_error(exc)))
+                raise
+            span.set_attribute("rows_deleted", _rows_deleted(counts))
     except Exception as exc:
+        # `log_db_error` / `describe_db_error` emit the exception TYPE + SQLSTATE
+        # only: a driver message routinely echoes bound row values (PII), and
+        # `error_detail` is retained in `data_deletion_requests` indefinitely.
+        log_db_error(logger, f"dsar.erasure_failed hub_user_id={user_id}", exc)
+        _record_erasure_metrics("failed", started, None)
         try:
             await async_dal.insert_async(
                 dal.data_deletion_requests,
                 hub_user_id=user_id,
                 requested_at=now,
                 status="failed",
-                error_detail=str(exc),
+                error_detail=describe_db_error(exc),
             )
-        except Exception:  # noqa: BLE001, S110 - best-effort; must not mask the original error
-            pass
+        except Exception as record_exc:  # noqa: BLE001 - best-effort; must not mask the original
+            log_db_error(
+                logger, f"dsar.erasure_failure_record_failed hub_user_id={user_id}", record_exc
+            )
         raise
+    _record_erasure_metrics("completed", started, counts)
+    logger.info("dsar.erasure_completed", extra={"hub_user_id": user_id, "deleted_counts": counts})

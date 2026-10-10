@@ -169,6 +169,26 @@ def _message_event(db: Any, *, community_id: int, user_id: int) -> None:
     db.dal.commit()
 
 
+def _chat_message(db: Any, *, community_id: int, user_id: int, text: str = "hello") -> None:
+    db.dal.hub_chat_messages.insert(
+        community_id=community_id,
+        channel_name="general",
+        sender_hub_user_id=user_id,
+        sender_platform="discord",
+        sender_username="someone",
+        message_content=text,
+        message_type="text",
+        created_at=datetime.now(UTC),
+    )
+    db.dal.commit()
+
+
+def _chat_count(db: Any, user_id: int) -> int:
+    count = db.dal(db.dal.hub_chat_messages.sender_hub_user_id == user_id).count()
+    db.dal.commit()
+    return int(count)
+
+
 def _audit_rows(db: Any) -> list[Any]:
     rows = db.dal(db.dal.audit_log.id > 0).select(orderby=db.dal.audit_log.id)
     db.dal.commit()
@@ -682,6 +702,33 @@ class TestErase:
         assert [(r.action, r.details["outcome"]) for r in rows] == [("dsar.erase", "completed")]
         assert rows[0].user_id == world["admin"]
 
+    async def test_erase_removes_chat_messages_but_keeps_consent_and_audit_logs(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """GRC#1 through the admin console: chat deleted, Art. 5(2) evidence retained."""
+        alice = world["alice"]
+        _chat_message(db, community_id=world["acme_community"], user_id=alice, text="one")
+        _chat_message(db, community_id=world["other_community"], user_id=alice, text="two")
+        db.dal.cookie_consent.insert(
+            user_id=alice,
+            consent_id="c-alice",
+            consent_version="1.0",
+            consented_at=datetime.now(UTC),
+        )
+        db.dal.commit()
+        assert _chat_count(db, alice) == 2
+
+        response = await client.post(
+            _base() + f"/users/{alice}/erase",
+            headers=_headers(world["admin"]),
+            json={"confirm": True},
+        )
+
+        assert response.status_code == 200
+        assert _chat_count(db, alice) == 0  # both communities -- erasure is not tenant-scoped
+        assert db.dal(db.dal.cookie_consent.user_id == alice).count() == 1
+        assert [r.action for r in _audit_rows(db)] == ["dsar.erase"]
+
     async def test_erase_needs_no_password_for_an_account_that_has_one(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
@@ -967,6 +1014,28 @@ class TestBulk:
         bulk_ids = {r.details["bulk_id"] for r in rows}
         assert len(bulk_ids) == 1 and None not in bulk_ids
 
+    async def test_bulk_erase_removes_every_targets_chat_messages(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        bob = _user(db, name="bob")
+        _member(db, community_id=world["acme_community"], user_id=bob)
+        for uid in (world["alice"], bob):
+            _chat_message(db, community_id=world["acme_community"], user_id=uid)
+        bystander = _user(db, name="bystander")
+        _member(db, community_id=world["acme_community"], user_id=bystander)
+        _chat_message(db, community_id=world["acme_community"], user_id=bystander)
+
+        response = await client.post(
+            _base() + "/bulk",
+            headers=_headers(world["admin"]),
+            json={"action": "erase", "userIds": [world["alice"], bob], "confirm": True},
+        )
+
+        assert response.status_code == 200
+        assert (await response.get_json())["succeeded"] == 2
+        assert (_chat_count(db, world["alice"]), _chat_count(db, bob)) == (0, 0)
+        assert _chat_count(db, bystander) == 1
+
     async def test_bulk_success_flag_and_dedup(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
@@ -1162,48 +1231,10 @@ class TestScopeEdgeCases:
 
 
 class TestAnonymizeCore:
-    """`anonymize_user_data()` -- the erasure core shared with self-service."""
+    """`anonymize_user_data()` -- the erasure core shared with self-service.
 
-    async def test_failure_is_recorded_then_the_original_error_propagates(
-        self, db: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        user_id = _user(db, name="victim")
-        original = db.delete_async
-
-        async def failing(query: Any) -> Any:
-            if "hub_user_profiles" in str(query):
-                raise RuntimeError("profiles locked")
-            return await original(query)
-
-        monkeypatch.setattr(db, "delete_async", failing)
-
-        with pytest.raises(RuntimeError, match="profiles locked"):
-            await privacy.anonymize_user_data(
-                db, db.dal, user_id=user_id, email="victim@example.com"
-            )
-
-        rows = list(db.dal(db.dal.data_deletion_requests.hub_user_id == user_id).select())
-        db.dal.commit()
-        assert [r.status for r in rows] == ["failed"]
-        assert "profiles locked" in rows[0].error_detail
-        assert _user_row(db, user_id).email == "victim@example.com"  # not anonymized
-
-    async def test_failure_to_record_the_failure_never_masks_the_original_error(
-        self, db: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        user_id = _user(db, name="victim2")
-
-        async def failing_delete(query: Any) -> Any:
-            raise RuntimeError("original failure")
-
-        async def failing_insert(table: Any, **fields: Any) -> Any:
-            raise OSError("cannot record either")
-
-        monkeypatch.setattr(db, "delete_async", failing_delete)
-        monkeypatch.setattr(db, "insert_async", failing_insert)
-
-        with pytest.raises(RuntimeError, match="original failure"):
-            await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email=None)
+    Failure/atomicity/retention proofs live in `test_data_privacy_erasure.py`.
+    """
 
     async def test_account_without_an_email_is_still_anonymized(self, db: Any) -> None:
         user_id = _user(db, name="noemail")
