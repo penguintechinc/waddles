@@ -165,6 +165,18 @@ class FakeDb:
         self.versions: dict[str, int] = {}
         self._id_counter = itertools.count(1)
         self.raise_on: dict[str, Exception] = {}
+        #: Per-op exception raised exactly once, then cleared (for fail-then-recover tests).
+        self.raise_once: dict[str, Exception] = {}
+        #: Number of upcoming `update` calls to fail with a version `Conflict` (simulates a
+        #: concurrent writer bumping the row between our `get` and our `update`).
+        self.conflicts_remaining = 0
+
+    def _maybe_raise(self, op: str) -> None:
+        """Raise a configured error for `op` (sticky via `raise_on`, one-shot via `raise_once`)."""
+        if op in self.raise_once:
+            raise self.raise_once.pop(op)
+        if op in self.raise_on:
+            raise self.raise_on[op]
 
     def _next_row_id(self) -> str:
         return f"00000000-0000-0000-0000-{next(self._id_counter):012d}"
@@ -176,8 +188,7 @@ class FakeDb:
     def insert(self, column_values: list[ColumnValue]) -> Row:
         """Fake `db.insert(column-values) -> row`."""
         self.calls.append(("insert", (column_values,)))
-        if "insert" in self.raise_on:
-            raise self.raise_on["insert"]
+        self._maybe_raise("insert")
         row_id = self._next_row_id()
         self.rows[row_id] = {cv.column: unwrap(cv.value) for cv in column_values}
         self.versions[row_id] = 1
@@ -186,8 +197,7 @@ class FakeDb:
     def get(self, row_id: str) -> Row:
         """Fake `db.get(row-id) -> row`, raising `Error_NotFound` if absent."""
         self.calls.append(("get", (row_id,)))
-        if "get" in self.raise_on:
-            raise self.raise_on["get"]
+        self._maybe_raise("get")
         if row_id not in self.rows:
             raise WitDbError(Error_NotFound())
         return self._to_row(row_id)
@@ -195,8 +205,7 @@ class FakeDb:
     def query(self, limit: int, offset: int, order_by: Any = None) -> list[Row]:
         """Fake `db.query(limit, offset, order-by) -> list<row>` -- see the real facade's doc."""
         self.calls.append(("query", (limit, offset, order_by)))
-        if "query" in self.raise_on:
-            raise self.raise_on["query"]
+        self._maybe_raise("query")
         ids = sorted(self.rows)
         if isinstance(order_by, OrderBy_Column):
             col = order_by.value
@@ -209,10 +218,13 @@ class FakeDb:
     def update(self, row_id: str, expected_version: int, column_values: list[ColumnValue]) -> Row:
         """Fake `db.update(row-id, expected-version, column-values) -> row`."""
         self.calls.append(("update", (row_id, expected_version, column_values)))
-        if "update" in self.raise_on:
-            raise self.raise_on["update"]
+        self._maybe_raise("update")
         if row_id not in self.rows:
             raise WitDbError(Error_NotFound())
+        if self.conflicts_remaining > 0:
+            self.conflicts_remaining -= 1
+            self.versions[row_id] += 1  # the "other writer" really did bump the version
+            raise WitDbError(Error_Conflict("version mismatch"))
         if self.versions[row_id] != expected_version:
             raise WitDbError(Error_Conflict("version mismatch"))
         self.rows[row_id].update({cv.column: unwrap(cv.value) for cv in column_values})
@@ -222,8 +234,7 @@ class FakeDb:
     def delete(self, row_id: str, expected_version: int) -> None:
         """Fake `db.delete(row-id, expected-version)`."""
         self.calls.append(("delete", (row_id, expected_version)))
-        if "delete" in self.raise_on:
-            raise self.raise_on["delete"]
+        self._maybe_raise("delete")
         if row_id not in self.rows:
             raise WitDbError(Error_NotFound())
         if self.versions[row_id] != expected_version:

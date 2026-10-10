@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Static hygiene checks over shipped App Bundle Python source (`bundles/**/src/**/*.py`).
 
-Two independent AST checks, each catching a defect class this project has
+Three independent AST checks, each catching a defect class this project has
 hit repeatedly in bundle code, selectable with `--check`:
 
 ``log-pii``
@@ -32,12 +32,21 @@ hit repeatedly in bundle code, selectable with `--check`:
     fail-closed shims) are expected control flow and are never flagged.
     Escape hatch: `# silent-ok: <reason>` on any line of the handler.
 
+``badge-truthiness``
+    A role/badge field (`is_mod`, `is_broadcaster`, ...) read through Python TRUTHINESS instead
+    of an identity check: `bool(payload.get("is_mod"))`, `bool(is_mod)`, or a bare badge read as
+    an operand of `or`/`and`/`not`/`if`/`while`/a ternary. A string badge such as `"false"` is
+    truthy, so a non-moderator whose normalizer emitted a string passed every mod gate that used
+    one -- and `transform()` laundered it into a real `True` for `dispatch` (fix/bundle-defects-wave:
+    40 bundles). Only `is True` (or `isinstance(x, bool)` guards, `"is_mod" in payload` tests and
+    comparisons) are accepted. Escape hatch: `# badge-ok: <reason>`.
+
 Exit code is the gate (critical-rules.md Verification Integrity): non-zero on
 any finding, on an unparseable source file, and on a ZERO denominator (no
 files scanned / no log calls or handlers examined -- a scanner pointed at the
 wrong root reports clean). Counts examined are always printed.
 
-Usage: check-bundle-source-hygiene.py [--check log-pii|silent-except|all] [--root DIR]
+Usage: check-bundle-source-hygiene.py [--check log-pii|silent-except|badge-truthiness|all] [--root DIR]
 """
 from __future__ import annotations
 
@@ -86,6 +95,11 @@ SAFE_CALLS = frozenset({
 BROAD_EXCEPTIONS = frozenset({"Exception", "BaseException"})
 PII_PRAGMA = re.compile(r"#\s*pii-ok\s*:\s*(\S.*)$")
 SILENT_PRAGMA = re.compile(r"#\s*silent-ok\s*:\s*(\S.*)$")
+BADGE_PRAGMA = re.compile(r"#\s*badge-ok\s*:\s*(\S.*)$")
+# Normalized role/badge field names a platform normalizer emits (core/svc_ingest/src/normalize.rs).
+BADGE_NAMES = frozenset({
+    "is_mod", "is_moderator", "is_broadcaster", "is_vip", "is_subscriber", "is_sub",
+})
 SKIP_DIR_NAMES = frozenset({"tests", "test", "__pycache__", "node_modules", "target", "dist", "build"})
 
 
@@ -345,9 +359,74 @@ def check_silent_except(root: Path, sources: list[Path]) -> Result:
     return result
 
 
+def _is_badge_read(node: ast.AST | None) -> bool:
+    """True when `node` directly reads a role/badge field: `is_mod`, `x.get("is_mod")`, `x["is_mod"]`."""
+    if isinstance(node, ast.Name):
+        return node.id in BADGE_NAMES
+    if isinstance(node, ast.Attribute):
+        return node.attr in BADGE_NAMES
+    if isinstance(node, ast.Subscript):
+        return _const_str_key(node.slice) in BADGE_NAMES
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+        return bool(node.args) and _const_str_key(node.args[0]) in BADGE_NAMES
+    return False
+
+
+def _contains_badge_read(node: ast.AST) -> bool:
+    """True when any sub-expression of `node` is a badge read."""
+    return any(_is_badge_read(sub) for sub in ast.walk(node))
+
+
+def _truthiness_operands(node: ast.AST) -> list[ast.expr]:
+    """The sub-expressions Python coerces to bool when `node` is a boolean context, else []."""
+    if isinstance(node, ast.BoolOp):
+        return list(node.values)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return [node.operand]
+    if isinstance(node, (ast.If, ast.While, ast.IfExp)):
+        return [node.test]
+    if isinstance(node, ast.comprehension):
+        return list(node.ifs)
+    return []
+
+
+def check_badge_truthiness(root: Path, sources: list[Path]) -> Result:
+    """Run the badge-truthiness check over `sources`; counts every badge read examined."""
+    result = Result(files_scanned=len(sources))
+    for path in sources:
+        rel = path.relative_to(root).as_posix()
+        tree, lines = parse_source(path)
+        result.examined += sum(1 for node in ast.walk(tree) if _is_badge_read(node))
+        flagged: list[tuple[ast.AST, str]] = []
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "bool"
+                and any(_contains_badge_read(arg) for arg in node.args)
+            ):
+                flagged.append((node, f"`{ast.unparse(node)}` coerces a badge through truthiness"))
+            for operand in _truthiness_operands(node):
+                if _is_badge_read(operand):
+                    flagged.append((operand, f"`{ast.unparse(operand)}` is used as a bare truthiness test"))
+        for node, why in flagged:
+            end = getattr(node, "end_lineno", None) or node.lineno
+            reason = pragma_reason(lines, node.lineno, end, BADGE_PRAGMA)
+            if reason:
+                result.suppressed.append(f"{rel}:{node.lineno} badge-ok: {reason}")
+                continue
+            result.findings.append(Finding(
+                rel, node.lineno, "badge-truthiness",
+                f"{why} -- a string badge (\"false\") is truthy, so a non-moderator would pass; "
+                "use `x is True` (fail closed on anything that is not a real boolean)",
+            ))
+    return result
+
+
 CHECKS = {
     "log-pii": ("log calls", check_log_pii),
     "silent-except": ("except handlers", check_silent_except),
+    "badge-truthiness": ("badge reads", check_badge_truthiness),
 }
 
 

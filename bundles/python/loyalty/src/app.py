@@ -79,6 +79,28 @@ onboarding integration -- wiring `bundle_manifest_v2.py`/
 `bundle_approval_service.py` to it is a separate, already-tracked follow-on
 phase, not something this bundle's own PR is positioned to fix.
 
+## Integrity guarantees (fix/bundle-defects-wave, 1.0.3)
+
+- **No lost first-time grants.** `kv` has no compare-and-swap, so two concurrent first-time
+  `add`s for the same user used to both `db.insert` a row and race on the index write: the
+  loser's row (and its points) was orphaned and the leaderboard showed the user twice. Row
+  creation is now gated by an atomic claim (`loyalty.claim.<pseudonym>`, `kv.increment` returning
+  `1` only for the first caller, 30 s TTL so a crashed creator cannot wedge the user): the loser
+  re-checks the index a few times and otherwise replies "busy, try again" -- never a duplicate
+  row, never a silent drop. A failed create releases its claim immediately.
+- **Bounded, never-negative balances.** A single `add`/`sub` amount is `1..MAX_ADJUST_AMOUNT`
+  (ASCII digits only -- `int()` also accepts `+5`, `1_000` and non-ASCII digits), balances
+  saturate at `MAX_BALANCE` (well inside int8 and JSON-exact range) and clamp at `0`. Replies
+  report what was *actually* applied (a clamped `sub` no longer claims the full amount), and a
+  `sub` against a user with no row writes nothing instead of creating a junk zero row. A stored
+  negative / over-cap balance is corruption and fails loud rather than being rendered or
+  silently "repaired".
+- **One identity form.** The caller's own `!points` lookup now normalizes the actor exactly like
+  a typed target (strip `@`, lower-case); previously a mixed-case actor hashed differently from
+  the same name typed by a mod, so points granted to `alice` were invisible to `Alice`.
+- **Strict mod gate.** Badges are read with an identity check; a string badge (`"false"`) is
+  never truthy.
+
 Gated behind the PostHog flag ``waddles.command-loyalty`` -- see
 `bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
 rationale and ordering (cheap command-match first, flag check second, real
@@ -103,6 +125,17 @@ FLAG_KEY = "waddles.command-loyalty"
 SPEC = CommandSpec(name="points", sub_modules=frozenset({"top"}))
 
 _INDEX_KEY_PREFIX = "loyalty.rowid."
+_CLAIM_KEY_PREFIX = "loyalty.claim."
+#: Largest single `add`/`sub` amount -- keeps every intermediate sum far inside int8.
+MAX_ADJUST_AMOUNT = 1_000_000_000
+#: Balances saturate here (< 2**53, so JSON consumers still read them exactly).
+MAX_BALANCE = 10**15
+#: A first-time-row creation claim expires after this many seconds, so a creator that crashed
+#: between claiming and indexing can never wedge a user for longer than this.
+_CLAIM_TTL_SECONDS = 30
+#: How many times a claim loser re-reads the index (no sleep exists under WASI) before replying
+#: "busy" -- the winner is normally one `db.insert` + one `kv.set` away from publishing it.
+_CLAIM_RECHECKS = 3
 _LEADERBOARD_SIZE = 10
 #: Bounded optimistic-concurrency retry budget for `!points add/sub` -- see
 #: `_db_update_with_retry()`. Five attempts absorbs ordinary concurrent-writer
@@ -112,10 +145,11 @@ _MAX_CONFLICT_RETRIES = 5
 _USAGE = (
     "Usage: !points | !points <user> | !points top | "
     "!points add <amount> <user> | !points sub <amount> <user> "
-    "(add/sub are broadcaster/mod only)"
+    "(add/sub are broadcaster/mod only; amount 1-1000000000)"
 )
 _PERMISSION_DENIED_MSG = "only moderators/broadcasters can adjust points"
 _UNAVAILABLE_MSG = "points are temporarily unavailable, try again shortly."
+_BUSY_MSG = "points for that user are being set up right now, try again in a few seconds."
 
 _KNOWN_COMMANDS = frozenset(
     {"balance_self", "balance_other", "leaderboard", "add", "sub", "usage"}
@@ -150,6 +184,20 @@ def _normalize_target(raw: str) -> str:
     return cleaned.lower()
 
 
+def _actor_pseudonym(actor: str | None) -> str:
+    """Pseudonym of the *calling* user, normalized exactly like a typed `<user>` target.
+
+    The same human must resolve to one row whether they are named by a mod's `add 10 Alice`
+    or by their own `!points` -- so the actor goes through `_normalize_target` too.
+    """
+    return _pseudonym(_normalize_target(actor or ""))
+
+
+def _claim_key(pseudonym: str) -> str:
+    """Per-(community, user) `kv` key for the first-time-row creation claim."""
+    return f"{_CLAIM_KEY_PREFIX}{pseudonym}"
+
+
 def _index_key(pseudonym: str) -> str:
     """Per-(community, user) `kv` key holding that user's `db` `row_id` -- see module docstring."""
     return f"{_INDEX_KEY_PREFIX}{pseudonym}"
@@ -164,7 +212,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
@@ -204,9 +252,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     # Forward the normalized badge signal, if present -- see `fish`/`count`/`lurk`'s own
     # identical forwarding comment for why absence must reach `dispatch` as absence, not `False`.
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
 
     return PlatformEvent(
         platform=event.platform,
@@ -254,12 +302,13 @@ def _resolve_adjust(verb: str, args: str | None) -> tuple[str, str | None, int |
     if len(parts) != 2:
         return "usage", None, None
     amount_text, target = parts
-    try:
-        amount = int(amount_text)
-    except ValueError:
+    # ASCII digits only: `int()` alone would also accept "+5", "1_000" and non-ASCII digits.
+    if not (amount_text.isascii() and amount_text.isdigit()) or len(amount_text) > 10:
         log.debug("loyalty.adjust_invalid_amount", command=verb)
         return "usage", None, None
-    if amount <= 0:
+    amount = int(amount_text)
+    if not 1 <= amount <= MAX_ADJUST_AMOUNT:
+        log.debug("loyalty.adjust_amount_out_of_range", command=verb)
         return "usage", None, None
     return verb, target, amount
 
@@ -377,7 +426,12 @@ async def _db_update_with_retry(
                 channel_id=channel_id,
                 op="index_stale",
             )
-        new_values = mutate(row)
+        try:
+            new_values = mutate(row)
+        except (KeyError, TypeError, ValueError) as exc:
+            await _fail_backend(
+                exc, provider=provider, channel_id=channel_id, op="balance_invalid"
+            )
         try:
             updated: dict[str, Any] = await db.update(row_id, int(row["version"]), new_values)
         except db.ConflictError:
@@ -392,6 +446,18 @@ async def _db_update_with_retry(
         channel_id=channel_id,
         op="db_update_retry",
     )
+
+
+def _checked_balance(raw: Any) -> int:
+    """Validate a stored `balance` column: an int in `0..MAX_BALANCE`, else raise `ValueError`.
+
+    A negative, over-cap or non-numeric stored balance is corruption (this bundle can only
+    ever write values in range) -- callers fail loud instead of rendering or "repairing" it.
+    """
+    balance = int(raw)
+    if not 0 <= balance <= MAX_BALANCE:
+        raise ValueError("stored balance is outside 0..MAX_BALANCE")
+    return balance
 
 
 async def _handle_balance(
@@ -409,7 +475,78 @@ async def _handle_balance(
             channel_id=channel_id,
             op="index_stale",
         )
-    return f"{display_name} has {int(row['balance'])} points."
+    try:
+        balance = _checked_balance(row["balance"])
+    except (KeyError, TypeError, ValueError) as exc:
+        await _fail_backend(exc, provider=provider, channel_id=channel_id, op="balance_invalid")
+    return f"{display_name} has {balance} points."
+
+
+async def _kv_claim_creation(
+    community: str, pseudonym: str, *, provider: str, channel_id: str
+) -> bool:
+    """Atomically claim the right to create `pseudonym`'s first row; `True` for exactly one caller.
+
+    `kv.increment` is atomic host-side and returns `1` only to the first caller inside the TTL
+    window -- the compare-and-swap `kv.set` lacks. See module docstring, "Integrity guarantees".
+    """
+    try:
+        count = await community_kv.increment(
+            community, _claim_key(pseudonym), 1, _CLAIM_TTL_SECONDS
+        )
+    except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_fail_backend`
+        await _fail_backend(exc, provider=provider, channel_id=channel_id, op="kv_claim")
+    return bool(count == 1)
+
+
+async def _kv_release_claim(community: str, pseudonym: str) -> None:
+    """Best-effort release of a creation claim after a failed create, so the user is not wedged.
+
+    A failed release is logged loudly (the caller raises the primary failure next); the claim's
+    TTL bounds the worst case either way.
+    """
+    try:
+        await community_kv.delete(community, _claim_key(pseudonym))
+    except Exception as exc:  # noqa: BLE001 -- logged; the primary failure is raised next
+        log.error("loyalty.claim_release_failed", error=type(getattr(exc, "value", exc)).__name__)
+
+
+async def _discard_orphan_row(row_id: str, version: int) -> None:
+    """Best-effort delete of a just-inserted row whose index write failed.
+
+    Without the index the row can never be reached again, and its points would show up as a
+    phantom second entry on the leaderboard. A failed cleanup is logged loudly (the caller then
+    raises the primary failure anyway) -- never swallowed silently.
+    """
+    try:
+        await db.delete(row_id, version)
+    except Exception as exc:  # noqa: BLE001 -- logged; the primary failure is raised next
+        log.error("loyalty.orphan_cleanup_failed", error=type(getattr(exc, "value", exc)).__name__)
+
+
+async def _create_first_row(
+    community: str, pseudonym: str, balance: int, *, provider: str, channel_id: str
+) -> None:
+    """Insert `pseudonym`'s first balance row and publish its index.
+
+    On any failure the claim is released (so the user is not wedged) and a row that was inserted
+    but could not be indexed is deleted (so no unreachable orphan keeps their points).
+    """
+    inserted: dict[str, Any] | None = None
+    try:
+        inserted = await _db_insert(
+            {"actor_hash": pseudonym, "balance": balance},
+            provider=provider,
+            channel_id=channel_id,
+        )
+        await _kv_set_rowid(
+            community, pseudonym, str(inserted["row_id"]), provider=provider, channel_id=channel_id
+        )
+    except Exception:
+        if inserted is not None:
+            await _discard_orphan_row(str(inserted["row_id"]), int(inserted["version"]))
+        await _kv_release_claim(community, pseudonym)
+        raise
 
 
 async def _handle_adjust(
@@ -427,31 +564,67 @@ async def _handle_adjust(
     row_id = await _kv_get_rowid(community, pseudonym, provider=provider, channel_id=channel_id)
 
     if row_id is None:
-        new_balance = max(0, delta)
-        inserted = await _db_insert(
-            {"actor_hash": pseudonym, "balance": new_balance},
-            provider=provider,
-            channel_id=channel_id,
-        )
-        await _kv_set_rowid(
-            community, pseudonym, str(inserted["row_id"]), provider=provider, channel_id=channel_id
-        )
-        return _format_adjust_reply(verb, target_raw, amount, new_balance)
+        if verb == "sub":
+            # Nothing to remove and nothing to record: never create a junk zero row from a typo.
+            return f"{target_raw} has 0 points; nothing to remove."
+        if not await _kv_claim_creation(
+            community, pseudonym, provider=provider, channel_id=channel_id
+        ):
+            # Another invocation is creating this user's row. Re-read the index (no sleep
+            # exists under WASI) and fall through to the update path if it has appeared.
+            for _ in range(_CLAIM_RECHECKS):
+                row_id = await _kv_get_rowid(
+                    community, pseudonym, provider=provider, channel_id=channel_id
+                )
+                if row_id is not None:
+                    break
+            else:
+                log.warn("loyalty.row_creation_busy", command=verb)
+                return _BUSY_MSG
+        else:
+            new_balance = min(MAX_BALANCE, delta)
+            await _create_first_row(
+                community, pseudonym, new_balance, provider=provider, channel_id=channel_id
+            )
+            return _format_adjust_reply(verb, target_raw, amount, 0, new_balance)
+
+    seen: dict[str, int] = {}
 
     def _mutate(row: dict[str, Any]) -> dict[str, Any]:
-        return {"balance": max(0, int(row["balance"]) + delta)}
+        old = _checked_balance(row["balance"])
+        seen["old"] = old
+        return {"balance": max(0, min(MAX_BALANCE, old + delta))}
 
     updated = await _db_update_with_retry(
         row_id, _mutate, provider=provider, channel_id=channel_id
     )
-    return _format_adjust_reply(verb, target_raw, amount, int(updated["balance"]))
+    return _format_adjust_reply(
+        verb, target_raw, amount, seen["old"], _checked_balance(updated["balance"])
+    )
 
 
-def _format_adjust_reply(verb: str, target_raw: str, amount: int, new_balance: int) -> str:
-    """Render the chat reply for a completed `add`/`sub` -- `target_raw` is the live typed name."""
+def _format_adjust_reply(
+    verb: str, target_raw: str, amount: int, old_balance: int, new_balance: int
+) -> str:
+    """Render the chat reply for a completed `add`/`sub`, reporting what was actually applied.
+
+    `target_raw` is the live typed name (echoed, never stored). A `sub` clamped at `0` and an
+    `add` saturated at `MAX_BALANCE` say so instead of claiming the full requested amount.
+    """
+    applied = abs(new_balance - old_balance)
     if verb == "add":
-        return f"Added {amount} points to {target_raw}. New balance: {new_balance}."
-    return f"Removed {amount} points from {target_raw}. New balance: {new_balance}."
+        if applied == amount:
+            return f"Added {amount} points to {target_raw}. New balance: {new_balance}."
+        return (
+            f"Added {applied} of {amount} points to {target_raw} (balance cap reached). "
+            f"New balance: {new_balance}."
+        )
+    if applied == amount:
+        return f"Removed {amount} points from {target_raw}. New balance: {new_balance}."
+    return (
+        f"Removed {applied} of {amount} points from {target_raw} (balance can't go below 0). "
+        f"New balance: {new_balance}."
+    )
 
 
 async def _handle_leaderboard(community: str, *, provider: str, channel_id: str) -> str:
@@ -469,10 +642,13 @@ async def _handle_leaderboard(community: str, *, provider: str, channel_id: str)
     )
     if not rows:
         return "no one has any points yet."
-    entries = [
-        f"{i}. player-{str(row['actor_hash'])[:8]}: {int(row['balance'])}"
-        for i, row in enumerate(rows, start=1)
-    ]
+    try:
+        entries = [
+            f"{i}. player-{str(row['actor_hash'])[:8]}: {_checked_balance(row['balance'])}"
+            for i, row in enumerate(rows, start=1)
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        await _fail_backend(exc, provider=provider, channel_id=channel_id, op="balance_invalid")
     return "Top points: " + ", ".join(entries)
 
 
@@ -520,7 +696,12 @@ async def dispatch(
             return DispatchResult(transport=provider, detail=f"{command}:denied")
         target = payload.get("target")
         amount = payload.get("amount")
-        if not isinstance(target, str) or not isinstance(amount, int):
+        if (
+            not isinstance(target, str)
+            or not isinstance(amount, int)
+            or isinstance(amount, bool)
+            or not 1 <= amount <= MAX_ADJUST_AMOUNT
+        ):
             raise ValueError(f"malformed {command} payload: target={target!r} amount={amount!r}")
         reply_text = await _handle_adjust(
             community, command, target, amount, provider=provider, channel_id=channel_id
@@ -544,7 +725,7 @@ async def dispatch(
             community, pseudonym, target, provider=provider, channel_id=channel_id
         )
     else:  # balance_self
-        pseudonym = _pseudonym(envelope.event.actor)
+        pseudonym = _actor_pseudonym(envelope.event.actor)
         reply_text = await _handle_balance(
             community, pseudonym, username, provider=provider, channel_id=channel_id
         )
