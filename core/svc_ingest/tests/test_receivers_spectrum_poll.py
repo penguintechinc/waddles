@@ -1,4 +1,4 @@
-"""Tests for `receivers.spectrum_poll` + `bundles.spectrum_ingest` (gh #101).
+"""Tests for `receivers.spectrum_poll` + `builtin_handlers.spectrum_ingest` (gh #101).
 
 HTTP is exercised through `RsiRestProvider` over `httpx.MockTransport` (the SSRF-guard
 DNS pin is patched to a passthrough; the guard itself is exercised unpatched against an
@@ -25,7 +25,7 @@ from waddle_transports import (
 )
 
 import receivers.spectrum_poll as sp
-from bundles.spectrum_ingest import SPECTRUM_MANIFEST, normalize, register_default_bundles
+from builtin_handlers.spectrum_ingest import SPECTRUM_MANIFEST, normalize, register_default_bundles
 from fanout import fan_out_event
 from receivers.spectrum_poll import (
     CONSUMES_TAG,

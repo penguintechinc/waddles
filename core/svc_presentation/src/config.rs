@@ -120,6 +120,60 @@ pub struct CliConfig {
     /// trusted_issuers`'s doc comment on why this is a list).
     #[arg(long, env = "PUSH_TRUSTED_ISSUER", default_value = "hub-api")]
     pub push_trusted_issuer: String,
+
+    /// SeaweedFS/S3-compatible endpoint for overlay image assets (P6/P9).
+    /// `IMAGE_BUCKET_*` (not `S3_*`/`RECORDINGS_BUCKET`, `core/svc_streaming`'s
+    /// convention) -- a distinct, service-scoped env namespace, same
+    /// precedent `core/bundle_executor`'s own `BUNDLE_BUCKET_*` convention
+    /// sets, so running both services in the same cluster never risks one
+    /// misreading the other's bucket/credential pair.
+    #[arg(
+        long,
+        env = "IMAGE_BUCKET_ENDPOINT",
+        default_value = "http://infra-seaweedfs:8333"
+    )]
+    pub image_bucket_endpoint: String,
+
+    /// Bucket name -- defaults to the same `waddlebot-assets` bucket the
+    /// existing Python hub avatar/logo uploads use (`docs/guides/
+    /// seaweedfs-object-storage.md`), but under `image_bucket_prefix`'s own
+    /// key prefix below so overlay image assets are never reachable at a
+    /// flat/public avatar-style path.
+    #[arg(long, env = "IMAGE_BUCKET_NAME", default_value = "waddlebot-assets")]
+    pub image_bucket_name: String,
+
+    #[arg(long, env = "IMAGE_BUCKET_REGION", default_value = "us-east-1")]
+    pub image_bucket_region: String,
+
+    /// Key prefix every overlay image object is stored under
+    /// (`{prefix}/{community_id}/{asset_id}.{ext}`) -- deliberately NOT
+    /// `avatars/`/`community-logos/` (those are public-read by design,
+    /// `docs/guides/seaweedfs-object-storage.md`'s "Public Read Access").
+    /// Overlay image assets are served only via `crate::images::render`'s
+    /// signed, scoped, expiring presigned URL -- see that module's doc for
+    /// the full rationale.
+    #[arg(long, env = "IMAGE_BUCKET_PREFIX", default_value = "overlay-images")]
+    pub image_bucket_prefix: String,
+
+    /// Maximum accepted upload size, bytes. Default 8 MiB -- generous for
+    /// a PNG/JPEG/WebP overlay graphic, small enough that
+    /// `crate::images::upload` never buffers an unbounded body.
+    #[arg(long, env = "IMAGE_MAX_BYTES", default_value_t = 8 * 1024 * 1024)]
+    pub image_max_bytes: u64,
+
+    /// TTL for a presigned GET URL `crate::images::render` issues. Short
+    /// enough that a leaked overlay-client URL stops working soon after;
+    /// long enough that a 60s-interval OBS browser-source poll/reconnect
+    /// doesn't need to re-fetch a render just to get a fresh link.
+    #[arg(long, env = "IMAGE_SIGNED_URL_TTL_SECONDS", default_value_t = 300)]
+    pub image_signed_url_ttl_seconds: u64,
+
+    /// Local-development mode: relaxes the fail-fast requirement for
+    /// `IMAGE_BUCKET_ACCESS_KEY_ID`/`IMAGE_BUCKET_SECRET_ACCESS_KEY`.
+    /// Off by default -- every deployed (non-dev) process must have a
+    /// bucket credential pair or refuse to start.
+    #[arg(long, env = "SVC_PRESENTATION_DEV_MODE", default_value_t = false)]
+    pub dev_mode: bool,
 }
 
 impl CliConfig {
@@ -143,6 +197,15 @@ pub struct Config {
     pub cli: CliConfig,
     pub db_password: Secret,
     pub cache_password: Option<Secret>,
+    /// `IMAGE_BUCKET_ACCESS_KEY_ID`/`IMAGE_BUCKET_SECRET_ACCESS_KEY` --
+    /// optional (unlike `db_password`): a deployment that never enables
+    /// `crate::flags::IMAGE_UPLOAD_FLAG` need not configure a bucket at
+    /// all, so a missing credential here is not a startup error. Absent ⇒
+    /// `crate::images::store::ObjectStoreImageStore::from_config` fails
+    /// loudly at first use (upload/render time), never silently -- see
+    /// that function's own doc.
+    pub image_bucket_access_key_id: Option<Secret>,
+    pub image_bucket_secret_access_key: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -153,6 +216,20 @@ impl fmt::Debug for Config {
             .field(
                 "cache_password",
                 &self.cache_password.as_ref().map(|_| Secret::new("")),
+            )
+            .field(
+                "image_bucket_access_key_id",
+                &self
+                    .image_bucket_access_key_id
+                    .as_ref()
+                    .map(|_| Secret::new("")),
+            )
+            .field(
+                "image_bucket_secret_access_key",
+                &self
+                    .image_bucket_secret_access_key
+                    .as_ref()
+                    .map(|_| Secret::new("")),
             )
             .finish()
     }
@@ -174,10 +251,28 @@ impl Config {
         cli.validate()?;
         let db_password = Secret::new(env_required("DB_PASSWORD")?);
         let cache_password = std::env::var("CACHE_PASSWORD").ok().map(Secret::new);
+        let non_blank = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .map(Secret::new)
+        };
+        let image_bucket_access_key_id = non_blank("IMAGE_BUCKET_ACCESS_KEY_ID");
+        let image_bucket_secret_access_key = non_blank("IMAGE_BUCKET_SECRET_ACCESS_KEY");
+        if !cli.dev_mode {
+            if image_bucket_access_key_id.is_none() {
+                return Err(ConfigError::MissingEnv("IMAGE_BUCKET_ACCESS_KEY_ID"));
+            }
+            if image_bucket_secret_access_key.is_none() {
+                return Err(ConfigError::MissingEnv("IMAGE_BUCKET_SECRET_ACCESS_KEY"));
+            }
+        }
         Ok(Self {
             cli,
             db_password,
             cache_password,
+            image_bucket_access_key_id,
+            image_bucket_secret_access_key,
         })
     }
 }
@@ -196,7 +291,12 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn clear_secret_env() {
-        for var in ["DB_PASSWORD", "CACHE_PASSWORD"] {
+        for var in [
+            "DB_PASSWORD",
+            "CACHE_PASSWORD",
+            "IMAGE_BUCKET_ACCESS_KEY_ID",
+            "IMAGE_BUCKET_SECRET_ACCESS_KEY",
+        ] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.
             unsafe { std::env::remove_var(var) };
@@ -242,10 +342,38 @@ mod tests {
         unsafe {
             std::env::set_var("DB_PASSWORD", "test-db-pass");
         }
-        let cli = CliConfig::parse_from(["svc-presentation"]);
+        let cli = CliConfig::parse_from(["svc-presentation", "--dev-mode"]);
         let cfg = Config::from_cli(cli).expect("secret is set");
         assert_eq!(cfg.db_password.expose(), "test-db-pass");
         assert!(cfg.cache_password.is_none());
+        clear_secret_env();
+    }
+
+    #[test]
+    fn non_dev_startup_fails_fast_on_blank_bucket_credentials() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_secret_env();
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::set_var("DB_PASSWORD", "db");
+            std::env::set_var("IMAGE_BUCKET_ACCESS_KEY_ID", "   ");
+            std::env::set_var("IMAGE_BUCKET_SECRET_ACCESS_KEY", "sk");
+        }
+        let err = Config::from_cli(CliConfig::parse_from(["svc-presentation"])).unwrap_err();
+        assert_eq!(err, ConfigError::MissingEnv("IMAGE_BUCKET_ACCESS_KEY_ID"));
+        unsafe {
+            std::env::set_var("IMAGE_BUCKET_ACCESS_KEY_ID", "ak");
+            std::env::set_var("IMAGE_BUCKET_SECRET_ACCESS_KEY", "");
+        }
+        let err = Config::from_cli(CliConfig::parse_from(["svc-presentation"])).unwrap_err();
+        assert_eq!(
+            err,
+            ConfigError::MissingEnv("IMAGE_BUCKET_SECRET_ACCESS_KEY")
+        );
+        unsafe {
+            std::env::set_var("IMAGE_BUCKET_SECRET_ACCESS_KEY", "sk");
+        }
+        Config::from_cli(CliConfig::parse_from(["svc-presentation"])).expect("both creds set");
         clear_secret_env();
     }
 
@@ -265,7 +393,7 @@ mod tests {
         unsafe {
             std::env::set_var("DB_PASSWORD", "super-secret-db-pass");
         }
-        let cli = CliConfig::parse_from(["svc-presentation"]);
+        let cli = CliConfig::parse_from(["svc-presentation", "--dev-mode"]);
         let cfg = Config::from_cli(cli).expect("secret is set");
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("super-secret-db-pass"));

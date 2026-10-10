@@ -68,7 +68,7 @@ from waddle_transports.url_guard import SSRFError, guarded_request
 logger = logging.getLogger(__name__)
 
 #: The `consumes` tag every ingest bundle wanting a raw Spectrum item declares
-#: (`bundles/spectrum_ingest.py`'s `stages.ingest.consumes`).
+#: (`builtin_handlers/spectrum_ingest.py`'s `stages.ingest.consumes`).
 CONSUMES_TAG = "spectrum.message"
 
 #: Flag key (ENV baseline `FLAG_WADDLES_SPECTRUM_INTEGRATION`, default OFF).
@@ -180,6 +180,8 @@ def _epoch(value: object) -> float | None:
         try:
             return float(value)
         except ValueError:
+            # Length only -- the raw value is upstream (RSI) content, never logged.
+            logger.debug("spectrum.epoch_non_numeric: length=%d, treated as absent", len(value))
             return None
     return None
 
@@ -320,6 +322,8 @@ def _retry_after(response: httpx.Response) -> float | None:
     try:
         return max(0.0, min(float(raw), _MAX_RETRY_AFTER_S))
     except ValueError:
+        # Typically an HTTP-date form (RFC 9110) we deliberately don't parse; length only.
+        logger.debug("spectrum.retry_after_non_numeric: length=%d, using default backoff", len(raw))
         return None
 
 
@@ -566,7 +570,7 @@ def _record_error(kind: str, reason: str, started: float, ended: float) -> None:
 
 
 def _to_raw_event(item: SpectrumItem) -> dict[str, Any]:
-    """Raw event dict `bundles/spectrum_ingest.py::normalize()` consumes (receiver contract)."""
+    """Raw event dict that `builtin_handlers/spectrum_ingest.py` `normalize()` consumes."""
     return {
         "platform": "spectrum",
         "kind": item.kind,

@@ -50,7 +50,7 @@ this fix addresses.
 The EventSub webhook (`POST /eventsub/twitch/webhook`, `eventsub.py`) is a
 genuine inbound HTTP push (not a persistent socket) -- registered as a
 plain Quart route, wired to the same `fanout.fan_out_event` machinery the
-IRC receivers use. `POST /webhook/kick` (`bundles.kick_ingest.
+IRC receivers use. `POST /webhook/kick` (`builtin_handlers.kick_ingest.
 handle_kick_webhook`, gh #287 S10) is the identical shape for Kick's own
 signed mod/sub/stream-lifecycle webhook -- a SEPARATE delivery mechanism
 from `receivers/kick_pusher.py`'s Pusher chat socket, always mounted
@@ -95,13 +95,23 @@ from flask_core.logging_config import StructuredFormatter
 from flask_core.stage_runner import BundlePoller
 from quart import Blueprint, Quart, request
 
-from bundles.discord_gateway_manifest import register_default_bundles as register_discord_bundles
-from bundles.kick_gateway_manifest import register_default_bundles as register_kick_bundles
-from bundles.kick_ingest import handle_kick_webhook
-from bundles.slack_gateway_manifest import register_default_bundles as register_slack_bundles
-from bundles.spectrum_ingest import register_default_bundles as register_spectrum_bundles
-from bundles.twitch_gateway_manifest import register_default_bundles as register_twitch_bundles
-from bundles.youtube_live_ingest import register_default_bundles as register_youtube_bundles
+from builtin_handlers.discord_gateway_manifest import (
+    register_default_bundles as register_discord_bundles,
+)
+from builtin_handlers.kick_gateway_manifest import register_default_bundles as register_kick_bundles
+from builtin_handlers.kick_ingest import handle_kick_webhook
+from builtin_handlers.slack_gateway_manifest import (
+    register_default_bundles as register_slack_bundles,
+)
+from builtin_handlers.spectrum_ingest import (
+    register_default_bundles as register_spectrum_bundles,
+)
+from builtin_handlers.twitch_gateway_manifest import (
+    register_default_bundles as register_twitch_bundles,
+)
+from builtin_handlers.youtube_live_ingest import (
+    register_default_bundles as register_youtube_bundles,
+)
 from config import Config
 from eventsub import TwitchEventSubHandler
 from fanout import fan_out_event
@@ -853,7 +863,7 @@ async def kick_webhook():  # type: ignore[no-untyped-def]
 
     Always mounted (unlike `eventsub_bp`'s Twitch route, whose underlying
     handler is only conditionally built in `startup()`) --
-    `bundles.kick_ingest.handle_kick_webhook` itself returns 503 when
+    `builtin_handlers.kick_ingest.handle_kick_webhook` itself returns 503 when
     `Config.KICK_WEBHOOK_SECRET` is unset, the same graceful
     "not configured yet" posture without needing a second app.config
     presence check here. `redis_client`/`registry` are unconditionally set

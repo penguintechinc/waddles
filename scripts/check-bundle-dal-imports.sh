@@ -3,11 +3,11 @@
 # §16 "M1.5 -- Bundle DAL migration", Gate deliverable).
 #
 # Asserts zero occurrences of the legacy `flask_core.database`/`pydal` surface
-# under today's three real App Bundle directories. The spec names
-# `bundles/python/`, but that path does not exist until M2/M6's directory
-# move -- `core/svc_action/bundles`, `core/svc_ingest/bundles` and
-# `core/svc_process/bundles` are the real locations today (verified by
-# listing the repo, not assumed).
+# under the three built-in stage-handler directories. The spec calls them
+# bundle directories and names `bundles/python/`; the handlers actually live in
+# `core/svc_action/builtin_handlers`, `core/svc_ingest/builtin_handlers` and
+# `core/svc_process/builtin_handlers` (verified by listing the repo, not
+# assumed), and installable bundles under `bundles/` are out of scope here.
 #
 # Unlike scripts/lint.sh's checks, this is not a debt ratchet against
 # `.checks-baseline` -- the milestone's Done-when wording is a hard zero, so
@@ -28,7 +28,7 @@ cd "$(dirname "$0")/.."
 # shellcheck source=scripts/lib/checks.sh
 . scripts/lib/checks.sh
 
-BUNDLE_DIRS="./core/svc_action/bundles ./core/svc_ingest/bundles ./core/svc_process/bundles"
+BUNDLE_DIRS="./core/svc_action/builtin_handlers ./core/svc_ingest/builtin_handlers ./core/svc_process/builtin_handlers"
 
 count_only=0
 [ "${1:-}" = "--count" ] && count_only=1

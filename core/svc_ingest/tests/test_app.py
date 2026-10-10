@@ -32,7 +32,7 @@ from quart.testing.app import LifespanError
 
 import app as app_module
 from app import app as quart_app
-from bundles.kick_ingest import EVENTSUB_CONSUMES_TAG
+from builtin_handlers.kick_ingest import EVENTSUB_CONSUMES_TAG
 from config import Config
 
 
@@ -284,7 +284,7 @@ class TestStartupFailureLogging:
 class TestSlackReceiverRegistration:
     """`_register_slack_receiver`'s disabled-without-tokens path + the manifest wiring.
 
-    gh-318: without `bundles/slack_gateway_manifest.py` registered into
+    gh-318: without `builtin_handlers/slack_gateway_manifest.py` registered into
     the `AppRegistry`, `fanout.fan_out_event` finds zero consumers for
     `slack.message` and every inbound Slack event is silently dropped
     (`gateway.fanout_no_consumers`) regardless of whether the receiver
@@ -365,7 +365,7 @@ class TestSlackReceiverRegistration:
 class TestYouTubeLiveReceiverRegistration:
     """`_register_youtube_live_receiver`'s disabled-without-config path + the manifest wiring.
 
-    gh-318: without `bundles/youtube_live_ingest.py` registered into the
+    gh-318: without `builtin_handlers/youtube_live_ingest.py` registered into the
     `AppRegistry`, `fanout.fan_out_event` finds zero consumers for
     `youtube.message` and every inbound YouTube Live chat message is
     silently dropped (`gateway.fanout_no_consumers`) regardless of
@@ -461,7 +461,7 @@ class TestYouTubeLiveReceiverRegistration:
 class TestKickReceiverRegistration:
     """`_register_kick_receivers`'s disabled-without-config path + the manifest wiring.
 
-    gh-318: without `bundles/kick_gateway_manifest.py` registered into the
+    gh-318: without `builtin_handlers/kick_gateway_manifest.py` registered into the
     `AppRegistry`, `fanout.fan_out_event` finds zero consumers for
     `kick.message` and every inbound Kick chat message is silently dropped
     (`gateway.fanout_no_consumers`) regardless of whether any channel
@@ -689,7 +689,7 @@ class TestKickWebhookRoute:
         """The real `startup()`-wired `redis_client`/`registry` are what the route reads.
 
         Swapped to a `fakeredis.FakeAsyncRedis` post-startup (matching
-        `test_bundles_kick_ingest.py`'s own fan-out fixture) so this
+        `test_builtin_kick_ingest.py`'s own fan-out fixture) so this
         exercises a genuine LPUSH round trip, not a mocked call, without
         needing a live Valkey in this test env.
         """
@@ -720,7 +720,7 @@ class TestKickWebhookRoute:
                         "is_default": True,
                         "stages": {
                             "ingest": {
-                                "entrypoint": "bundles.kick_ingest:normalize",
+                                "entrypoint": "builtin_handlers.kick_ingest:normalize",
                                 "consumes": [EVENTSUB_CONSUMES_TAG],
                             }
                         },

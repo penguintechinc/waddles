@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
 from config import Config
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -289,8 +290,7 @@ class ResearchService:
 
         except Exception as e:
             logger.error(
-                f"Research error: {e}",
-                exc_info=True,
+                f"Research error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return ResearchResult(
@@ -446,8 +446,7 @@ class ResearchService:
 
         except Exception as e:
             logger.error(
-                f"Ask error: {e}",
-                exc_info=True,
+                f"Ask error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return ResearchResult(
@@ -575,8 +574,7 @@ class ResearchService:
 
         except Exception as e:
             logger.error(
-                f"Recall error: {e}",
-                exc_info=True,
+                f"Recall error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return ResearchResult(
@@ -753,8 +751,7 @@ class ResearchService:
 
         except Exception as e:
             logger.error(
-                f"Summarize error: {e}",
-                exc_info=True,
+                f"Summarize error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return ResearchResult(
@@ -788,7 +785,7 @@ class ResearchService:
         try:
             return await self.rate_limiter.check_limit(key, limit_type)
         except Exception as e:
-            logger.error(f"Rate limit check error: {e}")
+            logger.error(f"Rate limit check error: {describe_db_error(e)}")
             # Fail open - allow request if rate limiter fails
             return True
 
@@ -810,7 +807,7 @@ class ResearchService:
         try:
             return await self.safety_layer.check(content, community_id)
         except Exception as e:
-            logger.error(f"Safety check error: {e}")
+            logger.error(f"Safety check error: {describe_db_error(e)}")
             # Fail open - allow content if safety check fails
             return {'safe': True}
 
@@ -851,7 +848,7 @@ class ResearchService:
                 return json.loads(cached)
             return None
         except Exception as e:
-            logger.error(f"Cache get error: {e}")
+            logger.error(f"Cache get error: {describe_db_error(e)}")
             return None
 
     async def _save_to_cache(
@@ -872,7 +869,7 @@ class ResearchService:
             import json
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as e:
-            logger.error(f"Cache save error: {e}")
+            logger.error(f"Cache save error: {describe_db_error(e)}")
 
     async def _check_semantic_cache(
         self,
@@ -911,7 +908,7 @@ class ResearchService:
 
             return None
         except Exception as e:
-            logger.error(f"Semantic cache check error: {e}")
+            logger.error(f"Semantic cache check error: {describe_db_error(e)}")
             return None
 
     async def _save_to_mem0(
@@ -935,7 +932,7 @@ class ResearchService:
                 metadata=metadata
             )
         except Exception as e:
-            logger.error(f"mem0 save error: {e}")
+            logger.error(f"mem0 save error: {describe_db_error(e)}")
 
     async def _get_community_context(
         self,
@@ -959,7 +956,7 @@ class ResearchService:
                 limit=5
             )
         except Exception as e:
-            logger.error(f"Get community context error: {e}")
+            logger.error(f"Get community context error: {describe_db_error(e)}")
             return []
 
     async def _get_recent_context(
@@ -991,7 +988,7 @@ class ResearchService:
             )
             return []
         except Exception as e:
-            logger.error(f"Get recent context error: {e}")
+            logger.error(f"Get recent context error: {describe_db_error(e)}")
             return []
 
     async def _generate_ai_response(
@@ -1038,9 +1035,9 @@ class ResearchService:
             }
 
         except Exception as e:
-            logger.error(f"AI generation error: {e}", exc_info=True)
+            logger.error(f"AI generation error: {describe_db_error(e)}")
             return {
                 'success': False,
-                'error': str(e),
+                'error': describe_db_error(e),
                 'tokens_used': 0
             }

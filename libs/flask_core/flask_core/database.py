@@ -18,6 +18,16 @@ Doing this in the closure that ran the statement (not a later, separate
 guarantee two submissions run on the same worker thread -- see
 `transaction_async()`'s docstring for the cross-thread hazard that bit
 `hub_api/services/token_billing_service.py` when it tried exactly that.
+
+Error logging never includes the driver's message. A DB driver error's text
+routinely embeds the statement's BOUND VALUES (psycopg2 ``DETAIL: Key
+(email)=(...) already exists``, invalid-input-syntax echoes, pydal's inlined
+INSERT text), so logging ``{e}`` leaks PII/tokens/handles into every
+consuming service's logs. Every failure here is logged via
+`flask_core.db_errors.log_db_error` instead: operation + exception type +
+SQLSTATE/driver code + a fixed category label (+ schema identifiers) at
+ERROR, and a frame-only traceback (no exception text) at DEBUG. The
+exception itself is still re-raised untouched for the caller to handle.
 """
 
 import asyncio
@@ -31,6 +41,8 @@ from pydal import (  # noqa: F401
     DAL,
     Field,
 )
+
+from .db_errors import is_db_driver_error, log_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +152,7 @@ class AsyncDAL:
                 query.db.commit()
                 return result
             except Exception as e:
-                logger.error(f"Select error: {e}")
+                log_db_error(logger, "Select error", e)
                 query.db.rollback()
                 raise
 
@@ -172,7 +184,7 @@ class AsyncDAL:
                 self.dal.commit()
                 return result
             except Exception as e:
-                logger.error(f"Insert error: {e}")
+                log_db_error(logger, "Insert error", e)
                 self.dal.rollback()
                 raise
 
@@ -201,7 +213,7 @@ class AsyncDAL:
                 self.dal.commit()
                 return result
             except Exception as e:
-                logger.error(f"Update error: {e}")
+                log_db_error(logger, "Update error", e)
                 self.dal.rollback()
                 raise
 
@@ -229,7 +241,7 @@ class AsyncDAL:
                 self.dal.commit()
                 return result
             except Exception as e:
-                logger.error(f"Delete error: {e}")
+                log_db_error(logger, "Delete error", e)
                 self.dal.rollback()
                 raise
 
@@ -259,7 +271,7 @@ class AsyncDAL:
                 dal.commit()
                 return result
             except Exception as e:
-                logger.error(f"Count error: {e}")
+                log_db_error(logger, "Count error", e)
                 dal.rollback()
                 raise
 
@@ -288,7 +300,7 @@ class AsyncDAL:
                 self.dal.commit()
                 return result
             except Exception as e:
-                logger.error(f"ExecuteSQL error: {e}")
+                log_db_error(logger, "ExecuteSQL error", e)
                 self.dal.rollback()
                 raise
 
@@ -363,7 +375,7 @@ class AsyncDAL:
                 return rows
 
             except Exception as e:
-                logger.error(f"Execute error: {e}")
+                log_db_error(logger, "Execute error", e)
                 self.dal.rollback()
                 raise
 
@@ -409,7 +421,7 @@ class AsyncDAL:
         except Exception as e:
             # Rollback on error
             await loop.run_in_executor(self.executor, self.dal.rollback)
-            logger.error(f"Transaction rolled back: {e}")
+            log_db_error(logger, "Transaction rolled back", e)
             raise
 
     async def bulk_insert_async(self, table, records: list[dict[str, Any]]):
@@ -435,7 +447,7 @@ class AsyncDAL:
                 self.dal.commit()
                 return result
             except Exception as e:
-                logger.error(f"Bulk insert error: {e}")
+                log_db_error(logger, "Bulk insert error", e)
                 self.dal.rollback()
                 raise
 
@@ -528,17 +540,15 @@ def db_operation(dal: Any, operation: str):
     try:
         yield
     except Exception as exc:
-        logger.error(
-            "DB operation %r failed: %s: %s -- rolling back connection",
-            operation,
-            type(exc).__name__,
-            exc,
-            exc_info=True,
-        )
+        # Never log `exc`'s message or a traceback that embeds it: driver and
+        # pydal errors echo bound values (PII/tokens) -- see module docstring.
+        log_db_error(logger, f"DB operation {operation!r} failed (rolling back connection)", exc)
         try:
             dal.rollback()
-        except Exception:  # noqa: BLE001 -- best-effort recovery, must not mask the original error
-            logger.exception("dal.rollback() itself failed after %r", operation)
+        except Exception as rollback_exc:  # noqa: BLE001 -- best-effort recovery, must not mask the original error
+            log_db_error(
+                logger, f"dal.rollback() itself failed after {operation!r}", rollback_exc
+            )
         raise
 
 
@@ -602,27 +612,34 @@ def install_db_resilience(app: Any, *, dal_key: str = "dal") -> None:
             return
 
         if exc is not None:
-            logger.error(
-                "Request failed with %s: %s -- rolling back shared DAL connection",
-                type(exc).__name__,
-                exc,
-                exc_info=exc,
-            )
+            if is_db_driver_error(exc):
+                # A DB driver error anywhere in the chain: its message (and any
+                # traceback rendering it) can embed bound values -- log sanitized.
+                log_db_error(
+                    logger, "Request failed -- rolling back shared DAL connection", exc
+                )
+            else:
+                logger.error(
+                    "Request failed with %s: %s -- rolling back shared DAL connection",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=exc,
+                )
             try:
                 dal.rollback()
-            except Exception:  # noqa: BLE001 -- best-effort recovery during teardown
-                logger.exception("dal.rollback() failed during teardown")
+            except Exception as rollback_exc:  # noqa: BLE001 -- best-effort recovery during teardown
+                log_db_error(logger, "dal.rollback() failed during teardown", rollback_exc)
             return
 
         try:
             dal.commit()
         except Exception as commit_exc:
-            logger.error(
-                "dal.commit() failed at request teardown: %s -- rolling back",
-                commit_exc,
-                exc_info=True,
+            log_db_error(
+                logger, "dal.commit() failed at request teardown -- rolling back", commit_exc
             )
             try:
                 dal.rollback()
-            except Exception:  # noqa: BLE001 -- best-effort recovery during teardown
-                logger.exception("dal.rollback() after failed commit also failed")
+            except Exception as rollback_exc:  # noqa: BLE001 -- best-effort recovery during teardown
+                log_db_error(
+                    logger, "dal.rollback() after failed commit also failed", rollback_exc
+                )

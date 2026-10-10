@@ -191,7 +191,7 @@ class Config:
     # webhook approach). One poller per configured channel, socket_lease-
     # guarded per channel exactly like TWITCH_CHANNELS above --
     # `community=<channel_id>` (see receivers/youtube_live_poll.py and
-    # bundles/youtube_live_ingest.py's own docstrings). Comma-separated
+    # builtin_handlers/youtube_live_ingest.py's own docstrings). Comma-separated
     # channel ids -- same "no DB-backed channel list yet" MVP posture as
     # TWITCH_CHANNELS documents.
     YOUTUBE_LIVE_CHANNELS = [
@@ -268,7 +268,7 @@ class Config:
     # Kick webhook (mod/sub/stream lifecycle events -- StreamStart/
     # StreamEnd/Subscription/etc. -- a SEPARATE delivery path from Pusher
     # chat). Empty secret disables the endpoint's signature verification
-    # path entirely -- see bundles/kick_ingest.py's own
+    # path entirely -- see builtin_handlers/kick_ingest.py's own
     # handle_kick_webhook()/verify_kick_webhook_signature() docstrings;
     # NOT yet mounted by app.py (out of this PR's scope, see that
     # module's own docstring for where it should be mounted).

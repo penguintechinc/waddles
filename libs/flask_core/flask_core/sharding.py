@@ -9,6 +9,8 @@ import hashlib
 import logging
 from typing import List, Dict, Any, Optional
 
+from .db_errors import log_db_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -226,7 +228,7 @@ class ChannelShardManager:
             return my_channels
 
         except Exception as e:
-            logger.error(f"Failed to get channels: {e}")
+            log_db_error(logger, "Failed to get channels", e)
             return []
 
     async def claim_channel_ownership(
