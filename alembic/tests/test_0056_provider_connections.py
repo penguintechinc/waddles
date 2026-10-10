@@ -34,7 +34,7 @@ requires_docker = pytest.mark.skipif(
 _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0056_provider_connections.py"
 )
-_PREVIOUS_REVISION = "0053_audit_events_hash_chain"
+_PREVIOUS_REVISION = "0052_bundle_identity_resolve"
 
 
 def _load_migration() -> ModuleType:

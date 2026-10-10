@@ -218,6 +218,9 @@ svc-ingest                              hub-api
   `token_expired` means *stop that session*; `502` means retry with backoff. Never retry a `409`.
 * The IRC session needs only `metadata.bot_login` (nick), `metadata.channel_login` (JOIN) and
   `accessToken` (PASS `oauth:<token>`).
+* Two tenants may legitimately connect the **same** channel, so the list can hold several bindings
+  for one `resourceId`. Open one IRC session per `(provider, resourceId)` and fan events out to every
+  binding, or one session per binding -- the framework deliberately does not decide that for you.
 * Responses are `Cache-Control: no-store`. `svc-ingest` has no entry in the chart's
   `serviceJwt.identities` yet (see the note beside that map in `values.yaml`); the follow-up adds one
   with `tenant: system` and `allowedScopes: ["connections:resolve"]`, which is also what the

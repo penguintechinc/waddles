@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 from typing import Any
 
@@ -215,15 +214,15 @@ class TestSmallBranches:
             twitch_module._env_app_credentials()  # noqa: SLF001
 
     def test_the_httpx_log_filter_installs_exactly_once_and_is_narrow(self) -> None:
-        importlib.reload(twitch_module)
-        importlib.reload(twitch_module)
+        twitch_module._install_log_filter()  # noqa: SLF001
+        twitch_module._install_log_filter()  # noqa: SLF001
         installed = [
             f
             for f in logging.getLogger("httpx").filters
             if isinstance(f, twitch_module._SuppressTwitchRequestLines)  # noqa: SLF001
         ]
         assert len(installed) == 1
-        record = logging.LogRecord(
+        twitch_line = logging.LogRecord(
             "httpx",
             logging.INFO,
             "",
@@ -232,11 +231,11 @@ class TestSmallBranches:
             None,
             None,
         )
-        other = logging.LogRecord(
+        other_line = logging.LogRecord(
             "httpx", logging.INFO, "", 0, 'HTTP Request: GET https://example.com/ "200"', None, None
         )
-        assert installed[0].filter(record) is False  # Twitch lines are dropped...
-        assert installed[0].filter(other) is True  # ...every other host still logs
+        assert installed[0].filter(twitch_line) is False  # Twitch lines are dropped...
+        assert installed[0].filter(other_line) is True  # ...every other host still logs
 
 
 class TestBlueprintDefensiveBranches:
