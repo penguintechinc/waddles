@@ -97,7 +97,7 @@ required. MVP tag per the product-owner scope above (WHIP/WHEP = MVP).
 | Progress | `.iter()` → `FfmpegEvent::Progress{frame,fps,bitrate,speed,…}`, parsed from ffmpeg's default stderr stats line; `-progress pipe:2 -nostats` is a more robust machine-parseable alternative — implementation choice |
 | Restart/backoff | exponential (1s→2s→4s…cap 30s) on unexpected exit; cap retries, then mark pipeline `failed` |
 | Stall detection | no `frame=` advance for N seconds (e.g. 10s) → force-restart |
-| Graceful stop | `q\n` on stdin (clean mux/trailer finalization) → grace timeout → SIGTERM → SIGKILL |
+| Graceful stop | **close stdin (EOF on `pipe:0`)** → grace → `SIGTERM` to the process group → grace → `SIGKILL` to the group → sweep + bounded reap. (Originally `q\n` on stdin; superseded 2026-10-10 — stdin *is* the media pipe, so `q` was just media bytes ffmpeg could never read as a command. See `core/svc_streaming/README.md` Teardown.) |
 
 | OTel signal | Name | Note |
 |---|---|---|
@@ -106,6 +106,8 @@ required. MVP tag per the product-owner scope above (WHIP/WHEP = MVP).
 | Histogram | `output_bitrate_kbps` | ffmpeg's default stats line is **aggregate across all mapped outputs**; tee muxer doesn't report per-slave bitrate — accuracy caveat |
 | Gauge | `active_pipelines` | |
 | Counter | `restarts_total{pipeline_id,reason}` | |
+| Histogram | `teardown_duration_ms` | one attempt's sweep + reap + event-thread join |
+| Counter | `teardown_failures_total{stage,signal}` | stage ∈ `signal`/`reap`/`join`/`stop_deadline`; any non-zero value is a teardown that did not complete cleanly |
 | Counter | `output_failures_total{pipeline_id,output_kind,reason}` | |
 | Span | one per pipeline lifecycle, child span per restart attempt | |
 

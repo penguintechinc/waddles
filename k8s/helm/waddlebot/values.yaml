@@ -1084,7 +1084,17 @@ pipeline:
     webrtcRangeStart: 40000
     webrtcRangeEnd: 40100
     streamDataDir: "/var/lib/waddlebot/stream"
+    # Externally-reachable base URL svc-streaming embeds in playback URLs and uses as
+    # the WebRTC ICE host. Empty = unset (service default http://localhost:8208).
+    # Set an explicit URL for stable-DNS environments; it always wins over the node-IP
+    # derivation below.
     publicBaseUrl: ""
+    # Derive PUBLIC_BASE_URL at runtime as http://<node hostIP>:<nodePort.httpPort> via the
+    # downward API (status.hostIP) instead of baking a LAN IP into a values file -- the
+    # node IP changes when a host moves networks, and a stale literal silently points
+    # playback URLs at a dead address. Only used when publicBaseUrl is empty; requires
+    # nodePort.enabled (the chart fails to render otherwise).
+    publicBaseUrlFromNodeIP: false
     replicas: 1
     # Direct NodePort media exposure (RTMP/SRT/HTTP) -- alpha-only; base/beta stay
     # ClusterIP-only (see templates/svc-streaming.yaml's second Service block).
@@ -1499,6 +1509,11 @@ presentation:
   # public hostname when unset (never a broken/empty player src). Alpha overrides to the
   # svc-streaming media NodePort's LAN URL -- see values-alpha.yaml.
   publicStreamingUrl: ""
+  # Same node-IP derivation as pipeline.svcStreaming.publicBaseUrlFromNodeIP: when
+  # publicStreamingUrl is empty, build http://<node hostIP>:<svcStreaming.nodePort.httpPort>
+  # from the downward API instead of a hardcoded LAN IP. Requires
+  # pipeline.svcStreaming.nodePort.enabled.
+  publicStreamingUrlFromNodeIP: false
   # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (core/svc_presentation,
   # Dockerfile.rust) replaces the Python Deployment above WHEN enabled: same Deployment/
   # Service names (in-place swap, Service/NodePort unchanged), templates/svc-presentation-
