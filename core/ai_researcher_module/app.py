@@ -23,6 +23,7 @@ from flask_core import (  # noqa: E402
     error_response,
     create_health_blueprint,
     install_rate_limiting,
+    describe_db_error,
 )
 from config import Config  # noqa: E402
 
@@ -205,7 +206,10 @@ async def startup():
         await redis_client.ping()
         logger.system("Redis connected", result="SUCCESS")
     except Exception as e:
-        logger.warning(f"Redis connection failed: {e}. Rate limiting will use DB fallback.")
+        logger.warning(
+            f"Redis connection failed: {describe_db_error(e)}. "
+            "Rate limiting will use DB fallback."
+        )
         redis_client = None
 
     # Initialize AI provider
@@ -585,7 +589,7 @@ async def receive_messages():
             ])
             processed += 1
         except Exception as e:
-            logger.error(f"Failed to store message: {e}")
+            logger.error(f"Failed to store message: {describe_db_error(e)}")
 
     return success_response({
         "success": True,
@@ -641,8 +645,8 @@ async def stream_end():
             "summary": summary
         })
     except Exception as e:
-        logger.error(f"Stream summary generation failed: {e}")
-        return error_response(f"Failed to generate stream summary: {str(e)}", 500)
+        logger.error(f"Stream summary generation failed: {describe_db_error(e)}")
+        return error_response("Failed to generate stream summary", 500)
 
 
 @researcher_bp.route('/context/<int:community_id>')
@@ -691,8 +695,8 @@ async def get_context(community_id: int):
             "count": len(messages)
         })
     except Exception as e:
-        logger.error(f"Failed to get context: {e}")
-        return error_response(f"Failed to retrieve context: {str(e)}", 500)
+        logger.error(f"Failed to get context: {describe_db_error(e)}")
+        return error_response("Failed to retrieve context", 500)
 
 
 @researcher_bp.route('/memory/<int:community_id>')
@@ -727,8 +731,8 @@ async def get_memory(community_id: int):
             "count": len(memories)
         })
     except Exception as e:
-        logger.error(f"Failed to get memories: {e}")
-        return error_response(f"Failed to retrieve memories: {str(e)}", 500)
+        logger.error(f"Failed to get memories: {describe_db_error(e)}")
+        return error_response("Failed to retrieve memories", 500)
 
 
 # =============================================================================
@@ -792,8 +796,8 @@ async def get_ai_insights(community_id: int):
             "count": len(insights)
         })
     except Exception as e:
-        logger.error(f"Failed to get insights: {e}")
-        return error_response(f"Failed to retrieve insights: {str(e)}", 500)
+        logger.error(f"Failed to get insights: {describe_db_error(e)}")
+        return error_response("Failed to retrieve insights", 500)
 
 
 @admin_bp.route('/<int:community_id>/ai-researcher/config', methods=['GET'])
@@ -847,8 +851,8 @@ async def get_researcher_config(community_id: int):
             "config": config
         })
     except Exception as e:
-        logger.error(f"Failed to get researcher config: {e}")
-        return error_response(f"Failed to retrieve config: {str(e)}", 500)
+        logger.error(f"Failed to get researcher config: {describe_db_error(e)}")
+        return error_response("Failed to retrieve config", 500)
 
 
 @admin_bp.route('/<int:community_id>/ai-researcher/config', methods=['PUT'])
@@ -938,8 +942,8 @@ async def update_researcher_config(community_id: int):
             "message": "Configuration updated"
         })
     except Exception as e:
-        logger.error(f"Failed to update researcher config: {e}")
-        return error_response(f"Failed to update config: {str(e)}", 500)
+        logger.error(f"Failed to update researcher config: {describe_db_error(e)}")
+        return error_response("Failed to update config", 500)
 
 
 # =============================================================================
@@ -1008,8 +1012,8 @@ async def get_insights(community_id: int):
             "count": len(insights)
         })
     except Exception as e:
-        logger.error(f"Failed to get insights: {e}")
-        return error_response(f"Failed to retrieve insights: {str(e)}", 500)
+        logger.error(f"Failed to get insights: {describe_db_error(e)}")
+        return error_response("Failed to retrieve insights", 500)
 
 
 @researcher_bp.route('/<int:community_id>/insights/generate', methods=['POST'])
@@ -1055,8 +1059,8 @@ async def generate_insights(community_id: int):
             "processing_time_ms": result.processing_time_ms
         })
     except Exception as e:
-        logger.error(f"Insight generation error: {e}")
-        return error_response(f"Failed to generate insights: {str(e)}", 500)
+        logger.error(f"Insight generation error: {describe_db_error(e)}")
+        return error_response("Failed to generate insights", 500)
 
 
 # =============================================================================
@@ -1094,8 +1098,8 @@ async def get_anomalies(community_id: int):
             "count": len(anomalies[:limit])
         })
     except Exception as e:
-        logger.error(f"Failed to get anomalies: {e}")
-        return error_response(f"Failed to retrieve anomalies: {str(e)}", 500)
+        logger.error(f"Failed to get anomalies: {describe_db_error(e)}")
+        return error_response("Failed to retrieve anomalies", 500)
 
 
 @researcher_bp.route('/<int:community_id>/anomalies/<int:anomaly_id>/acknowledge', methods=['POST'])
@@ -1142,8 +1146,8 @@ async def acknowledge_anomaly(community_id: int, anomaly_id: int):
             "message": "Anomaly acknowledged"
         })
     except Exception as e:
-        logger.error(f"Anomaly acknowledgment error: {e}")
-        return error_response(f"Failed to acknowledge anomaly: {str(e)}", 500)
+        logger.error(f"Anomaly acknowledgment error: {describe_db_error(e)}")
+        return error_response("Failed to acknowledge anomaly", 500)
 
 
 # =============================================================================
@@ -1183,8 +1187,8 @@ async def get_sentiment(community_id: int):
             "processing_time_ms": result.processing_time_ms
         })
     except Exception as e:
-        logger.error(f"Sentiment analysis error: {e}")
-        return error_response(f"Failed to analyze sentiment: {str(e)}", 500)
+        logger.error(f"Sentiment analysis error: {describe_db_error(e)}")
+        return error_response("Failed to analyze sentiment", 500)
 
 
 # =============================================================================
@@ -1251,8 +1255,8 @@ async def get_user_profile(community_id: int, platform: str, user_id: str):
             "processing_time_ms": profile.processing_time_ms
         })
     except Exception as e:
-        logger.error(f"User profile error: {e}")
-        return error_response(f"Failed to retrieve user profile: {str(e)}", 500)
+        logger.error(f"User profile error: {describe_db_error(e)}")
+        return error_response("Failed to retrieve user profile", 500)
 
 
 @researcher_bp.route('/<int:community_id>/users/profiles', methods=['GET'])
@@ -1283,8 +1287,8 @@ async def get_community_profiles(community_id: int):
             "count": len(profiles[:limit])
         })
     except Exception as e:
-        logger.error(f"Community profiles error: {e}")
-        return error_response(f"Failed to retrieve profiles: {str(e)}", 500)
+        logger.error(f"Community profiles error: {describe_db_error(e)}")
+        return error_response("Failed to retrieve profiles", 500)
 
 
 @admin_bp.route('/<int:community_id>/bot-detection')
@@ -1363,8 +1367,8 @@ async def get_bot_detection(community_id: int):
             "threshold": threshold
         })
     except Exception as e:
-        logger.error(f"Failed to get bot detection results: {e}")
-        return error_response(f"Failed to retrieve bot detection results: {str(e)}", 500)
+        logger.error(f"Failed to get bot detection results: {describe_db_error(e)}")
+        return error_response("Failed to retrieve bot detection results", 500)
 
 
 # Register blueprints

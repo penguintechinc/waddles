@@ -69,11 +69,28 @@ pub struct ReputationTarget {
     pub delta: Option<i32>,
 }
 
+/// The users + metered amount of one `economy.*` call (issue #714). Every
+/// named user is a bundle-supplied TARGET the gate verifies is an active
+/// member of the invocation's community; the community/tenant the call runs
+/// under is never part of this type. `target_user` is the user acted on (the
+/// wager's player, the transfer's SENDER, a balance read's subject) -- `None`
+/// for a community-wide read (leaderboard). `counterparty` is the transfer's
+/// recipient. `amount` is `Some(abs)` for a money-moving call (a wager's
+/// STAKE, a transfer's amount) and `None` for a read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EconomyTarget {
+    pub target_user: Option<Uuid>,
+    pub counterparty: Option<Uuid>,
+    pub amount: Option<i64>,
+}
+
 /// What a capability implementation passes to `authorize()` (spec SS5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResourceRef {
     AppScoped(AppScopedResource),
     ReputationScoped(ReputationTarget),
+    /// `economy.*` (issue #714).
+    EconomyScoped(EconomyTarget),
 }
 
 /// The concrete, server-derived resource `authorize()` hands back on success
@@ -99,6 +116,8 @@ pub enum ResolvedResource {
     /// A `reputation.*`/`users.profile.read` target whose membership in the
     /// invocation's community/tenant has already been verified.
     ReputationTarget(ReputationTarget),
+    /// An `economy.*` call whose named users are verified members.
+    EconomyTarget(EconomyTarget),
     /// See [`AppScopedResource::None`].
     None,
 }

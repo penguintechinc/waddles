@@ -12,6 +12,7 @@ from config import Config  # noqa: E402
 from flask_core import (  # noqa: E402
     async_endpoint, create_health_blueprint, init_database, install_rate_limiting,
     install_security_headers, setup_aaa_logging, success_response,
+    describe_db_error,
 )
 
 # Import services
@@ -115,12 +116,11 @@ def _run_grpc_server(
 
     except Exception as e:
         logger.error(
-            f"Failed to start gRPC server: {str(e)}",
+            f"Failed to start gRPC server: {describe_db_error(e)}",
             extra={
                 "action": "grpc_startup",
                 "result": "FAILURE"
-            },
-            exc_info=True
+            }
         )
 
 
@@ -218,18 +218,20 @@ async def startup():
             )
         except Exception as e:
             logger.warning(
-                f"Failed to start gRPC server: {str(e)}",
+                f"Failed to start gRPC server: {describe_db_error(e)}",
                 extra={
                     "action": "grpc_startup",
                     "result": "FAILURE"
-                },
-                exc_info=True
+                }
             )
             # Don't fail startup if gRPC fails - REST API should still work
 
         logger.system("workflow_core_module started successfully", result="SUCCESS")
     except Exception as e:
-        logger.error(f"Failed to start workflow_core_module: {str(e)}", result="FAILURE")
+        logger.error(
+            f"Failed to start workflow_core_module: {describe_db_error(e)}",
+            result="FAILURE",
+        )
         raise
 
 
@@ -246,7 +248,10 @@ async def shutdown():
                 await grpc_server.stop(0)
                 logger.system("gRPC server stopped", action="grpc_shutdown", result="SUCCESS")
             except Exception as e:
-                logger.warning(f"Error stopping gRPC server: {str(e)}", action="grpc_shutdown")
+                logger.warning(
+                    f"Error stopping gRPC server: {describe_db_error(e)}",
+                    action="grpc_shutdown",
+                )
 
         # Shutdown workflow engine
         if workflow_engine:
@@ -262,7 +267,7 @@ async def shutdown():
 
         logger.system("workflow_core_module shutdown complete", result="SUCCESS")
     except Exception as e:
-        logger.error(f"Error during shutdown: {str(e)}", result="FAILURE")
+        logger.error(f"Error during shutdown: {describe_db_error(e)}", result="FAILURE")
 
 
 @api_bp.route('/status', methods=['GET'])

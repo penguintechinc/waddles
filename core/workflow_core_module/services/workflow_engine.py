@@ -37,6 +37,7 @@ from models.nodes import (
     LoopForeachConfig, LoopWhileConfig,
     FlowParallelConfig
 )
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +259,7 @@ class WorkflowEngine:
 
         except Exception as e:
             logger.error(
-                f"Workflow execution failed: {str(e)}",
+                f"Workflow execution failed: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "workflow_id": workflow_id,
@@ -472,7 +473,7 @@ class WorkflowEngine:
             operation_count += 1
 
         except Exception as e:
-            logger.error(f"Node execution failed: {node_id} - {str(e)}")
+            logger.error(f"Node execution failed: {node_id} - {describe_db_error(e)}")
             await self._handle_error_and_retry(
                 workflow=workflow,
                 node=node,
@@ -938,7 +939,7 @@ class WorkflowEngine:
             )
 
         except Exception as e:
-            logger.error(f"Failed to save execution state: {str(e)}")
+            logger.error(f"Failed to save execution state: {describe_db_error(e)}")
 
     async def _load_workflow(self, workflow_id: str) -> Optional[WorkflowDefinition]:
         """

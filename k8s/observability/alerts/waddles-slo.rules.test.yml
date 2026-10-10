@@ -1,0 +1,215 @@
+# promtool unit tests for waddles-slo.rules.yml: `promtool test rules alerts/waddles-slo.rules.test.yml`.
+# Each alert test feeds synthetic series and asserts the alert fires (or, for the negative cases, stays
+# silent), so a rule that can never fire fails the suite. Run via scripts/validate.sh.
+rule_files:
+  - waddles-slo.rules.yml
+
+evaluation_interval: 30s
+
+tests:
+  - name: http 5xx ratio fires warning and critical per service
+    interval: 30s
+    input_series:
+      - series: 'svc_ingest_http_requests_total{method="POST", path="/x", status="200", job="svc-ingest"}'
+        values: "0+30x120"
+      - series: 'svc_ingest_http_requests_total{method="POST", path="/x", status="500", job="svc-ingest"}'
+        values: "0+30x120"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WaddlesHttpErrorRateCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, team: waddles, service: svc-ingest}
+            exp_annotations: {description: "svc-ingest is failing 50% of requests over 5m.", summary: "svc-ingest 5xx ratio above 20%"}
+      - eval_time: 20m
+        alertname: WaddlesHttpHighErrorRate
+        exp_alerts:
+          - exp_labels: {severity: warning, team: waddles, service: svc-ingest}
+            exp_annotations: {description: "svc-ingest has answered 50% of requests with 5xx over 5m (10m sustained).", summary: "svc-ingest 5xx ratio above 5%"}
+
+  - name: http 5xx ratio stays silent at trivial traffic
+    interval: 30s
+    input_series:
+      - series: 'svc_ingest_http_requests_total{method="POST", path="/x", status="500", job="svc-ingest"}'
+        values: "0+1x120"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WaddlesHttpErrorRateCritical
+        exp_alerts: []
+
+  - name: http p99 latency breach
+    interval: 30s
+    input_series:
+      - series: 'svc_action_http_requests_total{method="GET", path="/x", status="200"}'
+        values: "0+30x120"
+      - series: 'svc_action_http_request_duration_seconds_bucket{method="GET", path="/x", le="0.5"}'
+        values: "0+0x120"
+      - series: 'svc_action_http_request_duration_seconds_bucket{method="GET", path="/x", le="2.5"}'
+        values: "0+30x120"
+      - series: 'svc_action_http_request_duration_seconds_bucket{method="GET", path="/x", le="+Inf"}'
+        values: "0+30x120"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WaddlesHttpLatencyP99High
+        exp_alerts:
+          - exp_labels: {severity: warning, team: waddles, service: svc-action}
+            exp_annotations: {description: "svc-action p99 is 2.48s over 5m (10m sustained).", summary: "svc-action p99 request latency above 1s"}
+
+  - name: internal gRPC server-error ratio ignores client-class codes
+    interval: 30s
+    input_series:
+      - series: 'grpc_server_request_duration_seconds_count{rpc_method="/m", rpc_grpc_status_code="OK"}'
+        values: "0+30x30"
+      - series: 'grpc_server_request_duration_seconds_count{rpc_method="/m", rpc_grpc_status_code="INTERNAL"}'
+        values: "0+10x30"
+      - series: 'grpc_server_request_duration_seconds_count{rpc_method="/m", rpc_grpc_status_code="NOT_FOUND"}'
+        values: "0+10x30"
+    promql_expr_test:
+      - expr: waddles:grpc_internal_error_ratio:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'waddles:grpc_internal_error_ratio:rate5m'
+            value: 0.2
+
+  - name: active-set watermark stall
+    interval: 30s
+    input_series:
+      - series: 'waddles_bundle_active_set_watermark_computed_at_epoch_seconds{job="hub-api"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WaddlesActiveSetWatermarkStalled
+        exp_alerts:
+          - exp_labels: {severity: critical, team: waddles}
+            exp_annotations: {description: "No successful safe_seq computation for 9m 59s (job SAFE_SEQ_STALL_ALERT default 30s + one OTLP export interval). svc-process/svc-action stop picking up bundle changes.", summary: "bundle active-set safe_seq watermark has not advanced"}
+
+  - name: executor disconnected and consumer loop down
+    interval: 30s
+    input_series:
+      - series: 'host_api_connected_executors{job="svc-process", instance="a:9090"}'
+        values: "0x60"
+      - series: 'svc_process_consumer_loop_running{job="svc-process", instance="a:9090", loop="process"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WaddlesExecutorDisconnected
+        exp_alerts:
+          - exp_labels: {severity: critical, team: waddles, job: svc-process, instance: "a:9090"}
+            exp_annotations: {description: "Every dispatch from a:9090 is dead-lettering until an executor reconnects.", summary: "svc-process has no bundle-executor session"}
+      - eval_time: 10m
+        alertname: WaddlesConsumerLoopDown
+        exp_alerts:
+          - exp_labels: {severity: critical, team: waddles, job: svc-process, instance: "a:9090", loop: process}
+            exp_annotations: {description: "svc-process loop/receiver process reports consumer_loop_running=0 for 5m (Valkey unreachable or group missing).", summary: "A spine consumer loop is down or stuck reconnecting"}
+
+  - name: capability denial spike fires only above the prior baseline
+    interval: 30s
+    input_series:
+      - series: 'waddles_bundle_kv_authorize_denied_total{app_id="a", permission="storage.kv", job="svc-process"}'
+        values: "0x120 60+60x60"
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: WaddlesCapabilityDenialSpike
+        exp_alerts:
+          - exp_labels: {severity: warning, team: waddles}
+            exp_annotations: {description: "2.00 denials/s over 5m, more than 5x the previous hour. See the 'bundle executor and capability gate' dashboard for app_id / permission.", summary: "Bundle capability / quota / egress denials spiked"}
+      - eval_time: 30m
+        alertname: WaddlesCapabilityDenialSpike
+        exp_alerts: []
+
+  - name: capability denial steady state does not alert as a spike
+    interval: 30s
+    input_series:
+      - series: 'waddles_bundle_kv_authorize_denied_total{app_id="a", permission="storage.kv", job="svc-process"}'
+        values: "0+60x240"
+    alert_rule_test:
+      - eval_time: 110m
+        alertname: WaddlesCapabilityDenialSpike
+        exp_alerts: []
+
+  - name: bundle db backend errors
+    interval: 30s
+    input_series:
+      - series: 'waddles_bundle_tables_calls_total{op="query", result="backend", permission="storage.tables"}'
+        values: "0+30x80"
+      - series: 'waddles_bundle_tables_calls_total{op="query", result="ok", permission="storage.tables"}'
+        values: "0+30x80"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WaddlesBundleDbBackendErrors
+        exp_alerts:
+          - exp_labels: {severity: critical, team: waddles}
+            exp_annotations: {description: "50% of storage.tables calls failed at the database (connection failure or timeout) over 5m.", summary: "Bundle db capability: backend / timeout errors above 5%"}
+
+  - name: streaming fanout p99 breach (PR 758 histogram)
+    interval: 30s
+    input_series:
+      - series: 'stream_fanout_latency_seconds_bucket{kind="video", le="0.25"}'
+        values: "0+0x80"
+      - series: 'stream_fanout_latency_seconds_bucket{kind="video", le="0.5"}'
+        values: "0+10x80"
+      - series: 'stream_fanout_latency_seconds_bucket{kind="video", le="+Inf"}'
+        values: "0+10x80"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WaddlesStreamingFanoutLatencyHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, team: waddles}
+            exp_annotations: {description: "p99 packet dwell in the fanout is 497.5ms (requires PR #758 instruments).", summary: "WebRTC SFU fanout p99 above 250ms"}
+
+  - name: dead exporter - pods running but telemetry absent
+    interval: 30s
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="waddlebot", deployment="wb-svc-process-rust"}'
+        values: "2x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WaddlesTelemetryAbsentProcess
+        exp_alerts:
+          - exp_labels: {severity: critical, team: waddles, service: svc-process}
+            exp_annotations: {description: "svc_process_up has been absent for 10m while replicas are available - exporter / metrics endpoint is dead.", summary: "svc-process pods are running but emit no telemetry"}
+
+  - name: dead exporter stays silent while telemetry flows
+    interval: 30s
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="waddlebot", deployment="wb-svc-process-rust"}'
+        values: "2x60"
+      - series: 'svc_process_up{job="svc-process", instance="a:9090"}'
+        values: "1x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WaddlesTelemetryAbsentProcess
+        exp_alerts: []
+
+  - name: dead exporter stays silent when the service is not deployed
+    interval: 30s
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="waddlebot", deployment="wb-svc-ingest-rust"}'
+        values: "2x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WaddlesTelemetryAbsentStreaming
+        exp_alerts: []
+
+  - name: scrape target down
+    interval: 30s
+    input_series:
+      - series: 'up{job="waddlebot-svc-process-rust", instance="10.0.0.1:9090"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WaddlesScrapeTargetDown
+        exp_alerts:
+          - exp_labels: {severity: critical, team: waddles, job: waddlebot-svc-process-rust, instance: "10.0.0.1:9090"}
+            exp_annotations: {description: "/metrics on 10.0.0.1:9090 has been unreachable for 5m - the pod is down or the metrics surface is dead.", summary: "Prometheus cannot scrape waddlebot-svc-process-rust"}
+
+  - name: pod crash loop
+    interval: 30s
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{namespace="waddlebot", pod="svc-process-abc", container="svc-process", reason="CrashLoopBackOff"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WaddlesPodCrashLooping
+        exp_alerts:
+          - exp_labels: {severity: critical, team: waddles, namespace: waddlebot, pod: svc-process-abc, container: svc-process, reason: CrashLoopBackOff}
+            exp_annotations: {description: "Container svc-process in pod svc-process-abc has been in CrashLoopBackOff for 5m.", summary: "svc-process-abc (svc-process) is crash-looping"}

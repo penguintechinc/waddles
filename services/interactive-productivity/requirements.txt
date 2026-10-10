@@ -18,6 +18,10 @@ certifi==2026.2.25
 charset-normalizer==3.4.6
 click==8.3.1
 deep-translator==1.11.4
+# XXE protection for untrusted CalDAV XML (libs/calendar_sync Apple provider).
+# Exact pin; no --hash here because this file is unhashed (a single hashed entry
+# would force pip hash-checking mode on every other requirement).
+defusedxml==0.7.1
 # fasttext-wheel removed: optional dep, causes ARM64 build failure (needs Intel icx compiler via numpy)
 flask==3.1.3
 frozenlist==1.8.0

@@ -20,6 +20,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from flask_core import describe_db_error
+from flask_core.ai_guard import (
+    render_search_results,
+    sanitize_model_output,
+    wrap_untrusted,
+)
+
 logger = logging.getLogger(__name__)
 
 TECH_FIX_SYSTEM_PROMPT = (
@@ -176,16 +183,13 @@ class TechTroubleshooterService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'TECH_FIX_SYSTEM_PROMPT',
                 TECH_FIX_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Technical issue: {query}\n\n"
+                f"Technical issue: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Provide step-by-step troubleshooting instructions "
                 "based on these results."
@@ -229,7 +233,7 @@ class TechTroubleshooterService:
             )
 
         except Exception as exc:
-            logger.error("Tech fix failed: %s", exc)
+            logger.error("Tech fix failed: %s", describe_db_error(exc))
             return TechTroubleshooterResult(
                 success=False,
                 content="An internal error occurred during troubleshooting.",
@@ -316,6 +320,8 @@ class TechTroubleshooterService:
             for i, r in enumerate(searx_resp.results[:5], 1):
                 lines.append(f"{i}. **{r.title}**\n   {r.content}\n   {r.url}")
             content = f"**Troubleshoot Results:**\n\n" + '\n'.join(lines)
+            # Web snippets go straight to chat here: strip beacons / mass pings.
+            content = sanitize_model_output(content)
 
             # 6. Cache + log
             await self._set_cache(cache_key, {
@@ -338,7 +344,7 @@ class TechTroubleshooterService:
             )
 
         except Exception as exc:
-            logger.error("Quick troubleshoot failed: %s", exc)
+            logger.error("Quick troubleshoot failed: %s", describe_db_error(exc))
             return TechTroubleshooterResult(
                 success=False,
                 content="An internal error occurred during troubleshooting.",
@@ -395,7 +401,7 @@ class TechTroubleshooterService:
             ttl = getattr(self.config, 'TECH_CACHE_TTL', 14400)
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as exc:
-            logger.warning("Cache set failed: %s", exc)
+            logger.warning("Cache set failed: %s", describe_db_error(exc))
 
     async def _log_search(
         self,
@@ -421,4 +427,4 @@ class TechTroubleshooterService:
                  safety_flagged, result_count, was_cached, processing_time_ms],
             )
         except Exception as exc:
-            logger.warning("Failed to log search: %s", exc)
+            logger.warning("Failed to log search: %s", describe_db_error(exc))

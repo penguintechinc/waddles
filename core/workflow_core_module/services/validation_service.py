@@ -30,6 +30,7 @@ from models.nodes import (
     LoopForeachConfig, LoopWhileConfig, LoopBreakConfig,
     FlowMergeConfig, FlowParallelConfig, FlowEndConfig
 )
+from flask_core import describe_db_error
 
 
 logger = logging.getLogger(__name__)
@@ -175,8 +176,8 @@ class WorkflowValidationService:
             )
 
         except Exception as e:
-            logger.error(f"Unexpected error during workflow validation: {e}")
-            result.add_error(f"Validation error: {str(e)}")
+            logger.error(f"Unexpected error during workflow validation: {describe_db_error(e)}")
+            result.add_error(f"Validation error: {describe_db_error(e)}")
 
         return result
 

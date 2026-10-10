@@ -331,6 +331,218 @@ interface streaming-lifecycle {
     -> result<option<platform-event>, unsupported-stage>;
 }
 
+/// Community-scoped reputation points (issue #726, the reference host
+/// capability every later bundle-called host import -- economy #714,
+/// streaming-lifecycle #716 -- reuses). Additive, `stage-next`-only:
+/// `world stage` (1.0.0) never imports this.
+///
+/// Capability: `reputation.read` (`get`) / `reputation.community.write`
+/// (`adjust`), both gated host-side by `core/bundle_capability_gate` with
+/// a `ReputationScoped` resource -- the bundle names only a TARGET user
+/// (`user`, a UUID string); the community, tenant and app are always
+/// server-derived from the invocation scope, never a guest argument. The
+/// host additionally verifies, at call time, that `user` is a member of the
+/// invocation's community (`MembershipCheck`, then re-checked inside the
+/// store's own transaction), enforces the catalog's per-call/per-user-daily
+/// delta caps, and writes one `bundle_reputation_adjustments` ledger row
+/// per applied adjustment in the same transaction as the score update.
+///
+/// Wire note: `penguin-bundle-host`'s closed `CapabilityKind` has no
+/// `reputation` member yet, so the executor carries these calls as
+/// `capability = db`, `op = "reputation.get"|"reputation.adjust"`; the
+/// stage dispatches on the op prefix BEFORE the `db` (`storage.tables`)
+/// path, and the gate -- not the wire kind -- is what authorizes them.
+interface reputation {
+  variant error {
+    /// The gate denied the call (not granted, delta out of the declared
+    /// bounds, quota/rate exceeded, instance policy, ...); carries the
+    /// gate's stable denial code.
+    denied(string),
+    /// `user` is not a member of this invocation's community.
+    not-a-member,
+    /// The user's rolling-24h absolute-delta cap would be exceeded.
+    daily-cap-exceeded,
+    /// Malformed argument (non-UUID `user`, empty/oversized/non-code
+    /// `reason`, ...).
+    invalid(string),
+    /// The capability is not wired/enabled on this host.
+    unavailable(string),
+    backend(string),
+  }
+
+  /// Current community-scoped score for `user` (0 for a member with no
+  /// adjustments yet).
+  get: func(user: string) -> result<s64, error>;
+
+  /// Atomically adds `delta` (may be negative) to `user`'s community score
+  /// and returns the NEW score. `reason` is a short machine code
+  /// (`[a-z0-9._:-]`, <= 100 chars) recorded in the audit ledger -- never
+  /// free text or PII.
+  adjust: func(user: string, delta: s32, reason: string) -> result<s64, error>;
+}
+
+/// The shared community currency (issue #714), cloned from `reputation`'s
+/// recipe. Additive, `stage-next`-only: `world stage` (1.0.0) never imports
+/// this.
+///
+/// Capabilities, each gated host-side by `core/bundle_capability_gate` with an
+/// `EconomyScoped` resource: `economy.read` (`balance`, `leaderboard`),
+/// `economy.wager` (`wager`, and `max-bet`, which reports the wager
+/// capability's own limit), `economy.transfer` (`transfer`). The bundle names only TARGET users (UUID strings) and
+/// amounts; the community, tenant and app are always server-derived, never a
+/// guest argument. Every named user must be an active member of the
+/// invocation's community (checked by the gate, then re-checked inside the
+/// store's own write). Amounts are bounded by the economy's OWN quota family
+/// (per-call ceiling, community-declared `max_bet`/`max_amount`, per-user and
+/// per-community daily aggregates) -- not reputation's point caps.
+///
+/// Money never moves read-modify-write: `wager` is ONE guarded `UPDATE`
+/// (`balance = balance - stake + payout WHERE balance >= stake`), so any
+/// number of concurrent calls can never overdraw a balance. Every applied
+/// movement writes an append-only ledger row in the same statement. A bundle
+/// can only MOVE existing balance here; it can never mint beyond the
+/// host-bounded payout multiple of a stake it actually held.
+///
+/// Wire note: like `reputation`, calls are carried as `capability = db`,
+/// `op = "economy.balance"|"economy.wager"|"economy.transfer"|
+/// "economy.max_bet"|"economy.leaderboard"`; the stage dispatches on the op
+/// prefix BEFORE the `db` (`storage.tables`) path, and the gate -- not the
+/// wire kind -- is what authorizes them.
+interface economy {
+  variant error {
+    /// The gate denied the call (not granted, amount out of bounds,
+    /// quota/rate exceeded, instance policy, ...); carries the gate's stable
+    /// denial code.
+    denied(string),
+    /// The debited user holds less than the stake/amount; carries the balance
+    /// they do hold.
+    insufficient-funds(u64),
+    /// The stake/amount (or a wager's payout) exceeds the server-enforced
+    /// cap; carries that cap (`max-bet` for a stake, `max-amount` for a
+    /// transfer, `stake * 100` for a payout).
+    over-cap(u64),
+    /// A named user is not a member of this invocation's community.
+    not-a-member,
+    /// Malformed argument (non-UUID user, zero amount, self-transfer,
+    /// out-of-range leaderboard limit, ...).
+    invalid(string),
+    /// The capability is not wired/enabled on this host.
+    unavailable(string),
+    backend(string),
+  }
+
+  /// One leaderboard row: a member (UUID string only -- no names) and balance.
+  record entry {
+    user: string,
+    balance: s64,
+  }
+
+  /// `user`'s community balance (0 for a member who holds nothing yet).
+  balance: func(user: string) -> result<s64, error>;
+
+  /// Atomically debits `stake` and credits `payout` (net `payout - stake`;
+  /// `payout` is 0 for a loss) and returns the NEW balance. `stake` must be
+  /// >= 1, within `max-bet`, and held by the user; `payout` may be at most
+  /// 100x `stake`.
+  wager: func(user: string, stake: u64, payout: u64) -> result<s64, error>;
+
+  /// Atomically moves `amount` (>= 1) from `from-user` to `to-user` (both
+  /// members, distinct). Within the community-declared `max_amount`.
+  transfer: func(from-user: string, to-user: string, amount: u64) -> result<_, error>;
+
+  /// The largest stake `user` may place right now: the server-enforced
+  /// per-call cap (the grant's declared `max_bet`, clamped to the catalog
+  /// ceiling), bounded by what the user actually holds. Requires the
+  /// `economy.wager` grant; moves no money and is only rate limited.
+  max-bet: func(user: string) -> result<s64, error>;
+
+  /// The community's top `limit` (1..=100) members by balance, highest first.
+  leaderboard: func(limit: u32) -> result<list<entry>, error>;
+}
+
+/// Resolves WHO an invocation is about to the community `user-uuid` that
+/// `reputation` and `economy` name their targets by (the prerequisite of every
+/// points-game bundle: `!gamble` needs the actor, `!steal @user`/`!duel @user`
+/// need the actor AND the mentioned target). Additive, `stage-next`-only:
+/// `world stage` (1.0.0) never imports this.
+///
+/// Capability: `identity.resolve` (`bundle_capability_gate::permission::
+/// PermissionFamily::IdentityResolve`), gated host-side like every other
+/// import; a bundle that never declared it gets `denied("not_granted")`.
+///
+/// **UUID-only, PII-safe by construction.** The bundle receives a community
+/// `user-uuid` (the pseudonymous identity token `community_members.user_uuid`
+/// holds -- the same value `economy`/`reputation` then accept) and NEVER a
+/// platform user id, handle, display name or any other raw identity. The
+/// bundle supplies no tenant, community, platform or user argument that
+/// selects WHOSE identity is resolved:
+///
+/// * `resolve-actor` takes no argument at all -- the host resolves the
+///   TRIGGERING actor of the invocation in flight from the event it
+///   delivered (the platform account id it carries), scoped to the
+///   invocation's (tenant, community). A bundle can never ask about anyone
+///   but the person whose message triggered it.
+/// * `resolve-mention` takes the opaque mention token the bundle ALREADY
+///   holds -- the `<uuid>` inside a `{user:<uuid>}` placeholder it was shown
+///   in the message text (or, only when the operator has switched inbound
+///   PII tokenization off, the raw `<@123>` / `@handle` reference it was
+///   shown). The host keeps a per-invocation table of the references THIS
+///   message carried and answers only for those, so the call is NOT a
+///   directory lookup: an unknown token/handle is `not-found` and a bundle
+///   cannot probe whether an arbitrary handle exists. A free-text handle is
+///   resolved inside hub-api's PII boundary (`IdentityService.ResolveHandle`,
+///   tenant-scoped; never guessed -- ambiguous is an error), then confirmed
+///   an active member of THIS community.
+///
+/// **Fail-closed, never a wrong or default UUID.** Every refusal is an
+/// explicit error; there is no code path that returns a pseudonym, a platform
+/// id or a placeholder in the success position, and a member whose
+/// `user_uuid` is still NULL (identity not yet resolved) is `not-linked`, not
+/// a made-up value.
+///
+/// Wire note: like `reputation`/`economy`, calls are carried as
+/// `capability = db`, `op = "identity.resolve_actor"|"identity.resolve_mention"`;
+/// the stage dispatches on the op prefix BEFORE the `db` (`storage.tables`)
+/// path, and the gate -- not the wire kind -- is what authorizes them.
+interface identity {
+  variant error {
+    /// The gate denied the call (not granted, rate limited, instance policy,
+    /// ...); carries the gate's stable denial code.
+    denied(string),
+    /// The identity exists but has no resolved community `user-uuid` yet
+    /// (`community_members.user_uuid` is NULL), or the triggering event
+    /// carried no platform account id to resolve. The bundle should tell the
+    /// user their account is not linked -- never proceed with a guess.
+    not-linked,
+    /// The identity resolves but is not an active member of this
+    /// invocation's community.
+    not-a-member,
+    /// The mention token/handle is not one this message carried, or matches
+    /// no identity in the tenant.
+    not-found,
+    /// A free-text handle matches more than one identity in the tenant; the
+    /// host never guesses between them.
+    ambiguous,
+    /// Malformed argument (empty/oversized/ill-formed mention token, a
+    /// tenant-wide activation with no community, ...).
+    invalid(string),
+    /// The capability is not wired/enabled on this host (flag OFF, store or
+    /// hub-api resolver not provisioned, hub-api unreachable).
+    unavailable(string),
+    backend(string),
+  }
+
+  /// The community `user-uuid` of the actor whose event triggered this
+  /// invocation. No argument: the host derives the actor.
+  resolve-actor: func() -> result<string, error>;
+
+  /// The community `user-uuid` of the user a mention in the triggering
+  /// message refers to. `token` is the mention token the bundle was shown
+  /// (see the interface doc); the call resolves ONLY references present in
+  /// this invocation's message.
+  resolve-mention: func(token: string) -> result<string, error>;
+}
+
 /// PostHog flag + license entitlement, two-gate, cached, fail-open to the
 /// supplied default. Capability: always granted.
 ///
@@ -442,6 +654,9 @@ world stage-next {
   import log;
   import clock;
   import overlay;
+  import reputation;
+  import economy;
+  import identity;
 
   export process-stage;
   export action-stage;

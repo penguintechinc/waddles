@@ -230,7 +230,8 @@ class LocalOllamaClassifier(ClassificationProvider):
             # local Ollama is treated as "no match", the same shape as
             # WaddleAIClassifier's own unavailability handling.
             logger.warning(
-                "moderation.ollama_unreachable", extra={"category": category, "error": str(exc)}
+                "moderation.ollama_unreachable",
+                extra={"category": category, "error_type": type(exc).__name__},
             )
             return 0.0
         finally:

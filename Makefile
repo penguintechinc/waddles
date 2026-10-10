@@ -1,11 +1,12 @@
 .PHONY: openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
-        seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
+        seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-bundle-hygiene generate-bundle-signing-key
+        check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        verify-audit-chain verify-audit-export
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -83,6 +84,17 @@ test-unit:
 	@echo "Running unit tests..."
 	@bash tests/k8s/alpha/05-unit-tests.sh
 
+# Env-gated REAL-endpoint Ollama tests (hub-api router, AI Researcher, AI Interaction) --
+# LAN-only lab endpoint, never run in CI. The lab GPU is shared with the live WaddleAI, so the
+# three suites run strictly one after another (and each serializes its own requests). Needs each
+# module's test deps installed -- see docs/testing/ollama-realpath.md.
+#   make test-ollama-realpath WADDLE_TEST_OLLAMA_URL=http://192.168.2.105:11434/
+test-ollama-realpath:
+	@test -n "$(WADDLE_TEST_OLLAMA_URL)" || { echo "WADDLE_TEST_OLLAMA_URL is required (e.g. http://192.168.2.105:11434/)" >&2; exit 1; }
+	cd hub_api && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_routing_ollama_realpath.py -v -rs
+	cd core/ai_researcher_module && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_researcher_ollama_realpath.py -v -rs
+	cd action/interactive/ai_interaction_module && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_interaction_ollama_realpath.py -v -rs
+
 test-integration:
 	@echo "Running integration tests..."
 	@test -d tests/integration || { echo "tests/integration directory not found" >&2; exit 1; }
@@ -107,7 +119,19 @@ smoke-test:
 seed-mock-data:
 	@echo "Seeding mock data..."
 	@test -f scripts/seed-admin.sh || { echo "scripts/seed-admin.sh not found" >&2; exit 1; }
-	@bash scripts/seed-admin.sh
+	@bash scripts/seed-admin.sh $(SEED_ARGS)
+	@$(MAKE) --no-print-directory seed-ui-mock-data
+
+# UI content seed (communities, members, leaderboard, overlays, chat, bundles)
+# so marketing screenshots are not empty-state. SEED_ARGS e.g. --docker.
+seed-ui-mock-data:
+	@bash scripts/seed-ui-mock-data.sh $(filter --docker,$(SEED_ARGS))
+
+# Marketing screenshots -> docs/screenshots/ (pinned Playwright, see
+# tests/screenshots). Needs a running hub-webui at BASE_URL and seeded data;
+# SCREENSHOT_EMAIL/SCREENSHOT_PASSWORD from env (never committed).
+screenshots:
+	@bash scripts/screenshots.sh
 
 clean:
 	docker-compose down -v
@@ -182,6 +206,22 @@ build-superpenguin-roll-bundle:
 # (needs docker + network, ~1-2 minutes), so this is its only run path.
 test-csharp-bundle-compile:
 	@cd core/bundle_compiler && cargo test --locked builds_csping_via_docker -- --ignored --nocapture
+
+# Tamper-evident audit log (GRC audit finding #3, docs/compliance/audit-logging.md).
+# verify-audit-chain: recompute every audit chain straight from the database (DATABASE_URL / DB_*
+# env, run from hub_api so `cli.*` resolves). Exits 1 on tampering, 2 if zero records were
+# examined (a check over nothing is not a pass; add ALLOW_EMPTY=1 for deployments with no
+# Enterprise tenant), 3 if it could not run. Pin heads with EXPECT="tenant:1=42:<hash>".
+verify-audit-chain:
+	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \
+		$(foreach e,$(EXPECT),--expect $(e))
+
+# verify-audit-export: verify downloaded export file(s) offline -- no server, DB or network.
+#   make verify-audit-export EXPORT="page1.json page2.json" [ANCHOR=<hash>] [HEAD_SEQ=42] [HEAD_HASH=<hash>]
+verify-audit-export:
+	@test -n "$(EXPORT)" || { echo "usage: make verify-audit-export EXPORT=\"page1.json [page2.json ...]\"" >&2; exit 2; }
+	@python3 scripts/verify_audit_export.py $(EXPORT) $(if $(ANCHOR),--anchor-hash $(ANCHOR)) \
+		$(if $(HEAD_SEQ),--expect-head-seq $(HEAD_SEQ)) $(if $(HEAD_HASH),--expect-head-hash $(HEAD_HASH))
 
 # Proves bundles/Dockerfile.core-bundles's two example-bundle artifacts (ping.wasm from the
 # rust-bundle-builder stage, pyping.wasm from the python-bundle-builder stage) are both

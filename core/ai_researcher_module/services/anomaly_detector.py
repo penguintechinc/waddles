@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from statistics import mean, stdev
 
 from config import Config
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +132,7 @@ class AnomalyDetector:
 
         except Exception as e:
             logger.error(
-                f"Anomaly detection error: {e}",
-                exc_info=True,
+                f"Anomaly detection error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return AnomalyResult(
@@ -140,7 +140,7 @@ class AnomalyDetector:
                 anomalies=[],
                 total_detected=0,
                 processing_time_ms=int((time.time() - start_time) * 1000),
-                error=str(e)
+                error=describe_db_error(e)
             )
 
     async def _detect_activity_spikes(self, community_id: int) -> List[Dict[str, Any]]:
@@ -200,7 +200,7 @@ class AnomalyDetector:
             return anomalies
 
         except Exception as e:
-            logger.error(f"Activity spike detection error: {e}")
+            logger.error(f"Activity spike detection error: {describe_db_error(e)}")
             return []
 
     async def _detect_sentiment_shifts(self, community_id: int) -> List[Dict[str, Any]]:
@@ -220,7 +220,7 @@ class AnomalyDetector:
             return []
 
         except Exception as e:
-            logger.error(f"Sentiment shift detection error: {e}")
+            logger.error(f"Sentiment shift detection error: {describe_db_error(e)}")
             return []
 
     async def _detect_user_behavior_anomalies(self, community_id: int) -> List[Dict[str, Any]]:
@@ -286,7 +286,7 @@ class AnomalyDetector:
             return anomalies
 
         except Exception as e:
-            logger.error(f"User behavior anomaly detection error: {e}")
+            logger.error(f"User behavior anomaly detection error: {describe_db_error(e)}")
             return []
 
     async def acknowledge_anomaly(
@@ -330,7 +330,7 @@ class AnomalyDetector:
             return True
 
         except Exception as e:
-            logger.error(f"Anomaly acknowledgment error: {e}")
+            logger.error(f"Anomaly acknowledgment error: {describe_db_error(e)}")
             return False
 
     async def store_anomaly(
@@ -375,7 +375,7 @@ class AnomalyDetector:
             return None
 
         except Exception as e:
-            logger.error(f"Anomaly storage error: {e}")
+            logger.error(f"Anomaly storage error: {describe_db_error(e)}")
             return None
 
     async def get_recent_anomalies(
@@ -426,5 +426,5 @@ class AnomalyDetector:
             return anomalies
 
         except Exception as e:
-            logger.error(f"Get anomalies error: {e}")
+            logger.error(f"Get anomalies error: {describe_db_error(e)}")
             return []

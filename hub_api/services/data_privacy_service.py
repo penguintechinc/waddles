@@ -34,6 +34,7 @@ from typing import Any
 
 import bcrypt
 
+from services.audit_service import report_write_failure
 from services.errors import bad_request, not_found, unauthorized
 
 
@@ -442,8 +443,16 @@ async def request_data_deletion(
                 status="failed",
                 error_detail=str(exc),
             )
-        except Exception:  # noqa: BLE001, S110 - best-effort; must not mask the original error
-            pass
+        except Exception as record_exc:
+            # Recording the *failed* deletion attempt failed too. Make that loud (ERROR + metric +
+            # traceback) but never let it mask the original error, which is re-raised below.
+            report_write_failure(
+                category="privacy",
+                action="privacy.deletion_failure_record",
+                chain_id=None,
+                attempts=1,
+                exc=record_exc,
+            )
         raise
 
     return False, True

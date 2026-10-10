@@ -6,6 +6,7 @@
 
 pub mod ffmpeg;
 pub mod model;
+pub(crate) mod process_group;
 pub mod supervisor;
 
 pub use ffmpeg::{build_argv, rtp_legs, secret_ref_key, Paths, RtpLeg, RtpLegDirection};

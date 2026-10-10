@@ -8,6 +8,9 @@
 # values-beta.yaml's shape rather than duplicating it here.
 global:
   deploymentTier: "gamma"
+  # Per-deploy unique gamma-<epoch> tags -> IfNotPresent (matches values.yaml default; stated
+  # explicitly so all four env files declare the policy). Always only for a mutable tag.
+  imagePullPolicy: IfNotPresent
 
 pipeline:
   hubApi:

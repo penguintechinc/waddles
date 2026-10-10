@@ -269,7 +269,7 @@ async def example_8_error_handling():
             print(f"  Error rate: {health['error_rate']:.1%}")
 
     except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
+        logger.error("Unexpected error: %s", type(e).__name__)
 
 
 async def example_9_concurrent_invocations():
@@ -387,7 +387,7 @@ async def example_10_complete_workflow():
         logger.error("Analysis request timed out")
 
     except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
+        logger.error("Unexpected error: %s", type(e).__name__)
 
     finally:
         # Log final health status

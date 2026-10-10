@@ -13,6 +13,8 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'libs'))
 
 from flask_core import setup_aaa_logging, init_database
+from flask_core.db_errors import describe_db_error
+from services.log_safety import log_failure
 
 # Configuration
 BATCH_SIZE = int(os.environ.get('BOT_SCORE_BATCH_SIZE', '100'))
@@ -66,8 +68,10 @@ async def calculate_all_communities():
                 for idx, result in enumerate(results):
                     if isinstance(result, Exception):
                         error_count += 1
-                        logger.error(
-                            f"Failed to calculate score for community {batch[idx][0]}: {result}",
+                        log_failure(
+                            logger,
+                            "Failed to calculate score for community",
+                            result,
                             community_id=batch[idx][0],
                             action="calculate_score",
                             result="FAILED"
@@ -105,7 +109,7 @@ async def calculate_all_communities():
         }
 
     except Exception as e:
-        logger.error(f"Bot score calculation job failed: {e}", action="batch_failed", result="FAILED")
+        log_failure(logger, "Bot score calculation job failed", e, action="batch_failed", result="FAILED")
         raise
 
 
@@ -116,7 +120,7 @@ def main():
         print(f"Bot score calculation complete: {result}")
         return 0
     except Exception as e:
-        print(f"Bot score calculation failed: {e}", file=sys.stderr)
+        print(f"Bot score calculation failed: {describe_db_error(e)}", file=sys.stderr)
         return 1
 
 

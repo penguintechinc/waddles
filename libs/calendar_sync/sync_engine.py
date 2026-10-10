@@ -25,7 +25,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from libs.calendar_sync.base import CalendarProviderBase
+from libs.calendar_sync.base import CalendarProviderBase, describe_error
 from libs.calendar_sync.schema import normalize_event, denormalize_event
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ class CalendarSyncEngine:
                     max_results=250,
                 )
             except Exception as exc:
-                logger.error(f"[SYNC] get_events failed: {exc}")
+                logger.error("[SYNC] get_events failed: %s", describe_error(exc))
                 errors += 1
                 break
 
@@ -100,7 +100,7 @@ class CalendarSyncEngine:
                     )
                     pulled += 1
                 except Exception as exc:
-                    logger.error(f"[SYNC] pull_event_from_external failed: {exc}")
+                    logger.error("[SYNC] pull_event_from_external failed: %s", describe_error(exc))
                     errors += 1
 
             page_token = result.get("next_page_token")
@@ -169,7 +169,7 @@ class CalendarSyncEngine:
                 sync_token=stored_token,
             )
         except Exception as exc:
-            logger.error(f"[SYNC] sync_changes failed: {exc}")
+            logger.error("[SYNC] sync_changes failed: %s", describe_error(exc))
             # Stale token: fall back to full sync.
             logger.warning("[SYNC] Stale sync token detected; performing full sync.")
             result = await self.full_sync(user_id, calendar_id, community_id)
@@ -201,7 +201,7 @@ class CalendarSyncEngine:
                     )
                 changed += 1
             except Exception as exc:
-                logger.error(f"[SYNC] Incremental apply failed: {exc}")
+                logger.error("[SYNC] Incremental apply failed: %s", describe_error(exc))
                 errors += 1
 
         # Persist the new sync token.
@@ -288,7 +288,9 @@ class CalendarSyncEngine:
 
         except Exception as exc:
             logger.error(
-                f"[SYNC] push_event_to_external failed for wb_event={wb_event_id}: {exc}"
+                "[SYNC] push_event_to_external failed for wb_event=%s: %s",
+                wb_event_id,
+                describe_error(exc),
             )
             return None
 
@@ -363,8 +365,9 @@ class CalendarSyncEngine:
 
         except Exception as exc:
             logger.error(
-                f"[SYNC] pull_event_from_external failed for "
-                f"provider_id={provider_event_id}: {exc}"
+                "[SYNC] pull_event_from_external failed for provider_id=%s: %s",
+                provider_event_id,
+                describe_error(exc),
             )
             return None
 
@@ -464,7 +467,7 @@ class CalendarSyncEngine:
                 now,
             ])
         except Exception as exc:
-            logger.error(f"[SYNC] _update_sync_map failed: {exc}")
+            logger.error("[SYNC] _update_sync_map failed: %s", describe_error(exc))
 
     async def _get_stored_sync_token(
         self,
@@ -487,7 +490,7 @@ class CalendarSyncEngine:
                 return rows[0].get("sync_token")
             return None
         except Exception as exc:
-            logger.error(f"[SYNC] _get_stored_sync_token failed: {exc}")
+            logger.error("[SYNC] _get_stored_sync_token failed: %s", describe_error(exc))
             return None
 
     async def _get_provider_event_id(
@@ -515,7 +518,7 @@ class CalendarSyncEngine:
                 return rows[0].get("provider_event_id") or None
             return None
         except Exception as exc:
-            logger.error(f"[SYNC] _get_provider_event_id failed: {exc}")
+            logger.error("[SYNC] _get_provider_event_id failed: %s", describe_error(exc))
             return None
 
     async def _find_local_event_by_provider_id(
@@ -554,7 +557,7 @@ class CalendarSyncEngine:
             event_rows = await self.dal.execute(event_query, [wb_event_id])
             return dict(event_rows[0]) if event_rows else None
         except Exception as exc:
-            logger.error(f"[SYNC] _find_local_event_by_provider_id failed: {exc}")
+            logger.error("[SYNC] _find_local_event_by_provider_id failed: %s", describe_error(exc))
             return None
 
     async def _upsert_local_event(
@@ -630,7 +633,7 @@ class CalendarSyncEngine:
                 now,
             ])
         except Exception as exc:
-            logger.error(f"[SYNC] _upsert_local_event failed: {exc}")
+            logger.error("[SYNC] _upsert_local_event failed: %s", describe_error(exc))
             raise
 
     async def _apply_remote_deletion(
@@ -672,4 +675,4 @@ class CalendarSyncEngine:
                 f"provider_id={provider_event_id}"
             )
         except Exception as exc:
-            logger.error(f"[SYNC] _apply_remote_deletion failed: {exc}")
+            logger.error("[SYNC] _apply_remote_deletion failed: %s", describe_error(exc))

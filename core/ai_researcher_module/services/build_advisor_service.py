@@ -19,6 +19,9 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from flask_core import describe_db_error
+from flask_core.ai_guard import render_search_results, wrap_untrusted
+
 logger = logging.getLogger(__name__)
 
 BUILD_SEARCH_SYSTEM_PROMPT = (
@@ -193,18 +196,15 @@ class BuildAdvisorService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'BUILD_SEARCH_SYSTEM_PROMPT',
                 BUILD_SEARCH_SYSTEM_PROMPT,
             )
             class_label = f" ({resolved_class})" if resolved_class else ""
             user_prompt = (
-                f"Game: {resolved_game}{class_label}\n"
-                f"Question: {query}\n\n"
+                f"Game: {wrap_untrusted(resolved_game + class_label, max_chars=300)}\n"
+                f"Question: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Synthesize a clear build/loadout recommendation based on "
                 "these results."
@@ -246,7 +246,7 @@ class BuildAdvisorService:
             )
 
         except Exception as exc:
-            logger.error("Build search failed: %s", exc)
+            logger.error("Build search failed: %s", describe_db_error(exc))
             return BuildAdvisorResult(
                 success=False,
                 content="An internal error occurred during build search.",
@@ -343,17 +343,14 @@ class BuildAdvisorService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'META_SEARCH_SYSTEM_PROMPT',
                 META_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Game: {resolved_game}\n"
-                f"Question: {query}\n\n"
+                f"Game: {wrap_untrusted(resolved_game, max_chars=300)}\n"
+                f"Question: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Summarize the current meta and tier rankings based on "
                 "these results."
@@ -393,7 +390,7 @@ class BuildAdvisorService:
             )
 
         except Exception as exc:
-            logger.error("Meta search failed: %s", exc)
+            logger.error("Meta search failed: %s", describe_db_error(exc))
             return BuildAdvisorResult(
                 success=False,
                 content="An internal error occurred during meta search.",
@@ -436,7 +433,7 @@ class BuildAdvisorService:
             ttl = getattr(self.config, 'BUILD_CACHE_TTL', 10800)
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as exc:
-            logger.warning("Cache set failed: %s", exc)
+            logger.warning("Cache set failed: %s", describe_db_error(exc))
 
     async def _log_search(
         self,
@@ -466,4 +463,4 @@ class BuildAdvisorService:
                  processing_time_ms],
             )
         except Exception as exc:
-            logger.warning("Failed to log build advisor search: %s", exc)
+            logger.warning("Failed to log build advisor search: %s", describe_db_error(exc))

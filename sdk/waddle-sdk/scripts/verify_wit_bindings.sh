@@ -141,6 +141,57 @@ check "wit_world/exports/__init__.py" "class ActionStage(Protocol):" "exports.Ac
 check "wit_world/exports/__init__.py" "def transform(self, event: types.PlatformEvent) -> Optional[types.PlatformEvent]:" "exports.transform signature"
 check "wit_world/exports/__init__.py" "def dispatch(self, envelope: types.StageEnvelope, config: str) -> types.TransportResult:" "exports.dispatch signature"
 
+# ---- world stage-next: waddle_sdk/reputation.py (issue #726) ----
+# `reputation` exists ONLY in `world stage-next`, so it is generated and
+# checked from a second, separate bindings run. Every assertion below was
+# confirmed against a real `componentize-py==0.25.1 -w stage-next bindings`
+# run, not guessed.
+NEXT_OUT_DIR="$(mktemp -d)"
+trap 'rm -rf "${OUT_DIR}" "${NEXT_OUT_DIR}"' EXIT
+echo "Generating stage-next bindings from ${WIT_DIR}/stage.wit into ${NEXT_OUT_DIR} ..."
+componentize-py -d "${WIT_DIR}" -w stage-next bindings "${NEXT_OUT_DIR}"
+OUT_DIR="${NEXT_OUT_DIR}"
+
+check "wit_world/imports/reputation.py" "class Error_Denied:" "reputation.Error_Denied"
+check "wit_world/imports/reputation.py" "class Error_NotAMember:" "reputation.Error_NotAMember"
+check "wit_world/imports/reputation.py" "class Error_DailyCapExceeded:" "reputation.Error_DailyCapExceeded"
+check "wit_world/imports/reputation.py" "class Error_Invalid:" "reputation.Error_Invalid"
+check "wit_world/imports/reputation.py" "class Error_Unavailable:" "reputation.Error_Unavailable"
+check "wit_world/imports/reputation.py" "class Error_Backend:" "reputation.Error_Backend"
+check "wit_world/imports/reputation.py" "def get(user: str) -> int:" "reputation.get signature"
+check "wit_world/imports/reputation.py" "def adjust(user: str, delta: int, reason: str) -> int:" "reputation.adjust signature"
+
+# ---- world stage-next: waddle_sdk/economy.py (issue #714) ----
+# Same second bindings run as reputation above; every assertion confirmed
+# against a real `componentize-py==0.25.1 -w stage-next bindings` run.
+check "wit_world/imports/economy.py" "class Error_Denied:" "economy.Error_Denied"
+check "wit_world/imports/economy.py" "class Error_InsufficientFunds:" "economy.Error_InsufficientFunds"
+check "wit_world/imports/economy.py" "class Error_OverCap:" "economy.Error_OverCap"
+check "wit_world/imports/economy.py" "class Error_NotAMember:" "economy.Error_NotAMember"
+check "wit_world/imports/economy.py" "class Error_Invalid:" "economy.Error_Invalid"
+check "wit_world/imports/economy.py" "class Error_Unavailable:" "economy.Error_Unavailable"
+check "wit_world/imports/economy.py" "class Error_Backend:" "economy.Error_Backend"
+check "wit_world/imports/economy.py" "class Entry:" "economy.Entry record"
+check "wit_world/imports/economy.py" "def balance(user: str) -> int:" "economy.balance signature"
+check "wit_world/imports/economy.py" "def wager(user: str, stake: int, payout: int) -> int:" "economy.wager signature"
+check "wit_world/imports/economy.py" "def transfer(from_user: str, to_user: str, amount: int) -> None:" "economy.transfer signature"
+check "wit_world/imports/economy.py" "def max_bet(user: str) -> int:" "economy.max_bet signature"
+check "wit_world/imports/economy.py" "def leaderboard(limit: int) -> List[Entry]:" "economy.leaderboard signature"
+
+# ---- world stage-next: waddle_sdk/identity.py (actor/mention -> user_uuid) ----
+# Same second bindings run as reputation/economy above; every assertion
+# confirmed against a real `componentize-py==0.25.1 -w stage-next bindings` run.
+check "wit_world/imports/identity.py" "class Error_Denied:" "identity.Error_Denied"
+check "wit_world/imports/identity.py" "class Error_NotLinked:" "identity.Error_NotLinked"
+check "wit_world/imports/identity.py" "class Error_NotAMember:" "identity.Error_NotAMember"
+check "wit_world/imports/identity.py" "class Error_NotFound:" "identity.Error_NotFound"
+check "wit_world/imports/identity.py" "class Error_Ambiguous:" "identity.Error_Ambiguous"
+check "wit_world/imports/identity.py" "class Error_Invalid:" "identity.Error_Invalid"
+check "wit_world/imports/identity.py" "class Error_Unavailable:" "identity.Error_Unavailable"
+check "wit_world/imports/identity.py" "class Error_Backend:" "identity.Error_Backend"
+check "wit_world/imports/identity.py" "def resolve_actor() -> str:" "identity.resolve_actor signature"
+check "wit_world/imports/identity.py" "def resolve_mention(token: str) -> str:" "identity.resolve_mention signature"
+
 echo ""
 echo "Checked ${CHECKS} binding-shape assertions against componentize-py's real generated output."
 if [ "${FAILURES}" -gt 0 ]; then

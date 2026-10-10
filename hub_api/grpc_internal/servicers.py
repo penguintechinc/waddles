@@ -14,13 +14,16 @@ from typing import Any, NoReturn
 import grpc
 from waddles.hub.internal.v1 import identity_pb2, identity_pb2_grpc, key_pb2, key_pb2_grpc
 
+from grpc_internal.interceptors import service_claims
 from services.identity_resolution_service import (
     AmbiguousHandleError,
     HandleNotFoundError,
     IdentityRequest,
     IdentityResolutionError,
     IdentityValidationError,
+    TenantAccessDeniedError,
     TenantNotFoundError,
+    authorize_tenant,
     resolve_display_names,
     resolve_identities,
     resolve_target,
@@ -50,6 +53,8 @@ async def _abort_for(
         code, detail = grpc.StatusCode.NOT_FOUND, str(exc)
     elif isinstance(exc, AmbiguousHandleError):
         code, detail = grpc.StatusCode.FAILED_PRECONDITION, str(exc)
+    elif isinstance(exc, TenantAccessDeniedError):
+        code, detail = grpc.StatusCode.PERMISSION_DENIED, str(exc)
     else:
         code, detail = grpc.StatusCode.INTERNAL, "identity resolution failed"
     await context.abort(code, detail)
@@ -70,18 +75,42 @@ class IdentityServicer(identity_pb2_grpc.IdentityServiceServicer):  # type: igno
             raise AssertionError("unreachable")
         return self._async_dal
 
+    async def _caller(self, context: grpc.aio.ServicerContext[Any, Any]) -> tuple[str, str]:
+        """Return `(tenant claim, sub)` of the verified caller, or abort UNAUTHENTICATED.
+
+        Reads the claims `AuthInterceptor` stored after verifying the token. Absent
+        claims mean this servicer was reached around the interceptor chain -- fail
+        closed rather than fall back to trusting the request body's tenant.
+        """
+        claims = service_claims.get()
+        tenant = claims.get("tenant") if claims else None
+        if not claims or not isinstance(tenant, str) or not tenant.strip():
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "unauthorized")
+            raise AssertionError("unreachable")
+        return tenant.strip(), str(claims.get("sub", ""))
+
     async def MintEphemeralPseudonyms(  # noqa: N802 - grpc-generated servicer method name
         self,
         request: identity_pb2.MintEphemeralPseudonymsRequest,
         context: grpc.aio.ServicerContext[Any, Any],
     ) -> identity_pb2.MintEphemeralPseudonymsResponse:
-        """Mint-or-return the stable UUID for each platform identity (batch <=100)."""
+        """Mint-or-return the stable UUID for each platform identity (batch <=100).
+
+        Every distinct tenant in the batch is authorized against the caller's token
+        before anything is minted -- one denied tenant rejects the whole batch.
+        """
+        claim_tenant, caller = await self._caller(context)
         dal = await self._require_dal(context)
-        items = [
-            IdentityRequest(i.tenant_id, i.platform, i.platform_user_id, i.handle)
-            for i in request.items
-        ]
         try:
+            effective: dict[str, str] = {}
+            for ref in dict.fromkeys(i.tenant_id for i in request.items):
+                effective[ref] = await authorize_tenant(
+                    dal, claim_tenant, ref, op="mint", caller=caller
+                )
+            items = [
+                IdentityRequest(effective[i.tenant_id], i.platform, i.platform_user_id, i.handle)
+                for i in request.items
+            ]
             resolved = await resolve_identities(dal, items)
         except IdentityResolutionError as exc:
             await _abort_for(exc, context)
@@ -100,9 +129,13 @@ class IdentityServicer(identity_pb2_grpc.IdentityServiceServicer):  # type: igno
         context: grpc.aio.ServicerContext[Any, Any],
     ) -> identity_pb2.ResolveDisplayNamesResponse:
         """Resolve a tenant-scoped batch of UUIDs to display names (egress detokenizer)."""
+        claim_tenant, caller = await self._caller(context)
         dal = await self._require_dal(context)
         try:
-            result = await resolve_display_names(dal, request.tenant_id, list(request.uuids))
+            tenant = await authorize_tenant(
+                dal, claim_tenant, request.tenant_id, op="display_names", caller=caller
+            )
+            result = await resolve_display_names(dal, tenant, list(request.uuids))
         except IdentityResolutionError as exc:
             await _abort_for(exc, context)
         return identity_pb2.ResolveDisplayNamesResponse(
@@ -121,11 +154,13 @@ class IdentityServicer(identity_pb2_grpc.IdentityServiceServicer):  # type: igno
         context: grpc.aio.ServicerContext[Any, Any],
     ) -> identity_pb2.ResolveHandleResponse:
         """Resolve one raw handle/mention to a UUID; the handle never leaves hub-api."""
+        claim_tenant, caller = await self._caller(context)
         dal = await self._require_dal(context)
         try:
-            resolved = await resolve_target(
-                dal, request.tenant_id, request.platform, request.target
+            tenant = await authorize_tenant(
+                dal, claim_tenant, request.tenant_id, op="resolve_handle", caller=caller
             )
+            resolved = await resolve_target(dal, tenant, request.platform, request.target)
         except IdentityResolutionError as exc:
             await _abort_for(exc, context)
         return identity_pb2.ResolveHandleResponse(

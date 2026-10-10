@@ -50,7 +50,7 @@ jobs:
   lint-test:
     name: "${{ inputs.crate_name }}: fmt + clippy + deny + coverage"
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}

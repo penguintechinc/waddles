@@ -24,6 +24,13 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
 from config import Config
+from flask_core import describe_db_error
+from flask_core.ai_guard import (
+    RetrievedItem,
+    render_retrieved_data,
+    sanitize_model_output,
+    wrap_untrusted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +235,10 @@ class ResearchService:
             # Generate response with AI
             response = await self._generate_ai_response(
                 system_prompt=self.SYSTEM_PROMPTS['research'],
-                user_prompt=f"Research the following topic: {topic}",
+                user_prompt=(
+                    "Research the following topic:\n"
+                    f"{wrap_untrusted(topic, max_chars=Config.MAX_PROMPT_CHARS)}"
+                ),
                 community_id=community_id,
                 user_id=user_id,
                 context_type='research'
@@ -289,8 +299,7 @@ class ResearchService:
 
         except Exception as e:
             logger.error(
-                f"Research error: {e}",
-                exc_info=True,
+                f"Research error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return ResearchResult(
@@ -384,14 +393,20 @@ class ResearchService:
             # Get community context from mem0
             context = await self._get_community_context(community_id, question)
 
-            # Build prompt with context
+            # Build prompt with context. Recalled memories are untrusted DATA --
+            # they hold other users' chat and earlier model output, so a poisoned
+            # memory must not steer this answer: render them delimited and drop any
+            # that trip the injection scan. regression: sec-llm01-hardening
             context_str = ""
             if context:
-                context_str = "\n\nContext from community memory:\n"
-                for idx, memory in enumerate(context, 1):
-                    context_str += f"{idx}. {memory['content']}\n"
+                recalled = render_retrieved_data(
+                    [RetrievedItem(text=str(memory.get('content', ''))) for memory in context],
+                    source="community_memory",
+                )
+                context_str = f"\n\nContext from community memory:\n{recalled.text}"
 
-            user_prompt = f"Question: {question}{context_str}"
+            question_block = wrap_untrusted(question, max_chars=Config.MAX_PROMPT_CHARS)
+            user_prompt = f"Question:\n{question_block}{context_str}"
 
             # Generate response with AI
             response = await self._generate_ai_response(
@@ -446,8 +461,7 @@ class ResearchService:
 
         except Exception as e:
             logger.error(
-                f"Ask error: {e}",
-                exc_info=True,
+                f"Ask error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return ResearchResult(
@@ -548,6 +562,9 @@ class ResearchService:
                     content += f"{idx}. [{timestamp}] (relevance: {score:.2f})\n"
                     content += f"   {memory_content}\n\n"
 
+                # Stored memories are replayed verbatim to chat: strip beacons / pings.
+                content = sanitize_model_output(content)
+
                 logger.info(
                     f"Recall completed",
                     extra={
@@ -575,8 +592,7 @@ class ResearchService:
 
         except Exception as e:
             logger.error(
-                f"Recall error: {e}",
-                exc_info=True,
+                f"Recall error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return ResearchResult(
@@ -678,13 +694,23 @@ class ResearchService:
                     was_cached=True
                 )
 
-            # Build context string for summarization
-            context_str = f"Messages from the last {duration_minutes} minutes:\n\n"
-            for msg in context:
-                user = msg.get('user', 'unknown')
-                content = msg.get('content', '')
-                timestamp = msg.get('timestamp', '')
-                context_str += f"[{timestamp}] {user}: {content}\n"
+            # Chat lines are untrusted DATA (any viewer wrote them): render them
+            # delimited and labelled, dropping lines that carry injection payloads.
+            chat_log = render_retrieved_data(
+                [
+                    RetrievedItem(
+                        text=str(msg.get('content', '')),
+                        title=f"{msg.get('user', 'unknown')} @ {msg.get('timestamp', '')}",
+                    )
+                    for msg in context
+                ],
+                source="chat_log",
+                max_items=200,
+                max_item_chars=500,
+            )
+            context_str = (
+                f"Messages from the last {duration_minutes} minutes:\n\n{chat_log.text}"
+            )
 
             user_prompt = f"Summarize the following conversation:\n\n{context_str}"
 
@@ -753,8 +779,7 @@ class ResearchService:
 
         except Exception as e:
             logger.error(
-                f"Summarize error: {e}",
-                exc_info=True,
+                f"Summarize error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return ResearchResult(
@@ -788,7 +813,7 @@ class ResearchService:
         try:
             return await self.rate_limiter.check_limit(key, limit_type)
         except Exception as e:
-            logger.error(f"Rate limit check error: {e}")
+            logger.error(f"Rate limit check error: {describe_db_error(e)}")
             # Fail open - allow request if rate limiter fails
             return True
 
@@ -800,19 +825,28 @@ class ResearchService:
         """
         Check content safety.
 
+        Runs the SafetyLayer verdict (`check_prompt`, synchronous regex/topic
+        gate) and acts on it. The gate FAILS CLOSED: if the check itself errors
+        the content is blocked, never waved through (a fail-open gate hid a
+        broken `safety_layer.check()` call here -- the layer has no such method
+        -- so nothing was ever blocked).
+
         Args:
             content: Content to check
-            community_id: Community identifier
+            community_id: Community identifier (the layer's blocklist is global)
 
         Returns:
             Dict with 'safe' boolean and optional 'reason'
         """
         try:
-            return await self.safety_layer.check(content, community_id)
+            verdict = self.safety_layer.check_prompt(content)
         except Exception as e:
-            logger.error(f"Safety check error: {e}")
-            # Fail open - allow content if safety check fails
-            return {'safe': True}
+            logger.error(
+                f"Safety check error, failing closed: "
+                f"{type(e).__name__}: {describe_db_error(e)}"
+            )
+            return {'safe': False, 'reason': 'safety_check_error'}
+        return {'safe': verdict.is_safe, 'reason': verdict.blocked_reason}
 
     def _get_cache_key(
         self,
@@ -851,7 +885,7 @@ class ResearchService:
                 return json.loads(cached)
             return None
         except Exception as e:
-            logger.error(f"Cache get error: {e}")
+            logger.error(f"Cache get error: {describe_db_error(e)}")
             return None
 
     async def _save_to_cache(
@@ -872,7 +906,7 @@ class ResearchService:
             import json
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as e:
-            logger.error(f"Cache save error: {e}")
+            logger.error(f"Cache save error: {describe_db_error(e)}")
 
     async def _check_semantic_cache(
         self,
@@ -911,7 +945,7 @@ class ResearchService:
 
             return None
         except Exception as e:
-            logger.error(f"Semantic cache check error: {e}")
+            logger.error(f"Semantic cache check error: {describe_db_error(e)}")
             return None
 
     async def _save_to_mem0(
@@ -935,7 +969,7 @@ class ResearchService:
                 metadata=metadata
             )
         except Exception as e:
-            logger.error(f"mem0 save error: {e}")
+            logger.error(f"mem0 save error: {describe_db_error(e)}")
 
     async def _get_community_context(
         self,
@@ -959,7 +993,7 @@ class ResearchService:
                 limit=5
             )
         except Exception as e:
-            logger.error(f"Get community context error: {e}")
+            logger.error(f"Get community context error: {describe_db_error(e)}")
             return []
 
     async def _get_recent_context(
@@ -991,7 +1025,7 @@ class ResearchService:
             )
             return []
         except Exception as e:
-            logger.error(f"Get recent context error: {e}")
+            logger.error(f"Get recent context error: {describe_db_error(e)}")
             return []
 
     async def _generate_ai_response(
@@ -1016,15 +1050,18 @@ class ResearchService:
             Dict with success, content, tokens_used, and optional error
         """
         try:
+            # AIProviderService.generate(prompt, system_prompt, temperature,
+            # max_tokens) -> AIResponse. community_id/user_id/context_type stay
+            # out of the provider call: it neither takes nor needs them, and
+            # user ids must not travel to the model host.
             response = await self.ai_provider.generate(
+                prompt=user_prompt,
                 system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                community_id=community_id,
-                user_id=user_id,
-                metadata={'context_type': context_type}
+                temperature=Config.OLLAMA_TEMPERATURE,
+                max_tokens=Config.OLLAMA_MAX_TOKENS
             )
 
-            if not response:
+            if not response or not response.content:
                 return {
                     'success': False,
                     'error': 'Empty response from AI provider',
@@ -1033,14 +1070,14 @@ class ResearchService:
 
             return {
                 'success': True,
-                'content': response.get('content', ''),
-                'tokens_used': response.get('tokens_used', 0)
+                'content': response.content,
+                'tokens_used': response.tokens_used
             }
 
         except Exception as e:
-            logger.error(f"AI generation error: {e}", exc_info=True)
+            logger.error(f"AI generation error: {describe_db_error(e)}")
             return {
                 'success': False,
-                'error': str(e),
+                'error': describe_db_error(e),
                 'tokens_used': 0
             }

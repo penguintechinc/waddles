@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import redis.asyncio as redis
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ class RateLimiter:
 
         except Exception as e:
             self.logger.error(
-                f"Rate limit check failed: {e}",
+                f"Rate limit check failed: {describe_db_error(e)}",
                 extra={
                     'community_id': community_id,
                     'user_id': user_id,
@@ -299,7 +300,7 @@ class RateLimiter:
 
         except Exception as e:
             self.logger.error(
-                f"Rate limit increment failed: {e}",
+                f"Rate limit increment failed: {describe_db_error(e)}",
                 extra={
                     'community_id': community_id,
                     'user_id': user_id,
@@ -377,7 +378,7 @@ class RateLimiter:
 
         except Exception as e:
             self.logger.error(
-                f"Get usage failed: {e}",
+                f"Get usage failed: {describe_db_error(e)}",
                 extra={
                     'community_id': community_id,
                     'user_id': user_id,
@@ -389,7 +390,7 @@ class RateLimiter:
                 'community_id': community_id,
                 'user_id': user_id,
                 'usage': {},
-                'error': str(e)
+                'error': describe_db_error(e)
             }
 
     async def reset_user(self, community_id: int, user_id: str) -> bool:
@@ -429,7 +430,7 @@ class RateLimiter:
 
         except Exception as e:
             self.logger.error(
-                f"Reset user failed: {e}",
+                f"Reset user failed: {describe_db_error(e)}",
                 extra={
                     'community_id': community_id,
                     'user_id': user_id,
@@ -458,7 +459,7 @@ class RateLimiter:
             return int(value) if value else 0
         except Exception as e:
             self.logger.warning(
-                f"Redis get failed, trying DB fallback: {e}"
+                f"Redis get failed, trying DB fallback: {describe_db_error(e)}"
             )
             return await self._get_count_db(key)
 
@@ -480,7 +481,7 @@ class RateLimiter:
             return count
         except Exception as e:
             self.logger.warning(
-                f"Redis increment failed, trying DB fallback: {e}"
+                f"Redis increment failed, trying DB fallback: {describe_db_error(e)}"
             )
             return await self._increment_db(key)
 
@@ -498,7 +499,7 @@ class RateLimiter:
             count = await self.redis.decr(key)
             return max(0, count)  # Don't go below 0
         except Exception as e:
-            self.logger.warning(f"Redis decrement failed: {e}")
+            self.logger.warning(f"Redis decrement failed: {describe_db_error(e)}")
             return 0
 
     async def _delete_redis(self, key: str) -> bool:
@@ -515,7 +516,7 @@ class RateLimiter:
             await self.redis.delete(key)
             return True
         except Exception as e:
-            self.logger.warning(f"Redis delete failed: {e}")
+            self.logger.warning(f"Redis delete failed: {describe_db_error(e)}")
             return False
 
     # =========================================================================
@@ -547,7 +548,7 @@ class RateLimiter:
             row = await result.fetchone()
             return row[0] if row else 0
         except Exception as e:
-            self.logger.error(f"DB get count failed: {e}")
+            self.logger.error(f"DB get count failed: {describe_db_error(e)}")
             return 0  # Fail-open
 
     async def _increment_db(self, key: str) -> int:
@@ -582,5 +583,5 @@ class RateLimiter:
             row = await result.fetchone()
             return row[0] if row else 0
         except Exception as e:
-            self.logger.error(f"DB increment failed: {e}")
+            self.logger.error(f"DB increment failed: {describe_db_error(e)}")
             return 0  # Fail-open
