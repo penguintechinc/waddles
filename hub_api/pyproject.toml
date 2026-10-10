@@ -145,7 +145,7 @@ convention = "google"
 # assert as blueprints/v2/platform.py above (`get_tenant_context` always
 # non-None on the success path for Scenario 2/4 routes).
 "blueprints/v1/analytics.py" = ["S101"]
-# Enterprise SSO (SAML/OIDC/Google, migration 0048) -- request/response DTO
+# Enterprise SSO (SAML/OIDC/Google, migration 0049) -- request/response DTO
 # field names are camelCase to match every other v1 blueprint's JSON contract
 # with `frontend/src/services/api.js`; S101 is the standard tenant_middleware
 # postcondition assert. No per-class suppression exists for N815, hence the

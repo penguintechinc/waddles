@@ -20,6 +20,11 @@ whatever the request body says -- `apply_gpc()` below. One-way on
 purpose: absence of the header means "not opted out via this mechanism",
 never "opted in" -- a missing header must never be read as consent.
 
+Preference writes MERGE, never replace (`merge_preferences()` below):
+`save_consent`/`update_preferences`/`revoke_consent` each carry only the
+keys they own, so a stored `doNotSell` opt-out (a statutory CCPA/CPRA
+right) is never reverted by an unrelated update.
+
 Uses the pydal query builder throughout (Gotcha #1, `hub_api/
 PORTING.md`) -- `save_consent()`'s select-then-branch replaces Node's
 `INSERT ... ON CONFLICT (consent_id) DO UPDATE`, the same idiom
@@ -74,6 +79,18 @@ def default_preferences() -> dict[str, Any]:
         "marketing": False,
         "doNotSell": False,
     }
+
+
+def merge_preferences(stored: dict[str, Any] | None, updates: dict[str, Any]) -> dict[str, Any]:
+    """Merge `updates` over `stored` key-by-key; keys absent from `updates` are kept.
+
+    Every write that touches the stored `preferences` object goes through
+    here so a payload that does not carry a key (`doNotSell`, any future
+    field) can never silently erase it. A CCPA/CPRA opt-out reverted by an
+    unrelated update is a statutory-rights violation, not a cosmetic bug.
+    Only a key the caller explicitly supplies is changed.
+    """
+    return {**(stored or {}), **updates}
 
 
 def _iso(value: Any) -> str | None:
@@ -161,7 +178,14 @@ async def save_consent(
     user_agent: str | None,
     version: str,
 ) -> ConsentRecord:
-    """Insert-or-update the consent record for `consent_id` (a fresh UUID if absent)."""
+    """Insert-or-update the consent record for `consent_id` (a fresh UUID if absent).
+
+    `preferences` carries only the keys the caller actually specified. On
+    update it is MERGED over the stored object (`merge_preferences`), so a
+    save that omits `doNotSell` keeps a stored CCPA opt-out; an explicit
+    `doNotSell=False` still wins (a deliberate opt-back-in). On insert the
+    omitted keys fall back to `default_preferences()`.
+    """
     final_consent_id = consent_id or str(uuid4())
     now = datetime.now(UTC)
     expires_at = now + timedelta(days=365)
@@ -171,7 +195,7 @@ async def save_consent(
         await async_dal.update_async(
             dal.cookie_consent.consent_id == final_consent_id,
             user_id=user_id,
-            preferences=preferences,
+            preferences=merge_preferences(dict(existing[0].preferences or {}), preferences),
             updated_at=now,
         )
     else:
@@ -179,7 +203,7 @@ async def save_consent(
             dal.cookie_consent,
             user_id=user_id,
             consent_id=final_consent_id,
-            preferences=preferences,
+            preferences=merge_preferences(default_preferences(), preferences),
             consent_version=version,
             consent_method=consent_method,
             ip_address=ip_address,
@@ -218,15 +242,15 @@ async def update_preferences(
 ) -> ConsentRecord:
     """Update specific consent categories for the authenticated user (own record only).
 
-    NOTE (pre-existing Node gap, ported faithfully, not introduced here):
-    `preferences` is `{necessary, functional, analytics, marketing}` --
-    `updatePreferences()`'s Node controller never carries `doNotSell`
-    through, so a full-object `SET preferences = $1` (this port's
-    equivalent: `update_async(..., preferences=preferences)`) silently
-    drops a caller's CCPA opt-out from storage the next time this
-    endpoint is used. Byte-faithful port, same "document it, don't
-    silently invent a fix" precedent as `hub_api/PORTING.md` Gotcha #4;
-    flagged here for product/compliance review, not corrected in this PR.
+    `preferences` is MERGED over the stored object key-by-key
+    (`merge_preferences`), never written as a whole-object replacement:
+    keys the payload does not carry -- notably the CCPA/CPRA `doNotSell`
+    opt-out (statutory right), and any other stored key -- are preserved.
+    The Node original's full-object `SET preferences = $1` silently
+    dropped `doNotSell` the next time this endpoint was used; this port
+    deliberately does NOT reproduce that defect. A `Sec-GPC` opt-out is
+    applied by the caller (`apply_gpc`) before this runs, so a GPC-forced
+    `doNotSell=True` is carried in `preferences` and persisted here.
     """
     existing = await async_dal.select_async(
         dal(dal.cookie_consent.user_id == user_id),
@@ -237,16 +261,17 @@ async def update_preferences(
         raise not_found("No consent record found for user")
     row = existing[0]
     previous = dict(row.preferences or {})
+    merged = merge_preferences(previous, preferences)
     consent_id = row.consent_id
     version = row.consent_version
     now = datetime.now(UTC)
 
     await async_dal.update_async(
-        dal.cookie_consent.user_id == user_id, preferences=preferences, updated_at=now
+        dal.cookie_consent.user_id == user_id, preferences=merged, updated_at=now
     )
 
     for category in _AUDIT_CATEGORIES:
-        if previous.get(category) != preferences.get(category):
+        if previous.get(category) != merged.get(category):
             await log_audit_event(
                 async_dal,
                 dal,
@@ -255,7 +280,7 @@ async def update_preferences(
                 action="UPDATE",
                 category=category,
                 previous_value=previous.get(category),
-                new_value=preferences.get(category),
+                new_value=merged.get(category),
                 version=version,
             )
 
@@ -273,7 +298,14 @@ async def update_preferences(
 
 
 async def revoke_consent(async_dal: Any, dal: Any, *, user_id: int) -> ConsentRecord:
-    """Revoke all non-essential cookies for the authenticated user (own record only)."""
+    """Revoke all non-essential cookies for the authenticated user (own record only).
+
+    Only the cookie categories are reset -- the revoked categories are
+    MERGED over the stored object (`merge_preferences`), so a CCPA/CPRA
+    `doNotSell` opt-out (and any other stored key) survives a revoke.
+    Revoking cookies must never silently re-enable the sale/sharing of a
+    user's data.
+    """
     existing = await async_dal.select_async(
         dal(dal.cookie_consent.user_id == user_id),
         orderby=~dal.cookie_consent.updated_at,
@@ -284,12 +316,10 @@ async def revoke_consent(async_dal: Any, dal: Any, *, user_id: int) -> ConsentRe
     consent_id = existing[0].consent_id
     version = existing[0].consent_version
     now = datetime.now(UTC)
-    revoked_preferences = {
-        "necessary": True,
-        "functional": False,
-        "analytics": False,
-        "marketing": False,
-    }
+    revoked_preferences = merge_preferences(
+        dict(existing[0].preferences or {}),
+        {"necessary": True, "functional": False, "analytics": False, "marketing": False},
+    )
 
     await async_dal.update_async(
         dal.cookie_consent.user_id == user_id, preferences=revoked_preferences, updated_at=now

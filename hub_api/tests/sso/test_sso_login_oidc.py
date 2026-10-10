@@ -508,13 +508,13 @@ class TestOperationalFailures:
         assert response.status_code == 502
 
     async def test_missing_schema_is_a_loud_503_not_a_500(self, kit: Kit) -> None:
-        # Simulate hub-api running ahead of migration 0048: the table is not reflected.
+        # Simulate hub-api running ahead of migration 0049: the table is not reflected.
         import types
 
         kit.app.config["install_dal"] = types.SimpleNamespace()  # no SSO tables reflected
         response = await kit.client.get("/api/v1/tenant/sso/connections", headers=kit.headers())
         assert response.status_code == 503
-        assert "0048_sso_connections" in (await response.get_json())["error"]["message"]
+        assert "0049_sso_connections" in (await response.get_json())["error"]["message"]
 
 
 class TestConcurrency:

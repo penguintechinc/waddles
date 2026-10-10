@@ -21,6 +21,7 @@ from typing import Any, Optional
 import asyncpg
 import redis.asyncio as aioredis
 import httpx
+from flask_core.safe_logging import log_exc_safe
 
 from .oauth_handlers import OAuthRefreshError, get_handler
 from .token_crypto import decrypt_if_needed, encrypt_value
@@ -147,8 +148,10 @@ class RefreshService:
                 if count > 0:
                     logger.info("Refresh cycle: %d tokens refreshed", count)
                 self._last_cycle = datetime.now(timezone.utc)
-            except Exception:
-                logger.exception("Error in refresh cycle")
+            except Exception as exc:  # noqa: BLE001 - poll loop must survive any cycle failure
+                # Redacted: `logger.exception` would render the exception text, which for a
+                # failed DB/HTTP step can embed bound values or request bodies.
+                log_exc_safe(logger, logging.ERROR, "Error in refresh cycle", exc)
                 self._total_errors += 1
 
             await asyncio.sleep(self._poll_interval)
@@ -265,21 +268,21 @@ class RefreshService:
             )
             return new_tokens
         except OAuthRefreshError as e:
+            # OAuthRefreshError messages are built from describe_exc() -- safe to log.
             logger.warning(
                 "Token refresh failed for %s id=%s: %s",
                 platform, integration.get("id"), str(e),
             )
             return None
         except ValueError as e:
-            logger.error(
-                "Unsupported platform %s: %s",
-                platform, str(e),
+            log_exc_safe(
+                logger, logging.ERROR, "Unsupported platform", e, platform=platform,
             )
             return None
-        except Exception as e:
-            logger.error(
-                "Unexpected error refreshing %s token id=%s: %s",
-                platform, integration.get("id"), str(e),
+        except Exception as e:  # noqa: BLE001 - any handler failure is a failed refresh, not a crash
+            log_exc_safe(
+                logger, logging.ERROR, "Unexpected error refreshing token", e,
+                platform=platform, id=integration.get("id"),
             )
             return None
 

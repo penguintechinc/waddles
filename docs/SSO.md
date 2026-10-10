@@ -1,7 +1,7 @@
 # Enterprise SSO (SAML 2.0, OIDC, Google)
 
 Single sign-on for Waddles tenants, implemented in **hub-api** (`hub_api/services/sso_*.py`,
-`hub_api/blueprints/v1/sso.py`, migration `0048_sso_connections`).
+`hub_api/blueprints/v1/sso.py`, migration `0049_sso_connections`).
 
 | Protocol | Tier | Feature flag (PostHog + license tier, both must pass) |
 |---|---|---|
@@ -41,7 +41,7 @@ no admin scopes).
 
 ## Deploying
 
-1. **Migrate.** `0048_sso_connections` creates `sso_connections` and `sso_identities` (hub-api-only
+1. **Migrate.** `0049_sso_connections` creates `sso_connections` and `sso_identities` (hub-api-only
    grants in `config/postgres/rbac-matrix.yaml`). Run the normal `db-migrate` hook.
 2. **Key.** hub-api needs `SSO_ENCRYPTION_KEY` (64 lowercase hex chars). It derives, via
    HKDF-SHA256, (a) the AES-256-GCM key that encrypts stored client secrets (AAD = the

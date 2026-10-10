@@ -476,11 +476,11 @@ class TestStaticGuards:
 
 
 class TestMigrationParity:
-    """The sqlite test mirror must match migration 0048 column for column."""
+    """The sqlite test mirror must match migration 0049 column for column."""
 
     @staticmethod
     def _migration_columns(table: str) -> set[str]:
-        sql = (HUB_API.parent / "alembic/versions/0048_sso_connections.py").read_text()
+        sql = (HUB_API.parent / "alembic/versions/0049_sso_connections.py").read_text()
         block = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \((.*?)\n        \)", sql, re.S)
         assert block, table
         cols: set[str] = set()

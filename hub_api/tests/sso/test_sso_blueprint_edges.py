@@ -17,7 +17,7 @@ ADMIN_URL = "/api/v1/tenant/sso/connections"
 
 @pytest.fixture
 def no_schema(kit: Kit) -> Kit:
-    """hub-api running ahead of migration 0048: no SSO tables are reflected."""
+    """hub-api running ahead of migration 0049: no SSO tables are reflected."""
     kit.app.config["install_dal"] = types.SimpleNamespace()
     return kit
 
@@ -37,7 +37,7 @@ class TestSchemaSkewIsALoud503EverywhereNeverA500:
         for r in responses:
             body = await r.get_json()
             assert body["error"]["code"] == "SSO_UNAVAILABLE"
-            assert "0048_sso_connections" in body["error"]["message"]
+            assert "0049_sso_connections" in body["error"]["message"]
 
     async def test_public_routes(self, no_schema: Kit) -> None:
         kit = no_schema

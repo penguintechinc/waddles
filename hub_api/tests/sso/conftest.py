@@ -189,7 +189,7 @@ def entitlements() -> Iterator[Entitlements]:
 
 
 def build_sso_metadata() -> MetaData:
-    """SQLAlchemy Core mirror of migration 0048 (sqlite-compatible), plus `audit_log`."""
+    """SQLAlchemy Core mirror of migration 0049 (sqlite-compatible), plus `audit_log`."""
     metadata = MetaData()
     Table(
         "sso_connections",

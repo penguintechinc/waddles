@@ -209,7 +209,7 @@ def _table(ctx: SsoContext, name: str) -> Any:
     if table is None:
         raise SsoConfigError(
             "sso_schema_missing",
-            f"table {name!r} is not present -- run the 0048_sso_connections migration",
+            f"table {name!r} is not present -- run the 0049_sso_connections migration",
         )
     return table
 

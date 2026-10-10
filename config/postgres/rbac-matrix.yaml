@@ -744,7 +744,7 @@ grants:
     table: community_connection_access
     privileges: [SELECT, INSERT, UPDATE, DELETE]
 
-  # 0048_sso_connections: hub-api-owned control-plane tables for enterprise SSO.
+  # 0049_sso_connections: hub-api-owned control-plane tables for enterprise SSO.
   # sso_identities.subject may be an email (SAML NameID) -- PII, hub_api only;
   # every other role gets an explicit empty row (spec D28).
   - role: hub_api

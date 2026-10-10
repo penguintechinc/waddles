@@ -29,8 +29,8 @@ Login never adopts an existing `hub_users` row by email -- see
 `sso_service.complete_login` -- so there is deliberately no email column
 here.
 
-Revision ID: 0048_sso_connections
-Revises: 0047_builtin_handler_paths
+Revision ID: 0049_sso_connections
+Revises: 0048_identity_forged_uuid
 Create Date: 2026-10-10
 """
 
@@ -43,8 +43,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0048_sso_connections"
-down_revision = "0047_builtin_handler_paths"
+revision = "0049_sso_connections"
+down_revision = "0048_identity_forged_uuid"
 branch_labels = None
 depends_on = None
 
@@ -53,9 +53,9 @@ _MATRIX_TABLES = frozenset({"sso_connections", "sso_identities"})
 
 
 def _load_matrix_module():  # type: ignore[no-untyped-def]
-    spec = importlib.util.spec_from_file_location("waddles_rbac_matrix_0048", _MATRIX_MODULE_PATH)
+    spec = importlib.util.spec_from_file_location("waddles_rbac_matrix_0049", _MATRIX_MODULE_PATH)
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    sys.modules["waddles_rbac_matrix_0048"] = module
+    sys.modules["waddles_rbac_matrix_0049"] = module
     spec.loader.exec_module(module)  # type: ignore[union-attr]
     return module
 

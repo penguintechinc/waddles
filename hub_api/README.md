@@ -100,7 +100,7 @@ Tier-gated (`waddles.auth.sso_saml` Enterprise, `waddles.auth.sso_google` Profes
 Full deployment, configuration, security model and troubleshooting guide:
 [`docs/SSO.md`](../docs/SSO.md). Tests live in `tests/sso/` (OIDC/SAML run against protocol-faithful fake
 IdPs -- only the IdP socket and Redis are replaced) plus a real-Postgres migration test in
-`alembic/tests/test_0048_sso_connections.py`; run with
+`alembic/tests/test_0049_sso_connections.py`; run with
 `python3 -m pytest tests/sso -q --cov=services --cov=blueprints.v1.sso`.
 
 ## OpenAPI (two documents, per backend.md)

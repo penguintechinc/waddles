@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0048_sso_connections (enterprise SSO connections + identities).
+"""Real-Postgres tests for 0049_sso_connections (enterprise SSO connections + identities).
 
 Proves the migration lands on a real Postgres 17 (`pg_docker.migrated_postgres`, which
 replays 0020 through head), round-trips upgrade -> downgrade -> upgrade, and enforces the
@@ -58,7 +58,7 @@ def pg_db() -> Iterator[PgTestDatabase]:
     """One real Postgres 17 container migrated to head, shared by the non-round-trip tests."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0048-sso-connections") as db:
+    with migrated_postgres("0049-sso-connections") as db:
         yield db
 
 
@@ -225,8 +225,8 @@ class TestPrivileges:
 @requires_docker
 class TestRoundTrip:
     def test_downgrade_then_upgrade(self) -> None:
-        with migrated_postgres("0048-sso-roundtrip") as db:
-            alembic_cli("downgrade", "0047_builtin_handler_paths", dsn=db.dsn)
+        with migrated_postgres("0049-sso-roundtrip") as db:
+            alembic_cli("downgrade", "0048_identity_forged_uuid", dsn=db.dsn)
             conn = _connect(db)
             try:
                 with conn.cursor() as cur:
