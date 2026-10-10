@@ -77,6 +77,7 @@ use crate::identity::{
     self, IdentityError, IdentityScope, IdentityWiring, InvocationIdentity, MAX_MENTION_TOKEN_LEN,
 };
 use crate::license::FeatureGate;
+use crate::stage_metrics::{self, StageMetrics};
 
 /// The durable rolling-24h absolute-delta caps the store enforces for
 /// `reputation.community.write` -- the catalog's own `per_user_daily_abs_max`
@@ -427,6 +428,11 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// event it delivered, never from guest input. Paired with [`Self::identity`]
     /// by [`Self::with_identity`].
     invocation_identity: Option<Arc<InvocationIdentity>>,
+    /// The OTel instruments every `host-call` served by this value is timed
+    /// into (`waddles_host_call_latency_seconds`). Always the process-wide
+    /// set in production; tests swap it via `with_stage_metrics` so they can
+    /// read back exactly what this call emitted.
+    stage_metrics: Arc<StageMetrics>,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -468,7 +474,17 @@ impl<K: KvBackend> StageCapabilities<K> {
             economy: None,
             identity: None,
             invocation_identity: None,
+            stage_metrics: stage_metrics::stage_metrics(),
         }
+    }
+
+    /// Test seam: routes this value's host-call timings into `metrics`
+    /// instead of the process-wide set, so an assertion sees only the calls
+    /// made through this instance.
+    #[cfg(test)]
+    pub(crate) fn with_stage_metrics(mut self, metrics: Arc<StageMetrics>) -> Self {
+        self.stage_metrics = metrics;
+        self
     }
 
     /// Builds the gate's host-only [`bundle_capability_gate::InvokeScope`]
@@ -1538,93 +1554,109 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
         call: HostCallBody,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, HostResultError>> + Send + 'a>> {
         Box::pin(async move {
-            match call.capability {
-                CapabilityKind::Clock => self.handle_clock(&call.op),
-                CapabilityKind::Context => self.handle_context(),
-                CapabilityKind::Log => self.handle_log(&call.args),
-                CapabilityKind::Kv => self.handle_kv(&call).await,
-                // Gate call FIRST (spec SS5, PR #433): the classified
-                // `NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp`
-                // permission must be authorized before the request ever
-                // reaches the shared `EgressGuard` (module doc) -- a
-                // granted call still passes through the guard's own
-                // allowlist/DNS-pinning/redirect-recheck/SSRF checks
-                // (`self.handle_http`), which are enforced regardless of
-                // grant status.
-                CapabilityKind::Http => {
-                    let host = extract_http_host(&call.args).ok_or_else(|| {
-                        denied("invalid_args", "http.send requires a 'url' string")
-                    })?;
-                    self.gate
-                        .authorize(
-                            &self.gate_scope(),
-                            classify_net_http_permission(&host),
-                            ResourceRef::AppScoped(AppScopedResource::None),
-                        )
-                        .map_err(denied_from_gate)?;
-                    self.handle_http(&call.args).await
-                }
-                // `db` is wired to `bundle_host_db::DbHost` (PR #498) --
-                // `handle_db` itself gate-checks FIRST (spec SS5) before
-                // consulting its own feature-flag/wiring state.
-                //
-                // `reputation.*` ops (issue #726) ride the same wire kind
-                // (`CapabilityKind` is closed in penguin-bundle-host) and are
-                // dispatched on the op prefix BEFORE the `storage.tables`
-                // path: they carry their own gate permission
-                // (`reputation.read`/`reputation.community.write`), never
-                // `storage.tables`.
-                CapabilityKind::Db if call.op.starts_with("reputation.") => {
-                    self.handle_reputation(&call).await
-                }
-                // `economy.*` ops (issue #714) likewise: own gate permissions
-                // (`economy.read`/`economy.wager`/`economy.transfer`), own
-                // handler, never the `storage.tables` path.
-                CapabilityKind::Db if call.op.starts_with("economy.") => {
-                    self.handle_economy(&call).await
-                }
-                // `identity.*` ops likewise: own gate permission
-                // (`identity.resolve`), own handler, never the
-                // `storage.tables` path.
-                CapabilityKind::Db if call.op.starts_with("identity.") => {
-                    self.handle_identity(&call).await
-                }
-                CapabilityKind::Db => self.handle_db(&call).await,
-                // `enabled` is wired to a real `penguin_licensing::
-                // LicenseClient` (`crate::license::resolve_flag`) -- see
-                // that module's doc for the fallback semantics (live ->
-                // cached -> caller default, never an error). `tier` is
-                // not wired in this landing. `handle_flags` itself
-                // gate-checks FIRST (spec SS5).
-                CapabilityKind::Flags => self.handle_flags(&call).await,
-                // Spec §6.5: "Capability: granted only to action-stage
-                // bundles" -- never granted to a process-stage bundle at
-                // all. The gate is still consulted first for uniform audit
-                // (module doc), but this arm never trusts a `Granted`
-                // outcome alone: even if a grant somehow existed (a
-                // misconfiguration this stage's own manifest/linker should
-                // never produce), the hard denial below still fires --
-                // belt-and-suspenders against ever running relay
-                // process-side.
-                CapabilityKind::Relay => {
-                    let provider = call
-                        .args
-                        .get("provider")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let _ = self.gate.authorize(
+            let (capability, op) = stage_metrics::host_call_labels(call.capability, &call.op);
+            let started = std::time::Instant::now();
+            let outcome = self.dispatch(call).await;
+            let result =
+                stage_metrics::host_call_result(outcome.as_ref().err().map(|e| e.code.as_str()));
+            self.stage_metrics
+                .record_host_call(capability, op, result, started.elapsed());
+            outcome
+        })
+    }
+}
+
+impl<K: KvBackend> StageCapabilities<K> {
+    /// Routes one `host-call` to its capability arm. Split out of
+    /// [`CapabilityHandler::handle`] so that wrapper can time the whole call
+    /// (early `?` returns included) and label its outcome without every arm
+    /// touching telemetry; routing and behavior are unchanged.
+    async fn dispatch(&self, call: HostCallBody) -> Result<serde_json::Value, HostResultError> {
+        match call.capability {
+            CapabilityKind::Clock => self.handle_clock(&call.op),
+            CapabilityKind::Context => self.handle_context(),
+            CapabilityKind::Log => self.handle_log(&call.args),
+            CapabilityKind::Kv => self.handle_kv(&call).await,
+            // Gate call FIRST (spec SS5, PR #433): the classified
+            // `NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp`
+            // permission must be authorized before the request ever
+            // reaches the shared `EgressGuard` (module doc) -- a
+            // granted call still passes through the guard's own
+            // allowlist/DNS-pinning/redirect-recheck/SSRF checks
+            // (`self.handle_http`), which are enforced regardless of
+            // grant status.
+            CapabilityKind::Http => {
+                let host = extract_http_host(&call.args)
+                    .ok_or_else(|| denied("invalid_args", "http.send requires a 'url' string"))?;
+                self.gate
+                    .authorize(
                         &self.gate_scope(),
-                        PermissionId::ChatSend(provider),
+                        classify_net_http_permission(&host),
                         ResourceRef::AppScoped(AppScopedResource::None),
-                    );
-                    Err(denied(
+                    )
+                    .map_err(denied_from_gate)?;
+                self.handle_http(&call.args).await
+            }
+            // `db` is wired to `bundle_host_db::DbHost` (PR #498) --
+            // `handle_db` itself gate-checks FIRST (spec SS5) before
+            // consulting its own feature-flag/wiring state.
+            //
+            // `reputation.*` ops (issue #726) ride the same wire kind
+            // (`CapabilityKind` is closed in penguin-bundle-host) and are
+            // dispatched on the op prefix BEFORE the `storage.tables`
+            // path: they carry their own gate permission
+            // (`reputation.read`/`reputation.community.write`), never
+            // `storage.tables`.
+            CapabilityKind::Db if call.op.starts_with("reputation.") => {
+                self.handle_reputation(&call).await
+            }
+            // `economy.*` ops (issue #714) likewise: own gate permissions
+            // (`economy.read`/`economy.wager`/`economy.transfer`), own
+            // handler, never the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("economy.") => {
+                self.handle_economy(&call).await
+            }
+            // `identity.*` ops likewise: own gate permission
+            // (`identity.resolve`), own handler, never the
+            // `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("identity.") => {
+                self.handle_identity(&call).await
+            }
+            CapabilityKind::Db => self.handle_db(&call).await,
+            // `enabled` is wired to a real `penguin_licensing::
+            // LicenseClient` (`crate::license::resolve_flag`) -- see
+            // that module's doc for the fallback semantics (live ->
+            // cached -> caller default, never an error). `tier` is
+            // not wired in this landing. `handle_flags` itself
+            // gate-checks FIRST (spec SS5).
+            CapabilityKind::Flags => self.handle_flags(&call).await,
+            // Spec §6.5: "Capability: granted only to action-stage
+            // bundles" -- never granted to a process-stage bundle at
+            // all. The gate is still consulted first for uniform audit
+            // (module doc), but this arm never trusts a `Granted`
+            // outcome alone: even if a grant somehow existed (a
+            // misconfiguration this stage's own manifest/linker should
+            // never produce), the hard denial below still fires --
+            // belt-and-suspenders against ever running relay
+            // process-side.
+            CapabilityKind::Relay => {
+                let provider = call
+                    .args
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let _ = self.gate.authorize(
+                    &self.gate_scope(),
+                    PermissionId::ChatSend(provider),
+                    ResourceRef::AppScoped(AppScopedResource::None),
+                );
+                Err(denied(
                         "not_granted",
                         "relay is an action-stage-only capability, never granted to a process-stage bundle",
                     ))
-                }
             }
-        })
+        }
     }
 }
 
@@ -2430,6 +2462,109 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "unknown_op");
+    }
+
+    /// Builds an isolated OTel harness plus a `StageMetrics` on it, so a
+    /// test reads back exactly the host calls made through the capability
+    /// set it injects the metrics into.
+    fn isolated_metrics() -> (
+        crate::stage_metrics::test_support::Harness,
+        Arc<StageMetrics>,
+    ) {
+        let harness = crate::stage_metrics::test_support::Harness::new();
+        let metrics = Arc::new(StageMetrics::new(&harness.meter()));
+        (harness, metrics)
+    }
+
+    #[tokio::test]
+    async fn host_calls_are_timed_per_capability_op_and_result() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps().with_stage_metrics(metrics);
+
+        c.handle(call(
+            CapabilityKind::Clock,
+            "now-rfc3339",
+            serde_json::json!({}),
+        ))
+        .await
+        .expect("clock succeeds");
+        c.handle(call(
+            CapabilityKind::Clock,
+            "now-rfc3339",
+            serde_json::json!({}),
+        ))
+        .await
+        .expect("clock succeeds");
+        c.handle(call(CapabilityKind::Context, "get", serde_json::json!({})))
+            .await
+            .expect("context succeeds");
+        // An unknown clock op is an operational error, not a policy denial.
+        c.handle(call(CapabilityKind::Clock, "bogus", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        // `relay` is hard-denied on the process stage -> a policy denial.
+        c.handle(call(CapabilityKind::Relay, "send", serde_json::json!({})))
+            .await
+            .unwrap_err();
+
+        let name = "waddles_host_call_latency_seconds";
+        let count = |capability: &str, op: &str, result: &str| {
+            h.count(
+                name,
+                &[
+                    ("stage", "process"),
+                    ("capability", capability),
+                    ("op", op),
+                    ("result", result),
+                ],
+            )
+        };
+        assert_eq!(count("clock", "now-rfc3339", "ok"), 2.0);
+        assert_eq!(count("context", "get", "ok"), 1.0);
+        assert_eq!(count("clock", "other", "error"), 1.0);
+        assert_eq!(count("relay", "send", "denied"), 1.0);
+        let timed = h.last(name, &[("capability", "clock"), ("op", "now-rfc3339")]);
+        assert!(timed.expect("series exported").sum >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_gate_denial_is_labeled_denied_not_error() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps_denied().with_stage_metrics(metrics);
+        c.handle(call(
+            CapabilityKind::Clock,
+            "now-rfc3339",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(
+            h.count(
+                "waddles_host_call_latency_seconds",
+                &[("capability", "clock"), ("result", "denied")]
+            ),
+            1.0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hostile_op_string_never_becomes_a_label_value() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps().with_stage_metrics(metrics);
+        for i in 0..20 {
+            let hostile = format!("evil-op-{i}; drop table users");
+            c.handle(call(CapabilityKind::Kv, &hostile, serde_json::json!({})))
+                .await
+                .unwrap_err();
+        }
+        let points: Vec<_> = h
+            .points()
+            .into_iter()
+            .filter(|p| p.name == "waddles_host_call_latency")
+            .collect();
+        assert_eq!(points.len(), 1, "20 hostile ops must fold into one series");
+        assert_eq!(points[0].attrs.get("op").map(String::as_str), Some("other"));
+        assert_eq!(points[0].value, 20.0);
     }
 
     #[tokio::test]

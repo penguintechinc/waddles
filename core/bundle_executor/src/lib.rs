@@ -37,8 +37,10 @@ pub mod heartbeat;
 pub mod host;
 pub mod invoke;
 pub mod manifest;
+pub mod metrics;
 pub mod probe;
 pub mod signing;
+pub mod telemetry;
 pub mod tls;
 pub mod wire;
 
@@ -143,6 +145,13 @@ pub async fn run() -> Result<(), ExecutorError> {
     cfg.validate_host_api_tls()?;
 
     init_telemetry();
+    // Metrics pipeline (OTLP export only when `OTEL_EXPORTER_OTLP_ENDPOINT` is
+    // set -- see `crate::telemetry`). Held for the life of `run` so the final
+    // export interval is flushed on an orderly stop, and built strictly
+    // BEFORE the first `executor_metrics()` call so the instruments bind to
+    // the provider it installs rather than the no-op default.
+    let _metrics_guard = telemetry::init_metrics(SERVICE_NAME);
+    let _ = metrics::executor_metrics();
 
     // Marks "the long-running process started trying to connect now" --
     // `crate::probe::check_session`'s startup-grace window is measured
@@ -217,7 +226,14 @@ async fn connect_and_serve<S: ComponentSource>(
     heartbeat_metrics: Arc<HeartbeatMetrics>,
     disconnected_at: Option<Instant>,
 ) -> Result<(), ExecutorError> {
-    let io = tls::dial_stage(cfg).await?;
+    let metrics = metrics::executor_metrics();
+    let io = match tls::dial_stage(cfg).await {
+        Ok(io) => io,
+        Err(err) => {
+            metrics.record_connection_attempt("failed");
+            return Err(err);
+        }
+    };
     let peer = io
         .get_ref()
         .0
@@ -232,13 +248,23 @@ async fn connect_and_serve<S: ComponentSource>(
     );
     let probe_file = cfg.executor_probe_file.clone();
     let on_connected_peer = peer.clone();
+    // Set once, when the hello/hello-ok handshake completes: distinguishes a
+    // session that was established (and has a length) from a dial that never
+    // got that far (a failed attempt).
+    let connected_at: Arc<std::sync::OnceLock<Instant>> = Arc::new(std::sync::OnceLock::new());
+    let on_connected_metrics = Arc::clone(&metrics);
+    let on_connected_at = Arc::clone(&connected_at);
     let heartbeat = Heartbeat {
         cfg: heartbeat_cfg,
         metrics: heartbeat_metrics,
         probe_file: probe_file.clone(),
         probe_grace: std::time::Duration::from_secs(cfg.executor_grace_secs),
         on_connected: Some(Box::new(move || {
+            on_connected_metrics.record_connection_attempt("connected");
+            on_connected_metrics.set_connection_up(true);
+            let _ = on_connected_at.set(Instant::now());
             if let Some(since) = disconnected_at {
+                on_connected_metrics.record_outage(since.elapsed());
                 info!(
                     peer = %on_connected_peer,
                     attempt,
@@ -251,7 +277,14 @@ async fn connect_and_serve<S: ComponentSource>(
             }
         })),
     };
-    wire::run_connection(io, hello, Arc::clone(executor), &peer, heartbeat).await
+    let outcome = wire::run_connection(io, hello, Arc::clone(executor), &peer, heartbeat).await;
+    metrics.set_connection_up(false);
+    match connected_at.get() {
+        Some(connected) => metrics.record_session(connected.elapsed()),
+        // The dial succeeded but the handshake never completed.
+        None => metrics.record_connection_attempt("failed"),
+    }
+    outcome
 }
 
 /// Installs this binary's `tracing` subscriber: JSON to stdout, level
@@ -505,6 +538,159 @@ mod tests {
         .await?;
         stage_task.await?;
         let _ = std::fs::remove_file(&ca_path);
+        Ok(())
+    }
+
+    /// The OTel series this module's connect tests touch are label-light and
+    /// shared with every other test in the process, so they assert on deltas
+    /// against the process-wide harness.
+    fn shared_count(name: &str, filter: &[(&str, &str)]) -> f64 {
+        crate::metrics::test_support::shared().count(name, filter)
+    }
+
+    /// A dial that never reaches a stage must be counted as a failed attempt
+    /// (not silently skipped) and must not mark the session up.
+    #[tokio::test]
+    async fn a_failed_dial_is_counted_as_a_failed_connection_attempt() -> Result<(), ExecutorError>
+    {
+        // Bind then drop: a port nothing is listening on.
+        let addr = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .map_err(ExecutorError::Io)?;
+            listener.local_addr().map_err(ExecutorError::Io)?
+        };
+        let cfg = test_config_for(addr);
+        let executor = Arc::new(Executor::new(&cfg, UnimplementedBucketSource)?);
+        let before = shared_count(
+            "waddles_executor_connection_attempts_total",
+            &[("result", "failed")],
+        );
+
+        let outcome = connect_and_serve(
+            &cfg,
+            &executor,
+            1,
+            crate::heartbeat::HeartbeatConfig::disabled(),
+            Arc::new(crate::heartbeat::HeartbeatMetrics::default()),
+            None,
+        )
+        .await;
+
+        assert!(outcome.is_err(), "nothing is listening, the dial must fail");
+        assert!(
+            shared_count(
+                "waddles_executor_connection_attempts_total",
+                &[("result", "failed")]
+            ) >= before + 1.0
+        );
+        Ok(())
+    }
+
+    /// A full session against a local TLS stage: the handshake is counted as a
+    /// connected attempt, the prior outage is recorded, the session length is
+    /// recorded when it ends. (The up-gauge's down transition is asserted in
+    /// `tests/metrics_emission.rs`, which owns its process; here the gauge is
+    /// shared with a concurrently running connect test.)
+    #[tokio::test]
+    async fn a_completed_session_records_attempt_outage_and_session(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloLimits, HelloOkBody, Message, ShutdownBody,
+        };
+
+        let ca_key = rcgen::KeyPair::generate()?;
+        let ca_params = rcgen::CertificateParams::new(vec!["bundle-executor-test-ca".to_string()])?;
+        let ca_cert = ca_params.self_signed(&ca_key)?;
+        let issuer = rcgen::Issuer::from_params(&ca_params, ca_key);
+        let server_key = rcgen::KeyPair::generate()?;
+        let server_params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()])?;
+        let server_cert = server_params.signed_by(&server_key, &issuer)?;
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls_pki_types::CertificateDer::from(
+                    server_cert.der().to_vec(),
+                )],
+                rustls_pki_types::PrivateKeyDer::try_from(server_key.serialize_der())
+                    .map_err(|e| e.to_string())?,
+            )?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let ca_path = std::env::temp_dir().join(format!(
+            "bundle-executor-test-{}-session-metrics-ca.pem",
+            std::process::id()
+        ));
+        std::fs::write(&ca_path, ca_cert.pem())?;
+
+        let stage_task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("accept");
+            let mut tls = acceptor.accept(tcp).await.expect("server tls handshake");
+            let hello = read_frame(&mut tls).await.expect("hello");
+            write_frame(
+                &mut tls,
+                &Frame::new(
+                    hello.id,
+                    Message::HelloOk(HelloOkBody {
+                        stage: "svc-process".to_string(),
+                        protocol_version: 1,
+                        limits: HelloLimits {
+                            call_timeout_ms: 2000,
+                            memory_mb: 64,
+                            max_concurrent_calls: 32,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .expect("write hello-ok");
+            write_frame(
+                &mut tls,
+                &Frame::new(1, Message::Shutdown(ShutdownBody { grace_ms: 10 })),
+            )
+            .await
+            .expect("write shutdown");
+        });
+
+        let mut cfg = test_config_for(addr);
+        cfg.host_api_ca_file = Some(ca_path.clone());
+        let executor = Arc::new(Executor::new(&cfg, UnimplementedBucketSource)?);
+        let connected_before = shared_count(
+            "waddles_executor_connection_attempts_total",
+            &[("result", "connected")],
+        );
+        let sessions_before = shared_count("waddles_executor_session_seconds", &[]);
+        let outages_before = shared_count("waddles_executor_outage_seconds", &[]);
+
+        connect_and_serve(
+            &cfg,
+            &executor,
+            2,
+            crate::heartbeat::HeartbeatConfig::disabled(),
+            Arc::new(crate::heartbeat::HeartbeatMetrics::default()),
+            Some(Instant::now() - std::time::Duration::from_secs(5)),
+        )
+        .await?;
+        stage_task.await?;
+        let _ = std::fs::remove_file(&ca_path);
+
+        assert!(
+            shared_count(
+                "waddles_executor_connection_attempts_total",
+                &[("result", "connected")]
+            ) >= connected_before + 1.0
+        );
+        assert!(shared_count("waddles_executor_session_seconds", &[]) >= sessions_before + 1.0);
+        assert!(shared_count("waddles_executor_outage_seconds", &[]) >= outages_before + 1.0);
+        let outage = crate::metrics::test_support::shared()
+            .last("waddles_executor_outage_seconds", &[])
+            .expect("outage exported");
+        assert!(
+            outage.sum >= 5.0,
+            "the injected 5s outage must be reflected in the histogram sum, got {}",
+            outage.sum
+        );
         Ok(())
     }
 }

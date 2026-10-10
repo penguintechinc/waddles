@@ -65,8 +65,8 @@ groups:
 
       # Sum of every capability / quota / egress denial counter. Each term falls back to 0 so one
       # absent counter (service not deployed, nothing denied yet) never blanks the whole series.
-      # waddles_bundle_capability_denied_total is a `metrics`-facade counter with no recorder wired in
-      # svc-process/svc-action yet; it contributes 0 until one is installed.
+      # waddles_bundle_capability_denied_total is the central gate's audit counter (a `metrics`-facade
+      # counter that svc-process/svc-action now export through an OTel-backed recorder).
       - record: waddles:bundle_capability_denials:rate5m
         expr: >-
           (sum(rate(waddles_bundle_kv_authorize_denied_total[5m])) or vector(0))
