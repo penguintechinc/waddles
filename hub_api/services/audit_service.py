@@ -244,7 +244,7 @@ class AuditService:
         if table is None:
             raise AuditWriteError(
                 f"table {TABLE_NAME!r} is not present -- run the alembic migration "
-                "0048_audit_events_hash_chain before enabling the audit feature"
+                "0053_audit_events_hash_chain before enabling the audit feature"
             )
         return table
 

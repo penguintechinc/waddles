@@ -324,7 +324,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # rather than replacing it.
         install_dal = await build_install_dal(cfg.database_url, pool_size=cfg.db_pool_size)
         app.config["install_dal"] = install_dal
-        # Tamper-evident audit service on the same AsyncDB (migration 0048's `audit_events`).
+        # Tamper-evident audit service on the same AsyncDB (migration 0053's `audit_events`).
         # Published under the key `services/audit_http.py` reads; tests/test_audit_http.py
         # pins that startup wires it, so a regression cannot silently disable auditing.
         app.config[AUDIT_SERVICE_CONFIG_KEY] = get_audit_service(install_dal)

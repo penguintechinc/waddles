@@ -1,4 +1,4 @@
-"""Tests for 0048_audit_events_hash_chain (the tamper-evident `audit_events` table).
+"""Tests for 0053_audit_events_hash_chain (the tamper-evident `audit_events` table).
 
 Two layers, same split as the sibling migration tests:
 
@@ -30,7 +30,7 @@ requires_docker = pytest.mark.skipif(
 )
 
 _VERSIONS = Path(__file__).resolve().parent.parent / "versions"
-_REVISION = "0048_audit_events_hash_chain"
+_REVISION = "0053_audit_events_hash_chain"
 _GENESIS = "0" * 64
 
 
@@ -297,7 +297,7 @@ class TestRealPostgres:
         current = alembic_cli("current", dsn=pg_db.dsn).stdout
         if _REVISION not in current:
             pytest.skip(
-                "another migration landed after 0048; the CI chain covers the round trip"
+                "another migration landed after 0053; the CI chain covers the round trip"
             )
         alembic_cli("downgrade", "-1", dsn=pg_db.dsn)
         assert _exec(pg_db, "SELECT to_regclass('audit_events')") == [(None,)]

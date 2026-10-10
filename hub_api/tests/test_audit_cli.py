@@ -163,7 +163,7 @@ class TestRun:
     ) -> None:
         audit_dal.metadata.remove(audit_dal.metadata.tables["audit_events"])
         assert await cli._run(self._args()) == cli.EXIT_CANNOT_RUN
-        assert "0048_audit_events_hash_chain" in capsys.readouterr().err
+        assert "0053_audit_events_hash_chain" in capsys.readouterr().err
 
     async def test_unexpected_failure_exits_3_and_leaks_no_values(
         self,

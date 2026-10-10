@@ -264,7 +264,7 @@ class TestFailLoud:
         service = AuditService(audit_dal, gate=gate)
         audit_dal.metadata.remove(audit_dal.metadata.tables["audit_events"])
         caplog.set_level(logging.ERROR, logger="services.audit_service")
-        with pytest.raises(AuditWriteError, match="0048_audit_events_hash_chain"):
+        with pytest.raises(AuditWriteError, match="0053_audit_events_hash_chain"):
             await service.record(make_event())
         assert any("audit write FAILED" in r.getMessage() for r in caplog.records)
 

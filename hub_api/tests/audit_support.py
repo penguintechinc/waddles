@@ -6,7 +6,7 @@ audit_service``) rather than this living in the 1800-line shared ``conftest.py``
 ``audit_dal`` extends the existing ``install_dal`` fixture (file-backed sqlite shared with the
 pydal ``bundle_install_db``, which already owns ``tenants`` and the legacy ``audit_log``) with the
 two tables the audit service reads/writes: ``audit_events`` -- the sqlite-compatible mirror of
-migration 0048's table, minus the Postgres-only triggers/CHECKs the real-Postgres test proves --
+migration 0053's table, minus the Postgres-only triggers/CHECKs the real-Postgres test proves --
 and a ``hub_users`` table carrying the ``uuid`` column migration 0043 adds.
 """
 
@@ -49,7 +49,7 @@ OTHER_USER_UUID = uuid.UUID("22222222-2222-4222-8222-222222222222")
 
 
 def create_audit_tables(conn: Any) -> None:
-    """Synchronous Core DDL: sqlite mirror of 0048's `audit_events` plus `hub_users`(uuid)."""
+    """Synchronous Core DDL: sqlite mirror of 0053's `audit_events` plus `hub_users`(uuid)."""
     metadata = MetaData()
     Table(
         "audit_events",

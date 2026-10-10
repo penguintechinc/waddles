@@ -104,7 +104,7 @@ gotcha for why `sqlite:memory` breaks once a route calls
 
 Security-relevant events (authz denials, tenant/role changes, DSAR/erasure, logins incl. SSO and
 passkey, admin actions, license changes) are appended to a per-tenant **SHA-256 hash chain**
-(`audit_events`, alembic `0048_audit_events_hash_chain`): altering, removing, inserting or
+(`audit_events`, alembic `0053_audit_events_hash_chain`): altering, removing, inserting or
 re-ordering any record is detected by re-verification. Recording and reading are an **Enterprise**
 feature (flags `waddles.compliance.audit_logs` / `audit_export`, default OFF); the legacy
 `audit_log` basic trail and the statutory DSAR/erasure rights are never gated. A failed audit write

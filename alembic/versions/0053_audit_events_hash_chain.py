@@ -33,10 +33,12 @@ record, and the UUID alone identifies no one once the identity row is anonymised
 or user agent is stored.
 
 **Numbering note:** parallel migrations are landing on `release/v3.0.X`; chained off
-`0047_builtin_handler_paths` (the head when this was authored) -- expect a renumber on merge.
+`0049_sso_connections` (the head when this was last re-sequenced; renumbered 0048 -> 0053
+to sit after the other in-flight migrations) -- re-point `down_revision` at the then-current
+head if another migration merges first.
 
-Revision ID: 0048_audit_events_hash_chain
-Revises: 0047_builtin_handler_paths
+Revision ID: 0053_audit_events_hash_chain
+Revises: 0049_sso_connections
 Create Date: 2026-10-10
 """
 
@@ -44,8 +46,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0048_audit_events_hash_chain"
-down_revision = "0047_builtin_handler_paths"
+revision = "0053_audit_events_hash_chain"
+down_revision = "0049_sso_connections"
 branch_labels = None
 depends_on = None
 

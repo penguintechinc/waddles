@@ -1,4 +1,4 @@
-"""AuditService end-to-end on REAL Postgres 17 (migration 0048 applied, asyncpg driver).
+"""AuditService end-to-end on REAL Postgres 17 (migration 0053 applied, asyncpg driver).
 
 The sqlite tests prove the logic; this proves the parts only a real server can: native `UUID` /
 `timestamptz` / `JSONB` round-trip *bit-exactly* through the canonical hash, the per-chain advisory

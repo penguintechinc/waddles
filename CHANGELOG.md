@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Enterprise SSO for hub-api: SAML 2.0 and OpenID Connect (Enterprise tier, `waddles.auth.sso_saml`) and Google OAuth2 (Professional tier, `waddles.auth.sso_google`). Per-tenant connections with admin API, JIT provisioning keyed on (connection, subject) with no email adoption, PKCE + nonce + local ID-token validation, signature-wrapping/replay/XXE-hardened SAML SP, SSRF-guarded IdP HTTP, AES-256-GCM secret storage, login-CSRF binder cookie, OTel metrics/traces. Migration `0049_sso_connections`; auto-provisioned `SSO_ENCRYPTION_KEY` (alpha/local) that never fails the chart elsewhere. See `docs/SSO.md`.
 - Enterprise tamper-evident audit logging (GRC audit finding #3): append-only per-tenant SHA-256 hash chain
-  (`audit_events`, migration `0048_audit_events_hash_chain`), `GET /api/v1/compliance/audit/{events,head,verify,export}`,
+  (`audit_events`, migration `0053_audit_events_hash_chain`), `GET /api/v1/compliance/audit/{events,head,verify,export}`,
   `make verify-audit-chain` / `make verify-audit-export`, new Enterprise feature `waddles.compliance.audit_export`
   (see `docs/compliance/audit-logging.md`)
 - Audit coverage for authz denials, tenant/role changes, DSAR/erasure, logins (password, OAuth/SSO, passkey, refresh),

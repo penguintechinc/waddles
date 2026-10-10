@@ -10,7 +10,7 @@ security-relevant events, and had an `except: pass` swallowing write failures).
 
 | GRC #3 finding | Fix |
 |---|---|
-| Not tamper-evident | SHA-256 hash chain, one chain per tenant + a platform chain (`audit_events`, migration `0048_audit_events_hash_chain`); verifier API, CLI and offline checker |
+| Not tamper-evident | SHA-256 hash chain, one chain per tenant + a platform chain (`audit_events`, migration `0053_audit_events_hash_chain`); verifier API, CLI and offline checker |
 | Coverage gaps | App-wide HTTP hook + session-mint hook + legacy bundle bridge: authz decisions, tenant/role changes, erasure/DSAR, SSO/passkey/password logins, admin actions, license/subscription changes |
 | `except: pass` | Removed. A write failure is logged at ERROR (type + value-free cause + traceback), counted, and raised as `AuditWriteError`; entitled requests fail closed |
 
@@ -66,7 +66,7 @@ The platform chain (`?chain=platform`) additionally needs the platform-only `use
 Code map: `hub_api/services/audit_chain.py` (pure hashing/verification, stdlib only),
 `audit_events.py` (vocabulary, validation, request classification), `audit_service.py`
 (persistence, gate, telemetry), `audit_http.py` (hooks), `hub_api/blueprints/v1/compliance_audit.py`
-(API), `alembic/versions/0048_audit_events_hash_chain.py` (schema).
+(API), `alembic/versions/0053_audit_events_hash_chain.py` (schema).
 
 ## The hash chain
 
@@ -187,7 +187,7 @@ to supply its own anchor).
 
 ## Operating it
 
-**Enable.** Apply migration `0048_audit_events_hash_chain` (hub-api's bootstrap Job runs alembic), then turn
+**Enable.** Apply migration `0053_audit_events_hash_chain` (hub-api's bootstrap Job runs alembic), then turn
 on `waddles.compliance.audit_logs` (and `waddles.compliance.audit_export`) for the tenant in PostHog. The
 tenant must hold an Enterprise entitlement; bypass is by hardcoded domain only, never env/config.
 
