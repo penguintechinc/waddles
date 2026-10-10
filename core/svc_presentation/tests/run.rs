@@ -44,6 +44,21 @@ async fn run_with_shutdown_binds_connects_serves_and_stops_cleanly() {
     let http_port = free_port();
     let metrics_port = free_port();
 
+    // Overlay detokenization is on by default, so startup needs a connectable
+    // hub-api gRPC endpoint (or it fails loud, by design, before binding).
+    // `HubClient::connect` only needs a listening TCP peer -- it performs no
+    // gRPC handshake until the first RPC -- so a bare accept-and-drop loop is
+    // enough.
+    let hub_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a fake hub-api listener");
+    let hub_addr = hub_listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = hub_listener.accept().await {
+            std::mem::forget(sock);
+        }
+    });
+
     let cli = CliConfig::try_parse_from([
         "svc-presentation",
         "--dev-mode",
@@ -55,6 +70,10 @@ async fn run_with_shutdown_binds_connects_serves_and_stops_cleanly() {
         "127.0.0.1",
         "--db-name",
         &db_path.to_string_lossy(),
+        "--hub-api-grpc-endpoint",
+        &format!("http://{hub_addr}"),
+        "--service-jwt-token-endpoint",
+        &format!("http://{hub_addr}/internal/service-token"),
     ])
     .expect("valid CLI assembly");
     let config = Config::from_cli(cli).expect("required secrets are set");

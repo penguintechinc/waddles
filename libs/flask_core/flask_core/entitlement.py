@@ -117,13 +117,86 @@ from posthog import Posthog  # noqa: E402
 # never fire outside a misconfigured local env.
 # ---------------------------------------------------------------------------
 try:
-    from penguin_licensing import LicenseClient, get_license_client
+    # NOTE: `get_license_client` is deliberately NOT imported. penguin-licensing
+    # 0.1.0's shared singleton is `LicenseClient()` with the library default
+    # `product="elder"`, which resolves every tier against the WRONG product on
+    # license.penguintech.io. Waddles builds its own client pinned to
+    # `LICENSE_PRODUCT` -- see `get_waddles_license_client()`.
+    from penguin_licensing import LicenseClient
 
     _PENGUIN_LICENSING_AVAILABLE = True
 except ImportError:  # pragma: no cover - only fires with a broken install
     LicenseClient = None  # type: ignore[assignment,misc]
-    get_license_client = None  # type: ignore[assignment]
     _PENGUIN_LICENSING_AVAILABLE = False
+
+#: The product id Waddles is registered under on license.penguintech.io. Mirrors the
+#: Rust data plane's `LICENSE_PRODUCT` (`core/svc_action/src/lib.rs`,
+#: `core/svc_presentation/src/flags.rs`); `tests/test_license_product.py` pins the
+#: three together so they cannot drift apart.
+LICENSE_PRODUCT = "waddles"
+
+_DEFAULT_LICENSE_SERVER_URL = "https://license.penguintech.io"
+
+_license_client_built_counter = _meter.create_counter(
+    "waddles_entitlement_license_client_built_total",
+    description=(
+        "License clients constructed, labelled by the product they resolve tiers against. "
+        "Anything other than `waddles` is a misconfiguration (tier resolved for the wrong product)."
+    ),
+)
+
+_license_client: Optional["LicenseClient"] = None
+_license_client_lock = threading.Lock()
+
+
+def build_waddles_license_client() -> "LicenseClient":
+    """
+    Construct a `penguin_licensing.LicenseClient` pinned to the Waddles product.
+
+    Exists because `penguin_licensing.get_license_client()` hardcodes
+    `product="elder"`: tier resolution through it asks the license server about
+    Elder's licences, not Waddles's. `LICENSE_KEY` / `LICENSE_SERVER_URL` come from
+    the environment exactly as the library's own helper reads them; only the
+    product differs. Raises (never degrades to a default product) if the library is
+    unavailable or if the constructed client does not carry `LICENSE_PRODUCT`.
+    """
+    if LicenseClient is None:
+        raise RuntimeError("penguin_licensing is not installed; cannot build the Waddles license client")
+    base_url = os.getenv("LICENSE_SERVER_URL") or _DEFAULT_LICENSE_SERVER_URL
+    client = LicenseClient(
+        license_key=os.getenv("LICENSE_KEY") or None,
+        product=LICENSE_PRODUCT,
+        base_url=base_url,
+    )
+    # Fail loud if the library ever stops honouring the product we passed -- a silent
+    # fallback to its own default would resolve every tier against the wrong product.
+    if getattr(client, "product", None) != LICENSE_PRODUCT:
+        raise RuntimeError(
+            "license client product mismatch: expected "
+            f"{LICENSE_PRODUCT!r}, got {getattr(client, 'product', None)!r}"
+        )
+    _license_client_built_counter.add(1, {"product": LICENSE_PRODUCT})
+    logger.info(
+        "entitlement.license_client_built",
+        extra={
+            "product": LICENSE_PRODUCT,
+            "license_server": base_url,
+            "license_key_configured": bool(os.getenv("LICENSE_KEY")),
+        },
+    )
+    return client
+
+
+def get_waddles_license_client() -> "LicenseClient":
+    """Return the process-wide Waddles license client, building it once (keeps the 5-min validation cache shared)."""
+    global _license_client
+    client = _license_client
+    if client is not None:
+        return client
+    with _license_client_lock:
+        if _license_client is None:
+            _license_client = build_waddles_license_client()
+        return _license_client
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +443,7 @@ class PenguinLicenseGate:
         Returns `_CommunityOnlyLicenseGate` directly (not wrapped in
         `PenguinLicenseGate`, whose `resolve_tier` assumes a `.validate()`
         method the fallback doesn't have) when `penguin_licensing` failed to
-        import; otherwise a `PenguinLicenseGate` over the real shared client.
+        import; otherwise a `PenguinLicenseGate` over the shared client pinned to `LICENSE_PRODUCT`.
         """
         if not _PENGUIN_LICENSING_AVAILABLE:
             logger.error(
@@ -378,7 +451,7 @@ class PenguinLicenseGate:
                 extra={"action": "falling back to fail-closed free-tier adapter"},
             )
             return _CommunityOnlyLicenseGate()
-        return cls(get_license_client())
+        return cls(get_waddles_license_client())
 
     def resolve_tier(self) -> str:
         """Validate against the license server (penguin_licensing handles its own caching/fail-closed logic)."""

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-lfg"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!lfg` community-utility bundle (KV-backed, v2 port)."
 requires-python = ">=3.13"
 dependencies = []

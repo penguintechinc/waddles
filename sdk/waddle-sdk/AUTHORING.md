@@ -164,6 +164,23 @@ check, and vice versa (`critical-rules.md` Feature Flags & License Tiers).
   default value standing in for "something went wrong."
 - **No stubs.** A declared sub-module with no real implementation is not shipped — either
   implement it or don't declare it in `CommandSpec.sub_modules` yet.
+- **Role badges are strict booleans.** Read `is_mod`/`is_broadcaster` with an identity check
+  (`payload.get("is_mod") is True`), and forward them from `transform()` the same way
+  (`payload["is_mod"] = event.payload["is_mod"] is True`). Never `bool(is_mod)` or a bare
+  truthiness test: the string `"false"` is truthy, so a non-moderator whose normalizer emitted a
+  string badge passed the mod gate, and `transform()` laundered it into a real `True` for
+  `dispatch` (40 bundles, fixed in fix/bundle-defects-wave). Absent badge fields mean "unknown"
+  and must be denied. `scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness`
+  (CI: `bundle-hygiene`) fails the build on the pattern, and
+  `scripts/ci/tests/test_bundle_badge_gate.py` proves every bundle's gate behaviourally.
+- **One table per bundle means `kv` carries the rest.** The structured `db` interface gives a
+  bundle exactly one app-owned table with no column-equality filter; model anything relational
+  as one row-per-entity table plus `community_kv` for the id counter, the `id -> row_id` index
+  and atomic counters. `kv.increment` is the only compare-and-swap you have (it returns `1` to
+  the single first caller): use it as a short-TTL claim/lock around any create-or-update that two
+  invocations could race (see `bundles/python/poll`, `loyalty`, `inventory`), and compensate a
+  failed second step of a two-step write before raising. Host limits to design within: 64 `kv`
+  and 64 `db` ops per invocation, 8 KiB per text column, 10,000 `kv` keys per community.
 
 ## 5. Worked Examples
 

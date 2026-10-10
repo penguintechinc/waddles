@@ -271,8 +271,22 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
     .await
     .expect("seed database");
 
-    // --- 1. H.265 + SRT + an H.264 RTMP rung, on the CPU encoders --------
+    // Every fake-ffmpeg script is written before the first process spawns:
+    // writing an executable and exec'ing it while another thread forks
+    // fails with ETXTBSY.
     let cpu = harness(&config, &data_dir, EncoderSelection::software());
+    let gpu = harness(
+        &config,
+        &data_dir,
+        EncoderSelection::software()
+            .with(VideoFamily::H264, EncoderBackend::Nvenc)
+            .with(VideoFamily::H265, EncoderBackend::Nvenc),
+    );
+    let av1 = harness(&config, &data_dir, EncoderSelection::software());
+    let bad = harness(&config, &data_dir, EncoderSelection::software());
+    let fanout = harness(&config, &data_dir, EncoderSelection::software());
+
+    // --- 1. H.265 + SRT + an H.264 RTMP rung, on the CPU encoders --------
     let _publisher = cpu.publish("key_h265").await;
     let argv = wait_for_file(&cpu.argv_capture).await;
     assert!(
@@ -304,13 +318,6 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
     cpu.orchestrator.stop_pipeline(Uuid::from_u128(1)).await;
 
     // --- 1b. same rows, but the host proved NVENC for H.264/H.265 --------
-    let gpu = harness(
-        &config,
-        &data_dir,
-        EncoderSelection::software()
-            .with(VideoFamily::H264, EncoderBackend::Nvenc)
-            .with(VideoFamily::H265, EncoderBackend::Nvenc),
-    );
     let _publisher = gpu.publish("key_h265").await;
     let argv = wait_for_file(&gpu.argv_capture).await;
     assert!(argv_has(&argv, "hevc_nvenc"), "GPU H.265 missing: {argv}");
@@ -325,7 +332,6 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
     gpu.orchestrator.stop_pipeline(Uuid::from_u128(1)).await;
 
     // --- 2. AV1 HLS -------------------------------------------------------
-    let av1 = harness(&config, &data_dir, EncoderSelection::software());
     let _publisher = av1.publish("key_av1").await;
     let argv = wait_for_file(&av1.argv_capture).await;
     assert!(argv_has(&argv, "libsvtav1"), "AV1 HLS missing: {argv}");
@@ -333,7 +339,6 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
     av1.orchestrator.stop_pipeline(Uuid::from_u128(2)).await;
 
     // --- 3. AV1 inherited by an SRT target: refused, ffmpeg never spawns --
-    let bad = harness(&config, &data_dir, EncoderSelection::software());
     let _publisher = bad.publish("key_av1_srt").await;
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(
@@ -346,7 +351,6 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
     ));
 
     // --- 4. Over the destination cap: refused in the argv path ------------
-    let fanout = harness(&config, &data_dir, EncoderSelection::software());
     let _publisher = fanout.publish("key_fanout").await;
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(

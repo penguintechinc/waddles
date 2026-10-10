@@ -174,6 +174,56 @@ pub struct CliConfig {
     /// bucket credential pair or refuse to start.
     #[arg(long, env = "SVC_PRESENTATION_DEV_MODE", default_value_t = false)]
     pub dev_mode: bool,
+
+    /// hub-api's internal gRPC endpoint (`waddles.hub.internal.v1`,
+    /// `core/hub_client::HubClient::connect`'s `endpoint`), e.g.
+    /// `https://waddlebot-hub-api-v3:50204`. Overlay output resolves
+    /// `{user:<uuid>}` references to display names through it
+    /// (`overlay::detok`). Empty (the default) means "not configured": the
+    /// service then refuses to start unless detokenization was explicitly
+    /// switched off ([`Self::pii_detokenization_enabled_override`]) -- never
+    /// a silent degrade to "Unknown User" everywhere. Same env var names as
+    /// `core/svc_action`/`core/svc_process`.
+    #[arg(long, env = "HUB_API_GRPC_ENDPOINT", default_value = "")]
+    pub hub_api_grpc_endpoint: String,
+
+    /// hub-api's machine-JWT bootstrap endpoint
+    /// (`POST /internal/service-token`, `service_auth::MachineJwtClient`'s
+    /// `token_endpoint`). Empty means "not configured" -- same fail-loud
+    /// contract as [`Self::hub_api_grpc_endpoint`].
+    #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT", default_value = "")]
+    pub service_jwt_token_endpoint: String,
+
+    /// Path to this pod's projected Kubernetes ServiceAccount token, read by
+    /// `service_auth::MachineJwtClient` to bootstrap a machine JWT (the same
+    /// default every machine-JWT bootstrap in this repo uses).
+    #[arg(
+        long,
+        env = "SERVICE_JWT_SA_TOKEN_PATH",
+        default_value = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    )]
+    pub service_jwt_sa_token_path: String,
+
+    /// Path to the PEM CA bundle that signed hub-api's internal gRPC server
+    /// certificate, passed as `HubClient::connect`'s `ca_cert_path`. Empty
+    /// falls back to the system/webpki trust store (never correct against
+    /// this chart's internal CA; fine for local runs against a
+    /// publicly-rooted endpoint).
+    #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
+    pub hub_api_grpc_ca_file: String,
+
+    /// Explicit operator escape hatch for deployments with no working
+    /// hub-api gRPC connection yet (dev, air-gapped, alpha without an
+    /// in-cluster PostHog). `Some(false)` (`PII_DETOKENIZATION_ENABLED=false`)
+    /// lets the service start WITHOUT a hub client: every push is still
+    /// HTML-escaped and every `{user:<uuid>}` renders as the neutral label --
+    /// no name is ever resolved, and nothing raw is ever emitted. Any other
+    /// state (unset / `true`) keeps the default: detokenization on, and a
+    /// missing/unreachable hub-api is a hard startup error. Loudly logged at
+    /// startup, never a silent bypass; mirrors `core/svc_action`'s identical
+    /// flag.
+    #[arg(long, env = "PII_DETOKENIZATION_ENABLED")]
+    pub pii_detokenization_enabled_override: Option<bool>,
 }
 
 impl CliConfig {
@@ -311,6 +361,51 @@ mod tests {
         assert_eq!(cli.db_user, "svc-presentation-rw");
         assert_eq!(cli.push_trusted_issuer, "hub-api");
         cli.validate().expect("defaults must be valid");
+    }
+
+    #[test]
+    fn hub_api_grpc_settings_default_to_unconfigured() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for var in [
+            "HUB_API_GRPC_ENDPOINT",
+            "SERVICE_JWT_TOKEN_ENDPOINT",
+            "HUB_API_GRPC_CA_FILE",
+            "PII_DETOKENIZATION_ENABLED",
+        ] {
+            // SAFETY: serialized by ENV_LOCK.
+            unsafe { std::env::remove_var(var) };
+        }
+        let cli = CliConfig::parse_from(["svc-presentation"]);
+        assert!(cli.hub_api_grpc_endpoint.is_empty());
+        assert!(cli.service_jwt_token_endpoint.is_empty());
+        assert!(cli.hub_api_grpc_ca_file.is_empty());
+        assert_eq!(
+            cli.service_jwt_sa_token_path,
+            "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        );
+        assert_eq!(cli.pii_detokenization_enabled_override, None);
+    }
+
+    #[test]
+    fn hub_api_grpc_settings_parse_from_flags() {
+        let cli = CliConfig::parse_from([
+            "svc-presentation",
+            "--hub-api-grpc-endpoint",
+            "https://hub:50204",
+            "--service-jwt-token-endpoint",
+            "http://hub:8204/internal/service-token",
+            "--hub-api-grpc-ca-file",
+            "/ca.pem",
+            "--pii-detokenization-enabled-override",
+            "false",
+        ]);
+        assert_eq!(cli.hub_api_grpc_endpoint, "https://hub:50204");
+        assert_eq!(
+            cli.service_jwt_token_endpoint,
+            "http://hub:8204/internal/service-token"
+        );
+        assert_eq!(cli.hub_api_grpc_ca_file, "/ca.pem");
+        assert_eq!(cli.pii_detokenization_enabled_override, Some(false));
     }
 
     #[test]

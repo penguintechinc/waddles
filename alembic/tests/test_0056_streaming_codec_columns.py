@@ -73,7 +73,7 @@ class TestMigrationMetadata:
         """down_revision must be the head this was written against (re-point on renumber)."""
         migration = _load_migration()
         assert migration.revision == "0056_streaming_codec_columns"
-        assert migration.down_revision == "0053_audit_events_hash_chain"
+        assert migration.down_revision == "0052_bundle_identity_resolve"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
         """`alembic_version.version_num` is VARCHAR(32); a longer id errors on real Postgres."""

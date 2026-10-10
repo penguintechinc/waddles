@@ -8,6 +8,7 @@ pub mod codec;
 pub mod encoder;
 pub mod ffmpeg;
 pub mod model;
+pub(crate) mod process_group;
 pub mod supervisor;
 
 pub use codec::{AudioChoice, CodecError, OutputFormat, TargetProtocol, VideoFamily};

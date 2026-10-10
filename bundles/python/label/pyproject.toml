@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-label"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!label` community-utility bundle (KV-backed, v2 port)."
 requires-python = ">=3.13"
 dependencies = []

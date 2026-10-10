@@ -26,7 +26,7 @@ enable_incomplete_feature = ["NewGenericSyntax"]
 # db.py/_component_entry.py module docstrings) -- never pip-installable, so
 # no stub can exist for static analysis to find.
 [[tool.mypy.overrides]]
-module = ["wit_world", "componentize_py_types", "_entry_wiring", "_bundle_preimports"]
+module = ["wit_world", "wit_world.*", "componentize_py_types", "_entry_wiring", "_bundle_preimports"]
 ignore_missing_imports = true
 
 [tool.ruff]

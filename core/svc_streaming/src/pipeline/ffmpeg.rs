@@ -233,9 +233,16 @@ pub fn build_argv(spec: &PipelineSpec, paths: &Paths) -> Result<Vec<String>, Pip
     let use_filter_complex = ladder.len() >= 2;
     let labels = ladder_labels(&ladder);
 
+    // `-nostdin` is a *global* option placed first on purpose. ffmpeg-sidecar's
+    // `spawn()` appends a trailing `-n` ("never overwrite", after the output
+    // path -- where ffmpeg only warns "Trailing option(s) found" and ignores
+    // it) unless one of `-y`/`-n`/`-nostdin` is already present. It is also
+    // the honest statement of how this process is driven: stdin is either
+    // the `pipe:0` media input or unused, never an interactive console, and
+    // the supervisor ends ffmpeg by EOF/signal, not by keypress.
+    let mut argv: Vec<String> = vec!["-nostdin".into()];
     // A VA-API encode needs the render node registered once, globally,
     // before the inputs.
-    let mut argv = Vec::new();
     if ladder
         .iter()
         .any(|p| encoder_backend(p, paths) == EncoderBackend::Vaapi)
@@ -2090,9 +2097,10 @@ mod tests {
         let mut s = hls_h264_spec();
         s.profiles[0].resolution = Some((1280, 720));
         let argv = build_argv(&s, &paths).expect("builds");
-        // Global device registration comes before the input.
+        // `-nostdin` leads; global device registration follows, before the input.
+        assert_eq!(argv[0], "-nostdin");
         assert_eq!(
-            &argv[..4],
+            &argv[1..5],
             [
                 "-init_hw_device",
                 "vaapi=va:/dev/dri/renderD128",

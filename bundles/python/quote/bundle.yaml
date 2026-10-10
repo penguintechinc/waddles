@@ -9,7 +9,8 @@ name: Quote Book Bundle (Python)
 # Ported off the retired `waddle_sdk.db` DAL-style facade (create_dal/TableProxy/
 # AsyncQuerySet) onto the structured insert/get/query/update/delete API -- see
 # src/app.py's module docstring for the full rationale.
-version: 1.0.2
+# 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -68,6 +69,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.2"
-  min_version: "1.0.2"
+  tested_with: "1.0.3"
+  min_version: "1.0.3"
   max_version: null

@@ -32,12 +32,12 @@ environment where svc-streaming's own bootstrap already created a column,
 is a no-op).
 
 **Numbering note:** parallel migrations are landing on `release/v3.0.X`;
-this is chained off `0053_audit_events_hash_chain` (the head when written).
-Re-point `down_revision` (and renumber) at the then-current head if another
-migration merges first.
+this is chained off `0052_bundle_identity_resolve` (the head when last
+re-synced). Re-point `down_revision` (and renumber) at the then-current head
+if another migration merges first.
 
 Revision ID: 0056_streaming_codec_columns
-Revises: 0053_audit_events_hash_chain
+Revises: 0052_bundle_identity_resolve
 Create Date: 2026-10-10
 """
 
@@ -46,7 +46,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0056_streaming_codec_columns"
-down_revision = "0053_audit_events_hash_chain"
+down_revision = "0052_bundle_identity_resolve"
 branch_labels = None
 depends_on = None
 

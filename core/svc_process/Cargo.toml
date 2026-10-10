@@ -160,12 +160,37 @@ bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
 # (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
 # SS5, `src/capabilities.rs`).
 bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
+# Target-user id parsing for the `reputation` capability (`handle_reputation`):
+# a bundle names its target as a UUID string; same pin as the gate crate.
+uuid = { version = "=1.26.1" }
+# `src/identity.rs` (the `identity` bundle host capability): an OTel latency
+# histogram + outcome counter for identity resolutions, reading the global
+# meter provider `penguin-logging` installs (never building its own), exactly
+# as `core/bundle_host_economy`'s `metrics.rs` does. Already resolved in this
+# crate's `Cargo.lock` at this exact version (via the `bundle-host-*` crates);
+# declared directly so this crate does not depend on that staying true.
+opentelemetry = "=0.32.0"
+# `tonic::Code`, to classify a `hub_client` `ResolveHandle` failure
+# (`identity::hub_error_to_identity`): NOT_FOUND / FAILED_PRECONDITION /
+# INVALID_ARGUMENT are the caller's-input outcomes. Same exact pin
+# `core/hub_client` uses; default features off so this adds no transport code.
+tonic = { version = "=0.14.6", default-features = false }
 # The shared `db` bundle host-capability implementation (insert/get/update/
 # delete against a bundle's own `app_core`/`app_community` table) -- a
 # same-repo path dependency, same rationale as `bundle-active-set` above:
 # this crate's identifier-safety/tenant-isolation rules are owned by this
 # repo's own bundle-db-capability design doc, not penguin-libs.
 bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
+# The `reputation` bundle host capability's durable store + production
+# membership-snapshot loader (issue #726, `src/capabilities.rs`'s
+# `handle_reputation`, `src/lib.rs`'s `try_build_reputation_wiring`) -- same
+# same-repo path-dependency rationale as `bundle-host-db` above.
+bundle-host-reputation = { path = "../bundle_host_reputation", version = "=0.1.0" }
+# The `economy` bundle host capability's durable store + production
+# membership-snapshot loader (issue #714, `src/capabilities.rs`'s
+# `handle_economy`, `src/lib.rs`'s `try_build_economy_wiring`) -- same
+# same-repo path-dependency rationale as `bundle-host-reputation` above.
+bundle-host-economy = { path = "../bundle_host_economy", version = "=0.1.0" }
 # `kv` host capability (`src/lib.rs`'s `connect_kv`, `src/capabilities.rs`):
 # a direct Valkey connection, same crate/feature pins `core/svc_action`
 # uses for its own direct `relay`/usage connection, and the same version
@@ -214,6 +239,10 @@ rcgen = "=0.14.10"
 # `core/svc_action`'s own dev-dependencies enable for its equivalent
 # `db`-module tests.
 sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
+# `tests/reputation_pg_e2e.rs`: the `reputation` capability's handler + real
+# gate + real Postgres store joined end to end (same exact version as
+# `core/bundle_host_reputation`'s own integration-test dependency).
+testcontainers = "=0.28.0"
 
 [profile.release]
 opt-level = 3

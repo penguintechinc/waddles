@@ -81,8 +81,23 @@ spec:
         # externally-reachable svc-streaming base URL rewritten into HLS playback URLs for
         # the browser's own HLS.js fetches. Empty by default (live_stream.py degrades to
         # "offline" rather than guessing a hostname); see values.yaml/values-alpha.yaml.
+        {{- if .Values.presentation.publicStreamingUrl }}
         - name: PUBLIC_STREAMING_URL
-          value: {{ .Values.presentation.publicStreamingUrl | default "" | quote }}
+          value: {{ .Values.presentation.publicStreamingUrl | quote }}
+        {{- else if .Values.presentation.publicStreamingUrlFromNodeIP }}
+        {{- if not .Values.pipeline.svcStreaming.nodePort.enabled }}
+        {{- fail "presentation.publicStreamingUrlFromNodeIP requires pipeline.svcStreaming.nodePort.enabled=true (the URL is <node hostIP>:<svcStreaming nodePort.httpPort>); set an explicit presentation.publicStreamingUrl otherwise" }}
+        {{- end }}
+        - name: NODE_HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: PUBLIC_STREAMING_URL
+          value: {{ printf "http://$(NODE_HOST_IP):%v" .Values.pipeline.svcStreaming.nodePort.httpPort | quote }}
+        {{- else }}
+        - name: PUBLIC_STREAMING_URL
+          value: ""
+        {{- end }}
         livenessProbe:
           httpGet:
             path: /health

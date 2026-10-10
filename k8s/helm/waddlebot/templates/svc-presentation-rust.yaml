@@ -14,6 +14,17 @@
 #     REUSED from the existing <release>-secrets Secret (hub-api's SeaweedFS identity, which
 #     already has Read/Write/List/Tagging on the assets bucket) -- no new secret/identity.
 #   - OTEL_* : destination env-configurable, never hardcoded (presentation.rust.otlpEndpoint).
+#   - HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT/SERVICE_JWT_SA_TOKEN_PATH/
+#     HUB_API_GRPC_CA_FILE : overlay detokenization (core/svc_presentation/src/overlay/detok.rs)
+#     resolves `{user:<uuid>}` to hub-api display names over its internal gRPC
+#     (IdentityService.ResolveDisplayNames, scope identity:displayname:read). Field-for-field
+#     mirror of svc-action-rust.yaml's identical block, under the dedicated `svc-presentation`
+#     ServiceAccount (templates/service-jwt-rbac.yaml; serviceJwt.identities.svc-presentation).
+#   - PII_DETOKENIZATION_ENABLED=false : rendered only when pipeline.piiTokenization.enabled
+#     is false (alpha: no working hub gRPC yet) -- the explicit, loudly-logged operator
+#     escape hatch; every user then renders "Unknown User". Omitted otherwise, in which case
+#     the service REFUSES TO START without a reachable hub-api (fail loud, never a silently
+#     degraded overlay).
 {{- if and .Values.pipeline.svcPresentation.enabled .Values.presentation.rust.enabled }}
 ---
 apiVersion: apps/v1
@@ -35,7 +46,10 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-presentation
     spec:
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      # Dedicated identity so hub-api's TokenReview-backed machine-JWT bootstrap can tell
+      # this pod from every other workload in the namespace (templates/service-jwt-rbac.yaml,
+      # serviceJwt.identities.svc-presentation) -- same pattern as svc-action/svc-process.
+      serviceAccountName: svc-presentation
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -102,6 +116,24 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: HUB_API_S3_SECRET_ACCESS_KEY
+        # Overlay detokenization -> hub-api (see header). Endpoints default to hub-api's own
+        # in-cluster Service, computed here rather than needing a per-environment override.
+        - name: HUB_API_GRPC_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        # The audience-scoped projected token mounted below (NOT the generic k8s SA token
+        # path: wrong audience, hub-api's TokenReview would reject it).
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        {{- if not .Values.pipeline.piiTokenization.enabled }}
+        - name: PII_DETOKENIZATION_ENABLED
+          value: "false"
+        {{- end }}
+        {{- if .Values.pipeline.hubApi.enabled }}
+        # CA that signed hub-api's internal gRPC server cert (core/hub_client trusts only it).
+        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        {{- end }}
         - name: OTEL_SERVICE_NAME
           value: "svc-presentation"
         - name: OTEL_RESOURCE_ATTRIBUTES
@@ -133,9 +165,17 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- if .Values.pipeline.hubApi.enabled }}
+        {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
+        {{- end }}
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
+      {{- if .Values.pipeline.hubApi.enabled }}
+      {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
