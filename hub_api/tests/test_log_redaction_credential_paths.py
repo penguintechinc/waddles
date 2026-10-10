@@ -22,6 +22,7 @@ import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -243,7 +244,7 @@ class TestKnowledgeCrawlerLogs:
         async def mixed(_client: Any, url: str, **_kwargs: Any) -> httpx.Response:
             if url.endswith("/sitemap.xml"):
                 return httpx.Response(200, text=sitemap, request=httpx.Request("GET", url))
-            if "a.example.com" in url:
+            if urlsplit(url).hostname == "a.example.com":
                 raise SSRFError(f"blocked {url!r}")
             raise httpx.ReadTimeout(f"timed out fetching {url}")
 
