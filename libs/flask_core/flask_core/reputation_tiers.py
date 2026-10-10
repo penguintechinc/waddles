@@ -13,7 +13,7 @@ service's own package, is the correct single source of truth for a table
 shared across process boundaries.
 
 See module docstring history: `hub_api/services/community_reputation_service.py`
-and `core/svc_process/bundles/community_reputation_process.py` for the full
+and `core/svc_process/builtin_handlers/community_reputation_process.py` for the full
 0-1000 -> 300-850 rescale derivation this table encodes (gh-310).
 """
 

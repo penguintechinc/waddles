@@ -41,7 +41,7 @@ don't catch this.
 **Tier table** -- `flask_core.reputation_tiers.REPUTATION_TIERS` /
 `.reputation_tier()` is the single shared source for this FICO-style
 (300-850) table, used identically by this module and by
-`core/svc_process/bundles/community_reputation_process.py`'s `!rep` reply
+`core/svc_process/builtin_handlers/community_reputation_process.py`'s `!rep` reply
 (both processes already depend on `flask_core`; previously each kept a
 hand-mirrored copy guarded only by a source-parsing drift test -- see
 `core/reputation_module/config.py`'s `Config.REPUTATION_TIERS`, a

@@ -230,8 +230,8 @@ bundles:
       - tenant_slug: global
         community_id: null
   # `waddles.command-announce` has a known command-prefix collision with the legacy
-  # `core/svc_process/bundles/community_announcements_process.py` / `..._action.py`
-  # `!announce publish <id>` script bundle (bundles/python/announce/README.md's own note) --
+  # `core/svc_process/builtin_handlers/community_announcements_process.py` / `..._action.py`
+  # `!announce publish <id>` built-in stage handlers (bundles/python/announce/README.md's own note) --
   # registered here (installed) but its flag MUST stay OFF in PostHog until the migration
   # owner resolves the overlap; `feature_enabled(FLAG_KEY, default=False)` in its own
   # `transform()` keeps it silent by default either way.

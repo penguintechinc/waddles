@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.example.chat
 name: Chat History Bundle (Python)
-# 1.0.0: initial port of core/svc_process/bundles/community_chat_process.py's two read-only
+# 1.0.0: initial port of core/svc_process/builtin_handlers/community_chat_process.py's two read-only
 # commands (chat-history, channels) into a WASM-component App Bundle -- feature/bundle-chat.
 # BUILD-ONLY / INERT: bot_process._FEATURE_MODULES still runs the original monolith module;
 # cut-over to this bundle is a separate, later change (P4 activation gate).

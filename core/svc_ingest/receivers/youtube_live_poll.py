@@ -87,7 +87,7 @@ from waddle_transports.signing import SecretResolutionError, resolve_secret
 logger = logging.getLogger(__name__)
 
 #: The `consumes` tag every ingest bundle wanting a raw YouTube Live chat
-#: message declares (`bundles/youtube_live_ingest.py`'s own `stages.
+#: message declares (`builtin_handlers/youtube_live_ingest.py`'s own `stages.
 #: ingest.consumes`) -- this receiver's half of that contract.
 CONSUMES_TAG = "youtube.message"
 
@@ -243,7 +243,7 @@ class YouTubeLivePollReceiver(Transport):  # type: ignore[misc]
         test constructing this receiver standalone).
 
         Real transform (not a stub) of each `liveChatMessages.list` item
-        into the raw event dict `bundles/youtube_live_ingest.py::
+        into the raw event dict `builtin_handlers/youtube_live_ingest.py::
         normalize()` consumes -- field names here are this receiver's own
         contract with that entrypoint, matching `TwitchIrcReceiver.
         receive()`'s own precedent (no repo-wide "raw platform event"

@@ -1,6 +1,6 @@
 """`!quote` -> a per-community quote book, DB-backed (structured `db` facade, v2).
 
-Strangler extraction of `core/svc_process/bundles/social_quote_process.py`'s
+Strangler extraction of `core/svc_process/builtin_handlers/social_quote_process.py`'s
 `!quote` command (`feature/bundle-quote`), modeled on `bundles/python/rank`'s
 structured-`db` + `community_kv`-index template -- see that bundle's own
 module docstring for the full rationale this one reuses byte-for-byte.
