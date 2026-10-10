@@ -4,6 +4,7 @@ Metrics Service - Time-series metrics management
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from dateutil import parser as date_parser
+from .log_safety import log_failure
 
 
 class MetricsService:
@@ -79,10 +80,11 @@ class MetricsService:
             }
 
         except Exception as e:
-            self.logger.error(
-                f"Failed to get timeseries: {e}",
+            log_failure(
+                self.logger,
+                "Failed to get timeseries",
+                e,
                 community_id=community_id,
-                metric_type=metric_type
             )
             raise
 
@@ -116,5 +118,5 @@ class MetricsService:
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to record metric: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to record metric", e, community_id=community_id)
             raise

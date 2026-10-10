@@ -3788,6 +3788,44 @@ components:
       - updated_at
       title: RoleSyncBinding
       type: object
+    SaveConsentPreferencesDTO:
+      description: 'Preferences as submitted to `POST /api/v1/cookie`.
+
+
+        `doNotSell` is tri-state: `None` means the caller did not say, so a
+
+        stored CCPA opt-out is kept; `True`/`False` is an explicit choice
+
+        (`False` is a deliberate opt-back-in). Defaulting it to `False` would
+
+        make an omitted field indistinguishable from an opt-back-in and
+
+        silently revert the opt-out.'
+      properties:
+        analytics:
+          default: false
+          title: Analytics
+          type: boolean
+        doNotSell:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          default: null
+          title: Donotsell
+        functional:
+          default: false
+          title: Functional
+          type: boolean
+        marketing:
+          default: false
+          title: Marketing
+          type: boolean
+        necessary:
+          default: true
+          title: Necessary
+          type: boolean
+      title: SaveConsentPreferencesDTO
+      type: object
     Server:
       description: Response DTO -- one `server_status_configs` row, admin view (host/port
         visible).
@@ -14531,7 +14569,7 @@ paths:
                   title: Consentmethod
                   type: string
                 preferences:
-                  $ref: '#/components/schemas/ConsentPreferencesDTO'
+                  $ref: '#/components/schemas/SaveConsentPreferencesDTO'
               title: SaveConsentRequest
               type: object
       responses:
@@ -14658,7 +14696,13 @@ paths:
       summary: Activate an existing policy version (super admin only).
   /api/v1/cookie/preferences:
     patch:
-      description: ''
+      description: '
+
+        The four categories are merged over the stored preferences (a stored
+
+        `doNotSell` opt-out is preserved); a `Sec-GPC: 1` header additionally
+
+        forces `doNotSell` on and `marketing` off, same as `POST /api/v1/cookie`.'
       operationId: patch_update_preferences
       parameters: []
       requestBody:
@@ -14668,9 +14712,16 @@ paths:
               description: 'Request DTO for `PATCH /api/v1/cookie/preferences`.
 
 
-                No `doNotSell` field -- see `services/cookie_consent_service.py`''s
+                `doNotSell` is accepted for wire compatibility but never written from
 
-                `update_preferences()` docstring for why.'
+                the body: this endpoint merges the four cookie categories over the
+
+                stored preferences (`services/cookie_consent_service.py`''s
+
+                `update_preferences()`), so the stored opt-out is preserved, and only
+                a
+
+                `Sec-GPC` signal can force it on.'
               properties:
                 preferences:
                   $ref: '#/components/schemas/ConsentPreferencesDTO'

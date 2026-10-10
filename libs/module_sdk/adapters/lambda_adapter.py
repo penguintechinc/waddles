@@ -299,7 +299,7 @@ class LambdaAdapter(BaseAdapter):
             try:
                 response_data = json.loads(response_data)
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse Lambda response as JSON: {str(e)}")
+                logger.error("Failed to parse Lambda response as JSON: %s", type(e).__name__)
                 return ExecuteResponse(
                     success=False,
                     error=f"Failed to parse Lambda response as JSON: {str(e)}",
@@ -454,10 +454,13 @@ class LambdaAdapter(BaseAdapter):
                     )
 
                     logger.warning(
-                        f"Lambda invocation failed ({error_name}): {str(e)[:100]}. "
-                        f"Retrying in {delay:.2f}s "
-                        f"(attempt {attempt + 1}/{self.max_retries}, "
-                        f"session: {request.session_id})"
+                        "Lambda invocation failed (%s). Retrying in %.2fs "
+                        "(attempt %d/%d, session: %s)",
+                        error_name,
+                        delay,
+                        attempt + 1,
+                        self.max_retries,
+                        request.session_id,
                     )
 
                     await asyncio.sleep(delay)
@@ -465,9 +468,11 @@ class LambdaAdapter(BaseAdapter):
                 else:
                     # Non-retryable error or max retries exceeded
                     logger.error(
-                        f"Lambda invocation failed ({error_name}): {str(e)} "
-                        f"(attempt {attempt + 1}/{self.max_retries + 1}, "
-                        f"session: {request.session_id})"
+                        "Lambda invocation failed (%s) (attempt %d/%d, session: %s)",
+                        error_name,
+                        attempt + 1,
+                        self.max_retries + 1,
+                        request.session_id,
                     )
                     raise
 
@@ -526,7 +531,8 @@ class LambdaAdapter(BaseAdapter):
 
         except Exception as e:
             error_msg = f"Lambda invocation error: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            # SECURITY: log the type only -- the message/traceback may echo the request payload
+            logger.error("Lambda invocation error: %s", type(e).__name__)
             self.health.record_failure()
 
             return ExecuteResponse(
