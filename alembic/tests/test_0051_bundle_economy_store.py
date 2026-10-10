@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0050_bundle_economy_store (issue #714).
+"""Real-Postgres tests for 0051_bundle_economy_store (issue #714).
 
 Runs the actual Alembic chain to `head` in an ephemeral container (see
 `pg_docker.py`) and asserts the schema, the non-negative balance backstop, the
@@ -24,7 +24,7 @@ requires_docker = pytest.mark.skipif(
 )
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1] / "versions" / "0050_bundle_economy_store.py"
+    Path(__file__).resolve().parents[1] / "versions" / "0051_bundle_economy_store.py"
 )
 _ROLE = "waddles_economy_runtime"
 
@@ -38,10 +38,10 @@ def _load_migration():  # type: ignore[no-untyped-def]
 
 
 class TestMigrationMetadata:
-    def test_chains_off_0049_reputation_store(self) -> None:
+    def test_chains_off_0050_reputation_store(self) -> None:
         migration = _load_migration()
-        assert migration.revision == "0050_bundle_economy_store"
-        assert migration.down_revision == "0049_bundle_reputation_store"
+        assert migration.revision == "0051_bundle_economy_store"
+        assert migration.down_revision == "0050_bundle_reputation_store"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
         assert len(_load_migration().revision) <= 32
@@ -59,7 +59,7 @@ class TestMigrationMetadata:
 def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0050-economy") as db:
+    with migrated_postgres("0051-economy") as db:
         yield db
 
 

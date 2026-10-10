@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0051_bundle_identity_resolve (bundle `identity` capability).
+"""Real-Postgres tests for 0052_bundle_identity_resolve (bundle `identity` capability).
 
 Runs the actual Alembic chain to `head` in an ephemeral container (see
 `pg_docker.py`) and asserts the widened `community_member_identities` view:
@@ -27,22 +27,27 @@ requires_docker = pytest.mark.skipif(
 )
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1] / "versions" / "0051_bundle_identity_resolve.py"
+    Path(__file__).resolve().parents[1] / "versions" / "0052_bundle_identity_resolve.py"
 )
 _READER = "waddles_bundle_reader"
 _VIEW = "community_member_identities"
 _USER_TRIGGER = "trg_community_members_user_uuid"
 
-#: 0045's columns, in order, then the two this migration appends.
+#: 0045's five columns, then 0048_identity_forged_uuid's status/reason pair, then the two
+#: this migration appends -- the UNION of both migrations' column sets, in append order.
 _EXPECTED_COLUMNS = [
     "community_id",
     "platform",
     "platform_user_id",
     "hub_user_uuid",
     "user_uuid",
+    "user_uuid_status",
+    "user_uuid_unavailable_reason",
     "tenant_id",
     "is_active_member",
 ]
+#: The view as 0048 left it (and as this migration's downgrade must restore it).
+_COLUMNS_AT_0048 = _EXPECTED_COLUMNS[:7]
 _PII_COLUMNS = {
     "display_name",
     "username",
@@ -65,10 +70,10 @@ def _load_migration():  # type: ignore[no-untyped-def]
 
 
 class TestMigrationMetadata:
-    def test_chains_off_0050_economy_store(self) -> None:
+    def test_chains_off_0051_economy_store(self) -> None:
         migration = _load_migration()
-        assert migration.revision == "0051_bundle_identity_resolve"
-        assert migration.down_revision == "0050_bundle_economy_store"
+        assert migration.revision == "0052_bundle_identity_resolve"
+        assert migration.down_revision == "0051_bundle_economy_store"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
         assert len(_load_migration().revision) <= 32
@@ -104,7 +109,7 @@ class TestMigrationMetadata:
 def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0051-identity") as db:
+    with migrated_postgres("0052-identity") as db:
         yield db
 
 
@@ -202,7 +207,7 @@ def _seed(cur: Any) -> dict[str, Any]:
 
 @requires_docker
 class TestViewShape:
-    def test_columns_are_the_0045_five_in_order_then_the_two_appended(
+    def test_columns_are_the_union_of_0048_and_this_migration_in_append_order(
         self, pg_db: PgTestDatabase
     ) -> None:
         with _cursor(pg_db) as cur:
@@ -285,13 +290,13 @@ class TestActiveMembershipPredicate:
 
 @requires_docker
 class TestDowngradeRoundTrip:
-    def test_downgrade_restores_the_0045_view_shape_and_upgrade_reapplies(self) -> None:
+    def test_downgrade_restores_the_0048_view_shape_and_upgrade_reapplies(self) -> None:
         import os
         import subprocess
         import sys
 
         repo_root = Path(__file__).resolve().parents[2]
-        with migrated_postgres("0051-roundtrip") as db:
+        with migrated_postgres("0052-roundtrip") as db:
             env = {**os.environ, "DATABASE_URL": db.dsn}
             env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
 
@@ -314,8 +319,9 @@ class TestDowngradeRoundTrip:
                     return [r[0] for r in cur.fetchall()]
 
             assert view_columns() == _EXPECTED_COLUMNS
-            alembic("downgrade", "0050_bundle_economy_store")
-            assert view_columns() == _EXPECTED_COLUMNS[:5]
+            alembic("downgrade", "0051_bundle_economy_store")
+            # 0048's status/reason columns (#757) must survive this downgrade.
+            assert view_columns() == _COLUMNS_AT_0048
             with _cursor(db) as cur:
                 assert _priv(cur, _VIEW, "SELECT") is True, (
                     "downgrade must re-grant the reader"

@@ -305,7 +305,7 @@ jobs:
           );
           -- 0043_hub_users_identity_uuid creates a view over community_members
           -- (legacy config/postgres table); only the columns the view uses.
-          -- 0049_bundle_reputation_store also column-grants on is_active/left_at/
+          -- 0050_bundle_reputation_store also column-grants on is_active/left_at/
           -- removed_at. Mirrors pg_docker.py's `_BOOTSTRAP_SQL` -- keep in sync.
           CREATE TABLE community_members (
               id SERIAL PRIMARY KEY,

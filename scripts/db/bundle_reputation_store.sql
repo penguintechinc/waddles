@@ -1,5 +1,5 @@
 -- Bundle reputation store DDL (issue #726) -- the single source of truth read
--- by BOTH `alembic/versions/0049_bundle_reputation_store.py` (production
+-- by BOTH `alembic/versions/0050_bundle_reputation_store.py` (production
 -- schema) and `core/bundle_host_reputation/tests/postgres_integration.rs`
 -- (`include_str!`), so the Rust store's SQL is always tested against the
 -- exact DDL that ships. Idempotent (IF NOT EXISTS / guarded DO blocks); lives

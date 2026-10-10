@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0049_bundle_reputation_store (issue #726).
+"""Real-Postgres tests for 0050_bundle_reputation_store (issue #726).
 
 Runs the actual Alembic chain to `head` in an ephemeral container (see
 `pg_docker.py`) and asserts the schema, the fail-closed identity column, and
@@ -22,7 +22,7 @@ requires_docker = pytest.mark.skipif(
 )
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1] / "versions" / "0049_bundle_reputation_store.py"
+    Path(__file__).resolve().parents[1] / "versions" / "0050_bundle_reputation_store.py"
 )
 _ROLE = "waddles_bundle_reputation"
 
@@ -36,10 +36,10 @@ def _load_migration():  # type: ignore[no-untyped-def]
 
 
 class TestMigrationMetadata:
-    def test_chains_off_0045(self) -> None:
+    def test_chains_off_0049_sso_connections(self) -> None:
         migration = _load_migration()
-        assert migration.revision == "0049_bundle_reputation_store"
-        assert migration.down_revision == "0045_identity_resolution"
+        assert migration.revision == "0050_bundle_reputation_store"
+        assert migration.down_revision == "0049_sso_connections"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
         assert len(_load_migration().revision) <= 32
@@ -52,7 +52,7 @@ class TestMigrationMetadata:
 def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0049-reputation") as db:
+    with migrated_postgres("0050-reputation") as db:
         yield db
 
 
@@ -104,17 +104,28 @@ class TestSchema:
             cur.execute(
                 "INSERT INTO community_members (community_id) VALUES (%s), (%s)", (cid, cid)
             )  # two NULL user_uuid rows are fine
+            # 0048_identity_forged_uuid's membership trigger always DERIVES user_uuid and
+            # discards a caller-supplied value, so it would mask the unique index under test;
+            # disable it (reverted by the rollback in `finally`) to exercise the index directly.
             cur.execute(
-                "INSERT INTO community_members (community_id, user_uuid) "
-                "VALUES (%s, '11111111-2222-4333-8444-555555555555')",
-                (cid,),
+                "ALTER TABLE community_members DISABLE TRIGGER trg_community_members_user_uuid"
             )
-            with pytest.raises(psycopg2.errors.UniqueViolation):
+            try:
                 cur.execute(
                     "INSERT INTO community_members (community_id, user_uuid) "
                     "VALUES (%s, '11111111-2222-4333-8444-555555555555')",
                     (cid,),
                 )
+                with pytest.raises(psycopg2.errors.UniqueViolation):
+                    cur.execute(
+                        "INSERT INTO community_members (community_id, user_uuid) "
+                        "VALUES (%s, '11111111-2222-4333-8444-555555555555')",
+                        (cid,),
+                    )
+            finally:
+                # The violating INSERT aborted the transaction; rolling it back also reverts
+                # the (transactional) DISABLE TRIGGER, so nothing leaks into later tests.
+                conn.rollback()
 
     def test_public_has_no_access_to_the_scores_table(self, pg_db: PgTestDatabase) -> None:
         with _connect(pg_db) as conn, conn.cursor() as cur:

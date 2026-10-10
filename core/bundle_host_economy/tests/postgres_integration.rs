@@ -136,7 +136,7 @@ async fn fixture() -> Fixture {
     )
     .await;
     // The role must exist BEFORE the shipped DDL so its grants block fires
-    // (same ordering alembic 0050 guarantees).
+    // (same ordering alembic 0051 guarantees).
     exec(
         &su,
         &format!(

@@ -28,8 +28,8 @@ the migrations image, and `include_str!`'d by the Rust crate's integration
 test) so the shipped schema and the tested schema cannot drift.
 
 Chain note: this repo's live schema chain is the Alembic one (head was
-`0048_identity_forged_uuid` when this was renumbered from 0043 -> 0046 -> 0049 to
-chain after the identity migrations 0043-0045 and 0048); `config/postgres/migrations/*.sql` is
+`0049_sso_connections` when this was renumbered from 0043 -> 0046 -> 0049 -> 0050 to
+chain after the identity migrations 0043-0045 and 0048 and the SSO migration 0049); `config/postgres/migrations/*.sql` is
 only replayed by the 0001 baseline on a brand-new database, so a new SQL-only
 file there would never reach an existing deployment.
 
@@ -39,8 +39,8 @@ EXISTS` forms make them a no-op here (and keep the file runnable standalone for
 the Rust integration tests). 0045 therefore OWNS them: this migration's
 downgrade must not drop them.
 
-Revision ID: 0049_bundle_reputation_store
-Revises: 0048_identity_forged_uuid
+Revision ID: 0050_bundle_reputation_store
+Revises: 0049_sso_connections
 Create Date: 2026-10-09
 """
 
@@ -52,8 +52,8 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0049_bundle_reputation_store"
-down_revision = "0048_identity_forged_uuid"
+revision = "0050_bundle_reputation_store"
+down_revision = "0049_sso_connections"
 branch_labels = None
 depends_on = None
 
