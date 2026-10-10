@@ -978,9 +978,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../service_auth/src/jwt_hardening.rs"
         );
-        let original = std::fs::read_to_string(original_path).unwrap_or_else(|e| {
-            panic!("cannot read the service_auth original {original_path}: {e}")
-        });
+        let original = match std::fs::read_to_string(original_path) {
+            Ok(source) => source,
+            Err(error) => panic!("cannot read the service_auth original {original_path}: {error}"),
+        };
         let mirror = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/http/auth/hardening.rs"
