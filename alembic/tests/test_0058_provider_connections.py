@@ -327,7 +327,9 @@ class TestPrivilegesUnchanged:
                 grantees = {row[0] for row in cur.fetchall()}
         finally:
             conn.close()
-        assert grantees <= {"hub_api", "migration_runner"}, grantees
+        # `waddles_hub_api` is hub-api's own per-service login role (0055_per_service_db_roles,
+        # member_of hub_api): the same control-plane identity as `hub_api`, never a data-plane role.
+        assert grantees <= {"hub_api", "migration_runner", "waddles_hub_api"}, grantees
         assert "PUBLIC" not in grantees
 
 
