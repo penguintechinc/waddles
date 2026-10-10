@@ -1848,7 +1848,7 @@ impl HttpTransport for ReqwestTransport {
                 builder = builder.body(body);
             }
 
-            let response = builder.send().await.map_err(|e| classify_send_error(&e))?;
+            let response = builder.send().await.map_err(classify_send_error)?;
             let status = response.status().as_u16();
             let headers: Vec<(String, String)> = response
                 .headers()
@@ -1860,7 +1860,7 @@ impl HttpTransport for ReqwestTransport {
             let mut truncated = false;
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| classify_send_error(&e))?;
+                let chunk = chunk.map_err(classify_send_error)?;
                 if body.len() + chunk.len() > max_response_bytes {
                     let remaining = max_response_bytes.saturating_sub(body.len());
                     body.extend_from_slice(&chunk[..remaining]);
@@ -1886,7 +1886,16 @@ impl HttpTransport for ReqwestTransport {
 /// typed "certificate verification failed" variant) -- documented
 /// best-effort, never load-bearing for the SSRF property itself (that is
 /// enforced entirely before this function is ever reached).
-fn classify_send_error(err: &reqwest::Error) -> HostResultError {
+///
+/// **The request URL is redacted first** ([`crate::redact::scrub_error_url`]):
+/// `reqwest::Error`'s `Display` embeds the full URL, and a Discord webhook
+/// carries its bearer token in the URL *path* (`/api/webhooks/{id}/{token}`),
+/// so dropping only the query/fragment still leaked it into every
+/// `HostResultError` message, DLQ detail and bundle log. Only the host and
+/// a default-deny redacted path survive.
+fn classify_send_error(err: reqwest::Error) -> HostResultError {
+    let err = crate::redact::scrub_error_url(err);
+    let err = &err;
     if err.is_timeout() {
         return denied("timeout", err.to_string());
     }
