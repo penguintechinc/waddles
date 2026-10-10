@@ -111,6 +111,6 @@ class VaultCorrupt(ProviderConnectionError):
 
 
 class SchemaMissing(ProviderConnectionError):
-    """The connection tables or migration-0056 columns are not present."""
+    """The connection tables or migration-0058 columns are not present."""
 
     code = "schema_missing"

@@ -154,7 +154,7 @@ convention = "google"
 # SSO test suite: embedded SAML/XML payload strings and long assertion messages read better
 # unwrapped (same rationale as the per-file test ignores above).
 "tests/sso/*" = ["E501"]
-# Provider/connection framework (migration 0056) -- request/response DTO fields are camelCase to
+# Provider/connection framework (migration 0058) -- request/response DTO fields are camelCase to
 # match every other v1 blueprint's JSON contract (security.md Output Validation: the JSON key IS
 # the field name); S101 is the standard tenant_middleware postcondition assert.
 "blueprints/v1/provider_connections.py" = ["N815", "S101"]

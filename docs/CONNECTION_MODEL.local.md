@@ -161,7 +161,7 @@ JWT/machine-token on every call, regardless of transport).
 
 ---
 
-## Step 1, hub-api half (DONE, `feature/provider-connection-framework`, migration `0056_provider_connections`)
+## Step 1, hub-api half (DONE, `feature/provider-connection-framework`, migration `0058_provider_connections`)
 
 Full guide: [`PROVIDER_CONNECTIONS.md`](PROVIDER_CONNECTIONS.md). What shipped, and where it
 deliberately differs from the sketch above:

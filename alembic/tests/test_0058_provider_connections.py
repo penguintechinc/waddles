@@ -1,4 +1,4 @@
-"""Tests for 0056_provider_connections (provider/connection framework columns).
+"""Tests for 0058_provider_connections (provider/connection framework columns).
 
 Two layers, both cheap to keep green:
 
@@ -32,14 +32,14 @@ requires_docker = pytest.mark.skipif(
 )
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parent.parent / "versions" / "0056_provider_connections.py"
+    Path(__file__).resolve().parent.parent / "versions" / "0058_provider_connections.py"
 )
-_PREVIOUS_REVISION = "0052_bundle_identity_resolve"
+_PREVIOUS_REVISION = "0057_communities_overlay_code"
 
 
 def _load_migration() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "migration_0056_provider_connections", _MIGRATION_PATH
+        "migration_0058_provider_connections", _MIGRATION_PATH
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -68,7 +68,7 @@ def _added_columns(sql: str, table: str) -> set[str]:
 class TestStaticSchemaDrift:
     def test_the_revision_chain_is_what_the_docstring_says(self) -> None:
         module = _load_migration()
-        assert module.revision == "0056_provider_connections"
+        assert module.revision == "0058_provider_connections"
         assert module.down_revision == _PREVIOUS_REVISION
         assert len(module.revision) <= 32
 
@@ -79,7 +79,7 @@ class TestStaticSchemaDrift:
         from flask_core.models import guild_pairing  # type: ignore[import-not-found]
 
         sql = _upgrade_sql()
-        pre_0056 = {
+        pre_0058 = {
             "platform_connections": {
                 "id",
                 "tenant_id",
@@ -109,12 +109,12 @@ class TestStaticSchemaDrift:
             "community_connection_access": guild_pairing.CommunityConnectionAccess,
         }
         for table, model in models.items():
-            model_new = {c.name for c in model.__table__.columns} - pre_0056[table]
+            model_new = {c.name for c in model.__table__.columns} - pre_0058[table]
             sql_new = _added_columns(sql, table)
             assert sql_new, f"no ADD COLUMN found for {table}"
             assert sql_new == model_new, table
 
-    def test_the_0035_drift_guard_knows_exactly_the_columns_0056_adds(self) -> None:
+    def test_the_0035_drift_guard_knows_exactly_the_columns_0058_adds(self) -> None:
         from test_0035_schema_drift import _COLUMNS_ADDED_LATER  # type: ignore[import-not-found]
 
         sql = _upgrade_sql()
@@ -156,7 +156,7 @@ def _community(cur: psycopg2.extensions.cursor, name: str) -> int:
 
 
 def _connection(cur: psycopg2.extensions.cursor, tenant_id: int, resource_id: str = "r1") -> int:
-    """A row written exactly as a pre-0056 (0035-era) caller would: new columns omitted."""
+    """A row written exactly as a pre-0058 (0035-era) caller would: new columns omitted."""
     cur.execute(
         "INSERT INTO platform_connections (tenant_id, platform, resource_type, resource_id, access_token) "
         "VALUES (%s, 'twitch', 'twitch_channel', %s, 'ciphertext') RETURNING id",
@@ -167,10 +167,10 @@ def _connection(cur: psycopg2.extensions.cursor, tenant_id: int, resource_id: st
 
 @pytest.fixture(scope="module")
 def pg_db() -> Iterator[PgTestDatabase]:
-    """One real Postgres 17 container migrated to head (includes 0056)."""
+    """One real Postgres 17 container migrated to head (includes 0058)."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0056-provider-connections") as db:
+    with migrated_postgres("0058-provider-connections") as db:
         yield db
 
 
@@ -203,7 +203,7 @@ class TestColumnsAndDefaults:
         enabled = cols[("community_connection_access", "enabled")]
         assert (enabled[0], enabled[1]) == ("boolean", "NO") and "true" in enabled[2].lower()
 
-    def test_a_pre_0056_style_insert_gets_safe_defaults(self, pg_db: PgTestDatabase) -> None:
+    def test_a_pre_0058_style_insert_gets_safe_defaults(self, pg_db: PgTestDatabase) -> None:
         conn = _connect(pg_db)
         try:
             with conn.cursor() as cur:
@@ -334,7 +334,7 @@ class TestPrivilegesUnchanged:
 @requires_docker
 class TestRoundTrip:
     def test_downgrade_then_upgrade_preserves_the_0035_data(self) -> None:
-        with migrated_postgres("0056-roundtrip") as db:
+        with migrated_postgres("0058-roundtrip") as db:
             conn = _connect(db)
             try:
                 with conn.cursor() as cur:

@@ -149,10 +149,10 @@ class TestSchemaGuard:
         finally:
             await db.close()
 
-    async def test_missing_0056_columns_fail_loudly_naming_the_migration(
+    async def test_missing_0058_columns_fail_loudly_naming_the_migration(
         self, tmp_path: Any
     ) -> None:
-        """A database that has 0035 but not 0056 must refuse, not run on a half-schema."""
+        """A database that has 0035 but not 0058 must refuse, not run on a half-schema."""
         db = AsyncDB(f"sqlite://{tmp_path / 'half.db'}", pool_size=1)
         async with db.engine.begin() as conn:
             await conn.run_sync(build_pc_metadata().create_all)
@@ -164,7 +164,7 @@ class TestSchemaGuard:
             await conn.execute(text("ALTER TABLE community_connection_access DROP COLUMN enabled"))
         await db.reflect()
         try:
-            with pytest.raises(SchemaMissing, match="0056_provider_connections") as info:
+            with pytest.raises(SchemaMissing, match="0058_provider_connections") as info:
                 await store.list_bindings(db, tenant_id=1, community_id=1)
             assert "resource_metadata" in info.value.message and "enabled" in info.value.message
         finally:

@@ -134,7 +134,7 @@ IdPs -- only the IdP socket and Redis are replaced) plus a real-Postgres migrati
 
 One adapter interface, one connection API and one encrypted per-community token store for every
 external platform. Builds on the three-layer connection tables from migration 0035 (adds
-`0056_provider_connections`: per-link `resource_metadata` / `expires_at` / `status_reason`, per-grant
+`0058_provider_connections`: per-link `resource_metadata` / `expires_at` / `status_reason`, per-grant
 `enabled`). Gated by scope `connections:admin`, flag `waddles.integrations.provider_connections`
 (default OFF) and the Professional tier. Tokens are AES-256-GCM ciphertext under
 `CREDENTIAL_ENCRYPTION_KEY` and are decrypted only at the point of use; the data plane
@@ -142,7 +142,7 @@ external platform. Builds on the three-layer connection tables from migration 00
 routes. Full guide, API, security model, data-plane contract and "adding a provider" checklist:
 [`docs/PROVIDER_CONNECTIONS.md`](../docs/PROVIDER_CONNECTIONS.md). Tests: `tests/provider_connections/`
 (only the Twitch socket is faked) plus real-Postgres tests in `tests/provider_connections/
-test_pg_integration.py` and `alembic/tests/test_0056_provider_connections.py`; run with
+test_pg_integration.py` and `alembic/tests/test_0058_provider_connections.py`; run with
 `python3 -m pytest tests/provider_connections -q --cov=services.provider_connections
 --cov=blueprints.v1.provider_connections --cov-branch`.
 

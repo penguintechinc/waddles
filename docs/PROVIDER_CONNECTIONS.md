@@ -5,7 +5,7 @@ external platform Waddles talks to. **Twitch is the first provider**; Discord, S
 YouTube plug into the same framework (see [Adding a provider](#adding-a-provider)).
 
 Implemented in **hub-api**: `hub_api/services/provider_connections/`,
-`hub_api/blueprints/v1/provider_connections.py`, migration `0056_provider_connections`.
+`hub_api/blueprints/v1/provider_connections.py`, migration `0058_provider_connections`.
 Design background and the storage model it builds on:
 [`CONNECTION_MODEL.local.md`](CONNECTION_MODEL.local.md).
 
@@ -44,7 +44,7 @@ community_connection_access layer 3  which community may use a link + its approv
                                      -- no credentials, ever
 ```
 
-Migration `0056_provider_connections` adds, additively and online-safe:
+Migration `0058_provider_connections` adds, additively and online-safe:
 
 | Table | Column | Meaning |
 |---|---|---|
@@ -266,7 +266,7 @@ DEBUG.
 
 ## Deploying
 
-1. **Migrate.** `0056_provider_connections` (additive; no new table, no RBAC-matrix change).
+1. **Migrate.** `0058_provider_connections` (additive; no new table, no RBAC-matrix change).
 2. **Key.** `CREDENTIAL_ENCRYPTION_KEY` is already provisioned for hub-api by the chart
    (`secrets.yaml`); without it connections fail loud with `503`.
 3. **Refresh app.** hub-api must see `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` (the platform
@@ -284,7 +284,7 @@ DEBUG.
 cd hub_api
 python3 -m pytest tests/provider_connections -q \
   --cov=services.provider_connections --cov=blueprints.v1.provider_connections --cov-branch
-python3 -m pytest ../alembic/tests/test_0056_provider_connections.py -q   # real Postgres (docker)
+python3 -m pytest ../alembic/tests/test_0058_provider_connections.py -q   # real Postgres (docker)
 ```
 
 Real-path principle: only the Twitch **socket** (`httpx.MockTransport`), DNS, and the entitlement

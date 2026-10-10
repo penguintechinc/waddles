@@ -9,7 +9,7 @@ database, and the real machine-JWT verifier. What is replaced: the Twitch socket
 (``httpx.MockTransport`` -- ``fake_twitch.py``), DNS (public addresses for the Twitch hosts so the
 real SSRF guard still runs), and the entitlement backends.
 
-The sqlite tables below mirror migration 0035 + 0056 column-for-column;
+The sqlite tables below mirror migration 0035 + 0058 column-for-column;
 ``test_pg_integration.py`` asserts that mirror against the real migrated Postgres schema so the
 two cannot drift.
 """
@@ -134,7 +134,7 @@ def bot_tokens(fake_twitch: FakeTwitch) -> tuple[str, str | None]:
 
 
 def build_pc_metadata() -> MetaData:
-    """SQLAlchemy Core mirror of migrations 0035 + 0056 (sqlite-compatible)."""
+    """SQLAlchemy Core mirror of migrations 0035 + 0058 (sqlite-compatible)."""
     metadata = MetaData()
     Table(
         "platform_connections",

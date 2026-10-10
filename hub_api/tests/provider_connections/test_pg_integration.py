@@ -61,7 +61,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def pg_db() -> Iterator[PgTestDatabase]:
-    """One real Postgres 17 container migrated to head (Alembic chain incl. 0035 + 0056)."""
+    """One real Postgres 17 container migrated to head (Alembic chain incl. 0035 + 0058)."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
     with migrated_postgres("hub-api-provider-connections") as db:

@@ -38,12 +38,13 @@ metadata-only change on PostgreSQL 11+, no rewrite. Table privileges are table-l
 still cannot read a token column and reaches connections only through hub-api.
 
 **Numbering note:** parallel migrations are landing on ``release/v3.0.X``; this is chained off
-``0052_bundle_identity_resolve`` (the head when written). Re-point ``down_revision`` at the
+``0057_communities_overlay_code``, the last link of the consolidated chain
+``0052 -> 0054 -> 0055 -> 0056 -> 0057 -> 0058``. Re-point ``down_revision`` at the
 then-current head if another migration merges first
 (``bash scripts/ci/check-alembic-single-head.sh``).
 
-Revision ID: 0056_provider_connections
-Revises: 0052_bundle_identity_resolve
+Revision ID: 0058_provider_connections
+Revises: 0057_communities_overlay_code
 Create Date: 2026-10-10
 """
 
@@ -51,8 +52,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0056_provider_connections"
-down_revision = "0052_bundle_identity_resolve"
+revision = "0058_provider_connections"
+down_revision = "0057_communities_overlay_code"
 branch_labels = None
 depends_on = None
 

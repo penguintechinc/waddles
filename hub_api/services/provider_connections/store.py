@@ -1,6 +1,6 @@
 """Persistence for the connection framework: penguin-dal's reflected tables, one transaction each.
 
-Storage is the three-layer model from migration 0035, extended by 0056 (see
+Storage is the three-layer model from migration 0035, extended by 0058 (see
 ``docs/CONNECTION_MODEL.local.md``):
 
 * ``platform_connections`` (layer 2) -- the link itself: provider, resource, status, expiry,
@@ -136,7 +136,7 @@ def _tables(db: Any) -> _Tables:
         absent.append("enabled")
     if absent:
         raise SchemaMissing(
-            f"column(s) not present: {', '.join(absent)} -- run migration 0056_provider_connections"
+            f"column(s) not present: {', '.join(absent)} -- run migration 0058_provider_connections"
         )
     return _Tables(connections=connections, grants=grants, communities=tables["communities"])
 
