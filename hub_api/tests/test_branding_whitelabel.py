@@ -264,6 +264,25 @@ class TestTenantUpdateBrandingGate:
         assert _tenant_row(db).logo_url == STORED_LOGO  # unchanged
         assert gate_off.await_args.args[0] == FLAG
 
+    async def test_the_402_rejection_is_logged_without_branding_values(
+        self,
+        client: Any,
+        gate_off: AsyncMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The handler logs before returning (no-stubs gate) and never logs customer URLs."""
+        with caplog.at_level("INFO", logger="blueprints.v1.tenant"):
+            response = await client.put(
+                f"/api/v1/tenant/{TENANT_SLUG}",
+                headers=_admin_headers(),
+                json={"logoUrl": "https://cdn.acme.example/secret-path.png"},
+            )
+
+        assert response.status_code == 402
+        [record] = [r for r in caplog.records if r.getMessage() == "tenant.update_rejected"]
+        assert (record.__dict__["status"], record.__dict__["code"]) == (402, "FEATURE_NOT_ENABLED")
+        assert "secret-path" not in "\n".join(r.getMessage() for r in caplog.records)
+
     async def test_free_tenant_cannot_set_a_theme_or_welcome_message(
         self, client: Any, db: Any, gate_off: AsyncMock
     ) -> None:

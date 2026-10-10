@@ -20,6 +20,7 @@ exists and what it closes off relative to Node's own (bugged) auth chain.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -34,6 +35,8 @@ from services import tenant_service as svc
 from services.errors import ApiError, payment_required
 from services.pagination import parse_limit
 from services.schema import bind_tenant_tables
+
+logger = logging.getLogger(__name__)
 
 tenant_bp = Blueprint("v1_tenant", __name__, url_prefix="/api/v1/tenant")
 
@@ -358,6 +361,12 @@ async def update_tenant(
             config=data.config,
         )
     except ApiError as exc:
+        # Includes the whitelabel 402 (Professional gate): log the rejection (no
+        # branding values -- they may embed customer-supplied URLs) before returning.
+        logger.info(
+            "tenant.update_rejected",
+            extra={"status": exc.status_code, "code": exc.code},
+        )
         return _err(exc)
     return MessageResponse(success=True, message="Tenant updated")
 
