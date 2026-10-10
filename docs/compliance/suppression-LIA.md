@@ -172,7 +172,7 @@ coverage are in the pull request description.
 ## 11. Fail-first (mutation) record
 
 Executed 2026-10-10, not narrated: each mutation below was applied to the production source
-in-process, the relevant suites re-run, then the file restored. **52 of 52 mutants were killed**
+in-process, the relevant suites re-run, then the file restored. **54 of 54 mutants were killed**
 (one -- the transaction helper never rolling back -- first survived and drove a new direct test,
 `TestTransactionHelper`). A mutant counts as killed on the first red test.
 
@@ -184,7 +184,7 @@ in-process, the relevant suites re-run, then the file restored. **52 of 52 mutan
 | One transaction, all-or-nothing, fail loud | A13 suppression row committed on its own - A14 no rollback on failure - B15 transaction helper never rolls back |
 | Per tenant only | B2 lookup not tenant-scoped - B14 re-apply bans every tenant - C1 tenant key independent of tenant id |
 | Expiry / purge / lift | B3 expiry ignored - B5 purge deletes nothing - B6 purge deletes live rows - B7 lift does not delete - B9 earlier expiry wins - B10/A9 retention ceiling ignored |
-| Keyed, versioned, stable code | C2 unkeyed SHA-256 - C3 platform not bound - C4 platform not lower-cased - C5 only the current key tried - C6 static HKDF salt - C7 key version truncated - C8 short key accepted - C9 id case folded |
+| Keyed, versioned, stable code (over the envelope KEK seam) | C2 unkeyed SHA-256 - C3 platform not bound - C4 platform not lower-cased - C5 only the current key tried - C6 static HKDF salt - C7 previous KEK not listed for rotation - C8 unknown KEK id falls back to the current KEK - C9 id case folded - C10 HKDF label ignored (all uses share a key) - C11 KEK-load failure swallowed into a zero key |
 | Classification and upsert | B8 BAN no longer outranks AUTO_BAN - B12 `auto_ban` never classified - B16 duplicate row instead of extending |
 | Re-application on return | B11 re-applied membership stays active - B13 match found but not banned - D1 join approval skips the gate - D2/D3 OAuth link (new + retry) - D4 OAuth signup - D5/D6 identity link (new + retry) |
 | Operator CLI | E1 `lift` always exits 0 - E2 `check` exits 0 on no match - E3 `stats` counts expired as live - E4 id accepted off the stdin path |

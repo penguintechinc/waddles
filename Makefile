@@ -6,6 +6,7 @@
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
         check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        test-seaweedfs-sse-kms \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check
 
@@ -70,13 +71,16 @@ check-no-stubs:
 	@bash scripts/ci/check-no-stubs.sh
 
 # Bundle hygiene gates (.github/workflows/bundle-hygiene.yml): raw user input in
-# bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, and
-# broad silent `except` swallows. Each prints the count it examined and exits
-# non-zero on a hit (or on zero examined). Needs PyYAML for the manifest check.
+# bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, broad
+# silent `except` swallows, and role badges (`is_mod`, ...) read through Python
+# truthiness (`bool("false")` is True -> mod-gate bypass) in bundles AND the
+# legacy svc-ingest tree. Each prints the count it examined and exits non-zero on
+# a hit (or on zero examined). Needs PyYAML for the manifest check.
 check-bundle-hygiene:
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check log-pii
 	@python3 scripts/ci/check-bundle-manifest-permissions.py
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
 
 test:
 	@$(MAKE) test-unit
@@ -290,6 +294,13 @@ generate-service-jwt-key:
 generate-seaweedfs-sse-key:
 	@test -n "$(KUBE_CONTEXT)" || { echo "ERROR: KUBE_CONTEXT is required, e.g. make generate-seaweedfs-sse-key KUBE_CONTEXT=dal2-beta" >&2; exit 1; }
 	@bash scripts/generate-seaweedfs-sse-key.sh --context "$(KUBE_CONTEXT)" $(if $(NAMESPACE),--namespace "$(NAMESPACE)",)
+
+# Enterprise external KMS: the chart's rendered SeaweedFS KMS mapping against the REAL pinned `weed`
+# image (docker + helm required; the image must already be pulled -- this target never pulls
+# implicitly). A missing prerequisite FAILS the target, it is never a skip. See
+# hub_api/tests/envelope/test_seaweedfs_sse_kms_e2e.py and docs/guides/external-kms-byok.md.
+test-seaweedfs-sse-kms:
+	@cd hub_api && WADDLES_E2E_SEAWEEDFS=1 python3 -m pytest tests/envelope/test_seaweedfs_sse_kms_e2e.py -v -p no:cacheprovider
 
 # Builds+pushes images at HEAD's SHA (Rust svc-ingest/svc-process/svc-action into their
 # own "*-rust" repositories), then `helm upgrade --install` with only the image tag set --

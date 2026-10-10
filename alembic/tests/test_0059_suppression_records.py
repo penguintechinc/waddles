@@ -24,6 +24,8 @@ requires_docker = pytest.mark.skipif(
 )
 
 HMAC = "ab" * 32
+#: The revision this migration chains off -- the round-trip downgrades to exactly it, never past it.
+PREVIOUS_REVISION = "0054_tenant_external_kms"
 
 
 def _connect(db: PgTestDatabase) -> psycopg2.extensions.connection:
@@ -269,7 +271,7 @@ class TestPrivileges:
 class TestRoundTrip:
     def test_downgrade_then_upgrade(self) -> None:
         with migrated_postgres("0059-suppression-roundtrip") as db:
-            alembic_cli("downgrade", "0052_bundle_identity_resolve", dsn=db.dsn)
+            alembic_cli("downgrade", PREVIOUS_REVISION, dsn=db.dsn)
             conn = _connect(db)
             try:
                 with conn.cursor() as cur:

@@ -29,12 +29,12 @@ Hub-api-only privileges (explicit empty rows for every other role in
 can compute or test a code either.
 
 Chain note: ``down_revision`` is the release head when written
-(``0052_bundle_identity_resolve``). Several open PRs also append (0054-0058); renumber and
+(``0054_tenant_external_kms``). Several open PRs also append (0055-0058); renumber and
 re-point at the then-current head right before merging
 (``bash scripts/ci/check-alembic-single-head.sh``).
 
 Revision ID: 0059_suppression_records
-Revises: 0052_bundle_identity_resolve
+Revises: 0054_tenant_external_kms
 Create Date: 2026-10-10
 """
 
@@ -48,7 +48,7 @@ from pathlib import Path
 from alembic import op
 
 revision = "0059_suppression_records"
-down_revision = "0052_bundle_identity_resolve"
+down_revision = "0054_tenant_external_kms"
 branch_labels = None
 depends_on = None
 

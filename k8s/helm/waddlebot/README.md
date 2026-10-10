@@ -561,6 +561,36 @@ on-prem IdPs behind the SSRF guard), `sso.stateTtlSeconds`, `sso.clockSkewSecond
 `sso.google.existingSecret` (optional shared Google OAuth client -- never inline the values).
 Tests: `tests/test_sso_render.py`.
 
+## Enterprise external KMS / BYOK (`kms:`, default OFF)
+
+Customer-managed encryption keys, **on top of** the platform-managed at-rest baseline (never a substitute).
+`kms.enabled=false` renders nothing, so the zero-config baseline is unchanged. Full guide, per-provider
+setup (AWS KMS / Google Cloud KMS / Azure Key Vault), failure behaviour and the object-storage exit ramp:
+[`docs/guides/external-kms-byok.md`](../../../docs/guides/external-kms-byok.md). Templates:
+`templates/kms.yaml` (non-secret `-kms` ConfigMap + validation), `templates/_kms.tpl` (helpers; the only
+edits to shared templates are one-line `include` hooks in `hub-api.yaml` and `infrastructure/seaweedfs.yaml`).
+
+| Value | Description | Default |
+|-------|-------------|---------|
+| `kms.enabled` | Master switch; required by both sub-features (a sub-feature without it **fails the render**) | `false` |
+| `kms.tenantKeys.enabled` | hub-api accepts per-tenant customer keys (tenants opt in over `/api/v1/tenant/<slug>/kms`) | `false` |
+| `kms.tenantKeys.providers` | Any of `aws_kms`, `gcp_kms`, `azure_key_vault`; unlisted providers are refused | `[]` |
+| `kms.tenantKeys.aws.credentialsSecret` | Optional Secret (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`); empty = IRSA / Pod Identity | `""` |
+| `kms.tenantKeys.gcp.credentialsSecret` | Optional Secret (`ENVELOPE_GCP_CREDENTIALS_JSON`); empty = Workload Identity | `""` |
+| `kms.tenantKeys.azure.credentialsSecret` | **Required** with `azure_key_vault` (`ENVELOPE_AZURE_CLIENT_ID`/`ENVELOPE_AZURE_CLIENT_SECRET`) | `""` |
+| `kms.tenantKeys.{aws,gcp}.platformPrincipal` | Public identity customers must trust/grant (shown by `GET .../kms`) | `""` |
+| `kms.tenantKeys.aws.{kms,sts}EndpointUrl`, `gcp.kmsEndpoint`, `azure.authority` | Optional `https://` overrides | `""` |
+| `kms.objectStorage.mode` | SeaweedFS SSE-KMS: `off` \| `kms` \| `drain` (the ungated exit ramp) | `off` |
+| `kms.objectStorage.provider` / `keyId` | `aws_kms` \| `gcp_kms` (no native Azure provider in SeaweedFS) / key ARN, alias or CryptoKey name | `""` |
+| `kms.objectStorage.entitlementTenant` | Tenant whose Enterprise entitlement gates hub-api's `kms`-mode writes | `system` |
+| `kms.objectStorage.aws.{region,endpoint,credentialsSecret.*}` | AWS KMS client for SeaweedFS (credentials from an existing Secret) | `""` |
+| `kms.objectStorage.gcp.{projectId,credentialsSecret.*}` | Google Cloud KMS client for SeaweedFS (key file mounted read-only 0400) | `""` |
+
+Helm cannot ask the licence server: the Enterprise entitlement is enforced at runtime by hub-api (per tenant
+for tenant keys; at startup and on its own writes for object storage). Treat `kms.objectStorage.mode: kms`
+as an Enterprise-only setting. Opt-in end-to-end check of the rendered SeaweedFS mapping against the pinned
+image: `make test-seaweedfs-sse-kms`.
+
 ## SPIRE (optional, disabled pending #437)
 
 `spire.enabled` defaults to `false` at the chart level. `values-alpha.yaml` and

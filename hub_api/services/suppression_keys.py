@@ -29,41 +29,61 @@ Why this shape (each point has a regression test in
   key, and no "skip the suppression" fallback.
 
 ``K_master`` is the platform tenant KEK (``TENANT_KEK_HEX``, optionally
-``TENANT_KEK_HEX_PREVIOUS`` during rotation), the same Secret the per-tenant
-envelope / external-KMS work (PRs #442 / #789, ``services/envelope/
-platform_kek.py``) wraps tenant DEKs with. Those PRs are not on this branch's
-base, so :class:`SuppressionKeySource` is the seam: this module reads the same
-env contract and uses the same key-id scheme (``sha256(key)[:8]`` hex); once
-#789 lands, an adapter over ``services.envelope.platform_kek`` can replace
-:class:`PlatformKekKeySource` without touching any caller. The key never leaves
-hub-api (the PII boundary) and never appears in a log line, repr or error text.
+``TENANT_KEK_HEX_PREVIOUS`` during rotation) held by the per-tenant envelope
+service (``services/envelope/platform_kek.py``, PR #789): this module uses that
+adapter -- its env contract, its validation, its key-id scheme and its rotation
+window -- and asks it to derive the per-tenant key
+(:meth:`~services.envelope.platform_kek.PlatformKekAdapter.derive_key`), so the
+KEK material never leaves the adapter and there is no second copy of the
+Secret or of its parser. :class:`SuppressionKeySource` stays the seam callers
+and tests depend on. The key never leaves hub-api (the PII boundary) and never
+appears in a log line, repr or error text.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Final, Protocol
 
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from services.envelope.crypto import kek_id as key_version
+from services.envelope.errors import EnvelopeError
+from services.envelope.platform_kek import (
+    CURRENT_ENV,
+    PREVIOUS_ENV,
+    LazyPlatformKek,
+    PlatformKekAdapter,
+)
 
-#: Platform KEK env vars -- same names as ``services/envelope/platform_kek.py`` (#789).
-ENV_CURRENT: Final = "TENANT_KEK_HEX"
-ENV_PREVIOUS: Final = "TENANT_KEK_HEX_PREVIOUS"
+#: Platform KEK env vars -- re-exported from the envelope seam (#789), which owns them.
+ENV_CURRENT: Final = CURRENT_ENV
+ENV_PREVIOUS: Final = PREVIOUS_ENV
 
-KEY_LENGTH: Final = 32
-_HEX_LENGTH: Final = KEY_LENGTH * 2
-_KEY_VER_BYTES: Final = 8
 _INFO_PREFIX: Final = b"waddles-suppression/v1/tenant:"
 _MESSAGE_PREFIX: Final = b"waddles-suppression/v1\x00"
 _PLATFORM_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
 _CONTROL_RE: Final = re.compile(r"[\x00-\x1f\x7f]")
 _MAX_PLATFORM_USER_ID: Final = 255
+
+__all__ = [
+    "ENV_CURRENT",
+    "ENV_PREVIOUS",
+    "PlatformKekKeySource",
+    "SuppressionCode",
+    "SuppressionInputError",
+    "SuppressionKeyError",
+    "SuppressionKeySource",
+    "TenantKey",
+    "compute_code",
+    "current_code",
+    "key_version",
+    "lookup_codes",
+    "normalize_identity",
+    "validate_tenant_id",
+]
 
 
 class SuppressionKeyError(RuntimeError):
@@ -75,23 +95,11 @@ class SuppressionInputError(ValueError):
 
 
 @dataclass(slots=True, frozen=True)
-class MasterKey:
-    """One master key and its non-reversible version id (safe to store and log)."""
+class TenantKey:
+    """One tenant's HMAC key and the non-reversible id (`key_ver`) of the master key behind it."""
 
     key_ver: str
-    material: bytes = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class MasterKeys:
-    """The current master key (writes) plus previous ones (lookups only, rotation window)."""
-
-    current: MasterKey
-    previous: tuple[MasterKey, ...] = ()
-
-    def all(self) -> tuple[MasterKey, ...]:
-        """Current first, then previous -- the order lookups try them in."""
-        return (self.current, *self.previous)
+    key: bytes = field(repr=False)
 
 
 @dataclass(slots=True, frozen=True)
@@ -103,58 +111,59 @@ class SuppressionCode:
 
 
 class SuppressionKeySource(Protocol):
-    """Where ``K_master`` comes from -- the seam #789's envelope adapter will plug into."""
+    """Where per-tenant HMAC keys come from -- the seam over the envelope service's platform KEK."""
 
-    def master_keys(self) -> MasterKeys:
-        """Return the loaded master keys, or raise :class:`SuppressionKeyError`."""
+    def tenant_keys(self, tenant_id: int) -> tuple[TenantKey, ...]:
+        """Return the tenant's keys, CURRENT first (writes) then previous ones (lookups only).
+
+        Raises:
+            SuppressionKeyError: the master key is unavailable.
+            SuppressionInputError: invalid tenant id.
+        """
         ...
 
 
-def key_version(material: bytes) -> str:
-    """Stable 16-hex-char, non-reversible id for a master key (SHA-256 prefix)."""
-    return hashlib.sha256(material).digest()[:_KEY_VER_BYTES].hex()
-
-
-def _parse_key(name: str, raw: str) -> MasterKey:
-    """Decode a 64-hex-char key from env var `name`; never echo the value in an error."""
-    if len(raw) != _HEX_LENGTH:
-        raise SuppressionKeyError(f"{name} must be {_HEX_LENGTH} hex characters (256-bit key)")
-    try:
-        material = bytes.fromhex(raw)
-    except ValueError as exc:
-        raise SuppressionKeyError(f"{name} must be hex-encoded") from exc
-    return MasterKey(key_ver=key_version(material), material=material)
-
-
 class PlatformKekKeySource:
-    """:class:`SuppressionKeySource` over ``TENANT_KEK_HEX`` / ``TENANT_KEK_HEX_PREVIOUS``.
+    """:class:`SuppressionKeySource` over the envelope service's platform KEK (#789).
 
-    Reads the environment on every call and never caches a failure, so fixing
-    the Secret needs no extra step and a test's ``monkeypatch.setenv`` is seen
-    at once. The decode + SHA-256 is microseconds -- not worth a stale cache.
+    Builds the adapter through :class:`~services.envelope.platform_kek.LazyPlatformKek` -- the
+    same lazy, fail-loud, failure-not-cached loader the envelope runtime uses -- and derives each
+    tenant key from it; the KEK never leaves the adapter. A fresh source reads the environment on
+    first use, so a test's ``monkeypatch.setenv`` is seen and fixing the Secret needs no restart
+    of anything but the caller's own source object.
     """
 
-    def __init__(self, environ: Mapping[str, str] | None = None) -> None:
-        """`environ` is injectable for tests; defaults to ``os.environ`` (read lazily)."""
-        self._environ = environ
+    def __init__(
+        self,
+        environ: Mapping[str, str] | None = None,
+        *,
+        platform_kek: LazyPlatformKek | None = None,
+    ) -> None:
+        """Use `platform_kek` (e.g. the envelope runtime's loader) or build one from `environ`.
 
-    def master_keys(self) -> MasterKeys:
-        """Load the current (+ optional previous) key.
-
-        Raises:
-            SuppressionKeyError: the current key is missing/malformed, or the previous key is
-                malformed (a broken rotation must not silently lose lookups).
+        `environ` is injectable for tests and defaults to ``os.environ`` (read on first use).
         """
-        env = os.environ if self._environ is None else self._environ
-        raw = env.get(ENV_CURRENT, "").strip()
-        if not raw:
-            raise SuppressionKeyError(
-                f"{ENV_CURRENT} is not set -- ban-suppression needs the platform KEK"
+        if platform_kek is not None:
+            self._loader = platform_kek
+            return
+
+        def from_environment() -> PlatformKekAdapter:
+            return PlatformKekAdapter.from_env(environ)
+
+        self._loader = LazyPlatformKek(from_environment)
+
+    def tenant_keys(self, tenant_id: int) -> tuple[TenantKey, ...]:
+        """Derive the tenant's key under every loaded platform KEK, current first."""
+        info = _INFO_PREFIX + str(validate_tenant_id(tenant_id)).encode("ascii")
+        try:
+            adapter = self._loader.get()
+            return tuple(
+                TenantKey(key_ver=kid, key=adapter.derive_key(info, key_id=kid))
+                for kid in adapter.kek_ids
             )
-        current = _parse_key(ENV_CURRENT, raw)
-        previous_raw = env.get(ENV_PREVIOUS, "").strip()
-        previous = (_parse_key(ENV_PREVIOUS, previous_raw),) if previous_raw else ()
-        return MasterKeys(current=current, previous=previous)
+        except EnvelopeError as exc:
+            # `PlatformKekError` text names the env var and the rule, never a value.
+            raise SuppressionKeyError(str(exc)) from exc
 
 
 def validate_tenant_id(tenant_id: int) -> int:
@@ -182,30 +191,20 @@ def normalize_identity(platform: str, platform_user_id: str) -> tuple[str, str]:
     return plat, puid
 
 
-def derive_tenant_key(master: MasterKey, tenant_id: int) -> bytes:
-    """HKDF-SHA256 the per-tenant MAC key from `master` (domain-separated by tenant id)."""
-    info = _INFO_PREFIX + str(validate_tenant_id(tenant_id)).encode("ascii")
-    return HKDF(algorithm=hashes.SHA256(), length=KEY_LENGTH, salt=None, info=info).derive(
-        master.material
-    )
+def compute_code(tenant_key: TenantKey, platform: str, platform_user_id: str) -> SuppressionCode:
+    """Compute the keyed one-way code for one identity under one tenant key.
 
-
-def compute_code(
-    master: MasterKey, tenant_id: int, platform: str, platform_user_id: str
-) -> SuppressionCode:
-    """Compute the keyed one-way code for one identity under one master key.
-
-    Deterministic (same inputs -> same code, which is what makes a return
-    matchable) and one-way without `master`.
+    Deterministic (same inputs -> same code, which is what makes a return matchable) and
+    one-way without the key.
 
     Raises:
-        SuppressionInputError: invalid tenant id / platform / platform user id.
+        SuppressionInputError: invalid platform / platform user id.
     """
     plat, puid = normalize_identity(platform, platform_user_id)
-    key = derive_tenant_key(master, tenant_id)
     message = _MESSAGE_PREFIX + plat.encode("utf-8") + b"\x00" + puid.encode("utf-8")
     return SuppressionCode(
-        key_ver=master.key_ver, hmac=hmac.new(key, message, hashlib.sha256).hexdigest()
+        key_ver=tenant_key.key_ver,
+        hmac=hmac.new(tenant_key.key, message, hashlib.sha256).hexdigest(),
     )
 
 
@@ -213,7 +212,7 @@ def current_code(
     source: SuppressionKeySource, tenant_id: int, platform: str, platform_user_id: str
 ) -> SuppressionCode:
     """The code to WRITE: always under the current master key."""
-    return compute_code(source.master_keys().current, tenant_id, platform, platform_user_id)
+    return compute_code(source.tenant_keys(tenant_id)[0], platform, platform_user_id)
 
 
 def lookup_codes(
@@ -221,6 +220,6 @@ def lookup_codes(
 ) -> list[SuppressionCode]:
     """Every code a stored row for this identity could carry (current, then previous keys)."""
     return [
-        compute_code(master, tenant_id, platform, platform_user_id)
-        for master in source.master_keys().all()
+        compute_code(tenant_key, platform, platform_user_id)
+        for tenant_key in source.tenant_keys(tenant_id)
     ]
