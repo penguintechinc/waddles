@@ -40,6 +40,7 @@ from flask_core import (
     error_response,
     async_endpoint,
     auth_required,
+    describe_db_error,
 )
 from services.workflow_service import (
     WorkflowService,
@@ -49,6 +50,7 @@ from services.workflow_service import (
 )
 from services.permission_service import PermissionService
 from services.workflow_engine import WorkflowEngine
+from controllers.error_logging import log_internal_error
 
 
 logger = logging.getLogger(__name__)
@@ -228,13 +230,12 @@ def handle_webhook_errors(f: Callable) -> Callable:
             )
         except Exception as e:
             logger.error(
-                f"Unexpected error in {f.__name__}: {str(e)}",
+                f"Unexpected error in {f.__name__}: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": f.__name__,
                     "result": "FAILURE"
-                },
-                exc_info=True
+                }
             )
             return error_response(
                 message="Internal server error",
@@ -385,7 +386,7 @@ async def get_webhook_from_db(
             trigger_count=webhook_data.trigger_count
         )
     except Exception as e:
-        logger.error(f"Error retrieving webhook: {e}")
+        logger.error(f"Error retrieving webhook: {describe_db_error(e)}")
         return None
 
 
@@ -433,7 +434,7 @@ async def get_webhook_by_token(
             trigger_count=webhook_data.trigger_count
         )
     except Exception as e:
-        logger.error(f"Error retrieving webhook by token: {e}")
+        logger.error(f"Error retrieving webhook by token: {describe_db_error(e)}")
         return None
 
 
@@ -462,7 +463,7 @@ async def update_webhook_trigger_stats(
             }
         )
     except Exception as e:
-        logger.error(f"Error updating webhook trigger stats: {e}")
+        logger.error(f"Error updating webhook trigger stats: {describe_db_error(e)}")
 
 
 # ============================================================================
@@ -635,7 +636,7 @@ async def trigger_webhook_public(token: str):
         payload = await request.get_json() if body else {}
     except Exception as e:
         logger.warning(
-            f"Failed to parse webhook payload: {e}",
+            f"Failed to parse webhook payload: {describe_db_error(e)}",
             extra={
                 "event_type": "AUDIT",
                 "action": "trigger_webhook_public",
@@ -691,15 +692,14 @@ async def trigger_webhook_public(token: str):
 
     except Exception as e:
         logger.error(
-            f"Workflow execution failed: {e}",
+            f"Workflow execution failed: {describe_db_error(e)}",
             extra={
                 "event_type": "ERROR",
                 "action": "trigger_webhook_public",
                 "webhook_id": webhook.webhook_id,
                 "workflow_id": webhook.workflow_id,
                 "result": "EXECUTION_FAILED"
-            },
-            exc_info=True
+            }
         )
         return error_response(
             message="Failed to trigger workflow execution",
@@ -815,14 +815,13 @@ async def list_webhooks(workflow_id: str):
 
     except Exception as e:
         logger.error(
-            f"Error listing webhooks: {e}",
+            f"Error listing webhooks: {describe_db_error(e)}",
             extra={
                 "event_type": "ERROR",
                 "action": "list_webhooks",
                 "workflow_id": workflow_id,
                 "result": "FAILURE"
-            },
-            exc_info=True
+            }
         )
         raise
 
@@ -983,14 +982,13 @@ async def create_webhook(workflow_id: str):
 
     except Exception as e:
         logger.error(
-            f"Error creating webhook: {e}",
+            f"Error creating webhook: {describe_db_error(e)}",
             extra={
                 "event_type": "ERROR",
                 "action": "create_webhook",
                 "workflow_id": workflow_id,
                 "result": "FAILURE"
-            },
-            exc_info=True
+            }
         )
         raise
 
@@ -1086,15 +1084,14 @@ async def delete_webhook(workflow_id: str, webhook_id: str):
 
     except Exception as e:
         logger.error(
-            f"Error deleting webhook: {e}",
+            f"Error deleting webhook: {describe_db_error(e)}",
             extra={
                 "event_type": "ERROR",
                 "action": "delete_webhook",
                 "webhook_id": webhook_id,
                 "workflow_id": workflow_id,
                 "result": "FAILURE"
-            },
-            exc_info=True
+            }
         )
         raise
 
@@ -1145,12 +1142,17 @@ async def not_found(error):
 
 @webhook_api.errorhandler(500)
 async def internal_error(error):
-    """Handle 500 Internal Server Error"""
-    logger.error(f"Internal server error: {str(error)}", exc_info=True)
+    """Handle 500 Internal Server Error.
+
+    SECURITY (PII in logs): logs an ``error_id`` + exception type only -- never the
+    exception text/traceback, which can embed bound DB values.
+    """
+    error_id = log_internal_error(logger, error)
     return error_response(
         message="Internal server error",
         status_code=500,
-        error_code="INTERNAL_ERROR"
+        error_code="INTERNAL_ERROR",
+        details={"error_id": error_id}
     )
 
 

@@ -41,6 +41,10 @@ redis>=5.0.1
 # bundled video_proxy_module's client, see core/video_proxy_module/config.py)
 boto3>=1.35.0,<2.0.0
 
+# XML parsing of untrusted CalDAV responses (libs/calendar_sync Apple provider):
+# XXE / entity-expansion protection. Exact pin — never parse XML with stdlib.
+defusedxml==0.7.1
+
 # Utilities
 python-dotenv>=1.0.0
 python-dateutil>=2.8.2

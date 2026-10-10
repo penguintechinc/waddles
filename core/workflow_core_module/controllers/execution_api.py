@@ -34,6 +34,7 @@ from flask_core import (
     require_community_admin,
     require_community_member,
     CommunityAccessError,
+    describe_db_error,
 )
 from services.workflow_engine import (
     WorkflowEngine,
@@ -48,6 +49,7 @@ from services.community_scope import (
     resolve_workflow_community_id,
 )
 from models.execution import ExecutionStatus, ExecutionContext
+from controllers.error_logging import log_internal_error
 
 
 logger = logging.getLogger(__name__)
@@ -134,7 +136,7 @@ def handle_execution_errors(f: Callable) -> Callable:
             return await f(*args, **kwargs)
         except WorkflowTimeoutException as e:
             logger.warning(
-                f"Workflow execution timeout: {str(e)}",
+                f"Workflow execution timeout: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": f.__name__,
@@ -148,7 +150,7 @@ def handle_execution_errors(f: Callable) -> Callable:
             )
         except WorkflowEngineException as e:
             logger.error(
-                f"Workflow engine error: {str(e)}",
+                f"Workflow engine error: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": f.__name__,
@@ -191,7 +193,7 @@ def handle_execution_errors(f: Callable) -> Callable:
             )
         except PermissionError as e:
             logger.warning(
-                f"Permission denied: {str(e)}",
+                f"Permission denied: {describe_db_error(e)}",
                 extra={
                     "event_type": "AUTHZ",
                     "action": f.__name__,
@@ -205,13 +207,12 @@ def handle_execution_errors(f: Callable) -> Callable:
             )
         except Exception as e:
             logger.error(
-                f"Unexpected error in {f.__name__}: {str(e)}",
+                f"Unexpected error in {f.__name__}: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": f.__name__,
                     "result": "FAILURE"
-                },
-                exc_info=True
+                }
             )
             return error_response(
                 message="Internal server error",
@@ -374,7 +375,7 @@ async def execute_workflow(workflow_id: str):
 
     except Exception as e:
         logger.error(
-            f"Failed to execute workflow: {str(e)}",
+            f"Failed to execute workflow: {describe_db_error(e)}",
             extra={
                 "event_type": "ERROR",
                 "workflow_id": workflow_id,
@@ -746,7 +747,7 @@ async def list_workflow_executions(workflow_id: str):
         if count_result:
             total = count_result[0][0]
     except Exception as e:
-        logger.error(f"Error counting executions: {str(e)}")
+        logger.error(f"Error counting executions: {describe_db_error(e)}")
         total = 0
 
     # Calculate pagination
@@ -775,7 +776,7 @@ async def list_workflow_executions(workflow_id: str):
                     "success": row[2] == 'completed'
                 })
     except Exception as e:
-        logger.error(f"Error querying executions: {str(e)}")
+        logger.error(f"Error querying executions: {describe_db_error(e)}")
 
     logger.info(
         "Listed workflow executions",
@@ -1007,7 +1008,7 @@ async def test_workflow(workflow_id: str):
 
     except Exception as e:
         logger.error(
-            f"Workflow test failed: {str(e)}",
+            f"Workflow test failed: {describe_db_error(e)}",
             extra={
                 "event_type": "ERROR",
                 "workflow_id": workflow_id,
@@ -1066,12 +1067,17 @@ async def not_found(error):
 
 @execution_api.errorhandler(500)
 async def internal_error(error):
-    """Handle 500 Internal Server Error."""
-    logger.error(f"Internal server error: {str(error)}", exc_info=True)
+    """Handle 500 Internal Server Error.
+
+    SECURITY (PII in logs): logs an ``error_id`` + exception type only -- never the
+    exception text/traceback, which can embed bound DB values.
+    """
+    error_id = log_internal_error(logger, error)
     return error_response(
         message="Internal server error",
         status_code=500,
-        error_code="INTERNAL_ERROR"
+        error_code="INTERNAL_ERROR",
+        details={"error_id": error_id}
     )
 
 

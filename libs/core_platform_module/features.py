@@ -7,9 +7,16 @@ namespaces added to :data:`flask_core.app_manifest.KNOWN_MODULES` alongside
 the 4 product Modules (see that module's docstring): ``analytics``,
 ``video_proxy``, ``auth``, ``compliance``, ``integrations``, ``tenancy``.
 Tiers below are copied VERBATIM from the merged license catalog -- they are
-load-bearing (``entitlement.py``'s tier_requirements/PostHog gate keys off
-``min_tier`` per contract) and must not drift from the catalog on a future
-edit here.
+load-bearing and must not drift from the catalog on a future edit here.
+``min_tier`` is ENFORCED at runtime: ``EntitlementClient.required_tier`` takes
+the stricter of the live registry contract and the static
+``flask_core.tier_catalog.FEATURE_MIN_TIERS`` snapshot, and a feature is granted
+only when its PostHog flag is on AND the tenant's effective tier is >= that
+``min_tier`` -- a flag alone never unlocks a Professional/Enterprise feature.
+The snapshot exists because hub-api installs ``flask_core`` without these
+``*_module`` packages, so a tier changed here MUST also be changed in
+``tier_catalog``; ``flask_core/tests/test_tier_enforcement.py::
+TestCatalogMatchesContracts`` fails on any drift.
 
 | Feature id                            | Tier         | Flag                                          |
 |-----------------------------------------|--------------|------------------------------------------------|
