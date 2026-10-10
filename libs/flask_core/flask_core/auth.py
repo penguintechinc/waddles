@@ -58,7 +58,7 @@ PLATFORM_JWT_ALGORITHM = "HS256"
 #: phase, where `kid` selects the verification key). Rotation of the shared
 #: secret bumps this value. Validated at import so a malformed `JWT_KID` stops the
 #: service at startup instead of minting tokens every verifier would refuse.
-DEFAULT_JWT_KID = os.getenv("JWT_KID", "hs256-v1")
+DEFAULT_JWT_KID = os.getenv("JWT_KID") or "hs256-v1"  # empty (e.g. a blank Helm value) = unset
 if not is_valid_kid(DEFAULT_JWT_KID):
     raise ValueError("JWT_KID must match [A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}")
 

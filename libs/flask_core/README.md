@@ -195,7 +195,7 @@ in service code.
 ### Authentication
 
 ```python
-from libs.flask_core import setup_auth, create_jwt_token
+from libs.flask_core import setup_auth, create_jwt_token, verify_jwt_token
 from quart import Quart
 
 app = Quart(__name__)
@@ -210,9 +210,19 @@ token = create_jwt_token(
     username='john',
     email='john@example.com',
     roles=['user', 'moderator'],
-    secret_key=app.config['SECRET_KEY']
+    secret_key=app.config['SECRET_KEY'],
+    tenant='global',   # mandatory -- there is no untenanted token
+    scope='community:read',
 )
+
+# Verify (returns the payload, or None -- never raises for a bad token)
+payload = verify_jwt_token(token, app.config['SECRET_KEY'])
 ```
+
+`verify_jwt_token` pins one algorithm (HS256), rejects `alg: none` and `jku`/`jwk`/`x5u`/`x5c`
+headers, and requires `sub iss aud iat exp scope tenant`; each call emits
+`waddles_jwt_verifications_total{verifier,alg,outcome}`. See
+[`docs/JWT_VERIFICATION.md`](../../docs/JWT_VERIFICATION.md).
 
 ### API Endpoints
 

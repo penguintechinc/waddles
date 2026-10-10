@@ -141,6 +141,8 @@ class FakeOidcIdp:
     signing_key_override: Any = None
     alg: str = "RS256"
     include_kid: bool = True
+    #: Extra JOSE header params merged into every ID token (e.g. a hostile `jku`/`jwk`).
+    extra_headers: dict[str, Any] = field(default_factory=dict)
     advertised_auth_methods: list[str] = field(default_factory=lambda: ["client_secret_basic"])
     discovery_issuer_override: str | None = None
     jwks_keys_override: list[dict[str, Any]] | None = None
@@ -289,7 +291,8 @@ class FakeOidcIdp:
         claims.update(self.claims)
         claims.update(issued.claims)
         claims = {k: v for k, v in claims.items() if v is not None}
-        headers: dict[str, str] = {"kid": self.kid} if self.include_kid else {}
+        headers: dict[str, Any] = {"kid": self.kid} if self.include_kid else {}
+        headers.update(self.extra_headers)
         key = self.signing_key_override or self.key
         if self.alg.startswith("HS"):
             return jwt.encode(claims, b"shared-secret-of-sufficient-length-x", self.alg, headers)

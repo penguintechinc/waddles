@@ -32,6 +32,8 @@ token, its claims and the JWT library's exception text are never logged.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import re
 import time
@@ -76,6 +78,10 @@ FORBIDDEN_HEADER_PARAMS: Final[frozenset[str]] = frozenset({"jku", "jwk", "x5u",
 #: ``kid`` charset/length. Covers the platform ``hs256-v1`` style and the Helm
 #: ``keyId`` (POSIX env-var-safe) used for service keys.
 _KID_RE: Final = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:\-]{0,63}")
+
+#: A real JOSE header is ~50 bytes; anything this large is hostile or broken (a pasted
+#: ``x5c`` chain, a decompression-style payload) and is refused before JSON parsing.
+_MAX_HEADER_SEGMENT_CHARS: Final = 16 * 1024
 
 #: Algorithms that may appear as a metric label verbatim; anything else collapses to
 #: ``other`` so an attacker-chosen ``alg`` can never mint unbounded label values.
@@ -152,6 +158,27 @@ def is_valid_kid(kid: object) -> bool:
     return isinstance(kid, str) and _KID_RE.fullmatch(kid) is not None
 
 
+def _decode_header(token: object) -> Mapping[str, Any]:
+    """Decode the first compact-JWS segment ourselves, as a JSON object, or raise MALFORMED.
+
+    Deliberately NOT ``jwt.get_unverified_header``: PyJWT raises its own ``DecodeError`` for
+    some of the very headers we want to name precisely (``crit``, a non-string ``kid``), which
+    would collapse a hostile-header attack into an anonymous "malformed" in the metric.
+    """
+    if not isinstance(token, str) or token.count(".") != 2:
+        raise JwtRejection(REASON_MALFORMED)
+    segment = token.split(".", 1)[0]
+    if not segment or len(segment) > _MAX_HEADER_SEGMENT_CHARS:
+        raise JwtRejection(REASON_MALFORMED)
+    try:
+        decoded = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+    except (ValueError, TypeError, RecursionError) as exc:  # b64/UTF-8/JSON errors, deep nesting
+        raise JwtRejection(REASON_MALFORMED) from exc
+    if not isinstance(decoded, dict):
+        raise JwtRejection(REASON_MALFORMED)
+    return decoded
+
+
 def inspect_header(
     token: object,
     *,
@@ -173,12 +200,7 @@ def inspect_header(
         validate_kid: Reject a present ``kid`` outside the pinned charset.
         require_kid: Reject a token with no ``kid`` at all.
     """
-    if not isinstance(token, str) or not token:
-        raise JwtRejection(REASON_MALFORMED)
-    try:
-        header: Mapping[str, Any] = jwt.get_unverified_header(token)
-    except jwt.PyJWTError as exc:
-        raise JwtRejection(REASON_MALFORMED) from exc
+    header = _decode_header(token)
 
     raw_alg = header.get("alg")
     label = alg_label(raw_alg)
