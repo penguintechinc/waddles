@@ -358,7 +358,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
                 extra={"action": "grpc_startup_skipped"},
             )
         # Surfaces community members whose user_uuid the membership trigger could not
-        # derive (alembic 0047 fail-closed NULLs) as a gauge + WARNING -- a dead pass
+        # derive (alembic 0048 fail-closed NULLs) as a gauge + WARNING -- a dead pass
         # is logged and retried, never a request failure. Waits for schema readiness.
         app.config["identity_uuid_monitor"] = None
         if cfg.database_url.startswith("postgres"):
