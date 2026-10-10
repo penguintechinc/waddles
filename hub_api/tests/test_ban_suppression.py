@@ -1154,6 +1154,49 @@ class TestStoreEdges:
         assert "suppression.identity_skipped" in caplog.text
 
 
+class TestTransactionHelper:
+    """`run_in_transaction` is one executor job: one commit, rollback on any failure."""
+
+    async def test_a_failure_rolls_back_every_write_made_before_it(self, db: Any) -> None:
+        tenant = _tenant(db, "acme")
+
+        def work() -> None:
+            db.dal.suppression_records.insert(
+                tenant_id=tenant,
+                platform="discord",
+                key_ver="kv",
+                hmac="ab" * 32,
+                reason_enum="ban",
+                created_at=_now(),
+            )
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await bs.run_in_transaction(db, db.dal, work)
+        # The pool thread's connection is reused by the NEXT job, which commits: a write the failed
+        # job left pending would be made durable here. Rolled back, nothing is left to commit.
+        await bs.run_in_transaction(db, db.dal, lambda: None)
+
+        assert _rows(db) == []
+
+    async def test_success_commits_and_returns_the_result(self, db: Any) -> None:
+        tenant = _tenant(db, "acme")
+
+        def work() -> int:
+            db.dal.suppression_records.insert(
+                tenant_id=tenant,
+                platform="discord",
+                key_ver="kv",
+                hmac="cd" * 32,
+                reason_enum="ban",
+                created_at=_now(),
+            )
+            return 7
+
+        assert await bs.run_in_transaction(db, db.dal, work) == 7
+        assert len(_rows(db)) == 1  # visible from another connection: it was committed
+
+
 class TestStoreEdgesMore:
     def test_identities_of_collapses_duplicates_and_skips_blank_rows(self, db: Any) -> None:
         user = _user(db, name="dupes")

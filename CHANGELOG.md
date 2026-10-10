@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Ban-evasion suppression (GDPR Art. 6(1)(f), counsel to verify): an erased user with an ACTIVE ban leaves one per-tenant keyed
+  one-way code (`suppression_records`, migration `0059_suppression_records`; HMAC-SHA256 under an HKDF key derived per tenant
+  from the platform tenant KEK, closed `ban`/`auto_ban` enum, expiry) and a returning banned user is re-caught at join approval,
+  OAuth signup and identity link. Operator tooling `make suppression-check|lift|purge|stats`; chart `suppression.maxRetentionDays`;
+  draft `docs/compliance/suppression-LIA.md` / `suppression-DPIA.md`
 - Enterprise SSO for hub-api: SAML 2.0 and OpenID Connect (Enterprise tier, `waddles.auth.sso_saml`) and Google OAuth2 (Professional tier, `waddles.auth.sso_google`). Per-tenant connections with admin API, JIT provisioning keyed on (connection, subject) with no email adoption, PKCE + nonce + local ID-token validation, signature-wrapping/replay/XXE-hardened SAML SP, SSRF-guarded IdP HTTP, AES-256-GCM secret storage, login-CSRF binder cookie, OTel metrics/traces. Migration `0049_sso_connections`; auto-provisioned `SSO_ENCRYPTION_KEY` (alpha/local) that never fails the chart elsewhere. See `docs/SSO.md`.
 - Enterprise tamper-evident audit logging (GRC audit finding #3): append-only per-tenant SHA-256 hash chain
   (`audit_events`, migration `0053_audit_events_hash_chain`), `GET /api/v1/compliance/audit/{events,head,verify,export}`,
@@ -18,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `flask_core.authz.AuthzDecision`: `require_scope` publishes its verdict as `request.authz_decision`
 
 ### Changed
+- **Erasure keeps nothing for a user without an active ban.** `community_members` rows (with their reputation), `reputation_events`,
+  `reputation_tenant`, bundle reputation, the `ephemeral_pseudonyms` mapping and `hub_user_identities` are now DELETED instead of
+  nulled-and-retained (supersedes the "retained reputation / identity anchor" posture); a returning user starts fresh. The admin
+  DSAR console answers a repeat erase of an already-erased user with `not_found`
 - `compliance.audit_logs` now requires scope `compliance.audit:admin` (was `compliance.audit:read`, which every session's
   `*:read` wildcard satisfied); the tenant-owner scope bundle grants it
 - `bundle_audit.record` is fail-loud: a failed `audit_log` insert raises `AuditWriteError` instead of being swallowed
