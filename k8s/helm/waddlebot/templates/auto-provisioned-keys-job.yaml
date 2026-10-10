@@ -40,6 +40,23 @@
 # ConfigMap this Job writes contains ONLY public key material -- safe for any consumer
 # to mount, unlike the Secret itself which stays hub-api-only (see values.yaml
 # comment). RBAC for this exact scope: auto-provisioned-keys-job-rbac.yaml.
+#
+# fix/hub-api-grpc-service-jwt-issuer -- `provision_ed25519` now takes a `format`
+# arg ("raw" | "pem"). bundle-signing keeps "raw" (32-byte seed, base64, unsuffixed
+# key name) unchanged. service-jwt MUST use "pem": `flask_core.service_jwt.
+# load_issuer_from_env` (libs/flask_core/flask_core/service_jwt.py) scans env vars
+# for the `SERVICE_JWT_PRIVATE_KEY_` PREFIX (kid-suffixed) and feeds the value
+# straight to `serialization.load_pem_private_key` -- it needs PEM text, not a raw
+# seed, and the key name must carry `_<kid>`, matching exactly what the manual
+# fallback `scripts/generate-service-jwt-key.sh` already produces via
+# `--from-file="SERVICE_JWT_PRIVATE_KEY_${KID}=..."`. The previous single-format
+# raw-seed/unsuffixed-name implementation silently produced a Secret hub-api could
+# never parse: `load_issuer_from_env` raises `KeyError` on the missing
+# `SERVICE_JWT_ACTIVE_KID`-named key (no `SERVICE_JWT_PRIVATE_KEY_<kid>` present),
+# hub_api/app.py's startup caught that and disabled issuance, and the internal
+# gRPC listener on 50204 was then skipped every time (`grpc_startup_skipped`) --
+# live on alpha, blocking the whole PII-tokenization data path (svc-process/
+# svc-action can never dial HubClient).
 {{- $tier := .Values.global.deploymentTier }}
 {{- $fullname := include "waddlebot.fullname" . }}
 {{- $bs := .Values.autoProvisionedKeys.bundleSigning }}
@@ -139,7 +156,7 @@ spec:
                 alpha|local) can_generate=true ;;
               esac
 
-              # provision_ed25519 <secret> <cm> <key-id> <external-flag> <priv-key-name> <kid-key-name> <pub-key-name> [<pub-keys-json-key-name>]
+              # provision_ed25519 <secret> <cm> <key-id> <external-flag> <priv-key-name> <kid-key-name> <pub-key-name> [<pub-keys-json-key-name>] [<format: raw|pem>]
               # The optional 8th arg additionally publishes a JSON-map-shaped entry
               # (`{"<kid>":"<pub_b64>"}`) into the same ConfigMap -- fix/chart-autogen-
               # bundle-signing-key: core/bundle_executor/src/signing.rs's
@@ -151,7 +168,7 @@ spec:
               # needed there.
               provision_ed25519() {
                 local secret="$1" cm="$2" key_id="$3" external="$4"
-                local priv_key="$5" kid_key="$6" pub_key="$7" pub_keys_json_key="${8:-}"
+                local priv_key="$5" kid_key="$6" pub_key="$7" pub_keys_json_key="${8:-}" format="${9:-raw}"
 
                 if kubectl -n "${NAMESPACE}" get secret "${secret}" >/dev/null 2>&1; then
                   echo "keep: secret/${secret} already exists, leaving untouched"
@@ -166,21 +183,27 @@ spec:
                   trap 'shred -u -f "'"${wd}"'"/* 2>/dev/null || true; rm -rf "'"${wd}"'"' RETURN
                   umask 077
                   openssl genpkey -algorithm ed25519 -out "${wd}/priv.pem" >/dev/null 2>&1
-                  openssl pkey -in "${wd}/priv.pem" -outform DER -out "${wd}/priv.der" >/dev/null 2>&1
-                  # PKCS8 DER for an Ed25519 key always ends in exactly the 32 raw seed
-                  # bytes after a fixed-length ASN.1 prefix (RFC 8410) -- same extraction
-                  # scripts/generate-bundle-signing-key.sh and
-                  # scripts/generate-service-jwt-key.sh use, so a Secret this Job creates
-                  # and one an operator creates via those scripts are byte-format
-                  # identical.
-                  local priv_b64
-                  priv_b64="$(tail -c 32 "${wd}/priv.der" | base64 | tr -d '\n')"
-                  kubectl -n "${NAMESPACE}" create secret generic "${secret}" \
-                    --from-literal="${priv_key}=${priv_b64}" \
-                    --from-literal="${kid_key}=${key_id}"
+                  if [ "${format}" = "pem" ]; then
+                    # PEM (PKCS8) straight into the Secret -- matches
+                    # `scripts/generate-service-jwt-key.sh` and what
+                    # `flask_core.service_jwt.load_issuer_from_env` feeds directly to
+                    # `cryptography`'s `load_pem_private_key`.
+                    kubectl -n "${NAMESPACE}" create secret generic "${secret}" \
+                      --from-file="${priv_key}=${wd}/priv.pem" \
+                      --from-literal="${kid_key}=${key_id}"
+                  else
+                    openssl pkey -in "${wd}/priv.pem" -outform DER -out "${wd}/priv.der" >/dev/null 2>&1
+                    # PKCS8 DER for an Ed25519 key always ends in exactly the 32 raw seed
+                    # bytes after a fixed-length ASN.1 prefix (RFC 8410).
+                    local priv_b64
+                    priv_b64="$(tail -c 32 "${wd}/priv.der" | base64 | tr -d '\n')"
+                    kubectl -n "${NAMESPACE}" create secret generic "${secret}" \
+                      --from-literal="${priv_key}=${priv_b64}" \
+                      --from-literal="${kid_key}=${key_id}"
+                  fi
                   kubectl -n "${NAMESPACE}" annotate secret "${secret}" \
                     helm.sh/resource-policy=keep --overwrite
-                  echo "generated: secret/${secret} (kid=${key_id})"
+                  echo "generated: secret/${secret} (kid=${key_id}, format=${format})"
                 fi
 
                 # Always (re)derive + publish the PUBLIC key from whatever private key is
@@ -197,13 +220,19 @@ spec:
                 wd2="$(mktemp -d)"
                 trap 'shred -u -f "'"${wd2}"'"/* 2>/dev/null || true; rm -rf "'"${wd2}"'"' RETURN
                 umask 077
-                kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data.${priv_key}}" \
-                  | base64 -d | base64 -d > "${wd2}/priv.raw"
-                # Re-wrap the raw 32-byte seed into a minimal PKCS8 DER (fixed Ed25519
-                # prefix, RFC 8410) so openssl can load it back and derive the public key.
-                printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x70\x04\x22\x04\x20' > "${wd2}/priv.der"
-                cat "${wd2}/priv.raw" >> "${wd2}/priv.der"
-                openssl pkey -inform DER -in "${wd2}/priv.der" -pubout -outform DER -out "${wd2}/pub.der" >/dev/null 2>&1
+                if [ "${format}" = "pem" ]; then
+                  kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data.${priv_key}}" \
+                    | base64 -d > "${wd2}/priv.pem"
+                  openssl pkey -in "${wd2}/priv.pem" -pubout -outform DER -out "${wd2}/pub.der" >/dev/null 2>&1
+                else
+                  kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data.${priv_key}}" \
+                    | base64 -d | base64 -d > "${wd2}/priv.raw"
+                  # Re-wrap the raw 32-byte seed into a minimal PKCS8 DER (fixed Ed25519
+                  # prefix, RFC 8410) so openssl can load it back and derive the public key.
+                  printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x70\x04\x22\x04\x20' > "${wd2}/priv.der"
+                  cat "${wd2}/priv.raw" >> "${wd2}/priv.der"
+                  openssl pkey -inform DER -in "${wd2}/priv.der" -pubout -outform DER -out "${wd2}/pub.der" >/dev/null 2>&1
+                fi
                 local pub_b64 actual_kid
                 pub_b64="$(tail -c 32 "${wd2}/pub.der" | base64 | tr -d '\n')"
                 actual_kid="$(kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data.${kid_key}}" | base64 -d)"
@@ -225,10 +254,14 @@ spec:
               }
 
               provision_ed25519 "${BUNDLE_SIGNING_SECRET}" "${BUNDLE_SIGNING_CM}" "${BUNDLE_SIGNING_KEY_ID}" "${BUNDLE_SIGNING_EXTERNAL}" \
-                BUNDLE_SIGNING_PRIVATE_KEY BUNDLE_SIGNING_KEY_ID BUNDLE_SIGNING_PUBLIC_KEY BUNDLE_SIGNING_PUBLIC_KEYS
+                BUNDLE_SIGNING_PRIVATE_KEY BUNDLE_SIGNING_KEY_ID BUNDLE_SIGNING_PUBLIC_KEY BUNDLE_SIGNING_PUBLIC_KEYS raw
 
+              # PEM + kid-suffixed name (format=pem) -- see this file's header comment.
+              # Without this, hub-api's `SERVICE_JWT_ACTIVE_KID` env var pointed at a kid
+              # with no matching `SERVICE_JWT_PRIVATE_KEY_<kid>` var, `load_issuer_from_env`
+              # raised, and the internal gRPC listener (port 50204) never started.
               provision_ed25519 "${SERVICE_JWT_SECRET}" "${SERVICE_JWT_CM}" "${SERVICE_JWT_KEY_ID}" "${SERVICE_JWT_EXTERNAL}" \
-                SERVICE_JWT_PRIVATE_KEY SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY
+                "SERVICE_JWT_PRIVATE_KEY_${SERVICE_JWT_KEY_ID}" SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY "" pem
 
               echo "auto-provision-keys: done"
           resources:

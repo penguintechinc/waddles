@@ -1,0 +1,58 @@
+schema_version: 2
+app_id: waddles.core.example.weather
+name: Weather Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/weather
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!weather"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!weather"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress:
+  - host: api.weatherapi.com
+    methods: ["GET"]
+data:
+  tables: []
+limits:
+  timeout_ms: 5000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-weather feature flag"
+  - id: net.http.fqdn:api.weatherapi.com
+    justification: "fetches current conditions from the WeatherAPI.com HTTPS API; GET only"
+    params:
+      methods: ["GET"]
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

@@ -23,6 +23,7 @@ hub_api/
       profile.py              v1 `user profile` group (M1): self-service profile + avatar
       user_management.py       v1 `superadmin users` group (M1): platform user CRUD
       compliance_audit.py      v1 `compliance audit` group: Enterprise read/verify/export of the audit chain
+      sso.py                    v1 enterprise SSO: public login flows (SAML/OIDC/Google) + tenant-admin connection CRUD
     v2/
       platform.py          example v2 group: tenant -> scope -> DTO chain, exposes BLUEPRINTS
   routers/
@@ -38,6 +39,9 @@ hub_api/
     profile_service.py       self-service profile CRUD + avatar
     storage_service.py       S3-compatible avatar object storage (no local-disk fallback)
     user_management_service.py  superadmin user CRUD
+    sso_service.py           enterprise SSO orchestration: entitlement-gated connection CRUD, login start/complete, JIT provisioning
+    sso_oidc.py / sso_saml.py  protocol layers: OIDC code+PKCE with local ID-token validation; SAML 2.0 SP (XSW/replay/XXE defences)
+    sso_http.py / sso_state.py / sso_crypto.py / sso_settings.py / sso_telemetry.py / sso_types.py  SSRF-guarded IdP HTTP, Redis single-use state, AES-GCM secrets, operator settings, OTel + PII-safe logging, shared types
     current_user.py         resolve the caller's user id from the bearer JWT
     audit_chain.py          tamper-evident audit hash chain: canonical form, seal, verify (stdlib only)
     audit_events.py         audit vocabulary, PII-free event validation, request classification
@@ -114,6 +118,15 @@ make verify-audit-export EXPORT="a.json"  # verify a downloaded export offline, 
 
 API: `GET /api/v1/compliance/audit/{events,head,verify,export}` (scope `compliance.audit:admin`).
 Full design, threat model and operating guide: [`docs/compliance/audit-logging.md`](../docs/compliance/audit-logging.md).
+
+## Enterprise SSO (SAML 2.0 / OIDC / Google)
+
+Tier-gated (`waddles.auth.sso_saml` Enterprise, `waddles.auth.sso_google` Professional, both default OFF).
+Full deployment, configuration, security model and troubleshooting guide:
+[`docs/SSO.md`](../docs/SSO.md). Tests live in `tests/sso/` (OIDC/SAML run against protocol-faithful fake
+IdPs -- only the IdP socket and Redis are replaced) plus a real-Postgres migration test in
+`alembic/tests/test_0049_sso_connections.py`; run with
+`python3 -m pytest tests/sso -q --cov=services --cov=blueprints.v1.sso`.
 
 ## OpenAPI (two documents, per backend.md)
 

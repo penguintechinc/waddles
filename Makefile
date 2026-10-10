@@ -5,7 +5,7 @@
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-bundle-hygiene generate-bundle-signing-key \
+        check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
         verify-audit-chain verify-audit-export
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
@@ -83,6 +83,17 @@ test:
 test-unit:
 	@echo "Running unit tests..."
 	@bash tests/k8s/alpha/05-unit-tests.sh
+
+# Env-gated REAL-endpoint Ollama tests (hub-api router, AI Researcher, AI Interaction) --
+# LAN-only lab endpoint, never run in CI. The lab GPU is shared with the live WaddleAI, so the
+# three suites run strictly one after another (and each serializes its own requests). Needs each
+# module's test deps installed -- see docs/testing/ollama-realpath.md.
+#   make test-ollama-realpath WADDLE_TEST_OLLAMA_URL=http://192.168.2.105:11434/
+test-ollama-realpath:
+	@test -n "$(WADDLE_TEST_OLLAMA_URL)" || { echo "WADDLE_TEST_OLLAMA_URL is required (e.g. http://192.168.2.105:11434/)" >&2; exit 1; }
+	cd hub_api && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_routing_ollama_realpath.py -v -rs
+	cd core/ai_researcher_module && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_researcher_ollama_realpath.py -v -rs
+	cd action/interactive/ai_interaction_module && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_interaction_ollama_realpath.py -v -rs
 
 test-integration:
 	@echo "Running integration tests..."

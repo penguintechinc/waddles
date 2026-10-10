@@ -10,6 +10,15 @@ The AI Researcher Module uses a multi-tier testing approach:
 4. **Mock Data** — Realistic test scenarios
 5. **Performance Tests** — Latency and throughput validation
 
+## Real-Ollama integration tests (env-gated)
+
+`tests/test_ai_researcher_ollama_realpath.py` drives `AIProviderService`, `ResearchService` (+ the real
+`SafetyLayer`) and `SummaryService` against a live Ollama - no mocked transport, one query at a time.
+Set `WADDLE_TEST_OLLAMA_URL` to run them (unset = skipped). Offline contract/capability tests
+(`test_ai_provider_capability.py`, `test_research_service_contract.py`,
+`test_summary_service_capability.py`, `test_ai_provider_telemetry.py`) always run. Full instructions:
+`docs/testing/ollama-realpath.md`.
+
 ## Test Setup
 
 ### Prerequisites
