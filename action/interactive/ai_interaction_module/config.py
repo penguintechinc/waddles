@@ -83,6 +83,11 @@ class Config:
     # structured-output (JSON) params, so it works with text-only models.
     OLLAMA_DISABLE_THINKING = _env_flag('OLLAMA_DISABLE_THINKING', True)
 
+    # Redact PII / secret-shaped strings from prompts sent to the SELF-HOSTED
+    # Ollama too (default off). WaddleAI traffic is third-party egress and is
+    # always redacted regardless of this flag.
+    AI_REDACT_PII_SELF_HOSTED = _env_flag('AI_REDACT_PII_SELF_HOSTED', False)
+
     # SSL/TLS Configuration for Ollama
     OLLAMA_CERT_PATH = os.getenv(  # noqa: E501
         'OLLAMA_CERT_PATH', ''

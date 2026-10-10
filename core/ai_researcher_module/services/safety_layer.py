@@ -19,6 +19,14 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+from flask_core.ai_guard import (
+    CATEGORY_EXFIL_BEACON,
+    fold_for_scan,
+    neutralize_markup,
+    normalize_untrusted,
+    scan_for_injection,
+)
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -201,10 +209,23 @@ class SafetyLayer:
         """
         detected_patterns: list[str] = []
 
+        # Match against the canonical folded view so zero-width / full-width /
+        # lookalike-letter / spacing obfuscation cannot slip past the patterns.
+        folded = fold_for_scan(text)
         for pattern in INJECTION_PATTERNS:
-            match = pattern.search(text)
+            match = pattern.search(folded)
             if match:
                 detected_patterns.append(match.group(0))
+
+        # Directive-shaped attacks the phrase list does not cover: role/tenant/scope
+        # escalation, exfiltration, tool abuse (closed-vocabulary category names are
+        # reported, never the text). The remote-image beacon category is an
+        # OUTPUT-side concern, so a user merely pasting a markdown image is not blocked.
+        for category in sorted(
+            scan_for_injection(text, ignore=frozenset({CATEGORY_EXFIL_BEACON})).categories
+        ):
+            if category not in detected_patterns:
+                detected_patterns.append(category)
 
         is_safe = len(detected_patterns) == 0
 
@@ -268,7 +289,9 @@ class SafetyLayer:
         Returns:
             Sanitized prompt with dangerous patterns removed
         """
-        sanitized = prompt
+        # Normalise first (so obfuscated variants are matched) and defang any
+        # delimiter / chat-template control tokens.
+        sanitized = neutralize_markup(normalize_untrusted(prompt))
 
         # Remove detected injection patterns
         for pattern in INJECTION_PATTERNS:

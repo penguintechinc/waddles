@@ -271,15 +271,17 @@ _RULES: tuple[tuple[str, re.Pattern[str], bool], ...] = (
     ),
     (
         CATEGORY_ROLE_SPOOF,
-        re.compile(r"^\s*(?:#{1,4}\s*)?(?:system|assistant|developer|tool)\s*(?::|prompt\b)", re.M),
+        re.compile(
+            r"(?:^|[>\]])\s*(?:#{1,4}\s*)?(?:system|assistant|developer|tool)\s*(?::|prompt\b)",
+            re.M,
+        ),
         True,
     ),
     (
         CATEGORY_TENANT_SWITCH,
         re.compile(
             r"\b(?:switch|change|set|use|assume|impersonate|become)\b(?:\W+\w+){0,3}?\W+"
-            r"(?:tenant|organi[sz]ation|workspace|community|account)\b(?:\W+\w+){0,2}?"
-            r"\W+(?:to|as|id)\b"
+            r"(?:tenant|organi[sz]ation|workspace)\b(?:\W+\w+){0,2}?\W+(?:to|as|id)\b"
             r"|\btenant(?:[_ ]?id|[_ ]?slug)?\s*[:=]\s*\S"
             r"|\bcommunity[_ ]?id\s*[:=]\s*\S"
             r"|\bon behalf of (?:the |another |other |a different )?"
@@ -355,6 +357,22 @@ def _fold(text: str) -> tuple[str, str]:
     """Return ``(flat, lines)`` scan views: normalised + confusable-folded + lower-cased."""
     normalised = normalize_untrusted(text[:SCAN_MAX_CHARS]).translate(_CONFUSABLES).lower()
     return re.sub(r"\s+", " ", normalised), normalised
+
+
+def fold_for_scan(text: str) -> str:
+    """Return ``text`` in the canonical scanning form: normalised, lookalikes folded, lower-case.
+
+    Whitespace is collapsed to single spaces. Detectors that run their own patterns (e.g. the
+    researcher's ``SafetyLayer``) apply them to this view so zero-width, full-width, Cyrillic /
+    Greek-lookalike and spacing tricks cannot slip past a regex that matches the plain form.
+
+    Args:
+        text: Untrusted text (scanned up to :data:`SCAN_MAX_CHARS`).
+
+    Returns:
+        The folded view.
+    """
+    return _fold(text)[0]
 
 
 def scan_for_injection(text: str, *, ignore: frozenset[str] = frozenset()) -> InjectionScan:
@@ -648,6 +666,7 @@ __all__ = [
     "InjectionScan",
     "RenderedRetrieval",
     "RetrievedItem",
+    "fold_for_scan",
     "neutralize_markup",
     "normalize_untrusted",
     "redact_pii",

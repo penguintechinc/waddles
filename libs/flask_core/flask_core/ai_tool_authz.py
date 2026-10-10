@@ -179,7 +179,9 @@ class ToolSpec:
 
     ``required_scopes`` must be non-empty: a tool with no scope requirement is unauthorisable by
     construction (``resource:action`` scopes, no wildcard action). ``side_effects`` defaults to
-    True (conservative) -- only an explicitly read-only tool survives a tainted context.
+    True (conservative) -- only an explicitly read-only tool survives a tainted context -- and a
+    side-effecting tool MUST name a feature ``flag``: every executable action ships behind a
+    PostHog flag (resolved through the platform's flag-AND-licence-tier evaluator, default OFF).
     """
 
     name: str
@@ -199,6 +201,11 @@ class ToolSpec:
         for scope in self.required_scopes:
             if not _SCOPE_RE.match(scope):
                 raise ValueError(f"tool {self.name!r} scope {scope!r} must be resource:action")
+        if self.side_effects and self.flag is None:
+            raise ValueError(
+                f"side-effecting tool {self.name!r} must declare a feature flag "
+                "(every executable action ships behind a flag, default OFF)"
+            )
         names = [p.name for p in self.parameters]
         if len(names) != len(set(names)):
             raise ValueError(f"tool {self.name!r} declares duplicate parameters")

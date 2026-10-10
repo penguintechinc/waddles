@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from flask_core import describe_db_error
+from flask_core.ai_guard import render_search_results, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -183,17 +184,14 @@ class EventLookupService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'EVENT_SEARCH_SYSTEM_PROMPT',
                 EVENT_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Game: {game_name or 'Unknown'}\n"
-                f"Query: {query}\n\n"
+                f"Game: {wrap_untrusted(game_name or 'Unknown', max_chars=300)}\n"
+                f"Query: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Format these event results with event name, dates, game, "
                 "teams, format, stage, and where to watch."
@@ -328,17 +326,14 @@ class EventLookupService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'TOURNAMENT_SEARCH_SYSTEM_PROMPT',
                 TOURNAMENT_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Tournament: {tournament_name or 'Unknown'}\n"
-                f"Query: {query}\n\n"
+                f"Tournament: {wrap_untrusted(tournament_name or 'Unknown', max_chars=300)}\n"
+                f"Query: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Provide tournament details: name, organizer, dates, format, "
                 "prize pool, teams, standings, and where to watch."

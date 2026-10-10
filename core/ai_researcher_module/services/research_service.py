@@ -25,6 +25,12 @@ from typing import Optional, Dict, Any
 
 from config import Config
 from flask_core import describe_db_error
+from flask_core.ai_guard import (
+    RetrievedItem,
+    render_retrieved_data,
+    sanitize_model_output,
+    wrap_untrusted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +235,10 @@ class ResearchService:
             # Generate response with AI
             response = await self._generate_ai_response(
                 system_prompt=self.SYSTEM_PROMPTS['research'],
-                user_prompt=f"Research the following topic: {topic}",
+                user_prompt=(
+                    "Research the following topic:\n"
+                    f"{wrap_untrusted(topic, max_chars=Config.MAX_PROMPT_CHARS)}"
+                ),
                 community_id=community_id,
                 user_id=user_id,
                 context_type='research'
@@ -384,14 +393,20 @@ class ResearchService:
             # Get community context from mem0
             context = await self._get_community_context(community_id, question)
 
-            # Build prompt with context
+            # Build prompt with context. Recalled memories are untrusted DATA --
+            # they hold other users' chat and earlier model output, so a poisoned
+            # memory must not steer this answer: render them delimited and drop any
+            # that trip the injection scan. regression: sec-llm01-hardening
             context_str = ""
             if context:
-                context_str = "\n\nContext from community memory:\n"
-                for idx, memory in enumerate(context, 1):
-                    context_str += f"{idx}. {memory['content']}\n"
+                recalled = render_retrieved_data(
+                    [RetrievedItem(text=str(memory.get('content', ''))) for memory in context],
+                    source="community_memory",
+                )
+                context_str = f"\n\nContext from community memory:\n{recalled.text}"
 
-            user_prompt = f"Question: {question}{context_str}"
+            question_block = wrap_untrusted(question, max_chars=Config.MAX_PROMPT_CHARS)
+            user_prompt = f"Question:\n{question_block}{context_str}"
 
             # Generate response with AI
             response = await self._generate_ai_response(
@@ -547,6 +562,9 @@ class ResearchService:
                     content += f"{idx}. [{timestamp}] (relevance: {score:.2f})\n"
                     content += f"   {memory_content}\n\n"
 
+                # Stored memories are replayed verbatim to chat: strip beacons / pings.
+                content = sanitize_model_output(content)
+
                 logger.info(
                     f"Recall completed",
                     extra={
@@ -676,13 +694,23 @@ class ResearchService:
                     was_cached=True
                 )
 
-            # Build context string for summarization
-            context_str = f"Messages from the last {duration_minutes} minutes:\n\n"
-            for msg in context:
-                user = msg.get('user', 'unknown')
-                content = msg.get('content', '')
-                timestamp = msg.get('timestamp', '')
-                context_str += f"[{timestamp}] {user}: {content}\n"
+            # Chat lines are untrusted DATA (any viewer wrote them): render them
+            # delimited and labelled, dropping lines that carry injection payloads.
+            chat_log = render_retrieved_data(
+                [
+                    RetrievedItem(
+                        text=str(msg.get('content', '')),
+                        title=f"{msg.get('user', 'unknown')} @ {msg.get('timestamp', '')}",
+                    )
+                    for msg in context
+                ],
+                source="chat_log",
+                max_items=200,
+                max_item_chars=500,
+            )
+            context_str = (
+                f"Messages from the last {duration_minutes} minutes:\n\n{chat_log.text}"
+            )
 
             user_prompt = f"Summarize the following conversation:\n\n{context_str}"
 
