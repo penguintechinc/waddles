@@ -1,30 +1,37 @@
 name: Build svc-streaming
 
-# Modeled on build-ai-interaction.yml. NOTE: `build-container.yml` builds
-# `./<module_path>/Dockerfile` unconditionally -- it has no `dockerfile`
-# input. This service's Rust build lives at `core/svc_streaming/Dockerfile.rust`
-# (kept alongside the still-deployed Python alpha's `Dockerfile` until that
-# build retires -- see core/svc_streaming/README.md Container section).
-# Until `build-container.yml` gains a `dockerfile` input (or the Python
-# alpha is retired and this file is renamed to `Dockerfile`), this workflow
-# calling `build-container.yml` would build the *Python* Dockerfile, not
-# this Rust one -- so the container-build job is intentionally left
-# unwired here. `rust-svc-streaming.yml` (fmt/clippy/deny/coverage) is the
-# CI gate for this crate today; wiring the container build is a follow-up
-# once one of the two conditions above is met.
+# Publishes the three svc-streaming image variants built from
+# core/svc_streaming/Dockerfile.rust via `--target`:
+#   cpu     software encoders only                 -> svc-streaming:<version>-cpu
+#   amd     + VA-API driver (mesa), /dev/dri       -> svc-streaming:<version>-amd
+#   nvidia  NVENC via the NVIDIA runtime           -> svc-streaming:<version>-nvidia
+# <version> follows the svc-ingest convention (v<.version><branch suffix>).
+#
+# Self-contained (does not call build-container.yml): that reusable workflow has
+# no `dockerfile`/`target` input and always builds ./<module_path>/Dockerfile.
+# Modeled on build-svc-ingest.yml. Each variant is built, smoke-tested with
+# core/svc_streaming/scripts/image-smoke.sh (encoders + driver wiring + CPU
+# fallback), then gated on HIGH/CRITICAL Trivy findings.
+#
+# PR/merge_group builds run in `build-pr` (contents:read only, load:true, never
+# pushed). Only the push path is granted packages:write.
 
 on:
   push:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+    tags: ['v*']
     paths:
       - 'core/svc_streaming/**'
       - '.version'
       - '.github/workflows/build-svc-streaming.yml'
-      - '.github/workflows/build-container.yml'
   pull_request:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'core/svc_streaming/**'
+      - '.github/workflows/build-svc-streaming.yml'
+  merge_group:
+    types: [checks_requested]
+    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
   workflow_dispatch:
 
 concurrency:
@@ -33,17 +40,213 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  MODULE_NAME: svc-streaming
+  MODULE_PATH: core/svc_streaming
+  # amd64-only, same toggle as the other build-*.yml workflows. The GPU variants
+  # are amd64 hardware; cpu could go multi-arch later without changing the variants.
+  BUILD_PLATFORM: linux/amd64
 
 jobs:
-  build:
-    name: Build svc-streaming Container
-    # DISABLED pending the `dockerfile` input / rename described above --
-    # see this file's header comment. Flip `if: false` off once resolved.
-    if: false
-    uses: ./.github/workflows/build-container.yml
-    with:
-      module_path: 'core/svc_streaming'
-      module_name: 'svc-streaming'
-      module_port: '8208'
-    secrets: inherit
+  determine-version:
+    name: Determine Version and Suffix
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      suffix: ${{ steps.version.outputs.suffix }}
+      is_release: ${{ steps.version.outputs.is_release }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Determine version and suffix
+        id: version
+        # Reads $GITHUB_REF/$GITHUB_HEAD_REF from the environment rather than
+        # interpolating them into the script (zizmor template-injection).
+        run: |
+          if [ -f .version ]; then
+            VERSION=$(tr -d '[:space:]' < .version)
+          else
+            VERSION="0.0.0"
+          fi
+
+          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "suffix=" >> "$GITHUB_OUTPUT"
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/heads/v* ]] || [[ "$GITHUB_HEAD_REF" == v* ]]; then
+            echo "suffix=-beta" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            echo "suffix=-gamma" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "suffix=-alpha" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Push path: build each variant, push, pull the pushed digest back and smoke-test it,
+  # then gate on Trivy by digest (never by the mutable tag).
+  build-push:
+    name: Build & Push (${{ matrix.variant }})
+    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    needs: determine-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cpu, amd, nvidia]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+          IS_RELEASE: ${{ needs.determine-version.outputs.is_release }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          TAGS="${IMAGE}:${VERSION}-${VARIANT}"
+          if [ "${IS_RELEASE}" = "true" ]; then
+            TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:latest-${VARIANT}")
+          fi
+          {
+            echo "list<<TAGEOF"
+            echo "${TAGS}"
+            echo "TAGEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image (${{ matrix.variant }})
+        id: build
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
+        with:
+          context: ${{ env.MODULE_PATH }}
+          file: ${{ env.MODULE_PATH }}/Dockerfile.rust
+          target: ${{ matrix.variant }}
+          push: true
+          platforms: ${{ env.BUILD_PLATFORM }}
+          tags: ${{ steps.tags.outputs.list }}
+          cache-from: type=gha,scope=${{ env.MODULE_NAME }}-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ env.MODULE_NAME }}-${{ matrix.variant }}
+
+      - name: Smoke-test pushed image (${{ matrix.variant }})
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          docker pull "${IMAGE}@${DIGEST}"
+          bash core/svc_streaming/scripts/image-smoke.sh "${IMAGE}@${DIGEST}" "${VARIANT}"
+
+      - name: Trivy vulnerability scanner (gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        with:
+          version: v0.69.3
+          image-ref: ${{ env.IMAGE }}@${{ env.DIGEST }}
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Trivy vulnerability scanner (SARIF)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        with:
+          version: v0.69.3
+          image-ref: ${{ env.IMAGE }}@${{ env.DIGEST }}
+          format: 'sarif'
+          output: 'trivy-${{ env.MODULE_NAME }}-${{ matrix.variant }}.sarif'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225  # v4
+        if: always()
+        with:
+          sarif_file: 'trivy-${{ env.MODULE_NAME }}-${{ matrix.variant }}.sarif'
+          category: trivy-${{ env.MODULE_NAME }}-${{ matrix.variant }}
+
+  # PR/merge_group path: no registry credentials, nothing pushed. Each variant is
+  # built, loaded locally, smoke-tested and Trivy-gated.
+  build-pr:
+    name: Build, Smoke & Scan (PR, ${{ matrix.variant }})
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    needs: determine-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cpu, amd, nvidia]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+
+      - name: Build image (${{ matrix.variant }}, not pushed)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
+        with:
+          context: ${{ env.MODULE_PATH }}
+          file: ${{ env.MODULE_PATH }}/Dockerfile.rust
+          target: ${{ matrix.variant }}
+          push: false
+          load: true
+          platforms: ${{ env.BUILD_PLATFORM }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:pr-${{ github.run_id }}-${{ matrix.variant }}
+          cache-from: type=gha,scope=${{ env.MODULE_NAME }}-${{ matrix.variant }}
+
+      - name: Smoke-test image (${{ matrix.variant }})
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:pr-${{ github.run_id }}-${{ matrix.variant }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          bash core/svc_streaming/scripts/image-smoke.sh "${IMAGE}" "${VARIANT}"
+
+      - name: Trivy vulnerability scanner (gated, local image)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:pr-${{ github.run_id }}-${{ matrix.variant }}
+        with:
+          version: v0.69.3
+          image-ref: ${{ env.IMAGE }}
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
