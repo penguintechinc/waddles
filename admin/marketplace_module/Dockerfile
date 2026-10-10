@@ -1,10 +1,14 @@
 # Dockerfile for WaddleBot Marketplace Module
-FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
+# node:20 reached upstream EOL 2026-04-30; bumped to node:24 (same interim pin as hub_module).
+FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
 WORKDIR /app
 
-# Install dumb-init and build tools for native modules (bcrypt)
+# Install dumb-init and build tools for native modules (bcrypt). perl-base is an
+# exact pin to the Debian bookworm security release that clears the trivy
+# HIGH/CRITICAL finding (never a blanket `apt-get upgrade`, devops-containers.md).
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    perl-base=5.36.0-7+deb12u4 \
     dumb-init python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
@@ -26,6 +30,13 @@ RUN npm install --only=production
 RUN apt-get remove -y python3 make g++ \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
+
+# The runtime entrypoint is `node src/index.js` -- npm/npx/corepack are never
+# invoked after this point. Remove the base image's bundled global npm (and its
+# vendored node_modules: tar, brace-expansion, sigstore, ... carry independent CVEs
+# unrelated to this app's dependency tree) to close that residual attack surface.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
 # Copy backend source
 COPY --chown=nodejs:nodejs admin/marketplace_module/backend/src ./src

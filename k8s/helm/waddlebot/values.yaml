@@ -2915,3 +2915,17 @@ sso:
     existingSecret: ""
     clientIdKey: "SSO_GOOGLE_CLIENT_ID"
     clientSecretKey: "SSO_GOOGLE_CLIENT_SECRET"
+
+# Supply-chain admission (templates/supply-chain/). Verifies that Waddles images were
+# signed by this repo's release workflow and carry an SPDX SBOM attestation.
+# Requires Kyverno CRDs in the cluster when enabled. Off by default: unsigned images
+# from before this pipeline existed would be rejected. See docs/SUPPLY_CHAIN.md.
+supplyChain:
+  verifyImages:
+    enabled: false
+    # false = Audit (report only), true = Enforce (reject unverified pods).
+    enforce: false
+    imageReference: "ghcr.io/penguintechinc/waddles/*"
+    issuer: "https://token.actions.githubusercontent.com"
+    # Must match the identity regex in scripts/ci/supply-chain.sh (test enforces parity).
+    subjectRegExp: "^https://github\\.com/penguintechinc/waddles/\\.github/workflows/containers\\.yml@refs/(heads|tags)/.+$"

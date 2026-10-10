@@ -6,7 +6,7 @@
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
         check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
-        verify-audit-chain verify-audit-export
+        verify-audit-chain verify-audit-export test-supply-chain
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -110,6 +110,13 @@ test-functional:
 
 test-security:
 	@bash scripts/security-scan.sh
+
+# Supply-chain signing self-test (scripts/ci/supply-chain.sh) against a throwaway local
+# registry + ephemeral keys, plus the Kyverno admission render tests. Needs cosign, syft,
+# jq, docker, helm and pytest on PATH; a missing tool fails loudly, it never skips.
+test-supply-chain:
+	@bash scripts/ci/test-supply-chain.sh
+	@python3 -m pytest -q k8s/helm/waddlebot/tests/test_supply_chain_verify_images_render.py
 
 smoke-test:
 	@echo "Running smoke tests..."

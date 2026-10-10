@@ -1,0 +1,71 @@
+{{- /*
+Kyverno admission policy: a Waddles image runs only if this repo's release workflow
+signed it (keyless cosign, GitHub OIDC identity pinned by subjectRegExp) and it carries
+a signed SPDX SBOM attestation. Additive to the mandatory baseline (Pod Security
+Admission, Cilium, Tetragon) -- never a replacement for it.
+Gated by supplyChain.verifyImages.enabled (off by default, needs Kyverno CRDs).
+enforce=false renders Audit (report only); enforce=true renders Enforce.
+Signing side: scripts/ci/supply-chain.sh + .github/workflows/containers.yml.
+*/ -}}
+{{- if .Values.supplyChain.verifyImages.enabled }}
+{{- $vi := .Values.supplyChain.verifyImages }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: waddles-verify-image-signatures
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+  annotations:
+    policies.kyverno.io/title: Verify Waddles image signatures and SBOM attestations
+    policies.kyverno.io/description: >-
+      Admits only Waddles images signed by the release workflow of penguintechinc/waddles
+      (keyless cosign via GitHub OIDC) and carrying a signed SPDX SBOM attestation.
+spec:
+  validationFailureAction: {{ ternary "Enforce" "Audit" $vi.enforce }}
+  background: false
+  failurePolicy: Fail
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: verify-release-signature
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - {{ $vi.imageReference | quote }}
+          # Kyverno rejects mutateDigest=true under Audit; digest rewrite only when enforcing.
+          mutateDigest: {{ $vi.enforce }}
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: {{ $vi.issuer | quote }}
+                    subjectRegExp: {{ $vi.subjectRegExp | quote }}
+                    rekor:
+                      url: https://rekor.sigstore.dev
+    - name: verify-spdx-sbom-attestation
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - {{ $vi.imageReference | quote }}
+          # Kyverno rejects mutateDigest=true under Audit; digest rewrite only when enforcing.
+          mutateDigest: {{ $vi.enforce }}
+          verifyDigest: true
+          required: true
+          attestations:
+            - type: https://spdx.dev/Document
+              attestors:
+                - entries:
+                    - keyless:
+                        issuer: {{ $vi.issuer | quote }}
+                        subjectRegExp: {{ $vi.subjectRegExp | quote }}
+                        rekor:
+                          url: https://rekor.sigstore.dev
+{{- end }}
