@@ -20,6 +20,7 @@ import jwt
 # Import generated protobuf messages
 import sys
 import os
+from flask_core import describe_db_error
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'proto'))
 
 try:
@@ -144,7 +145,7 @@ class WorkflowServiceServicer:
                 )
             except jwt.InvalidTokenError as e:
                 self.logger.warning(
-                    f"gRPC: JWT verification failed: {str(e)}",
+                    f"gRPC: JWT verification failed: {describe_db_error(e)}",
                     extra={
                         "action": "grpc_trigger_workflow",
                         "workflow_id": workflow_id,
@@ -199,7 +200,7 @@ class WorkflowServiceServicer:
                 trigger_data = json.loads(trigger_data_json)
             except json.JSONDecodeError as e:
                 self.logger.error(
-                    f"gRPC: Invalid trigger_data JSON: {str(e)}",
+                    f"gRPC: Invalid trigger_data JSON: {describe_db_error(e)}",
                     extra={
                         "action": "grpc_trigger_workflow",
                         "workflow_id": workflow_id,
@@ -277,7 +278,7 @@ class WorkflowServiceServicer:
             # Re-raise gRPC errors
             raise
         except Exception as e:
-            error_msg = f"Failed to trigger workflow: {str(e)}"
+            error_msg = f"Failed to trigger workflow: {describe_db_error(e)}"
 
             self.logger.error(
                 error_msg,
@@ -288,8 +289,7 @@ class WorkflowServiceServicer:
                     "execution_id": execution_id,
                     "user_id": request.user_id,
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
 
             await context.abort(

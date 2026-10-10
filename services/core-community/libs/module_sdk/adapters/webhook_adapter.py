@@ -298,7 +298,8 @@ class WebhookAdapter(BaseAdapter):
                     f"Webhook returned HTTP {response.status_code}: "
                     f"{response.text[:200]}"
                 )
-                logger.error(error_msg)
+                # SECURITY: never log the remote body (it can echo the request payload)
+                logger.error("Webhook returned HTTP %s", response.status_code)
                 self.health.record_failure()
 
                 return ExecuteResponse(
@@ -311,7 +312,7 @@ class WebhookAdapter(BaseAdapter):
                 response_data = response.json()
             except json.JSONDecodeError as e:
                 error_msg = f"Failed to parse webhook response as JSON: {str(e)}"
-                logger.error(error_msg)
+                logger.error("Failed to parse webhook response as JSON: %s", type(e).__name__)
                 self.health.record_failure()
 
                 return ExecuteResponse(
@@ -340,7 +341,9 @@ class WebhookAdapter(BaseAdapter):
 
         except httpx.TimeoutException as e:
             error_msg = f"Webhook request timed out after {self.timeout}s: {str(e)}"
-            logger.error(error_msg)
+            logger.error(
+                "Webhook request timed out after %ss: %s", self.timeout, type(e).__name__
+            )
             self.health.record_failure()
 
             return ExecuteResponse(
@@ -350,7 +353,7 @@ class WebhookAdapter(BaseAdapter):
 
         except httpx.RequestError as e:
             error_msg = f"Webhook request failed: {str(e)}"
-            logger.error(error_msg)
+            logger.error("Webhook request failed: %s", type(e).__name__)
             self.health.record_failure()
 
             return ExecuteResponse(
@@ -360,7 +363,7 @@ class WebhookAdapter(BaseAdapter):
 
         except Exception as e:
             error_msg = f"Unexpected error during webhook execution: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            logger.error("Unexpected error during webhook execution: %s", type(e).__name__)
             self.health.record_failure()
 
             return ExecuteResponse(
