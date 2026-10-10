@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an empty signing secret is refused at mint and at verify. Minted HS256 tokens carry a `kid` header
   (`JWT_KID`, default `hs256-v1`). New metrics `waddles_jwt_verifications_total{verifier,alg,outcome}` and
   `waddles_jwt_verification_seconds`. Minting stays HS256 (asymmetric cutover is a later phase).
+  `/internal/service-token` no longer decodes its own token with signature verification disabled
+  (`ServiceJwtIssuer.issue_with_claims`).
 
 ### Changed
 - `compliance.audit_logs` now requires scope `compliance.audit:admin` (was `compliance.audit:read`, which every session's

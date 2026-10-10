@@ -71,6 +71,14 @@ default; a malformed value stops the service at import). The HS256 verifier only
 tolerates its absence (tokens minted before this change live for up to 24 h); in the JWKS phase
 `kid` selects the verification key. Bump `JWT_KID` when rotating the shared secret.
 
+## No unverified decodes
+
+`POST /internal/service-token` used to re-parse its own freshly minted token with
+`verify_signature=False` to read `jti`/`exp` for the audit log. It now takes them from
+`ServiceJwtIssuer.issue_with_claims()` (the claims that were just signed), so no
+signature-disabled `jwt.decode` remains in hub-api or `flask_core`. Keep it that way: a decode
+that does not verify must never feed an authorization decision.
+
 ## Telemetry
 
 OpenTelemetry API only; the destination is the standard `OTEL_EXPORTER_OTLP_*` configuration.
