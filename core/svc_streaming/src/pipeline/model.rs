@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::redact::{fingerprint, redact_url};
 use crate::store::SecretRef;
 
 /// Unique identifier for a configured or running pipeline.
@@ -24,7 +25,13 @@ pub struct PipelineSpec {
 }
 
 /// A single ingest source for a pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written: every variant carries a bearer credential (stream
+/// key, SRT stream id, WHIP token, or a pull URL that may embed
+/// `user:password@`), so a derived `{:?}` -- of this or of a
+/// [`PipelineSpec`] -- would print it. The manual impl shows a
+/// [`crate::redact::fingerprint`] / [`crate::redact::redact_url`] instead.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InputSpec {
     /// RTMP push ingest, keyed by stream key (owned by `ingest::rtmp`).
@@ -35,6 +42,29 @@ pub enum InputSpec {
     Whip { token: String },
     /// Pull ingest from an arbitrary upstream URL (RTMP/SRT/HLS source).
     Pull { url: String },
+}
+
+impl std::fmt::Debug for InputSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rtmp { stream_key } => f
+                .debug_struct("Rtmp")
+                .field("stream_key_hash", &fingerprint(stream_key))
+                .finish(),
+            Self::Srt { stream_id } => f
+                .debug_struct("Srt")
+                .field("stream_id_hash", &fingerprint(stream_id))
+                .finish(),
+            Self::Whip { token } => f
+                .debug_struct("Whip")
+                .field("token_hash", &fingerprint(token))
+                .finish(),
+            Self::Pull { url } => f
+                .debug_struct("Pull")
+                .field("url_redacted", &redact_url(url))
+                .finish(),
+        }
+    }
 }
 
 /// A named transcode profile: one video + one audio codec configuration,
