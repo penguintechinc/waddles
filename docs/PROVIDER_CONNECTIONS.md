@@ -269,8 +269,10 @@ DEBUG.
 1. **Migrate.** `0056_provider_connections` (additive; no new table, no RBAC-matrix change).
 2. **Key.** `CREDENTIAL_ENCRYPTION_KEY` is already provisioned for hub-api by the chart
    (`secrets.yaml`); without it connections fail loud with `503`.
-3. **Refresh app.** Set `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` (the platform Twitch app) on
-   hub-api so refresh works; mint the bot's token with that app.
+3. **Refresh app.** hub-api must see `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` (the platform
+   Twitch app) so refresh works -- the chart already injects the `platform-credentials` Secret
+   into hub-api (`waddlebot.platformCredentialsSecretName`), so put them there. Mint the bot's
+   token with that same app.
 4. **Flag + tier.** Turn on `waddles.integrations.provider_connections` for the tenant and ensure it
    is Professional or above. Default OFF.
 5. **Scope.** Tenant owners already hold `connections:admin` (new sessions); existing sessions pick
