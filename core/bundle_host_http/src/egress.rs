@@ -347,6 +347,22 @@ const REDACTED: &str = "[REDACTED]";
 /// its raw form and in both URL-encodings it can take inside a URL (the
 /// `application/x-www-form-urlencoded` form the host itself writes into the
 /// query, and strict RFC 3986 percent-encoding), longest needle first.
+///
+/// **This scrub is best-effort defense-in-depth, NOT a security boundary.**
+/// It is a literal-substring match, so a server that re-encodes the value in
+/// some form no needle covers (base64, HTML entities, a hash, a compressed or
+/// ranged body the request headers were allowed to provoke, ...) can still
+/// hand it back. The actual security boundary is structural: the resolved
+/// secret value is resolved and injected **host-side only** and never enters
+/// the guest component's memory, request, or any value the guest authored --
+/// the scrub only narrows what a misbehaving or malicious *bound host* can
+/// reflect back. Hardening that keeps the scrub useful rather than complete:
+/// [`force_scrubbable_response_encoding`] (no bundle-chosen compression or
+/// byte ranges on a call that carries a query secret) and
+/// [`SecretRedactor::trim_partial_needle_suffix`] (no secret prefix left at
+/// the response-size cap). Per-ref host binding (a `?`-ref reaching only the
+/// FQDN it was granted for) is the structural follow-up that shrinks the
+/// reflection surface itself.
 struct SecretRedactor {
     needles: Vec<String>,
 }
@@ -412,12 +428,45 @@ impl SecretRedactor {
         }
     }
 
+    /// Removes the longest trailing run of `body` that is a **proper prefix**
+    /// of any needle. The transport caps the body at `max_response_bytes`
+    /// *before* this scrub runs, so a secret straddling the cap is cut short:
+    /// the full needle no longer occurs, [`SecretRedactor::scrub_bytes`] cannot
+    /// match it, and the surviving prefix (`...?key=wk_live_9f`) would reach
+    /// the guest verbatim. Only meaningful -- and only called -- for a body the
+    /// transport reported `truncated`; a complete body ends where the server
+    /// ended it, so its tail is not a cut-off secret.
+    ///
+    /// A single pass is exact: the trimmed bytes are the only ones that could
+    /// be the first half of a needle whose second half the cap discarded.
+    fn trim_partial_needle_suffix(&self, body: &mut Vec<u8>) {
+        let trim = self
+            .needles
+            .iter()
+            .filter_map(|needle| {
+                let needle = needle.as_bytes();
+                (1..needle.len())
+                    .rev()
+                    .find(|&k| k <= body.len() && body.ends_with(&needle[..k]))
+            })
+            .max();
+        if let Some(k) = trim {
+            body.truncate(body.len() - k);
+        }
+    }
+
     /// Scrubs a transport response's header values and body so a server
     /// that reflects the request URL (or a pagination `Link`) can never hand
-    /// the guest component a secret the host injected.
+    /// the guest component a secret the host injected. Best-effort, not a
+    /// boundary -- see the type-level doc. A `truncated` body additionally
+    /// loses any trailing partial secret ([`Self::trim_partial_needle_suffix`]).
     fn scrub_response(&self, resp: TransportResponse) -> TransportResponse {
         if self.is_empty() {
             return resp;
+        }
+        let mut body = self.scrub_bytes(resp.body);
+        if resp.truncated {
+            self.trim_partial_needle_suffix(&mut body);
         }
         TransportResponse {
             status: resp.status,
@@ -426,7 +475,7 @@ impl SecretRedactor {
                 .into_iter()
                 .map(|(name, value)| (name, self.scrub_str(&value)))
                 .collect(),
-            body: self.scrub_bytes(resp.body),
+            body,
             truncated: resp.truncated,
         }
     }
@@ -479,21 +528,46 @@ fn form_encode_query_value(value: &str) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+/// Every query parameter of `url`, split on **both** `&` and `;`.
+///
+/// `Url::query_pairs()` splits on `&` only, but several server stacks (older
+/// Java servlet containers, Python `urlparse`/`cgi` defaults, some Perl/Ruby
+/// parsers) also accept `;` as a parameter separator. A bundle URL
+/// `?q=1;key=evil` is one `q` parameter to `Url` but two to such a server --
+/// and the injected `&key=<secret>` would then be the *second* `key`, losing
+/// to the bundle's. Splitting on `;` here lets the same-name drop see what the
+/// server will see. A percent-encoded `%3B` is data to every server and is
+/// left alone.
+fn query_params_any_separator(url: &reqwest::Url) -> Vec<(String, String)> {
+    let Some(query) = url.query() else {
+        return Vec::new();
+    };
+    let mut normalized = url.clone();
+    normalized.set_query(Some(&query.replace(';', "&")));
+    normalized
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect()
+}
+
+/// `true` if `name` is the parameter name of one of the injected `secrets`.
+fn is_secret_param(secrets: &[(String, String)], name: &str) -> bool {
+    secrets.iter().any(|(secret, _)| secret.as_str() == name)
+}
+
 /// Appends each `(param, value)` secret to `url`'s query as
 /// `param=<form-encoded value>`. A pre-existing same-named parameter in the
-/// bundle-supplied URL is dropped first (the host's value always wins, and a
-/// bundle can't pre-seed a duplicate for a server that reads the first
-/// one); every other existing byte of the query is preserved verbatim
-/// unless a same-named parameter forced a re-serialization.
+/// bundle-supplied URL -- separated by `&` or by `;`
+/// ([`query_params_any_separator`]) -- is dropped first (the host's value
+/// always wins, and a bundle can't pre-seed a duplicate for a server that
+/// reads the first one); every other existing byte of the query is preserved
+/// verbatim unless a same-named parameter forced a re-serialization.
 fn inject_query_secrets(url: &mut reqwest::Url, secrets: &[(String, String)]) {
-    let conflicts = url
-        .query_pairs()
-        .any(|(k, _)| secrets.iter().any(|(name, _)| name.as_str() == k));
-    if conflicts {
-        let kept: Vec<(String, String)> = url
-            .query_pairs()
-            .filter(|(k, _)| !secrets.iter().any(|(name, _)| name.as_str() == k))
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+    let existing = query_params_any_separator(url);
+    if existing.iter().any(|(k, _)| is_secret_param(secrets, k)) {
+        let kept: Vec<(String, String)> = existing
+            .into_iter()
+            .filter(|(k, _)| !is_secret_param(secrets, k))
             .collect();
         let mut pairs = url.query_pairs_mut();
         pairs.clear();
@@ -505,21 +579,35 @@ fn inject_query_secrets(url: &mut reqwest::Url, secrets: &[(String, String)]) {
     }
 }
 
+/// Request headers a bundle controls that would let a bound host answer with
+/// a body the substring [`SecretRedactor`] cannot read: `Accept-Encoding` (a
+/// `gzip`/`br` echo), `Range` and `If-Range` (a partial/offset echo that
+/// splits the secret). On a call carrying a query secret every bundle value
+/// of these is dropped and `Accept-Encoding: identity` is forced, so the
+/// response body is whole plaintext. Names compare ASCII-case-insensitively.
+/// Hardening of a best-effort scrub, not a boundary -- see [`SecretRedactor`].
+fn force_scrubbable_response_encoding(headers: &mut Vec<(String, String)>) {
+    headers.retain(|(name, _)| {
+        !name.eq_ignore_ascii_case("accept-encoding")
+            && !name.eq_ignore_ascii_case("range")
+            && !name.eq_ignore_ascii_case("if-range")
+    });
+    headers.push(("Accept-Encoding".to_string(), "identity".to_string()));
+}
+
 /// Removes every query parameter named like an injected secret from a
 /// redirect target -- the secret is only ever sent on the first hop, to the
 /// bound host, and a redirect's `Location` (server-chosen) never gets to
-/// carry the parameter onward, whatever value it names.
+/// carry the parameter onward, whatever value it names and whichever of
+/// `&`/`;` separates it ([`query_params_any_separator`]).
 fn strip_query_secret_params(url: &mut reqwest::Url, secrets: &[(String, String)]) {
-    if !url
-        .query_pairs()
-        .any(|(k, _)| secrets.iter().any(|(name, _)| name.as_str() == k))
-    {
+    let existing = query_params_any_separator(url);
+    if !existing.iter().any(|(k, _)| is_secret_param(secrets, k)) {
         return;
     }
-    let kept: Vec<(String, String)> = url
-        .query_pairs()
-        .filter(|(k, _)| !secrets.iter().any(|(name, _)| name.as_str() == k))
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+    let kept: Vec<(String, String)> = existing
+        .into_iter()
+        .filter(|(k, _)| !is_secret_param(secrets, k))
         .collect();
     if kept.is_empty() {
         url.set_query(None);
@@ -1024,6 +1112,14 @@ impl EgressGuard {
             // never contains the secret, so every redirect hop is
             // structurally secret-free.
             let inject_query_secrets_now = hop == 0 && !query_secrets.is_empty();
+            if inject_query_secrets_now {
+                // The response scrub is a literal-substring match: a
+                // bundle-chosen compression or byte range would let the
+                // bound host echo the secret in a form it cannot match.
+                // Applied after every other header is assembled (bundle,
+                // secret-ref, proxy assertion) so none can reintroduce one.
+                force_scrubbable_response_encoding(&mut req_headers);
+            }
             let transport_url = if inject_query_secrets_now {
                 let mut with_secrets = url.clone();
                 inject_query_secrets(&mut with_secrets, &query_secrets);
@@ -4913,9 +5009,11 @@ mod tests {
             requests[0].url,
             format!("https://api.weatherapi.com/v1/current.json?q=London&key={QS_SECRET}")
         );
-        assert!(
-            requests[0].headers.is_empty(),
-            "a ?-ref is a query parameter, never also a header"
+        assert_eq!(
+            requests[0].headers,
+            vec![("Accept-Encoding".to_string(), "identity".to_string())],
+            "a ?-ref is a query parameter, never also a header; the only header \
+             the host adds is the forced plaintext encoding"
         );
     }
 
@@ -5518,6 +5616,365 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(REDACTED));
+    }
+
+    /// Decodes a `send` result's `body_base64`.
+    fn decoded_body(value: &serde_json::Value) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(value["body_base64"].as_str().unwrap())
+            .unwrap()
+    }
+
+    /// regression: egress-query-secret truncation partial-needle leak. The
+    /// transport caps the body before the guard scrubs, so a secret
+    /// straddling the cap survives as a prefix (`echo:/p?key=wk_live_9f`);
+    /// the guard must trim that partial secret off a `truncated` body.
+    #[tokio::test]
+    async fn truncated_body_ending_in_a_partial_query_secret_is_trimmed() {
+        let partial = &QS_SECRET[..10];
+        assert_eq!(partial, "wk_live_9f");
+        let transport = fake_transport(vec![Ok(TransportResponse {
+            status: 200,
+            headers: vec![],
+            body: format!("echo:/p?key={partial}").into_bytes(),
+            truncated: true,
+        })]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        let value = guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/p",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("send succeeds");
+        assert_eq!(value["truncated"], true);
+        let body = decoded_body(&value);
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "echo:/p?key=",
+            "no prefix of the secret may survive the truncation boundary"
+        );
+        assert!(!String::from_utf8_lossy(&body).contains("wk_"));
+    }
+
+    /// The trim is for a *cut-off* body only: a complete body ends where the
+    /// server ended it, so a tail that merely resembles a secret prefix is
+    /// ordinary data and is delivered untouched.
+    #[tokio::test]
+    async fn a_complete_body_ending_in_a_secret_lookalike_is_not_trimmed() {
+        let transport = fake_transport(vec![Ok(TransportResponse {
+            status: 200,
+            headers: vec![],
+            body: b"served by wk_live_9f".to_vec(),
+            truncated: false,
+        })]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        let value = guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/p",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("send succeeds");
+        assert_eq!(decoded_body(&value), b"served by wk_live_9f");
+    }
+
+    /// regression: the PoC end to end against the real transport -- a real
+    /// local server echoes the request URI, the real size cap cuts it inside
+    /// the secret, and the redactor (as the guard applies it to the
+    /// transport's output) must not hand back the prefix.
+    #[tokio::test]
+    async fn real_transport_cap_inside_the_secret_leaves_no_secret_prefix() {
+        let app = axum::Router::new().route(
+            "/p",
+            axum::routing::get(|uri: axum::http::Uri| async move { format!("echo:{uri}") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let cap = "echo:/p?key=wk_live_9f".len();
+        let resp = ReqwestTransport::new()
+            .send(
+                TransportRequest {
+                    method: "GET".to_string(),
+                    url: format!("http://127.0.0.1:{}/p?key={QS_SECRET}", addr.port()),
+                    pinned_addr: addr,
+                    headers: vec![],
+                    body: None,
+                },
+                Duration::from_secs(5),
+                cap,
+            )
+            .await
+            .expect("request succeeds even when truncated");
+        assert!(resp.truncated);
+        assert_eq!(
+            resp.body,
+            b"echo:/p?key=wk_live_9f",
+            "precondition: the cap cut the secret in half, so the full-needle scrub alone cannot see it"
+        );
+
+        let scrubbed = SecretRedactor::new([QS_SECRET]).scrub_response(resp);
+        assert!(scrubbed.truncated);
+        assert_eq!(scrubbed.body, b"echo:/p?key=");
+    }
+
+    /// The trim covers every encoding the redactor matches, picks the longest
+    /// partial across needles, runs after full occurrences were replaced, and
+    /// leaves non-matching tails alone.
+    #[test]
+    fn truncated_response_trim_handles_encodings_multiple_needles_and_non_matches() {
+        let nasty = "p@ss w/rd&admin=1";
+        let form = form_encode_query_value(nasty);
+        let rfc = percent_encode_rfc3986(nasty);
+        assert_eq!(form, "p%40ss+w%2Frd%26admin%3D1");
+        let redactor = SecretRedactor::new([nasty, "other-secret-value"]);
+        let cut = |body: &str| {
+            redactor
+                .scrub_response(TransportResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: body.as_bytes().to_vec(),
+                    truncated: true,
+                })
+                .body
+        };
+
+        // Each variant, cut mid-needle, loses exactly its partial tail.
+        assert_eq!(cut("x=p@ss w/"), b"x=");
+        assert_eq!(cut(&format!("x={}", &form[..11])), b"x=");
+        assert_eq!(cut(&format!("x={}", &rfc[..11])), b"x=");
+        // A one-byte prefix is still a leak of the secret's first character.
+        assert_eq!(cut("x=o"), b"x=");
+        assert_eq!(cut("x=other-secr"), b"x=");
+        // A full needle is replaced; the partial of another after it is trimmed.
+        assert_eq!(
+            cut(&format!("a={nasty}&b=other-sec")),
+            format!("a={REDACTED}&b=").into_bytes()
+        );
+        // The needle's own tail overlapping its head ("abab") still trims.
+        let overlap = SecretRedactor::new(["abcabd"]);
+        let trimmed = overlap
+            .scrub_response(TransportResponse {
+                status: 200,
+                headers: vec![],
+                body: b"zabcab".to_vec(),
+                truncated: true,
+            })
+            .body;
+        assert_eq!(trimmed, b"z");
+        // When two needles both have a partial at the tail, the LONGER one is
+        // trimmed ("abcde" for the first, "cde" for the second): trimming only
+        // the shorter would leave "ab" of the first secret behind.
+        let two = SecretRedactor::new(["abcdef", "cdefgh"]);
+        let trimmed = two
+            .scrub_response(TransportResponse {
+                status: 200,
+                headers: vec![],
+                body: b"zabcde".to_vec(),
+                truncated: true,
+            })
+            .body;
+        assert_eq!(trimmed, b"z");
+        // A tail that is not a needle prefix is untouched, and so is a body
+        // shorter than the shortest possible partial.
+        assert_eq!(cut("plain body ends here"), b"plain body ends here");
+        assert_eq!(cut(""), b"");
+    }
+
+    /// regression: a bundle-chosen `Accept-Encoding`/`Range`/`If-Range` would
+    /// let the bound host return a compressed or ranged echo the substring
+    /// scrub cannot match. With a query secret on the request they are all
+    /// dropped (any case, any count) and `Accept-Encoding: identity` is
+    /// forced; every other bundle header is untouched.
+    #[tokio::test]
+    async fn encoding_and_range_headers_are_forced_off_when_a_query_secret_is_present() {
+        let transport = fake_transport(vec![Ok(ok_response())]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &serde_json::json!({
+                    "method": "GET",
+                    "url": "https://api.weatherapi.com/v1/current.json?q=London",
+                    "headers": [
+                        {"name": "Accept-Encoding", "value": "gzip, br"},
+                        {"name": "accept-encoding", "value": "deflate"},
+                        {"name": "Range", "value": "bytes=0-31"},
+                        {"name": "RANGE", "value": "bytes=32-"},
+                        {"name": "If-Range", "value": "\"etag-1\""},
+                        {"name": "X-Trace", "value": "keep-me"},
+                    ],
+                    "secret_refs": {"?key": "KEY_REF"},
+                }),
+            )
+            .await
+            .expect("send succeeds");
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let headers = &requests[0].headers;
+        let named = |n: &str| -> Vec<&str> {
+            headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case(n))
+                .map(|(_, v)| v.as_str())
+                .collect()
+        };
+        assert_eq!(
+            named("accept-encoding"),
+            vec!["identity"],
+            "exactly one Accept-Encoding, forced to identity: {headers:?}"
+        );
+        assert!(
+            named("range").is_empty(),
+            "Range must be dropped: {headers:?}"
+        );
+        assert!(
+            named("if-range").is_empty(),
+            "If-Range must be dropped: {headers:?}"
+        );
+        assert_eq!(named("x-trace"), vec!["keep-me"]);
+    }
+
+    /// The forcing is scoped to calls that actually carry a query secret: a
+    /// header-only secret call (and a plain call) keeps the bundle's own
+    /// encoding/range headers exactly as before.
+    #[tokio::test]
+    async fn encoding_and_range_headers_pass_through_without_a_query_secret() {
+        for secret_refs in [
+            serde_json::json!({"Authorization": "TOKEN_REF"}),
+            serde_json::json!({}),
+        ] {
+            let transport = fake_transport(vec![Ok(ok_response())]);
+            let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+            guard
+                .send(
+                    QS_APP,
+                    &serde_json::json!({
+                        "method": "GET",
+                        "url": "https://api.weatherapi.com/v1/current.json",
+                        "headers": [
+                            {"name": "Accept-Encoding", "value": "gzip"},
+                            {"name": "Range", "value": "bytes=0-9"},
+                        ],
+                        "secret_refs": secret_refs,
+                    }),
+                )
+                .await
+                .expect("send succeeds");
+            let requests = transport.requests.lock().unwrap();
+            let headers = &requests[0].headers;
+            assert!(
+                headers.contains(&("Accept-Encoding".to_string(), "gzip".to_string())),
+                "{headers:?}"
+            );
+            assert!(
+                headers.contains(&("Range".to_string(), "bytes=0-9".to_string())),
+                "{headers:?}"
+            );
+        }
+    }
+
+    /// The helper removes every case/count of the three headers, appends a
+    /// single `Accept-Encoding: identity`, and keeps all other headers.
+    #[test]
+    fn force_scrubbable_response_encoding_replaces_only_the_three_headers() {
+        let mut headers = vec![
+            ("Accept-Encoding".to_string(), "gzip".to_string()),
+            ("X-A".to_string(), "1".to_string()),
+            ("range".to_string(), "bytes=1-".to_string()),
+            ("IF-RANGE".to_string(), "x".to_string()),
+        ];
+        force_scrubbable_response_encoding(&mut headers);
+        assert_eq!(
+            headers,
+            vec![
+                ("X-A".to_string(), "1".to_string()),
+                ("Accept-Encoding".to_string(), "identity".to_string()),
+            ]
+        );
+    }
+
+    /// regression: `?q=1;key=evil` -- `;` is a parameter separator to some
+    /// server stacks, so a bundle-supplied `key` hiding behind it must be
+    /// dropped like an `&`-separated one, leaving only the host's value.
+    #[tokio::test]
+    async fn semicolon_separated_same_named_parameter_is_dropped() {
+        for (bundle_url, expected_query) in [
+            ("?q=1;key=evil", "q=1".to_string()),
+            ("?key=evil;q=1", "q=1".to_string()),
+            ("?a=1;key=x;b=2&key=y", "a=1&b=2".to_string()),
+            ("?k%65y=evil;q=1", "q=1".to_string()),
+        ] {
+            let transport = fake_transport(vec![Ok(ok_response())]);
+            let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+            guard
+                .send(
+                    QS_APP,
+                    &weather_args(
+                        &format!("https://api.weatherapi.com/v1/current.json{bundle_url}"),
+                        serde_json::json!({"?key": "KEY_REF"}),
+                    ),
+                )
+                .await
+                .expect("send succeeds");
+            let sent = sent_urls(&transport).remove(0);
+            assert_eq!(
+                sent,
+                format!(
+                    "https://api.weatherapi.com/v1/current.json?{expected_query}&key={QS_SECRET}"
+                ),
+                "bundle url {bundle_url}"
+            );
+            assert!(!sent.contains("evil"), "{sent}");
+            assert!(!sent.contains(';'), "{sent}");
+        }
+    }
+
+    /// A redirect `Location` is server-chosen: a `;`-separated secret-named
+    /// parameter in it is stripped too, never carried onward.
+    #[tokio::test]
+    async fn semicolon_separated_secret_named_parameter_is_stripped_from_a_redirect() {
+        let transport = fake_transport(vec![
+            redirect_to("https://api.weatherapi.com/next?x=1;key=evil"),
+            Ok(ok_response()),
+        ]);
+        let guard = qs_guard(&transport, &[QS_WEATHER], QS_SECRET);
+        guard
+            .send(
+                QS_APP,
+                &weather_args(
+                    "https://api.weatherapi.com/v1/current.json",
+                    serde_json::json!({"?key": "KEY_REF"}),
+                ),
+            )
+            .await
+            .expect("send succeeds");
+        let urls = sent_urls(&transport);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[1], "https://api.weatherapi.com/next?x=1");
+    }
+
+    /// `%3B` is data, not a separator, to every server: an encoded `;` keeps
+    /// the parameter intact and is not mistaken for a hidden `key`.
+    #[test]
+    fn percent_encoded_semicolon_is_not_a_separator() {
+        let secrets = [("key".to_string(), "v".to_string())];
+        let mut url = reqwest::Url::parse("https://h.example/p?q=a%3Bkey%3Devil").unwrap();
+        inject_query_secrets(&mut url, &secrets);
+        assert_eq!(url.as_str(), "https://h.example/p?q=a%3Bkey%3Devil&key=v");
+        let mut redirect = reqwest::Url::parse("https://h.example/p?q=a%3Bkey%3Devil").unwrap();
+        strip_query_secret_params(&mut redirect, &secrets);
+        assert_eq!(redirect.as_str(), "https://h.example/p?q=a%3Bkey%3Devil");
     }
 
     #[test]
