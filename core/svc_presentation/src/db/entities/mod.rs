@@ -28,9 +28,14 @@
 //!   [`crate::overlay::community_ctx::SeaOrmCommunityContextStore`], which
 //!   maps a verified credential's `community_id` to its tenant for
 //!   display-name resolution.
+//! - `communities` again, projected to `id`/`overlay_code` (alembic
+//!   `0056_communities_overlay_code`) -- backs
+//!   [`crate::overlay::code::SeaOrmOverlayCodeResolver`], which maps the
+//!   unguessable overlay code in a URL to the real community id.
 
 pub mod caption_event;
 pub mod community;
+pub mod community_overlay_code;
 pub mod overlay_image;
 pub mod overlay_surface;
 pub mod overlay_view_credential;

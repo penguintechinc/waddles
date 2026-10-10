@@ -227,7 +227,7 @@ async fn ws_handshake_with_a_non_numeric_community_is_a_400() {
 
 fn ingest_router(state: AppState, community_id: i64) -> Router {
     Router::new()
-        .route("/overlay/{community}/caption/push", post(push_caption))
+        .route("/{overlay_code}/caption/push", post(push_caption))
         .layer(Extension(push_credential(community_id)))
         .with_state(state)
 }
@@ -254,7 +254,7 @@ async fn ingest_validates_publishes_and_persists_a_caption() {
 
     let response = post_json(
         ingest_router(state.clone(), 42),
-        "/overlay/42/caption/push",
+        &format!("/{CODE_42}/caption/push"),
         &caption_push("hola amigos"),
     )
     .await;
@@ -263,7 +263,8 @@ async fn ingest_validates_publishes_and_persists_a_caption() {
     let json: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
     assert_eq!(json["status"], "published");
     assert_eq!(json["surface"], "caption");
-    assert_eq!(json["community"], "42");
+    assert_eq!(json["overlay_code"], CODE_42);
+    assert!(json.get("community").is_none());
     assert_eq!(json["persisted"], true);
 
     // Broadcast to the community's live viewers...
@@ -298,7 +299,7 @@ async fn ingest_rejects_an_invalid_caption_without_publishing_or_persisting() {
     push.caption.as_mut().unwrap().user = "raw_username".to_string();
     let response = post_json(
         ingest_router(state.clone(), 42),
-        "/overlay/42/caption/push",
+        &format!("/{CODE_42}/caption/push"),
         &push,
     )
     .await;
@@ -317,7 +318,7 @@ async fn ingest_rejects_an_invalid_caption_without_publishing_or_persisting() {
     // Nothing reached the hub: a valid push afterwards is the first frame.
     let ok = post_json(
         ingest_router(state, 42),
-        "/overlay/42/caption/push",
+        &format!("/{CODE_42}/caption/push"),
         &caption_push("second"),
     )
     .await;
@@ -335,7 +336,7 @@ async fn ingest_rejects_a_push_with_no_caption_payload() {
     let state = state_with_no_queries(true);
     let response = post_json(
         ingest_router(state, 42),
-        "/overlay/42/caption/push",
+        &format!("/{CODE_42}/caption/push"),
         &OverlayPush::default(),
     )
     .await;
@@ -350,7 +351,7 @@ async fn ingest_rejects_malformed_json_with_a_client_error() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/overlay/42/caption/push")
+                .uri(format!("/{CODE_42}/caption/push"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from("{not json"))
                 .unwrap(),
@@ -372,7 +373,7 @@ async fn ingest_reports_a_persist_failure_but_still_broadcasts() {
 
     let response = post_json(
         ingest_router(state.clone(), 42),
-        "/overlay/42/caption/push",
+        &format!("/{CODE_42}/caption/push"),
         &caption_push("live only"),
     )
     .await;
@@ -403,7 +404,7 @@ async fn ingest_is_forbidden_when_the_flag_is_off() {
     state.caption_store = store.clone();
     let response = post_json(
         ingest_router(state.clone(), 42),
-        "/overlay/42/caption/push",
+        &format!("/{CODE_42}/caption/push"),
         &caption_push("hola"),
     )
     .await;
@@ -414,32 +415,6 @@ async fn ingest_is_forbidden_when_the_flag_is_off() {
         counter(&state, "svc_presentation_caption_ingest_total", "disabled"),
         1
     );
-}
-
-#[tokio::test]
-async fn ingest_rejects_a_path_community_that_differs_from_the_credential() {
-    let store = arc_store(FakeCaptionStore::default());
-    let mut state = state_with_no_queries(true);
-    state.caption_store = store.clone();
-    let mut other_community = state.hub.subscribe(43, Surface::Caption);
-
-    // Credential is for 42; the path names 43.
-    let response = post_json(
-        ingest_router(state.clone(), 42),
-        "/overlay/43/caption/push",
-        &caption_push("cross-tenant"),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(store.inserted.lock().unwrap().is_empty());
-
-    // And nothing was delivered to community 43.
-    let nothing = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        other_community.recv(),
-    )
-    .await;
-    assert!(nothing.is_err(), "no frame may reach another community");
 }
 
 #[tokio::test]
@@ -454,7 +429,7 @@ async fn ingest_scopes_persistence_to_the_credential_community_only() {
         // `.clone()`: the hub lives in `state`; dropping the last handle
         // would close every subscriber's channel mid-test.
         ingest_router(state.clone(), 7),
-        "/overlay/7/caption/push",
+        &format!("/{CODE_7}/caption/push"),
         &caption_push("only for seven"),
     )
     .await;

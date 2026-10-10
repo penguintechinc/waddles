@@ -1,7 +1,8 @@
 //! Overlay-auth wiring (contract C4, `overlay_auth` crate): the concrete
-//! VIEW/PUSH trust sources this service provides, plus the axum routers
-//! that mount `overlay_auth`'s guard middleware ahead of the real overlay
-//! routes P2 (render), P3 (live SSE/websocket), and P4 (push) add.
+//! VIEW/PUSH trust sources this service provides, plus the guards that
+//! resolve the unguessable overlay code in the URL to a community
+//! ([`code`]) and then apply `overlay_auth`'s VIEW/PUSH checks ahead of the
+//! real overlay routes P2 (render), P3 (live SSE/websocket), and P4 (push) add.
 //!
 //! [`hub`] is P3's in-process push fan-out; `crate::http::overlay` (P4)
 //! mounts the real routes -- `GET .../live` (SSE), `GET .../live/ws`
@@ -15,6 +16,7 @@
 //! the sanitized [`render::RenderedFrame`] is fanned out.
 
 pub mod caption_store;
+pub mod code;
 pub mod community_ctx;
 pub mod detok;
 pub mod hub;
@@ -24,6 +26,7 @@ pub mod router;
 pub mod view_store;
 
 pub use caption_store::{CaptionStore, SeaOrmCaptionStore};
+pub use code::{OverlayCodeResolver, SeaOrmOverlayCodeResolver, StaticOverlayCodes};
 pub use community_ctx::{CommunityContextStore, SeaOrmCommunityContextStore};
 pub use hub::PresentationHub;
 pub use push_trust::AppPushTrustSource;
