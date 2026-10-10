@@ -2092,7 +2092,7 @@ All routes are on `:8200`. `INTAKE_MAX_BODY_BYTES` = `262144` (256 KiB) applies 
 
 ### 10.2 Fixed platform inputs
 
-Ported with today's exact authentication and lifecycle behaviour (`core/svc_ingest/receivers/*.py`, `eventsub.py`, `bundles/kick_ingest.py`):
+Ported with today's exact authentication and lifecycle behaviour (`core/svc_ingest/receivers/*.py`, `eventsub.py`, `builtin_handlers/kick_ingest.py`):
 
 | Input | Mechanism | Credential | Lease |
 |---|---|---|---|

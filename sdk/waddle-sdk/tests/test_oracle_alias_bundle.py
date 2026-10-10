@@ -101,7 +101,7 @@ def _event(text: str, *, actor: str | None = "penguin") -> PlatformEvent:
 
 @pytest.fixture
 def alias_bundle(monkeypatch: pytest.MonkeyPatch):
-    """Import the real `builtin_handlers.social_alias_process` with `flask_core` shimmed to this SDK."""
+    """Import real `builtin_handlers.social_alias_process`, `flask_core` shimmed to this SDK."""
     if not SVC_PROCESS_ROOT.is_dir():
         pytest.skip(f"core/svc_process not found at {SVC_PROCESS_ROOT} -- requires a full checkout")
 
