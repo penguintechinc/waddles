@@ -2,7 +2,7 @@
 //! capability.
 //!
 //! [`DbScope`] is built exclusively from the invocation's already-validated
-//! `(tenant, community, app_id)` -- the same triple `StageCapabilities`
+//! `(tenant_id, community_id, app_id)` -- the numeric ids `StageCapabilities`
 //! already carries in both `core/svc_process` and `core/svc_action`, itself
 //! sourced from the JWT/manifest-driven invoke scope, never from a bundle
 //! host-call's own `args`. This module never accepts a tenant/community/
@@ -82,26 +82,50 @@ impl AppSchema {
     }
 }
 
+/// `community_id` for a tenant-wide (no-community) activation -- the same
+/// `0` sentinel `InvokeScope::community_id` (`core/svc_action`) and
+/// `bundle_active_set` already use. The provisioned DDL declares
+/// `community_id integer NOT NULL` (`hub_api/services/bundle_data_ddl.py`
+/// `_platform_columns_sql`), so a tenant-wide row cannot be `NULL`: it is
+/// stored, matched and RLS-scoped under this value instead.
+pub const TENANT_WIDE_COMMUNITY_ID: i32 = 0;
+
 /// The authenticated, server-derived scope one `db` host-call is answered
 /// under. Every field here is trusted input by the time it reaches this
-/// struct -- `tenant`/`community`/`app_id` come from the invocation's own
-/// validated scope, exactly like every other capability in both stages.
+/// struct -- `tenant_id`/`community_id`/`app_id` come from the invocation's
+/// own validated scope, exactly like every other capability in both stages.
+///
+/// **Numeric ids, deliberately -- the one representation the stored column,
+/// the RLS policy and the bind all share.** A bundle table's platform
+/// columns are `tenant_id integer NOT NULL` / `community_id integer NOT
+/// NULL`, and its RLS policy compares them to
+/// `NULLIF(current_setting('waddles.tenant_id', true), '')::integer` (and
+/// likewise for the community) -- the same integer `tenants.id`/
+/// `communities.id` every other hub-api table references. So the scope
+/// carries the resolved ids ([`i32`]), never the tenant/community *slug*
+/// the invocation also knows: a slug can be neither bound to nor cast to an
+/// `integer`. A struct holding both would invite binding the wrong one, so
+/// the slugs are not carried here at all.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DbScope {
-    pub tenant: String,
-    pub community: Option<String>,
+    /// `tenants.id` of the invoking tenant.
+    pub tenant_id: i32,
+    /// `communities.id` of the invoking community, or
+    /// [`TENANT_WIDE_COMMUNITY_ID`] (`0`) for a tenant-wide activation.
+    pub community_id: i32,
     pub app_id: String,
 }
 
 impl DbScope {
-    pub fn new(
-        tenant: impl Into<String>,
-        community: Option<String>,
-        app_id: impl Into<String>,
-    ) -> Self {
+    /// Builds the scope from the invocation's already-resolved numeric ids
+    /// (`community_id` = [`TENANT_WIDE_COMMUNITY_ID`] for a tenant-wide
+    /// activation). All three are required, never defaulted: a caller with
+    /// no resolved id must fail closed upstream (the capability gate does),
+    /// not silently write under scope `0`.
+    pub fn new(tenant_id: i32, community_id: i32, app_id: impl Into<String>) -> Self {
         Self {
-            tenant: tenant.into(),
-            community,
+            tenant_id,
+            community_id,
             app_id: app_id.into(),
         }
     }

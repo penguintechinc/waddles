@@ -10,6 +10,20 @@ pub const MAX_TEXT_BYTES: usize = 8192;
 /// Largest `jsonb` column value accepted, in bytes (design doc SS3.1).
 pub const MAX_JSONB_BYTES: usize = 16 * 1024;
 
+/// Highest `numeric(p,s)` precision a column may declare -- mirrors
+/// `MAX_NUMERIC_PRECISION` in `hub_api/services/bundle_data_schema.py`.
+pub const MAX_NUMERIC_PRECISION: u8 = 38;
+
+/// Highest `numeric(p,s)` scale a column may declare -- mirrors
+/// `MAX_NUMERIC_SCALE` in `hub_api/services/bundle_data_schema.py`.
+pub const MAX_NUMERIC_SCALE: u8 = 12;
+
+/// Longest decimal string accepted for a `numeric` column, in bytes: far
+/// above any legal value (sign + 38 digits + point) so harmless zero padding
+/// still fits, yet small enough that a bundle cannot make the host scan an
+/// arbitrarily long digit string.
+pub const MAX_NUMERIC_TEXT_BYTES: usize = 128;
+
 /// Highest row count `query` may ever return in one call, and the default
 /// applied when a bundle requests more (design doc SS6.1: "`limit` capped
 /// (default 200)").

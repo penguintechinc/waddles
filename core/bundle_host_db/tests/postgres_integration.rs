@@ -6,22 +6,24 @@
 //! them. Mirrors `bundle_host_kv/tests/valkey_integration.rs`'s pattern
 //! (own container per scenario, `testcontainers::runners::AsyncRunner`).
 //!
-//! **DDL provenance.** `alembic/versions/0030_bundle_app_schemas.py`
-//! (merged) creates the `app_core`/`app_community` schemas and the
-//! `waddles_bundle_migrator`/`waddles_bundle_runtime` roles, but is a
-//! Python/Alembic migration -- invoking it from this Rust integration test
-//! would require a Python/hub-api environment as a test dependency, which
-//! this crate does not otherwise need. `hub_api/services/bundle_data_ddl.py`
-//! (PR #430, the generator that would emit a bundle's own `CREATE TABLE`)
-//! is not merged yet. So `apply_bundle_schema_ddl` below re-issues the same
-//! SQL 0030 runs (roles, schemas, grants, `REVOKE ALL ... FROM PUBLIC` on
-//! `public`) plus a hand-written `CREATE TABLE`/RLS policy matching the
-//! design doc's fixed per-app-table template (§3.3/§3.4/§7:
-//! `row_id`/`tenant_id`/`community_id`/`version`/`created_at`/`updated_at`
-//! platform columns, `FORCE ROW LEVEL SECURITY`, a policy keyed on the same
-//! `waddles.tenant_id`/`waddles.community_id` GUCs `crate::backend::
-//! set_local_scope` sets) -- faithfully reproducing what those two
-//! migrations do, not a simplified stand-in for them.
+//! **DDL provenance -- the test DDL mirrors production, type for type.**
+//! `alembic/versions/0030_bundle_app_schemas.py` (merged) creates the
+//! `app_core`/`app_community` schemas and the `waddles_bundle_migrator`/
+//! `waddles_bundle_runtime` roles; `hub_api/services/bundle_data_ddl.py`
+//! emits each bundle's own `CREATE TABLE` + RLS policy + grant. Invoking
+//! either from this Rust test would need a Python/hub-api environment as a
+//! test dependency, so `apply_bundle_schema_ddl` re-issues the schema/role
+//! SQL 0030 runs and `production_table_ddl` re-states the generator's fixed
+//! template **verbatim** -- the exact text hub-api's golden snapshot pins
+//! (`hub_api/tests/test_bundle_data_ddl.py::TestGoldenDdlSnapshots`):
+//! `tenant_id integer NOT NULL`, `community_id integer NOT NULL`,
+//! `version integer NOT NULL DEFAULT 1`, `FORCE ROW LEVEL SECURITY`, and a
+//! policy comparing both scope columns to
+//! `NULLIF(current_setting('waddles.*_id', true), '')::integer`. This test
+//! once used its own hand-written shape (`tenant_id text`, `community_id
+//! text NULL`, a `text`-comparing policy) and so passed while every scoped
+//! statement failed against the real hub-api-created schema -- keep this
+//! helper byte-identical to the generator, never "simplified".
 //!
 //! Requires Docker (via `testcontainers`) -- CI (`rust-bundle-host-db.yml`,
 //! alongside `rust-bundle-host-kv.yml`) runs on `ubuntu-latest`, which ships
@@ -33,7 +35,7 @@ use std::sync::Arc;
 
 use bundle_host_db::{
     AppSchema, CapabilitySnapshot, ColumnDef, ColumnType, DbBackend, DbError, DbHost, DbScope,
-    DbValue, OrderBy, PostgresBackend, Row, SchemaCache, TableSchema,
+    DbValue, OrderBy, PostgresBackend, Row, SchemaCache, TableSchema, TENANT_WIDE_COMMUNITY_ID,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement, TransactionTrait};
 use testcontainers::core::logs::LogSource;
@@ -58,6 +60,19 @@ const RUNTIME_ROLE: &str = "waddles_bundle_runtime";
 /// The all-column-types table `typed_columns_round_trip_against_real_postgres`
 /// runs against -- see `apply_bundle_schema_ddl`.
 const TYPED_TABLE: &str = "typed_core";
+/// The tenant the typed-column scenario scopes its rows to.
+const TYPED_TENANT: i32 = 110;
+/// The `numeric(p,s)` table `numeric_columns_round_trip_against_real_postgres`
+/// runs against.
+const MONEY_TABLE: &str = "money_core";
+
+/// Tenant/community ids the scenarios scope rows to. Distinct values per
+/// scenario keep the shared-container assertions independent; `COMMUNITY_*`
+/// are real community ids, `TENANT_WIDE` the `0` sentinel.
+const TENANT_A: i32 = 101;
+const TENANT_B: i32 = 102;
+const COMMUNITY_MAIN: i32 = 7;
+const TENANT_WIDE: i32 = TENANT_WIDE_COMMUNITY_ID;
 
 /// Starts one Postgres container and returns it alongside a superuser
 /// connection URL -- callers open additional connections (as the
@@ -112,27 +127,10 @@ fn runtime_url(superuser_url: &str) -> String {
     )
 }
 
-/// Re-issues the schema/role half of `alembic/versions/0030_bundle_app_schemas.py`
-/// plus a hand-written per-app `CREATE TABLE` matching the design doc's
-/// fixed template (row_id/tenant_id/community_id/version/created_at/
-/// updated_at, `FORCE ROW LEVEL SECURITY`, a policy on the same
-/// `waddles.tenant_id`/`waddles.community_id` GUCs `crate::backend` sets)
-/// -- see module doc "DDL provenance" for why this isn't invoked through
-/// Alembic itself. `community_id` uses `IS NOT DISTINCT FROM` against
-/// `NULLIF(current_setting(...), '')` so a tenant-only (no community)
-/// scope's GUC still matches a `NULL` `community_id` column, exactly like
-/// `crate::backend::tenant_predicate`'s own `IS NULL` branch --
-/// **discovered empirically while writing this test**: `crate::backend::
-/// set_local_scope` binds `scope.community`'s `None` as a SQL `NULL`
-/// parameter to `set_config(..., $2, true)`, and Postgres's `set_config`
-/// silently turns a `NULL` new-value into an **empty string** GUC, not an
-/// unset/NULL one (`current_setting(..., true)` then returns `''`, not
-/// `NULL`) -- a naive `community_id IS NOT DISTINCT FROM current_setting(...)`
-/// policy (without the `NULLIF`) therefore never matches a real `NULL`
-/// `community_id` column and silently denies every tenant-only bundle's
-/// own rows under RLS. This is a real landmine for whatever DDL generator
-/// (`hub_api/services/bundle_data_ddl.py`, PR #430) eventually emits the
-/// production RLS policy -- flagged in this PR's "remaining work".
+/// Re-issues the schema/role half of `alembic/versions/0030_bundle_app_schemas.py`,
+/// then creates every test table from [`production_table_ddl`] -- see module
+/// doc "DDL provenance" for why this isn't invoked through Alembic/hub-api
+/// itself.
 async fn apply_bundle_schema_ddl(conn: &DatabaseConnection) {
     let statements = [
         "CREATE SCHEMA IF NOT EXISTS app_core",
@@ -161,51 +159,72 @@ async fn apply_bundle_schema_ddl(conn: &DatabaseConnection) {
     // the isolation scenarios were written against; `typed_core` carries
     // every declared column type (uuid incl. `user_ref`, int4, timestamptz,
     // jsonb, and a length-limited varchar like hub-api's `text(max_len)`
-    // DDL) -- what the type round-trip test needs.
-    const PLAIN_COLUMNS: &str = "user_ref uuid, score bigint, note text";
-    const TYPED_COLUMNS: &str = "user_ref uuid, other_ref uuid, small int4, score int8, \
-                                 flag boolean, note varchar(8), seen_at timestamptz, doc jsonb";
+    // DDL); `money_core` carries the `numeric(p,s)` shapes.
+    const PLAIN_COLUMNS: &[&str] = &[
+        r#""user_ref" uuid"#,
+        r#""score" bigint"#,
+        r#""note" varchar(240)"#,
+    ];
+    const TYPED_COLUMNS: &[&str] = &[
+        r#""user_ref" uuid"#,
+        r#""other_ref" uuid"#,
+        r#""small" integer"#,
+        r#""score" bigint"#,
+        r#""flag" boolean"#,
+        r#""note" varchar(8)"#,
+        r#""seen_at" timestamptz"#,
+        r#""doc" jsonb"#,
+    ];
+    const MONEY_COLUMNS: &[&str] = &[
+        r#""amount" numeric(10,2)"#,
+        r#""units" numeric(3,0)"#,
+        r#""ratio" numeric(5,5)"#,
+    ];
     for (schema, table, columns) in [
         ("app_core", "fishing_core", PLAIN_COLUMNS),
         ("app_core", "other_app_core", PLAIN_COLUMNS),
         ("app_core", TYPED_TABLE, TYPED_COLUMNS),
+        ("app_core", MONEY_TABLE, MONEY_COLUMNS),
     ] {
-        let ddl = format!(
-            "CREATE TABLE {schema}.{table} (
-                row_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                tenant_id text NOT NULL,
-                community_id text,
-                version bigint NOT NULL DEFAULT 1,
-                created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now(),
-                {columns}
-            )"
-        );
-        conn.execute_unprepared(&ddl).await.expect("create table");
-        conn.execute_unprepared(&format!(
-            "ALTER TABLE {schema}.{table} ENABLE ROW LEVEL SECURITY"
-        ))
-        .await
-        .expect("enable rls");
-        conn.execute_unprepared(&format!(
-            "ALTER TABLE {schema}.{table} FORCE ROW LEVEL SECURITY"
-        ))
-        .await
-        .expect("force rls");
-        conn.execute_unprepared(&format!(
-            "CREATE POLICY {table}_tenant_isolation ON {schema}.{table} USING ( \
-                tenant_id = current_setting('waddles.tenant_id', true) \
-                AND community_id IS NOT DISTINCT FROM NULLIF(current_setting('waddles.community_id', true), '') \
-            )"
-        ))
-        .await
-        .expect("create rls policy");
-        conn.execute_unprepared(&format!(
-            "GRANT SELECT, INSERT, UPDATE, DELETE ON {schema}.{table} TO {RUNTIME_ROLE}"
-        ))
-        .await
-        .expect("grant dml");
+        for ddl in production_table_ddl(schema, table, columns) {
+            conn.execute_unprepared(&ddl)
+                .await
+                .unwrap_or_else(|e| panic!("table setup failed ({ddl:?}): {e}"));
+        }
     }
+}
+
+/// The fixed per-table DDL `hub_api/services/bundle_data_ddl.py`
+/// (`generate_create_table_ddl`) emits, statement for statement and in the
+/// same order: `CREATE TABLE` with the six platform columns, `ENABLE` +
+/// `FORCE ROW LEVEL SECURITY`, the tenant/community RLS policy, and the
+/// runtime-role grant. `declared_columns` is the already-rendered
+/// bundle-declared column list. See the module doc -- this must stay
+/// identical to the generator's output, including every platform column
+/// type.
+fn production_table_ddl(schema: &str, table: &str, declared_columns: &[&str]) -> Vec<String> {
+    let declared_columns = declared_columns.join(",\n    ");
+    let qualified = format!("\"{schema}\".\"{table}\"");
+    vec![
+        format!(
+            "CREATE TABLE {qualified} (\n    \
+                 row_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n    \
+                 tenant_id integer NOT NULL,\n    \
+                 community_id integer NOT NULL,\n    \
+                 version integer NOT NULL DEFAULT 1,\n    \
+                 created_at timestamptz NOT NULL DEFAULT now(),\n    \
+                 updated_at timestamptz NOT NULL DEFAULT now(),\n    \
+                 {declared_columns}\n)"
+        ),
+        format!("ALTER TABLE {qualified} ENABLE ROW LEVEL SECURITY"),
+        format!("ALTER TABLE {qualified} FORCE ROW LEVEL SECURITY"),
+        format!(
+            "CREATE POLICY \"{table}_tenant_isolation\" ON {qualified} USING \
+             (tenant_id = NULLIF(current_setting('waddles.tenant_id', true), '')::integer \
+             AND community_id = NULLIF(current_setting('waddles.community_id', true), '')::integer)"
+        ),
+        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON {qualified} TO \"{RUNTIME_ROLE}\""),
+    ]
 }
 
 fn fishing_core_schema() -> TableSchema {
@@ -273,7 +292,7 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
 
     // --- 1. Insert round-trips, SQL-injection-shaped values are inert ---
     let injection_note = "acme'); DROP TABLE app_core.fishing_core; --".to_string();
-    let tenant_a_scope = DbScope::new("tenant-a", Some("main".to_string()), "waddles.bot.a");
+    let tenant_a_scope = DbScope::new(TENANT_A, COMMUNITY_MAIN, "waddles.bot.a");
     let inserted = backend
         .insert(
             &schema,
@@ -318,7 +337,7 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
     );
 
     // --- 3. Tenant isolation, BOTH layers active: tenant B cannot read tenant A's row ---
-    let tenant_b_scope = DbScope::new("tenant-b", Some("main".to_string()), "waddles.bot.a");
+    let tenant_b_scope = DbScope::new(TENANT_B, COMMUNITY_MAIN, "waddles.bot.a");
     let cross_tenant_get = backend
         .get(&schema, &tenant_b_scope, &inserted.row_id)
         .await;
@@ -386,8 +405,8 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
         .expect("second runtime connection");
     runtime_txn
         .execute_unprepared(&format!(
-            "SET waddles.tenant_id = '{}'; SET waddles.community_id = 'main';",
-            tenant_b_scope.tenant
+            "SET waddles.tenant_id = '{}'; SET waddles.community_id = '{}';",
+            tenant_b_scope.tenant_id, tenant_b_scope.community_id
         ))
         .await
         .expect("set rls gucs for tenant b");
@@ -433,7 +452,7 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
 
     // --- 6. Cross-bundle isolation: bundle Y's table never exposes bundle X's row ---
     let other_schema = other_app_core_schema();
-    let bundle_y_scope = DbScope::new("tenant-a", Some("main".to_string()), "waddles.bot.other");
+    let bundle_y_scope = DbScope::new(TENANT_A, COMMUNITY_MAIN, "waddles.bot.other");
     let cross_bundle = backend
         .get(&other_schema, &bundle_y_scope, &inserted.row_id)
         .await;
@@ -472,7 +491,7 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
             .expect("quota-test connection"),
     )
     .with_row_cap_for_test(2);
-    let quota_scope = DbScope::new("tenant-quota", None, "waddles.bot.a");
+    let quota_scope = DbScope::new(103, TENANT_WIDE, "waddles.bot.a");
     quota_backend
         .insert(&schema, &quota_scope, vec![])
         .await
@@ -562,7 +581,7 @@ async fn concurrent_inserts_never_exceed_the_row_cap() {
     apply_bundle_schema_ddl(&superuser_conn).await;
 
     let schema = Arc::new(fishing_core_schema());
-    let scope = Arc::new(DbScope::new("tenant-race", None, "waddles.bot.a"));
+    let scope = Arc::new(DbScope::new(104, TENANT_WIDE, "waddles.bot.a"));
 
     let mut handles = Vec::with_capacity(CONCURRENT_ATTEMPTS);
     for _ in 0..CONCURRENT_ATTEMPTS {
@@ -621,7 +640,7 @@ async fn db_host_wrapper_reaches_a_real_backend_for_every_op() {
     let schemas = SchemaCache::new();
     schemas.update("waddles.bot.a", fishing_core_schema());
     let snapshot = CapabilitySnapshot::new();
-    let scope = DbScope::new("tenant-host", Some("main".to_string()), "waddles.bot.a");
+    let scope = DbScope::new(105, COMMUNITY_MAIN, "waddles.bot.a");
 
     // Denied before ever touching the schema cache or the DB.
     let denied = host
@@ -751,11 +770,7 @@ async fn typed_columns_round_trip_against_real_postgres() {
             .expect("runtime role connects"),
     );
     let schema = typed_core_schema();
-    let scope = DbScope::new(
-        "tenant-typed",
-        Some("main".to_string()),
-        "waddles.bot.typed",
-    );
+    let scope = DbScope::new(TYPED_TENANT, COMMUNITY_MAIN, "waddles.bot.typed");
 
     // --- 1. insert: every typed column, incl. user_ref and a non-UTC offset ---
     let user_ref = "3f2b8c1e-7a4d-4e0b-9c55-1d2e3f4a5b6c";
@@ -955,7 +970,7 @@ async fn typed_columns_round_trip_against_real_postgres() {
     );
 
     // --- 6. query: typed columns decode, and ORDER BY sorts the stored type ---
-    let q_scope = DbScope::new("tenant-typed-q", None, "waddles.bot.typed");
+    let q_scope = DbScope::new(TYPED_TENANT + 1, TENANT_WIDE, "waddles.bot.typed");
     // Insert order differs from chronological order; the middle row is only
     // earliest once its -05:00 offset is applied (2026-01-01T04:00:00Z).
     let instants = [
@@ -1100,7 +1115,7 @@ async fn typed_columns_round_trip_against_real_postgres() {
             superuser_conn.get_database_backend(),
             format!(
                 "INSERT INTO app_core.{TYPED_TABLE} (tenant_id, community_id, seen_at) \
-                 VALUES ('tenant-typed', 'main', 'infinity') RETURNING row_id::text AS id"
+                 VALUES ({TYPED_TENANT}, {COMMUNITY_MAIN}, 'infinity') RETURNING row_id::text AS id"
             ),
         ))
         .await
@@ -1110,4 +1125,562 @@ async fn typed_columns_round_trip_against_real_postgres() {
         .expect("row id text");
     let infinite = backend.get(&schema, &scope, &infinite_id).await.unwrap();
     assert_eq!(cell(&infinite, "seen_at"), &text("infinity"));
+}
+
+/// `information_schema` data type of `app_core.<table>.<column>`, read as
+/// the superuser -- what the DDL *actually* created, not what the test
+/// helper claims to have asked for.
+async fn column_data_type(conn: &DatabaseConnection, table: &str, column: &str) -> String {
+    conn.query_one_raw(Statement::from_string(
+        conn.get_database_backend(),
+        format!(
+            "SELECT data_type::text AS t FROM information_schema.columns \
+             WHERE table_schema = 'app_core' AND table_name = '{table}' \
+             AND column_name = '{column}'"
+        ),
+    ))
+    .await
+    .expect("information_schema query")
+    .unwrap_or_else(|| panic!("no column {table}.{column}"))
+    .try_get::<String>("", "t")
+    .expect("data_type text")
+}
+
+/// Runs `body` inside a runtime-role transaction whose RLS scope GUCs are
+/// `SET LOCAL` to `(tenant_id, community_id)` -- exactly what
+/// `crate::backend::set_local_scope` sets, but with **no explicit predicate
+/// anywhere**, so only the production RLS policy decides what is visible.
+async fn rls_only_count(
+    runtime: &DatabaseConnection,
+    gucs: Option<(&str, &str)>,
+    table: &str,
+) -> Result<i64, String> {
+    let txn = runtime.begin().await.expect("begin");
+    if let Some((tenant, community)) = gucs {
+        txn.execute_unprepared(&format!(
+            "SET LOCAL waddles.tenant_id = '{tenant}'; SET LOCAL waddles.community_id = '{community}'"
+        ))
+        .await
+        .expect("set local gucs");
+    }
+    let result = txn
+        .query_one_raw(Statement::from_string(
+            txn.get_database_backend(),
+            format!("SELECT COUNT(*) AS n FROM app_core.{table}"),
+        ))
+        .await
+        .map_err(|e| e.to_string())
+        .map(|row| {
+            row.expect("count row")
+                .try_get::<i64>("", "n")
+                .expect("count value")
+        });
+    txn.rollback().await.expect("rollback");
+    result
+}
+
+/// Regression for the scope-column type mismatch: `hub_api/services/
+/// bundle_data_ddl.py` creates `tenant_id`/`community_id` as `integer NOT
+/// NULL` (and `version` as `integer`), but the crate bound/compared them as
+/// `text` -- so every insert/update/get/delete/query on a real hub-api table
+/// failed ("column \"tenant_id\" is of type integer but expression is of
+/// type text", "operator does not exist: integer = text") while the old
+/// hand-written test DDL (`text` columns) passed. This drives every op on
+/// tenant+community scoped rows against the production-shaped DDL
+/// ([`production_table_ddl`]) and its production RLS policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn scope_columns_are_integers_end_to_end_against_production_ddl() {
+    let (_container, superuser_url) = start().await;
+    let superuser = connect_superuser(&superuser_url).await;
+    apply_bundle_schema_ddl(&superuser).await;
+    let runtime = Database::connect(runtime_url(&superuser_url))
+        .await
+        .expect("runtime role connects");
+    let backend = PostgresBackend::new(runtime.clone());
+    let schema = fishing_core_schema();
+
+    // --- 1. The test DDL really is production-shaped (guards the guard) ---
+    for column in ["tenant_id", "community_id", "version"] {
+        assert_eq!(
+            column_data_type(&superuser, "fishing_core", column).await,
+            "integer",
+            "{column} must be `integer`, exactly as bundle_data_ddl.py provisions it"
+        );
+    }
+
+    let community = DbScope::new(TENANT_A, COMMUNITY_MAIN, "waddles.bot.a");
+    let tenant_wide = DbScope::new(TENANT_A, TENANT_WIDE, "waddles.bot.a");
+    let other_community = DbScope::new(TENANT_A, COMMUNITY_MAIN + 1, "waddles.bot.a");
+    let other_tenant = DbScope::new(TENANT_B, COMMUNITY_MAIN, "waddles.bot.a");
+    // Same two numbers, swapped: a tenant/community binding mix-up cannot
+    // pass as a match.
+    let swapped = DbScope::new(COMMUNITY_MAIN, TENANT_A, "waddles.bot.a");
+
+    // --- 2. insert: stored as real integers, tenant-wide is 0 (never NULL) ---
+    let row = backend
+        .insert(
+            &schema,
+            &community,
+            vec![("score".to_string(), DbValue::Int(1))],
+        )
+        .await
+        .expect("insert under a community scope against the real DDL");
+    let wide_row = backend
+        .insert(
+            &schema,
+            &tenant_wide,
+            vec![("score".to_string(), DbValue::Int(2))],
+        )
+        .await
+        .expect("insert under a tenant-wide scope against the real DDL");
+    assert_eq!((row.version, wide_row.version), (1, 1));
+    assert!(
+        pg_bool(
+            &superuser,
+            format!(
+                "SELECT (tenant_id = {TENANT_A} AND community_id = {COMMUNITY_MAIN} \
+                    AND pg_typeof(tenant_id) = 'integer'::regtype \
+                    AND pg_typeof(community_id) = 'integer'::regtype) AS ok \
+                 FROM app_core.fishing_core WHERE row_id = '{}'",
+                row.row_id
+            )
+        )
+        .await,
+        "community row stored under its integer ids"
+    );
+    assert!(
+        pg_bool(
+            &superuser,
+            format!(
+                "SELECT (tenant_id = {TENANT_A} AND community_id = 0) AS ok \
+                 FROM app_core.fishing_core WHERE row_id = '{}'",
+                wide_row.row_id
+            )
+        )
+        .await,
+        "a tenant-wide row is stored with community_id = 0 (the column is NOT NULL)"
+    );
+
+    // --- 3. get: the WHERE predicate matches the owner and nobody else ---
+    let got = backend
+        .get(&schema, &community, &row.row_id)
+        .await
+        .expect("owner reads its community row");
+    assert_eq!(cell(&got, "score"), &DbValue::Int(1));
+    assert_eq!(got.version, 1, "int4 version decodes");
+    let got_wide = backend
+        .get(&schema, &tenant_wide, &wide_row.row_id)
+        .await
+        .expect("owner reads its tenant-wide row");
+    assert_eq!(cell(&got_wide, "score"), &DbValue::Int(2));
+    for (label, scope, target) in [
+        ("tenant-wide scope", &tenant_wide, &row.row_id),
+        ("community scope", &community, &wide_row.row_id),
+        ("other community", &other_community, &row.row_id),
+        ("other tenant", &other_tenant, &row.row_id),
+        ("swapped ids", &swapped, &row.row_id),
+    ] {
+        assert_eq!(
+            backend.get(&schema, scope, target).await.unwrap_err(),
+            DbError::NotFound,
+            "{label} must not read a row outside its (tenant, community)"
+        );
+    }
+
+    // --- 4. update: version-checked, scope-checked, int4 version bumps ---
+    for (label, scope) in [
+        ("other community", &other_community),
+        ("other tenant", &other_tenant),
+        ("swapped ids", &swapped),
+        ("tenant-wide scope", &tenant_wide),
+    ] {
+        let denied = backend
+            .update(
+                &schema,
+                scope,
+                &row.row_id,
+                row.version,
+                vec![("score".to_string(), DbValue::Int(999))],
+            )
+            .await;
+        assert!(
+            matches!(denied, Err(DbError::NotFound | DbError::Conflict)),
+            "{label} must not update a row outside its scope: {denied:?}"
+        );
+    }
+    let updated = backend
+        .update(
+            &schema,
+            &community,
+            &row.row_id,
+            row.version,
+            vec![("score".to_string(), DbValue::Int(10))],
+        )
+        .await
+        .expect("owner updates its row");
+    assert_eq!(updated.version, 2);
+    let stale = backend
+        .update(
+            &schema,
+            &community,
+            &row.row_id,
+            row.version,
+            vec![("score".to_string(), DbValue::Int(11))],
+        )
+        .await;
+    assert_eq!(
+        stale.unwrap_err(),
+        DbError::Conflict,
+        "a stale expected_version conflicts"
+    );
+    let wide_updated = backend
+        .update(
+            &schema,
+            &tenant_wide,
+            &wide_row.row_id,
+            wide_row.version,
+            vec![("score".to_string(), DbValue::Int(20))],
+        )
+        .await
+        .expect("tenant-wide owner updates its row");
+    assert_eq!(wide_updated.version, 2);
+    assert_eq!(
+        cell(
+            &backend.get(&schema, &community, &row.row_id).await.unwrap(),
+            "score"
+        ),
+        &DbValue::Int(10),
+        "the denied updates changed nothing"
+    );
+
+    // --- 5. query: each scope lists exactly its own rows ---
+    for (label, scope, expected) in [
+        ("community", &community, vec![row.row_id.clone()]),
+        ("tenant-wide", &tenant_wide, vec![wide_row.row_id.clone()]),
+        ("other community", &other_community, vec![]),
+        ("other tenant", &other_tenant, vec![]),
+        ("swapped ids", &swapped, vec![]),
+    ] {
+        let rows = backend
+            .query(&schema, scope, 10, 0, None)
+            .await
+            .unwrap_or_else(|e| panic!("{label} query failed: {e:?}"));
+        assert_eq!(
+            rows.iter().map(|r| r.row_id.clone()).collect::<Vec<_>>(),
+            expected,
+            "{label}"
+        );
+    }
+
+    // --- 6. RLS alone (no explicit predicate), production policy ---
+    let (ta, tb, cm) = (
+        TENANT_A.to_string(),
+        TENANT_B.to_string(),
+        COMMUNITY_MAIN.to_string(),
+    );
+    let count = |gucs| rls_only_count(&runtime, gucs, "fishing_core");
+    assert_eq!(
+        count(Some((ta.as_str(), cm.as_str()))).await,
+        Ok(1),
+        "RLS shows the community row to its own (tenant, community)"
+    );
+    assert_eq!(
+        count(Some((ta.as_str(), "0"))).await,
+        Ok(1),
+        "RLS shows the tenant-wide row to community 0"
+    );
+    assert_eq!(
+        count(Some((tb.as_str(), cm.as_str()))).await,
+        Ok(0),
+        "RLS hides another tenant's rows"
+    );
+    assert_eq!(
+        count(Some((cm.as_str(), ta.as_str()))).await,
+        Ok(0),
+        "RLS hides rows from swapped ids"
+    );
+    assert_eq!(
+        count(None).await,
+        Ok(0),
+        "no GUCs set (or set-then-reset to '') fails closed to zero rows, never an error"
+    );
+    // A non-numeric GUC (what a slug would be) is rejected loudly by the
+    // production policy -- the exact failure the old text binding hit.
+    let slug = count(Some(("acme", "main"))).await.unwrap_err();
+    assert!(
+        slug.contains("invalid input syntax for type integer"),
+        "a slug GUC must not be silently accepted: {slug}"
+    );
+    // RLS also guards writes: a row outside the GUC scope cannot be inserted.
+    let txn = runtime.begin().await.expect("begin");
+    txn.execute_unprepared(&format!(
+        "SET LOCAL waddles.tenant_id = '{TENANT_A}'; SET LOCAL waddles.community_id = '{COMMUNITY_MAIN}'"
+    ))
+    .await
+    .expect("set local gucs");
+    let forged = txn
+        .execute_unprepared(&format!(
+            "INSERT INTO app_core.fishing_core (tenant_id, community_id) \
+             VALUES ({TENANT_B}, {COMMUNITY_MAIN})"
+        ))
+        .await
+        .expect_err("RLS must reject a row for another tenant");
+    assert!(
+        forged.to_string().contains("row-level security"),
+        "unexpected error: {forged}"
+    );
+    txn.rollback().await.expect("rollback");
+
+    // --- 7. delete: version-checked and scope-checked ---
+    for (label, scope) in [
+        ("other community", &other_community),
+        ("other tenant", &other_tenant),
+        ("swapped ids", &swapped),
+    ] {
+        assert_eq!(
+            backend
+                .delete(&schema, scope, &row.row_id, updated.version)
+                .await
+                .unwrap_err(),
+            DbError::NotFound,
+            "{label} must not delete outside its scope"
+        );
+    }
+    backend
+        .delete(&schema, &community, &row.row_id, updated.version)
+        .await
+        .expect("owner deletes its community row");
+    backend
+        .delete(
+            &schema,
+            &tenant_wide,
+            &wide_row.row_id,
+            wide_updated.version,
+        )
+        .await
+        .expect("owner deletes its tenant-wide row");
+    assert_eq!(row_count(&superuser, "app_core", "fishing_core").await, 0);
+}
+
+/// `numeric(p,s)` end to end: written as a decimal string or an integer,
+/// read back as the column's exact decimal text, ordered by value, and every
+/// shape the host validator accepts is also accepted by real Postgres.
+#[tokio::test(flavor = "multi_thread")]
+async fn numeric_columns_round_trip_against_real_postgres() {
+    let (_container, superuser_url) = start().await;
+    let superuser = connect_superuser(&superuser_url).await;
+    apply_bundle_schema_ddl(&superuser).await;
+    let backend = PostgresBackend::new(
+        Database::connect(runtime_url(&superuser_url))
+            .await
+            .expect("runtime role connects"),
+    );
+    let schema = money_schema();
+    let scope = DbScope::new(120, COMMUNITY_MAIN, "waddles.bot.money");
+
+    // --- 1. insert: decimal text, integer and NULL; exact text back ---
+    let row = backend
+        .insert(
+            &schema,
+            &scope,
+            vec![
+                ("amount".to_string(), text("1234.50")),
+                ("units".to_string(), DbValue::Int(42)),
+                ("ratio".to_string(), DbValue::Null),
+            ],
+        )
+        .await
+        .expect("insert numeric columns");
+    let got = backend.get(&schema, &scope, &row.row_id).await.unwrap();
+    assert_eq!(cell(&got, "amount"), &text("1234.50"));
+    assert_eq!(cell(&got, "units"), &text("42"));
+    assert_eq!(cell(&got, "ratio"), &DbValue::Null);
+    assert!(
+        pg_bool(
+            &superuser,
+            format!(
+                "SELECT (amount = 1234.50 AND pg_typeof(amount) = 'numeric'::regtype \
+                    AND units = 42 AND ratio IS NULL) AS ok \
+                 FROM app_core.{MONEY_TABLE} WHERE row_id = '{}'",
+                row.row_id
+            )
+        )
+        .await,
+        "stored as real numerics, not text"
+    );
+
+    // --- 2. update: scale is applied by the column, read back exactly ---
+    let updated = backend
+        .update(
+            &schema,
+            &scope,
+            &row.row_id,
+            row.version,
+            vec![
+                ("amount".to_string(), text("9.9")),
+                ("units".to_string(), DbValue::Int(-7)),
+                ("ratio".to_string(), text("0.12345")),
+            ],
+        )
+        .await
+        .expect("update numeric columns");
+    let got = backend.get(&schema, &scope, &row.row_id).await.unwrap();
+    assert_eq!(got.version, updated.version);
+    assert_eq!(cell(&got, "amount"), &text("9.90"), "scale 2 is applied");
+    assert_eq!(cell(&got, "units"), &text("-7"));
+    assert_eq!(cell(&got, "ratio"), &text("0.12345"));
+
+    // --- 3. every shape the host accepts is accepted by Postgres, exactly ---
+    for (input, expected) in [
+        ("0", "0.00"),
+        ("12", "12.00"),
+        ("-12", "-12.00"),
+        ("+12", "12.00"),
+        ("12.5", "12.50"),
+        ("12.500", "12.50"),
+        (".5", "0.50"),
+        ("5.", "5.00"),
+        ("-0.01", "-0.01"),
+        ("00012.34", "12.34"),
+        ("99999999.99", "99999999.99"),
+        ("-99999999.9900", "-99999999.99"),
+    ] {
+        let inserted = backend
+            .insert(&schema, &scope, vec![("amount".to_string(), text(input))])
+            .await
+            .unwrap_or_else(|e| panic!("{input:?} accepted by the host but not Postgres: {e:?}"));
+        let back = backend
+            .get(&schema, &scope, &inserted.row_id)
+            .await
+            .unwrap();
+        assert_eq!(cell(&back, "amount"), &text(expected), "{input:?}");
+    }
+
+    // --- 4. ORDER BY sorts by numeric value, not by the text projection ---
+    let q_scope = DbScope::new(121, TENANT_WIDE, "waddles.bot.money");
+    let mut ids = Vec::new();
+    for amount in ["100.00", "9.50", "10.25"] {
+        ids.push(
+            backend
+                .insert(
+                    &schema,
+                    &q_scope,
+                    vec![("amount".to_string(), text(amount))],
+                )
+                .await
+                .unwrap()
+                .row_id,
+        );
+    }
+    let by = |descending| {
+        Some(OrderBy::Column {
+            name: "amount".to_string(),
+            descending,
+        })
+    };
+    let amounts = |rows: Vec<Row>| -> Vec<DbValue> {
+        rows.iter().map(|r| cell(r, "amount").clone()).collect()
+    };
+    assert_eq!(
+        amounts(
+            backend
+                .query(&schema, &q_scope, 10, 0, by(false))
+                .await
+                .unwrap()
+        ),
+        vec![text("9.50"), text("10.25"), text("100.00")],
+        "text ordering would put 100.00 before 9.50"
+    );
+    assert_eq!(
+        amounts(
+            backend
+                .query(&schema, &q_scope, 10, 0, by(true))
+                .await
+                .unwrap()
+        ),
+        vec![text("100.00"), text("10.25"), text("9.50")]
+    );
+
+    // --- 5. values that do not fit or are not exact fail loud, write nothing ---
+    let rows_before = row_count(&superuser, "app_core", MONEY_TABLE).await;
+    let bad_values: Vec<(&str, DbValue)> = vec![
+        ("amount", text("1.234")),
+        ("amount", text("123456789")),
+        ("amount", text("1e3")),
+        ("amount", text("NaN")),
+        ("amount", text("Infinity")),
+        ("amount", text("")),
+        ("amount", text("12,5")),
+        ("amount", DbValue::Int(100_000_000)),
+        ("amount", DbValue::Float(1.5)),
+        ("amount", DbValue::Bool(true)),
+        ("units", text("1000")),
+        ("units", text("1.5")),
+        ("ratio", text("1")),
+        ("ratio", DbValue::Int(1)),
+    ];
+    for (column, bad) in &bad_values {
+        let err = backend
+            .insert(&schema, &scope, vec![(column.to_string(), bad.clone())])
+            .await
+            .expect_err(&format!("insert of {bad:?} into {column} must fail"));
+        assert_eq!(err.code(), "invalid_value", "insert {column}={bad:?}");
+        let err = backend
+            .update(
+                &schema,
+                &scope,
+                &row.row_id,
+                updated.version,
+                vec![(column.to_string(), bad.clone())],
+            )
+            .await
+            .expect_err(&format!("update of {column} to {bad:?} must fail"));
+        assert_eq!(err.code(), "invalid_value", "update {column}={bad:?}");
+    }
+    assert_eq!(
+        row_count(&superuser, "app_core", MONEY_TABLE).await,
+        rows_before,
+        "a rejected numeric must never leave a row behind"
+    );
+    let untouched = backend.get(&schema, &scope, &row.row_id).await.unwrap();
+    assert_eq!(
+        untouched.version, updated.version,
+        "no rejected update may bump the version"
+    );
+
+    // --- 6. NULL in every numeric column, insert and update ---
+    let nulls = || -> Vec<(String, DbValue)> {
+        ["amount", "units", "ratio"]
+            .iter()
+            .map(|c| (c.to_string(), DbValue::Null))
+            .collect()
+    };
+    let null_row = backend.insert(&schema, &scope, nulls()).await.unwrap();
+    let back = backend
+        .get(&schema, &scope, &null_row.row_id)
+        .await
+        .unwrap();
+    assert!(back.columns.iter().all(|(_, v)| *v == DbValue::Null));
+    backend
+        .update(&schema, &scope, &row.row_id, updated.version, nulls())
+        .await
+        .expect("update every numeric column to NULL");
+    let back = backend.get(&schema, &scope, &row.row_id).await.unwrap();
+    assert!(back.columns.iter().all(|(_, v)| *v == DbValue::Null));
+}
+
+/// The `numeric(p,s)` table's schema, matching `MONEY_COLUMNS`.
+fn money_schema() -> TableSchema {
+    let col = |name: &str, precision: u8, scale: u8| ColumnDef {
+        name: name.to_string(),
+        sql_type: ColumnType::numeric(precision, scale).expect("valid numeric"),
+        nullable: true,
+        is_user_ref: false,
+    };
+    TableSchema::validated(
+        AppSchema::Core,
+        MONEY_TABLE,
+        vec![col("amount", 10, 2), col("units", 3, 0), col("ratio", 5, 5)],
+    )
+    .unwrap()
 }

@@ -1005,11 +1005,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             ));
         }
 
-        let db_scope = DbScope::new(
-            scope.tenant.clone(),
-            scope.community.clone(),
-            scope.app_id.clone(),
-        );
+        // Numeric ids (not the slugs): the bundle table's scope columns and
+        // RLS policy are `integer` -- see `bundle_host_db::DbScope`.
+        // `community_id` is `0` for a tenant-wide activation, the same
+        // sentinel `bundle_host_db::TENANT_WIDE_COMMUNITY_ID` stores.
+        let db_scope = DbScope::new(scope.tenant_id, scope.community_id, scope.app_id.clone());
 
         let column_values =
             |args: &serde_json::Value| -> Result<Vec<(String, DbValue)>, HostResultError> {
