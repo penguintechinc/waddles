@@ -324,20 +324,28 @@ impl InvocationIdentity {
     /// (`<@123>`, `@bob`) -- still limited to references THIS message carried,
     /// so it is no more of a lookup oracle than the tokenized path.
     pub fn for_untokenized_event(event: &PlatformEvent) -> Self {
-        let bindings = event
+        let bindings: Vec<MentionBinding> = match event
             .payload
             .get("text")
             .and_then(serde_json::Value::as_str)
-            .map(|text| {
-                crate::pii_tokenize::scan_mentions(text)
-                    .into_iter()
-                    .map(|m| MentionBinding {
-                        key: m.matched_text,
-                        reference: m.reference,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        {
+            Some(text) => crate::pii_tokenize::scan_mentions(text)
+                .into_iter()
+                .map(|m| MentionBinding {
+                    key: m.matched_text,
+                    reference: m.reference,
+                })
+                .collect(),
+            // A non-text event (no `text` string) names no one: an empty
+            // mention table is the correct state, not a swallowed error.
+            None => {
+                tracing::debug!(
+                    platform = %event.platform,
+                    "identity: untokenized event carries no text; no mentions to bind"
+                );
+                Vec::new()
+            }
+        };
         Self::from_event(event, bindings)
     }
 

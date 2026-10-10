@@ -3240,13 +3240,16 @@ mod tests {
                 .expect("payload_json string")
                 .to_string();
             let delivered: serde_json::Value = serde_json::from_str(&payload_json).unwrap();
-            let text = delivered["text"].as_str().unwrap_or_default().to_string();
+            let text = delivered["text"]
+                .as_str()
+                .expect("delivered payload carries a `text` string")
+                .to_string();
             // The token inside the first `{user:<token>}` placeholder.
             let token = text
                 .split("{user:")
                 .nth(1)
                 .and_then(|rest| rest.split('}').next())
-                .unwrap_or_default()
+                .expect("delivered text carries a `{user:<token>}` placeholder")
                 .to_string();
             {
                 let mut o = observed_task.lock().unwrap();

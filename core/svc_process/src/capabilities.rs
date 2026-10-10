@@ -668,24 +668,39 @@ impl<K: KvBackend> StageCapabilities<K> {
         &self,
         call: &HostCallBody,
     ) -> Result<serde_json::Value, HostResultError> {
+        // Each op carries exactly the users it names, so an op can never run
+        // against a missing/defaulted user: the parse below either yields every
+        // user an op needs or refuses the call.
         #[derive(Clone, Copy)]
         enum Op {
-            Balance,
-            MaxBet,
-            Wager(i64, i64),
-            Transfer(i64),
+            Balance(uuid::Uuid),
+            MaxBet(uuid::Uuid),
+            Wager {
+                user: uuid::Uuid,
+                stake: i64,
+                payout: i64,
+            },
+            Transfer {
+                from: uuid::Uuid,
+                to: uuid::Uuid,
+                amount: i64,
+            },
             Leaderboard(u32),
         }
 
         let args = &call.args;
-        let (op, target_user, counterparty) = match call.op.as_str() {
-            "economy.balance" => (Op::Balance, Some(economy_user_arg(args, "user")?), None),
-            "economy.max_bet" => (Op::MaxBet, Some(economy_user_arg(args, "user")?), None),
+        let op = match call.op.as_str() {
+            "economy.balance" => Op::Balance(economy_user_arg(args, "user")?),
+            "economy.max_bet" => Op::MaxBet(economy_user_arg(args, "user")?),
             "economy.wager" => {
                 let user = economy_user_arg(args, "user")?;
                 let stake = economy_amount_arg(args, "stake", 1)?;
                 let payout = economy_amount_arg(args, "payout", 0)?;
-                (Op::Wager(stake, payout), Some(user), None)
+                Op::Wager {
+                    user,
+                    stake,
+                    payout,
+                }
             }
             "economy.transfer" => {
                 let from = economy_user_arg(args, "from")?;
@@ -694,7 +709,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                     return Err(denied("invalid_args", "cannot transfer to oneself"));
                 }
                 let amount = economy_amount_arg(args, "amount", 1)?;
-                (Op::Transfer(amount), Some(from), Some(to))
+                Op::Transfer { from, to, amount }
             }
             "economy.leaderboard" => {
                 let limit = args
@@ -711,7 +726,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                             ),
                         )
                     })?;
-                (Op::Leaderboard(limit), None, None)
+                Op::Leaderboard(limit)
             }
             other => {
                 return Err(denied(
@@ -731,11 +746,19 @@ impl<K: KvBackend> StageCapabilities<K> {
         // `max_bet` describes the WAGER capability's own limit, so it is
         // authorized under `economy.wager` (carrying no amount: it is rate
         // limited, not metered); balance/leaderboard are `economy.read`.
-        let (permission, amount) = match op {
-            Op::Balance | Op::Leaderboard(_) => (PermissionId::EconomyRead, None),
-            Op::MaxBet => (PermissionId::EconomyWager, None),
-            Op::Wager(stake, _) => (PermissionId::EconomyWager, Some(stake)),
-            Op::Transfer(amount) => (PermissionId::EconomyTransfer, Some(amount)),
+        let (permission, amount, target_user, counterparty) = match op {
+            Op::Balance(user) => (PermissionId::EconomyRead, None, Some(user), None),
+            Op::Leaderboard(_) => (PermissionId::EconomyRead, None, None, None),
+            Op::MaxBet(user) => (PermissionId::EconomyWager, None, Some(user), None),
+            Op::Wager { user, stake, .. } => {
+                (PermissionId::EconomyWager, Some(stake), Some(user), None)
+            }
+            Op::Transfer { from, to, amount } => (
+                PermissionId::EconomyTransfer,
+                Some(amount),
+                Some(from),
+                Some(to),
+            ),
         };
         let family = permission.family();
         let authorized = self
@@ -770,14 +793,13 @@ impl<K: KvBackend> StageCapabilities<K> {
             community_id: self.community_id,
             app_id: self.app_id.clone(),
         };
-        let user = target_user.unwrap_or_default();
         let result = match op {
-            Op::Balance => wiring
+            Op::Balance(user) => wiring
                 .store
                 .balance(&scope, user)
                 .await
                 .map(|balance| serde_json::json!({ "balance": balance })),
-            Op::MaxBet => {
+            Op::MaxBet(user) => {
                 // The cap is the grant's declared `max_bet` clamped to the
                 // catalog ceiling: the exact number the gate enforces on a
                 // wager's stake.
@@ -790,7 +812,11 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .await
                     .map(|max_bet| serde_json::json!({ "max_bet": max_bet }))
             }
-            Op::Wager(stake, payout) => {
+            Op::Wager {
+                user,
+                stake,
+                payout,
+            } => {
                 let cap = family
                     .economy_amount_bound(&authorized.params)
                     .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
@@ -800,14 +826,13 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .await
                     .map(|balance| serde_json::json!({ "balance": balance }))
             }
-            Op::Transfer(amount) => {
+            Op::Transfer { from, to, amount } => {
                 let cap = family
                     .economy_amount_bound(&authorized.params)
                     .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
-                let to = counterparty.unwrap_or_default();
                 wiring
                     .store
-                    .transfer(&scope, user, to, amount, cap, economy_caps(family))
+                    .transfer(&scope, from, to, amount, cap, economy_caps(family))
                     .await
                     .map(|()| serde_json::json!({}))
             }
