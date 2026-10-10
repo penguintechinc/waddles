@@ -201,10 +201,18 @@ jobs:
       - name: Assert hook Jobs succeeded + pods Ready
         run: |
           set -euo pipefail
+          # Every hook Job carries `helm.sh/hook-delete-policy: hook-succeeded`, so Helm
+          # DELETES a hook Job once it succeeds: a clean install leaves zero live Jobs, and
+          # only a failed/incomplete hook survives. The denominator is therefore the hook
+          # Jobs the release DECLARES (`helm get hooks`) -- Helm itself awaited each one
+          # (the install would have failed otherwise) -- and the assertion is that no
+          # surviving Job is failed/incomplete. Zero declared hooks is still a FAIL.
+          declared=$(helm get hooks waddlebot -n "${NAMESPACE}" | grep -c '^kind: Job$' || true)
+          echo "hook Jobs declared by the release: ${declared}"
+          [ "${declared}" -gt 0 ] || { echo "::error::zero hook Jobs declared - denominator check failed"; exit 1; }
           hooks=$(kubectl get jobs -n "${NAMESPACE}" -o json)
-          hook_count=$(echo "${hooks}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["items"]))')
-          echo "hook/job count examined: ${hook_count}"
-          [ "${hook_count}" -gt 0 ] || { echo "::error::zero Jobs examined - denominator check failed"; exit 1; }
+          surviving=$(echo "${hooks}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["items"]))')
+          echo "surviving (not hook-succeeded-deleted) Jobs examined: ${surviving}"
           echo "${hooks}" | python3 -c '
           import json, sys
           d = json.load(sys.stdin)
@@ -234,7 +242,7 @@ jobs:
             echo "::error::pods not Ready: ${not_ready}"
             exit 1
           fi
-          echo "all ${pod_count} pods Ready or Completed; all ${hook_count} hook Jobs succeeded"
+          echo "all ${pod_count} pods Ready or Completed; all ${declared} declared hook Jobs completed (no failed/incomplete survivors)"
 
       - name: Snapshot Secret hashes (pre-upgrade)
         run: |
@@ -338,14 +346,17 @@ jobs:
       - name: Verify migrations + seeder results (real DB state)
         run: |
           set -euo pipefail
-          # core-bundle-seeder (and auto-provision-keys) use hook-delete-policy
-          # hook-succeeded, so their Jobs are GONE after a clean run -- helm's
-          # helm already failed the install/upgrade if either failed. Prove they
-          # actually did their work by reading the resulting DB state instead of
-          # a Job flag that can never exist.
-          migrate_job=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=db-migrate -o jsonpath='{.items[0].status.succeeded}')
-          echo "migrations job succeeded flag: ${migrate_job:-<not found>}"
-          [ "${migrate_job}" = "1" ] || { echo "::error::migrations hook Job did not report succeeded"; exit 1; }
+          # db-migrate, core-bundle-seeder and auto-provision-keys all use
+          # hook-delete-policy hook-succeeded, so their Jobs are GONE after a clean
+          # run -- helm already failed the install/upgrade if any of them failed.
+          # Prove they actually did their work by reading the resulting DB state
+          # instead of a Job flag that can never exist. If a Job DID survive it is by
+          # definition not a clean success, so it must report succeeded.
+          if kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=db-migrate -o name | grep -q .; then
+            migrate_job=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=db-migrate -o jsonpath='{.items[0].status.succeeded}')
+            echo "migrations job survived; succeeded flag: ${migrate_job:-<unset>}"
+            [ "${migrate_job}" = "1" ] || { echo "::error::migrations hook Job present but not succeeded"; exit 1; }
+          fi
           if kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=core-bundle-seeder -o name | grep -q .; then
             seeder_ok=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=core-bundle-seeder -o jsonpath='{.items[0].status.succeeded}')
             [ "${seeder_ok}" = "1" ] || { echo "::error::core-bundle-seeder Job present but not succeeded"; exit 1; }
