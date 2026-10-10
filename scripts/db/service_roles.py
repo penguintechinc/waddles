@@ -807,18 +807,14 @@ def _engine_url() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: `reconcile [--strict]`, `gen-passwords`, `validate-catalog`."""
+    """CLI: `reconcile [--strict]`, `validate-catalog`."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     rec = sub.add_parser("reconcile", help="re-assert the catalog on DATABASE_URL")
     rec.add_argument("--strict", action="store_true", help="fail if a catalog table is missing")
-    sub.add_parser("gen-passwords", help="print a throwaway password JSON (CI / tests only)")
     sub.add_parser("validate-catalog", help="load + validate the catalog, print role count")
     args = parser.parse_args(argv)
     catalog = load_catalog()
-    if args.cmd == "gen-passwords":
-        print(json.dumps(generate_passwords(catalog)))
-        return 0
     if args.cmd == "validate-catalog":
         print(f"catalog ok: {len(catalog.roles)} service roles")
         return 0

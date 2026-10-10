@@ -351,7 +351,17 @@ jobs:
           DB_READER_PASSWORD: ci-smoke-test-reader-pw
         run: |
           set -euo pipefail
-          WADDLES_DB_SERVICE_ROLE_PASSWORDS="$(python3 scripts/db/service_roles.py gen-passwords)"
+          WADDLES_DB_SERVICE_ROLE_PASSWORDS="$(python3 - <<'PY'
+          import json, secrets, string
+
+          import yaml
+
+          alphabet = string.ascii_letters + string.digits
+          with open("config/postgres/service-roles.yaml", encoding="utf-8") as handle:
+              roles = yaml.safe_load(handle)["roles"]
+          print(json.dumps({r: "".join(secrets.choice(alphabet) for _ in range(32)) for r in roles}))
+          PY
+          )"
           export WADDLES_DB_SERVICE_ROLE_PASSWORDS
           python3 -m alembic stamp 0019_kick_app
 
@@ -433,7 +443,17 @@ jobs:
           set -euo pipefail
           # 0048 re-runs on the second upgrade (and its downgrade drops the roles) -- see the
           # "empty baseline" step above for why the passwords are minted here.
-          WADDLES_DB_SERVICE_ROLE_PASSWORDS="$(python3 scripts/db/service_roles.py gen-passwords)"
+          WADDLES_DB_SERVICE_ROLE_PASSWORDS="$(python3 - <<'PY'
+          import json, secrets, string
+
+          import yaml
+
+          alphabet = string.ascii_letters + string.digits
+          with open("config/postgres/service-roles.yaml", encoding="utf-8") as handle:
+              roles = yaml.safe_load(handle)["roles"]
+          print(json.dumps({r: "".join(secrets.choice(alphabet) for _ in range(32)) for r in roles}))
+          PY
+          )"
           export WADDLES_DB_SERVICE_ROLE_PASSWORDS
           base_rev="${PRIOR_BASE_REVISION}"
           # Redundant with the producing step's own check -- cheap, and this
