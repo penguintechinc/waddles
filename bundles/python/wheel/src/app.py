@@ -87,6 +87,10 @@ OPTIONS_KEY = "wheel.options"
 MAX_OPTION_LEN = 200
 MAX_OPTIONS = 100
 
+#: The only sub-command tokens that may appear verbatim in a log line (static, code-owned
+#: names; the empty string is bare `!wheel`, logged as `spin`). Anything else is user input.
+_LOGGED_TOKENS = frozenset({"", "spin", "add", "remove", "list", "reset"})
+
 _USAGE = (
     "Usage: !wheel [spin] | !wheel add <option> | !wheel remove <option> | "
     "!wheel list | !wheel reset"
@@ -293,7 +297,10 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
             log.error("wheel.kv_failure", error=str(exc))
             reply = _KV_ERROR_MSG
 
-    log.info("wheel.transform matched", command=token or "spin")
+    # PII-free: `token` is user-typed (e.g. `!wheel @someone`), so log a static name only --
+    # an unrecognized token is reported as the fixed string "unknown", never echoed.
+    logged_command = (token or "spin") if token in _LOGGED_TOKENS else "unknown"
+    log.info("wheel.transform matched", command=logged_command)
     return PlatformEvent(
         platform=event.platform,
         event_type=event.event_type,

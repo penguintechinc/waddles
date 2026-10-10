@@ -8,10 +8,10 @@ short key (`!announce set <key> <message>`); anyone can later recall it with
 moderator/broadcaster can delete one with `!announce remove <key>`.
 
 **Not to be confused with** the pre-existing, DB-backed
-`core/svc_process/bundles/community_announcements_process.py` /
-`core/svc_action/bundles/community_announcements_action.py` script bundles,
+`core/svc_process/builtin_handlers/community_announcements_process.py` /
+`core/svc_action/builtin_handlers/community_announcements_action.py` built-in stage handlers,
 which already parse `!announce publish <announcement_id>` against the
-legacy `flask_core`/`svc_process`/`svc_action` script-bundle runner (not
+legacy `flask_core`/`svc_process`/`svc_action` stage-runner (not
 this repo's newer WASI-component `waddle_sdk` bundle SDK) to broadcast a
 web-UI-authored `announcements` DB row. Both consume the same `!announce`
 command-text prefix; this bundle only recognizes `set`/`remove`/`list`/a

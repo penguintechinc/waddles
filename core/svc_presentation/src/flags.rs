@@ -1,6 +1,6 @@
-//! PostHog flag gate for the image-upload feature (P6/P9) -- `rules/
-//! general.md` Red Flags: "Feature merged without a PostHog feature flag
-//! wrapping it". Mirrors `core/svc_action/src/flags.rs`'s plain opt-in
+//! PostHog flag gates for this service's features (image upload P6/P9, the
+//! caption overlay) -- `rules/general.md` Red Flags: "Feature merged without
+//! a PostHog feature flag wrapping it". Mirrors `core/svc_action/src/flags.rs`'s plain opt-in
 //! `LicenseFlag` shape (not the kill-switch inversion that module's other
 //! flags use -- this is a brand-new capability, not toggling off an
 //! already-default-on path), trimmed to just what this crate needs.
@@ -14,6 +14,13 @@ use std::sync::Arc;
 /// Tiers) ⇒ the upload route returns 403 rather than ever touching the
 /// object store or `overlay_images` table.
 pub const IMAGE_UPLOAD_FLAG: &str = "waddles.core.overlay-image-upload";
+
+/// Gates every caption route in `crate::http::captions` (the OBS page, the
+/// websocket, and the PUSH-guarded ingest). Same OFF-by-default semantics as
+/// [`IMAGE_UPLOAD_FLAG`]: a never-seen flag leaves the Rust caption path
+/// off, so the Python `browser_source_core_module` caption path stays the
+/// live one until this is deliberately switched on at the parity cutover.
+pub const CAPTIONS_FLAG: &str = "waddles.core.overlay-captions";
 
 /// One flag's live enabled/disabled state -- object-safe (boxed future) so
 /// callers can hold `Arc<dyn FeatureFlag>`, same shape
@@ -116,17 +123,33 @@ pub fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
     }
 }
 
-/// Builds the [`FeatureFlag`] `crate::images::upload::upload_image` gates
-/// on: a live [`LicenseFlag`] over `license` when available, or a fixed
-/// "disabled" answer otherwise -- the single place the fail-closed-to-OFF
-/// fallback is applied.
+/// Builds the [`FeatureFlag`] for `key`: a live [`LicenseFlag`] over
+/// `license` when available, or a fixed "disabled" answer otherwise -- the
+/// single place the fail-closed-to-OFF fallback is applied.
+fn flag_for(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+    key: &'static str,
+) -> Arc<dyn FeatureFlag> {
+    match license {
+        Some(client) => boxed(LicenseFlag::new(Arc::clone(client), key)),
+        None => boxed(StaticFlag(false)),
+    }
+}
+
+/// The [`FeatureFlag`] `crate::images::upload::upload_image` gates on
+/// ([`IMAGE_UPLOAD_FLAG`]).
 pub fn image_upload_flag(
     license: &Option<Arc<penguin_licensing::LicenseClient>>,
 ) -> Arc<dyn FeatureFlag> {
-    match license {
-        Some(client) => boxed(LicenseFlag::new(Arc::clone(client), IMAGE_UPLOAD_FLAG)),
-        None => boxed(StaticFlag(false)),
-    }
+    flag_for(license, IMAGE_UPLOAD_FLAG)
+}
+
+/// The [`FeatureFlag`] every `crate::http::captions` route gates on
+/// ([`CAPTIONS_FLAG`]).
+pub fn captions_flag(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> Arc<dyn FeatureFlag> {
+    flag_for(license, CAPTIONS_FLAG)
 }
 
 #[cfg(test)]
@@ -195,5 +218,33 @@ mod tests {
     #[test]
     fn image_upload_flag_key_matches_the_product_flag_key_convention() {
         assert_eq!(IMAGE_UPLOAD_FLAG, "waddles.core.overlay-image-upload");
+    }
+
+    #[test]
+    fn captions_flag_key_matches_the_product_flag_key_convention() {
+        assert_eq!(CAPTIONS_FLAG, "waddles.core.overlay-captions");
+    }
+
+    #[tokio::test]
+    async fn captions_flag_defaults_disabled_when_no_license_client_is_available() {
+        let flag = captions_flag(&None);
+        assert!(!flag.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn captions_flag_wraps_a_real_client_and_resolves_bypass_true() {
+        let client = build_license_client().expect("defaults always build a client");
+        let flag = captions_flag(&Some(client));
+        assert!(flag.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn captions_flag_fails_closed_to_off_on_a_cold_client() {
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        let flag = captions_flag(&Some(client));
+        assert!(!flag.enabled().await);
     }
 }

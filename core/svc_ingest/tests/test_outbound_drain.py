@@ -162,7 +162,7 @@ class TestRunStop:
     ) -> None:
         """Fail-first proof: a message relayed via `outbound_queue_key` is delivered.
 
-        Via the same queue `bundles/twitch_send_action.py` LPUSHes onto
+        Via the same queue `builtin_handlers/twitch_send_action.py` LPUSHes onto
         from svc-action. This replica is the only claimant, so it wins
         the lease and drains normally.
         """

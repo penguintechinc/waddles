@@ -16,6 +16,12 @@
 //! the P9 image-surface slice; see `image`'s own module doc for why that
 //! is not a silent default.
 //!
+//! `caption` is the live closed-caption surface ported from the Python
+//! `browser_source_core_module` (see `caption`'s own module doc); unlike
+//! the other surfaces it is also reached directly through
+//! [`render_caption`] by `crate::http::captions`, so the ingest and
+//! websocket-replay paths share its exact validation.
+//!
 //! `full_screen`/`media` share [`shared::TextImageContent`]/
 //! [`shared::validate_text_image`]; `crawler`/`ticker` share
 //! [`shared::TextContent`]/[`shared::validate_text`] -- both pairs mirror
@@ -24,6 +30,7 @@
 //! surface.
 
 mod alert_box;
+mod caption;
 mod chat;
 mod crawler;
 mod error;
@@ -42,6 +49,7 @@ pub use metrics::{register_render_metrics, RenderMetrics};
 pub use theme::{RenderTheme, ResolvedTheme};
 
 pub use alert_box::AlertContent;
+pub use caption::{render_caption, CaptionContent};
 pub use chat::ChatContent;
 pub use goals::GoalsContent;
 pub use music::MusicContent;
@@ -100,6 +108,7 @@ pub enum RenderedContent {
     AlertBox(AlertContent),
     Chat(ChatContent),
     Goals(GoalsContent),
+    Caption(CaptionContent),
 }
 
 /// Returns the single [`Renderer`] for `surface`. Total over every
@@ -116,6 +125,7 @@ fn renderer_for(surface: Surface) -> &'static dyn Renderer {
         Surface::Chat => &chat::ChatRenderer,
         Surface::Goals => &goals::GoalsRenderer,
         Surface::Image => &image::ImageRenderer,
+        Surface::Caption => &caption::CaptionRenderer,
     }
 }
 
@@ -267,6 +277,42 @@ mod tests {
                 surface: Surface::Image
             }
         );
+    }
+
+    #[test]
+    fn caption_surface_dispatches_to_the_caption_renderer() {
+        let push = OverlayPush {
+            caption: Some(overlay_schema::CaptionPayload {
+                user: "11111111-1111-1111-1111-111111111111".to_string(),
+                display_name: "Name".to_string(),
+                platform: "twitch".to_string(),
+                original: "hola".to_string(),
+                translated: Some("hello".to_string()),
+                detected_lang: Some("es".to_string()),
+                target_lang: Some("en".to_string()),
+                confidence: Some(0.9),
+            }),
+            ..Default::default()
+        };
+        let frame = render(Surface::Caption, &push, &theme()).unwrap();
+        assert_eq!(frame.surface, Surface::Caption);
+        let value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(value["surface"], "caption");
+        assert_eq!(value["content_type"], "caption");
+        assert_eq!(value["original"], "hola");
+        assert_eq!(value["translated"], "hello");
+    }
+
+    #[test]
+    fn caption_surface_rejects_a_push_without_a_caption() {
+        let err = render(Surface::Caption, &OverlayPush::default(), &theme()).unwrap_err();
+        assert!(matches!(
+            err,
+            RenderError::MissingField {
+                surface: Surface::Caption,
+                field: "caption"
+            }
+        ));
     }
 
     #[test]

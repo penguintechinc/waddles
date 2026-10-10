@@ -3,7 +3,7 @@
 Ported from the legacy `action/interactive/shoutout_interaction_module/
 services/twitch_service.py` (`get_user_info`/`get_channel_info`/
 `get_stream_info`) and `video_service.py` (`get_twitch_clips`) into one
-client sized for `bundles/twitch_shoutout_action.py`'s action-stage
+client sized for `builtin_handlers/twitch_shoutout_action.py`'s action-stage
 entrypoint contract -- reuses the shared `httpx.AsyncClient` the runner
 already threads through every action-stage script
 (`runner.py::_handle_envelope`) rather than opening a fresh `aiohttp`
@@ -19,7 +19,7 @@ chooses to raise around this client's own errors.
 
 Reads `TWITCH_CLIENT_ID`/`TWITCH_CLIENT_SECRET` directly from the process
 environment (security.md Secrets & Credentials: env vars, never a literal
-in bundle config) -- the connector's own platform-wide app credentials,
+in handler config) -- the connector's own platform-wide app credentials,
 one pair for the whole svc-action process, not a per-tenant
 `waddle_transports.signing.resolve_secret` indirection like
 `discord_send_action.py`'s `bot_token_ref` (Discord's credential is per-
@@ -47,7 +47,7 @@ _EXPIRY_SAFETY_MARGIN_SECONDS = 60.0
 
 
 class TwitchHelixError(Exception):
-    """Raised for any Helix/OAuth failure -- callers (the shoutout bundle) catch this directly."""
+    """Raised for any Helix/OAuth failure -- callers (the shoutout handler) catch this directly."""
 
 
 @dataclass(slots=True)

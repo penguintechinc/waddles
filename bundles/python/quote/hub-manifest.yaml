@@ -2,7 +2,7 @@
 # waddles.core.example.quote -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 #
-# 1.0.0: strangler extraction of core/svc_process/bundles/social_quote_process.py's `!quote`
+# 1.0.0: strangler extraction of core/svc_process/builtin_handlers/social_quote_process.py's `!quote`
 # command -- see this bundle's src/app.py module docstring (feature/bundle-quote).
 # BUILD-ONLY / INERT: ships flag-OFF (`waddles.command-quote`) and is not wired into the
 # strangler cut-over yet -- bot_process._FEATURE_MODULES still owns live `quote` traffic.
