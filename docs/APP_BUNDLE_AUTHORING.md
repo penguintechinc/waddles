@@ -317,6 +317,29 @@ class TestNormalize:
             await normalize({"text": "hi"})
 ```
 
+**Role/badge flags (`is_mod`, `is_subscriber`, `is_vip`, `is_broadcaster`, `is_owner`, `is_sponsor`, ...) —
+never `bool()` them.** A raw event is `json.loads`-ed off a Valkey list, so a flag can be any JSON type, and
+`bool("false")` is `True`: a non-moderator whose producer wrote the string `"false"` (or `"0"`, `"no"`, a badge
+name) is promoted to a moderator and passes every downstream mod gate. Read them through
+`receivers.badge_flags.strict_flag`, which grants a role only for the real boolean `True` (fail closed on
+everything else, including `"true"` and `1`) and logs a non-boolean value by platform/field/type only — never
+the value:
+
+```python
+from receivers.badge_flags import strict_flag
+
+payload = {
+    "is_mod": strict_flag(raw.get("is_mod"), field="is_mod", platform="<platform>"),
+}
+```
+
+Receivers that build the raw event from an upstream payload (`receivers/kick_pusher.py`,
+`receivers/youtube_live_poll.py`) apply the same rule to the platform's own flags. The static gate
+`python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness` scans `core/svc_ingest/**` as well
+as `bundles/**` (each with its own non-zero denominator) and fails on `bool(raw.get("is_mod"))`, a bare
+`if raw.get("is_mod"):` or `a or b` over a badge; `core/svc_ingest/tests/test_badge_flags_regression.py` proves
+the behaviour end to end through the real `IngestRunner`.
+
 ### 4b. Process handler (command + no-reply branch) — `core/svc_process/builtin_handlers/<name>_process.py`
 
 ```python

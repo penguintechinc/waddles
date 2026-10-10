@@ -40,6 +40,11 @@ hit repeatedly in bundle code, selectable with `--check`:
     one -- and `transform()` laundered it into a real `True` for `dispatch` (fix/bundle-defects-wave:
     40 bundles). Only `is True` (or `isinstance(x, bool)` guards, `"is_mod" in payload` tests and
     comparisons) are accepted. Escape hatch: `# badge-ok: <reason>`.
+    This check ALSO scans the legacy svc-ingest Python tree (`core/svc_ingest/**`: the
+    `builtin_handlers/*_ingest.py` normalizers and the `receivers/*` that build the raw
+    events), where the identical `bool(raw.get("is_mod"))` promoted non-moderators on every
+    platform. The ingest scope has its OWN denominator (files + badge reads) so a moved or
+    emptied tree fails instead of passing on the bundles alone.
 
 Exit code is the gate (critical-rules.md Verification Integrity): non-zero on
 any finding, on an unparseable source file, and on a ZERO denominator (no
@@ -55,6 +60,7 @@ import ast
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -97,9 +103,20 @@ PII_PRAGMA = re.compile(r"#\s*pii-ok\s*:\s*(\S.*)$")
 SILENT_PRAGMA = re.compile(r"#\s*silent-ok\s*:\s*(\S.*)$")
 BADGE_PRAGMA = re.compile(r"#\s*badge-ok\s*:\s*(\S.*)$")
 # Normalized role/badge field names a platform normalizer emits (core/svc_ingest/src/normalize.rs).
+# Lowercase: every lookup below lowercases the candidate first (`_const_str_key` does for keys).
 BADGE_NAMES = frozenset({
     "is_mod", "is_moderator", "is_broadcaster", "is_vip", "is_subscriber", "is_sub",
 })
+# Extra role spellings the svc-ingest normalizers/receivers read: Kick/YouTube owner + sponsor
+# roles and the raw YouTube Data API field names. Ingest-only on purpose -- a bundle's local
+# `is_owner = a == b` is an ordinary comparison result, not a platform badge.
+INGEST_BADGE_NAMES = BADGE_NAMES | frozenset({
+    "is_owner", "is_channel_owner", "is_sponsor",
+    "ischatmoderator", "ischatowner", "ischatsponsor",
+})
+# Checks that also run over the svc-ingest tree, each scope with its own zero-denominator rule.
+INGEST_SCOPED_CHECKS = frozenset({"badge-truthiness"})
+INGEST_SOURCE_DIR = Path("core") / "svc_ingest"
 SKIP_DIR_NAMES = frozenset({"tests", "test", "__pycache__", "node_modules", "target", "dist", "build"})
 
 
@@ -138,6 +155,24 @@ def discover_sources(root: Path) -> list[Path]:
         rel_parts = Path(dirpath).relative_to(bundles).parts
         if "src" not in rel_parts:
             continue
+        for name in sorted(filenames):
+            if name.endswith(".py") and not name.startswith("test_") and name != "conftest.py":
+                found.append(Path(dirpath) / name)
+    return found
+
+
+def discover_ingest_sources(root: Path) -> list[Path]:
+    """Return every shipped svc-ingest Python source: `.py` under `<root>/core/svc_ingest`.
+
+    Same exclusions as `discover_sources` (tests, `test_*.py`, `conftest.py`, build output); the
+    `builtin_handlers/` normalizers and `receivers/` that feed them are the files that matter.
+    """
+    base = root / INGEST_SOURCE_DIR
+    found: list[Path] = []
+    if not base.is_dir():
+        return found
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIR_NAMES)
         for name in sorted(filenames):
             if name.endswith(".py") and not name.startswith("test_") and name != "conftest.py":
                 found.append(Path(dirpath) / name)
@@ -359,22 +394,22 @@ def check_silent_except(root: Path, sources: list[Path]) -> Result:
     return result
 
 
-def _is_badge_read(node: ast.AST | None) -> bool:
+def _is_badge_read(node: ast.AST | None, names: frozenset[str] = BADGE_NAMES) -> bool:
     """True when `node` directly reads a role/badge field: `is_mod`, `x.get("is_mod")`, `x["is_mod"]`."""
     if isinstance(node, ast.Name):
-        return node.id in BADGE_NAMES
+        return node.id.lower() in names
     if isinstance(node, ast.Attribute):
-        return node.attr in BADGE_NAMES
+        return node.attr.lower() in names
     if isinstance(node, ast.Subscript):
-        return _const_str_key(node.slice) in BADGE_NAMES
+        return _const_str_key(node.slice) in names
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
-        return bool(node.args) and _const_str_key(node.args[0]) in BADGE_NAMES
+        return bool(node.args) and _const_str_key(node.args[0]) in names
     return False
 
 
-def _contains_badge_read(node: ast.AST) -> bool:
+def _contains_badge_read(node: ast.AST, names: frozenset[str] = BADGE_NAMES) -> bool:
     """True when any sub-expression of `node` is a badge read."""
-    return any(_is_badge_read(sub) for sub in ast.walk(node))
+    return any(_is_badge_read(sub, names) for sub in ast.walk(node))
 
 
 def _truthiness_operands(node: ast.AST) -> list[ast.expr]:
@@ -390,24 +425,26 @@ def _truthiness_operands(node: ast.AST) -> list[ast.expr]:
     return []
 
 
-def check_badge_truthiness(root: Path, sources: list[Path]) -> Result:
+def check_badge_truthiness(
+    root: Path, sources: list[Path], names: frozenset[str] = BADGE_NAMES
+) -> Result:
     """Run the badge-truthiness check over `sources`; counts every badge read examined."""
     result = Result(files_scanned=len(sources))
     for path in sources:
         rel = path.relative_to(root).as_posix()
         tree, lines = parse_source(path)
-        result.examined += sum(1 for node in ast.walk(tree) if _is_badge_read(node))
+        result.examined += sum(1 for node in ast.walk(tree) if _is_badge_read(node, names))
         flagged: list[tuple[ast.AST, str]] = []
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "bool"
-                and any(_contains_badge_read(arg) for arg in node.args)
+                and any(_contains_badge_read(arg, names) for arg in node.args)
             ):
                 flagged.append((node, f"`{ast.unparse(node)}` coerces a badge through truthiness"))
             for operand in _truthiness_operands(node):
-                if _is_badge_read(operand):
+                if _is_badge_read(operand, names):
                     flagged.append((operand, f"`{ast.unparse(operand)}` is used as a bare truthiness test"))
         for node, why in flagged:
             end = getattr(node, "end_lineno", None) or node.lineno
@@ -457,24 +494,39 @@ def emit(check: str, unit: str, result: Result) -> bool:
 
 
 def main(argv: list[str]) -> int:
-    """CLI entry: run the selected check(s) against `--root`; exit 1 on any failure."""
+    """CLI entry: run the selected check(s) against `--root`; exit 1 on any failure.
+
+    `badge-truthiness` runs twice -- over the bundles and over `core/svc_ingest` -- each scope
+    reporting (and failing on a zero) its own denominator.
+    """
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--check", choices=[*CHECKS, "all"], default="all")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2],
-                        help="repo root containing bundles/ (default: this repo)")
+                        help="repo root containing bundles/ and core/svc_ingest/ (default: this repo)")
     args = parser.parse_args(argv)
     root: Path = args.root.resolve()
     sources = discover_sources(root)
+    ingest_sources = discover_ingest_sources(root)
     selected = list(CHECKS) if args.check == "all" else [args.check]
     ok = True
     for name in selected:
         unit, runner = CHECKS[name]
-        try:
-            result = runner(root, sources)
-        except (SyntaxError, UnicodeDecodeError) as exc:
-            print(f"check-bundle-source-hygiene[{name}]: FAIL -- cannot parse a bundle source file: {exc}", file=sys.stderr)
-            return 1
-        ok = emit(name, unit, result) and ok
+        scopes: list[tuple[str, list[Path], Callable[[Path, list[Path]], Result]]] = [
+            (name, sources, runner)
+        ]
+        if name in INGEST_SCOPED_CHECKS:
+            scopes.append((
+                f"{name}:svc-ingest",
+                ingest_sources,
+                lambda r, s: check_badge_truthiness(r, s, INGEST_BADGE_NAMES),
+            ))
+        for label, scope_sources, scope_runner in scopes:
+            try:
+                result = scope_runner(root, scope_sources)
+            except (SyntaxError, UnicodeDecodeError) as exc:
+                print(f"check-bundle-source-hygiene[{label}]: FAIL -- cannot parse a source file: {exc}", file=sys.stderr)
+                return 1
+            ok = emit(label, unit, result) and ok
     return 0 if ok else 1
 
 
