@@ -20,7 +20,7 @@ MIT notice because it reuses original code.
 |---|---|---|
 | `!inventory` / `!inv` | bare (two aliases) | Caller's own item collection. |
 | `!inv <user>` | documented grammar extension (see `src/app.py`) | That user's item collection. "has no items" if they own nothing. |
-| `!inv give <item> <user>` | documented grammar extension | Transfers 1 unit of `<item>` from the caller to `<user>`. Fails (no-op reply) if the caller has none, or if `<user>` is the caller themself. |
+| `!inv give <item> <user>` | documented grammar extension | Transfers 1 unit of `<item>` from the caller to `<user>`. Fails (no-op reply) if the caller has none, if `<user>` is the caller themself, or if the recipient is at a cap or busy -- in every failure case the caller keeps the item. |
 | `!inv add <item> <user>` | `add` verb | Broadcaster/moderator only. Grants 1 unit of `<item>` to `<user>`. |
 | `!inv remove <item> <user>` | `remove` verb | Broadcaster/moderator only. Revokes 1 unit of `<item>` from `<user>`, clamped at `0` (never negative); a no-op reply if they have none. |
 
@@ -102,30 +102,23 @@ replenished row: a `db.ConflictError` on the cleanup delete is treated as "someo
 it first" and simply skipped, leaving a harmless zero-quantity row behind (listing already
 filters `quantity > 0`).
 
-**Known, honestly-documented concurrency limitation.** `kv.set` has no compare-and-swap -- two
-concurrent *first-time* grants of two *different* items to the same user can race on writing the
-directory value, and whichever `kv.set` wins last can drop the other's new directory entry (the
-underlying `db` row still exists -- nothing is lost from the ledger, only that item's entry in
-the user's own at-a-glance listing, until the next write for that user touches it again). This is
-the same class of gap `loyalty`'s own module docstring documents for its single-value index, just
-the multi-item shape of the identical limitation -- not a new weakness this bundle introduces.
+## Integrity guarantees (1.0.3)
+
+| Risk | Guard |
+|---|---|
+| `give` destroyed the item when the credit step failed (the giver was already debited) | Debit, then credit, then clean up. A credit that cannot complete (backend failure, target at a cap, target locked) **refunds the giver's row** before reporting; a refund that itself fails is logged at ERROR (`inventory.give_refund_failed`) for the operator. Exactly one chat reply either way. |
+| Two simultaneous first-time grants raced on the per-user directory and the loser's item dropped out of the listing | Every directory write (new item, zero-row cleanup) is serialized per user by a short-TTL lock (`inventory.lock.<pseudonym>`, `kv.increment` -- only the holder sees `1`, 10 s TTL). The new-item path re-reads the directory *under* the lock and adopts a concurrent creator's row. A caller that cannot get the lock replies "that inventory is being updated right now, try again in a few seconds." |
+| Row inserted but its directory write failed -> unreachable orphan row | The orphan row is deleted and the lock released before the error is raised (a failed cleanup is logged: `inventory.orphan_cleanup_failed`). |
+| Two simultaneous `give`s of someone's last unit | Quantity changes are version-gated (`expected_version`); the loser re-reads, sees `0`, and gets "has no <item> to give". |
+| Unbounded item names / distinct items / quantities | Names are 1-32 word characters, `.` or `-` (no spaces, no `@`/`#` mention syntax); a user holds at most **50** distinct items (this also keeps `!inventory` -- one `kv.get` plus one `db.get` per item -- inside the host's 64-ops-per-invocation budget); a row caps at **1,000,000**. Out-of-range stored quantities are corruption and fail loud (`quantity_invalid`). |
+| A mod-granted item invisible to its owner (`Alice` vs `alice` hashed differently) | The caller's own identity is normalized exactly like a typed `<user>` (strip `@`, lower-case), including the `give` self-check. |
+| Non-moderator passing the mod gate with a string badge (`"false"` is truthy) | Badges are read with an identity check; only a real boolean `True` opens the gate. |
 
 **Listing cannot show real display names for an arbitrary user.** Like `loyalty`'s leaderboard,
 there is no reverse lookup from a stored `actor_hash` back to a chat-visible name (PII
 tokenization: raw PII lives only inside the hub/API server). `!inventory`/`!inv <user>` always
 have a live, chat-typed name available and echo it straight back into the reply -- never
 persisted.
-
-**`give` is not atomic.** It decrements the giver and then increments the recipient as two
-separate backend writes. If the recipient-side write fails, the bundle fails loud (error reply +
-`RuntimeError`, no success line) but the giver's unit has already been taken -- there is no
-rollback. Pinned by `test_give_recipient_side_failure_fails_loud_with_no_success_reply` so any
-future compensation logic is a deliberate change.
-
-**First-time grants are insert-then-index.** The `db` row is inserted *before* the `kv` directory
-entry is written. If the directory write fails the bundle fails loud, but the row already exists
-un-indexed -- a retry inserts a second row for the same `(user, item)`. Same shape `loyalty`
-documents; no orphan cleanup exists yet.
 
 ## Failure behavior (fail-loud, never silent)
 
@@ -135,7 +128,7 @@ documents; no orphan cleanup exists yet.
 | Optimistic-concurrency conflicts | Retried up to 5 times with a fresh `db.get`; exhausted => loud `db_update_retry` failure. A conflict on the zero-row cleanup delete is a benign skip (INFO `inventory.cleanup_skipped`), never a failure. |
 | Corrupt per-user directory (not UTF-8, bad JSON, not a JSON object) | Loud `dir_decode` failure on **every** command that reads it; the corrupt bytes are never overwritten or silently reset. |
 | Directory points at a row `db.get` can no longer find | Loud `directory_stale` failure -- never silently re-created (that would orphan/duplicate the row). |
-| Non-numeric `quantity` column | Raises (never rendered as garbage). |
+| Non-numeric, negative or over-cap `quantity` column | Loud `quantity_invalid` failure (never rendered as garbage, never silently repaired). |
 | Missing `channel_id`, missing community (no tenant-wide fallback), unknown command, malformed forwarded payload | `ValueError`; missing community also logs ERROR `inventory.missing_community`. |
 | `relay.push` fails | Propagates; no success line is logged. |
 
@@ -167,7 +160,7 @@ is a separate, already-tracked platform follow-on. Identical note to `loyalty`'s
 |---|---|
 | `bundle.yaml` | Manifest -- app id, consumes rules, limits, data table, attribution metadata |
 | `hub-manifest.yaml` | hub-api install-pipeline manifest (separate schema consumer, see its own header comment) |
-| `src/app.py` | `transform`/`dispatch` -- the full command grammar, data model, and backend wrappers |
+| `src/app.py` | `transform`/`dispatch` -- the full command grammar, data model, directory lock, lossless `give`, and backend wrappers |
 | `src/_entry_wiring.py` | Static `bundle_compiler`-shaped entry wiring (see `pyping`'s own) |
 | `tests/` | Host-native pytest suite (fake `wit_world`: flags/kv/db/relay/log, no wasmtime) |
 
@@ -198,7 +191,7 @@ mypy --strict src
 ruff check .
 ```
 
-Current result: 171 tests, `src/app.py` at 100% statement+branch coverage.
+Current result: 245 tests, `src/app.py` at 100% statement+branch coverage.
 
 ## Activation
 

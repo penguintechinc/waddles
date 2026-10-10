@@ -69,22 +69,29 @@ item this user owns" (`!inventory`/`!inv <user>`) without an unbounded
 O(1) by-item lookup for `give`/`add`/`remove` (a dict-key lookup inside the
 decoded JSON, no extra round trip).
 
-**Known, honestly-documented concurrency limitation.** `kv.set` has no
-compare-and-swap -- two concurrent *first-time* grants of two *different*
-items to the same user can race on writing this directory value, and
-whichever `kv.set` wins last can silently drop the other's new directory
-entry (the underlying `db` row for the dropped item still exists --
-nothing is lost from the ledger, only the user's own at-a-glance listing
-of it, until the next successful directory write for that user touches the
-same item again). This is the exact same class of gap `loyalty`'s own
-module docstring documents for its single-value index (two concurrent
-first-time balance grants to the same user can race the same way) -- not a
-new weakness introduced here, just the multi-item shape of the identical
-limitation. Every directory write here re-fetches the directory
-immediately beforehand to keep the race window as small as practical (see
-`_increment_item`/`_maybe_cleanup_zero_row`), the same mitigation
-`loyalty` does not need (it has only one directory entry per user) but
-this bundle's richer shape does.
+**Concurrency, and what is now guarded (fix/bundle-defects-wave, 1.0.3).** `kv.set` has no
+compare-and-swap, so two concurrent first-time grants for the same user used to race on the
+directory write and the loser's new item silently dropped out of the user's listing (its `db` row
+still existed, so the points were stranded). Every *directory* mutation (new-item insert, zero-row
+cleanup) is now serialized per user by a short-TTL lock built from `kv.increment` -- atomic
+host-side, returns `1` only to the holder -- and the new-item path re-reads the directory *under
+the lock*, so a concurrent creator's entry is adopted instead of overwritten. A caller that
+cannot take the lock after a few immediate retries (no sleep exists under WASI) gets a "busy, try
+again" reply, never a lost write; the 10 s TTL bounds a crashed holder. Row quantity changes
+(`+1`/`-1`) never touch the directory and stay version-gated (`db.update` with
+`expected_version`), so two simultaneous `give`s of someone's last item cannot both succeed.
+
+**`give` is two writes and must not destroy items.** It debits the giver and then credits the
+target. Previously a failed credit (db/kv outage, target at a cap, lock contention) left the item
+deleted from the giver and never delivered. A failed credit now *refunds* the giver before the
+error is surfaced; a failed refund is logged at ERROR (`inventory.give_refund_failed`) so the
+operator can reconcile -- never swallowed.
+
+**Bounds.** Item names are 1-32 word characters, `.` or `-` (no whitespace, no `@`/mention syntax),
+a user holds at most `MAX_ITEMS_PER_USER` (50) distinct items -- which also keeps `!inventory`
+(one `kv.get` + one `db.get` per item) inside the host's 64-ops-per-invocation budget -- and a
+row's quantity is capped at `MAX_QUANTITY`. The caller's own identity is normalized exactly like
+a typed target (strip `@`, lower-case), so items a mod grants to `alice` are visible to `Alice`.
 
 **Listing cannot show real display names for items the caller doesn't
 already know the owner of.** Like `loyalty`'s leaderboard, there is no
@@ -111,7 +118,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, db, log, relay
@@ -130,7 +139,22 @@ SPEC = CommandSpec(name=_COMMAND_NAME, sub_modules=frozenset())
 
 _ALIASES = ("!inventory", "!inv")
 _DIR_KEY_PREFIX = "inventory.dir."
+_LOCK_KEY_PREFIX = "inventory.lock."
 _MAX_LIST_ITEMS = 25
+#: Longest item name, in characters.
+MAX_ITEM_LEN = 32
+#: Most distinct items one user may hold. Also bounds `!inventory` at 1 kv.get + N db.gets, which
+#: must stay under the host's 64-ops-per-invocation limit (`core/bundle_host_db/src/limits.rs`).
+MAX_ITEMS_PER_USER = 50
+#: Largest quantity of one item a user may hold.
+MAX_QUANTITY = 1_000_000
+#: A directory lock expires after this many seconds, so a holder that crashed mid-section can
+#: never block a user for longer than this.
+_LOCK_TTL_SECONDS = 10
+#: How many immediate attempts to take the lock before replying "busy" (no sleep under WASI).
+_LOCK_ATTEMPTS = 3
+#: Item names: word characters, dot, dash -- no whitespace, no `@`/`#` mention syntax.
+_ITEM_RE = re.compile(r"^[\w.-]{1,32}$")
 #: Bounded optimistic-concurrency retry budget for a single row mutation -- see
 #: `_db_update_with_retry()`. Five attempts absorbs ordinary concurrent-writer contention without
 #: looping forever on a genuinely stuck row.
@@ -143,6 +167,10 @@ _USAGE = (
 )
 _PERMISSION_DENIED_MSG = "only moderators/broadcasters can adjust inventories"
 _UNAVAILABLE_MSG = "inventory is temporarily unavailable, try again shortly."
+_BUSY_MSG = "that inventory is being updated right now, try again in a few seconds."
+_BAD_ITEM_MSG = (
+    f"item names must be 1-{MAX_ITEM_LEN} letters, digits, '_', '-' or '.' (no spaces or @)."
+)
 
 _KNOWN_COMMANDS = frozenset(
     {"list_self", "list_other", "give", "add", "remove", "usage"}
@@ -155,6 +183,22 @@ class _InsufficientQuantityError(Exception):
     Caught by the caller as a benign "nothing to give/remove" user-facing
     reply -- never a backend failure. See `_decrement_item()`.
     """
+
+
+class _BusyError(Exception):
+    """The per-user directory lock could not be taken -- surfaced as a "busy, try again" reply."""
+
+
+class _LimitError(Exception):
+    """A per-user bound (`MAX_ITEMS_PER_USER` / `MAX_QUANTITY`) would be exceeded.
+
+    `reply` is the ready-to-send chat text; this is a user-facing refusal, not a backend failure.
+    """
+
+    def __init__(self, reply: str) -> None:
+        """Store the chat reply text."""
+        super().__init__(reply)
+        self.reply = reply
 
 
 def _pseudonym(identity: str | None) -> str:
@@ -186,6 +230,20 @@ def _normalize_target(raw: str) -> str:
 def _normalize_item(raw: str) -> str:
     """Normalize a chat-typed item name -- strip + lower-case, same rule as `_normalize_target`."""
     return raw.strip().lower()
+
+
+def _actor_pseudonym(actor: str | None) -> str:
+    """Pseudonym of the *calling* user, normalized exactly like a typed `<user>` target.
+
+    The same human must resolve to one directory whether a mod granted to `alice` or they
+    invoke the command as `Alice` -- so the actor goes through `_normalize_target` too.
+    """
+    return _pseudonym(_normalize_target(actor or ""))
+
+
+def _lock_key(pseudonym: str) -> str:
+    """Per-(community, user) `kv` key for the directory-mutation lock."""
+    return f"{_LOCK_KEY_PREFIX}{pseudonym}"
 
 
 def _dir_key(pseudonym: str) -> str:
@@ -447,7 +505,12 @@ async def _db_update_with_retry(
                 channel_id=channel_id,
                 op="directory_stale",
             )
-        new_values = mutate(row)
+        try:
+            new_values = mutate(row)
+        except (KeyError, TypeError, ValueError) as exc:
+            await _fail_backend(
+                exc, provider=provider, channel_id=channel_id, op="quantity_invalid"
+            )
         try:
             updated: dict[str, Any] = await db.update(row_id, int(row["version"]), new_values)
         except db.ConflictError:
@@ -466,10 +529,40 @@ async def _db_update_with_retry(
 
 def _mutate_decrement(row: dict[str, Any]) -> dict[str, Any]:
     """Decrement `quantity` by 1 -- raises `_InsufficientQuantityError` if already at `0`."""
-    current = int(row["quantity"])
+    current = _checked_quantity(row["quantity"])
     if current < 1:
         raise _InsufficientQuantityError()
     return {"quantity": current - 1}
+
+
+async def _acquire_dir_lock(
+    community: str, pseudonym: str, *, provider: str, channel_id: str
+) -> bool:
+    """Try to take `pseudonym`'s directory lock; `True` only for the single holder.
+
+    `kv.increment` is atomic host-side and returns `1` only to the caller that created the key,
+    which makes it the compare-and-swap `kv.set` lacks. A few immediate attempts (no sleep exists
+    under WASI) cover the lock being released between two of them; the TTL bounds a crashed
+    holder. See module docstring.
+    """
+    for _ in range(_LOCK_ATTEMPTS):
+        try:
+            count = await community_kv.increment(
+                community, _lock_key(pseudonym), 1, _LOCK_TTL_SECONDS
+            )
+        except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_fail_backend`
+            await _fail_backend(exc, provider=provider, channel_id=channel_id, op="kv_lock")
+        if count == 1:
+            return True
+    return False
+
+
+async def _release_dir_lock(community: str, pseudonym: str) -> None:
+    """Best-effort lock release; a failure is logged loudly (the TTL bounds the damage)."""
+    try:
+        await community_kv.delete(community, _lock_key(pseudonym))
+    except Exception as exc:  # noqa: BLE001 -- logged, never silent; the TTL expires the lock
+        log.error("inventory.lock_release_failed", error=type(getattr(exc, "value", exc)).__name__)
 
 
 async def _maybe_cleanup_zero_row(
@@ -489,45 +582,186 @@ async def _maybe_cleanup_zero_row(
     this skips the delete and leaves the directory entry in place -- a
     stale zero-quantity row is a harmless storage/listing cosmetic
     (listing already filters `quantity > 0`, see `_handle_list`), never
-    silent data loss. See module docstring's concurrency-limitation note.
+    silent data loss. The directory write runs under the per-user lock and
+    is skipped (logged) if the lock is busy -- see module docstring.
+    """
+    if not await _acquire_dir_lock(community, pseudonym, provider=provider, channel_id=channel_id):
+        log.info("inventory.cleanup_skipped", reason="lock_busy")
+        return
+    try:
+        try:
+            await _db_delete(row_id, expected_version, provider=provider, channel_id=channel_id)
+        except db.ConflictError:
+            log.info("inventory.cleanup_skipped", reason="conflict")
+            return
+        directory = await _dir_get(
+            community, pseudonym, provider=provider, channel_id=channel_id
+        )
+        if directory.get(item) == row_id:
+            del directory[item]
+            await _dir_set(
+                community, pseudonym, directory, provider=provider, channel_id=channel_id
+            )
+    finally:
+        await _release_dir_lock(community, pseudonym)
+
+
+async def _discard_orphan_row(row_id: str, version: int) -> None:
+    """Best-effort delete of a just-inserted row whose directory write failed.
+
+    Without the directory entry the row can never be listed, given or removed again. A failed
+    cleanup is logged loudly (the caller then re-raises the primary failure) -- never swallowed.
     """
     try:
-        await _db_delete(row_id, expected_version, provider=provider, channel_id=channel_id)
-    except db.ConflictError:
-        log.info("inventory.cleanup_skipped", row_id=row_id, reason="conflict")
-        return
-    directory = await _dir_get(community, pseudonym, provider=provider, channel_id=channel_id)
-    if directory.get(item) == row_id:
-        del directory[item]
-        await _dir_set(community, pseudonym, directory, provider=provider, channel_id=channel_id)
+        await db.delete(row_id, version)
+    except Exception as exc:  # noqa: BLE001 -- logged; the primary failure is raised next
+        error = type(getattr(exc, "value", exc)).__name__
+        log.error("inventory.orphan_cleanup_failed", error=error)
 
 
-async def _increment_item(
+async def _create_item_row(
     community: str, pseudonym: str, item: str, *, provider: str, channel_id: str
-) -> int:
-    """Insert `item` at quantity `1`, or increment an existing row by `1`. Returns new quantity."""
-    directory = await _dir_get(community, pseudonym, provider=provider, channel_id=channel_id)
-    row_id = directory.get(item)
-    if row_id is None:
+) -> int | None:
+    """Create `item`'s row at quantity `1` under the directory lock; `None` if it already exists.
+
+    The directory is re-read *under the lock*, so an entry a concurrent creator published first
+    is adopted (caller then increments it) instead of being overwritten -- the lost-update race
+    the lock exists to close. Raises `_BusyError` when the lock cannot be taken and `_LimitError`
+    at `MAX_ITEMS_PER_USER`.
+    """
+    if not await _acquire_dir_lock(community, pseudonym, provider=provider, channel_id=channel_id):
+        log.warn("inventory.dir_lock_busy")
+        raise _BusyError()
+    try:
+        directory = await _dir_get(
+            community, pseudonym, provider=provider, channel_id=channel_id
+        )
+        if item in directory:
+            return None
+        if len(directory) >= MAX_ITEMS_PER_USER:
+            raise _LimitError(
+                f"that user already holds the maximum of {MAX_ITEMS_PER_USER} distinct items."
+            )
         inserted = await _db_insert(
             {"actor_hash": pseudonym, "item": item, "quantity": 1},
             provider=provider,
             channel_id=channel_id,
         )
-        # Re-fetch the directory immediately before writing to narrow the lost-update race
-        # window documented in the module docstring.
-        directory = await _dir_get(community, pseudonym, provider=provider, channel_id=channel_id)
         directory[item] = str(inserted["row_id"])
-        await _dir_set(community, pseudonym, directory, provider=provider, channel_id=channel_id)
+        try:
+            await _dir_set(
+                community, pseudonym, directory, provider=provider, channel_id=channel_id
+            )
+        except RuntimeError:
+            await _discard_orphan_row(str(inserted["row_id"]), int(inserted["version"]))
+            raise
         return 1
+    finally:
+        await _release_dir_lock(community, pseudonym)
 
-    def _mutate(row: dict[str, Any]) -> dict[str, Any]:
-        return {"quantity": int(row["quantity"]) + 1}
+
+def _mutate_increment(row: dict[str, Any]) -> dict[str, Any]:
+    """Increment `quantity` by 1 -- raises `_LimitError` at `MAX_QUANTITY`."""
+    current = _checked_quantity(row["quantity"])
+    if current >= MAX_QUANTITY:
+        raise _LimitError(f"that user already holds the maximum quantity ({MAX_QUANTITY}).")
+    return {"quantity": current + 1}
+
+
+def _checked_quantity(raw: Any) -> int:
+    """Validate a stored `quantity`: an int in `0..MAX_QUANTITY`, else raise `ValueError`.
+
+    This bundle only ever writes values in range, so anything else is corruption -- callers fail
+    loud instead of rendering or silently "repairing" it.
+    """
+    quantity = int(raw)
+    if not 0 <= quantity <= MAX_QUANTITY:
+        raise ValueError("stored quantity is outside 0..MAX_QUANTITY")
+    return quantity
+
+
+async def _increment_item(
+    community: str, pseudonym: str, item: str, *, provider: str, channel_id: str
+) -> int:
+    """Insert `item` at quantity `1`, or increment an existing row by `1`. Returns new quantity.
+
+    Raises:
+        _BusyError: A new row was needed but the directory lock could not be taken.
+        _LimitError: `MAX_ITEMS_PER_USER` or `MAX_QUANTITY` would be exceeded.
+    """
+    directory = await _dir_get(community, pseudonym, provider=provider, channel_id=channel_id)
+    row_id = directory.get(item)
+    if row_id is None:
+        created = await _create_item_row(
+            community, pseudonym, item, provider=provider, channel_id=channel_id
+        )
+        if created is not None:
+            return created
+        # A concurrent creator published this item while we waited for the lock: adopt its row.
+        directory = await _dir_get(community, pseudonym, provider=provider, channel_id=channel_id)
+        row_id = directory[item]
 
     updated = await _db_update_with_retry(
-        row_id, _mutate, provider=provider, channel_id=channel_id
+        row_id, _mutate_increment, provider=provider, channel_id=channel_id
     )
-    return int(updated["quantity"])
+    return _checked_quantity(updated["quantity"])
+
+
+@dataclass(slots=True, frozen=True)
+class _Debit:
+    """The result of taking one unit from a user's row: enough to refund or finalize it."""
+
+    row_id: str
+    new_quantity: int
+    version: int
+
+
+async def _debit_item(
+    community: str, pseudonym: str, item: str, *, provider: str, channel_id: str
+) -> _Debit | None:
+    """Take one `item` from the user if they own at least one; `None` if they own none.
+
+    The row is left in place even at quantity `0` -- `_finalize_debit` (or a `give` refund)
+    decides what happens next, so a failed credit can still put the unit back on the same row.
+    """
+    directory = await _dir_get(community, pseudonym, provider=provider, channel_id=channel_id)
+    row_id = directory.get(item)
+    if row_id is None:
+        return None
+    try:
+        updated = await _db_update_with_retry(
+            row_id, _mutate_decrement, provider=provider, channel_id=channel_id
+        )
+    except _InsufficientQuantityError:
+        log.debug("inventory.decrement_skipped", reason="already_zero")
+        return None
+    return _Debit(
+        row_id=row_id,
+        new_quantity=_checked_quantity(updated["quantity"]),
+        version=int(updated["version"]),
+    )
+
+
+async def _finalize_debit(
+    community: str,
+    pseudonym: str,
+    item: str,
+    debit: _Debit,
+    *,
+    provider: str,
+    channel_id: str,
+) -> None:
+    """Delete the row (and its directory entry) once a debit has reached `0`."""
+    if debit.new_quantity == 0:
+        await _maybe_cleanup_zero_row(
+            community,
+            pseudonym,
+            item,
+            debit.row_id,
+            debit.version,
+            provider=provider,
+            channel_id=channel_id,
+        )
 
 
 async def _decrement_item(
@@ -540,29 +774,13 @@ async def _decrement_item(
     already `0`) -- callers render `None` as a "nothing to give/remove"
     reply, never a backend failure.
     """
-    directory = await _dir_get(community, pseudonym, provider=provider, channel_id=channel_id)
-    row_id = directory.get(item)
-    if row_id is None:
+    debit = await _debit_item(community, pseudonym, item, provider=provider, channel_id=channel_id)
+    if debit is None:
         return None
-    try:
-        updated = await _db_update_with_retry(
-            row_id, _mutate_decrement, provider=provider, channel_id=channel_id
-        )
-    except _InsufficientQuantityError:
-        log.debug("inventory.decrement_skipped", row_id=row_id, reason="already_zero")
-        return None
-    new_quantity = int(updated["quantity"])
-    if new_quantity == 0:
-        await _maybe_cleanup_zero_row(
-            community,
-            pseudonym,
-            item,
-            row_id,
-            int(updated["version"]),
-            provider=provider,
-            channel_id=channel_id,
-        )
-    return new_quantity
+    await _finalize_debit(
+        community, pseudonym, item, debit, provider=provider, channel_id=channel_id
+    )
+    return debit.new_quantity
 
 
 async def _handle_list(
@@ -584,7 +802,12 @@ async def _handle_list(
                 channel_id=channel_id,
                 op="directory_stale",
             )
-        quantity = int(row["quantity"])
+        try:
+            quantity = _checked_quantity(row["quantity"])
+        except (KeyError, TypeError, ValueError) as exc:
+            await _fail_backend(
+                exc, provider=provider, channel_id=channel_id, op="quantity_invalid"
+            )
         if quantity > 0:
             entries.append(f"{item} x{quantity}")
 
@@ -604,6 +827,68 @@ def _format_grant_reply(verb: str, item: str, target_raw: str, new_quantity: int
     if verb == "add":
         return f"Gave 1 {item} to {target_raw}. They now have {new_quantity}."
     return f"Removed 1 {item} from {target_raw}. They now have {new_quantity}."
+
+
+async def _refund_debit(row_id: str) -> None:
+    """Put one unit back on the giver's still-present row after a failed credit.
+
+    Deliberately talks to `db` directly (not the chat-replying wrappers): it runs while the
+    original failure is propagating, which already owns the single chat reply, so it must neither
+    reply a second time nor mask that failure. A refund that cannot complete is logged at ERROR
+    (`inventory.give_refund_failed`, error class only) for the operator to reconcile.
+    """
+    for _ in range(_MAX_CONFLICT_RETRIES):
+        try:
+            row = await db.get(row_id)
+            if row is None:
+                log.error("inventory.give_refund_failed", error="row_missing")
+                return
+            quantity = _checked_quantity(row["quantity"])
+            await db.update(row_id, int(row["version"]), {"quantity": quantity + 1})
+            return
+        except db.ConflictError:
+            continue
+        except Exception as exc:  # noqa: BLE001 -- logged loudly; the original error still raises
+            error = type(getattr(exc, "value", exc)).__name__
+            log.error("inventory.give_refund_failed", error=error)
+            return
+    log.error("inventory.give_refund_failed", error="conflict_retries_exhausted")
+
+
+async def _give(
+    community: str,
+    giver: str,
+    target: str,
+    item: str,
+    *,
+    username: str,
+    target_raw: str,
+    provider: str,
+    channel_id: str,
+) -> tuple[str, str]:
+    """Move one `item` from `giver` to `target`; returns `(reply_text, detail)`.
+
+    Debit, then credit, and only then finalize (zero-row cleanup). A credit that cannot complete
+    (target at a cap, directory lock busy, backend failure) refunds the same row before
+    reporting -- the item is never lost.
+    """
+    debit = await _debit_item(community, giver, item, provider=provider, channel_id=channel_id)
+    if debit is None:
+        log.info("inventory.give_denied", reason="insufficient")
+        return f"{username} has no {item} to give.", "give:insufficient"
+    try:
+        await _increment_item(community, target, item, provider=provider, channel_id=channel_id)
+    except (_BusyError, _LimitError) as refusal:
+        await _refund_debit(debit.row_id)
+        log.info("inventory.give_denied", reason="credit_refused")
+        if isinstance(refusal, _LimitError):
+            return refusal.reply, "give:limit"
+        return _BUSY_MSG, "give:busy"
+    except Exception:
+        await _refund_debit(debit.row_id)
+        raise
+    await _finalize_debit(community, giver, item, debit, provider=provider, channel_id=channel_id)
+    return f"{username} gave 1 {item} to {target_raw}.", "give"
 
 
 async def dispatch(
@@ -657,10 +942,19 @@ async def dispatch(
         item = _normalize_item(item_raw)
         pseudonym = _pseudonym(_normalize_target(target_raw))
         if command == "add":
-            new_quantity = await _increment_item(
-                community, pseudonym, item, provider=provider, channel_id=channel_id
-            )
-            reply_text = _format_grant_reply("add", item, target_raw, new_quantity)
+            if not _ITEM_RE.match(item):
+                reply_text = _BAD_ITEM_MSG
+            else:
+                try:
+                    new_quantity = await _increment_item(
+                        community, pseudonym, item, provider=provider, channel_id=channel_id
+                    )
+                except _BusyError:
+                    reply_text = _BUSY_MSG
+                except _LimitError as limit:
+                    reply_text = limit.reply
+                else:
+                    reply_text = _format_grant_reply("add", item, target_raw, new_quantity)
         else:
             decremented = await _decrement_item(
                 community, pseudonym, item, provider=provider, channel_id=channel_id
@@ -679,28 +973,31 @@ async def dispatch(
         if not isinstance(item_raw, str) or not isinstance(target_raw, str):
             raise ValueError(f"malformed give payload: item={item_raw!r} target={target_raw!r}")
         item = _normalize_item(item_raw)
-        giver_pseudonym = _pseudonym(envelope.event.actor)
+        giver_pseudonym = _actor_pseudonym(envelope.event.actor)
         target_pseudonym = _pseudonym(_normalize_target(target_raw))
         if giver_pseudonym == target_pseudonym:
             reply_text = "you cannot give an item to yourself."
             await relay.push(provider, {"channel": channel_id, "text": reply_text})
             log.info("inventory.give_denied", reason="self")
             return DispatchResult(transport=provider, detail="give:self")
-        decremented = await _decrement_item(
-            community, giver_pseudonym, item, provider=provider, channel_id=channel_id
+        if not _ITEM_RE.match(item):
+            await relay.push(provider, {"channel": channel_id, "text": _BAD_ITEM_MSG})
+            log.info("inventory.give_denied", reason="bad_item")
+            return DispatchResult(transport=provider, detail="give:bad_item")
+        reply_text, detail = await _give(
+            community,
+            giver_pseudonym,
+            target_pseudonym,
+            item,
+            username=username,
+            target_raw=target_raw,
+            provider=provider,
+            channel_id=channel_id,
         )
-        if decremented is None:
-            reply_text = f"{username} has no {item} to give."
-            await relay.push(provider, {"channel": channel_id, "text": reply_text})
-            log.info("inventory.give_denied", reason="insufficient")
-            return DispatchResult(transport=provider, detail="give:insufficient")
-        await _increment_item(
-            community, target_pseudonym, item, provider=provider, channel_id=channel_id
-        )
-        reply_text = f"{username} gave 1 {item} to {target_raw}."
         await relay.push(provider, {"channel": channel_id, "text": reply_text})
-        log.info("inventory.dispatch gave", command=command)
-        return DispatchResult(transport=provider, detail="give")
+        if detail == "give":
+            log.info("inventory.dispatch gave", command=command)
+        return DispatchResult(transport=provider, detail=detail)
 
     if command == "list_other":
         target_raw = payload.get("target")
@@ -711,7 +1008,7 @@ async def dispatch(
             community, pseudonym, target_raw, provider=provider, channel_id=channel_id
         )
     else:  # list_self
-        pseudonym = _pseudonym(envelope.event.actor)
+        pseudonym = _actor_pseudonym(envelope.event.actor)
         reply_text = await _handle_list(
             community, pseudonym, username, provider=provider, channel_id=channel_id
         )
