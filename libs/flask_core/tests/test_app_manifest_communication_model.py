@@ -41,6 +41,6 @@ def test_unknown_communication_model_is_rejected() -> None:
 
 def test_missing_communication_model_still_parses() -> None:
     data = dict(_BASE)
-    data["stages"] = {"ingest": {"entrypoint": "bundles.discord_ingest:normalize"}}
+    data["stages"] = {"ingest": {"entrypoint": "builtin_handlers.discord_ingest:normalize"}}
     manifest = parse_manifest(data)
     assert manifest.stage_specs["ingest"].communication_model is None

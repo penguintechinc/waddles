@@ -12,6 +12,13 @@ Usage:
     async def list_users(query_params: PaginationParams):
         users = await get_users(limit=query_params.limit, offset=query_params.offset)
         return success_response(users)
+
+Logging (SECURITY -- PII in logs): a failed validation is logged as the error
+count, field locations and Pydantic error types only. The client-supplied
+``input`` value (and ``msg``/``ctx``, which can echo it) is never logged, and
+exceptions raised inside a decorated endpoint are logged type-only
+(``flask_core.db_errors.log_db_error``), never as ``str(e)``. See
+``flask_core.validation_errors``.
 """
 
 from pydantic import BaseModel, Field, validator, ValidationError
@@ -21,6 +28,9 @@ from functools import wraps
 from datetime import datetime
 import re
 import logging
+
+from .db_errors import log_db_error
+from .validation_errors import describe_validation_errors
 
 # Import from shared library for re-export (penguin-libs when available, graceful fallback)
 try:
@@ -218,9 +228,13 @@ def validate_json(model: type[BaseModel], strict: bool = True):
                         'type': error['type']
                     })
 
+                # Count + field locations + error types only -- never the
+                # client-supplied input/msg/ctx (see validation_errors.py).
                 logger.warning(
-                    f"AUTHZ validation_failed endpoint={request.endpoint} "
-                    f"model={model.__name__} errors={len(errors)}"
+                    "AUTHZ validation_failed endpoint=%s model=%s %s",
+                    request.endpoint,
+                    model.__name__,
+                    describe_validation_errors(e, model),
                 )
 
                 if strict:
@@ -231,13 +245,25 @@ def validate_json(model: type[BaseModel], strict: bool = True):
                     }, 400
                 else:
                     # Log but continue with original data
-                    logger.error(f"Validation errors: {errors}")
+                    logger.error(
+                        "Validation errors (non-strict, passing raw data through) "
+                        "endpoint=%s model=%s %s",
+                        request.endpoint,
+                        model.__name__,
+                        describe_validation_errors(e, model),
+                    )
                     return await f(data, *args, **kwargs)
 
             except Exception as e:
-                logger.error(
+                # The wrapped endpoint runs inside this try, so `e` may be a DB
+                # driver error or any handler exception whose message embeds
+                # request values. Log type/SQLSTATE only, frames-only traceback
+                # at DEBUG -- never `str(e)` (see db_errors.py).
+                log_db_error(
+                    logger,
                     f"ERROR validation_exception endpoint={request.endpoint} "
-                    f"error={str(e)}"
+                    f"model={model.__name__}",
+                    e,
                 )
                 return {
                     'status': 'error',
@@ -310,9 +336,13 @@ def validate_query(model: type[BaseModel], strict: bool = True):
                         'type': error['type']
                     })
 
+                # Count + field locations + error types only -- never the
+                # client-supplied input/msg/ctx (see validation_errors.py).
                 logger.warning(
-                    f"AUTHZ validation_failed endpoint={request.endpoint} "
-                    f"model={model.__name__} errors={len(errors)}"
+                    "AUTHZ validation_failed endpoint=%s model=%s %s",
+                    request.endpoint,
+                    model.__name__,
+                    describe_validation_errors(e, model),
                 )
 
                 if strict:
@@ -323,13 +353,25 @@ def validate_query(model: type[BaseModel], strict: bool = True):
                     }, 400
                 else:
                     # Log but continue with original data
-                    logger.error(f"Validation errors: {errors}")
+                    logger.error(
+                        "Validation errors (non-strict, passing raw data through) "
+                        "endpoint=%s model=%s %s",
+                        request.endpoint,
+                        model.__name__,
+                        describe_validation_errors(e, model),
+                    )
                     return await f(query_data, *args, **kwargs)
 
             except Exception as e:
-                logger.error(
+                # The wrapped endpoint runs inside this try, so `e` may be a DB
+                # driver error or any handler exception whose message embeds
+                # request values. Log type/SQLSTATE only, frames-only traceback
+                # at DEBUG -- never `str(e)` (see db_errors.py).
+                log_db_error(
+                    logger,
                     f"ERROR validation_exception endpoint={request.endpoint} "
-                    f"error={str(e)}"
+                    f"model={model.__name__}",
+                    e,
                 )
                 return {
                     'status': 'error',
@@ -384,9 +426,13 @@ def validate_form(model: type[BaseModel], strict: bool = True):
                         'type': error['type']
                     })
 
+                # Count + field locations + error types only -- never the
+                # client-supplied input/msg/ctx (see validation_errors.py).
                 logger.warning(
-                    f"AUTHZ validation_failed endpoint={request.endpoint} "
-                    f"model={model.__name__} errors={len(errors)}"
+                    "AUTHZ validation_failed endpoint=%s model=%s %s",
+                    request.endpoint,
+                    model.__name__,
+                    describe_validation_errors(e, model),
                 )
 
                 if strict:
@@ -397,13 +443,25 @@ def validate_form(model: type[BaseModel], strict: bool = True):
                     }, 400
                 else:
                     # Log but continue with original data
-                    logger.error(f"Validation errors: {errors}")
+                    logger.error(
+                        "Validation errors (non-strict, passing raw data through) "
+                        "endpoint=%s model=%s %s",
+                        request.endpoint,
+                        model.__name__,
+                        describe_validation_errors(e, model),
+                    )
                     return await f(form_dict, *args, **kwargs)
 
             except Exception as e:
-                logger.error(
+                # The wrapped endpoint runs inside this try, so `e` may be a DB
+                # driver error or any handler exception whose message embeds
+                # request values. Log type/SQLSTATE only, frames-only traceback
+                # at DEBUG -- never `str(e)` (see db_errors.py).
+                log_db_error(
+                    logger,
                     f"ERROR validation_exception endpoint={request.endpoint} "
-                    f"error={str(e)}"
+                    f"model={model.__name__}",
+                    e,
                 )
                 return {
                     'status': 'error',

@@ -173,10 +173,16 @@ pub async fn validate_view_token(
 /// (`/overlay/{community}/{surface}`, `.../{surface}/live`) -- axum's
 /// `Path<T>` only captures named segments, so this deserializes correctly
 /// regardless of trailing literal segments like `/live`.
+///
+/// `surface` is `#[serde(default)]` for the same reason as
+/// [`crate::push::PushPathParams::surface`]: a route may spell the surface
+/// as a literal segment (no `{surface}` capture), and the guard never reads
+/// the field.
 #[derive(Debug, Deserialize)]
 pub struct ViewPathParams {
     pub community: String,
     #[allow(dead_code)]
+    #[serde(default)]
     pub surface: String,
 }
 
@@ -379,6 +385,32 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let response = test_router(store).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// A VIEW route that spells the surface as a literal segment (no
+    /// `{surface}` capture) must still be guardable -- the guard never
+    /// reads `surface`, so its absence must not fail path extraction.
+    #[tokio::test]
+    async fn middleware_allows_a_literal_surface_route() {
+        use tower::ServiceExt;
+
+        let token = generate_view_token();
+        let store = Arc::new(FakeStore::new(vec![active_record(42, &token)]));
+        let router = axum::Router::new()
+            .route(
+                "/overlay/{community}/caption",
+                axum::routing::get(|| async { "ok" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                store,
+                require_view_credential::<Arc<FakeStore>>,
+            ));
+        let request = axum::http::Request::builder()
+            .uri(format!("/overlay/42/caption?key={token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
     }
 

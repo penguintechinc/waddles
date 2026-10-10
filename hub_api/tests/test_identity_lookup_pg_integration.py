@@ -217,7 +217,7 @@ async def _member(
     )
     if value is not None and display:
         # The membership trigger never copies display names into the PII table (alembic
-        # 0047); a pseudonym's handle arrives from the platform-asserted mint that
+        # 0048); a pseudonym's handle arrives from the platform-asserted mint that
         # svc-process performs with the sender's name. Emulate that mint here.
         await adal.executesql_async(
             "UPDATE ephemeral_pseudonyms SET handle = %s WHERE pseudonym = %s::uuid",

@@ -7,6 +7,48 @@
 -- PHASE 1: Extend calendar_events table for ticketing
 -- ============================================================================
 
+-- Fresh-DB replay: no migration in either chain ever CREATEd calendar_events
+-- (historically created out-of-band by the calendar module / PyDAL), so on an empty
+-- database every ALTER below -- and 061_calendar_sync -- hit UndefinedTable. Create it
+-- first, with the same column set as alembic 0039_event_sync_enabled.py and
+-- hub_api bind_calendar_sync_tables(); IF NOT EXISTS keeps this a no-op on any DB
+-- where the table already exists (all already-migrated DBs skip this file entirely).
+CREATE TABLE IF NOT EXISTS calendar_events (
+    id SERIAL PRIMARY KEY,
+    community_id INTEGER NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    event_date TIMESTAMPTZ NOT NULL,
+    end_date TIMESTAMPTZ,
+    timezone VARCHAR(100),
+    location TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'scheduled',
+    discord_event_id VARCHAR(255),
+    sync_status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    sync_error TEXT,
+    last_sync_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- calendar_rsvps is referenced by calendar_tickets.rsvp_id below and likewise has no
+-- CREATE TABLE anywhere; columns are the ones calendar_interaction_module's
+-- rsvp_service.py reads/writes.
+CREATE TABLE IF NOT EXISTS calendar_rsvps (
+    id SERIAL PRIMARY KEY,
+    event_id INTEGER NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+    platform VARCHAR(50) NOT NULL,
+    platform_user_id VARCHAR(100) NOT NULL,
+    rsvp_status VARCHAR(20) NOT NULL DEFAULT 'yes',
+    guest_count INTEGER NOT NULL DEFAULT 0,
+    user_note TEXT,
+    is_waitlisted BOOLEAN NOT NULL DEFAULT FALSE,
+    waitlist_position INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (event_id, platform, platform_user_id)
+);
+
 ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS ticketing_enabled BOOLEAN DEFAULT FALSE;
 ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS require_ticket BOOLEAN DEFAULT FALSE;
 ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS is_paid_event BOOLEAN DEFAULT FALSE;
@@ -107,7 +149,7 @@ COMMENT ON TABLE calendar_ticket_types IS 'Ticket type definitions for events (G
 
 CREATE TABLE IF NOT EXISTS calendar_tickets (
     id SERIAL PRIMARY KEY,
-    ticket_uuid UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
+    ticket_uuid UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
     ticket_code VARCHAR(64) UNIQUE NOT NULL,  -- 64-char hex for QR verification
     ticket_number INTEGER NOT NULL,  -- Sequential per event (#001, #002, etc.)
 
@@ -193,7 +235,7 @@ CREATE OR REPLACE TRIGGER update_calendar_tickets_updated_at
 COMMENT ON TABLE calendar_tickets IS 'Individual tickets with unique 64-char hex codes for QR verification';
 COMMENT ON COLUMN calendar_tickets.ticket_code IS '64-char hex code for QR verification (256 bits entropy)';
 COMMENT ON COLUMN calendar_tickets.ticket_number IS 'Sequential ticket number per event for display (#001, #002)';
-COMMENT ON COLUMN calendar_tickets.check_in_mode IS 'How this ticket was checked in: qr_scan, manual, api, self_checkin, auto_checkin';
+COMMENT ON COLUMN calendar_tickets.check_in_method IS 'How this ticket was checked in: qr_scan, manual, api, self_checkin, auto_checkin';
 
 -- ============================================================================
 -- PHASE 4: Create check-in audit log table

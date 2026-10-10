@@ -26,7 +26,7 @@ hiredis>=2.3.2
 
 # HTTP client -- svc-action's own shared httpx.AsyncClient (app.py's
 # startup(), passed to every bundle entrypoint as its http_client kwarg).
-# [http2] extra (pulls in `h2`) is mandatory, not decorative -- bundles/
+# [http2] extra (pulls in `h2`) is mandatory, not decorative -- builtin_handlers/
 # discord_send_action.py and any bundle using waddle_transports' `http`
 # transport's `grpc` sub_type need real HTTP/2 negotiation, which httpx
 # only does when the client was constructed with http2=True.

@@ -101,7 +101,7 @@ _target_refusals = _meter.create_counter(
 )
 
 #: Why a community member's ``user_uuid`` is NULL ("unavailable"), as written by the
-#: membership trigger (alembic 0047). Kept in step with the table's CHECK constraint.
+#: membership trigger (alembic 0048). Kept in step with the table's CHECK constraint.
 UNAVAILABLE_REASONS = ("uuid_collision", "dangling_user_id", "unresolvable", "no_tenant")
 _unavailable_counts: dict[str, int] = {}
 

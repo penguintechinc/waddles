@@ -520,3 +520,193 @@ def test_active_game_missing_required_fields_is_treated_as_no_active_game(
 def test_kv_key_builders_satisfy_host_guest_key_charset() -> None:
     validate_key(_ACTIVE_KEY)
     assert ":" not in _ACTIVE_KEY
+
+
+# ---------------------------------------------------------------------------
+# PII-free logs -- regression: gh-674 (bundle-logs-must-be-pii-free)
+# ---------------------------------------------------------------------------
+
+_SENTINEL = "SENTINELpii9f3a"
+
+#: Field names a bundle log line must never carry -- each is a vector for raw user input.
+_FORBIDDEN_LOG_FIELDS = frozenset(
+    {"raw", "rest", "text", "message", "arg", "actor", "username", "user", "target", "handle"}
+)
+
+
+def _assert_logs_pii_free(fake_host: _FakeHost, *, minimum_lines: int = 1) -> None:
+    """Assert every captured log line is free of the sentinel and of raw-input field names.
+
+    Asserts a non-empty denominator first -- a check that examined zero log lines proves nothing.
+    """
+    assert len(fake_host.log_calls) >= minimum_lines
+    for _lvl, message, fields_json in fake_host.log_calls:
+        assert _SENTINEL not in message
+        assert _SENTINEL not in fields_json
+        assert not set(json.loads(fields_json)) & _FORBIDDEN_LOG_FIELDS
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"!hangman guess {_SENTINEL}",
+        f"!hangman {_SENTINEL}",
+        f"!hangman start {_SENTINEL}",
+        f"!hangman reveal {_SENTINEL}",
+        "!hangman guess",
+        "!hangman guess p",
+        "!hangman start",
+        "!hangman",
+    ],
+)
+def test_transform_logs_never_carry_user_input(text: str, fake_host: _FakeHost) -> None:
+    # regression: gh-674
+    assert _run(transform(_sample_event(text, actor=_SENTINEL))) is not None
+    _assert_logs_pii_free(fake_host)
+
+
+def test_dispatch_logs_never_carry_user_input_on_any_verb(
+    fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # regression: gh-674
+    _start_with_word(fake_host, monkeypatch, "go")
+    steps = [
+        ("guess", _SENTINEL),  # invalid letter
+        ("guess", "z"),  # wrong
+        ("guess", "z"),  # repeat
+        ("guess", "g"),  # correct, continues
+        ("reveal", None),
+        ("start", None),  # already active
+        ("usage", _SENTINEL),
+        ("guess", "o"),  # win
+    ]
+    for action, arg in steps:
+        _run(dispatch(_envelope(action, actor=_SENTINEL, arg=arg), {}, http_client=None))
+    _assert_logs_pii_free(fake_host, minimum_lines=len(steps))
+
+
+class _Error_Backend:  # noqa: N801 -- mirrors the generated WIT variant-case class name
+    """Stand-in for the generated `Error_Backend` WIT variant case."""
+
+
+def test_kv_failure_and_corrupt_state_logs_never_carry_user_input(
+    fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # regression: gh-674 -- the failure paths historically echoed `str(exc)` / raw bytes.
+    fake_host.store[_scoped(_ACTIVE_KEY)] = ("{" + _SENTINEL).encode("utf-8")
+    _run(dispatch(_envelope("reveal", actor=_SENTINEL), {}, http_client=None))
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise _HostKvError(f"backend {_SENTINEL}")
+
+    monkeypatch.setattr(community_kv, "get", _boom)
+    with pytest.raises(RuntimeError):
+        _run(dispatch(_envelope("guess", actor=_SENTINEL, arg=_SENTINEL), {}, http_client=None))
+    _assert_logs_pii_free(fake_host, minimum_lines=2)
+
+
+def test_kv_error_log_carries_only_the_wit_error_case_name(
+    fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _WitError(Exception):
+        value = _Error_Backend()
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise _WitError(f"detail {_SENTINEL}")
+
+    monkeypatch.setattr(community_kv, "get", _boom)
+    with pytest.raises(RuntimeError, match="hangman kv get failed: _Error_Backend"):
+        _run(dispatch(_envelope("reveal"), {}, http_client=None))
+    errors = [json.loads(f) for _lvl, msg, f in fake_host.log_calls if msg == "hangman.kv_error"]
+    assert errors == [{"op": "get", "error": "_Error_Backend"}]
+    _assert_logs_pii_free(fake_host)
+
+
+# ---------------------------------------------------------------------------
+# No silent fallback: every `guess` write path fails loud and leaves state untouched
+# ---------------------------------------------------------------------------
+
+
+def _seed_game(fake_host: _FakeHost, *, word: str, guessed: list[str], wrong: int) -> bytes:
+    raw = json.dumps({"word": word, "guessed": guessed, "wrong": wrong}).encode("utf-8")
+    fake_host.store[_scoped(_ACTIVE_KEY)] = raw
+    return raw
+
+
+def test_guess_kv_get_failure_fails_loud(
+    fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_game(fake_host, word="go", guessed=[], wrong=0)
+    monkeypatch.setattr(community_kv, "get", _raise_err)
+    with pytest.raises(RuntimeError, match="hangman kv get failed"):
+        _run(dispatch(_envelope("guess", arg="g"), {}, http_client=None))
+    assert "temporarily unavailable" in _relay_text(fake_host)
+    assert len(fake_host.relay_calls) == 1
+
+
+@pytest.mark.parametrize("letter", ["g", "z"], ids=["correct-guess", "wrong-guess"])
+def test_guess_kv_set_failure_fails_loud_and_state_is_untouched(
+    letter: str, fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _seed_game(fake_host, word="go", guessed=[], wrong=0)
+    monkeypatch.setattr(community_kv, "set", _raise_err)
+    with pytest.raises(RuntimeError, match="hangman kv set failed"):
+        _run(dispatch(_envelope("guess", arg=letter), {}, http_client=None))
+    assert fake_host.store[_scoped(_ACTIVE_KEY)] == before
+    assert "temporarily unavailable" in _relay_text(fake_host)
+
+
+def test_losing_guess_kv_delete_failure_fails_loud_and_state_is_untouched(
+    fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _seed_game(
+        fake_host, word="go", guessed=["a", "b", "c", "d", "e"], wrong=_MAX_WRONG_GUESSES - 1
+    )
+    monkeypatch.setattr(community_kv, "delete", _raise_err)
+    with pytest.raises(RuntimeError, match="hangman kv delete failed"):
+        _run(dispatch(_envelope("guess", arg="z"), {}, http_client=None))
+    assert fake_host.store[_scoped(_ACTIVE_KEY)] == before
+    assert "temporarily unavailable" in _relay_text(fake_host)
+    # No "Out of lives" reply was relayed ahead of the failure.
+    assert all("Out of lives" not in json.loads(m)["text"] for _p, m in fake_host.relay_calls)
+
+
+# ---------------------------------------------------------------------------
+# Corrupt store: every malformed shape is ERROR-logged (loud) and self-heals
+# ---------------------------------------------------------------------------
+
+_CORRUPT_PAYLOADS = [
+    pytest.param(b"\xff\xfe\x00", id="not-utf8"),
+    pytest.param(b"{", id="truncated-json"),
+    pytest.param(b"[]", id="json-not-an-object"),
+    pytest.param(b'{"word": 5, "guessed": [], "wrong": 0}', id="word-not-str"),
+    pytest.param(b'{"word": "go", "guessed": "g", "wrong": 0}', id="guessed-not-list"),
+    pytest.param(b'{"word": "go", "guessed": [1], "wrong": 0}', id="guessed-item-not-str"),
+    pytest.param(b'{"word": "go", "guessed": [], "wrong": "0"}', id="wrong-not-int"),
+]
+
+
+@pytest.mark.parametrize("payload", _CORRUPT_PAYLOADS)
+def test_every_corrupt_shape_is_error_logged_and_reads_as_no_game(
+    payload: bytes, fake_host: _FakeHost
+) -> None:
+    fake_host.store[_scoped(_ACTIVE_KEY)] = payload
+    _run(dispatch(_envelope("reveal"), {}, http_client=None))
+    assert _relay_text(fake_host) == _NO_ACTIVE_GAME
+    corrupt = [(lvl, f) for lvl, msg, f in fake_host.log_calls if msg == "hangman.state_corrupt"]
+    assert len(corrupt) == 1
+    assert corrupt[0][0] == 0  # Level.ERROR
+    assert json.loads(corrupt[0][1]) == {"context": "active", "community": "comm-1"}
+
+
+def test_start_over_a_corrupt_record_replaces_it_with_a_fresh_game(
+    fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_host.store[_scoped(_ACTIVE_KEY)] = b"not json"
+    _start_with_word(fake_host, monkeypatch, "go")
+    assert json.loads(fake_host.store[_scoped(_ACTIVE_KEY)]) == {
+        "word": "go",
+        "guessed": [],
+        "wrong": 0,
+    }
+    assert any(msg == "hangman.state_corrupt" for _lvl, msg, _f in fake_host.log_calls)

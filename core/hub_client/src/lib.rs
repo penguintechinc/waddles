@@ -789,6 +789,311 @@ mod tests {
     }
 }
 
+/// Coverage for the client's auth/retry/circuit-breaker paths using a lazily-connected
+/// channel to a dead port (every RPC fails `UNAVAILABLE`) and a tiny local token server.
+#[cfg(test)]
+mod client_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const DEAD_ENDPOINT: &str = "http://127.0.0.1:1";
+
+    /// Local HTTP server answering every request with the given status/body.
+    async fn token_server(status: u16, body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn sa_token_file(label: &str) -> String {
+        let path =
+            std::env::temp_dir().join(format!("hub_client_sa_{}_{label}", std::process::id()));
+        std::fs::write(&path, "sa-token").expect("write sa token");
+        path.to_string_lossy().into_owned()
+    }
+
+    fn client_with(token_endpoint: &str, sa_path: &str, threshold: u32) -> HubClient {
+        let channel = Endpoint::from_static(DEAD_ENDPOINT).connect_lazy();
+        HubClient {
+            identity: IdentityServiceClient::new(channel.clone()),
+            key: KeyServiceClient::new(channel),
+            token_client: Arc::new(MachineJwtClient::new(token_endpoint, sa_path, "scope")),
+            circuit: Arc::new(CircuitBreaker::new(threshold, Duration::from_secs(60))),
+            deadline: Duration::from_millis(500),
+            max_retries: 2,
+        }
+    }
+
+    fn token_body() -> String {
+        r#"{"token":"jwt-abc","expires_in":900}"#.to_string()
+    }
+
+    #[test]
+    fn error_display_strings() {
+        assert!(HubClientError::CircuitOpen
+            .to_string()
+            .contains("circuit breaker open"));
+        assert!(HubClientError::Grpc(Status::internal("x"))
+            .to_string()
+            .contains("gRPC call failed"));
+        assert!(
+            HubClientError::Auth(ServiceAuthError::BootstrapRejected("r".into()))
+                .to_string()
+                .contains("machine JWT")
+        );
+        let e = HubClientError::TlsCaRead {
+            path: "/p".into(),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(e.to_string().contains("/p"));
+    }
+
+    #[test]
+    fn build_tls_config_without_ca_uses_system_roots() {
+        assert!(build_tls_config(None).is_ok());
+    }
+
+    #[test]
+    fn build_tls_config_reads_a_ca_file() {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let params = rcgen::CertificateParams::new(vec!["ca".to_string()]).expect("params");
+        let cert = params.self_signed(&key).expect("cert");
+        let path = std::env::temp_dir().join(format!("hub_client_ca_{}.pem", std::process::id()));
+        std::fs::write(&path, cert.pem()).expect("write");
+        assert!(build_tls_config(path.to_str()).is_ok());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn circuit_breaker_stays_open_before_reset_window() {
+        let breaker = CircuitBreaker::new(1, Duration::from_secs(60));
+        breaker.record_failure();
+        assert!(!breaker.allow());
+        assert!(!breaker.allow(), "still open until reset_after elapses");
+        breaker.record_success();
+        assert!(breaker.allow(), "success closes the breaker");
+    }
+
+    #[test]
+    fn now_ms_is_nonzero() {
+        assert!(now_ms() > 0);
+    }
+
+    #[tokio::test]
+    async fn connect_fails_closed_on_missing_ca_file() {
+        let err = HubClient::connect(
+            "https://127.0.0.1:1",
+            "http://t",
+            "/sa",
+            "s",
+            Some("/nonexistent/ca.pem"),
+        )
+        .await
+        .err()
+        .expect("must fail");
+        assert!(matches!(err, HubClientError::TlsCaRead { .. }));
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_invalid_endpoint_uri() {
+        let err = HubClient::connect("not a uri", "http://t", "/sa", "s", None)
+            .await
+            .err()
+            .expect("must fail");
+        assert!(matches!(err, HubClientError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_refused_is_transport_error() {
+        let err = HubClient::connect("https://127.0.0.1:1", "http://t", "/sa", "s", None)
+            .await
+            .err()
+            .expect("must fail");
+        assert!(matches!(err, HubClientError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn authed_request_sets_bearer_and_timeout() {
+        let url = token_server(200, token_body()).await;
+        let sa = sa_token_file("authed");
+        let client = client_with(&url, &sa, 5);
+        let req = client.authed_request(()).await.expect("request");
+        assert_eq!(
+            req.metadata().get("authorization").unwrap(),
+            "Bearer jwt-abc"
+        );
+        assert!(req.metadata().get("grpc-timeout").is_some());
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn authed_request_surfaces_bootstrap_rejection_as_auth_error() {
+        let url = token_server(401, "{}".into()).await;
+        let sa = sa_token_file("rejected");
+        let client = client_with(&url, &sa, 5);
+        let err = client.authed_request(()).await.expect_err("must fail");
+        assert!(matches!(
+            err,
+            HubClientError::Auth(ServiceAuthError::BootstrapRejected(_))
+        ));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn rpcs_fail_with_auth_error_when_token_unavailable() {
+        let client = client_with("http://127.0.0.1:1/t", "/nonexistent/sa", 5);
+        assert!(matches!(
+            client.mint_ephemeral_pseudonyms(vec![]).await,
+            Err(HubClientError::Auth(_))
+        ));
+        assert!(matches!(
+            client.resolve_display_names("t".into(), vec![]).await,
+            Err(HubClientError::Auth(_))
+        ));
+        assert!(matches!(
+            client
+                .get_stream_dek("t".into(), "p".into(), 1, vec![1])
+                .await,
+            Err(HubClientError::Auth(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn mint_is_not_retried_and_failures_open_the_circuit() {
+        let url = token_server(200, token_body()).await;
+        let sa = sa_token_file("mint");
+        let client = client_with(&url, &sa, 2);
+        for _ in 0..2 {
+            let err = client.mint_ephemeral_pseudonyms(vec![]).await.unwrap_err();
+            assert!(matches!(err, HubClientError::Grpc(_)));
+        }
+        assert!(matches!(
+            client.mint_ephemeral_pseudonyms(vec![]).await,
+            Err(HubClientError::CircuitOpen)
+        ));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn idempotent_rpcs_surface_grpc_error_after_retries_exhausted() {
+        let url = token_server(200, token_body()).await;
+        let sa = sa_token_file("idem");
+        let client = client_with(&url, &sa, 100);
+        let err = client
+            .resolve_display_names("tenant".into(), vec!["u".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::Grpc(_)));
+        let err = client
+            .get_stream_dek("tenant".into(), "purpose".into(), 1, vec![0; 32])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::Grpc(_)));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_retries_transient_then_succeeds() {
+        let client = client_with("http://t", "/sa", 100);
+        let calls = AtomicUsize::new(0);
+        let out = client
+            .call_with_retry(|| async {
+                if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(HubClientError::Grpc(Status::unavailable("flap")))
+                } else {
+                    Ok(7u32)
+                }
+            })
+            .await
+            .expect("succeeds on third attempt");
+        assert_eq!(out, 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_gives_up_after_max_retries() {
+        let client = client_with("http://t", "/sa", 100);
+        let calls = AtomicUsize::new(0);
+        let err = client
+            .call_with_retry(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(HubClientError::Grpc(Status::deadline_exceeded("slow")))
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::Grpc(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "1 try + max_retries(2)");
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_never_retries_non_transient_grpc() {
+        let client = client_with("http://t", "/sa", 100);
+        let calls = AtomicUsize::new(0);
+        let err = client
+            .call_with_retry(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(HubClientError::Grpc(Status::permission_denied("no")))
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HubClientError::Grpc(s) if s.code() == tonic::Code::PermissionDenied)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_never_retries_non_grpc_errors() {
+        let client = client_with("http://t", "/sa", 100);
+        let calls = AtomicUsize::new(0);
+        let err = client
+            .call_with_retry(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(HubClientError::Auth(ServiceAuthError::BootstrapRejected(
+                    "x".into(),
+                )))
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::Auth(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_fails_fast_when_circuit_open() {
+        let client = client_with("http://t", "/sa", 1);
+        client.circuit.record_failure();
+        let calls = AtomicUsize::new(0);
+        let err = client
+            .call_with_retry(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, HubClientError>(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::CircuitOpen));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no call made while open");
+    }
+}
+
 /// PR #570 review blocker 2 regression coverage: `HubClient::connect` must trust the
 /// chart's internal CA (loaded from `ca_cert_path`/`HUB_API_GRPC_CA_FILE`), not just
 /// system/webpki roots. `build_tls_config` can't be exercised through a real TLS
