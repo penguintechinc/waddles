@@ -4,6 +4,7 @@ Analytics Service - Core analytics calculations and data retrieval
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
+from .log_safety import log_failure
 
 
 @dataclass
@@ -85,7 +86,7 @@ class AnalyticsService:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to get analytics config: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to get analytics config", e, community_id=community_id)
             raise
 
     async def update_config(self, community_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -127,7 +128,7 @@ class AnalyticsService:
             return await self.get_config(community_id)
 
         except Exception as e:
-            self.logger.error(f"Failed to update analytics config: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to update analytics config", e, community_id=community_id)
             raise
 
     async def get_basic_stats(self, community_id: int) -> Dict[str, Any]:
@@ -209,7 +210,7 @@ class AnalyticsService:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to get basic stats: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to get basic stats", e, community_id=community_id)
             raise
 
     async def process_events(self, events: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -237,7 +238,7 @@ class AnalyticsService:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to process events: {e}")
+            log_failure(self.logger, "Failed to process events", e)
             raise
 
     async def run_aggregation(
@@ -268,5 +269,5 @@ class AnalyticsService:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to run aggregation: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to run aggregation", e, community_id=community_id)
             raise
