@@ -2,8 +2,20 @@
 -- Adds knowledge source indexing, vector chunk storage, and AI-generated
 -- ticket suggestions with citation support.
 
--- Enable pgvector extension (must come before table creation that uses vector type)
-CREATE EXTENSION IF NOT EXISTS vector;
+-- Enable pgvector extension (must come before table creation that uses vector type).
+-- Ensure-extension-first, but do not hard-fail a fresh replay on a stock Postgres
+-- image that does not ship pgvector (e.g. postgres:16/17-bookworm): in that case
+-- warn loudly and fall back to a plain REAL[] embedding column with no ANN index.
+-- Installing pgvector later and converting the column is a separate, explicit step.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'vector') THEN
+    CREATE EXTENSION IF NOT EXISTS vector;
+  ELSE
+    RAISE WARNING 'pgvector is not available in this Postgres image: '
+      'ai_knowledge_chunks.embedding will be REAL[] and the ivfflat index is skipped';
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS ai_knowledge_sources (
   id SERIAL PRIMARY KEY,
@@ -49,19 +61,25 @@ CREATE INDEX IF NOT EXISTS idx_ai_knowledge_sources_active
   ON ai_knowledge_sources (is_active, refresh_interval)
   WHERE is_active = true;
 
-CREATE TABLE IF NOT EXISTS ai_knowledge_chunks (
-  id SERIAL PRIMARY KEY,
-  source_id INTEGER NOT NULL REFERENCES ai_knowledge_sources(id) ON DELETE CASCADE,
-  content TEXT NOT NULL,
-  content_hash VARCHAR(64) NOT NULL,      -- SHA-256 of content for dedup
-  source_url TEXT,                        -- original page URL for citation
-  source_title VARCHAR(500),
-  chunk_index INTEGER NOT NULL DEFAULT 0, -- position within document
-  embedding vector(384),                  -- pgvector, nomic-embed-text dimension
-  token_count INTEGER,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
+DO $$
+BEGIN
+  EXECUTE format($sql$
+    CREATE TABLE IF NOT EXISTS ai_knowledge_chunks (
+      id SERIAL PRIMARY KEY,
+      source_id INTEGER NOT NULL REFERENCES ai_knowledge_sources(id) ON DELETE CASCADE,
+      content TEXT NOT NULL,
+      content_hash VARCHAR(64) NOT NULL,      -- SHA-256 of content for dedup
+      source_url TEXT,                        -- original page URL for citation
+      source_title VARCHAR(500),
+      chunk_index INTEGER NOT NULL DEFAULT 0, -- position within document
+      embedding %s,                           -- pgvector (nomic-embed-text dimension 384) or REAL[] fallback
+      token_count INTEGER,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )$sql$,
+    CASE WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')
+         THEN 'vector(384)' ELSE 'REAL[]' END);
+END $$;
 
 -- Lookup chunks by source (for reindex / deletion)
 CREATE INDEX IF NOT EXISTS idx_ai_knowledge_chunks_source_id
@@ -73,9 +91,14 @@ CREATE INDEX IF NOT EXISTS idx_ai_knowledge_chunks_content_hash
 
 -- Vector similarity search (IVFFlat with 100 lists; tune lists = sqrt(row_count))
 -- Uses cosine distance to match nomic-embed-text normalised embeddings
-CREATE INDEX IF NOT EXISTS idx_ai_knowledge_chunks_embedding
-  ON ai_knowledge_chunks USING ivfflat (embedding vector_cosine_ops)
-  WITH (lists = 100);
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+    CREATE INDEX IF NOT EXISTS idx_ai_knowledge_chunks_embedding
+      ON ai_knowledge_chunks USING ivfflat (embedding vector_cosine_ops)
+      WITH (lists = 100);
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS ai_ticket_suggestions (
   id SERIAL PRIMARY KEY,

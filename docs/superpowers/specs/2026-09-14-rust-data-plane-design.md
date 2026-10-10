@@ -319,7 +319,7 @@ penguin-libs/packages/
 | Outbound | One Valkey `XADD` per event onto `{scope}:src:{platform}:{source_id}:events`; Twitch IRC sends drained from the outbound relay list. |
 | Control | `GET {HUB_API_URL}/api/v1/distribution/bundles?stage=process` every `POLL_INTERVAL_S`, with a `distribution:read`-scoped HS256 service JWT minted from `SECRET_KEY` (unchanged mechanism). |
 
-**Normalizers absorbed as code.** The six `core/svc_ingest/bundles/*_ingest.py` `normalize()` functions become Rust functions in `src/normalize/{twitch,twitch_eventsub,discord,slack,youtube,kick,generic}.rs`. Their behaviour is preserved exactly; the ported tests are the acceptance criterion (§14.4).
+**Normalizers absorbed as code.** The six `core/svc_ingest/builtin_handlers/*_ingest.py` `normalize()` functions become Rust functions in `src/normalize/{twitch,twitch_eventsub,discord,slack,youtube,kick,generic}.rs`. Their behaviour is preserved exactly; the ported tests are the acceptance criterion (§14.4).
 
 **Activation-resolution fix.** `core/svc_ingest/fanout.py`'s `NULL_INSTALLATIONS` lookup always returned zero rows, so the gateway fan-out path always fell through to each Feature's shipped default App and ignored real per-community activation. The Rust ingest resolves the target bundle set **only** through the distribution API (the same path `BundlePoller` already used correctly), so per-community activation is honoured on every path. This is a behaviour change and is called out in §15.3.
 
@@ -2092,7 +2092,7 @@ All routes are on `:8200`. `INTAKE_MAX_BODY_BYTES` = `262144` (256 KiB) applies 
 
 ### 10.2 Fixed platform inputs
 
-Ported with today's exact authentication and lifecycle behaviour (`core/svc_ingest/receivers/*.py`, `eventsub.py`, `bundles/kick_ingest.py`):
+Ported with today's exact authentication and lifecycle behaviour (`core/svc_ingest/receivers/*.py`, `eventsub.py`, `builtin_handlers/kick_ingest.py`):
 
 | Input | Mechanism | Credential | Lease |
 |---|---|---|---|
@@ -2912,7 +2912,7 @@ One example bundle per Tier 1 language (`bundles/rust/example`, `bundles/javascr
 - **Every** file under `bundles/python/` is compiled by the **real** `bundle-compiler` in CI (not a stub), and each is invoked through a real `bundle-executor` with golden events for its stage. The suite asserts `bundles_compiled == bundles_on_disk` and prints both numbers.
 - The bundles' pytest suites — already green natively after the M1.5 DAL migration — keep running unchanged against the `waddle-sdk` shim; their assertions are the compatibility oracle for D7.
 - A repo-wide check asserts zero `flask_core.database` and zero `pydal` imports under `bundles/python/`, printing the number of files scanned; the compiler's own `legacy_dal_import` rejection is exercised by a fixture bundle that still has one.
-- The six ported ingest normalizers are covered by translating `core/svc_ingest/bundles/test_*_ingest.py`'s cases into Rust table tests, one case per original assertion; the suite asserts the case count matches.
+- The six ported ingest normalizers are covered by translating `core/svc_ingest/builtin_handlers/test_*_ingest.py`'s cases into Rust table tests, one case per original assertion; the suite asserts the case count matches.
 - Retry classification parity: the action-stage cases from `core/svc_action/tests/` are replayed against the Rust runner and must produce the same retry/no-retry decision for every input.
 
 ### 14.5 Per-service and per-crate gates

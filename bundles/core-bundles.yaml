@@ -230,8 +230,8 @@ bundles:
       - tenant_slug: global
         community_id: null
   # `waddles.command-announce` has a known command-prefix collision with the legacy
-  # `core/svc_process/bundles/community_announcements_process.py` / `..._action.py`
-  # `!announce publish <id>` script bundle (bundles/python/announce/README.md's own note) --
+  # `core/svc_process/builtin_handlers/community_announcements_process.py` / `..._action.py`
+  # `!announce publish <id>` built-in stage handlers (bundles/python/announce/README.md's own note) --
   # registered here (installed) but its flag MUST stay OFF in PostHog until the migration
   # owner resolves the overlap; `feature_enabled(FLAG_KEY, default=False)` in its own
   # `transform()` keeps it silent by default either way.
@@ -499,6 +499,42 @@ bundles:
     source_dir: python/slap
     manifest_path: slap.manifest.yaml
     artifact_path: slap.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.hug
+    version: "1.0.0"
+    language: python
+    source_dir: python/hug
+    manifest_path: hug.manifest.yaml
+    artifact_path: hug.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.boop
+    version: "1.0.0"
+    language: python
+    source_dir: python/boop
+    manifest_path: boop.manifest.yaml
+    artifact_path: boop.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.highfive
+    version: "1.0.0"
+    language: python
+    source_dir: python/highfive
+    manifest_path: highfive.manifest.yaml
+    artifact_path: highfive.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.secret
+    version: "1.0.0"
+    language: python
+    source_dir: python/secret
+    manifest_path: secret.manifest.yaml
+    artifact_path: secret.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null

@@ -816,6 +816,23 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
+  # Odoo / external-WaddleDB connector (hub_api/services/odoo_sync_service.py) -- deploy-time
+  # kill switch, defaulted OFF. Odoo creds come ONLY from an operator-created Secret holding
+  # ODOO_URL/ODOO_DB/ODOO_LOGIN/ODOO_API_KEY/ODOO_SYNC_REF_KEY -- never rendered here.
+  odooSync:
+    enabled: false
+    envBaseline: false
+    secretName: "waddlebot-odoo-credentials"
+    schedule: "*/30 * * * *"
+    backoffLimit: 2
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
   # Bar Citizen role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
   # deploy-time kill switch, defaulted OFF (critical-rules.md Feature Flags: every feature
   # flagged OFF until validated) -- see templates/role-sync-cronjob.yaml's own header comment.
@@ -2833,4 +2850,11 @@ autoProvisionedKeys:
     # `SERVICE_JWT_PRIVATE_KEY_` prefix scan finds nothing and issuance stays
     # disabled. Must stay `[A-Za-z_][A-Za-z0-9_]*` if ever changed.
     keyId: "waddlebot1"
+    externalSecret: false
+  # #684 / PR #718 secret messaging (one-time secrets) -- AES-256-GCM key, 64 lowercase
+  # hex chars, hub-api env ONE_TIME_SECRET_ENCRYPTION_KEY. Generated once, never rotated.
+  # Feature flag waddles.secret-messaging stays OFF by default (PostHog/ENV baseline).
+  oneTimeSecret:
+    secretName: "waddlebot-ots-encryption-key"
+    secretKey: "ONE_TIME_SECRET_ENCRYPTION_KEY"
     externalSecret: false

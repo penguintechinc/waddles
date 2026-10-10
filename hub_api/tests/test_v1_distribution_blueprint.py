@@ -63,8 +63,16 @@ def _seed_bundle(
         stages=stages
         if stages is not None
         else {
-            "ingest": {"entrypoint": "bundles.echo_ingest:normalize", "config": {}, "spec": {}},
-            "process": {"entrypoint": "bundles.echo_process:transform", "config": {}, "spec": {}},
+            "ingest": {
+                "entrypoint": "builtin_handlers.echo_ingest:normalize",
+                "config": {},
+                "spec": {},
+            },
+            "process": {
+                "entrypoint": "builtin_handlers.echo_process:transform",
+                "config": {},
+                "spec": {},
+            },
         },
     )
     dal.commit()
@@ -160,7 +168,7 @@ class TestListBundles:
         bundle = body["bundles"][0]
         assert bundle["appId"] == "waddles.core.demo.echo"
         assert bundle["communityId"] is None
-        assert bundle["entrypoint"] == "bundles.echo_ingest:normalize"
+        assert bundle["entrypoint"] == "builtin_handlers.echo_ingest:normalize"
         assert bundle["config"] == {"greeting": "hi"}
 
     async def test_community_activation_overrides_tenant_wide_config(
@@ -232,7 +240,13 @@ class TestListBundles:
         _seed_bundle(
             distribution_db,
             app_id="waddles.core.demo.actiononly",
-            stages={"action": {"entrypoint": "bundles.echo_action:run", "config": {}, "spec": {}}},
+            stages={
+                "action": {
+                    "entrypoint": "builtin_handlers.echo_action:run",
+                    "config": {},
+                    "spec": {},
+                }
+            },
         )
         tenant_id, community_id = _seed_community(distribution_db)
         dal = distribution_db.dal
@@ -341,7 +355,11 @@ class TestListBundles:
             platform_compatibility={},
             status="active",
             stages={
-                "ingest": {"entrypoint": "bundles.echo_ingest:normalize", "config": {}, "spec": {}}
+                "ingest": {
+                    "entrypoint": "builtin_handlers.echo_ingest:normalize",
+                    "config": {},
+                    "spec": {},
+                }
             },
         )
         replica_dal.app_tenant_availability.insert(

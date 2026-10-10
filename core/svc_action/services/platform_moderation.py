@@ -1,25 +1,25 @@
 """services/platform_moderation.py -- Discord/Twitch REST/relay clients for moderation ENFORCEMENT.
 
-Split out from `bundles/moderation_enforce_action.py` so the two
+Split out from `builtin_handlers/moderation_enforce_action.py` so the two
 platforms' actual call logic (SSRF-guarded Discord REST + Valkey-relayed
 Twitch IRC) is independently testable and the action-stage entrypoint
 itself stays a thin per-platform dispatcher -- mirrors this repo's
-`bundles/social_alias_action.py` split into `_send_discord`/`_send_twitch`,
+`builtin_handlers/social_alias_action.py` split into `_send_discord`/`_send_twitch`,
 except these two platform implementations (SSRF-guarded REST call +
 inline 429 retry-once, or relay-queue warn + Helix ban) are large enough
-to earn a dedicated module rather than two private bundle functions.
+to earn a dedicated module rather than two private handler functions.
 
 Every function here raises `waddle_transports.{Retryable,NonRetryable}
 TransportError` with a SPECIFIC message on every failure path (design
 doc's "error states must be specific, e.g. 'oauth token didn't work'")
 -- never a bare/unclassified exception -- and returns an
-:class:`EnforcementOutcome` on success. `bundles/moderation_enforce_
+:class:`EnforcementOutcome` on success. `builtin_handlers/moderation_enforce_
 action.py::enforce()` owns config parsing, target resolution, and
 combining outcomes into one `TransportResult`; this module owns nothing
 but "make the actual call, classify the actual response."
 
 `resolve_community_moderator_token()` (gh-320) is this module's
-community-aware addition: `bundles/moderation_enforce_action.py`'s Twitch
+community-aware addition: `builtin_handlers/moderation_enforce_action.py`'s Twitch
 timeout path (the one call here needing a *user*-scoped token, `twitch_
 timeout`'s `moderator_token`) tries it FIRST, falling back to the
 existing `moderator_token_ref`/`resolve_secret` config path only when no
@@ -49,17 +49,17 @@ except ImportError:  # pragma: no cover -- exercised only before gh-320's resolv
 
 #: Discord's own ceiling for `communication_disabled_until` (28 days out
 #: from now) -- a request beyond this is rejected by Discord itself with
-#: a 400, so this bundle clamps proactively rather than letting that
+#: a 400, so this handler clamps proactively rather than letting that
 #: round-trip happen.
 DISCORD_MAX_TIMEOUT_SECONDS = 28 * 24 * 3600  # 2,419,200
 
 #: Twitch Helix `/moderation/bans` max timed-ban `duration` (14 days) --
 #: a duration beyond this is a permanent ban (omit `duration` entirely),
-#: out of scope for this enforcement bundle (timeout only, never a
+#: out of scope for this enforcement handler (timeout only, never a
 #: permanent ban).
 TWITCH_MAX_TIMEOUT_SECONDS = 1_209_600
 
-#: Real API roots -- public (no leading underscore) since `bundles/
+#: Real API roots -- public (no leading underscore) since `builtin_handlers/
 #: moderation_enforce_action.py` reuses them as the `config["api_base"]`
 #: fallback default, mirroring `discord_send_action.py`'s own
 #: `config.get("api_base", _DEFAULT_API_BASE)` convention.
@@ -266,7 +266,7 @@ async def resolve_community_moderator_token(community_id: int | None) -> str | N
     `source == "community"`); `None` for every other outcome -- no
     community connection, `source == "env"`, the resolver module not
     importable yet, or the resolver itself raising. Never raises: the
-    caller (`bundles/moderation_enforce_action.py::_enforce_twitch`) falls
+    caller (`builtin_handlers/moderation_enforce_action.py::_enforce_twitch`) falls
     back to its existing `moderator_token_ref`/`resolve_secret` config
     path whenever this returns `None`, so a community with no connected
     Twitch account behaves exactly as before this feature existed.
@@ -319,7 +319,7 @@ async def twitch_timeout(
     manage:banned_users`) belonging to the broadcaster or one of their
     mods -- an app/client-credentials token can never authorize this
     endpoint (Twitch rejects it with 401/403 same as any other invalid
-    token); the caller (`bundles/moderation_enforce_action.py`) is
+    token); the caller (`builtin_handlers/moderation_enforce_action.py`) is
     responsible for refusing BEFORE calling this function when no such
     token is configured at all (see that module's own specific "requires
     a user token" error), so a 401/403 actually reaching this function

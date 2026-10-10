@@ -29,10 +29,10 @@ rather than just returning a value.
 Delivery primitives (`waddle_transports.transports.{http,message_queue,
 irc,socket,overlay,email}` -- `libs/waddle_transports`, a shared library
 also imported by svc-ingest for inbound) are NOT wired into this loop's
-routing -- they are a library an action bundle's own script may import
-and call for its actual delivery mechanism
-(`waddle_transports.registry.get_transport`), or, like `bundles/
-discord_send_action.py`, a bundle may implement its own connector-
+routing -- they are a library a built-in action handler's own module may
+import and call for its actual delivery mechanism
+(`waddle_transports.registry.get_transport`), or, like `builtin_handlers/
+discord_send_action.py`, a handler may implement its own connector-
 specific API logic entirely. Routing -- *which* bundle handles a given
 envelope -- is solely "whichever bundle's own `:action` queue key the
 envelope was popped from", exactly mirroring ingest/process; there is no

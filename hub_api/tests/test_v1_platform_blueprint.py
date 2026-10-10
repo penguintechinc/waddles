@@ -116,9 +116,7 @@ class TestScopeEnforcement:
 
 
 class TestUsers:
-    async def test_list_users_returns_seeded_member(
-        self, client: Any, platform_db: Any
-    ) -> None:
+    async def test_list_users_returns_seeded_member(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db)
         _seed_member(platform_db, community_id=community_id, user_id="42")
 
@@ -167,9 +165,7 @@ class TestUsers:
         response = await client.get("/api/v1/platform/users/9999", headers=_admin_headers())
         assert response.status_code == 404
 
-    async def test_get_user_found_with_memberships(
-        self, client: Any, platform_db: Any
-    ) -> None:
+    async def test_get_user_found_with_memberships(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db)
         _seed_member(platform_db, community_id=community_id, user_id="7")
 
@@ -229,9 +225,7 @@ class TestUsers:
         assert len(rows) == 1
         assert rows.first().role == "platform-admin"
 
-    async def test_update_user_role_clear_deactivates(
-        self, client: Any, platform_db: Any
-    ) -> None:
+    async def test_update_user_role_clear_deactivates(self, client: Any, platform_db: Any) -> None:
         grant = await client.put(
             "/api/v1/platform/users/7/role",
             headers=_admin_headers(),
@@ -262,9 +256,7 @@ class TestUsers:
 
 
 class TestCommunities:
-    async def test_list_communities_filters_inactive(
-        self, client: Any, platform_db: Any
-    ) -> None:
+    async def test_list_communities_filters_inactive(self, client: Any, platform_db: Any) -> None:
         _seed_community(platform_db, name="active-one", is_active=True)
         _seed_community(platform_db, name="inactive-one", is_active=False)
 
@@ -274,6 +266,28 @@ class TestCommunities:
         names = [c["name"] for c in body["communities"]]
         assert "active-one" in names
         assert "inactive-one" not in names
+
+    async def test_list_communities_excludes_tenant_wide_sentinel(
+        self, client: Any, platform_db: Any
+    ) -> None:
+        """The sentinel community (id 0, grants seeder) never appears, even for isActive=false."""
+        platform_db.dal.communities.insert(
+            id=0,
+            name="__tenant_wide__",
+            is_active=False,
+            is_public=False,
+            member_count=0,
+            tenant_id=1,
+            created_at=datetime.now(UTC),
+        )
+        platform_db.dal.commit()
+        for query in ("", "?isActive=false"):
+            response = await client.get(
+                f"/api/v1/platform/communities{query}", headers=_admin_headers()
+            )
+            assert response.status_code == 200
+            body = await response.get_json()
+            assert "__tenant_wide__" not in [c["name"] for c in body["communities"]]
 
     async def test_list_communities_search(self, client: Any, platform_db: Any) -> None:
         _seed_community(platform_db, name="findme")
@@ -287,9 +301,7 @@ class TestCommunities:
         assert [c["name"] for c in body["communities"]] == ["findme"]
 
     async def test_get_community_not_found_is_404(self, client: Any) -> None:
-        response = await client.get(
-            "/api/v1/platform/communities/9999", headers=_admin_headers()
-        )
+        response = await client.get("/api/v1/platform/communities/9999", headers=_admin_headers())
         assert response.status_code == 404
 
     async def test_get_community_found(self, client: Any, platform_db: Any) -> None:
@@ -383,12 +395,8 @@ class TestSystem:
     async def test_audit_log_filters_by_action_and_user(
         self, client: Any, platform_db: Any
     ) -> None:
-        platform_db.dal.audit_log.insert(
-            user_id=7, action="login", created_at=datetime.now(UTC)
-        )
-        platform_db.dal.audit_log.insert(
-            user_id=8, action="logout", created_at=datetime.now(UTC)
-        )
+        platform_db.dal.audit_log.insert(user_id=7, action="login", created_at=datetime.now(UTC))
+        platform_db.dal.audit_log.insert(user_id=8, action="logout", created_at=datetime.now(UTC))
         platform_db.dal.commit()
 
         by_action = await client.get(

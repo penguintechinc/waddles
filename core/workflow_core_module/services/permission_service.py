@@ -26,6 +26,7 @@ Permission Targets:
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from uuid import UUID
+from flask_core import describe_db_error
 
 
 @dataclass(slots=True)
@@ -183,7 +184,7 @@ class PermissionService:
 
         except Exception as e:
             self.logger.error(
-                f"Error checking permission: {str(e)}",
+                f"Error checking permission: {describe_db_error(e)}",
                 extra={"workflow_id": workflow_id, "user_id": user_id, "permission": permission_type}
             )
             return False
@@ -308,7 +309,7 @@ class PermissionService:
             )
 
         except Exception as e:
-            error_msg = f"Failed to grant permission: {str(e)}"
+            error_msg = f"Failed to grant permission: {describe_db_error(e)}"
             self.logger.error(
                 error_msg,
                 extra={"workflow_id": workflow_id, "target_type": target_type, "target_id": target_id}
@@ -319,7 +320,7 @@ class PermissionService:
                 workflow_id=workflow_id,
                 target_type=target_type,
                 target_id=target_id,
-                error=str(e)
+                error=describe_db_error(e)
             )
 
     async def revoke_permission(
@@ -382,7 +383,7 @@ class PermissionService:
             )
 
         except Exception as e:
-            error_msg = f"Failed to revoke permission: {str(e)}"
+            error_msg = f"Failed to revoke permission: {describe_db_error(e)}"
             self.logger.error(
                 error_msg,
                 extra={"workflow_id": workflow_id, "target_type": target_type, "target_id": target_id}
@@ -393,7 +394,7 @@ class PermissionService:
                 workflow_id=workflow_id,
                 target_type=target_type,
                 target_id=target_id,
-                error=str(e)
+                error=describe_db_error(e)
             )
 
     async def get_user_permissions(
@@ -464,7 +465,7 @@ class PermissionService:
 
         except Exception as e:
             self.logger.error(
-                f"Error getting user permissions: {str(e)}",
+                f"Error getting user permissions: {describe_db_error(e)}",
                 extra={"workflow_id": workflow_id, "user_id": user_id}
             )
             return PermissionInfo()
@@ -558,7 +559,7 @@ class PermissionService:
 
         except Exception as e:
             self.logger.error(
-                f"Error listing workflows for user: {str(e)}",
+                f"Error listing workflows for user: {describe_db_error(e)}",
                 extra={"user_id": user_id, "entity_id": entity_id, "permission": permission}
             )
             return []
@@ -578,7 +579,7 @@ class PermissionService:
                 return result[0][0] == user_id
             return False
         except Exception as e:
-            self.logger.error(f"Error checking workflow owner: {str(e)}")
+            self.logger.error(f"Error checking workflow owner: {describe_db_error(e)}")
             return False
 
     async def _get_permission(
@@ -607,7 +608,7 @@ class PermissionService:
                 )
             return None
         except Exception as e:
-            self.logger.error(f"Error getting permission: {str(e)}")
+            self.logger.error(f"Error getting permission: {describe_db_error(e)}")
             return None
 
     async def _get_user_roles(self, user_id: int, community_id: int = None) -> List[int]:
@@ -627,7 +628,7 @@ class PermissionService:
 
             return [row[0] for row in result] if result else []
         except Exception as e:
-            self.logger.error(f"Error getting user roles: {str(e)}")
+            self.logger.error(f"Error getting user roles: {describe_db_error(e)}")
             return []
 
     async def _get_workflow_entity_permission(
@@ -667,7 +668,7 @@ class PermissionService:
                 )
             return None
         except Exception as e:
-            self.logger.error(f"Error getting workflow entity permission: {str(e)}")
+            self.logger.error(f"Error getting workflow entity permission: {describe_db_error(e)}")
             return None
 
     async def _get_all_workflow_entity_permissions(
@@ -695,5 +696,5 @@ class PermissionService:
                 )
             return None
         except Exception as e:
-            self.logger.error(f"Error getting entity permissions: {str(e)}")
+            self.logger.error(f"Error getting entity permissions: {describe_db_error(e)}")
             return None

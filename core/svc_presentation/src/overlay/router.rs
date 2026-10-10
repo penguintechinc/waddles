@@ -2,9 +2,17 @@
 //! they've added the real overlay routes, so each route is auth-gated
 //! from the moment it is added with zero additional wiring.
 //!
-//! **Deliberately NOT invoked by [`crate::http::router`] yet.** axum has
-//! no way to pre-attach a guard to a router with zero routes that doesn't
-//! also corrupt the router's own 404 handling:
+//! P3/P4 now call both: `crate::http::router` wraps the live SSE/websocket
+//! routes with [`with_view_guard`] and the push route with
+//! [`with_push_guard`] (see `crate::http::overlay`). P2's render route
+//! (the plain `GET /{community}/{surface}` full-page surface) is still
+//! pending and will apply [`with_view_guard`] the same way once it lands.
+//!
+//! This module's functions exist specifically because axum has no way to
+//! pre-attach a guard to a router with zero routes that doesn't also
+//! corrupt the router's own 404 handling -- true for P1's original empty
+//! scaffold and still the reason these are applied per-router-with-routes
+//! rather than once globally:
 //! - `Router::layer(...)` wraps the *whole* router's service, including
 //!   its fallback -- attached to an empty router, it intercepts every
 //!   request that would otherwise 404 and runs the guard's extractors
@@ -91,6 +99,8 @@ mod tests {
             cli,
             db_password: Secret::new("x"),
             cache_password: None,
+            image_bucket_access_key_id: None,
+            image_bucket_secret_access_key: None,
         };
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
         AppState::new(config, prometheus::Registry::new(), db)
@@ -198,6 +208,8 @@ mod tests {
             cli,
             db_password: Secret::new("x"),
             cache_password: None,
+            image_bucket_access_key_id: None,
+            image_bucket_secret_access_key: None,
         };
         Arc::new(AppPushTrustSource::from_config(&config))
     }

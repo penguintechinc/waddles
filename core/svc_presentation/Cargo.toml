@@ -23,7 +23,12 @@ path = "src/main.rs"
 # versions of the same crate.
 [dependencies]
 tokio = { version = "=1.53.1", features = ["full"] }
-axum = "=0.8.9"
+# "ws" (not a default axum feature) -- P4's live overlay viewer channel
+# (`http::overlay::live_ws`) needs `axum::extract::ws`; "tokio" (default)
+# already covers `axum::serve` itself. "multipart" (`dep:multer`, not a
+# default feature) -- P6's image upload handler (`src/images/upload.rs`) is
+# the only consumer.
+axum = { version = "=0.8.9", features = ["ws", "multipart"] }
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace", "cors"] }
 hyper = { version = "=1.11.1", features = ["full"] }
@@ -54,6 +59,11 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
     "macros",
     "with-json",
     "with-chrono",
+    # `overlay_images.asset_id` (migration 101) is a `UUID` column --
+    # `with-uuid` is what makes `sea_orm::entity::prelude::Uuid` resolve to
+    # the `uuid` crate's type in a `DeriveEntityModel`, same convention
+    # `core/bundle_host_db/Cargo.toml` already pins this feature for.
+    "with-uuid",
 ] }
 # Pinned exactly alongside `sea-orm` above -- sea-orm 2.0.2's own manifest
 # constrains this transitive dependency to `~2.0.2` (>=2.0.2, <2.1.0), so
@@ -87,6 +97,55 @@ overlay_auth = { path = "../overlay_auth", version = "=0.1.0" }
 # second direct use of the same already-resolved crate, not new surface.
 service_auth = { path = "../service_auth", version = "=0.1.0" }
 
+# -- P6 (image upload) / P9 (image render) additions below --
+
+# S3-compatible object storage client (SeaweedFS in this cluster) --
+# `crate::images::store::ObjectStoreImageStore`. Same exact pin
+# `core/svc_streaming/Cargo.toml` already resolves for its own recording
+# uploads against the identical SeaweedFS S3 gateway -- reusing it here
+# keeps this crate's own `Cargo.lock` resolving against an already-fetched,
+# already-reviewed dependency tree rather than a second S3 client crate.
+# `aws` feature is what provides `AmazonS3Builder` + the presigned-URL
+# `Signer` impl this module's signed/scoped/expiring GET URLs depend on
+# (`object_store::signer::Signer`, confirmed present on `AmazonS3` in this
+# exact pinned version).
+object_store = { version = "=0.14.1", features = ["aws"] }
+# `crate::images::store`'s `ImageStore` trait -- same exact pin
+# `core/service_auth`/`core/overlay_auth` already resolve (both are direct
+# path deps of this crate), so no second resolved version appears in this
+# crate's dependency graph.
+async-trait = "=0.1.89"
+# SHA-256 of uploaded image bytes (`crate::images::upload`) -- dedup/
+# integrity metadata, same exact pin every other crate in this repo that
+# hashes bytes already uses (`core/overlay_auth`, `core/bundle_executor`,
+# ...).
+sha2 = "=0.10.9"
+# `object_store::signer::Signer::signed_url` returns a `url::Url` --
+# already resolved at this exact version transitively (`core/svc_streaming`,
+# `core/bundle_active_set`); declared directly so `crate::images::render`'s
+# return type is nameable.
+url = "=2.5.8"
+# `Signer::signed_url`'s `method: http::Method` parameter -- already
+# resolved at this exact version transitively (axum/hyper); declared
+# directly for the same reason as `url` above.
+http = "=1.5.0"
+# Uploaded image bytes (`crate::images::upload`) and the `PutPayload` this
+# crate's `object_store::ObjectStore::put` call needs -- same exact pin
+# `core/svc_streaming`/`core/egress_proxy` already resolve.
+bytes = "=1.12.1"
+# Spec SS13.5-style PostHog flag gate for the image-upload feature
+# (`crate::flags::IMAGE_UPLOAD_FLAG`) -- same git/rev pin
+# `core/svc_action`/`core/svc_process`/`core/svc_ingest` already use, so no
+# second resolved revision of this unpublished crate appears anywhere in
+# this repo.
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
+
+# P3's live SSE stream (`overlay::hub`/`http::overlay::live_event_stream`)
+# builds a `Stream` by hand with `futures::stream::unfold` rather than
+# pulling in `async-stream`'s proc-macro -- same exact version/feature pin
+# as core/svc_streaming/Cargo.toml so cargo-deny sees one resolved version.
+futures = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
+
 [dev-dependencies]
 http-body-util = "=0.1.3"
 # Test-only: `MockDatabase` for `overlay::view_store`/`http::health`/
@@ -100,6 +159,12 @@ sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
 # version/feature pin as core/overlay_auth/Cargo.toml and
 # core/service_auth/Cargo.toml so cargo-deny sees one resolved version.
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs"] }
+# Test-only real websocket client -- `tests/overlay_live.rs` connects to a
+# genuinely bound TCP listener running the real axum app (same `axum::serve`
+# pattern as `tests/run.rs`) rather than mocking the upgrade; exact same
+# version axum's own "ws" feature pins above, so cargo-deny sees one
+# resolved version, not two.
+tokio-tungstenite = "=0.29.0"
 
 [profile.release]
 opt-level = 3

@@ -32,13 +32,13 @@ sandbox1=$(mktemp -d)
 temp_dirs+=("$sandbox1")
 
 # Copy real bundle directories to sandbox
-mkdir -p "$sandbox1/core/svc_process/bundles"
-mkdir -p "$sandbox1/core/svc_action/bundles"
-mkdir -p "$sandbox1/core/svc_ingest/bundles"
+mkdir -p "$sandbox1/core/svc_process/builtin_handlers"
+mkdir -p "$sandbox1/core/svc_action/builtin_handlers"
+mkdir -p "$sandbox1/core/svc_ingest/builtin_handlers"
 
-cp -r "$REPO_ROOT/core/svc_process/bundles/"*.py "$sandbox1/core/svc_process/bundles/"
-cp -r "$REPO_ROOT/core/svc_action/bundles/"*.py "$sandbox1/core/svc_action/bundles/"
-cp -r "$REPO_ROOT/core/svc_ingest/bundles/"*.py "$sandbox1/core/svc_ingest/bundles/"
+cp -r "$REPO_ROOT/core/svc_process/builtin_handlers/"*.py "$sandbox1/core/svc_process/builtin_handlers/"
+cp -r "$REPO_ROOT/core/svc_action/builtin_handlers/"*.py "$sandbox1/core/svc_action/builtin_handlers/"
+cp -r "$REPO_ROOT/core/svc_ingest/builtin_handlers/"*.py "$sandbox1/core/svc_ingest/builtin_handlers/"
 
 # Verify files were copied
 files_copied=$(find "$sandbox1/core" -maxdepth 3 -name '*.py' | wc -l)
@@ -87,10 +87,10 @@ sandbox2=$(mktemp -d)
 temp_dirs+=("$sandbox2")
 
 # Create incomplete directory structure (missing svc_process)
-mkdir -p "$sandbox2/core/svc_action/bundles"
-mkdir -p "$sandbox2/core/svc_ingest/bundles"
-touch "$sandbox2/core/svc_action/bundles/dummy.py"
-touch "$sandbox2/core/svc_ingest/bundles/dummy.py"
+mkdir -p "$sandbox2/core/svc_action/builtin_handlers"
+mkdir -p "$sandbox2/core/svc_ingest/builtin_handlers"
+touch "$sandbox2/core/svc_action/builtin_handlers/dummy.py"
+touch "$sandbox2/core/svc_ingest/builtin_handlers/dummy.py"
 
 # Run gate from sandbox
 cd "$sandbox2"
@@ -107,7 +107,7 @@ else
 fi
 
 # Check that error message names the missing directory
-if echo "$output2" | grep -q "expected directory missing: core/svc_process/bundles"; then
+if echo "$output2" | grep -q "expected directory missing: core/svc_process/builtin_handlers"; then
     echo "  ✓ Error message names missing directory"
     cases_passed=$((cases_passed + 1))
 else
@@ -124,13 +124,13 @@ sandbox3=$(mktemp -d)
 temp_dirs+=("$sandbox3")
 
 # Copy real bundle directories to sandbox
-mkdir -p "$sandbox3/core/svc_process/bundles"
-mkdir -p "$sandbox3/core/svc_action/bundles"
-mkdir -p "$sandbox3/core/svc_ingest/bundles"
+mkdir -p "$sandbox3/core/svc_process/builtin_handlers"
+mkdir -p "$sandbox3/core/svc_action/builtin_handlers"
+mkdir -p "$sandbox3/core/svc_ingest/builtin_handlers"
 
-cp -r "$REPO_ROOT/core/svc_process/bundles/"*.py "$sandbox3/core/svc_process/bundles/"
-cp -r "$REPO_ROOT/core/svc_action/bundles/"*.py "$sandbox3/core/svc_action/bundles/"
-cp -r "$REPO_ROOT/core/svc_ingest/bundles/"*.py "$sandbox3/core/svc_ingest/bundles/"
+cp -r "$REPO_ROOT/core/svc_process/builtin_handlers/"*.py "$sandbox3/core/svc_process/builtin_handlers/"
+cp -r "$REPO_ROOT/core/svc_action/builtin_handlers/"*.py "$sandbox3/core/svc_action/builtin_handlers/"
+cp -r "$REPO_ROOT/core/svc_ingest/builtin_handlers/"*.py "$sandbox3/core/svc_ingest/builtin_handlers/"
 
 # Verify files were copied
 files_copied=$(find "$sandbox3/core" -maxdepth 3 -name '*.py' | wc -l)
@@ -141,9 +141,9 @@ if [ "$files_copied" -eq 0 ]; then
 fi
 
 # Inject a legacy import into one bundle
-echo "" >> "$sandbox3/core/svc_action/bundles/social_quote_action.py"
-echo "# Test injection for violation" >> "$sandbox3/core/svc_action/bundles/social_quote_action.py"
-echo "from flask_core.database import AsyncDAL  # This should trigger the gate" >> "$sandbox3/core/svc_action/bundles/social_quote_action.py"
+echo "" >> "$sandbox3/core/svc_action/builtin_handlers/social_quote_action.py"
+echo "# Test injection for violation" >> "$sandbox3/core/svc_action/builtin_handlers/social_quote_action.py"
+echo "from flask_core.database import AsyncDAL  # This should trigger the gate" >> "$sandbox3/core/svc_action/builtin_handlers/social_quote_action.py"
 
 # Run gate from sandbox
 cd "$sandbox3"
@@ -160,7 +160,7 @@ else
 fi
 
 # Check that output contains the file:line reference
-if echo "$output3" | grep -qE "core/svc_action/bundles/social_quote_action\.py:[0-9]+:"; then
+if echo "$output3" | grep -qE "core/svc_action/builtin_handlers/social_quote_action\.py:[0-9]+:"; then
     echo "  ✓ Output contains path:line format"
     cases_passed=$((cases_passed + 1))
 else
