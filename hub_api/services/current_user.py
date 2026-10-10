@@ -14,6 +14,7 @@ other M-phase groups build on; not touched by this PR).
 from __future__ import annotations
 
 from flask_core.auth import verify_jwt_token
+from flask_core.authz import parse_scope_claim
 from flask_core.secrets import require_secret_key
 from quart import Request
 
@@ -56,3 +57,22 @@ def get_optional_current_user_id(request: Request) -> int | None:
         return get_current_user_id(request)
     except Exception:  # noqa: BLE001 - any failure means "not logged in"
         return None
+
+
+def get_current_scopes(request: Request) -> frozenset[str]:
+    """Return the caller's verified OIDC scope set from the bearer JWT, or raise 401.
+
+    The `scope` claim is parsed exactly as `flask_core.authz.require_scope` parses it. A token
+    without the claim yields the EMPTY set -- "grants nothing", never an error swallowed into a
+    default -- so anything authorised against it (e.g. a model-requested tool call) fails closed.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise unauthorized("Authentication required")
+
+    secret_key = require_secret_key()
+    payload = verify_jwt_token(auth_header[7:], secret_key)
+    if payload is None:
+        raise unauthorized("Invalid or expired token")
+    scopes: frozenset[str] = parse_scope_claim(payload.get("scope"))
+    return scopes

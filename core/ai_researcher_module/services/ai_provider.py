@@ -30,7 +30,14 @@ from dataclasses import dataclass, field
 
 from config import Config
 from flask_core import describe_db_error
+from flask_core.ai_guard import (
+    RetrievedItem,
+    render_retrieved_data,
+    sanitize_model_output,
+    with_untrusted_notice,
+)
 from flask_core.ai_telemetry import AITelemetry
+from flask_core.ai_tool_authz import reject_unsolicited_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -331,13 +338,19 @@ class AIProviderService:
         Returns:
             AIResponse with content and metadata
         """
-        # Build contextualized prompt
-        context_text = "\n".join([
-            f"{msg.get('role', 'user')}: {msg.get('content', '')}"
-            for msg in context[-10:]  # Last 10 messages
-        ])
+        # Each prior turn is untrusted DATA (it may carry text from other users or
+        # earlier model output): render it delimited and labelled, with the role as
+        # a title -- never as a `role:` line the model could mistake for a turn.
+        history = render_retrieved_data(
+            [
+                RetrievedItem(text=str(msg.get('content', '')), title=str(msg.get('role', 'user')))
+                for msg in context[-10:]  # Last 10 messages
+            ],
+            source="conversation_history",
+            max_items=10,
+        )
 
-        full_prompt = f"{context_text}\n\nCurrent query: {prompt}"
+        full_prompt = f"{history.text}\n\nCurrent query: {prompt}"
 
         return await self.generate(
             prompt=full_prompt,
@@ -402,15 +415,16 @@ class AIProviderService:
         """Generate response using Ollama (native /api/generate)"""
         client = await self._get_client()
 
-        # Build full prompt with system instruction
-        full_prompt = prompt
-        if system_prompt:
-            full_prompt = f"{system_prompt}\n\n{prompt}"
-
+        # Real system/user split (Ollama's `system` field) rather than gluing the
+        # standing instructions onto the prompt: whatever the caller embedded in
+        # `prompt` (chat, memories, search snippets) is never in the instruction
+        # turn. The untrusted-data notice is ALWAYS appended -- it tells the model
+        # what the delimited blocks in `prompt` are. regression: sec-llm01-hardening
         json_mode = want_json and self.supports_json
         payload = {
             "model": self.config.OLLAMA_MODEL,
-            "prompt": full_prompt,
+            "prompt": prompt,
+            "system": with_untrusted_notice(system_prompt),
             "stream": False,
             # temperature belongs under `options`; a top-level key is ignored
             "options": {
@@ -438,7 +452,14 @@ class AIProviderService:
             response.raise_for_status()
             data = response.json()
 
-            content = data.get('response') or ''
+            # No tools are ever offered on this surface: a tool call in the answer
+            # is a hijacked/misbehaving model and is refused, never ignored.
+            reject_unsolicited_tool_calls(data, provider="ollama", surface="research")
+
+            # Strip exfiltration channels (remote-image beacons, active HTML, mass
+            # mentions, invisible characters) before the text is cached, stored in
+            # memory or posted to chat.
+            content = sanitize_model_output(data.get('response') or '')
             tokens = data.get('eval_count', 0)
 
             if not content.strip():
