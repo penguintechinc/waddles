@@ -12,8 +12,9 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use crate::db::entities::streaming_config;
 use crate::error::ApiError;
 use crate::http::auth::AuthenticatedClaims;
+use crate::spec_builder::validate_config;
 
-use super::common::fetch_config;
+use super::common::{canonical_audio_codec, canonical_video_codec, enabled_targets, fetch_config};
 use super::dto::{CreateConfigRequest, StreamingConfigDto, UpdateConfigRequest};
 use super::extract::{DbConn, ValidatedJson};
 use super::response::ApiSuccess;
@@ -87,6 +88,25 @@ pub async fn create_config(
     assert_tenant_owns_community(&db, &claims.tenant, community_id).await?;
     validate_source_type(&body.source_type)?;
     validate_bitrate(body.transcode_bitrate_kbps)?;
+    let video_codec = canonical_video_codec(&body.video_codec)?;
+    let audio_codec = canonical_audio_codec(&body.audio_codec)?;
+    // Codec selection needs transcoding; reject the combination now rather
+    // than at the first publish.
+    validate_config(
+        &streaming_config::Model {
+            id: 0,
+            community_id,
+            source_url: String::new(),
+            source_type: body.source_type.clone(),
+            enabled: true,
+            record_enabled: body.record_enabled,
+            transcode_enabled: body.transcode_enabled,
+            transcode_bitrate_kbps: body.transcode_bitrate_kbps,
+            video_codec: video_codec.clone(),
+            audio_codec: audio_codec.clone(),
+        },
+        &[],
+    )?;
 
     let existing = streaming_config::Entity::find()
         .filter(streaming_config::Column::CommunityId.eq(community_id))
@@ -107,6 +127,8 @@ pub async fn create_config(
         record_enabled: Set(body.record_enabled),
         transcode_enabled: Set(body.transcode_enabled),
         transcode_bitrate_kbps: Set(body.transcode_bitrate_kbps),
+        video_codec: Set(video_codec),
+        audio_codec: Set(audio_codec),
         ..Default::default()
     };
     let model = active
@@ -173,6 +195,31 @@ pub async fn update_config(
     if let Some(kbps) = body.transcode_bitrate_kbps {
         validate_bitrate(kbps)?;
     }
+    let video_codec = body
+        .video_codec
+        .as_deref()
+        .map(canonical_video_codec)
+        .transpose()?;
+    let audio_codec = body
+        .audio_codec
+        .as_deref()
+        .map(canonical_audio_codec)
+        .transpose()?;
+
+    // Validate the *merged* config against the targets that already hang
+    // off it: switching to AV1 must not silently break an SRT target that
+    // inherits the codec, and a codec change needs transcoding on.
+    let mut merged = model.clone();
+    if let Some(v) = &video_codec {
+        merged.video_codec = v.clone();
+    }
+    if let Some(v) = &audio_codec {
+        merged.audio_codec = v.clone();
+    }
+    if let Some(v) = body.transcode_enabled {
+        merged.transcode_enabled = v;
+    }
+    validate_config(&merged, &enabled_targets(&db, model.id).await?)?;
 
     let mut active: streaming_config::ActiveModel = model.into();
     if let Some(v) = body.source_url {
@@ -192,6 +239,12 @@ pub async fn update_config(
     }
     if let Some(v) = body.transcode_bitrate_kbps {
         active.transcode_bitrate_kbps = Set(v);
+    }
+    if let Some(v) = video_codec {
+        active.video_codec = Set(v);
+    }
+    if let Some(v) = audio_codec {
+        active.audio_codec = Set(v);
     }
 
     let updated = active

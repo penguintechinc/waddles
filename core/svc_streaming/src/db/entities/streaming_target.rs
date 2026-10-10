@@ -24,6 +24,15 @@ pub struct Model {
     /// Serialized [`crate::store::SecretRef`] JSON, never a raw URL.
     pub forward_url: String,
     pub enabled: bool,
+    /// Push protocol (`rtmp`/`srt`, `crate::pipeline::codec::TargetProtocol`):
+    /// decides the container (FLV vs MPEG-TS) and so which codecs the
+    /// target can carry. Added by alembic `0056_streaming_codec_columns`.
+    pub protocol: String,
+    /// Per-target video codec override; `NULL` = the protocol default
+    /// (RTMP: `h264`, SRT: the config's `video_codec`).
+    pub video_codec: Option<String>,
+    /// Per-target audio codec override; `NULL` = the config's `audio_codec`.
+    pub audio_codec: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

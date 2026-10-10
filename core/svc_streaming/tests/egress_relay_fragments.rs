@@ -17,6 +17,7 @@ fn rtmp_spec(url: &str) -> OutputSpec {
         url_secret_ref: SecretRef::Env {
             var: url.to_string(),
         },
+        profile: None,
     }
 }
 
@@ -25,6 +26,7 @@ fn srt_spec(url: &str) -> OutputSpec {
         url_secret_ref: SecretRef::Env {
             var: url.to_string(),
         },
+        profile: None,
     }
 }
 

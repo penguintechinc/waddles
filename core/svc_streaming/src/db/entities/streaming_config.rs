@@ -20,6 +20,13 @@ pub struct Model {
     pub record_enabled: bool,
     pub transcode_enabled: bool,
     pub transcode_bitrate_kbps: i32,
+    /// Video codec family used when transcoding (`h264`/`h265`/`av1`,
+    /// `crate::pipeline::codec::VideoFamily`). Meaningful only with
+    /// `transcode_enabled`; added by alembic `0056_streaming_codec_columns`.
+    pub video_codec: String,
+    /// Audio handling (`copy`/`aac`/`opus`,
+    /// `crate::pipeline::codec::AudioChoice`).
+    pub audio_codec: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

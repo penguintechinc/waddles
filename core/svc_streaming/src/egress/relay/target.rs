@@ -34,10 +34,14 @@ impl RelayTargetKind {
         }
     }
 
-    fn expected_scheme(&self) -> &'static str {
+    /// URL schemes this protocol's push URL may use. RTMP additionally
+    /// accepts `rtmps://` (RTMP over TLS) -- ffmpeg's `flv` muxer pushes to
+    /// either through the same `rtmp` protocol handler, and several
+    /// destinations (Facebook Live, many CDNs) only accept TLS ingest.
+    fn accepted_schemes(&self) -> &'static [&'static str] {
         match self {
-            RelayTargetKind::Rtmp => "rtmp",
-            RelayTargetKind::Srt => "srt",
+            RelayTargetKind::Rtmp => &["rtmp", "rtmps"],
+            RelayTargetKind::Srt => &["srt"],
         }
     }
 }
@@ -57,11 +61,11 @@ impl RelayTargetSpec {
     /// variant (every other variant belongs to a different egress sink).
     pub fn from_output_spec(spec: &OutputSpec) -> Option<Self> {
         match spec {
-            OutputSpec::RtmpPush { url_secret_ref } => Some(Self {
+            OutputSpec::RtmpPush { url_secret_ref, .. } => Some(Self {
                 kind: RelayTargetKind::Rtmp,
                 url_secret_ref: url_secret_ref.clone(),
             }),
-            OutputSpec::SrtPush { url_secret_ref } => Some(Self {
+            OutputSpec::SrtPush { url_secret_ref, .. } => Some(Self {
                 kind: RelayTargetKind::Srt,
                 url_secret_ref: url_secret_ref.clone(),
             }),
@@ -225,9 +229,14 @@ fn validate(kind: RelayTargetKind, raw: &str) -> Result<(), String> {
     let Some((scheme, rest)) = raw.split_once("://") else {
         return Err("missing scheme (expected \"scheme://host...\")".to_string());
     };
-    let expected = kind.expected_scheme();
-    if !scheme.eq_ignore_ascii_case(expected) {
-        return Err(format!("expected {expected}:// scheme, got {scheme}://"));
+    let accepted = kind.accepted_schemes();
+    if !accepted.iter().any(|s| scheme.eq_ignore_ascii_case(s)) {
+        let expected = accepted
+            .iter()
+            .map(|s| format!("{s}://"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        return Err(format!("expected {expected} scheme, got {scheme}://"));
     }
     let authority = rest.split(['/', '?']).next().unwrap_or("");
     let host = authority.split(':').next().unwrap_or("");
@@ -256,6 +265,7 @@ mod tests {
             url_secret_ref: SecretRef::Env {
                 var: "RELAY_URL".into(),
             },
+            profile: None,
         };
         let target = RelayTargetSpec::from_output_spec(&spec).expect("rtmp push maps");
         assert_eq!(target.kind, RelayTargetKind::Rtmp);
@@ -267,6 +277,7 @@ mod tests {
             url_secret_ref: SecretRef::Env {
                 var: "RELAY_URL".into(),
             },
+            profile: None,
         };
         let target = RelayTargetSpec::from_output_spec(&spec).expect("srt push maps");
         assert_eq!(target.kind, RelayTargetKind::Srt);
@@ -327,8 +338,70 @@ mod tests {
         )
         .unwrap_err();
         let rendered = err.to_string();
-        assert!(rendered.contains("expected rtmp://"));
+        assert!(rendered.contains("expected rtmp:// or rtmps:// scheme"));
         assert!(!rendered.contains("streamid=x"));
+    }
+
+    #[test]
+    fn rtmp_kind_accepts_rtmps_urls_case_insensitively() {
+        for raw in [
+            "rtmps://live-api-s.facebook.com:443/rtmp/FB-key",
+            "RTMPS://ingest.example.com/app/sk_abc",
+            "rtmp://ingest.example.com/app/sk_abc",
+        ] {
+            let target =
+                ResolvedRelayTarget::from_raw(RelayTargetKind::Rtmp, Secret::new(raw.to_string()))
+                    .unwrap_or_else(|err| panic!("{raw} should be accepted: {err}"));
+            assert_eq!(target.kind, RelayTargetKind::Rtmp);
+            // Whatever the scheme, the stream key never reaches the redacted form.
+            assert!(!target.url_redacted.contains("sk_abc"));
+            assert!(!target.url_redacted.contains("FB-key"));
+        }
+    }
+
+    #[test]
+    fn rtmps_redacts_the_stream_key_like_rtmp() {
+        assert_eq!(
+            redact("rtmps://live-api-s.facebook.com:443/rtmp/FB-key"),
+            "rtmps://live-api-s.facebook.com:443/rtmp/****"
+        );
+    }
+
+    #[test]
+    fn rtmps_is_not_accepted_for_srt_and_srt_is_not_accepted_for_rtmp() {
+        let err = ResolvedRelayTarget::from_raw(
+            RelayTargetKind::Srt,
+            Secret::new("rtmps://ingest.example.com/app/k".to_string()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expected srt:// scheme"));
+        assert!(ResolvedRelayTarget::from_raw(
+            RelayTargetKind::Rtmp,
+            Secret::new("srt://ingest.example.com:9000?streamid=x".to_string()),
+        )
+        .is_err());
+        assert!(ResolvedRelayTarget::from_raw(
+            RelayTargetKind::Rtmp,
+            Secret::new("http://ingest.example.com/app/k".to_string()),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rtmps_target_feeds_ffmpeg_the_flv_muxer() {
+        let target = ResolvedRelayTarget::from_raw(
+            RelayTargetKind::Rtmp,
+            Secret::new("rtmps://ingest.example.com/app/sk_abc".to_string()),
+        )
+        .expect("valid rtmps url");
+        assert_eq!(
+            target.ffmpeg_output_args_unredacted(),
+            vec![
+                "-f".to_string(),
+                "flv".to_string(),
+                "rtmps://ingest.example.com/app/sk_abc".to_string(),
+            ]
+        );
     }
 
     #[test]

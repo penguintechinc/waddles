@@ -36,6 +36,7 @@ async fn resolves_an_rtmp_target_from_an_env_secret() {
         url_secret_ref: SecretRef::Env {
             var: "SVC_STREAMING_RELAY_TEST_ENV".to_string(),
         },
+        profile: None,
     };
     sink.start(pipeline_id, spec)
         .await
@@ -78,6 +79,7 @@ async fn resolves_an_srt_target_from_a_mounted_secret_file() {
         url_secret_ref: SecretRef::File {
             path: path.to_string_lossy().to_string(),
         },
+        profile: None,
     };
     sink.start(pipeline_id, spec)
         .await
@@ -108,6 +110,7 @@ async fn missing_env_secret_surfaces_as_a_sink_error() {
         url_secret_ref: SecretRef::Env {
             var: "SVC_STREAMING_RELAY_TEST_MISSING".to_string(),
         },
+        profile: None,
     };
     let err = sink.start(Uuid::new_v4(), spec).await.unwrap_err();
     assert!(matches!(err, SinkError::Other(_)));
@@ -120,6 +123,7 @@ async fn missing_secret_file_surfaces_as_a_sink_error() {
         url_secret_ref: SecretRef::File {
             path: "/nonexistent/path/for/svc-streaming-relay-tests".to_string(),
         },
+        profile: None,
     };
     let err = sink.start(Uuid::new_v4(), spec).await.unwrap_err();
     assert!(matches!(err, SinkError::Other(_)));
@@ -147,6 +151,7 @@ async fn a_file_resolved_secret_never_appears_in_tee_slave_debug_or_display() {
             url_secret_ref: SecretRef::File {
                 path: path.to_string_lossy().to_string(),
             },
+            profile: None,
         },
     )
     .await

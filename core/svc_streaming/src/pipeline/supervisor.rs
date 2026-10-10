@@ -40,6 +40,8 @@ use opentelemetry::{global, KeyValue};
 use tokio::sync::{mpsc, Mutex as TokioMutex, Notify, RwLock as TokioRwLock};
 use tokio::task::JoinHandle;
 
+use crate::egress::relay::RelayPolicy;
+use crate::pipeline::encoder::EncoderSelection;
 use crate::pipeline::ffmpeg;
 use crate::pipeline::model::{
     OutputSpec, PipelineEngine, PipelineError, PipelineHandle, PipelineId, PipelineSpec,
@@ -166,6 +168,7 @@ struct Metrics {
     active_pipelines: Gauge<i64>,
     restarts_total: Counter<u64>,
     output_failures_total: Counter<u64>,
+    encodes_started_total: Counter<u64>,
 }
 
 impl Metrics {
@@ -200,6 +203,10 @@ impl Metrics {
                 .u64_counter("output_failures_total")
                 .with_description("Terminal pipeline/output failures, labeled by pipeline_id/kind/reason")
                 .build(),
+            encodes_started_total: meter
+                .u64_counter("encodes_started_total")
+                .with_description("Video encodes started, labeled by codec and encoder backend (cpu/nvenc/vaapi)")
+                .build(),
         }
     }
 }
@@ -215,6 +222,12 @@ pub struct FfmpegSupervisor {
     rtp_base_port: u16,
     resolver: Arc<dyn SecretResolver>,
     config: SupervisorConfig,
+    /// Encoder backend per codec family (GPU when proven usable at
+    /// startup, else CPU). Defaults to all-software.
+    encoders: EncoderSelection,
+    /// Destination cap enforced in the argv path. Defaults to the Free
+    /// tier -- fail-closed until license-tier resolution is wired.
+    relay_policy: Option<RelayPolicy>,
     registry: Arc<TokioRwLock<HashMap<PipelineId, Arc<Slot>>>>,
     metrics: Arc<Metrics>,
     active_count: Arc<AtomicI64>,
@@ -238,10 +251,25 @@ impl FfmpegSupervisor {
             rtp_base_port,
             resolver,
             config,
+            encoders: EncoderSelection::default(),
+            relay_policy: Some(RelayPolicy::default()),
             registry: Arc::new(TokioRwLock::new(HashMap::new())),
             metrics: Arc::new(Metrics::new()),
             active_count: Arc::new(AtomicI64::new(0)),
         }
+    }
+
+    /// Sets the per-codec encoder backends (see
+    /// [`crate::pipeline::encoder::detect_encoders`]).
+    pub fn with_encoders(mut self, encoders: EncoderSelection) -> Self {
+        self.encoders = encoders;
+        self
+    }
+
+    /// Sets the relay destination cap enforced on every pipeline's argv.
+    pub fn with_relay_policy(mut self, policy: RelayPolicy) -> Self {
+        self.relay_policy = Some(policy);
+        self
     }
 
     /// Returns a handle listeners (`ingest::rtmp`/`ingest::srt`) use to
@@ -313,8 +341,8 @@ impl FfmpegSupervisor {
         let mut resolved_secrets = HashMap::new();
         for output in &spec.outputs {
             let secret_ref: Option<&SecretRef> = match output {
-                OutputSpec::RtmpPush { url_secret_ref }
-                | OutputSpec::SrtPush { url_secret_ref } => Some(url_secret_ref),
+                OutputSpec::RtmpPush { url_secret_ref, .. }
+                | OutputSpec::SrtPush { url_secret_ref, .. } => Some(url_secret_ref),
                 _ => None,
             };
             if let Some(secret_ref) = secret_ref {
@@ -334,6 +362,8 @@ impl FfmpegSupervisor {
             resolved_secrets,
             whip_sdp_paths: HashMap::new(),
             rtp_base_port: self.rtp_base_port,
+            encoders: self.encoders.clone(),
+            relay_policy: self.relay_policy,
         })
     }
 }
@@ -375,7 +405,26 @@ impl FfmpegSupervisor {
         paths.whip_sdp_paths.extend(extra_whip_sdp_paths);
 
         let argv = match ffmpeg::build_argv(&spec, &paths) {
-            Ok(argv) => argv,
+            Ok(argv) => {
+                for encode in ffmpeg::encode_summary(&spec, &paths) {
+                    tracing::info!(
+                        pipeline_id = %id,
+                        profile = %encode.profile,
+                        codec = encode.family.as_str(),
+                        backend = encode.backend.as_str(),
+                        encoder = encode.backend.encoder_name(encode.family),
+                        "pipeline encode"
+                    );
+                    self.metrics.encodes_started_total.add(
+                        1,
+                        &[
+                            KeyValue::new("codec", encode.family.as_str()),
+                            KeyValue::new("backend", encode.backend.as_str()),
+                        ],
+                    );
+                }
+                argv
+            }
             Err(PipelineError::NoFfmpegNeeded) => {
                 // A pure-copy WHIP->WHEP leg needs no ffmpeg process at all
                 // -- webrtc-rs forwards RTP directly (SFU-style). Register
@@ -924,6 +973,7 @@ mod tests {
             url_secret_ref: crate::store::SecretRef::Env {
                 var: "SVC_STREAMING_SUPERVISOR_TEST_MISSING".into(),
             },
+            profile: None,
         });
         let err = sup.start(spec).await.unwrap_err();
         assert!(matches!(err, PipelineError::InvalidSpec(_)));
@@ -1051,9 +1101,11 @@ mod tests {
         };
         spec.outputs.push(ModelOutputSpec::RtmpPush {
             url_secret_ref: shared_ref.clone(),
+            profile: None,
         });
         spec.outputs.push(ModelOutputSpec::RtmpPush {
             url_secret_ref: shared_ref,
+            profile: None,
         });
         let id = spec.id;
         // start() only resolves secrets + builds argv synchronously; the

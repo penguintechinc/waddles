@@ -16,8 +16,11 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use crate::db::entities::streaming_target;
 use crate::error::ApiError;
 use crate::http::auth::AuthenticatedClaims;
+use crate::spec_builder::validate_new_target;
 
-use super::common::fetch_config;
+use super::common::{
+    canonical_audio_codec, canonical_protocol, canonical_video_codec, enabled_targets, fetch_config,
+};
 use super::dto::{AddTargetRequest, SecretRefDto, StreamingTargetDto};
 use super::extract::{DbConn, ValidatedJson};
 use super::response::ApiSuccess;
@@ -39,6 +42,9 @@ fn target_dto(model: streaming_target::Model) -> Result<StreamingTargetDto, ApiE
         platform: model.platform,
         url_secret_ref: SecretRefDto::from(url_secret_ref),
         enabled: model.enabled,
+        protocol: model.protocol,
+        video_codec: model.video_codec,
+        audio_codec: model.audio_codec,
     })
 }
 
@@ -84,7 +90,7 @@ pub async fn list_targets(
     request_body = AddTargetRequest,
     responses(
         (status = 201, description = "Target added", body = StreamingTargetDto),
-        (status = 400, description = "Invalid platform or body shape (e.g. inline URL)"),
+        (status = 400, description = "Invalid platform, protocol or codec, a codec the protocol cannot carry (e.g. h265/av1 over RTMP), or a body shape error (e.g. inline URL)"),
         (status = 404, description = "Config not found"),
     ),
     tag = "streaming"
@@ -96,7 +102,7 @@ pub async fn add_target(
     ValidatedJson(body): ValidatedJson<AddTargetRequest>,
 ) -> Result<ApiSuccess<StreamingTargetDto>, ApiError> {
     assert_tenant_owns_community(&db, &claims.tenant, community_id).await?;
-    fetch_config(&db, community_id, config_id).await?;
+    let config = fetch_config(&db, community_id, config_id).await?;
 
     if !VALID_PLATFORMS.contains(&body.platform.as_str()) {
         return Err(ApiError::BadRequest(format!(
@@ -104,15 +110,45 @@ pub async fn add_target(
         )));
     }
 
+    let protocol = canonical_protocol(&body.protocol)?;
+    let video_codec = body
+        .video_codec
+        .as_deref()
+        .map(canonical_video_codec)
+        .transpose()?;
+    let audio_codec = body
+        .audio_codec
+        .as_deref()
+        .map(canonical_audio_codec)
+        .transpose()?;
+
     let secret_ref: crate::store::SecretRef = body.url_secret_ref.into();
     let forward_url =
         serde_json::to_string(&secret_ref).map_err(|err| ApiError::Internal(err.into()))?;
+
+    // Reject a codec the target's container cannot carry (e.g. h265/av1 on
+    // an RTMP target) now, with the reason, instead of letting ffmpeg's tee
+    // muxer drop the destination silently at publish time.
+    let candidate = streaming_target::Model {
+        id: 0,
+        config_id,
+        platform: body.platform.clone(),
+        forward_url: forward_url.clone(),
+        enabled: true,
+        protocol: protocol.clone(),
+        video_codec: video_codec.clone(),
+        audio_codec: audio_codec.clone(),
+    };
+    validate_new_target(&config, &enabled_targets(&db, config_id).await?, &candidate)?;
 
     let active = streaming_target::ActiveModel {
         config_id: Set(config_id),
         platform: Set(body.platform),
         forward_url: Set(forward_url),
         enabled: Set(true),
+        protocol: Set(protocol),
+        video_codec: Set(video_codec),
+        audio_codec: Set(audio_codec),
         ..Default::default()
     };
     let model = active

@@ -9,18 +9,35 @@
 //! resolving `SecretRef`s via [`crate::store::SecretResolver`] and
 //! populating [`Paths::resolved_secrets`] before calling in.
 //!
-//! **Known model gap (flagged for the model owner, not fixed here to avoid
-//! breaking `tests/model.rs` which this chunk does not own):**
-//! [`OutputSpec::RtmpPush`] and [`OutputSpec::SrtPush`] carry no `profile`
-//! field, unlike every other profile-consuming output variant. Until the
-//! model gains one, both variants implicitly bind to `spec.profiles[0]` --
-//! see [`output_profile_name`]. Every golden test spec in this module
-//! orders `profiles` so the intended profile is first.
+//! # Codecs, encoders and fan-out
+//!
+//! - **Profile binding.** [`OutputSpec::RtmpPush`]/[`OutputSpec::SrtPush`]
+//!   carry an optional `profile`; `None` keeps the legacy binding to
+//!   `spec.profiles[0]` (see [`output_profile_name`]). That is what lets an
+//!   H.265 HLS output and an H.264 RTMP push share one pipeline.
+//! - **Container compatibility is validated here, loudly.** `ffmpeg -f tee`
+//!   skips a slave whose header write fails (even with the default
+//!   `onfail=abort`; verified on the runtime image's ffmpeg 5.1) and still
+//!   exits 0, so an HEVC/AV1 stream aimed at FLV would be dropped without
+//!   a trace. [`build_argv`] therefore refuses such a spec up front via
+//!   [`crate::pipeline::codec`].
+//! - **GPU-preferred, CPU-fallback.** The encoder for each codec family comes
+//!   from [`Paths::encoders`] (probed once at startup by
+//!   [`crate::pipeline::encoder::detect_encoders`]); the default is all
+//!   software, so a pure `build_argv` call is a CPU command that works
+//!   everywhere.
+//! - **Fan-out cap.** [`Paths::relay_policy`] bounds the number of
+//!   `RtmpPush`/`SrtPush` destinations in the argv itself.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::egress::hls::HlsOutputTarget;
+use crate::egress::relay::RelayPolicy;
+use crate::pipeline::codec::{self, AudioChoice, OutputFormat, VideoFamily};
+use crate::pipeline::encoder::{
+    hardware_video_args, vaapi_global_args, EncoderBackend, EncoderSelection, VAAPI_UPLOAD_FILTER,
+};
 use crate::pipeline::model::{
     AudioCodec, InputSpec, ObjectStoreRef, OutputSpec, PipelineError, PipelineId, PipelineSpec,
     TranscodeProfile, VideoCodec,
@@ -52,6 +69,13 @@ pub struct Paths {
     /// allocated in `spec.inputs` then `spec.outputs` order -- see
     /// [`rtp_legs`].
     pub rtp_base_port: u16,
+    /// Encoder backend per codec family, chosen once at startup (GPU when a
+    /// trial encode passed, else CPU). [`Default`] is all-software.
+    pub encoders: EncoderSelection,
+    /// Destination cap enforced on the `RtmpPush`/`SrtPush` outputs of the
+    /// spec. `None` means unbounded -- only for pure unit use; the
+    /// supervisor always supplies one.
+    pub relay_policy: Option<RelayPolicy>,
 }
 
 /// Deterministic map key for a [`SecretRef`], used to look up its resolved
@@ -145,6 +169,7 @@ pub fn build_argv(spec: &PipelineSpec, paths: &Paths) -> Result<Vec<String>, Pip
     if spec.outputs.is_empty() {
         return Err(PipelineError::InvalidSpec("pipeline has no outputs".into()));
     }
+    enforce_push_cap(spec, paths)?;
 
     let input = &spec.inputs[0];
 
@@ -206,12 +231,27 @@ pub fn build_argv(spec: &PipelineSpec, paths: &Paths) -> Result<Vec<String>, Pip
         }
     }
     let use_filter_complex = ladder.len() >= 2;
+    let labels = ladder_labels(&ladder);
 
-    let mut argv = input_args(input, paths)?;
+    // A VA-API encode needs the render node registered once, globally,
+    // before the inputs.
+    let mut argv = Vec::new();
+    if ladder
+        .iter()
+        .any(|p| encoder_backend(p, paths) == EncoderBackend::Vaapi)
+    {
+        let device = paths.encoders.vaapi_device().ok_or_else(|| {
+            PipelineError::InvalidSpec(
+                "a VA-API encoder is selected but no render node is configured".into(),
+            )
+        })?;
+        argv.extend(vaapi_global_args(device));
+    }
+    argv.extend(input_args(input, paths)?);
 
     if use_filter_complex {
         argv.push("-filter_complex".into());
-        argv.push(build_filter_complex(&ladder)?);
+        argv.push(build_filter_complex(&ladder, &labels, paths)?);
     }
 
     // Group tee-eligible outputs by profile name (stable, first-appearance
@@ -227,8 +267,12 @@ pub fn build_argv(spec: &PipelineSpec, paths: &Paths) -> Result<Vec<String>, Pip
 
     for (_, members) in &groups {
         let profile = members[0].profile;
-        push_map_and_codec(&mut argv, profile, use_filter_complex);
-        if members.len() == 1 {
+        let in_tee = members.len() > 1;
+        for m in members {
+            validate_output_codecs(m, in_tee)?;
+        }
+        push_map_and_codec(&mut argv, profile, use_filter_complex, &labels, paths);
+        if !in_tee {
             argv.extend(solo_muxer_args(members[0].output, spec.id, paths)?);
         } else {
             let mut slaves = Vec::with_capacity(members.len());
@@ -250,7 +294,7 @@ pub fn build_argv(spec: &PipelineSpec, paths: &Paths) -> Result<Vec<String>, Pip
         .map(|leg| leg.local_port)
         .collect();
     for (r, port) in resolved_whep.iter().zip(whep_ports.iter()) {
-        push_map_and_codec(&mut argv, r.profile, use_filter_complex);
+        push_map_and_codec(&mut argv, r.profile, use_filter_complex, &labels, paths);
         argv.push("-f".into());
         argv.push("rtp".into());
         argv.push(format!("udp://127.0.0.1:{port}"));
@@ -274,6 +318,112 @@ pub fn build_argv(spec: &PipelineSpec, paths: &Paths) -> Result<Vec<String>, Pip
     Ok(argv)
 }
 
+/// Rejects a spec with more `RtmpPush`/`SrtPush` destinations than
+/// [`Paths::relay_policy`] allows. Enforced here, in the argv path, so the
+/// cap holds for every caller -- the `RelaySink` policy alone is advisory
+/// (the orchestrator used to log its refusal and let ffmpeg forward to the
+/// extra destinations anyway).
+fn enforce_push_cap(spec: &PipelineSpec, paths: &Paths) -> Result<(), PipelineError> {
+    let Some(policy) = paths.relay_policy else {
+        return Ok(());
+    };
+    let pushes = spec
+        .outputs
+        .iter()
+        .filter(|o| matches!(o, OutputSpec::RtmpPush { .. } | OutputSpec::SrtPush { .. }))
+        .count();
+    policy.check_destination_count(pushes).map_err(|err| {
+        tracing::warn!(
+            pipeline_id = %spec.id,
+            destinations = pushes,
+            max = policy.max_destinations,
+            "pipeline refused: too many relay destinations"
+        );
+        PipelineError::InvalidSpec(err.to_string())
+    })
+}
+
+/// The container `output` muxes into. A `Record` output is MPEG-TS
+/// segments on its own but a single MP4 inside a `tee` group (see
+/// [`solo_muxer_args`] vs [`tee_slave`]).
+fn output_format(output: &OutputSpec, in_tee: bool) -> Option<OutputFormat> {
+    match output {
+        OutputSpec::RtmpPush { .. } => Some(OutputFormat::Flv),
+        OutputSpec::SrtPush { .. } => Some(OutputFormat::MpegTs),
+        OutputSpec::Hls { .. } => Some(OutputFormat::HlsFmp4),
+        OutputSpec::Record { .. } if in_tee => Some(OutputFormat::Mp4),
+        OutputSpec::Record { .. } => Some(OutputFormat::MpegTs),
+        OutputSpec::Whep { .. } | OutputSpec::DiscordVoice { .. } => None,
+    }
+}
+
+/// Refuses an output whose profile carries a codec its container cannot
+/// hold. Passthrough (`Copy`) streams are accepted: their real codec is
+/// only known at runtime.
+fn validate_output_codecs(r: &Resolved, in_tee: bool) -> Result<(), PipelineError> {
+    let Some(format) = output_format(r.output, in_tee) else {
+        return Ok(());
+    };
+    codec::check_pair(
+        format,
+        VideoFamily::of(&r.profile.video),
+        AudioChoice::of(&r.profile.audio),
+    )
+    .map_err(|err| {
+        tracing::warn!(
+            profile = %r.profile.name,
+            error = %err,
+            "pipeline refused: codec cannot be muxed into the requested output"
+        );
+        PipelineError::InvalidSpec(format!("profile {:?}: {err}", r.profile.name))
+    })
+}
+
+/// The encoder backend `profile`'s video is encoded with. Passthrough and
+/// non-video-codec profiles report [`EncoderBackend::Software`] (they run
+/// no hardware encode).
+fn encoder_backend(profile: &TranscodeProfile, paths: &Paths) -> EncoderBackend {
+    VideoFamily::of(&profile.video)
+        .map(|family| paths.encoders.backend_for(family))
+        .unwrap_or(EncoderBackend::Software)
+}
+
+/// One encode a pipeline will run: which profile, which codec family, and
+/// on which backend. Surfaced for logs/metrics at pipeline start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodeInfo {
+    pub profile: String,
+    pub family: VideoFamily,
+    pub backend: EncoderBackend,
+}
+
+/// Lists the video encodes `spec` will run under `paths` (one per distinct
+/// non-passthrough profile an output actually references). Pure.
+pub fn encode_summary(spec: &PipelineSpec, paths: &Paths) -> Vec<EncodeInfo> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out = Vec::new();
+    for output in &spec.outputs {
+        let Ok(name) = output_profile_name(output, spec) else {
+            continue;
+        };
+        let Some(profile) = spec.profiles.iter().find(|p| p.name == name) else {
+            continue;
+        };
+        if seen.contains(&profile.name.as_str()) {
+            continue;
+        }
+        seen.push(profile.name.as_str());
+        if let Some(family) = VideoFamily::of(&profile.video) {
+            out.push(EncodeInfo {
+                profile: profile.name.clone(),
+                family,
+                backend: paths.encoders.backend_for(family),
+            });
+        }
+    }
+    out
+}
+
 struct Resolved<'a> {
     output: &'a OutputSpec,
     profile: &'a TranscodeProfile,
@@ -293,15 +443,21 @@ fn resolve_profiles<'a>(
         .collect()
 }
 
-/// Resolves the [`TranscodeProfile`] name an output applies. See module
-/// docs for the `RtmpPush`/`SrtPush` model-gap caveat.
+/// Resolves the [`TranscodeProfile`] name an output applies. A push
+/// output without an explicit `profile` binds to `spec.profiles[0]`.
 fn output_profile_name(output: &OutputSpec, spec: &PipelineSpec) -> Result<String, PipelineError> {
     match output {
-        OutputSpec::RtmpPush { .. } | OutputSpec::SrtPush { .. } => spec
-            .profiles
-            .first()
-            .map(|p| p.name.clone())
-            .ok_or_else(|| PipelineError::InvalidSpec("pipeline has no transcode profiles".into())),
+        OutputSpec::RtmpPush { profile, .. } | OutputSpec::SrtPush { profile, .. } => match profile
+        {
+            Some(name) => Ok(name.clone()),
+            None => spec
+                .profiles
+                .first()
+                .map(|p| p.name.clone())
+                .ok_or_else(|| {
+                    PipelineError::InvalidSpec("pipeline has no transcode profiles".into())
+                }),
+        },
         OutputSpec::Hls { profile, .. }
         | OutputSpec::Whep { profile }
         | OutputSpec::Record { profile, .. } => Ok(profile.clone()),
@@ -402,10 +558,8 @@ fn input_args(input: &InputSpec, paths: &Paths) -> Result<Vec<String>, PipelineE
     }
 }
 
-/// Resolution-derived filter-graph label for a ladder rung -- `v<height>`.
-/// Two rungs sharing an identical resolution but different profile names
-/// would collide; not reachable from any golden case, flagged as a known
-/// MVP simplification rather than worked around with an uglier label.
+/// Resolution-derived filter-graph label for a ladder rung -- `v<height>`
+/// when it has a resolution, `v_<name>` otherwise.
 fn video_label(profile: &TranscodeProfile) -> String {
     match profile.resolution {
         Some((_, h)) => format!("v{h}"),
@@ -419,22 +573,60 @@ fn sanitize(name: &str) -> String {
         .collect()
 }
 
-/// Builds `[0:v]split=N[label1][label2]...;[label1]scale=W:H[label1s];...`
+/// Filter-graph labels for each ladder rung, keyed by profile name. Two
+/// rungs that would share a label (same height, or names that sanitize
+/// alike -- e.g. an H.265 and an H.264 profile at the same resolution) get
+/// a `_<index>` suffix so the graph never declares one pad twice.
+fn ladder_labels(ladder: &[&TranscodeProfile]) -> HashMap<String, String> {
+    let mut used: Vec<String> = Vec::with_capacity(ladder.len());
+    let mut labels = HashMap::with_capacity(ladder.len());
+    for (index, profile) in ladder.iter().enumerate() {
+        let mut label = video_label(profile);
+        if used.contains(&label) {
+            label = format!("{label}_{index}");
+        }
+        used.push(label.clone());
+        labels.insert(profile.name.clone(), label);
+    }
+    labels
+}
+
+/// Builds `[0:v]split=N[label1][label2]...;[label1]<chain>[label1s];...`
 /// per spec §1/§3/§7 case 7 -- only the non-copy rungs participate; a
 /// `Copy` rung always maps `0:v` directly (never through the filter
-/// graph).
-fn build_filter_complex(ladder: &[&TranscodeProfile]) -> Result<String, PipelineError> {
-    let labels: Vec<String> = ladder.iter().map(|p| video_label(p)).collect();
-    let split_targets: String = labels.iter().map(|l| format!("[{l}]")).collect();
+/// graph). A rung's `<chain>` is `scale=W:H` when it has a resolution, the
+/// VA-API upload when its encoder needs surfaces, both comma-joined, or the
+/// no-op `null` filter when it has neither -- so several codecs can share
+/// one decode at the source resolution without any rung needing a size.
+fn build_filter_complex(
+    ladder: &[&TranscodeProfile],
+    labels: &HashMap<String, String>,
+    paths: &Paths,
+) -> Result<String, PipelineError> {
+    let ordered: Vec<&String> = ladder
+        .iter()
+        .map(|p| {
+            labels.get(&p.name).ok_or_else(|| {
+                PipelineError::InvalidSpec(format!("profile {:?} has no ladder label", p.name))
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let split_targets: String = ordered.iter().map(|l| format!("[{l}]")).collect();
     let mut filter = format!("[0:v]split={}{}", ladder.len(), split_targets);
-    for (profile, label) in ladder.iter().zip(labels.iter()) {
-        let (w, h) = profile.resolution.ok_or_else(|| {
-            PipelineError::InvalidSpec(format!(
-                "profile {:?} needs a resolution to participate in a scale ladder",
-                profile.name
-            ))
-        })?;
-        filter.push_str(&format!(";[{label}]scale={w}:{h}[{label}s]"));
+    for (profile, label) in ladder.iter().zip(ordered.iter()) {
+        let mut chain: Vec<String> = Vec::new();
+        if let Some((w, h)) = profile.resolution {
+            chain.push(format!("scale={w}:{h}"));
+        }
+        if encoder_backend(profile, paths) == EncoderBackend::Vaapi {
+            chain.push(VAAPI_UPLOAD_FILTER.to_string());
+        }
+        let chain = if chain.is_empty() {
+            "null".to_string()
+        } else {
+            chain.join(",")
+        };
+        filter.push_str(&format!(";[{label}]{chain}[{label}s]"));
     }
     Ok(filter)
 }
@@ -446,9 +638,11 @@ fn push_map_and_codec(
     argv: &mut Vec<String>,
     profile: &TranscodeProfile,
     use_filter_complex: bool,
+    labels: &HashMap<String, String>,
+    paths: &Paths,
 ) {
     let filtered_label = if use_filter_complex && !is_full_copy(profile) {
-        Some(format!("{}s", video_label(profile)))
+        labels.get(&profile.name).map(|label| format!("{label}s"))
     } else {
         None
     };
@@ -480,14 +674,26 @@ fn push_map_and_codec(
             argv.push("copy".into());
         }
     } else {
-        argv.extend(video_codec_args(&profile.video, profile.fps.unwrap_or(30)));
+        let backend = encoder_backend(profile, paths);
+        argv.extend(video_codec_args(
+            &profile.video,
+            profile.fps.unwrap_or(30),
+            backend,
+        ));
         if filtered_label.is_none() {
             // Not going through the filter graph -- scale/fps are plain
             // output options (spec §7 case 2). When filtered, scale is
             // already embedded in the `-filter_complex` chain.
+            let mut chain: Vec<String> = Vec::new();
             if let Some((w, h)) = profile.resolution {
+                chain.push(format!("scale={w}:{h}"));
+            }
+            if backend == EncoderBackend::Vaapi {
+                chain.push(VAAPI_UPLOAD_FILTER.to_string());
+            }
+            if !chain.is_empty() {
                 argv.push("-vf".into());
-                argv.push(format!("scale={w}:{h}"));
+                argv.push(chain.join(","));
             }
             if let Some(fps) = profile.fps {
                 argv.push("-r".into());
@@ -498,9 +704,40 @@ fn push_map_and_codec(
     }
 }
 
-/// Spec §3 video codec recipes. `2*fps` keyframe interval and CPU-only
-/// (no VAAPI/NVENC) throughout, per spec §3 note.
-fn video_codec_args(codec: &VideoCodec, fps: u32) -> Vec<String> {
+/// Rate-control, keyframe-interval and tuning knobs of an encode recipe.
+fn video_tuning(codec: &VideoCodec) -> Option<(&str, Option<u8>, Option<u32>)> {
+    match codec {
+        VideoCodec::Copy => None,
+        VideoCodec::H264 {
+            preset,
+            crf,
+            bitrate_kbps,
+        }
+        | VideoCodec::H265 {
+            preset,
+            crf,
+            bitrate_kbps,
+        }
+        | VideoCodec::Av1Svt {
+            preset,
+            crf,
+            bitrate_kbps,
+        } => Some((preset.as_str(), *crf, *bitrate_kbps)),
+    }
+}
+
+/// Spec §3 video codec recipes. `2*fps` keyframe interval throughout. The
+/// CPU recipes (`libx264`/`libx265`/`libsvtav1`) are the ones spec §3
+/// defines and the guaranteed fallback; a GPU `backend` swaps in the
+/// equivalent NVENC/VA-API recipe from [`hardware_video_args`].
+fn video_codec_args(codec: &VideoCodec, fps: u32, backend: EncoderBackend) -> Vec<String> {
+    if backend != EncoderBackend::Software {
+        if let (Some(family), Some((preset, crf, bitrate_kbps))) =
+            (VideoFamily::of(codec), video_tuning(codec))
+        {
+            return hardware_video_args(backend, family, preset, crf, bitrate_kbps, fps);
+        }
+    }
     match codec {
         VideoCodec::Copy => vec!["-c:v".into(), "copy".into()],
         VideoCodec::H264 {
@@ -566,6 +803,10 @@ fn video_codec_args(codec: &VideoCodec, fps: u32) -> Vec<String> {
                     format!("{}k", kbps * 2),
                 ]);
             }
+            // HLS fMP4 players (Safari/iOS) only accept `hvc1`; ffmpeg's
+            // default `hev1` plays nowhere on Apple devices. Harmless for
+            // the MPEG-TS and rtp muxers, which keep no such tag table.
+            a.extend(["-tag:v".into(), "hvc1".into()]);
             a
         }
         VideoCodec::Av1Svt {
@@ -621,14 +862,6 @@ fn audio_codec_args(codec: &AudioCodec) -> Vec<String> {
     }
 }
 
-fn hls_dir(paths: &Paths, spec_id: PipelineId, profile: &str) -> PathBuf {
-    paths
-        .stream_data_dir
-        .join("hls")
-        .join(spec_id.to_string())
-        .join(profile)
-}
-
 /// Matches `egress::record::RecordSink::segment_dir`'s layout exactly
 /// (`{STREAM_DATA_DIR}/rec/{prefix}/{pipeline_id}`) -- S12 integration fix:
 /// this previously used `records/{prefix}` (no `pipeline_id`, wrong root
@@ -664,11 +897,11 @@ fn solo_muxer_args(
     paths: &Paths,
 ) -> Result<Vec<String>, PipelineError> {
     match output {
-        OutputSpec::RtmpPush { url_secret_ref } => {
+        OutputSpec::RtmpPush { url_secret_ref, .. } => {
             let url = resolve_secret(url_secret_ref, paths)?;
             Ok(vec!["-f".into(), "flv".into(), url])
         }
-        OutputSpec::SrtPush { url_secret_ref } => {
+        OutputSpec::SrtPush { url_secret_ref, .. } => {
             let url = resolve_secret(url_secret_ref, paths)?;
             Ok(vec!["-f".into(), "mpegts".into(), url])
         }
@@ -715,28 +948,94 @@ fn solo_muxer_args(
     }
 }
 
-/// `[f=<muxer>:onfail=ignore]<target>` fragment for an output grouped with
-/// siblings inside `-f tee`. HLS/Record tee slaves use a minimal
-/// `f=<muxer>` (no per-slave HLS options) -- a known simplification; no
-/// golden case exercises HLS inside a tee group.
+/// True if `c` cannot appear verbatim in a `tee` slave target: the muxer
+/// splits slaves on `|` and then honours `\` and `'` quoting at two nested
+/// parse levels, so those (and control characters) cannot be represented
+/// reliably -- and a `|` inside a secret URL would silently inject an extra
+/// slave.
+fn tee_unsafe_char(c: char) -> bool {
+    matches!(c, '\\' | '\'' | '|') || c.is_control()
+}
+
+/// Validates a slave *target* (URL or path -- the part after the closing
+/// `]`). Never echoes the value: it may be a secret URL.
+fn check_tee_target(value: &str) -> Result<(), PipelineError> {
+    if value.chars().any(tee_unsafe_char) {
+        return Err(PipelineError::InvalidSpec(
+            "an output target contains a character ffmpeg's tee muxer cannot carry (backslash, quote, '|' or a control character)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a slave *option value* (inside the `[...]` list), which
+/// additionally cannot hold the option separators `:`, `[` and `]`.
+fn check_tee_option_value(value: &str) -> Result<(), PipelineError> {
+    if value
+        .chars()
+        .any(|c| tee_unsafe_char(c) || matches!(c, ':' | '[' | ']'))
+    {
+        return Err(PipelineError::InvalidSpec(
+            "an output option contains a character ffmpeg's tee muxer cannot carry (colon, bracket, backslash, quote, '|' or a control character)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// `[<options>]<target>` fragment for an output grouped with siblings
+/// inside `-f tee`.
+///
+/// Failure policy per slave:
+/// - **RTMP/SRT pushes keep `onfail=ignore`**: an external destination
+///   being down must not take the HLS output or the other destinations with
+///   it.
+/// - **HLS has no `onfail` (the default, `abort`)**: it is the playback
+///   surface the live listing advertises, so a runtime write failure ends
+///   the ffmpeg process and the supervisor restarts it, rather than leaving
+///   viewers on a stalled playlist while the pipeline reports healthy.
+/// - **Record keeps `onfail=ignore`**: archival is best-effort relative to
+///   live delivery.
+///
+/// `onfail` only governs *runtime* write failures. A slave whose container
+/// cannot hold the stream fails at header time and ffmpeg 5.1 skips it
+/// regardless of `onfail` -- which is why [`build_argv`] rejects
+/// incompatible codec/container pairs before any slave is built.
+///
+/// HLS slaves get the complete [`HlsOutputTarget`] option set (segment
+/// type, init/segment filenames, master playlist), identical to what the
+/// standalone path emits.
 fn tee_slave(
     output: &OutputSpec,
     spec_id: PipelineId,
     paths: &Paths,
 ) -> Result<String, PipelineError> {
     match output {
-        OutputSpec::RtmpPush { url_secret_ref } => {
+        OutputSpec::RtmpPush { url_secret_ref, .. } => {
             let url = resolve_secret(url_secret_ref, paths)?;
+            check_tee_target(&url)?;
             Ok(format!("[f=flv:onfail=ignore]{url}"))
         }
-        OutputSpec::SrtPush { url_secret_ref } => {
+        OutputSpec::SrtPush { url_secret_ref, .. } => {
             let url = resolve_secret(url_secret_ref, paths)?;
+            check_tee_target(&url)?;
             Ok(format!("[f=mpegts:onfail=ignore]{url}"))
         }
-        OutputSpec::Hls { profile, .. } => Ok(format!(
-            "[f=hls:onfail=ignore]{}/index.m3u8",
-            hls_dir(paths, spec_id, profile).to_string_lossy()
-        )),
+        OutputSpec::Hls { variant, profile } => {
+            let target = HlsOutputTarget::new(&paths.stream_data_dir, spec_id, profile, *variant);
+            let mut options = String::from("f=hls");
+            for (name, value) in target.muxer_options() {
+                check_tee_option_value(&value)?;
+                options.push(':');
+                options.push_str(name);
+                options.push('=');
+                options.push_str(&value);
+            }
+            let playlist = target.media_playlist_path().to_string_lossy().into_owned();
+            check_tee_target(&playlist)?;
+            Ok(format!("[{options}]{playlist}"))
+        }
         // NOTE (S12 integration gap, not fixed here): this single-file mp4
         // target is never picked up by `egress::record`'s watcher, which
         // only globs `%Y%m%d%H%M%S.ts` segment files (the `solo_muxer_args`
@@ -745,11 +1044,15 @@ fn tee_slave(
         // storage in this MVP. Still pointed at the same `rec/` root as the
         // solo path (was previously a third, divergent `records/` root) so
         // at least the two paths agree on where recordings live on disk.
-        OutputSpec::Record { target, .. } => Ok(format!(
-            "[f=mp4:onfail=ignore]{}/{}.mp4",
-            record_dir(paths, spec_id, target).to_string_lossy(),
-            spec_id
-        )),
+        OutputSpec::Record { target, .. } => {
+            let file = format!(
+                "{}/{}.mp4",
+                record_dir(paths, spec_id, target).to_string_lossy(),
+                spec_id
+            );
+            check_tee_target(&file)?;
+            Ok(format!("[f=mp4:onfail=ignore]{file}"))
+        }
         OutputSpec::Whep { .. } | OutputSpec::DiscordVoice { .. } => {
             Err(PipelineError::InvalidSpec(
                 "Whep/DiscordVoice outputs never participate in -f tee".into(),
@@ -774,6 +1077,7 @@ mod tests {
             resolved_secrets,
             whip_sdp_paths: HashMap::new(),
             rtp_base_port: 40000,
+            ..Default::default()
         }
     }
 
@@ -834,6 +1138,7 @@ mod tests {
             vec![copy_profile("copy")],
             vec![OutputSpec::RtmpPush {
                 url_secret_ref: rtmp_url_ref(),
+                profile: None,
             }],
         );
         let paths = paths_with_secrets(&[(rtmp_url_ref(), "rtmp://push/key1")]);
@@ -960,6 +1265,7 @@ mod tests {
             }],
             vec![OutputSpec::SrtPush {
                 url_secret_ref: srt_ref.clone(),
+                profile: None,
             }],
         );
         let paths = paths_with_secrets(&[(srt_ref, "srt://push:9000?streamid=abc&latency=200")]);
@@ -994,6 +1300,7 @@ mod tests {
             vec![
                 OutputSpec::RtmpPush {
                     url_secret_ref: rtmp_url_ref(),
+                    profile: None,
                 },
                 OutputSpec::Record {
                     profile: "copy".into(),
@@ -1109,6 +1416,7 @@ mod tests {
             vec![
                 OutputSpec::RtmpPush {
                     url_secret_ref: rtmp_url_ref(),
+                    profile: None,
                 },
                 OutputSpec::Hls {
                     variant: HlsVariant::Std,
@@ -1368,6 +1676,7 @@ mod tests {
             vec![copy_profile("copy")],
             vec![OutputSpec::RtmpPush {
                 url_secret_ref: rtmp_url_ref(),
+                profile: None,
             }],
         );
         let paths = paths_with_secrets(&[]); // secret intentionally unresolved

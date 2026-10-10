@@ -341,6 +341,7 @@ mod tests {
             url_secret_ref: SecretRef::Env {
                 var: var.to_string(),
             },
+            profile: None,
         }
     }
 
@@ -349,6 +350,7 @@ mod tests {
             url_secret_ref: SecretRef::Env {
                 var: var.to_string(),
             },
+            profile: None,
         }
     }
 
