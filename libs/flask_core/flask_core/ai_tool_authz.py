@@ -353,6 +353,7 @@ def _decode_arguments(raw: Any) -> tuple[Mapping[str, Any], str | None]:
         try:
             raw = json.loads(raw)
         except ValueError:
+            logger.debug("ai_tool_arguments_undecodable")
             return {}, REASON_MALFORMED_CALL
     if not isinstance(raw, Mapping):
         return {}, REASON_MALFORMED_CALL
