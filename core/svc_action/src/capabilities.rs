@@ -1164,11 +1164,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     app_id = %scope.app_id,
                     "discord outbound drain is not ready (drain flag off, DISCORD_BOT_TOKEN missing, spine config missing, or drain down); refusing op, nothing queued"
                 );
+                // The guest-facing text names the effect only; the deployment
+                // causes (flag / token / spine config) stay in the host log
+                // above -- a bundle is third-party code.
                 Err(denied(
                     "relay_unavailable",
                     format!(
-                        "discord {} refused: the discord outbound drain is not running \
-                         (check the svc-ingest data-plane flag, DISCORD_BOT_TOKEN and spine config); nothing was queued",
+                        "discord {} refused: the discord outbound drain is not running; nothing was queued",
                         op.as_str()
                     ),
                 ))
