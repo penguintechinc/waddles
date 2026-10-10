@@ -36,6 +36,8 @@ from typing import Any
 
 from opentelemetry import metrics, trace
 
+from flask_core.db_errors import describe_db_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,7 +98,7 @@ class AITelemetry:
         try:
             tracer = self.instruments().tracer
         except Exception as exc:  # telemetry must never fail the request
-            logger.warning("ai_telemetry_failed error=%s: %s", type(exc).__name__, exc)
+            logger.warning("ai_telemetry_failed %s", describe_db_error(exc))
             yield None
             return
         with tracer.start_as_current_span("ai.provider.generate") as span:
@@ -139,4 +141,4 @@ class AITelemetry:
             if output_tokens:
                 inst.tokens.add(output_tokens, {**labels, "direction": "output"})
         except Exception as exc:  # telemetry must never fail the request
-            logger.warning("ai_telemetry_failed error=%s: %s", type(exc).__name__, exc)
+            logger.warning("ai_telemetry_failed %s", describe_db_error(exc))

@@ -41,6 +41,7 @@ from typing import Any
 
 import httpx
 from flask_core.ai_telemetry import AITelemetry
+from flask_core.db_errors import describe_db_error, format_sanitized_traceback
 
 from services.ai_routing.errors import invalid_byok_key, provider_error
 from services.ai_routing.models import AIRequest, AIResponse, ByokProvider, Tier
@@ -227,14 +228,16 @@ class OllamaClient:
                 response = await client.post("/api/generate", json=payload)
             response.raise_for_status()
         except httpx.HTTPError as exc:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
             logger.error(
-                "ollama_generate_failed tier=%s model=%s error=%s: %s",
+                "ollama_generate_failed tier=%s model=%s %s status=%s",
                 tier,
                 model,
-                type(exc).__name__,
-                exc,
-                exc_info=True,
+                describe_db_error(exc),
+                status,
             )
+            frames = format_sanitized_traceback(exc)  # frames only -- no exception text
+            logger.debug("ollama_generate_failed_frames %s", frames)
             raise provider_error(
                 f"Ollama ({tier}) request failed: {_describe_http_error(exc)}"
             ) from exc
