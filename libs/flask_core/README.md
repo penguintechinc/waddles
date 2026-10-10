@@ -33,6 +33,9 @@ Shared utilities and components for all WaddleBot Flask/Quart modules.
 - Console, file, and optional syslog output
 - Log rotation with configurable size and backup count
 - Performance logging with execution time tracking
+- **Redaction-safe exception logging** (`safe_logging.py`): `describe_exc` /
+  `log_exc_safe` / `url_host` report exception type + code + a fixed category and
+  never the message (see [Exception logging](#exception-logging-never-log-the-message))
 
 ### API Utilities (`api_utils.py`)
 - Standardized API response formatting
@@ -188,6 +191,56 @@ logger.audit(action='update_settings', user='john', community='my_community', re
 logger.error('Something went wrong', user='john', action='process_data')
 logger.performance(action='process_batch', execution_time=150)
 ```
+
+#### Exception logging (never log the message)
+
+A raw exception's text is data-influenced: DB driver errors embed the bound values of
+the failed statement, `httpx` errors embed the request URL (query-string secrets
+included), SSRF-guard errors embed the offending URL, crypto errors can echo key or
+ciphertext fragments. So `f"...{e}"`, `"...%s", exc`, `str(e)`,
+`extra={"error": str(e)}` and `exc_info=True` all write whatever the failing operation
+was handling into the log. On any path that touches credentials, tokens, URLs, or user
+data, use `flask_core.safe_logging` instead:
+
+```python
+import logging
+from flask_core import describe_exc, log_exc_safe, url_host
+
+try:
+    await client.post(token_url, data=form)
+except httpx.HTTPError as exc:
+    # -> "token refresh failed type=httpx.HTTPStatusError code=401 category=http_status host=id.twitch.tv"
+    log_exc_safe(logger, logging.WARNING, "token refresh failed", exc, host=url_host(token_url))
+    # building a new error message? use describe_exc, and `from None` so the cause
+    # (which holds the URL/body) is not rendered in a traceback chain:
+    raise RefreshError(f"refresh failed: {describe_exc(exc)}") from None
+```
+
+| Helper | Returns |
+|---|---|
+| `describe_exc(exc)` | `type=... [code=...] category=... [cause=...]` -- safe for logs, error messages, span attributes |
+| `classify_exc(exc)` | the same as a frozen `SafeExcInfo` dataclass |
+| `log_exc_safe(logger, level, event, exc, **fields)` | logs `event` + `describe_exc` + `name=value` fields; DEBUG also logs a frames-only traceback (no exception text); never attaches `exc_info` |
+| `frames_only(exc)` | `file:line:func` frames, innermost first -- where it failed, without the footer |
+| `url_host(url)` | the lowercase hostname only (drops userinfo, port, path, query, fragment); `<invalid-url>` if unparseable |
+
+What is reported is allowlisted: the type is the charset-validated qualified class name;
+the code is a SQLSTATE/driver code, HTTP status (100-599), botocore error code, or
+`errno`, accepted only if it matches a strict pattern (a hostile attribute value is
+dropped); the category is a label from a closed table (`unique_violation`,
+`crypto_auth_failed`, `network_timeout`, `http_status`, ...) looked up by class/SQLSTATE,
+never derived from text. DB driver errors are classified by `flask_core.db_errors` (the
+single owner of the SQLSTATE tables) -- `describe_exc` reuses its code and category, so
+the two never disagree; use `describe_db_error` / `log_db_error` when you also want the
+constraint/table/column identifiers. `str(exc)` and `exc.args` are never read, and the `orig` /
+`__cause__` / `__context__` chain contributes only types, codes and categories.
+
+- `event` is typed `LiteralString`: `mypy --strict` rejects an f-string that
+  interpolates runtime data into it.
+- `**fields` are the caller's responsibility -- pass ids, hosts and counts, never user
+  input. Values are rendered single-line, printable ASCII, capped at 128 chars.
+- Third-party library loggers are outside this helper: `httpx` itself logs
+  `HTTP Request: GET <full url>` at INFO.
 
 ### Data Models
 

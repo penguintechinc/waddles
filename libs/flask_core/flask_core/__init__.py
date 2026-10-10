@@ -76,6 +76,14 @@ from .datamodels import (
     ModuleResponse
 )
 from .logging_config import setup_aaa_logging, get_logger
+from .safe_logging import (
+    SafeExcInfo,
+    classify_exc,
+    describe_exc,
+    frames_only,
+    log_exc_safe,
+    url_host,
+)
 from .feature_flags import feature_enabled
 from .api_utils import (
     success_response,
@@ -281,6 +289,13 @@ __all__ = [
     # Logging
     "setup_aaa_logging",
     "get_logger",
+    # Redaction-safe exception logging (type + code + category, never the message)
+    "SafeExcInfo",
+    "classify_exc",
+    "describe_exc",
+    "frames_only",
+    "log_exc_safe",
+    "url_host",
     # Feature Flags
     "feature_enabled",
     # API Utils
