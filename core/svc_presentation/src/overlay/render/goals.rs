@@ -3,14 +3,20 @@
 //! non-empty `label`, a non-negative `current`, and a strictly positive
 //! `target` (a zero/negative target makes the progress fraction undefined
 //! for the browser client to render).
+//!
+//! `label` and `unit` are bundle-authored free text, so both go through
+//! [`super::shared::sanitize_text`]: HTML-escaped, `{user:<token>}`
+//! placeholders replaced with hub-api-resolved display names (or
+//! `Unknown User`) -- never a raw token or unescaped markup on the wire.
 
 use overlay_schema::OverlayPush;
 use overlay_schema::Surface;
 
+use super::shared::{sanitize_opt, sanitize_text};
 use super::{RenderError, RenderedContent, Renderer, ResolvedTheme};
 
 /// `goals`' rendered content -- mirrors `overlay_schema::GoalPayload`
-/// field-for-field.
+/// field-for-field, with `label`/`unit` sanitized.
 #[derive(Debug, Clone, serde::Serialize, PartialEq)]
 pub struct GoalsContent {
     pub label: String,
@@ -59,10 +65,10 @@ impl Renderer for GoalsRenderer {
             });
         }
         Ok(RenderedContent::Goals(GoalsContent {
-            label: goal.label.clone(),
+            label: sanitize_text(&goal.label),
             current: goal.current,
             target: goal.target,
-            unit: goal.unit.clone(),
+            unit: sanitize_opt(&goal.unit),
         }))
     }
 }
@@ -181,5 +187,55 @@ mod tests {
     #[test]
     fn surface_reports_goals() {
         assert_eq!(GoalsRenderer.surface(), Surface::Goals);
+    }
+
+    use crate::overlay::detok::test_support::{names, USER_A, USER_UNKNOWN};
+    use crate::overlay::detok::with_names;
+    use egress_detokenizer::NEUTRAL_LABEL;
+
+    #[test]
+    fn label_and_unit_are_escaped_and_user_tokens_resolved() {
+        let push = OverlayPush {
+            goal: Some(GoalPayload {
+                label: format!("<script>x</script> for {{user:{USER_A}}}"),
+                unit: Some(format!("<b>{{user:{USER_UNKNOWN}}}</b>")),
+                ..valid_goal()
+            }),
+            ..Default::default()
+        };
+        let frame = with_names(names(&[(USER_A, "Al<i>ce")]), || {
+            GoalsRenderer.render(&push, &theme()).unwrap()
+        });
+        let RenderedContent::Goals(content) = frame else {
+            panic!("expected Goals content");
+        };
+        assert_eq!(
+            content.label,
+            "&lt;script&gt;x&lt;/script&gt; for Al&lt;i&gt;ce"
+        );
+        assert_eq!(
+            content.unit.as_deref(),
+            Some(format!("&lt;b&gt;{NEUTRAL_LABEL}&lt;/b&gt;").as_str())
+        );
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(
+            !json.contains(USER_A) && !json.contains(USER_UNKNOWN),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn an_absent_unit_stays_absent() {
+        let push = OverlayPush {
+            goal: Some(GoalPayload {
+                unit: None,
+                ..valid_goal()
+            }),
+            ..Default::default()
+        };
+        let RenderedContent::Goals(content) = GoalsRenderer.render(&push, &theme()).unwrap() else {
+            panic!("expected Goals content");
+        };
+        assert_eq!(content.unit, None);
     }
 }

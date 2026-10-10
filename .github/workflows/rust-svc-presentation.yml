@@ -8,6 +8,8 @@ on:
       - 'core/overlay_schema/**'
       - 'core/overlay_auth/**'
       - 'core/service_auth/**'
+      - 'core/hub_client/**'
+      - 'core/egress_detokenizer/**'
       - '.github/workflows/rust-svc-presentation.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
@@ -17,6 +19,8 @@ on:
       - 'core/overlay_schema/**'
       - 'core/overlay_auth/**'
       - 'core/service_auth/**'
+      - 'core/hub_client/**'
+      - 'core/egress_detokenizer/**'
   workflow_dispatch:
 
 permissions:
@@ -33,6 +37,10 @@ jobs:
     with:
       crate_name: svc-presentation
       working_directory: core/svc_presentation
+      # protoc is needed by hub_client's build.rs (tonic-prost-build), a
+      # dependency of `overlay::detok` (via egress_detokenizer).
+      extra_apt_packages: protobuf-compiler
+      extra_apt_reason: 'for hub_client (protoc)'
       # Thin binary entrypoint, untestable without subprocessing -- same
       # convention as rust-svc-process.yml/rust-egress-proxy.yml.
       coverage_ignore_regex: 'main\.rs'

@@ -279,21 +279,59 @@ async fn legacy_caption_page_url_routes_to_the_page_handler() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-/// A numeric community's 3-segment path is not the caption page:
-/// `/overlay/42/caption` is no route.
+/// A numeric community's `/overlay/42/caption` is the generic overlay-page
+/// route (VIEW-guarded), never the legacy caption page: with a valid key it
+/// reaches the page handler, which answers 404 because `caption` has its own
+/// page (`/overlay/captions/{key}`) -- not a 200 caption page.
 #[tokio::test]
 async fn a_numeric_community_never_matches_the_legacy_caption_page_route() {
-    let app = router(state_with_no_queries_expected());
+    let token = generate_view_token();
+    let app = router(state_with_view_credential(42, &token));
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/overlay/42/caption")
+                .uri(format!("/overlay/42/caption?key={token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// The overlay page route and the literal caption page route coexist:
+/// `/overlay/42/chat` reaches the page, `/overlay/captions/{key}` still
+/// reaches the caption handler.
+#[tokio::test]
+async fn the_overlay_page_route_does_not_shadow_the_caption_page_route() {
+    let token = generate_view_token();
+    let app = router(state_with_view_credential(42, &token));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/overlay/42/chat?key={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/html; charset=utf-8"
+    );
+    // And the literal caption URL is unchanged (wrong key => its own 403).
+    let app = router(state_with_view_credential(42, &token));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/overlay/captions/not-the-key?community_id=42")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 /// The legacy websocket URL routes to the caption websocket handshake (401

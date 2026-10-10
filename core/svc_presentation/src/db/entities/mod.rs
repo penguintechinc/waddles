@@ -24,8 +24,13 @@
 //!   `config/postgres/migrations/102_caption_events_rust_port.sql`) --
 //!   backs [`crate::overlay::caption_store::SeaOrmCaptionStore`] (the
 //!   caption overlay's reconnect-replay history).
+//! - `communities` (hub-owned; read-only, `id`/`tenant_id` only) -- backs
+//!   [`crate::overlay::community_ctx::SeaOrmCommunityContextStore`], which
+//!   maps a verified credential's `community_id` to its tenant for
+//!   display-name resolution.
 
 pub mod caption_event;
+pub mod community;
 pub mod overlay_image;
 pub mod overlay_surface;
 pub mod overlay_view_credential;
