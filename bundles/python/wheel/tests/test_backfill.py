@@ -181,7 +181,12 @@ def test_corrupt_options_blob_replies_generic_error_logs_error_and_is_never_over
     assert fake_host.kv.store[key] == blob, "corrupt state must not be silently reset"
     errors = [(m, json.loads(f)) for lvl, m, f in fake_host.log_calls if lvl == ERROR_LEVEL]
     assert [m for m, _f in errors] == ["wheel.kv_failure"]
-    assert "corrupt wheel options" in errors[0][1]["error"]
+    fields = errors[0][1]
+    # PII-free: static op name + exception CLASS name only -- never the decode/parse message,
+    # which could echo user-typed option text from the stored blob.
+    assert set(fields) == {"op", "error"}
+    assert fields["op"] in {"options_decode", "options_shape"}
+    assert fields["error"] in {"UnicodeDecodeError", "JSONDecodeError", "NotAStringList"}
 
 
 @pytest.mark.parametrize(
@@ -199,7 +204,8 @@ def test_kv_backend_failure_replies_generic_error_and_logs_the_failing_call(
 
     assert _reply_text(result) == _KV_ERROR_MSG
     [(_m, fields)] = [(m, json.loads(f)) for lvl, m, f in fake_host.log_calls if lvl == ERROR_LEVEL]
-    assert f"kv.{kv_op}(" in fields["error"] and "backend down" in fields["error"]
+    assert fields == {"op": f"kv_{kv_op}", "error": "RuntimeError"}
+    assert "backend down" not in json.dumps(fields), "the host's free-form message is never logged"
 
 
 # -- behavior details

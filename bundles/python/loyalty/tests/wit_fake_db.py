@@ -218,3 +218,15 @@ class FakeDb:
         self.rows[row_id].update({cv.column: unwrap(cv.value) for cv in column_values})
         self.versions[row_id] += 1
         return self._to_row(row_id)
+
+    def delete(self, row_id: str, expected_version: int) -> None:
+        """Fake `db.delete(row-id, expected-version)`."""
+        self.calls.append(("delete", (row_id, expected_version)))
+        if "delete" in self.raise_on:
+            raise self.raise_on["delete"]
+        if row_id not in self.rows:
+            raise WitDbError(Error_NotFound())
+        if self.versions[row_id] != expected_version:
+            raise WitDbError(Error_Conflict("version mismatch"))
+        del self.rows[row_id]
+        del self.versions[row_id]

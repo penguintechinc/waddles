@@ -1,0 +1,35 @@
+name: Rust bundle-host-reputation (lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/bundle_host_reputation/**'
+      - 'core/bundle_capability_gate/**'
+      - 'scripts/db/bundle_reputation_store.sql'
+      - '.github/workflows/rust-bundle-host-reputation.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/bundle_host_reputation/**'
+      - 'core/bundle_capability_gate/**'
+      - 'scripts/db/bundle_reputation_store.sql'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: bundle-host-reputation
+      working_directory: core/bundle_host_reputation
+      # `tests/postgres_integration.rs` starts a real Postgres container via
+      # `testcontainers` -- needs Docker, which `ubuntu-latest` ships.

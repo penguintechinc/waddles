@@ -144,7 +144,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """`True`/`False` from badge fields, or `None` if absent (absent must deny)."""
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 def _resolve_command(parsed: ParsedCommand | None) -> str:
@@ -188,9 +188,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
             payload["arg"] = parsed.args
     log.info("heist.transform matched", command=payload["command"])
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
     return PlatformEvent(
         platform=event.platform,
         event_type=event.event_type,

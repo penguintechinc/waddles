@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-duel"
-version = "1.0.2"
+version = "1.0.3"
 description = "`!duel <user>` -> a 1v1 challenge game, community-scoped, kv-only v1 (random winner, per-caller cooldown, W/L record via `!duel list`, admin cooldown config via `!duel set cooldown <seconds>`). Net-new original content, not a port of anything."
 requires-python = ">=3.13"
 dependencies = []

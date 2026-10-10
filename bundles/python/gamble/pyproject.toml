@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-gamble"
-version = "1.0.0"
+version = "1.0.1"
 description = "kv-only `!gamble <amount>` single-user points bet (win/lose by configurable odds; admin `set odds`). Net-new Waddles content; points only, no real-money ties."
 requires-python = ">=3.13"
 dependencies = []

@@ -178,6 +178,15 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::db_wiring`'s doc.
     pub db_wiring: Option<crate::capabilities::DbWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::reputation_wiring`'s doc.
+    pub reputation_wiring: Option<crate::capabilities::ReputationWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::economy_wiring`'s doc.
+    pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::identity_wiring`'s doc.
+    pub identity_wiring: Option<crate::identity::IdentityWiring>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -327,6 +336,9 @@ async fn run_binding_consumer(
             pii_gate: Arc::clone(&deps.pii_gate),
             pii_minter: deps.pii_minter.clone(),
             db_wiring: deps.db_wiring.clone(),
+            reputation_wiring: deps.reputation_wiring.clone(),
+            economy_wiring: deps.economy_wiring.clone(),
+            identity_wiring: deps.identity_wiring.clone(),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();
