@@ -35,16 +35,22 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from flask_core.ai_telemetry import AITelemetry
 
 from services.ai_routing.errors import invalid_byok_key, provider_error
 from services.ai_routing.models import AIRequest, AIResponse, ByokProvider, Tier
 from services.ai_routing.pii_redaction import redact_pii
+from services.errors import ApiError
 
 logger = logging.getLogger(__name__)
+
+#: Spans + histogram/counters for every Ollama call (PII-free; no-op without an OTel provider).
+telemetry = AITelemetry("waddles.hub_api.ai_routing")
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _ANTHROPIC_API_VERSION = "2023-06-01"
@@ -156,10 +162,40 @@ class OllamaClient:
         Output mode follows the model's configured capability, not the caller's
         wish: `format: json` is sent only when `request.wants_json` AND
         `config.supports_json`. The returned `AIResponse.json_mode` is True only
-        in that case, and then `text` has been verified to parse as JSON.
+        in that case, and then `text` has been verified to parse as JSON. The
+        call is spanned and timed (`flask_core.ai_telemetry`, PII-free).
         """
         model = self._config.model
         json_mode = request.wants_json and self._config.supports_json
+        mode = "json" if json_mode else "text"
+        started = time.perf_counter()
+        with telemetry.span(provider="ollama", tier=tier, model=model, mode=mode):
+            try:
+                response = await self._generate(request, tier=tier, json_mode=json_mode)
+            except ApiError as exc:
+                telemetry.record_call(
+                    provider="ollama",
+                    tier=tier,
+                    model=model,
+                    mode=mode,
+                    duration_ms=(time.perf_counter() - started) * 1000.0,
+                    error_code=exc.code,
+                )
+                raise
+        telemetry.record_call(
+            provider="ollama",
+            tier=tier,
+            model=model,
+            mode=mode,
+            duration_ms=(time.perf_counter() - started) * 1000.0,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+        )
+        return response
+
+    async def _generate(self, request: AIRequest, *, tier: Tier, json_mode: bool) -> AIResponse:
+        """The un-instrumented call: build the payload, POST, validate and normalize the reply."""
+        model = self._config.model
         payload: dict[str, Any] = {
             "model": model,
             "prompt": request.prompt,

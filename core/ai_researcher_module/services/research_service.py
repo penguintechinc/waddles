@@ -797,19 +797,28 @@ class ResearchService:
         """
         Check content safety.
 
+        Runs the SafetyLayer verdict (`check_prompt`, synchronous regex/topic
+        gate) and acts on it. The gate FAILS CLOSED: if the check itself errors
+        the content is blocked, never waved through (a fail-open gate hid a
+        broken `safety_layer.check()` call here -- the layer has no such method
+        -- so nothing was ever blocked).
+
         Args:
             content: Content to check
-            community_id: Community identifier
+            community_id: Community identifier (the layer's blocklist is global)
 
         Returns:
             Dict with 'safe' boolean and optional 'reason'
         """
         try:
-            return await self.safety_layer.check(content, community_id)
+            verdict = self.safety_layer.check_prompt(content)
         except Exception as e:
-            logger.error(f"Safety check error: {describe_db_error(e)}")
-            # Fail open - allow content if safety check fails
-            return {'safe': True}
+            logger.error(
+                f"Safety check error, failing closed: "
+                f"{type(e).__name__}: {describe_db_error(e)}"
+            )
+            return {'safe': False, 'reason': 'safety_check_error'}
+        return {'safe': verdict.is_safe, 'reason': verdict.blocked_reason}
 
     def _get_cache_key(
         self,
@@ -1013,15 +1022,18 @@ class ResearchService:
             Dict with success, content, tokens_used, and optional error
         """
         try:
+            # AIProviderService.generate(prompt, system_prompt, temperature,
+            # max_tokens) -> AIResponse. community_id/user_id/context_type stay
+            # out of the provider call: it neither takes nor needs them, and
+            # user ids must not travel to the model host.
             response = await self.ai_provider.generate(
+                prompt=user_prompt,
                 system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                community_id=community_id,
-                user_id=user_id,
-                metadata={'context_type': context_type}
+                temperature=Config.OLLAMA_TEMPERATURE,
+                max_tokens=Config.OLLAMA_MAX_TOKENS
             )
 
-            if not response:
+            if not response or not response.content:
                 return {
                     'success': False,
                     'error': 'Empty response from AI provider',
@@ -1030,8 +1042,8 @@ class ResearchService:
 
             return {
                 'success': True,
-                'content': response.get('content', ''),
-                'tokens_used': response.get('tokens_used', 0)
+                'content': response.content,
+                'tokens_used': response.tokens_used
             }
 
         except Exception as e:

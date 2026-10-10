@@ -79,7 +79,8 @@ async def test_concurrent_callers_are_serialized_never_overlapped(
     assert wire.max_active == 1  # the wire never saw two requests at once
     assert guard.max_in_flight == 1
     assert guard.in_flight == 0
-    assert [r.json()["i"] for r in guard.requests] == sorted(r.json()["i"] for r in guard.requests)
+    # Waiters poll the flock, so grant order is not FIFO -- only exclusivity matters.
+    assert sorted(r.json()["i"] for r in guard.requests) == [0, 1, 2, 3, 4]
 
 
 async def test_records_what_went_over_the_wire(guard: SingleFlightGuard) -> None:
