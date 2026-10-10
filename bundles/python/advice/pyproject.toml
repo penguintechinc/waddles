@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-advice"
+version = "1.0.0"
+description = "`!advice` -> a random piece of advice from a curated built-in list, relayed back to the caller's own origin platform. Relay only, no kv/db state, no external API calls. Same stateless shape as bundles/python/eightball."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

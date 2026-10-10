@@ -3630,6 +3630,44 @@ components:
       - updated_at
       title: RoleSyncBinding
       type: object
+    SaveConsentPreferencesDTO:
+      description: 'Preferences as submitted to `POST /api/v1/cookie`.
+
+
+        `doNotSell` is tri-state: `None` means the caller did not say, so a
+
+        stored CCPA opt-out is kept; `True`/`False` is an explicit choice
+
+        (`False` is a deliberate opt-back-in). Defaulting it to `False` would
+
+        make an omitted field indistinguishable from an opt-back-in and
+
+        silently revert the opt-out.'
+      properties:
+        analytics:
+          default: false
+          title: Analytics
+          type: boolean
+        doNotSell:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          default: null
+          title: Donotsell
+        functional:
+          default: false
+          title: Functional
+          type: boolean
+        marketing:
+          default: false
+          title: Marketing
+          type: boolean
+        necessary:
+          default: true
+          title: Necessary
+          type: boolean
+      title: SaveConsentPreferencesDTO
+      type: object
     Server:
       description: Response DTO -- one `server_status_configs` row, admin view (host/port
         visible).
@@ -4029,6 +4067,170 @@ components:
       - communityType
       - memberCount
       title: SpotlightedCommunityDTO
+      type: object
+    SsoConnectionDTO:
+      description: Admin view of one connection. Carries no secret -- only `hasClientSecret`.
+      properties:
+        acsUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Acsurl
+        allowedDomains:
+          items:
+            type: string
+          title: Alloweddomains
+          type: array
+        callbackUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Callbackurl
+        clientId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Clientid
+        createdAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Createdat
+        discoveryUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Discoveryurl
+        displayName:
+          title: Displayname
+          type: string
+        emailAttribute:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Emailattribute
+        enabled:
+          title: Enabled
+          type: boolean
+        entitled:
+          title: Entitled
+          type: boolean
+        forceAuthn:
+          title: Forceauthn
+          type: boolean
+        hasClientSecret:
+          title: Hasclientsecret
+          type: boolean
+        hostedDomain:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Hosteddomain
+        id:
+          title: Id
+          type: string
+        idpCertificateCount:
+          title: Idpcertificatecount
+          type: integer
+        idpEntityId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Idpentityid
+        idpSsoUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Idpssourl
+        issuer:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Issuer
+        loginUrl:
+          title: Loginurl
+          type: string
+        metadataUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Metadataurl
+        nameAttribute:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Nameattribute
+        nameIdFormat:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Nameidformat
+        protocol:
+          title: Protocol
+          type: string
+        scopes:
+          items:
+            type: string
+          title: Scopes
+          type: array
+        spEntityId:
+          title: Spentityid
+          type: string
+        updatedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updatedat
+        usePlatformClient:
+          title: Useplatformclient
+          type: boolean
+      required:
+      - id
+      - protocol
+      - displayName
+      - enabled
+      - entitled
+      - allowedDomains
+      - issuer
+      - discoveryUrl
+      - clientId
+      - hasClientSecret
+      - usePlatformClient
+      - hostedDomain
+      - scopes
+      - idpEntityId
+      - idpSsoUrl
+      - idpCertificateCount
+      - nameIdFormat
+      - emailAttribute
+      - nameAttribute
+      - forceAuthn
+      - spEntityId
+      - acsUrl
+      - callbackUrl
+      - metadataUrl
+      - loginUrl
+      - createdAt
+      - updatedAt
+      title: SsoConnectionDTO
+      type: object
+    SsoOptionDTO:
+      description: One login button.
+      properties:
+        displayName:
+          title: Displayname
+          type: string
+        id:
+          title: Id
+          type: string
+        protocol:
+          title: Protocol
+          type: string
+      required:
+      - id
+      - displayName
+      - protocol
+      title: SsoOptionDTO
       type: object
     StatsCommunitiesDTO:
       description: Stats communities DTO.
@@ -12511,6 +12713,127 @@ paths:
                 type: object
           description: Response DTO for `{success, message}` endpoints (resend-verification).
       summary: Resend verification.
+  /api/v1/auth/sso/options:
+    get:
+      description: ''
+      operationId: get_sso_options
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response for `GET /options`.
+                properties:
+                  options:
+                    items:
+                      $ref: '#/components/schemas/SsoOptionDTO'
+                    title: Options
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: SsoOptionsResponse
+                type: object
+          description: Response for `GET /options`.
+      summary: '`GET /options?tenant=<slug>` -- enabled, currently-entitled SSO buttons
+        for a tenant.'
+  /api/v1/auth/sso/{public_id}/acs:
+    post:
+      description: ''
+      operationId: post_sso_saml_acs
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`POST /<id>/acs` -- SAML Assertion Consumer Service (HTTP-POST binding).'
+  /api/v1/auth/sso/{public_id}/callback:
+    get:
+      description: ''
+      operationId: get_sso_oidc_callback
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`GET /<id>/callback` -- OIDC / Google redirect URI.'
+  /api/v1/auth/sso/{public_id}/login:
+    get:
+      description: ''
+      operationId: get_sso_login
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`GET /<id>/login` -- begin a login and 302 straight to the IdP.'
+  /api/v1/auth/sso/{public_id}/metadata:
+    get:
+      description: ''
+      operationId: get_sso_saml_metadata
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`GET /<id>/metadata` -- SAML SP metadata for the IdP admin. Public;
+        contains no secret.'
+  /api/v1/auth/sso/{public_id}/start:
+    get:
+      description: ''
+      operationId: get_sso_start
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response for `GET /<id>/start`: where the SPA navigates
+                  the browser.'
+                properties:
+                  protocol:
+                    title: Protocol
+                    type: string
+                  redirectUrl:
+                    title: Redirecturl
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - redirectUrl
+                - protocol
+                title: SsoStartResponse
+                type: object
+          description: 'Response for `GET /<id>/start`: where the SPA navigates the
+            browser.'
+      summary: '`GET /<id>/start` -- begin a login; sets the binder cookie, returns
+        the IdP URL as JSON.'
   /api/v1/auth/temp-password:
     post:
       description: ''
@@ -14103,7 +14426,7 @@ paths:
                   title: Consentmethod
                   type: string
                 preferences:
-                  $ref: '#/components/schemas/ConsentPreferencesDTO'
+                  $ref: '#/components/schemas/SaveConsentPreferencesDTO'
               title: SaveConsentRequest
               type: object
       responses:
@@ -14230,7 +14553,13 @@ paths:
       summary: Activate an existing policy version (super admin only).
   /api/v1/cookie/preferences:
     patch:
-      description: ''
+      description: '
+
+        The four categories are merged over the stored preferences (a stored
+
+        `doNotSell` opt-out is preserved); a `Sec-GPC: 1` header additionally
+
+        forces `doNotSell` on and `marketing` off, same as `POST /api/v1/cookie`.'
       operationId: patch_update_preferences
       parameters: []
       requestBody:
@@ -14240,9 +14569,16 @@ paths:
               description: 'Request DTO for `PATCH /api/v1/cookie/preferences`.
 
 
-                No `doNotSell` field -- see `services/cookie_consent_service.py`''s
+                `doNotSell` is accepted for wire compatibility but never written from
 
-                `update_preferences()` docstring for why.'
+                the body: this endpoint merges the four cookie categories over the
+
+                stored preferences (`services/cookie_consent_service.py`''s
+
+                `update_preferences()`), so the stored opt-out is preserved, and only
+                a
+
+                `Sec-GPC` signal can force it on.'
               properties:
                 preferences:
                   $ref: '#/components/schemas/ConsentPreferencesDTO'
@@ -18936,6 +19272,389 @@ paths:
                 type: object
           description: Response DTO for message endpoints.
       summary: Set email verification.
+  /api/v1/tenant/sso/connections:
+    get:
+      description: ''
+      operationId: get_list_sso_connections
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response wrapping the tenant's connections.
+                properties:
+                  connections:
+                    items:
+                      $ref: '#/components/schemas/SsoConnectionDTO'
+                    title: Connections
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: SsoConnectionListResponse
+                type: object
+          description: Response wrapping the tenant's connections.
+      summary: '`GET /connections` -- the caller''s tenant''s connections (no secrets).'
+    post:
+      description: ''
+      operationId: post_create_sso_connection
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Body of `POST /connections`. Unknown fields are a 400.
+              properties:
+                allowedDomains:
+                  items:
+                    type: string
+                  title: Alloweddomains
+                  type: array
+                clientId:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Clientid
+                clientSecret:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Clientsecret
+                discoveryUrl:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Discoveryurl
+                displayName:
+                  title: Displayname
+                  type: string
+                emailAttribute:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Emailattribute
+                enabled:
+                  default: false
+                  title: Enabled
+                  type: boolean
+                forceAuthn:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Forceauthn
+                hostedDomain:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Hosteddomain
+                idpCertificates:
+                  anyOf:
+                  - items:
+                      type: string
+                    type: array
+                  - type: 'null'
+                  default: null
+                  title: Idpcertificates
+                idpEntityId:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Idpentityid
+                idpMetadataXml:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Idpmetadataxml
+                idpSsoUrl:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Idpssourl
+                issuer:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Issuer
+                nameAttribute:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Nameattribute
+                nameIdFormat:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Nameidformat
+                protocol:
+                  title: Protocol
+                  type: string
+                scopes:
+                  anyOf:
+                  - items:
+                      type: string
+                    type: array
+                  - type: 'null'
+                  default: null
+                  title: Scopes
+                usePlatformClient:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Useplatformclient
+              required:
+              - protocol
+              - displayName
+              - allowedDomains
+              title: CreateConnectionRequest
+              type: object
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Response wrapping one connection.
+                properties:
+                  connection:
+                    $ref: '#/components/schemas/SsoConnectionDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - connection
+                title: SsoConnectionResponse
+                type: object
+          description: Response wrapping one connection.
+      summary: '`POST /connections` -- create a connection (a disabled draft unless
+        `enabled: true`).'
+  /api/v1/tenant/sso/connections/{public_id}:
+    delete:
+      description: ''
+      operationId: delete_delete_sso_connection
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response for DELETE.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: SsoDeleteResponse
+                type: object
+          description: Response for DELETE.
+      summary: '`DELETE /connections/<id>` -- always allowed, regardless of entitlement.'
+    get:
+      description: ''
+      operationId: get_get_sso_connection
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response wrapping one connection.
+                properties:
+                  connection:
+                    $ref: '#/components/schemas/SsoConnectionDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - connection
+                title: SsoConnectionResponse
+                type: object
+          description: Response wrapping one connection.
+      summary: '`GET /connections/<id>` -- one of the caller''s tenant''s connections.'
+    patch:
+      description: ''
+      operationId: patch_update_sso_connection
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Body of `PATCH /connections/<id>`. Omitted fields are unchanged;
+                protocol is immutable.
+              properties:
+                allowedDomains:
+                  anyOf:
+                  - items:
+                      type: string
+                    type: array
+                  - type: 'null'
+                  default: null
+                  title: Alloweddomains
+                clearClientSecret:
+                  default: false
+                  title: Clearclientsecret
+                  type: boolean
+                clientId:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Clientid
+                clientSecret:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Clientsecret
+                discoveryUrl:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Discoveryurl
+                displayName:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Displayname
+                emailAttribute:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Emailattribute
+                enabled:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Enabled
+                forceAuthn:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Forceauthn
+                hostedDomain:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Hosteddomain
+                idpCertificates:
+                  anyOf:
+                  - items:
+                      type: string
+                    type: array
+                  - type: 'null'
+                  default: null
+                  title: Idpcertificates
+                idpEntityId:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Idpentityid
+                idpMetadataXml:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Idpmetadataxml
+                idpSsoUrl:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Idpssourl
+                issuer:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Issuer
+                nameAttribute:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Nameattribute
+                nameIdFormat:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Nameidformat
+                scopes:
+                  anyOf:
+                  - items:
+                      type: string
+                    type: array
+                  - type: 'null'
+                  default: null
+                  title: Scopes
+                usePlatformClient:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Useplatformclient
+              title: UpdateConnectionRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response wrapping one connection.
+                properties:
+                  connection:
+                    $ref: '#/components/schemas/SsoConnectionDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - connection
+                title: SsoConnectionResponse
+                type: object
+          description: Response wrapping one connection.
+      summary: '`PATCH /connections/<id>` -- partial update; enabling re-validates
+        the full config.'
   /api/v1/tenant/twitch-install/authorize:
     post:
       description: '
