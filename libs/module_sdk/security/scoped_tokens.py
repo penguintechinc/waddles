@@ -227,7 +227,7 @@ class ScopedTokenService:
             return token
 
         except Exception as e:
-            logger.error(f"Failed to generate token: {e}")
+            logger.error("Failed to generate token: %s", type(e).__name__)
             raise
 
     def validate_token(self, token: str) -> Optional[Dict[str, Any]]:
@@ -295,10 +295,10 @@ class ScopedTokenService:
             logger.error("Invalid token signature")
             return None
         except jwt.DecodeError as e:
-            logger.error(f"Token decode error: {e}")
+            logger.error("Token decode error: %s", type(e).__name__)
             return None
         except Exception as e:
-            logger.error(f"Unexpected token validation error: {e}")
+            logger.error("Unexpected token validation error: %s", type(e).__name__)
             return None
 
     def revoke_token(self, token: str) -> bool:
@@ -351,7 +351,7 @@ class ScopedTokenService:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to revoke token: {e}")
+            logger.error("Failed to revoke token: %s", type(e).__name__)
             return False
 
     def get_granted_scopes(self, community_id: str, module_name: str) -> List[str]:
@@ -392,7 +392,7 @@ class ScopedTokenService:
             return []
 
         except Exception as e:
-            logger.error(f"Failed to get granted scopes: {e}")
+            logger.error("Failed to get granted scopes: %s", type(e).__name__)
             return []
 
     def grant_scope(
@@ -454,7 +454,7 @@ class ScopedTokenService:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to grant scope: {e}")
+            logger.error("Failed to grant scope: %s", type(e).__name__)
             return False
 
     def revoke_scope(
@@ -507,7 +507,7 @@ class ScopedTokenService:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to revoke scope: {e}")
+            logger.error("Failed to revoke scope: %s", type(e).__name__)
             return False
 
     # Private helper methods
@@ -701,7 +701,7 @@ class ScopedTokenService:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to grant scope: {e}")
+            logger.error("Failed to grant scope: %s", type(e).__name__)
             return False
 
     async def revoke_scope_async(
@@ -765,7 +765,7 @@ class ScopedTokenService:
                 return False
 
         except Exception as e:
-            logger.error(f"Failed to revoke scope: {e}")
+            logger.error("Failed to revoke scope: %s", type(e).__name__)
             return False
 
     async def get_granted_scopes_async(
@@ -813,7 +813,7 @@ class ScopedTokenService:
             return scopes
 
         except Exception as e:
-            logger.error(f"Failed to get granted scopes: {e}")
+            logger.error("Failed to get granted scopes: %s", type(e).__name__)
             return []
 
 

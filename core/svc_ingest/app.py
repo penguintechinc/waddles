@@ -103,6 +103,9 @@ from builtin_handlers.kick_ingest import handle_kick_webhook
 from builtin_handlers.slack_gateway_manifest import (
     register_default_bundles as register_slack_bundles,
 )
+from builtin_handlers.spectrum_ingest import (
+    register_default_bundles as register_spectrum_bundles,
+)
 from builtin_handlers.twitch_gateway_manifest import (
     register_default_bundles as register_twitch_bundles,
 )
@@ -119,6 +122,9 @@ from receivers.kick_pusher import CONSUMES_TAG as KICK_CONSUMES_TAG
 from receivers.kick_pusher import KickPusherReceiver
 from receivers.slack_socket import CONSUMES_TAG as SLACK_CONSUMES_TAG
 from receivers.slack_socket import SlackSocketReceiver
+from receivers.spectrum_poll import CONSUMES_TAG as SPECTRUM_CONSUMES_TAG
+from receivers.spectrum_poll import FLAG_KEY as SPECTRUM_FLAG_KEY
+from receivers.spectrum_poll import KIND_FORUM, KIND_LOBBY, SpectrumPollReceiver
 from receivers.twitch_irc import CONSUMES_TAG as TWITCH_CONSUMES_TAG
 from receivers.twitch_irc import TwitchIrcReceiver
 from receivers.youtube_live_poll import CONSUMES_TAG as YOUTUBE_CONSUMES_TAG
@@ -476,6 +482,108 @@ def _register_kick_receivers(
     )
 
 
+async def _spectrum_flag_enabled() -> bool:
+    """Evaluate `waddles.spectrum-integration` -- PostHog when connected, else the ENV baseline.
+
+    `flask_core.feature_flags.feature_enabled` degrades to `default` (here the
+    `FLAG_WADDLES_SPECTRUM_INTEGRATION` baseline, default OFF) whenever the flag
+    backend is absent/unreachable, so alpha needs no PostHog.
+    """
+    from flask_core.feature_flags import feature_enabled
+
+    return bool(
+        await feature_enabled(
+            SPECTRUM_FLAG_KEY,
+            tenant=Config.RUNNER_TENANT_SLUG,
+            default=Config.spectrum_flag_baseline(),
+        )
+    )
+
+
+def _register_spectrum_receivers(
+    supervisor: ReceiverSupervisor,
+    *,
+    redis_client: Any,
+    registry: AppRegistry,
+) -> None:
+    """Build + lease-guard + supervise one Spectrum poller per configured forum channel/lobby.
+
+    One-way (Spectrum -> Waddles) only. Skipped with a loud WARN when sources are
+    configured but the RSI session token is missing (never a silent no-op); skipped
+    quietly (INFO) when nothing is configured. Flag evaluation happens inside each
+    poller so PostHog can flip it at runtime without a restart.
+    """
+    sources = [(KIND_FORUM, c) for c in Config.SPECTRUM_FORUM_CHANNELS] + [
+        (KIND_LOBBY, c) for c in Config.SPECTRUM_LOBBIES
+    ]
+    if not sources:
+        logger.system(
+            "svc-ingest starting with no Spectrum receivers -- "
+            "SPECTRUM_FORUM_CHANNELS/SPECTRUM_LOBBIES not configured",
+            action="startup",
+            result="SKIPPED",
+        )
+        return
+    if not Config.spectrum_token_configured():
+        logger.warning(
+            "svc-ingest Spectrum sources configured but the RSI session token env var "
+            f"{Config.SPECTRUM_RSI_TOKEN_REF} is unset -- Spectrum ingest NOT started",
+            action="startup",
+            result="SKIPPED",
+        )
+        return
+
+    replica_id = uuid.uuid4().hex
+    leased_receivers = []
+
+    async def _on_spectrum_item(item: Mapping[str, Any]) -> None:
+        """Fan one normalized Spectrum item out to every consuming bundle (tenant-wide)."""
+        await fan_out_event(
+            item,
+            consumes_tag=SPECTRUM_CONSUMES_TAG,
+            tenant=Config.RUNNER_TENANT_SLUG,
+            community=None,
+            redis_client=redis_client,
+            registry=registry,
+        )
+
+    for kind, source_id in sources:
+        spectrum_receiver = SpectrumPollReceiver(flag_check=_spectrum_flag_enabled)
+        leased = LeasedReceiver(
+            transport=spectrum_receiver,
+            config={  # nosec B105 -- env var name, not a token value
+                "kind": kind,
+                "source_id": source_id,
+                "token_ref": Config.SPECTRUM_RSI_TOKEN_REF,
+                "api_base": Config.SPECTRUM_API_BASE or None,
+                "poll_interval_s": Config.SPECTRUM_POLL_INTERVAL_S,
+                "max_consecutive_errors": Config.SPECTRUM_MAX_CONSECUTIVE_ERRORS,
+                "emit_backlog": Config.SPECTRUM_EMIT_BACKLOG,
+            },
+            on_item=_on_spectrum_item,
+            redis_client=redis_client,
+            provider="spectrum",
+            community=f"{kind}-{source_id}",
+            owner_id=replica_id,
+            ttl_s=Config.SOCKET_LEASE_TTL_S,
+            renew_interval_s=Config.SOCKET_LEASE_RENEW_INTERVAL_S,
+            claim_timeout_s=Config.SOCKET_LEASE_CLAIM_TIMEOUT_S,
+            run_without_lease_on_unavailable=Config.SOCKET_LEASE_RUN_WITHOUT_ON_UNAVAILABLE,
+        )
+        leased_receivers.append(leased)
+        supervisor.register(
+            f"spectrum_poll:{kind}-{source_id}", leased.run, transport=spectrum_receiver
+        )
+
+    app.config["spectrum_leased_receivers"] = leased_receivers
+    logger.system(
+        "svc-ingest registered Spectrum poll receivers",
+        action="startup",
+        replica_id=replica_id,
+        sources=len(sources),
+    )
+
+
 def _register_twitch_receivers(
     supervisor: ReceiverSupervisor,
     *,
@@ -646,6 +754,7 @@ async def startup() -> None:
     register_discord_bundles(registry)
     register_slack_bundles(registry)
     register_youtube_bundles(registry)
+    register_spectrum_bundles(registry)
     register_kick_bundles(registry)
     register_twitch_bundles(registry)
     app.config["registry"] = registry
@@ -672,6 +781,7 @@ async def startup() -> None:
         _register_slack_receiver(supervisor, redis_client=redis_client, registry=registry)
         _register_youtube_live_receiver(supervisor, redis_client=redis_client, registry=registry)
         _register_kick_receivers(supervisor, redis_client=redis_client, registry=registry)
+        _register_spectrum_receivers(supervisor, redis_client=redis_client, registry=registry)
         _register_twitch_receivers(supervisor, redis_client=redis_client, registry=registry)
         _register_twitch_eventsub(redis_client=redis_client, registry=registry)
         await supervisor.start()

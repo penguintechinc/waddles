@@ -70,6 +70,37 @@ def test_issue_and_verify_round_trip(issuer: ServiceJwtIssuer, service_id: str) 
     assert claims["aud"] == AUDIENCE
 
 
+def test_issued_token_carries_tenant_claim_from_identity_only(
+    keypair: tuple[Ed25519PrivateKey, SigningKey], service_id: str
+) -> None:
+    """The `tenant` claim is stamped from the allow-listed identity -- never the caller."""
+    _, key = keypair
+
+    def issuer_for(tenant: str) -> ServiceJwtIssuer:
+        identity = ServiceIdentity(
+            service_id=service_id,
+            k8s_namespace="waddlebot",
+            k8s_service_account="svc-process",
+            allowed_scopes=frozenset({SCOPE}),
+            tenant=tenant,
+        )
+        return ServiceJwtIssuer(
+            keys={"k1": key}, active_kid="k1", identities={service_id: identity}, audience=AUDIENCE
+        )
+
+    bound = issuer_for("acme")
+    claims = bound.as_verifier().verify(bound.issue(service_id, SCOPE), required_scope=SCOPE)
+    assert claims["tenant"] == "acme"
+    system = issuer_for("system")
+    claims = system.as_verifier().verify(system.issue(service_id, SCOPE), required_scope=SCOPE)
+    assert claims["tenant"] == "system"
+    # an identity with no tenant binding issues a token with NO tenant claim (consumers that
+    # require one -- the internal gRPC server -- reject it; nothing defaults to a tenant)
+    untenanted = issuer_for("")
+    claims = untenanted.as_verifier().verify(untenanted.issue(service_id, SCOPE), required_scope=SCOPE)
+    assert "tenant" not in claims
+
+
 def test_issue_sets_nbf_to_iat(issuer: ServiceJwtIssuer, service_id: str) -> None:
     """Security review MEDIUM finding: `nbf` must be set at issuance."""
     token = issuer.issue(service_id, SCOPE)
@@ -351,6 +382,25 @@ class TestEnvWiring:
         assert len(identities) == 1
         assert identities[0].service_id == "spiffe://penguintech.io/alpha/svc-process"
         assert identities[0].allowed_scopes == frozenset({"identity:ephemeral:mint"})
+
+    def test_load_identities_from_env_parses_tenant_binding(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv(
+            "SERVICE_JWT_IDENTITIES",
+            '[{"service_id": "svc-process", "k8s_namespace": "waddlebot", '
+            '"k8s_service_account": "svc-process", "allowed_scopes": ["identity:ephemeral:mint"], '
+            '"tenant": "system"},'
+            ' {"service_id": "svc-action", "k8s_namespace": "waddlebot", '
+            '"k8s_service_account": "svc-action", "allowed_scopes": ["egress:connect"]}]',
+        )
+        with caplog.at_level("WARNING"):
+            identities = load_identities_from_env(env="alpha")
+        assert [i.tenant for i in identities] == ["system", ""]
+        # the unbound identity is called out at startup, loudly, by id (not silently accepted)
+        warned = [r for r in caplog.records if "no tenant binding" in r.getMessage()]
+        assert len(warned) == 1
+        assert warned[0].service_id == "spiffe://penguintech.io/alpha/svc-action"  # type: ignore[attr-defined]
 
     def test_load_identities_from_env_accepts_full_spiffe_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(
