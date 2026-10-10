@@ -341,7 +341,10 @@ class OpenWhiskAdapter(BaseAdapter):
                         f"OpenWhisk returned HTTP {response.status_code}: "
                         f"{response.text[:200]}"
                     )
-                    logger.warning(f"Attempt {attempt + 1}: {error_msg}")
+                    # SECURITY: never log the remote body (it can echo the request payload)
+                    logger.warning(
+                        "Attempt %d: OpenWhisk returned HTTP %s", attempt + 1, response.status_code
+                    )
 
                     # If it's a client error (4xx), don't retry
                     if 400 <= response.status_code < 500:
@@ -362,7 +365,11 @@ class OpenWhiskAdapter(BaseAdapter):
                     return response.json()
                 except json.JSONDecodeError as e:
                     error_msg = f"Failed to parse OpenWhisk response as JSON: {str(e)}"
-                    logger.error(f"Attempt {attempt + 1}: {error_msg}")
+                    logger.error(
+                        "Attempt %d: Failed to parse OpenWhisk response as JSON: %s",
+                        attempt + 1,
+                        type(e).__name__,
+                    )
                     raise
 
             except httpx.TimeoutException as e:
@@ -379,7 +386,9 @@ class OpenWhiskAdapter(BaseAdapter):
                 raise
 
             except httpx.RequestError as e:
-                logger.warning(f"Attempt {attempt + 1}: OpenWhisk request failed: {str(e)}")
+                logger.warning(
+                    "Attempt %d: OpenWhisk request failed: %s", attempt + 1, type(e).__name__
+                )
                 last_exception = e
 
                 if attempt < self.max_retries:
@@ -468,7 +477,12 @@ class OpenWhiskAdapter(BaseAdapter):
                 f"OpenWhisk action timed out after {self.timeout}s "
                 f"(retried {self.max_retries} times): {str(e)}"
             )
-            logger.error(error_msg)
+            logger.error(
+                "OpenWhisk action timed out after %ss (retried %d times): %s",
+                self.timeout,
+                self.max_retries,
+                type(e).__name__,
+            )
             self.health.record_failure()
 
             return ExecuteResponse(
@@ -478,7 +492,7 @@ class OpenWhiskAdapter(BaseAdapter):
 
         except httpx.RequestError as e:
             error_msg = f"OpenWhisk request failed: {str(e)}"
-            logger.error(error_msg)
+            logger.error("OpenWhisk request failed: %s", type(e).__name__)
             self.health.record_failure()
 
             return ExecuteResponse(
@@ -488,7 +502,7 @@ class OpenWhiskAdapter(BaseAdapter):
 
         except ValueError as e:
             error_msg = f"OpenWhisk invocation error: {str(e)}"
-            logger.error(error_msg)
+            logger.error("OpenWhisk invocation error: %s", type(e).__name__)
             self.health.record_failure()
 
             return ExecuteResponse(
@@ -498,7 +512,7 @@ class OpenWhiskAdapter(BaseAdapter):
 
         except json.JSONDecodeError as e:
             error_msg = f"Failed to parse OpenWhisk response as JSON: {str(e)}"
-            logger.error(error_msg)
+            logger.error("Failed to parse OpenWhisk response as JSON: %s", type(e).__name__)
             self.health.record_failure()
 
             return ExecuteResponse(
@@ -508,7 +522,9 @@ class OpenWhiskAdapter(BaseAdapter):
 
         except Exception as e:
             error_msg = f"Unexpected error during OpenWhisk action execution: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            logger.error(
+                "Unexpected error during OpenWhisk action execution: %s", type(e).__name__
+            )
             self.health.record_failure()
 
             return ExecuteResponse(
