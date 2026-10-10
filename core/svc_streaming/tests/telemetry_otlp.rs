@@ -30,8 +30,48 @@ async fn init_with_unreachable_otlp_endpoint_does_not_crash() {
     tracing::info!("telemetry initialized with an unreachable OTLP endpoint");
     let rendered = svc_streaming::telemetry::render_metrics(&registry).unwrap();
     assert!(rendered.is_empty());
+
+    // A dead collector must never slow or break the data plane: hammer the
+    // hot-path instruments and span creation against the unreachable
+    // endpoint. Exporters run on their own background threads behind bounded
+    // queues (excess is dropped, never blocked on), so the burst finishes at
+    // in-process speed and no recording call panics or returns an error.
+    let stream_metrics = svc_streaming::telemetry::stream::StreamMetrics::shared();
+    let burst = 20_000u64;
+    let started = std::time::Instant::now();
+    for i in 0..burst {
+        stream_metrics.record_ingest_chunk(
+            svc_streaming::ingest::IngestKind::Rtmp,
+            std::time::Duration::from_micros(i % 500),
+            1316,
+        );
+        stream_metrics.record_stage(
+            svc_streaming::telemetry::stream::Stage::EngineStart,
+            std::time::Duration::from_micros(i),
+        );
+        let span = tracing::info_span!("dead_exporter_burst", i);
+        let _entered = span.enter();
+    }
+    let elapsed = started.elapsed();
+    println!(
+        "telemetry: {burst} instrument + span iterations against a dead OTLP endpoint took {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "a dead OTLP exporter blocked the recording path: {burst} iterations took {elapsed:?}"
+    );
+
     // Must return promptly rather than hanging on the dead endpoint.
+    let shutdown_started = std::time::Instant::now();
     guard.shutdown();
+    // Tracer flush is capped at 2s and the SDK bounds the meter flush at 5s;
+    // anything near the old unbounded behavior fails this.
+    let shutdown_elapsed = shutdown_started.elapsed();
+    println!("telemetry: shutdown with a dead OTLP endpoint took {shutdown_elapsed:?}");
+    assert!(
+        shutdown_elapsed < std::time::Duration::from_secs(9),
+        "shutdown hung on the dead endpoint: {shutdown_elapsed:?}"
+    );
 
     unsafe {
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");

@@ -15,8 +15,20 @@
 //! duplicated from `tests/ingest_rtmp_publish.rs` (self-contained --
 //! `tests/*.rs` files don't share code without a `tests/common`-style
 //! helper module, and this is the only other file that needs it).
+//!
+//! # Telemetry gate (`rules/testing.md` Telemetry Validation)
+//!
+//! The same run also proves the stream latency histograms really emit: the
+//! process-global meter provider and `tracing` subscriber are pointed at the
+//! in-memory sink in `tests/otel_common` *before* anything is constructed,
+//! and after the publish -> pipeline -> HLS path has run the test asserts
+//! each ingest->egress histogram, stage histogram, counter, and span was
+//! received (>= 1 data point, counts printed). A histogram that silently
+//! stops emitting fails this test.
 
 #![cfg(unix)]
+
+mod otel_common;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::fs::PermissionsExt;
@@ -54,6 +66,8 @@ use svc_streaming::pipeline::{FfmpegSupervisor, SupervisorConfig};
 use svc_streaming::rtc::ingest_auth::InternalIngestAuthClient;
 use svc_streaming::rtc::{PeerConnectionFactory, RtcConfig, RtcMetrics};
 use svc_streaming::store::DefaultSecretResolver;
+
+use otel_common::span_attrs;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const STREAM_KEY: &str = "sk_e2e_fake_ffmpeg";
@@ -272,6 +286,11 @@ fn unused_whip_state(config: &Config) -> Arc<WhipState> {
 
 #[tokio::test]
 async fn rtmp_publish_starts_a_transcoded_pipeline_and_hls_lists_it() {
+    // Must precede every `FfmpegSupervisor`/`HlsSink`/`Orchestrator`
+    // construction: they bind their OTel instruments to whichever global
+    // meter provider is installed at that moment.
+    let otel = otel_common::OtelSink::install();
+
     // SAFETY: single test in this file/process, before any await point.
     unsafe { std::env::set_var("DB_TYPE", "sqlite") };
 
@@ -347,7 +366,14 @@ async fn rtmp_publish_starts_a_transcoded_pipeline_and_hls_lists_it() {
         Arc::new(DefaultSecretResolver),
         SupervisorConfig::default(),
     ));
-    let hls = Arc::new(HlsSink::new(stream_data_dir.clone(), &prom_registry));
+    // 50 ms poll so the HLS poller notices the fixture segment quickly
+    // instead of waiting out the production 2 s default.
+    let hls = Arc::new(HlsSink::with_intervals(
+        stream_data_dir.clone(),
+        &prom_registry,
+        Duration::from_millis(50),
+        svc_streaming::egress::hls::DEFAULT_CLEANUP_DELAY,
+    ));
     let registry = Arc::new(PipelineRegistry::new());
     let relay = Arc::new(RelaySink::new());
     let whip_state = unused_whip_state(&config);
@@ -491,6 +517,32 @@ async fn rtmp_publish_starts_a_transcoded_pipeline_and_hls_lists_it() {
     tokio::fs::write(expected_hls_dir.join("segment_00001.m4s"), vec![0u8; 64])
         .await
         .expect("write fixture segment");
+    // The media playlist is written *after* the segment, exactly as ffmpeg's
+    // hls muxer does -- the HLS sink treats "listed in the playlist" as
+    // "segment complete", which is what unlocks the segment-duration /
+    // size / time-to-first-egress histograms.
+    tokio::fs::write(
+        expected_hls_dir.join("index.m3u8"),
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:4\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.000000,\nsegment_00001.m4s\n",
+    )
+    .await
+    .expect("write fixture media playlist");
+
+    // The HLS poller (50 ms interval here) publishes the first segment's
+    // egress timings; wait for it *before* tearing the pipeline down (stop
+    // aborts the poller).
+    otel_common::wait_for(
+        "stream_time_to_first_egress_seconds{protocol=rtmp,egress=hls} to emit",
+        TEST_TIMEOUT,
+        || {
+            otel.histogram(
+                "stream_time_to_first_egress_seconds",
+                &[("protocol", "rtmp"), ("egress", "hls")],
+            )
+            .0 >= 1
+        },
+    )
+    .await;
 
     let playlist_response = hls_app
         .clone()
@@ -559,6 +611,193 @@ async fn rtmp_publish_starts_a_transcoded_pipeline_and_hls_lists_it() {
         0,
         "pipeline must be delisted immediately once stop_pipeline returns"
     );
+    // 6. Telemetry gate. The publisher disconnects, which ends the ingest
+    // pump (FLV stream EOF) and with it the session: the live-session
+    // gauge returns to 0 and the session-lifetime histogram gets its point.
+    assert_eq!(
+        otel.counter("stream_active_sessions", &[("protocol", "rtmp")]),
+        1,
+        "exactly one pumped RTMP session is live while the publisher is connected"
+    );
+    drop(client_session);
+    drop(stream);
+    otel_common::wait_for(
+        "the ingest session to end after the publisher disconnects",
+        TEST_TIMEOUT,
+        || otel.counter("stream_active_sessions", &[("protocol", "rtmp")]) == 0,
+    )
+    .await;
+
+    otel.assert_histograms_emitted(&[
+        // ingest -> egress latency
+        ("stream_ingest_handoff_seconds", &[("protocol", "rtmp")]),
+        (
+            "stream_time_to_first_egress_seconds",
+            &[("protocol", "rtmp"), ("egress", "hls")],
+        ),
+        // segment duration + size
+        ("stream_segment_duration_seconds", &[("variant", "std")]),
+        ("stream_segment_size_bytes", &[("variant", "std")]),
+        // every pipeline setup/teardown stage the orchestrator + supervisor ran
+        ("stream_stage_duration_seconds", &[("stage", "db_connect")]),
+        (
+            "stream_stage_duration_seconds",
+            &[("stage", "config_lookup")],
+        ),
+        (
+            "stream_stage_duration_seconds",
+            &[("stage", "tenant_resolve")],
+        ),
+        ("stream_stage_duration_seconds", &[("stage", "spec_build")]),
+        (
+            "stream_stage_duration_seconds",
+            &[("stage", "egress_start")],
+        ),
+        (
+            "stream_stage_duration_seconds",
+            &[("stage", "engine_start")],
+        ),
+        (
+            "stream_stage_duration_seconds",
+            &[("stage", "ffmpeg_spawn")],
+        ),
+        (
+            "stream_stage_duration_seconds",
+            &[("stage", "ffmpeg_first_progress")],
+        ),
+        ("stream_stage_duration_seconds", &[("stage", "ffmpeg_stop")]),
+        ("stream_stage_duration_seconds", &[("stage", "teardown")]),
+        // session lifetime
+        ("stream_session_duration_seconds", &[("protocol", "rtmp")]),
+        // the pre-existing supervisor histograms still emit alongside
+        ("pipeline_start_ms", &[]),
+    ]);
+
+    // Value checks: the fixture segment is 64 bytes / 4.000000 s, and the
+    // time-to-first-egress is a small positive wall-clock interval.
+    assert_eq!(
+        otel.histogram("stream_segment_duration_seconds", &[("variant", "std")]),
+        (1, 4.0)
+    );
+    assert_eq!(
+        otel.histogram("stream_segment_size_bytes", &[("variant", "std")]),
+        (1, 64.0)
+    );
+    let (first_egress_count, first_egress_sum) = otel.histogram(
+        "stream_time_to_first_egress_seconds",
+        &[("protocol", "rtmp"), ("egress", "hls")],
+    );
+    assert_eq!(first_egress_count, 1, "recorded exactly once per pipeline");
+    assert!(
+        (0.0..TEST_TIMEOUT.as_secs_f64() * 3.0).contains(&first_egress_sum),
+        "time-to-first-egress must be a small non-negative interval, got {first_egress_sum}s"
+    );
+    assert!(
+        otel.counter("stream_ingest_bytes_total", &[("protocol", "rtmp")]) > 0,
+        "the pump forwarded the FLV header + published chunks to ffmpeg stdin"
+    );
+    for outcome in ["started", "ended"] {
+        assert_eq!(
+            otel.counter(
+                "stream_sessions_total",
+                &[("protocol", "rtmp"), ("outcome", outcome)]
+            ),
+            1,
+            "sessions_total{{outcome={outcome}}}"
+        );
+    }
+    assert_eq!(
+        otel.counter("stream_session_failures_total", &[]),
+        0,
+        "a healthy publish must not count any session failure"
+    );
+
+    // Spans: one trace covers listener connection -> orchestrator session
+    // -> setup stages / ingest pump, linked across the mpsc channel and the
+    // `tokio::spawn` (neither carries tracing context by itself).
+    let spans = otel.spans();
+    let by_name = |name: &str| {
+        spans.iter().find(|s| s.name == name).unwrap_or_else(|| {
+            panic!("no `{name}` span exported; got {:?}", {
+                let mut names: Vec<_> = spans.iter().map(|s| s.name.to_string()).collect();
+                names.sort();
+                names.dedup();
+                names
+            })
+        })
+    };
+    let connection = by_name("rtmp_connection");
+    let session_span = by_name("orchestrator.handle_session");
+    assert_eq!(
+        session_span.parent_span_id,
+        connection.span_context.span_id(),
+        "the session span must be parented to the listener's connection span"
+    );
+    assert_eq!(
+        session_span.span_context.trace_id(),
+        connection.span_context.trace_id(),
+        "one trace across the ingest -> orchestrator hop"
+    );
+    for stage in [
+        "pipeline.config_lookup",
+        "pipeline.egress_start",
+        "pipeline.engine_start",
+        "ingest.pump",
+    ] {
+        let span = by_name(stage);
+        assert_eq!(
+            span.parent_span_id,
+            session_span.span_context.span_id(),
+            "{stage} must be a child of the session span"
+        );
+    }
+    let pump_attrs = span_attrs(by_name("ingest.pump"));
+    assert!(
+        pump_attrs.iter().any(|a| a == "protocol=rtmp"),
+        "pump attrs: {pump_attrs:?}"
+    );
+    let pumped: i64 = pump_attrs
+        .iter()
+        .find_map(|a| a.strip_prefix("bytes_total=")?.parse().ok())
+        .expect("ingest.pump records bytes_total on exit");
+    assert!(pumped > 0, "bytes_total={pumped}");
+    println!(
+        "telemetry: {} span(s) exported; session trace {}",
+        spans.len(),
+        session_span.span_context.trace_id()
+    );
+
+    // PII / secret hygiene: the stream key must not appear in any span
+    // attribute, span name, or metric attribute value.
+    for span in &spans {
+        assert!(
+            !span.name.contains(STREAM_KEY)
+                && span_attrs(span).iter().all(|a| !a.contains(STREAM_KEY)),
+            "stream key leaked into span `{}`: {:?}",
+            span.name,
+            span_attrs(span)
+        );
+    }
+    for metric in [
+        "stream_ingest_handoff_seconds",
+        "stream_ingest_bytes_total",
+        "stream_time_to_first_egress_seconds",
+        "stream_segment_duration_seconds",
+        "stream_stage_duration_seconds",
+        "stream_session_duration_seconds",
+        "stream_sessions_total",
+        "stream_active_sessions",
+        "pipeline_start_ms",
+    ] {
+        for point in otel.points(metric) {
+            assert!(
+                point.attrs.iter().all(|(_, v)| !v.contains(STREAM_KEY)),
+                "stream key leaked into metric {metric} attributes: {:?}",
+                point.attrs
+            );
+        }
+    }
+
     tokio::time::sleep(Duration::from_millis(100)).await;
     tokio::fs::remove_dir_all(&stream_data_dir).await.ok();
     tokio::fs::remove_file(&db_path).await.ok();

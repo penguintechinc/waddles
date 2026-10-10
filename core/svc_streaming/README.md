@@ -83,7 +83,7 @@ together into one running service -- see Runtime Wiring below.
 | `src/main.rs`, `src/lib.rs` | Bootstrap: config, telemetry, orchestrator + ingest listeners, router, graceful shutdown | Implemented |
 | `src/orchestrator.rs` | Ingest -> pipeline -> egress wiring: `Orchestrator`, `PipelineRegistry`, `DbIngestAuth`, `RefreshingSrtAuth` | **S12** -- Implemented |
 | `src/config.rs` | Env-driven `Config`/`CliConfig`, secrets never as CLI args | Implemented |
-| `src/telemetry.rs` | `tracing` + OTLP traces/metrics + Prometheus registry | Implemented (OTel *logs* export not wired -- no `opentelemetry-appender-tracing` in the approved dependency set yet) |
+| `src/telemetry.rs`, `src/telemetry/` | `tracing` + OTLP traces/metrics + Prometheus registry; `stream.rs` (stream latency/stage/external-call instruments), `trace_context.rs` (W3C propagation, route-template request spans) | Implemented (OTel *logs* export not wired -- no `opentelemetry-appender-tracing` in the approved dependency set yet) |
 | `src/http/` | Router (community JWT + internal ServiceKey + HLS + WHIP/WHEP mounts), `/health`, `/readyz`, two-document OpenAPI split | Implemented |
 | `src/api/` | Control-plane `/api/v1/*` routes | Implemented |
 | `src/pipeline/` | `PipelineSpec`/model types, `ffmpeg` argv builder, `FfmpegSupervisor` lifecycle | Implemented |
@@ -122,6 +122,45 @@ ladder bug, see `RECORD_PROFILE`'s doc comment).
 `Record` sharing a `-f tee` group writes a `.mp4` the upload watcher never
 scans (`pipeline::ffmpeg::tee_slave`); no graceful shutdown for RTMP/SRT
 listeners or the dispatch loop (dropped on process exit).
+
+## Observability (OTLP)
+
+Destination is always env-configured (`OTEL_EXPORTER_OTLP_*`, see
+Environment) -- unset means no export, never a hardcoded collector. Every
+instrument below is emitted over OTLP; recording is infallible and a dead
+collector never blocks the data plane (exporters run on their own threads
+behind bounded queues that drop on overflow; shutdown flush is time-boxed).
+Attributes are bounded enums only -- never a stream key, WHIP token, peer
+address, or per-stream id.
+
+| Instrument | Kind | Attributes | What it measures |
+|---|---|---|---|
+| `stream_ingest_handoff_seconds` | histogram | `protocol` | one ingest chunk read -> written to ffmpeg stdin (rises under ffmpeg backpressure) |
+| `stream_time_to_first_egress_seconds` | histogram | `protocol`, `egress` | ingest accepted -> first HLS segment published (segment mtime vs. acceptance) |
+| `stream_fanout_latency_seconds` | histogram | `kind` | RTP packet entering the SFU fanout -> a WHEP viewer receiving it (1-in-16 sampled) |
+| `stream_segment_duration_seconds` / `stream_segment_size_bytes` | histogram | `variant` | each completed HLS segment (`#EXTINF`, on-disk size) |
+| `stream_hls_playlist_age_seconds` | histogram | `variant` | media playlist age, sampled every poll |
+| `stream_stage_duration_seconds` | histogram | `stage` | `db_connect`, `config_lookup`, `tenant_resolve`, `spec_build`, `egress_start`, `engine_start`, `ffmpeg_spawn`, `ffmpeg_first_progress`, `ffmpeg_stop`, `teardown` |
+| `stream_external_call_duration_seconds` | histogram | `peer`, `outcome` | `token_ledger`, `ingest_auth`, `object_store` calls (`outcome=error` = transport failure) |
+| `stream_relay_session_seconds` | histogram | `kind` | RTMP/SRT relay target lifetime (recorded on stop) |
+| `stream_session_duration_seconds` | histogram | `protocol` | pumped RTMP/SRT ingest session lifetime |
+| `stream_sessions_total`, `stream_session_failures_total`, `stream_ingest_bytes_total`, `stream_segments_total` | counter | `protocol`/`outcome`/`reason`/`variant` | events; failures carry a bounded `reason` (`config_not_found`, `tenant_unresolved`, `spec_build_failed`, `engine_start_failed`, `whip_sdp_missing`, `stdin_unavailable`, `no_database`) |
+| `stream_active_sessions` | up-down counter | `protocol` | pumped ingest sessions live now |
+
+Traces: one trace covers a publish end to end. The listener's connection span
+(`rtmp_connection` / `srt_connection` / the WHIP request span) is carried on
+`IngestSession::span`, so `orchestrator.handle_session` and its
+`pipeline.<stage>` / `ingest.pump` / `egress.hls_poller` children join it
+across the channel and the `tokio::spawn`. Inbound `traceparent` parents the
+HTTP request span and outbound calls (token ledger, loopback ingest-auth)
+inject it. HTTP spans and the `/metrics` `path` label use the matched route
+template (`/whip/{token}`), never the raw URI (tokens ride in the path).
+
+Telemetry-emission gate: `tests/e2e_rtmp_to_hls_fake.rs` (RTMP -> HLS),
+`tests/rtc_whip_whep_roundtrip.rs` (WHIP -> WHEP), `tests/e2e_session_failure_telemetry.rs`,
+`tests/telemetry_external_calls.rs` and `tests/http_trace_labels.rs` read the
+in-memory OTel sink (`tests/otel_common`) and fail on any histogram with zero
+data points.
 
 ## Container
 
