@@ -36,6 +36,19 @@ then reverted to green):
 - `start_as_current_span()` left at the OTel SDK defaults (record_exception /
   set_status_on_exception on): `TestTelemetry::test_failure_emits_error_span_and_counter_
   without_driver_text` red -- the span status carried the raw driver message.
+
+`community_members` PII erasure (`TestCommunityMemberErasure`, `TestMemberErasureAtomicity`,
+executed 2026-10-10 against this file + `test_admin_data_privacy.py` + `test_audit_swallow_
+regressions.py`; the real-Postgres file `test_dsar_member_erasure_pg_integration.py` separately):
+- member step removed from `_sync_erase()`: 12 red.
+- `platform_user_id` / `bio` dropped from `COMMUNITY_MEMBER_PII_COLUMNS`: 7 red each.
+- platform-keyed (linked-identity) arm disabled: 2 red; arm no longer requires an empty
+  `user_id` (another hub user's row hit): 1 red; blank platform id guard removed: 1 red.
+- `user_id` prefix match instead of equality: 1 red (`1` vs `10`).
+- `dal.commit()` right after the member step (non-atomic): 7 red.
+- unbound-column guard disabled (pydal silently drops unknown fields): 1 red.
+- member rows counted as deletes in the rows histogram / span: 2 red.
+- (Postgres) `social_links` dropped from the set: 2 of 3 red.
 """
 
 from __future__ import annotations
@@ -148,6 +161,75 @@ def _chat(db: Any, *, user_id: int | None, community_id: int, text: str) -> None
         created_at=_now(),
     )
     db.dal.commit()
+
+
+#: Distinctive sentinels so a leak into a log line / span is unmistakable.
+MEMBER_DISPLAY = "Zed Display-Sentinel"
+MEMBER_AVATAR = "https://cdn.example/zed-avatar-sentinel.png"
+MEMBER_BIO = "zed bio sentinel: lives at 1 Privacy Lane"
+MEMBER_LINKS = {"twitter": "@zed_sentinel", "site": "https://zed.example"}
+MEMBER_PII_FIELDS = ("display_name", "avatar_url", "bio", "social_links", "platform_user_id")
+
+
+def _member(
+    db: Any,
+    *,
+    community_id: int,
+    user_id: int | str | None = None,
+    platform: str | None = "discord",
+    platform_user_id: str | None = None,
+    reputation: int = 742,
+    role: str = "moderator",
+) -> int:
+    """Insert a fully-populated `community_members` row (`user_id=None`: platform-keyed)."""
+    member_id = db.dal.community_members.insert(
+        community_id=community_id,
+        user_id=None if user_id is None else str(user_id),
+        platform=platform,
+        platform_user_id=platform_user_id,
+        display_name=MEMBER_DISPLAY,
+        avatar_url=MEMBER_AVATAR,
+        bio=MEMBER_BIO,
+        social_links=dict(MEMBER_LINKS),
+        reputation=reputation,
+        role=role,
+        is_active=True,
+        joined_at=_now(),
+    )
+    db.dal.commit()
+    return int(member_id)
+
+
+def _link_identity(db: Any, *, user_id: int, platform: str, platform_user_id: str) -> None:
+    """Link a platform account to a hub user (`hub_user_identities`, retained by erasure)."""
+    db.dal.hub_user_identities.insert(
+        hub_user_id=user_id,
+        platform=platform,
+        platform_user_id=platform_user_id,
+        platform_username="linked-handle",
+        linked_at=_now(),
+    )
+    db.dal.commit()
+
+
+def _member_row(db: Any, member_id: int) -> Any:
+    row = db.dal(db.dal.community_members.id == member_id).select().first()
+    db.dal.commit()
+    return row
+
+
+def _member_pii(db: Any, member_id: int) -> dict[str, Any]:
+    row = _member_row(db, member_id)
+    return {column: row[column] for column in MEMBER_PII_FIELDS}
+
+
+def _assert_member_intact(db: Any, member_id: int) -> None:
+    """Every PII column still holds its original sentinel (nothing erased, nothing half-erased)."""
+    row = _member_row(db, member_id)
+    assert row.display_name == MEMBER_DISPLAY
+    assert row.avatar_url == MEMBER_AVATAR
+    assert row.bio == MEMBER_BIO
+    assert row.social_links == MEMBER_LINKS
 
 
 def _seed_footprint(db: Any, user_id: int) -> None:
@@ -341,6 +423,319 @@ class TestChatMessageErasure:
         assert _user_row(db, user_id).email == f"deleted_{user_id}@deleted.waddlebot"
 
 
+class TestCommunityMemberErasure:
+    """Art. 17 gap: erasure never nulled `community_members` PII (name, avatar, bio, ...)."""
+
+    async def test_every_pii_column_is_nulled_on_every_hub_keyed_member_row(self, db: Any) -> None:
+        user_id = _user(db, name="member")
+        rows = [
+            _member(db, community_id=1, user_id=user_id, platform_user_id="d-111"),
+            _member(db, community_id=2, user_id=user_id, platform_user_id="d-222"),
+        ]
+        for member_id in rows:
+            assert _member_pii(db, member_id)["platform_user_id"] is not None  # seeded
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="member@example.com")
+
+        for member_id in rows:
+            assert _member_pii(db, member_id) == dict.fromkeys(MEMBER_PII_FIELDS)
+
+    def test_pii_column_set_is_exactly_the_documented_one(self) -> None:
+        assert privacy.COMMUNITY_MEMBER_PII_COLUMNS == MEMBER_PII_FIELDS
+
+    async def test_the_row_survives_with_its_non_pii_fields(self, db: Any) -> None:
+        """Rows are anonymized, never deleted: FK integrity + the retained reputation signal."""
+        user_id = _user(db, name="kept")
+        member_id = _member(db, community_id=7, user_id=user_id, platform_user_id="d-9")
+        before = _member_row(db, member_id)
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="kept@example.com")
+
+        row = _member_row(db, member_id)
+        assert row is not None
+        assert (row.community_id, row.user_id, row.platform) == (7, str(user_id), "discord")
+        assert (row.reputation, row.role, row.is_active) == (742, "moderator", True)
+        assert row.joined_at == before.joined_at
+        assert row.updated_at is not None  # stamped by the erasure
+
+    async def test_platform_keyed_row_for_a_linked_identity_is_nulled(self, db: Any) -> None:
+        """Rows the reputation service creates carry no hub link -- found via the identity."""
+        user_id = _user(db, name="linked")
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-555")
+        orphan = _member(
+            db, community_id=3, user_id=None, platform="twitch", platform_user_id="t-555"
+        )
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="linked@example.com")
+
+        assert _member_pii(db, orphan) == dict.fromkeys(MEMBER_PII_FIELDS)
+        row = _member_row(db, orphan)
+        assert (row.reputation, row.role) == (742, "moderator")
+
+    async def test_platform_keyed_row_is_matched_on_platform_and_id_together(self, db: Any) -> None:
+        user_id = _user(db, name="exact")
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-777")
+        wrong_platform = _member(
+            db, community_id=1, user_id=None, platform="discord", platform_user_id="t-777"
+        )
+        wrong_id = _member(
+            db, community_id=1, user_id=None, platform="twitch", platform_user_id="t-778"
+        )
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="exact@example.com")
+
+        _assert_member_intact(db, wrong_platform)
+        _assert_member_intact(db, wrong_id)
+
+    async def test_an_identity_with_a_blank_platform_id_never_sweeps_unkeyed_rows(
+        self, db: Any
+    ) -> None:
+        """A blank id must not "match" every orphan row that also has a blank id."""
+        user_id = _user(db, name="blankid")
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="")
+        stranger = _member(db, community_id=1, user_id=None, platform="twitch", platform_user_id="")
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="blankid@example.com")
+
+        _assert_member_intact(db, stranger)
+        [row] = _ledger(db, user_id)
+        assert row.deletion_scope["community_members_anonymized"] == 0
+
+    async def test_a_row_linked_to_another_hub_user_is_never_touched(self, db: Any) -> None:
+        """Same platform account string, but the row names a different hub user: not ours."""
+        victim = _user(db, name="victim2")
+        other = _user(db, name="other2")
+        _link_identity(db, user_id=victim, platform="discord", platform_user_id="d-shared")
+        others_row = _member(
+            db, community_id=1, user_id=other, platform="discord", platform_user_id="d-shared"
+        )
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=victim, email="victim2@example.com")
+
+        _assert_member_intact(db, others_row)
+        assert _member_row(db, others_row).platform_user_id == "d-shared"
+
+    async def test_other_users_member_rows_are_untouched(self, db: Any) -> None:
+        victim = _user(db, name="victim3")
+        bystander = _user(db, name="bystander3")
+        _member(db, community_id=1, user_id=victim, platform_user_id="d-v")
+        theirs = _member(db, community_id=1, user_id=bystander, platform_user_id="d-b")
+        # An id that merely STARTS WITH the victim's (e.g. 1 vs 10) must not match.
+        lookalike = _member(db, community_id=2, user_id=f"{victim}0", platform_user_id="d-l")
+        platform_only = _member(db, community_id=2, user_id=None, platform_user_id="d-nobody")
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=victim, email="victim3@example.com")
+
+        for member_id in (theirs, lookalike, platform_only):
+            _assert_member_intact(db, member_id)
+
+    async def test_ledger_counts_the_anonymized_members_separately_from_deletes(
+        self, db: Any
+    ) -> None:
+        user_id = _user(db, name="counted2")
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-1")
+        _member(db, community_id=1, user_id=user_id, platform_user_id="d-1")
+        _member(db, community_id=2, user_id=user_id, platform_user_id="d-2")
+        _member(db, community_id=3, user_id=None, platform="twitch", platform_user_id="t-1")
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="counted2@example.com")
+
+        [row] = _ledger(db, user_id)
+        assert row.status == "completed"
+        assert row.deletion_scope["community_members_anonymized"] == 3
+        assert privacy._rows_deleted(dict(row.deletion_scope)) == sum(
+            v
+            for k, v in row.deletion_scope.items()
+            if k not in {"hub_users_anonymized", "community_members_anonymized"}
+        )
+
+    async def test_erasure_with_no_member_rows_completes_with_a_zero_count(self, db: Any) -> None:
+        user_id = _user(db, name="nomember")
+
+        await privacy.anonymize_user_data(db, db.dal, user_id=user_id, email="nomember@example.com")
+
+        [row] = _ledger(db, user_id)
+        assert row.status == "completed"
+        assert row.deletion_scope["community_members_anonymized"] == 0
+
+    async def test_self_service_route_nulls_member_pii(self, app: Quart, db: Any) -> None:
+        user_id = _user(db, name="viaroute3")
+        member_id = _member(db, community_id=1, user_id=user_id, platform_user_id="d-r")
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=user_id)}"}
+
+        response = await app.test_client().delete("/api/v1/user/me/data", headers=headers, json={})
+
+        assert response.status_code == 200
+        assert _member_pii(db, member_id) == dict.fromkeys(MEMBER_PII_FIELDS)
+
+    async def test_an_unbound_pii_column_fails_loud_instead_of_leaving_pii_behind(
+        self, db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pydal `update()` silently DROPS unknown fields -- the guard must raise instead."""
+        user_id = _user(db, name="drift")
+        _seed_footprint(db, user_id)
+        member_id = _member(db, community_id=1, user_id=user_id, platform_user_id="d-x")
+        before = _footprint(db, user_id)
+        monkeypatch.setattr(
+            privacy,
+            "COMMUNITY_MEMBER_PII_COLUMNS",
+            (*privacy.COMMUNITY_MEMBER_PII_COLUMNS, "no_such_column"),
+        )
+
+        with pytest.raises(RuntimeError, match="refusing a partial erasure"):
+            await privacy.anonymize_user_data(
+                db, db.dal, user_id=user_id, email="drift@example.com"
+            )
+
+        assert _footprint(db, user_id) == before  # the deletes that ran first were rolled back
+        _assert_member_intact(db, member_id)
+        assert _user_row(db, user_id).email == "drift@example.com"
+        assert [r.status for r in _ledger(db, user_id)] == ["failed"]
+
+    async def test_debug_logs_never_contain_member_pii(
+        self, db: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        user_id = _user(db, name="logquiet")
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-secret-id")
+        _member(db, community_id=1, user_id=user_id, platform_user_id="d-secret-id")
+
+        with caplog.at_level("DEBUG", logger=privacy.logger.name):
+            await privacy.anonymize_user_data(
+                db, db.dal, user_id=user_id, email="logquiet@example.com"
+            )
+
+        text = "\n".join(r.getMessage() + repr(r.__dict__) for r in caplog.records)
+        assert "dsar.erasure_community_members" in text  # the step really logged
+        for secret in (
+            MEMBER_DISPLAY,
+            MEMBER_AVATAR,
+            MEMBER_BIO,
+            "zed_sentinel",
+            "d-secret-id",
+            "t-secret-id",
+            "logquiet@example.com",
+        ):
+            assert secret not in text
+
+    async def test_member_anonymization_is_reported_but_not_counted_as_a_delete(
+        self, db: Any, otel: OtelSink
+    ) -> None:
+        user_id = _user(db, name="observed2")
+        _seed_footprint(db, user_id)  # 8 deletable rows
+        _member(db, community_id=1, user_id=user_id, platform_user_id="d-o1")
+        _member(db, community_id=2, user_id=user_id, platform_user_id="d-o2")
+
+        await privacy.anonymize_user_data(
+            db, db.dal, user_id=user_id, email="observed2@example.com"
+        )
+
+        [span] = otel.spans.get_finished_spans()
+        [rows] = otel.points("waddles_hub_dsar_erasure_rows")
+        assert span.attributes["rows_deleted"] == 8
+        assert span.attributes["community_members_anonymized"] == 2
+        assert (rows.count, rows.sum) == (1, 8)
+
+
+class TestMemberErasureAtomicity:
+    """The `community_members` step is part of the SAME all-or-nothing transaction."""
+
+    @pytest.fixture
+    def block_member_update(self, db: Any) -> Iterator[None]:
+        """Make the `community_members` UPDATE fail -- AFTER the deletes before it have run."""
+        _install_trigger(
+            db,
+            "block_members",
+            "CREATE TRIGGER block_members BEFORE UPDATE ON community_members "
+            f"BEGIN SELECT RAISE(ABORT, '{TRIGGER_MESSAGE}'); END",
+        )
+        yield
+        _drop_trigger(db, "block_members")
+
+    async def test_member_update_failure_rolls_back_every_delete(
+        self, db: Any, block_member_update: None
+    ) -> None:
+        user_id = _user(db, name="memberhalf")
+        _seed_footprint(db, user_id)
+        member_id = _member(db, community_id=1, user_id=user_id, platform_user_id="d-h")
+        before = _footprint(db, user_id)
+        assert all(count > 0 for count in before.values())
+
+        with pytest.raises(Exception, match=TRIGGER_MESSAGE):
+            await privacy.anonymize_user_data(
+                db, db.dal, user_id=user_id, email="memberhalf@example.com"
+            )
+
+        assert _footprint(db, user_id) == before  # chat messages, sessions, ... all still there
+        _assert_member_intact(db, member_id)
+        row = _user_row(db, user_id)
+        assert (row.email, row.is_active) == ("memberhalf@example.com", True)
+        assert [r.status for r in _ledger(db, user_id)] == ["failed"]
+
+    async def test_anonymization_failure_rolls_back_the_member_nulling(
+        self, db: Any, block_anonymization: None
+    ) -> None:
+        user_id = _user(db, name="memberlate")
+        member_id = _member(db, community_id=1, user_id=user_id, platform_user_id="d-l")
+
+        with pytest.raises(Exception, match=TRIGGER_MESSAGE):
+            await privacy.anonymize_user_data(
+                db, db.dal, user_id=user_id, email="memberlate@example.com"
+            )
+
+        _assert_member_intact(db, member_id)
+        assert _member_row(db, member_id).platform_user_id == "d-l"
+
+    async def test_ledger_write_failure_rolls_back_the_member_nulling(
+        self, db: Any, block_completion_ledger: None
+    ) -> None:
+        """No erasure without its proof, and no half-erased membership either."""
+        user_id = _user(db, name="memberledger")
+        member_id = _member(db, community_id=1, user_id=user_id, platform_user_id="d-g")
+
+        with pytest.raises(Exception, match=TRIGGER_MESSAGE):
+            await privacy.anonymize_user_data(
+                db, db.dal, user_id=user_id, email="memberledger@example.com"
+            )
+
+        _assert_member_intact(db, member_id)
+        assert [r.status for r in _ledger(db, user_id)] == ["failed"]
+
+    async def test_a_failed_erasure_can_be_retried_to_completion_including_members(
+        self, db: Any, block_member_update: None
+    ) -> None:
+        user_id = _user(db, name="memberretry")
+        member_id = _member(db, community_id=1, user_id=user_id, platform_user_id="d-t")
+        with pytest.raises(Exception, match=TRIGGER_MESSAGE):
+            await privacy.anonymize_user_data(
+                db, db.dal, user_id=user_id, email="memberretry@example.com"
+            )
+        _drop_trigger(db, "block_members")
+
+        await privacy.anonymize_user_data(
+            db, db.dal, user_id=user_id, email="memberretry@example.com"
+        )
+
+        assert _member_pii(db, member_id) == dict.fromkeys(MEMBER_PII_FIELDS)
+        assert [r.status for r in _ledger(db, user_id)] == ["failed", "completed"]
+
+    async def test_success_still_commits_exactly_once_with_member_rows(
+        self, db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        user_id = _user(db, name="memberonce")
+        _member(db, community_id=1, user_id=user_id, platform_user_id="d-c")
+        _link_identity(db, user_id=user_id, platform="twitch", platform_user_id="t-c")
+        _member(db, community_id=2, user_id=None, platform="twitch", platform_user_id="t-c")
+        commits: list[int] = []
+        real_commit = db.dal.commit
+        monkeypatch.setattr(db.dal, "commit", lambda: (commits.append(1), real_commit())[1])
+
+        await privacy.anonymize_user_data(
+            db, db.dal, user_id=user_id, email="memberonce@example.com"
+        )
+
+        assert len(commits) == 1
+
+
 class TestRetention:
     """Consent + audit evidence outlives the subject's data -- GDPR Art. 5(2)."""
 
@@ -415,7 +810,9 @@ class TestRetention:
         assert self._evidence_counts(db, user_id) == before
 
     def test_erasure_never_references_a_retained_table(self) -> None:
-        source = inspect.getsource(privacy._sync_erase)
+        source = inspect.getsource(privacy._sync_erase) + inspect.getsource(
+            privacy._erase_community_member_pii
+        )
         for table in privacy.ERASURE_RETAINED_TABLES:
             if table == "data_deletion_requests":
                 # The ledger is INSERTed to (never deleted from) -- pin the verb.

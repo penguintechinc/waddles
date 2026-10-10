@@ -376,7 +376,7 @@ class InputSanitizer:
         try:
             parsed = urlparse(url)
         except Exception as e:
-            logger.warning(f'SECURITY url_parse_failed error={str(e)}')
+            logger.warning('SECURITY url_parse_failed error_type=%s', type(e).__name__)
             return False
 
         # Check for valid scheme
@@ -464,7 +464,7 @@ class InputSanitizer:
             try:
                 data = json.loads(data)
             except json.JSONDecodeError as e:
-                logger.warning(f'SECURITY json_parse_failed error={str(e)}')
+                logger.warning('SECURITY json_parse_failed error_type=%s', type(e).__name__)
                 return False, [f'Invalid JSON: {str(e)}']
 
         # Data must be a dict

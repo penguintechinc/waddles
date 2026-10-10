@@ -188,10 +188,10 @@ async def allowed(client: EntitlementClient, flag: str, **kwargs: object) -> boo
 # ---------------------------------------------------------------------------
 class TestCatalogMatchesContracts:
     def test_denominator_is_the_full_catalog(self) -> None:
-        # 53 contracts, 22 non-free -- a gate over zero examined items is a fail.
-        assert len(ALL_CONTRACTS) == 53
-        assert len(LICENSED_CONTRACTS) == 22
-        assert len(FEATURE_MIN_TIERS) == 22
+        # 56 contracts, 25 non-free -- a gate over zero examined items is a fail.
+        assert len(ALL_CONTRACTS) == 56
+        assert len(LICENSED_CONTRACTS) == 25
+        assert len(FEATURE_MIN_TIERS) == 25
 
     @pytest.mark.parametrize("contract", ALL_CONTRACTS, ids=lambda c: c.id)
     def test_required_tier_equals_contract_min_tier_from_catalog_alone(
@@ -265,7 +265,7 @@ class TestTierEnforcement:
     async def test_every_contract_at_every_tier(
         self, contract: FeatureContract, held_tier: str
     ) -> None:
-        """Flag ON everywhere; the decision must be exactly `held >= min_tier`, for all 53 contracts."""
+        """Flag ON everywhere; the decision must be exactly `held >= min_tier`, for all 56 contracts."""
         client, _, _ = make_client(tier=held_tier, flag=True)
         expected = tier_level(held_tier) >= required_level(contract.min_tier)
         assert await allowed(client, contract.flag) is expected, (
@@ -677,10 +677,17 @@ STATUTORY_FLAGS = (
     "waddles.privacy.do_not_sell",
     "waddles.privacy.consent_withdrawal",
 )
+#: The ONE licensed feature whose name matches `STATUTORY_KEYWORDS`: the tenant-admin BULK console
+#: (export / erase / Do-Not-Sell across many users, with audit). critical-rules.md: the statutory
+#: rights themselves ship in every tier; only the admin convenience layer is Enterprise. Maps
+#: flag -> contract id. Adding to this dict is a licensing-policy decision, hence the pinning test.
+BULK_ADMIN_LAYER = {"waddles.compliance.bulk_dsar": "compliance.bulk_dsar"}
 REPO_ROOT = Path(__file__).resolve().parents[3]
 STATUTORY_SOURCES = (
     "hub_api/blueprints/v1/data_privacy.py",
     "hub_api/services/data_privacy_service.py",
+    "hub_api/blueprints/v1/cookie_consent.py",
+    "hub_api/services/cookie_consent_service.py",
 )
 
 
@@ -691,13 +698,29 @@ class TestStatutoryRightsUngated:
         offenders = [
             flag
             for flag in FEATURE_MIN_TIERS
-            if STATUTORY_KEYWORDS.search(flag)
+            if STATUTORY_KEYWORDS.search(flag) and flag not in BULK_ADMIN_LAYER
         ] + [
             c.id
             for c in ALL_CONTRACTS
-            if c.min_tier != "free" and STATUTORY_KEYWORDS.search(c.id)
+            if c.min_tier != "free"
+            and STATUTORY_KEYWORDS.search(c.id)
+            and c.id not in BULK_ADMIN_LAYER.values()
         ]
         assert offenders == []
+
+    def test_the_bulk_admin_layer_is_the_only_gated_dsar_feature_and_it_is_enterprise(self) -> None:
+        """Self-service stays free in every tier; the bulk console is exactly one Enterprise flag."""
+        gated = {
+            flag
+            for flag in FEATURE_MIN_TIERS
+            if STATUTORY_KEYWORDS.search(flag)
+        }
+        assert gated == set(BULK_ADMIN_LAYER)  # no second exemption slipped in unreviewed
+        for flag, contract_id in BULK_ADMIN_LAYER.items():
+            assert FEATURE_MIN_TIERS[flag] == "enterprise"
+            [contract] = [c for c in ALL_CONTRACTS if c.id == contract_id]
+            assert (contract.flag, contract.min_tier) == (flag, "enterprise")
+        assert not set(STATUTORY_FLAGS) & set(FEATURE_MIN_TIERS)
 
     @pytest.mark.parametrize("flag", STATUTORY_FLAGS)
     async def test_statutory_flags_require_free_and_unlock_for_a_free_tenant(self, flag: str) -> None:
@@ -806,21 +829,21 @@ class TestRealLicenseClientIntegration:
     async def test_mcp_tool_listing_no_longer_leaks_licensed_features_to_a_free_tenant(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`entitled_features` (the per-tenant MCP tool source) over the REAL 53-contract registry."""
+        """`entitled_features` (the per-tenant MCP tool source) over the REAL 56-contract registry."""
         free_lic = _real_license_client(key="")
         client, registry = _wire_real_stack(free_lic)
         monkeypatch.setattr(feature_flags_module, "get_entitlement_client", lambda: client)
-        assert len(registry.all_contracts()) == 53
+        assert len(registry.all_contracts()) == 56
 
         visible = await entitled_features(tenant=TENANT, contracts=registry.all_contracts())
         assert {c.id for c in visible} == {c.id for c in ALL_CONTRACTS if c.min_tier == "free"}
-        assert len(visible) == 53 - 22
+        assert len(visible) == 56 - 25
 
         ent_lic = _real_license_client(key="PENG-TEST-0000")
         ent_lic.session.post = lambda *a, **k: _FakeHttpResponse(200, _license_payload("enterprise"))  # type: ignore[method-assign,assignment]
         ent_client, _ = _wire_real_stack(ent_lic)
         monkeypatch.setattr(feature_flags_module, "get_entitlement_client", lambda: ent_client)
-        assert len(await entitled_features(tenant=TENANT, contracts=registry.all_contracts())) == 53
+        assert len(await entitled_features(tenant=TENANT, contracts=registry.all_contracts())) == 56
 
     async def test_default_singleton_client_enforces_without_any_registry_or_wiring(
         self, monkeypatch: pytest.MonkeyPatch

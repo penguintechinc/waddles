@@ -368,6 +368,13 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("platform", "string", length=50),
         Field("platform_user_id", "string", length=255),
         Field("display_name", "string", length=255),
+        # Profile PII the member row carries (000_create_base_schema.sql:
+        # `avatar_url TEXT, bio TEXT, social_links JSONB DEFAULT '{}'`). Bound
+        # so Art. 17 erasure (`data_privacy_service.COMMUNITY_MEMBER_PII_COLUMNS`)
+        # can null them; nothing else in hub-api reads or writes them.
+        Field("avatar_url", "text"),
+        Field("bio", "text"),
+        Field("social_links", "json"),
         Field("reputation", "integer", default=600),
         Field("role", "string", length=50, default="member"),
         Field("is_active", "boolean", default=True),

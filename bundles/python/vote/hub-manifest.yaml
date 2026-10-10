@@ -1,0 +1,38 @@
+schema_version: 2
+app_id: waddles.core.example.vote
+name: Quick Vote Tally (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+language: python
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!vote"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!vote"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists the per-community quick-vote state (open flag, option tally, hashed voter choices)"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-vote feature flag"
+routes_to: []

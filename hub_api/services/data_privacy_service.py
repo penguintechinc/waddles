@@ -47,6 +47,7 @@ import bcrypt
 from flask_core.db_errors import describe_db_error, log_db_error
 from opentelemetry import trace
 
+from services.audit_service import report_write_failure
 from services.bundle_telemetry import get_meter, get_tracer
 from services.errors import bad_request, not_found, unauthorized
 
@@ -64,6 +65,25 @@ ERASURE_RETAINED_TABLES: tuple[str, ...] = (
     "cookie_audit_log",
     "audit_log",
     "data_deletion_requests",
+)
+
+#: `community_members` columns holding the data subject's own PII. Erasure
+#: NULLs every one of them (GDPR Art. 17) on the member rows that belong to
+#: the subject, while the row itself survives for FK integrity and the
+#: retained reputation (`user_id`, `community_id`, `reputation`, `role`,
+#: timestamps). Pinned by `tests/test_data_privacy_erasure.py::
+#: TestCommunityMemberErasure`; a new PII column on that table belongs here.
+COMMUNITY_MEMBER_PII_COLUMNS: tuple[str, ...] = (
+    "display_name",
+    "avatar_url",
+    "bio",
+    "social_links",
+    "platform_user_id",
+)
+
+#: `deletion_scope` keys that count rows ANONYMIZED IN PLACE, not hard-deleted.
+_ANONYMIZED_COUNT_KEYS: frozenset[str] = frozenset(
+    {"hub_users_anonymized", "community_members_anonymized"}
 )
 
 
@@ -438,7 +458,9 @@ async def request_data_deletion(
     account has one, then `anonymize_user_data()` -- the all-or-nothing
     erasure core (deletes across every table holding this user's PII,
     in-place anonymization of `hub_users`, and the `data_deletion_requests`
-    audit record, in ONE database transaction).
+    audit record, in ONE database transaction). The membership rows in
+    `community_members` keep their reputation/role but lose their personal
+    columns (`COMMUNITY_MEMBER_PII_COLUMNS`) in that same transaction.
     """
     rows = await async_dal.select_async(
         dal(dal.hub_users.id == user_id), dal.hub_users.email, dal.hub_users.password_hash
@@ -500,8 +522,8 @@ def _instruments() -> _ErasureInstruments:
 
 
 def _rows_deleted(counts: dict[str, int]) -> int:
-    """Total rows hard-deleted (the in-place `hub_users` anonymization is not a delete)."""
-    return sum(v for k, v in counts.items() if k != "hub_users_anonymized")
+    """Total rows hard-deleted (the in-place anonymizations are not deletes)."""
+    return sum(v for k, v in counts.items() if k not in _ANONYMIZED_COUNT_KEYS)
 
 
 def _record_erasure_metrics(result: str, started: float, counts: dict[str, int] | None) -> None:
@@ -515,6 +537,58 @@ def _record_erasure_metrics(result: str, started: float, counts: dict[str, int] 
             instruments.rows_deleted.record(_rows_deleted(counts), labels)
     except Exception:  # noqa: BLE001 - telemetry must never fail an erasure
         logger.exception("dsar.erasure_metrics_failed")
+
+
+def _erase_community_member_pii(dal: Any, *, user_id: int, now: datetime) -> int:
+    """NULL `COMMUNITY_MEMBER_PII_COLUMNS` on every `community_members` row of `user_id`.
+
+    Runs INSIDE `_sync_erase()`'s transaction and never commits or rolls back
+    itself -- the caller owns that. A member row belongs to the subject two
+    ways, and both are cleared (every community, matching the other
+    erasure deletes -- `hub_users` is one global identity):
+
+    1. `user_id == str(hub_users.id)` -- the hub-linked membership. `user_id`
+       stays, so the row keeps its FK-style link, `reputation` and `role`
+       (the retained anti-gaming signal, PRIVACY.md).
+    2. Rows keyed ONLY by platform identity (`user_id` NULL/empty, as the
+       reputation service creates them) whose `(platform, platform_user_id)`
+       matches one of the subject's linked `hub_user_identities`. A row whose
+       `user_id` names a DIFFERENT hub user is never touched.
+
+    Returns the number of member rows anonymized. Raises (and so rolls the
+    whole erasure back) if a column is missing from the bound table: pydal's
+    `update()` silently DROPS an unknown field name, so without this check a
+    schema drift would report a "completed" erasure that left PII behind.
+    """
+    members = dal.community_members
+    unbound = [c for c in COMMUNITY_MEMBER_PII_COLUMNS if c not in members.fields]
+    if unbound:
+        raise RuntimeError(
+            f"community_members is not bound with PII column(s) {unbound}; "
+            "refusing a partial erasure"
+        )
+    blank: dict[str, Any] = {column: None for column in COMMUNITY_MEMBER_PII_COLUMNS}
+    keyed = dal(members.user_id == str(user_id)).update(updated_at=now, **blank) or 0
+    identities = dal(dal.hub_user_identities.hub_user_id == user_id).select(
+        dal.hub_user_identities.platform, dal.hub_user_identities.platform_user_id
+    )
+    platform_keyed = 0
+    for identity in identities:
+        if not identity.platform or not identity.platform_user_id:
+            continue
+        platform_keyed += (
+            dal(
+                (members.platform == identity.platform)
+                & (members.platform_user_id == identity.platform_user_id)
+                & ((members.user_id == None) | (members.user_id == ""))  # noqa: E711 - pydal query
+            ).update(updated_at=now, **blank)
+            or 0
+        )
+    logger.debug(
+        "dsar.erasure_community_members",
+        extra={"hub_user_id": user_id, "keyed_rows": keyed, "platform_keyed_rows": platform_keyed},
+    )
+    return int(keyed) + platform_keyed
 
 
 def _sync_erase(dal: Any, *, user_id: int, email: str | None, now: datetime) -> dict[str, int]:
@@ -553,6 +627,13 @@ def _sync_erase(dal: Any, *, user_id: int, email: str | None, now: datetime) -> 
         # deleted them, leaving the subject's message bodies, platform username
         # and avatar behind after a "completed" erasure.
         counts["chat_messages"] = dal(dal.hub_chat_messages.sender_hub_user_id == user_id).delete()
+        # Art. 17 gap closed alongside GRC#1: the membership rows used to keep the
+        # subject's display name, avatar, bio, social links and platform id after a
+        # "completed" erasure. Nulled in place (the row itself is retained, see
+        # `COMMUNITY_MEMBER_PII_COLUMNS`) in the SAME transaction as everything else.
+        counts["community_members_anonymized"] = _erase_community_member_pii(
+            dal, user_id=user_id, now=now
+        )
         dal(dal.hub_users.id == user_id).update(
             email=f"deleted_{user_id}@deleted.waddlebot",
             username=f"deleted_{user_id}",
@@ -616,6 +697,9 @@ async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: 
                 span.set_status(trace.Status(trace.StatusCode.ERROR, describe_db_error(exc)))
                 raise
             span.set_attribute("rows_deleted", _rows_deleted(counts))
+            span.set_attribute(
+                "community_members_anonymized", counts.get("community_members_anonymized", 0)
+            )
     except Exception as exc:
         # `log_db_error` / `describe_db_error` emit the exception TYPE + SQLSTATE
         # only: a driver message routinely echoes bound row values (PII), and
@@ -630,9 +714,16 @@ async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: 
                 status="failed",
                 error_detail=describe_db_error(exc),
             )
-        except Exception as record_exc:  # noqa: BLE001 - best-effort; must not mask the original
-            log_db_error(
-                logger, f"dsar.erasure_failure_record_failed hub_user_id={user_id}", record_exc
+        except Exception as record_exc:
+            # Recording the *failed* deletion attempt failed too. Make that loud (ERROR + metric +
+            # sanitised traceback, no driver message) but never let it mask the original error,
+            # which is re-raised below.
+            report_write_failure(
+                category="privacy",
+                action="privacy.deletion_failure_record",
+                chain_id=None,
+                attempts=1,
+                exc=record_exc,
             )
         raise
     _record_erasure_metrics("completed", started, counts)

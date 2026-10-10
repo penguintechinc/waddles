@@ -25,6 +25,11 @@ in-process, the named test re-run, then dropped):
   2 of 2 red.
 - `test_export_excludes_other_tenants_community_rows` -- `_community_scope()`
   returning no filter: red (the other tenant's rows disclosed).
+- `test_production_catalog_alone_denies_every_route_below_enterprise` --
+  `waddles.compliance.bulk_dsar` removed from `flask_core.tier_catalog`: 12 of 12
+  (4 routes x 3 tiers) red -- the gate was fail-open for a flag-on Free tenant.
+- `test_self_service_dsar_erasure_and_do_not_sell_work_in_every_tier` -- the self-service
+  export handler consulting the entitlement gate: 14 red (12 tier/flag params + 2 siblings).
 """
 
 from __future__ import annotations
@@ -189,6 +194,26 @@ def _chat_count(db: Any, user_id: int) -> int:
     return int(count)
 
 
+def _fill_member_pii(db: Any, *, user_id: int) -> None:
+    """Give every `community_members` row of `user_id` the full set of profile PII."""
+    db.dal(db.dal.community_members.user_id == str(user_id)).update(
+        display_name="Sentinel Name",
+        avatar_url="https://cdn.example/sentinel.png",
+        bio="sentinel bio",
+        social_links={"twitter": "@sentinel"},
+        platform_user_id=f"discord-{user_id}",
+    )
+    db.dal.commit()
+
+
+def _member_pii_rows(db: Any, *, user_id: int) -> list[tuple[Any, ...]]:
+    rows = db.dal(db.dal.community_members.user_id == str(user_id)).select(
+        orderby=db.dal.community_members.id
+    )
+    db.dal.commit()
+    return [(r.display_name, r.avatar_url, r.bio, r.social_links, r.platform_user_id) for r in rows]
+
+
 def _audit_rows(db: Any) -> list[Any]:
     rows = db.dal(db.dal.audit_log.id > 0).select(orderby=db.dal.audit_log.id)
     db.dal.commit()
@@ -330,6 +355,50 @@ class TestEnterpriseGate:
 
         assert response.status_code == expected
 
+    @pytest.mark.parametrize("tier", ["free", "community", "professional"])
+    @pytest.mark.parametrize(("method", "path", "body"), ROUTES)
+    async def test_production_catalog_alone_denies_every_route_below_enterprise(
+        self,
+        client: Any,
+        db: Any,
+        world: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+        method: str,
+        path: str,
+        body: Any,
+        tier: str,
+    ) -> None:
+        """Regression: `bulk_dsar` was missing from `tier_catalog.FEATURE_MIN_TIERS`.
+
+        Every other test here hands `tier_requirements={FLAG: "enterprise"}` to the client,
+        which masks that hub-api's REAL client (no registry populated, no explicit
+        requirements) required only "free" for the flag -- a Free tenant with the PostHog flag
+        on got the Enterprise console. Here NOTHING is passed: only the static catalog speaks.
+        """
+        flag_gate = FakeFlagGate(result=True)
+        install_entitlement_client(
+            monkeypatch, flag_gate=flag_gate, license_gate=FakeLicenseGate(tier=tier)
+        )
+
+        response = await self._call(client, world, method, path, body)
+
+        assert response.status_code == 402
+        assert _audit_rows(db) == []
+        assert _user_row(db, world["alice"]).email == "alice@example.com"  # untouched
+
+    async def test_production_catalog_alone_admits_an_enterprise_tenant(
+        self, client: Any, world: dict[str, int], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_entitlement_client(
+            monkeypatch,
+            flag_gate=FakeFlagGate(result=True),
+            license_gate=FakeLicenseGate("enterprise"),
+        )
+
+        for method, path, body in self.ROUTES[:3]:
+            response = await self._call(client, world, method, path, body)
+            assert response.status_code == 200, (method, path)
+
 
 class TestSelfServiceStaysUngated:
     """Statutory self-service DSAR must work in EVERY tier -- critical-rules.md."""
@@ -388,6 +457,50 @@ class TestSelfServiceStaysUngated:
 
         assert response.status_code == 200
         assert _user_row(db, user_id).email == f"deleted_{user_id}@deleted.waddlebot"
+
+    @pytest.mark.parametrize("tier", ["free", "community", "professional", "enterprise"])
+    @pytest.mark.parametrize("flag_result", [False, None, True])
+    async def test_self_service_dsar_erasure_and_do_not_sell_work_in_every_tier(
+        self, db: Any, monkeypatch: pytest.MonkeyPatch, tier: str, flag_result: bool | None
+    ) -> None:
+        """Access, erasure AND Do-Not-Sell answer 200 whatever the tier or flag state.
+
+        The bulk console for the same operations is Enterprise-only (see
+        `TestEnterpriseGate`); these statutory rights never consult either gate.
+        """
+        from blueprints.v1.cookie_consent import cookie_consent_bp
+        from blueprints.v1.data_privacy import data_privacy_bp
+
+        flag_gate = FakeFlagGate(result=flag_result)
+        license_gate = FakeLicenseGate(tier=tier)
+        install_entitlement_client(monkeypatch, flag_gate=flag_gate, license_gate=license_gate)
+        quart_app = Quart(__name__)
+        QuartSchema(quart_app)
+        quart_app.register_blueprint(data_privacy_bp)
+        quart_app.register_blueprint(cookie_consent_bp)
+        quart_app.config["dal"] = db.dal
+        quart_app.config["async_dal"] = db
+        quart_app.config["HUB_API_CONFIG"] = None
+        test_client = quart_app.test_client()
+        user_id = _user(db, name=f"tier-{tier}-{flag_result}")
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=user_id)}"}
+
+        do_not_sell = await test_client.post(
+            "/api/v1/cookie",
+            headers=headers,
+            json={"preferences": {"functional": True, "doNotSell": True}},
+        )
+        export = await test_client.get("/api/v1/user/me/data", headers=headers)
+        deletion = await test_client.delete("/api/v1/user/me/data", headers=headers, json={})
+
+        assert (do_not_sell.status_code, export.status_code, deletion.status_code) == (
+            200,
+            200,
+            200,
+        )
+        assert (await do_not_sell.get_json())["data"]["preferences"]["doNotSell"] is True
+        assert _user_row(db, user_id).email == f"deleted_{user_id}@deleted.waddlebot"
+        assert (flag_gate.calls, license_gate.calls) == ([], 0)  # never even consulted
 
     def test_self_service_modules_never_reference_the_entitlement_gate(self) -> None:
         import blueprints.v1.data_privacy as data_privacy_blueprint
@@ -729,6 +842,30 @@ class TestErase:
         assert db.dal(db.dal.cookie_consent.user_id == alice).count() == 1
         assert [r.action for r in _audit_rows(db)] == ["dsar.erase"]
 
+    async def test_erase_nulls_member_pii_in_every_community_and_spares_others(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """Art. 17 gap: the console erased the account but left the membership profile PII."""
+        alice = world["alice"]
+        second = _community(db, tenant_id=ACME_ID, name="acme-second")
+        _member(db, community_id=second, user_id=alice)  # erasure spans every community
+        _fill_member_pii(db, user_id=alice)
+        _fill_member_pii(db, user_id=world["mallory"])
+        assert len(_member_pii_rows(db, user_id=alice)) == 2
+
+        response = await client.post(
+            _base() + f"/users/{alice}/erase",
+            headers=_headers(world["admin"]),
+            json={"confirm": True},
+        )
+
+        assert response.status_code == 200
+        assert _member_pii_rows(db, user_id=alice) == [(None,) * 5, (None,) * 5]
+        [mallory_row] = _member_pii_rows(db, user_id=world["mallory"])
+        assert mallory_row[0] == "Sentinel Name"  # a bystander's membership is untouched
+        [deletion] = db.dal(db.dal.data_deletion_requests.hub_user_id == alice).select()
+        assert deletion.deletion_scope["community_members_anonymized"] == 2
+
     async def test_erase_needs_no_password_for_an_account_that_has_one(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
@@ -955,6 +1092,37 @@ class TestDoNotSell:
         assert (await second.get_json())["result"]["status"] == "already_done"
         assert db.dal(db.dal.cookie_consent.user_id == world["alice"]).count() == 1
 
+    async def test_admin_opt_out_survives_a_later_self_service_preferences_update(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """Consent writes are key-by-key, so a later self-service edit keeps the admin opt-out.
+
+        Merge-time regression: the old "a later self-service PUT drops doNotSell" caveat no
+        longer holds -- pin the new behaviour.
+        """
+        from blueprints.v1.cookie_consent import cookie_consent_bp
+
+        await client.put(
+            _base() + f"/users/{world['alice']}/do-not-sell", headers=_headers(world["admin"])
+        )
+        quart_app = Quart(__name__)
+        QuartSchema(quart_app)
+        quart_app.register_blueprint(cookie_consent_bp)
+        quart_app.config["dal"] = db.dal
+        quart_app.config["async_dal"] = db
+        quart_app.config["HUB_API_CONFIG"] = None
+
+        response = await quart_app.test_client().patch(
+            "/api/v1/cookie/preferences",
+            headers=_headers(world["alice"]),
+            json={"preferences": {"functional": True, "analytics": True}},
+        )
+
+        assert response.status_code == 200
+        row = db.dal(db.dal.cookie_consent.user_id == world["alice"]).select().first()
+        assert row.preferences["doNotSell"] is True  # the admin's opt-out is still in force
+        assert row.preferences["analytics"] is True  # ...and the subject's own edit applied
+
     async def test_only_the_target_user_is_changed(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
@@ -1035,6 +1203,28 @@ class TestBulk:
         assert (await response.get_json())["succeeded"] == 2
         assert (_chat_count(db, world["alice"]), _chat_count(db, bob)) == (0, 0)
         assert _chat_count(db, bystander) == 1
+
+    async def test_bulk_erase_nulls_every_targets_member_pii(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        bob = _user(db, name="bob-members")
+        _member(db, community_id=world["acme_community"], user_id=bob)
+        bystander = _user(db, name="bystander-members")
+        _member(db, community_id=world["acme_community"], user_id=bystander)
+        for uid in (world["alice"], bob, bystander):
+            _fill_member_pii(db, user_id=uid)
+
+        response = await client.post(
+            _base() + "/bulk",
+            headers=_headers(world["admin"]),
+            json={"action": "erase", "userIds": [world["alice"], bob], "confirm": True},
+        )
+
+        assert response.status_code == 200
+        assert (await response.get_json())["succeeded"] == 2
+        assert _member_pii_rows(db, user_id=world["alice"]) == [(None,) * 5]
+        assert _member_pii_rows(db, user_id=bob) == [(None,) * 5]
+        assert _member_pii_rows(db, user_id=bystander)[0][0] == "Sentinel Name"
 
     async def test_bulk_success_flag_and_dedup(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any

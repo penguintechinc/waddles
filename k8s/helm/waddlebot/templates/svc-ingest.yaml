@@ -119,6 +119,14 @@ spec:
               name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: TWITCH_OAUTH_TOKEN
               optional: true
+        # RSI Spectrum session token (gh #101) -- operator-managed platform-credentials
+        # Secret, never chart-rendered; optional so an unconfigured platform doesn't block.
+        - name: SPECTRUM_RSI_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
+              key: SPECTRUM_RSI_TOKEN
+              optional: true
         - name: TWITCH_NICK
           value: {{ .Values.oauth.twitch.nick | default "" | quote }}
         - name: TWITCH_CHANNELS

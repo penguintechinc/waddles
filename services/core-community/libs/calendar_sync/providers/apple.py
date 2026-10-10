@@ -51,7 +51,7 @@ import httpx
 from defusedxml import ElementTree as SafeET
 from defusedxml.common import DefusedXmlException
 
-from libs.calendar_sync.base import CalendarProviderBase
+from libs.calendar_sync.base import CalendarProviderBase, describe_error
 from libs.calendar_sync.schema import normalize_event
 
 logger = logging.getLogger(__name__)
@@ -98,17 +98,6 @@ def _parse_xml(xml_text: str) -> Element:
     return SafeET.fromstring(
         xml_text, forbid_dtd=True, forbid_entities=True, forbid_external=True
     )
-
-
-def _xml_error_summary(exc: Exception) -> str:
-    """Return a log-safe description of an XML rejection.
-
-    ``DefusedXmlException`` messages embed attacker-chosen entity names and
-    system ids, so only the exception class is logged for those.
-    """
-    if isinstance(exc, DefusedXmlException):
-        return f"unsafe XML construct rejected ({type(exc).__name__})"
-    return str(exc)
 
 
 class AppleCalendarProvider(CalendarProviderBase):
@@ -596,7 +585,7 @@ class AppleCalendarProvider(CalendarProviderBase):
                     return href
         except _XML_REJECTED as exc:
             self.logger.error(
-                f"[APPLE] Failed to parse PROPFIND XML: {_xml_error_summary(exc)}"
+                "[APPLE] Failed to parse PROPFIND XML: %s", describe_error(exc)
             )
         return None
 
@@ -630,7 +619,7 @@ class AppleCalendarProvider(CalendarProviderBase):
             return ctag_elem.text.strip()
         except _XML_REJECTED as exc:
             self.logger.error(
-                f"[APPLE] Failed to parse ctag PROPFIND: {_xml_error_summary(exc)}"
+                "[APPLE] Failed to parse ctag PROPFIND: %s", describe_error(exc)
             )
             return None
         except Exception as exc:
@@ -675,7 +664,7 @@ class AppleCalendarProvider(CalendarProviderBase):
                 })
         except _XML_REJECTED as exc:
             self.logger.error(
-                f"[APPLE] Failed to parse calendar PROPFIND: {_xml_error_summary(exc)}"
+                "[APPLE] Failed to parse calendar PROPFIND: %s", describe_error(exc)
             )
         return calendars
 
@@ -707,7 +696,7 @@ class AppleCalendarProvider(CalendarProviderBase):
 
         except _XML_REJECTED as exc:
             self.logger.error(
-                f"[APPLE] Failed to parse REPORT response: {_xml_error_summary(exc)}"
+                "[APPLE] Failed to parse REPORT response: %s", describe_error(exc)
             )
         return events
 

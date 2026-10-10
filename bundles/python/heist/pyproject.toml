@@ -1,0 +1,47 @@
+[project]
+name = "waddle-bundle-heist"
+version = "1.0.0"
+description = "kv-only `!heist <amount>` timed group gamble (join a pool, one collective roll pays out or busts; lazy resolution). Concept inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot heist -- original implementation, no code/text reused."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3", "mypy==1.14.1", "ruff==0.14.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+# Points at the SDK's own source (not the installed/editable package) so mypy
+# type-checks `waddle_sdk` as first-party source instead of treating it as an
+# untyped third-party distribution (PEP 561 requires a `py.typed` marker for
+# the latter, which `waddle-sdk` does not ship -- see its own pyproject.toml).
+# Verified: `pip install -e sdk/waddle-sdk` + `mypy --strict src` reports
+# `import-untyped`/`no-any-return` on every `waddle_sdk` call; this
+# `mypy_path` resolves the same imports from source and is clean.
+mypy_path = "../../../sdk/waddle-sdk/src"
+
+# `wit_world` is generated per-build, only inside a real compiled component
+# (see sdk/waddle-sdk/src/waddle_sdk/db.py's own module docstring) -- never
+# pip-installable, so no stub can exist for static analysis to find. Mirrors
+# bundles/python/fish/pyproject.toml's own override.
+[[tool.mypy.overrides]]
+module = ["wit_world"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "D", "UP", "B", "ASYNC", "S"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test names are self-documenting (pytest convention); S101 is standard
+# pytest usage; D1xx docstrings are not required on every test function.
+"tests/*" = ["D100", "D101", "D102", "D103", "D104", "S101"]

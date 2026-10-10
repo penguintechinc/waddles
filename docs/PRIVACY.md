@@ -78,10 +78,11 @@ The deletion runs as a single, **all-or-nothing** database transaction (`service
 | `activity_message_events` | Hard delete |
 | `activity_watch_sessions` | Hard delete |
 | `hub_chat_messages` | Hard delete (rows the user *sent*, every community) |
+| `community_members` | **PII columns nulled in place** — `display_name`, `avatar_url`, `bio`, `social_links`, `platform_user_id`; the row itself is kept (see *What Is Retained* §3) |
 | `hub_users` | **Anonymized in-place** (see below) |
 | `data_deletion_requests` | Completion row inserted (see *Deletion Audit Trail*) |
 
-**Atomicity.** Every delete, the `hub_users` anonymization and the `completed` ledger row are issued in one executor job and committed once. If any statement fails, everything is rolled back — the account is left exactly as it was, never half-erased — a separate `failed` ledger row records the attempt, and the original error is returned (a `500`; the request can simply be retried). Erasure never ends in a state where the data is gone but the proof of erasure is missing, or vice versa.
+**Atomicity.** Every delete, the `community_members` PII nulling, the `hub_users` anonymization and the `completed` ledger row are issued in one executor job and committed once. If any statement fails, everything is rolled back — the account is left exactly as it was, never half-erased — a separate `failed` ledger row records the attempt, and the original error is returned (a `500`; the request can simply be retried). Erasure never ends in a state where the data is gone but the proof of erasure is missing, or vice versa.
 
 **Export/erasure symmetry.** Everything the Art. 15 export discloses from the message/activity tables (`message_activity`, `watch_activity`, `chat_messages`) is removed by Art. 17 erasure. `hub_chat_messages` was previously exported but not erased (GRC finding #1, fixed).
 
@@ -121,6 +122,8 @@ The rows linking a user's Discord ID, Twitch ID, etc. to their `hub_user_id` are
 - **Account reclaim**: If a user returns and logs in via their platform account, the OAuth flow (`findOrCreateUserFromOAuth`) finds the existing identity link and reconnects them to their original account — including their full reputation history. See *Account Reclaim After Deletion* below.
 - **Platform identity is not WaddleBot PII**: Discord/Twitch user IDs are owned and managed by those platforms. Deleting them from our records does not erase them from the source platform.
 
+The identity link is the only reclaim anchor. The copy of the platform id on `community_members` is not needed for reclaim and **is** cleared by erasure (see §3).
+
 #### 2. `reputation_tenant` + `reputation_events` — Score & Audit Trail
 *Legal basis: Legitimate interest (Article 6(1)(f)) — platform integrity / anti-gaming*
 
@@ -128,10 +131,17 @@ Reputation scores and their audit trail are retained. **This is disclosed to use
 
 Allowing reputation reset via deletion would be a trivially exploitable loophole (farm score → delete → repeat). Reputation is also a community-wide signal that affects other users' experiences and community health calculations. The `reputation_events` trail justifies the retained score — without it, the score would be an unexplained number with no audit basis.
 
-#### 3. `community_members` — Membership Row (PII fields nulled)
+#### 3. `community_members` — Membership Row (PII columns nulled)
 *Legal basis: Same as above — FK integrity + reputation retention*
 
-The row itself is kept for FK integrity. Display fields are nulled: `display_name`, `avatar_url`, `bio`, `social_links`. The retained columns are: `community_id`, `hub_user_id`, `reputation`, `role`, timestamps.
+The row itself is kept for FK integrity and the reputation signal above, but in the same transaction as the rest of erasure every personal column is set to `NULL`: `display_name`, `avatar_url`, `bio`, `social_links` and `platform_user_id`. This applies in **every** community (the hub identity is global). Two kinds of row belong to the account and are both cleared:
+
+- rows linked to it — `user_id` equals the account's `hub_users.id`; and
+- rows keyed only by platform identity (no `user_id`, as the reputation service creates them) whose `(platform, platform_user_id)` matches one of the account's linked `hub_user_identities`.
+
+A row linked to a *different* account is never touched, even if it names the same platform id. The retained columns are `community_id`, `user_id` (the pseudonymous id of the now-anonymized `hub_users` row), `platform` (the platform name only), `reputation`, `role`, `is_active` and timestamps. Consequence: lookups by `(platform, platform_user_id)` no longer match a cleared row — the retained reputation stays reachable through its hub link (`user_id` / `user_uuid`), while a platform-keyed row has no hub link to keep and becomes unattributable by design (the identity-resolution trigger records it as `unresolvable`).
+
+This is pinned in code (`COMMUNITY_MEMBER_PII_COLUMNS`) and by `hub_api/tests/test_data_privacy_erasure.py::TestCommunityMemberErasure` / `TestMemberErasureAtomicity`, plus a real-Postgres test against the production trigger (`hub_api/tests/test_dsar_member_erasure_pg_integration.py`). A schema drift that leaves one of these columns unbound fails the erasure loudly (and rolls it back) rather than reporting success with PII left behind.
 
 ### Account Reclaim After Deletion
 
@@ -140,12 +150,14 @@ If a user deletes their data and later returns:
 1. They log in via a linked platform account (Discord, Twitch, etc.)
 2. `findOrCreateUserFromOAuth()` queries `hub_user_identities` and finds the existing record
 3. The record resolves to the original `hub_user_id`
-4. Their reputation score and community membership reputation are fully intact
+4. Their reputation score is intact, and the retained membership rows (still keyed by `user_id`) keep their reputation and role; the display name, avatar, bio, social links and platform id on those rows were erased and are **not** restored
 5. The `hub_users` row is updated with fresh profile data from the platform; `is_active` is set back to `true`
 
 The platform identity (Discord snowflake, Twitch ID) acts as the **permanent identity anchor** across the entire account lifecycle — including through deletion and return.
 
 ### Deletion Audit Trail
+
+> Enterprise tenants additionally get erasure and DSAR-export requests recorded in the tamper-evident audit chain (actor is a `hub_users.uuid`, never a name or e-mail) -- see [Enterprise Audit Logging](compliance/audit-logging.md). The rights themselves are available in every tier.
 
 Every deletion attempt is recorded in `data_deletion_requests`. This table stores no PII values — only metadata:
 
@@ -155,7 +167,7 @@ Every deletion attempt is recorded in `data_deletion_requests`. This table store
 | `requested_at` | Timestamp of request |
 | `completed_at` | Timestamp of completion |
 | `status` | `pending`, `completed`, or `failed` |
-| `deletion_scope` | JSONB: row counts deleted per table (no field values), including `chat_messages` |
+| `deletion_scope` | JSONB: row counts deleted per table (no field values), including `chat_messages`, plus `community_members_anonymized` (rows nulled in place, not deleted) |
 | `error_detail` | Failure category if status = `failed` — exception type / SQLSTATE only, never the driver message (which can echo row values) |
 
 Superadmins can view `{ requested_at, completed_at, status }` at `GET /api/v1/superadmin/users/:userId/deletion-request` for support inquiries. No PII is returned.
@@ -183,7 +195,7 @@ Bulk requests return `200` with a per-user `status` (`completed`, `already_done`
 
 `audit_log` row shape: `user_id` = acting admin; `action` = `dsar.export` / `dsar.erase` / `dsar.do_not_sell`; `target_type` = `user`; `target_id` = target `hub_users.id`; `details` = `{tenant_id, tenant_slug, bulk_id, outcome, ...}` where `outcome` is `attempted` → `completed` / `already_done` / `failed`, or `denied_not_in_tenant` / `denied_self` / `denied_super_admin` / `denied_shared_identity` for refused attempts (also audited). Exports add per-source `row_counts`; failures add `error_type` only.
 
-**Do-Not-Sell** is stored where the opt-out already lives, `cookie_consent.preferences.doNotSell`, and is **one-way** (opt-out only, forces `marketing` off; mirrored into the subject-visible `cookie_audit_log` as `ADMIN_DO_NOT_SELL`). Withdrawing an opt-out is the subject's own consent decision. A user with no consent record gets a new privacy-maximal one (`consent_method = admin_dsar`). Known pre-existing limitation: a later self-service category-preferences `PUT` rewrites the whole `preferences` object without `doNotSell` (documented in `cookie_consent_service.update_preferences`).
+**Do-Not-Sell** is stored where the opt-out already lives, `cookie_consent.preferences.doNotSell`, and is **one-way** (opt-out only, forces `marketing` off; mirrored into the subject-visible `cookie_audit_log` as `ADMIN_DO_NOT_SELL`). Withdrawing an opt-out is the subject's own consent decision. A user with no consent record gets a new privacy-maximal one (`consent_method = admin_dsar`). The opt-out is durable: later self-service consent writes merge key-by-key and never drop `doNotSell`.
 
 ---
 

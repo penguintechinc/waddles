@@ -96,6 +96,7 @@ class TestContractShape:
         compliance_ids = {c.id for c in build_contracts() if c.module == "compliance"}
         assert compliance_ids == {
             "compliance.audit_logs",
+            "compliance.audit_export",
             "compliance.external_kms",
             "compliance.bulk_dsar",
         }

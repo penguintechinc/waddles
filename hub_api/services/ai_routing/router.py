@@ -114,6 +114,7 @@ async def _run_premium(
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
             billed_tokens=response.total_tokens,
+            json_mode=response.json_mode,
         )
     # Balance dropped between the pre-check and this debit (concurrent
     # spend) -- compute already happened; bill 0 and say so explicitly
@@ -128,6 +129,7 @@ async def _run_premium(
         output_tokens=response.output_tokens,
         billed_tokens=0,
         fallback_reason="metering_failed_insufficient_balance",
+        json_mode=response.json_mode,
     )
 
 
@@ -157,6 +159,7 @@ async def _run_free(ai_request: AIRequest, *, fallback_reason: str | None) -> AI
         output_tokens=response.output_tokens,
         billed_tokens=0,
         fallback_reason=fallback_reason,
+        json_mode=response.json_mode,
     )
 
 

@@ -360,7 +360,9 @@ async def oauth_callback(
         async_dal, dal, platform=platform, user_data=user_data
     )
 
-    return await create_session_token(async_dal, dal, cfg, user=user)
+    return await create_session_token(
+        async_dal, dal, cfg, user=user, auth_method=f"oauth_{platform}"
+    )
 
 
 async def create_oauth_exchange_code(

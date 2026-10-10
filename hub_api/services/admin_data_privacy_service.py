@@ -334,10 +334,10 @@ async def apply_do_not_sell(async_dal: Any, dal: Any, *, user_id: int) -> bool:
     the subject-visible `cookie_audit_log` (best-effort, same helper the
     self-service consent flow uses). Idempotent.
 
-    Known pre-existing limitation (documented in
-    `cookie_consent_service.update_preferences`, not introduced here): a
-    later self-service `PUT` of category preferences rewrites the whole
-    `preferences` object without `doNotSell`.
+    The opt-out is durable: `cookie_consent_service` merges later self-service
+    writes (`update_preferences`, `save_consent`, `revoke_consent`) key-by-key,
+    so none of them drops `doNotSell` (pinned by
+    `tests/test_admin_data_privacy.py::TestDoNotSell`).
     """
     rows = await async_dal.select_async(dal(dal.cookie_consent.user_id == user_id))
     now = datetime.now(UTC)

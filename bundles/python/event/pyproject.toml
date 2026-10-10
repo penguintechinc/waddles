@@ -1,0 +1,24 @@
+[project]
+name = "waddle-bundle-event"
+version = "1.0.0"
+description = "`!event create|list|view` + `!rsvp <id> yes|no` -> light community events and RSVPs in kv (RSVPs keyed by user UUID, never username). Separate from the beta-trio event-sync feature."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3", "mypy==1.14.1", "ruff==0.11.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+
+# `waddle-sdk` ships no `py.typed` marker (a pre-existing SDK packaging gap, not fixable from
+# this bundle without touching `sdk/waddle-sdk/` -- out of this bundle's scope). Silencing
+# `import-untyped` here only, so `--strict` still catches real type errors in this bundle's
+# own code -- same workaround as `bundles/python/joke/pyproject.toml`.
+[[tool.mypy.overrides]]
+module = "waddle_sdk.*"
+ignore_missing_imports = true

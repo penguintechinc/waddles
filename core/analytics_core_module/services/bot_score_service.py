@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from decimal import Decimal
 import json
+from .log_safety import log_failure
 
 # Score weighting for composite calculation
 SCORE_WEIGHTS = {
@@ -114,7 +115,7 @@ class BotScoreService:
             return result
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate bot score: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate bot score", e, community_id=community_id)
             raise
 
     async def get_score(self, community_id: int) -> Dict[str, Any]:
@@ -164,7 +165,7 @@ class BotScoreService:
             return await self.calculate_score(community_id)
 
         except Exception as e:
-            self.logger.error(f"Failed to get bot score: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to get bot score", e, community_id=community_id)
             raise
 
     async def get_suspected_bots(
@@ -227,7 +228,7 @@ class BotScoreService:
             return bots
 
         except Exception as e:
-            self.logger.error(f"Failed to get suspected bots: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to get suspected bots", e, community_id=community_id)
             raise
 
     async def mark_bot_reviewed(
@@ -307,7 +308,7 @@ class BotScoreService:
             return result
 
         except Exception as e:
-            self.logger.error(f"Failed to mark bot reviewed: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to mark bot reviewed", e, community_id=community_id)
             raise
 
     async def _calculate_bad_actor_score(self, community_id: int) -> int:
@@ -351,7 +352,7 @@ class BotScoreService:
             return score
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate bad actor score: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate bad actor score", e, community_id=community_id)
             return 50  # Default neutral score
 
     async def _calculate_reputation_score(self, community_id: int) -> int:
@@ -387,7 +388,7 @@ class BotScoreService:
             return 50
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate reputation score: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate reputation score", e, community_id=community_id)
             return 50  # Default neutral score
 
     async def _calculate_security_score(self, community_id: int) -> int:
@@ -425,7 +426,7 @@ class BotScoreService:
             return 75
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate security score: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate security score", e, community_id=community_id)
             return 75  # Default neutral score
 
     async def _calculate_ai_behavioral_score(self, community_id: int) -> int:
@@ -494,7 +495,7 @@ class BotScoreService:
             return score
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate AI behavioral score: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate AI behavioral score", e, community_id=community_id)
             return 60  # Default neutral score
 
     async def _get_community_size_category(self, community_id: int) -> str:
@@ -522,7 +523,7 @@ class BotScoreService:
                 return 'large'
 
         except Exception as e:
-            self.logger.error(f"Failed to get community size: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to get community size", e, community_id=community_id)
             return 'medium'  # Default category
 
     def _score_to_grade(self, score: int) -> str:
@@ -585,5 +586,5 @@ class BotScoreService:
             )
 
         except Exception as e:
-            self.logger.error(f"Failed to upsert bot score: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to upsert bot score", e, community_id=community_id)
             raise

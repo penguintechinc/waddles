@@ -22,6 +22,8 @@ hub_api/
       passkey.py             v1 `user passkey` group (M1): WebAuthn credential management
       profile.py              v1 `user profile` group (M1): self-service profile + avatar
       user_management.py       v1 `superadmin users` group (M1): platform user CRUD
+      compliance_audit.py      v1 `compliance audit` group: Enterprise read/verify/export of the audit chain
+      sso.py                    v1 enterprise SSO: public login flows (SAML/OIDC/Google) + tenant-admin connection CRUD
     v2/
       platform.py          example v2 group: tenant -> scope -> DTO chain, exposes BLUEPRINTS
   routers/
@@ -37,7 +39,15 @@ hub_api/
     profile_service.py       self-service profile CRUD + avatar
     storage_service.py       S3-compatible avatar object storage (no local-disk fallback)
     user_management_service.py  superadmin user CRUD
+    sso_service.py           enterprise SSO orchestration: entitlement-gated connection CRUD, login start/complete, JIT provisioning
+    sso_oidc.py / sso_saml.py  protocol layers: OIDC code+PKCE with local ID-token validation; SAML 2.0 SP (XSW/replay/XXE defences)
+    sso_http.py / sso_state.py / sso_crypto.py / sso_settings.py / sso_telemetry.py / sso_types.py  SSRF-guarded IdP HTTP, Redis single-use state, AES-GCM secrets, operator settings, OTel + PII-safe logging, shared types
     current_user.py         resolve the caller's user id from the bearer JWT
+    audit_chain.py          tamper-evident audit hash chain: canonical form, seal, verify (stdlib only)
+    audit_events.py         audit vocabulary, PII-free event validation, request classification
+    audit_service.py        append / list / verify the chain (entitlement-gated, fail-loud, OTel)
+    audit_http.py           after_request hook + session-issuance hook (HTTP audit coverage)
+    bundle_audit.py         bundle-lifecycle audit helper: legacy `audit_log` row + chain bridge
     dto_response.py         jsonify_dto() -- workaround for a quart-schema/pydantic-core crash
     errors.py              ApiError + bad_request()/unauthorized()/etc factories
   openapi/
@@ -90,6 +100,34 @@ Most tests use `sqlite:memory` (pydal). The M1 group's own tests
 gotcha for why `sqlite:memory` breaks once a route calls
 `async_dal.select_async`/`insert_async`/etc.
 
+## Enterprise audit logging (tamper-evident)
+
+Security-relevant events (authz denials, tenant/role changes, DSAR/erasure, logins incl. SSO and
+passkey, admin actions, license changes) are appended to a per-tenant **SHA-256 hash chain**
+(`audit_events`, alembic `0053_audit_events_hash_chain`): altering, removing, inserting or
+re-ordering any record is detected by re-verification. Recording and reading are an **Enterprise**
+feature (flags `waddles.compliance.audit_logs` / `audit_export`, default OFF); the legacy
+`audit_log` basic trail and the statutory DSAR/erasure rights are never gated. A failed audit write
+is never swallowed -- it logs at ERROR with a traceback, bumps `waddles.audit.write_failures`, and
+fails the request (entitled tenants only).
+
+```bash
+make verify-audit-chain                   # recompute every chain from the DB (exit 1 = tampering)
+make verify-audit-export EXPORT="a.json"  # verify a downloaded export offline, no server needed
+```
+
+API: `GET /api/v1/compliance/audit/{events,head,verify,export}` (scope `compliance.audit:admin`).
+Full design, threat model and operating guide: [`docs/compliance/audit-logging.md`](../docs/compliance/audit-logging.md).
+
+## Enterprise SSO (SAML 2.0 / OIDC / Google)
+
+Tier-gated (`waddles.auth.sso_saml` Enterprise, `waddles.auth.sso_google` Professional, both default OFF).
+Full deployment, configuration, security model and troubleshooting guide:
+[`docs/SSO.md`](../docs/SSO.md). Tests live in `tests/sso/` (OIDC/SAML run against protocol-faithful fake
+IdPs -- only the IdP socket and Redis are replaced) plus a real-Postgres migration test in
+`alembic/tests/test_0049_sso_connections.py`; run with
+`python3 -m pytest tests/sso -q --cov=services --cov=blueprints.v1.sso`.
+
 ## OpenAPI (two documents, per backend.md)
 
 - `GET /openapi/v1-public.json` -- unauthenticated, exactly one path (`POST /api/v1/auth/login`).
@@ -112,6 +150,7 @@ Gates are `flask_core.feature_flags.feature_enabled` (PostHog flag AND license t
 
 - **All-or-nothing** -- every delete, the `hub_users` anonymization and the `completed` `data_deletion_requests` row run as ONE executor job with ONE commit (rollback on any failure). `AsyncDAL.delete_async()` & co. commit per call, so they are deliberately not used here. A failed erasure leaves the account untouched, records a `failed` ledger row (exception type only) and re-raises.
 - **Erases `hub_chat_messages`** the user sent (previously exported, never deleted -- GRC#1).
+- **Nulls `community_members` PII** (`display_name`, `avatar_url`, `bio`, `social_links`, `platform_user_id`; `COMMUNITY_MEMBER_PII_COLUMNS`) on the subject's membership rows in every community -- hub-linked rows (`user_id == str(hub_users.id)`) and platform-keyed rows matching a linked `hub_user_identities`. The rows stay (reputation/role retention); a bound-column drift fails the erasure instead of leaving PII behind. Counted as `community_members_anonymized` in the ledger and the `hub.dsar.erase` span (not as deleted rows).
 - **Telemetry (OTLP via the standard `OTEL_*` env vars)** -- span `hub.dsar.erase`, counter `waddles_hub_dsar_erasure_total{result}`, histograms `waddles_hub_dsar_erasure_duration_ms` / `waddles_hub_dsar_erasure_rows`. Labels/attributes carry no user id; failure spans carry the exception type only (never the driver message). A broken exporter is logged, never fails an erasure.
 - **Retains consent + audit evidence** (`cookie_consent`, `cookie_audit_log`, `audit_log`, `data_deletion_requests`; `ERASURE_RETAINED_TABLES`) for GDPR Art. 5(2). See `docs/PRIVACY.md` "Data Deletion". Regression tests: `tests/test_data_privacy_erasure.py`.
 

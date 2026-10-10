@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-fortune"
+version = "1.0.0"
+description = "`!fortune` -> a random SFW fortune-cookie line. Relay only, no kv/db state. Mirrors bundles/python/eightball."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
