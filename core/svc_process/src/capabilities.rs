@@ -699,6 +699,16 @@ impl<K: KvBackend> StageCapabilities<K> {
             Leaderboard(u32),
         }
 
+        /// A money mover's claimed idempotency slot: the mutation kind, the
+        /// account whose funds it would move, and the `(event_id, ordinal)`
+        /// position it holds among the invocation's mutations (`None` when the
+        /// invocation has no replay-stable event id).
+        struct MutationClaim {
+            kind: &'static str,
+            payer: uuid::Uuid,
+            slot: Option<(String, u32)>,
+        }
+
         let args = &call.args;
         let op = match call.op.as_str() {
             "economy.balance" => Op::Balance(economy_user_arg(args, "user")?),
@@ -765,7 +775,7 @@ impl<K: KvBackend> StageCapabilities<K> {
         // account whose funds the call would move (a wager's player, a
         // transfer's sender) -- the one [`Self::bind_actor`] must tie to the
         // invocation's actor.
-        let claim: Option<(&'static str, uuid::Uuid, Option<(String, u32)>)> = match op {
+        let claim: Option<MutationClaim> = match op {
             Op::Wager { user, .. } => Some(("wager", user)),
             Op::Transfer { from, .. } => Some(("transfer", from)),
             Op::Balance(_) | Op::MaxBet(_) | Op::Leaderboard(_) => None,
@@ -776,7 +786,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                 .as_deref()
                 .and_then(|inv| inv.reserve_mutation(kind))
                 .map(|(event_id, ordinal)| (event_id.to_string(), ordinal));
-            (kind, payer, slot)
+            MutationClaim { kind, payer, slot }
         });
 
         // `max_bet` describes the WAGER capability's own limit, so it is
@@ -845,7 +855,12 @@ impl<K: KvBackend> StageCapabilities<K> {
         // the mutation is refused loudly rather than run unbound/unkeyed.
         let mut reservation: Option<(&InvocationIdentity, &'static str, u32)> = None;
         let mut idempotency: Option<IdempotencyKey> = None;
-        if let Some((kind, payer, claimed)) = claim {
+        if let Some(MutationClaim {
+            kind,
+            payer,
+            slot: claimed,
+        }) = claim
+        {
             self.bind_actor(kind, payer).await?;
             let (Some(invocation), Some((event_id, ordinal))) =
                 (self.invocation_identity.as_deref(), claimed)
