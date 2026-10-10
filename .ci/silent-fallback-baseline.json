@@ -1301,20 +1301,20 @@
     {
       "rule_id": "python-silent-except-return-default",
       "path": "core/workflow_core_module/controllers/execution_api.py",
-      "line": 133,
-      "line_hash": "36a658ec1a0779dd"
+      "line": 135,
+      "line_hash": "982b0a218033cf7f"
     },
     {
       "rule_id": "python-silent-except-return-default",
       "path": "core/workflow_core_module/controllers/webhook_api.py",
-      "line": 195,
-      "line_hash": "be792a0d77f7e7e6"
+      "line": 197,
+      "line_hash": "503a172377a0933f"
     },
     {
       "rule_id": "python-silent-except-return-default",
       "path": "core/workflow_core_module/controllers/workflow_api.py",
-      "line": 109,
-      "line_hash": "b670d33075de173e"
+      "line": 111,
+      "line_hash": "96220889ba1143ba"
     },
     {
       "rule_id": "python-silent-except-return-default",

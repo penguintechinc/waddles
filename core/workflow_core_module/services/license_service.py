@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 import asyncio
 
-from flask_core import setup_aaa_logging
+from flask_core import setup_aaa_logging, describe_db_error
 
 try:
     import aiohttp
@@ -152,7 +152,7 @@ class LicenseService:
                 )
             except Exception as e:
                 self.logger.error(
-                    f"Failed to connect to Redis: {str(e)}",
+                    f"Failed to connect to Redis: {describe_db_error(e)}",
                     extra={"event_type": "SYSTEM", "result": "FAILURE"}
                 )
                 self._redis_connected = False
@@ -167,7 +167,7 @@ class LicenseService:
             )
         except Exception as e:
             self.logger.error(
-                f"Failed to initialize license service: {str(e)}",
+                f"Failed to initialize license service: {describe_db_error(e)}",
                 extra={"event_type": "SYSTEM", "result": "FAILURE"}
             )
 
@@ -263,14 +263,14 @@ class LicenseService:
             raise
         except Exception as e:
             self.logger.error(
-                f"License check failed: {str(e)}",
+                f"License check failed: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "community": str(community_id),
                     "result": "FAILURE"
                 }
             )
-            raise LicenseException(f"License check failed: {str(e)}")
+            raise LicenseException(f"License check failed: {describe_db_error(e)}")
 
     async def validate_workflow_creation(
         self,
@@ -344,7 +344,7 @@ class LicenseService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Workflow creation validation failed: {str(e)}",
+                f"Workflow creation validation failed: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "community": str(community_id),
@@ -353,7 +353,7 @@ class LicenseService:
                 }
             )
             raise LicenseValidationException(
-                f"Workflow creation validation failed: {str(e)}",
+                f"Workflow creation validation failed: {describe_db_error(e)}",
                 community_id
             )
 
@@ -427,7 +427,7 @@ class LicenseService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Workflow execution validation failed: {str(e)}",
+                f"Workflow execution validation failed: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "community": str(community_id),
@@ -436,7 +436,7 @@ class LicenseService:
                 }
             )
             raise LicenseValidationException(
-                f"Workflow execution validation failed: {str(e)}",
+                f"Workflow execution validation failed: {describe_db_error(e)}",
                 community_id
             )
 
@@ -482,7 +482,7 @@ class LicenseService:
 
         except Exception as e:
             self.logger.error(
-                f"Failed to get license info: {str(e)}",
+                f"Failed to get license info: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "community": str(community_id),
@@ -522,7 +522,7 @@ class LicenseService:
 
         except Exception as e:
             self.logger.error(
-                f"Cache retrieval failed: {str(e)}",
+                f"Cache retrieval failed: {describe_db_error(e)}",
                 extra={"event_type": "ERROR", "result": "FAILURE"}
             )
 
@@ -563,7 +563,7 @@ class LicenseService:
 
         except Exception as e:
             self.logger.error(
-                f"Cache storage failed: {str(e)}",
+                f"Cache storage failed: {describe_db_error(e)}",
                 extra={"event_type": "ERROR", "result": "FAILURE"}
             )
 
@@ -647,6 +647,6 @@ class LicenseService:
 
         except Exception as e:
             self.logger.error(
-                f"Cache invalidation failed: {str(e)}",
+                f"Cache invalidation failed: {describe_db_error(e)}",
                 extra={"event_type": "ERROR", "result": "FAILURE"}
             )

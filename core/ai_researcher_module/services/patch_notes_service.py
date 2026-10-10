@@ -18,6 +18,8 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from flask_core import describe_db_error
+
 logger = logging.getLogger(__name__)
 
 PATCH_NOTES_SYSTEM_PROMPT = (
@@ -214,7 +216,7 @@ class PatchNotesService:
             )
 
         except Exception as exc:
-            logger.error("Patch notes search failed: %s", exc)
+            logger.error("Patch notes search failed: %s", describe_db_error(exc))
             return PatchNotesResult(
                 success=False,
                 content="An internal error occurred during patch notes search.",
@@ -332,7 +334,7 @@ class PatchNotesService:
             )
 
         except Exception as exc:
-            logger.error("Quick patch notes search failed: %s", exc)
+            logger.error("Quick patch notes search failed: %s", describe_db_error(exc))
             return PatchNotesResult(
                 success=False,
                 content="An internal error occurred during patch notes search.",
@@ -370,7 +372,7 @@ class PatchNotesService:
             ttl = getattr(self.config, 'PATCH_CACHE_TTL', 1800)
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as exc:
-            logger.warning("Cache set failed: %s", exc)
+            logger.warning("Cache set failed: %s", describe_db_error(exc))
 
     async def _log_search(
         self,
@@ -396,4 +398,4 @@ class PatchNotesService:
                  result_count, was_cached, processing_time_ms],
             )
         except Exception as exc:
-            logger.warning("Failed to log patch notes search: %s", exc)
+            logger.warning("Failed to log patch notes search: %s", describe_db_error(exc))

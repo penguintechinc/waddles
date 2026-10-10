@@ -27,6 +27,7 @@ import grpc
 
 from config import Config
 from models.execution import ExecutionContext
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,10 @@ class GrpcModuleClientManager:
                 return channel
 
             except Exception as e:
-                logger.warning(f"Failed to create gRPC channel for {module_name}: {e}")
+                logger.warning(
+                    f"Failed to create gRPC channel for {module_name}: "
+                    f"{describe_db_error(e)}"
+                )
                 return None
 
     async def call_with_retry(
@@ -186,7 +190,7 @@ class GrpcModuleClientManager:
                     await channel.close()
                     logger.info(f"Closed gRPC channel to {name}")
                 except Exception as e:
-                    logger.warning(f"Error closing channel to {name}: {e}")
+                    logger.warning(f"Error closing channel to {name}: {describe_db_error(e)}")
             self._channels.clear()
 
 
@@ -324,7 +328,8 @@ class ModuleExecutor:
                     return result
             except Exception as e:
                 logger.warning(
-                    f"gRPC execution failed for {module_name}, falling back to HTTP: {e}"
+                    f"gRPC execution failed for {module_name}, falling back to HTTP: "
+                    f"{describe_db_error(e)}"
                 )
 
         # Fallback to HTTP
@@ -337,7 +342,7 @@ class ModuleExecutor:
             )
             return result
         except Exception as e:
-            logger.error(f"HTTP execution failed for {module_name}: {e}")
+            logger.error(f"HTTP execution failed for {module_name}: {describe_db_error(e)}")
             return ModuleExecutionResult(
                 success=False,
                 error=f"Module execution failed: {str(e)}",
@@ -384,7 +389,7 @@ class ModuleExecutor:
                 )
 
         except Exception as e:
-            logger.debug(f"gRPC execution not available for {module_name}: {e}")
+            logger.debug(f"gRPC execution not available for {module_name}: {describe_db_error(e)}")
             return None
 
     async def _execute_grpc_action_module(
@@ -432,7 +437,7 @@ class ModuleExecutor:
             return None
 
         except Exception as e:
-            logger.debug(f"gRPC action module execution error: {e}")
+            logger.debug(f"gRPC action module execution error: {describe_db_error(e)}")
             return None
 
     async def _execute_grpc_generic(
@@ -562,7 +567,7 @@ class ModuleExecutor:
                 if attempt < retry_count:
                     wait_time = 2 ** attempt
                     logger.warning(
-                        f"Module {module_name} execution error: {e}, "
+                        f"Module {module_name} execution error: {describe_db_error(e)}, "
                         f"retrying in {wait_time}s (attempt {attempt + 1}/{retry_count + 1})"
                     )
                     await asyncio.sleep(wait_time)
