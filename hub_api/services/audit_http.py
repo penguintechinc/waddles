@@ -73,6 +73,9 @@ def _subject_user_id(decision: AuthzDecision | None) -> int | None:
         try:
             parsed = int(decision.subject)
         except ValueError:
+            # A non-numeric subject (machine/service identity) has no ``hub_users.id``; the event
+            # is attributed without a user id. The subject value itself is never logged.
+            logger.debug("audit hook: authz subject is not a hub_users id; recording without one")
             return None
         return parsed if parsed > 0 else None
     return get_optional_current_user_id(request)
@@ -162,7 +165,8 @@ async def _audit_response(response: Response) -> Response:
         )
         await service.record(event)
     except AuditWriteError:
-        # Already logged (ERROR + traceback) and counted by the service.
+        # The failure itself is already logged (ERROR + traceback) and counted by the service.
+        logger.warning("audit hook: audit write failed; answering the request with a generic 500")
         return _audit_failure_response()
     except Exception as exc:
         # Building the event failed (a programming error): same treatment -- loud, then 500.

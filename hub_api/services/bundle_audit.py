@@ -24,6 +24,7 @@ install) could vanish with no trace whatsoever. It is now **fail-loud**:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -44,6 +45,8 @@ from services.audit_service import (
     get_audit_service,
     report_write_failure,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _legacy_created_at(install_dal: AsyncDB) -> datetime:
@@ -148,6 +151,9 @@ async def try_record(install_dal: AsyncDB, **kwargs: Any) -> AuditWriteError | N
     try:
         await record(install_dal, **kwargs)
     except AuditWriteError as exc:
+        # Not swallowed: handed back so the caller raises it after its follow-on work. The
+        # failure itself was already logged at ERROR and counted when the write failed.
+        logger.warning("bundle audit: write failed; returning the error for the caller to raise")
         return exc
     return None
 

@@ -24,6 +24,7 @@ cannot mistake a broken chain for success.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -63,6 +64,8 @@ from services.errors import ApiError
 compliance_audit_bp = Blueprint(
     "v1_compliance_audit", __name__, url_prefix="/api/v1/compliance/audit"
 )
+
+logger = logging.getLogger(__name__)
 
 _SCOPE = "compliance.audit:admin"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -295,6 +298,8 @@ async def list_events() -> AuditEventsResponse | tuple[dict[str, object], int]:
             until=_parse_when("until"),
         )
     except ValueError as exc:
+        # The message is one of this module's static validation strings (never the raw value).
+        logger.debug("compliance.audit list_events: rejected query parameters: %s", exc)
         return api_error(f"Invalid query: {exc}", 400)
     records, total = await _service().list_events(chain_id, filters=filters, page=page, limit=limit)
     return AuditEventsResponse(
@@ -365,6 +370,8 @@ async def verify_chain() -> tuple[AuditVerifyResponse, int] | tuple[dict[str, ob
         if from_seq > 1 and not anchor:
             raise ValueError("anchor_hash is required when from_seq > 1")
     except ValueError as exc:
+        # The message is one of this module's static validation strings (never the raw value).
+        logger.debug("compliance.audit verify_chain: rejected query parameters: %s", exc)
         return api_error(f"Invalid query: {exc}", 400)
     report = await _service().verify(
         chain_id,
@@ -419,8 +426,13 @@ async def export_chain() -> (
         limit = _parse_int("limit", 500, minimum=1, maximum=MAX_EXPORT_LIMIT)
         user_id = get_current_user_id(request)
     except ValueError as exc:
+        # The message is one of this module's static validation strings (never the raw value).
+        logger.debug("compliance.audit export_chain: rejected query parameters: %s", exc)
         return api_error(f"Invalid query: {exc}", 400)
     except ApiError as exc:
+        logger.debug(
+            "compliance.audit export_chain: caller identity refused: status=%s", exc.status_code
+        )
         return api_error(exc.message, exc.status_code)
 
     ctx = get_tenant_context(request)
@@ -443,6 +455,13 @@ async def export_chain() -> (
             )
         )
     except AuditWriteError:
+        # The write failure itself is already logged at ERROR and counted by the service; this
+        # records the consequence for the operator: the export was refused, nothing was disclosed.
+        logger.warning(
+            "compliance.audit export_chain: export refused, its audit event was not recorded "
+            "(chain=%s)",
+            chain_id,
+        )
         return api_error(
             "The export could not be recorded in the audit log; nothing was exported", 500
         )
