@@ -94,6 +94,16 @@ ffmpeg-sidecar = "=2.5.2"
 hls_m3u8 = "=0.7.0"
 object_store = { version = "=0.14.1", features = ["aws"] }
 
+# Direct process-group signalling (`killpg`) and non-reaping exit detection
+# (`waitid(WNOWAIT)`) for `pipeline::process_group` -- the supervisor used to
+# shell out to a `kill` binary the `debian:bookworm-slim` runtime image does not
+# ship, so teardown signals were silently never delivered. `nix` is NOT new
+# supply-chain surface: 0.31.3 (MIT) is already resolved at this exact version
+# and checksum in Cargo.lock via the WebRTC stack; only this crate's edge to it
+# is new. `signal` pulls in `process` (waitid/getpgrp); default features off.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["signal"] }
+
 [dev-dependencies]
 http-body-util = "=0.1.3"
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks

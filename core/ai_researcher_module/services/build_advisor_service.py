@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 
 from flask_core import describe_db_error
+from flask_core.ai_guard import render_search_results, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -195,18 +196,15 @@ class BuildAdvisorService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'BUILD_SEARCH_SYSTEM_PROMPT',
                 BUILD_SEARCH_SYSTEM_PROMPT,
             )
             class_label = f" ({resolved_class})" if resolved_class else ""
             user_prompt = (
-                f"Game: {resolved_game}{class_label}\n"
-                f"Question: {query}\n\n"
+                f"Game: {wrap_untrusted(resolved_game + class_label, max_chars=300)}\n"
+                f"Question: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Synthesize a clear build/loadout recommendation based on "
                 "these results."
@@ -345,17 +343,14 @@ class BuildAdvisorService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'META_SEARCH_SYSTEM_PROMPT',
                 META_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Game: {resolved_game}\n"
-                f"Question: {query}\n\n"
+                f"Game: {wrap_untrusted(resolved_game, max_chars=300)}\n"
+                f"Question: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Summarize the current meta and tier rankings based on "
                 "these results."

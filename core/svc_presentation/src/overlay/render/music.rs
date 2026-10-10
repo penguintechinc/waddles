@@ -8,6 +8,11 @@
 //! one shape every surface shares: `type: clear`. Anything else is
 //! rejected loudly rather than silently ignored -- a caller pushing track
 //! data here would otherwise believe it worked.
+//!
+//! Detokenization/escaping (`crate::overlay::detok`) therefore has nothing
+//! to act on here: [`MusicContent`] carries no push-derived text at all, so
+//! no token, UUID or markup can reach the wire from this surface (pinned by
+//! `output_carries_no_push_derived_text_at_all`).
 
 use overlay_schema::OverlayPush;
 use overlay_schema::PushKind;
@@ -99,5 +104,25 @@ mod tests {
     #[test]
     fn surface_reports_music() {
         assert_eq!(MusicRenderer.surface(), Surface::Music);
+    }
+
+    /// `music` has no free-text field, so there is nothing to detokenize or
+    /// escape: its rendered output is exactly `{"cleared": true}`, even for
+    /// a push stuffed with hostile text in every other field -- the
+    /// sanitization contract holds by construction, not by a missing call.
+    #[test]
+    fn output_carries_no_push_derived_text_at_all() {
+        let push = OverlayPush {
+            kind: Some(PushKind::Clear),
+            title: Some("<script>x</script>".to_string()),
+            body: Some("{user:11111111-1111-1111-1111-111111111111}".to_string()),
+            text: Some("<img src=x onerror=alert(1)>".to_string()),
+            ..Default::default()
+        };
+        let frame = MusicRenderer.render(&push, &theme()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            serde_json::json!({"content_type": "music", "cleared": true})
+        );
     }
 }
