@@ -117,6 +117,7 @@ async def issue_service_token() -> tuple[Response, int]:
             community="internal",
             result="SUCCESS",
             scope=scope,
+            tenant=claims.get("tenant"),
             jti=claims.get("jti"),
             exp=claims.get("exp"),
         )

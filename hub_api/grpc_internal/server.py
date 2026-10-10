@@ -72,25 +72,35 @@ def _load_server_credentials() -> grpc.ServerCredentials:
     return grpc.ssl_server_credentials([(private_key, cert_chain)])
 
 
+def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInterceptor]:
+    """The production interceptor chain: deadline -> auth -> rate limit -> OTel.
+
+    Auth runs before rate limiting so the limiter keys on the caller's verified
+    identity, never an unauthenticated claim; the servicers rely on auth having
+    populated `service_claims` (they fail closed without it). Tests build their
+    in-process servers from this same function so they exercise the real chain,
+    never a servicer reached around its interceptors.
+    """
+    return [
+        DeadlineInterceptor(),
+        AuthInterceptor(verifier=issuer.as_verifier(), required_scopes=REQUIRED_SCOPES),
+        RateLimitInterceptor(
+            requests_per_second=float(os.getenv("GRPC_RATE_LIMIT_RPS", "50")),
+            burst=float(os.getenv("GRPC_RATE_LIMIT_BURST", "100")),
+        ),
+        OTelInterceptor(),
+    ]
+
+
 async def build_internal_grpc_server(
     *, issuer: ServiceJwtIssuer, async_dal: Any = None
 ) -> grpc.aio.Server:
     """Builds (but does not start) the internal gRPC server.
 
-    Interceptor chain: deadline enforcement -> auth -> rate limiting ->
-    OTel. Auth runs before rate limiting so the limiter keys on the
-    caller's verified identity, never an unauthenticated claim.
+    Interceptor chain: see :func:`build_interceptor_chain`.
     """
     server = grpc.aio.server(
-        interceptors=[
-            DeadlineInterceptor(),
-            AuthInterceptor(verifier=issuer.as_verifier(), required_scopes=REQUIRED_SCOPES),
-            RateLimitInterceptor(
-                requests_per_second=float(os.getenv("GRPC_RATE_LIMIT_RPS", "50")),
-                burst=float(os.getenv("GRPC_RATE_LIMIT_BURST", "100")),
-            ),
-            OTelInterceptor(),
-        ],
+        interceptors=build_interceptor_chain(issuer),
         options=[
             ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
             ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
