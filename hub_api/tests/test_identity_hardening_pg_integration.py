@@ -1,4 +1,4 @@
-"""Identity security hardening (alembic 0047) against a REAL, fully-migrated Postgres.
+"""Identity security hardening (alembic 0048) against a REAL, fully-migrated Postgres.
 
 Regression coverage for the post-merge adversarial review of #429:
 
@@ -71,7 +71,7 @@ _VERSIONS = Path(__file__).resolve().parents[2] / "alembic" / "versions"
 
 @pytest.fixture(scope="module")
 def pg_db() -> Iterator[PgTestDatabase]:
-    """One real Postgres 17 container migrated to head (includes 0047)."""
+    """One real Postgres 17 container migrated to head (includes 0048)."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
     with migrated_postgres("hub-api-identity-hardening") as db:
@@ -284,7 +284,9 @@ async def test_rederive_replaces_stale_and_forged_rows_from_the_0045_window(
     await adal.executesql_async(
         "ALTER TABLE community_members ENABLE TRIGGER trg_community_members_user_uuid"
     )
-    spec = importlib.util.spec_from_file_location("m0047", _VERSIONS / "0047_identity_hardening.py")
+    spec = importlib.util.spec_from_file_location(
+        "m0048", _VERSIONS / "0048_identity_forged_uuid.py"
+    )
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -698,9 +700,9 @@ async def test_cross_tenant_mint_cannot_correlate_a_hub_user_through_the_rpc(
 
 
 @pg_only
-def test_0047_downgrade_restores_0045_shape_and_upgrade_reapplies() -> None:
+def test_0048_downgrade_restores_0045_shape_and_upgrade_reapplies() -> None:
     with migrated_postgres("hub-api-identity-hardening-rt") as db:
-        alembic_cli("downgrade", "0046_bundle_reputation_store", dsn=db.dsn)
+        alembic_cli("downgrade", "0047_builtin_handler_paths", dsn=db.dsn)
 
         def scalar(sql: str) -> Any:
             with closing(psycopg2.connect(db.dsn)) as conn, conn.cursor() as cur:

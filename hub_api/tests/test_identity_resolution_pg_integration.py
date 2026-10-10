@@ -151,7 +151,7 @@ async def test_unlinked_identity_gets_stable_per_tenant_pseudonym(adal: AsyncDAL
         adal, "SELECT handle FROM ephemeral_pseudonyms WHERE pseudonym = %s::uuid", [a]
     )
     # The membership trigger never copies community display names into the PII table:
-    # a handle only arrives via a platform-asserted mint (hardening, alembic 0047).
+    # a handle only arrives via a platform-asserted mint (hardening, alembic 0048).
     assert stored is None
     await resolve_identities(adal, [IdentityRequest("t1", "twitch", "tw-9", SECRET_HANDLE)])
     stored = await _one(

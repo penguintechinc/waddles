@@ -32,8 +32,8 @@ Closes the findings the review raised against 0045_identity_resolution:
    count as a gauge. GDPR erasure for ``ephemeral_pseudonyms.handle`` is
    ``erase_ephemeral_pseudonym_handles()`` (wipe the handle, or delete the mapping).
 
-Revision ID: 0047_identity_hardening
-Revises: 0046_bundle_reputation_store
+Revision ID: 0048_identity_forged_uuid
+Revises: 0047_builtin_handler_paths
 Create Date: 2026-10-09
 """
 
@@ -44,8 +44,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0047_identity_hardening"
-down_revision = "0046_bundle_reputation_store"
+revision = "0048_identity_forged_uuid"
+down_revision = "0047_builtin_handler_paths"
 branch_labels = None
 depends_on = None
 
