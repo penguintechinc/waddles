@@ -2852,7 +2852,16 @@ autoProvisionedKeys:
   serviceJwt:
     secretName: "service-jwt-signing-key"
     publicKeyConfigMapName: ""  # default: "<fullname>-service-jwt-public" when empty
-    keyId: "waddlebot-1"
+    # fix/hub-api-grpc-service-jwt-issuer -- NOT "waddlebot-1" (bundleSigning's
+    # value): this keyId becomes the `SERVICE_JWT_PRIVATE_KEY_<keyId>` SECRET KEY
+    # NAME (auto-provisioned-keys-job.yaml), which reaches the hub-api container as
+    # an env var of the identical name via `envFrom.secretRef` (hub-api.yaml). A
+    # hyphen there makes it an invalid POSIX env var name -- kubelet silently drops
+    # it from the container's environment (logs an `InvalidVariableNames` Event,
+    # does not fail the pod), so `flask_core.service_jwt.load_issuer_from_env`'s
+    # `SERVICE_JWT_PRIVATE_KEY_` prefix scan finds nothing and issuance stays
+    # disabled. Must stay `[A-Za-z_][A-Za-z0-9_]*` if ever changed.
+    keyId: "waddlebot1"
     externalSecret: false
   # #684 / PR #718 secret messaging (one-time secrets) -- AES-256-GCM key, 64 lowercase
   # hex chars, hub-api env ONE_TIME_SECRET_ENCRYPTION_KEY. Generated once, never rotated.
