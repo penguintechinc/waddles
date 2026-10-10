@@ -32,6 +32,8 @@ import boto3
 from botocore.client import Config as BotoConfig
 from flask_core.safe_logging import describe_exc, log_exc_safe
 
+from services.object_storage_kms import get_object_storage_sse
+
 logger = logging.getLogger(__name__)
 
 ALLOWED_AVATAR_CONTENT_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
@@ -80,6 +82,10 @@ async def upload_avatar(data: bytes, original_filename: str, content_type: str) 
     """Upload avatar bytes to `avatars/<uuid><ext>`. Returns the public URL."""
     ext = os.path.splitext(original_filename)[1] or ""
     key = f"avatars/{uuid.uuid4()}{ext}"
+    # security.md: default server-side encryption -- AES256 (SSE-S3) by default, SSE-KMS under the
+    # operator's key when kms.objectStorage.mode=kms (services/object_storage_kms.py; raises
+    # rather than silently writing under the platform key when KMS mode is on but not entitled).
+    sse = await get_object_storage_sse().put_params()
 
     def _put() -> None:
         _client().put_object(
@@ -87,7 +93,7 @@ async def upload_avatar(data: bytes, original_filename: str, content_type: str) 
             Key=key,
             Body=data,
             ContentType=content_type,
-            ServerSideEncryption="AES256",  # security.md: default server-side encryption
+            **sse,
         )
 
     await asyncio.to_thread(_put)
@@ -111,6 +117,7 @@ async def upload_community_asset(
     """
     ext = os.path.splitext(original_filename)[1] or ""
     key = f"{folder}/{uuid.uuid4()}{ext}"
+    sse = await get_object_storage_sse().put_params()  # AES256 baseline, or entitled SSE-KMS
 
     def _put() -> None:
         _client().put_object(
@@ -118,7 +125,7 @@ async def upload_community_asset(
             Key=key,
             Body=data,
             ContentType=content_type,
-            ServerSideEncryption="AES256",  # security.md: default server-side encryption
+            **sse,
         )
 
     await asyncio.to_thread(_put)
@@ -161,6 +168,7 @@ async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, da
     """
     key = bundle_component_key(app_id, version, sha256_hex)
     sidecar_key = bundle_sidecar_key(app_id, version, sha256_hex)
+    sse = await get_object_storage_sse().put_params()  # AES256 baseline, or entitled SSE-KMS
 
     def _put() -> None:
         client = _client()
@@ -169,14 +177,14 @@ async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, da
             Key=key,
             Body=data,
             ContentType="application/wasm",
-            ServerSideEncryption="AES256",  # security.md: default server-side encryption
+            **sse,  # security.md: default server-side encryption
         )
         client.put_object(
             Bucket=_bundle_bucket(),
             Key=sidecar_key,
             Body=b"{}",
             ContentType="application/json",
-            ServerSideEncryption="AES256",
+            **sse,
         )
 
     await asyncio.to_thread(_put)
@@ -199,6 +207,7 @@ async def write_bundle_sidecar(
     """
     key = bundle_sidecar_key(app_id, version, sha256_hex)
     body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    sse = await get_object_storage_sse().put_params()  # AES256 baseline, or entitled SSE-KMS
 
     def _put() -> None:
         _client().put_object(
@@ -206,7 +215,7 @@ async def write_bundle_sidecar(
             Key=key,
             Body=body,
             ContentType="application/json",
-            ServerSideEncryption="AES256",  # security.md: default server-side encryption
+            **sse,  # security.md: default server-side encryption
         )
 
     await asyncio.to_thread(_put)

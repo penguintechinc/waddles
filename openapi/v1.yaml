@@ -1411,6 +1411,44 @@ components:
       - adminCount
       title: DashboardStatsDTO
       type: object
+    DekDTO:
+      description: 'Response DTO: a no-secrets summary of one DEK version.'
+      properties:
+        activatedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Activatedat
+        dekVersion:
+          title: Dekversion
+          type: integer
+        kekKind:
+          title: Kekkind
+          type: string
+        kekRef:
+          title: Kekref
+          type: string
+        retiredAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Retiredat
+        status:
+          title: Status
+          type: string
+        usageCount:
+          title: Usagecount
+          type: integer
+      required:
+      - dekVersion
+      - kekKind
+      - kekRef
+      - status
+      - usageCount
+      - activatedAt
+      - retiredAt
+      title: DekDTO
+      type: object
     DeletionRequestDTO:
       description: Deletion request DTO.
       properties:
@@ -1758,6 +1796,59 @@ components:
       - email
       - avatarUrl
       title: JoinRequestListItemDTO
+      type: object
+    KmsConfigDTO:
+      description: 'Response DTO: one tenant KMS config. `externalId` is the proof-of-control
+        token.'
+      properties:
+        externalId:
+          title: Externalid
+          type: string
+        keyRef:
+          title: Keyref
+          type: string
+        lastErrorCode:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lasterrorcode
+        lastVerifiedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lastverifiedat
+        principal:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Principal
+        provider:
+          title: Provider
+          type: string
+        region:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Region
+        status:
+          title: Status
+          type: string
+        updatedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updatedat
+      required:
+      - provider
+      - keyRef
+      - region
+      - principal
+      - externalId
+      - status
+      - lastVerifiedAt
+      - lastErrorCode
+      - updatedAt
+      title: KmsConfigDTO
       type: object
     KnowledgeChunkDTO:
       description: Nested response field -- Knowledge Chunk.
@@ -3582,6 +3673,43 @@ components:
       - authorAvatar
       - createdAt
       title: ReviewDTO
+      type: object
+    RewrapDTO:
+      description: 'Response DTO: outcome of re-wrapping every DEK version onto a
+        target KEK.'
+      properties:
+        alreadyCurrent:
+          title: Alreadycurrent
+          type: integer
+        failedVersions:
+          items:
+            type: integer
+          title: Failedversions
+          type: array
+        ok:
+          title: Ok
+          type: boolean
+        rewrapped:
+          title: Rewrapped
+          type: integer
+        targetKind:
+          title: Targetkind
+          type: string
+        targetRef:
+          title: Targetref
+          type: string
+        total:
+          title: Total
+          type: integer
+      required:
+      - targetKind
+      - targetRef
+      - total
+      - rewrapped
+      - alreadyCurrent
+      - failedVersions
+      - ok
+      title: RewrapDTO
       type: object
     RoleSyncBinding:
       description: One `community_role_sync_bindings` row -- the wire-shape DTO for
@@ -19240,6 +19368,193 @@ paths:
                 type: object
           description: Response DTO for `GET /<tenant_slug>/communities`.
       summary: Get tenant communities.
+  /api/v1/tenant/{tenant_slug}/kms:
+    delete:
+      description: '
+
+        409 when some DEKs could not be re-wrapped (e.g. the customer key is already
+
+        revoked): the config is kept so they stay addressable, and the body lists
+        them.'
+      operationId: delete_disable_kms
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `DELETE /kms`.
+                properties:
+                  rewrap:
+                    $ref: '#/components/schemas/RewrapDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - rewrap
+                title: KmsDisableResponse
+                type: object
+          description: Response DTO for `DELETE /kms`.
+      summary: 'Exit ramp: re-wrap every DEK back to the platform baseline (never
+        entitlement-gated).'
+    get:
+      description: ''
+      operationId: get_get_kms_status
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /kms`.
+                properties:
+                  config:
+                    anyOf:
+                    - $ref: '#/components/schemas/KmsConfigDTO'
+                    - type: 'null'
+                  keys:
+                    items:
+                      $ref: '#/components/schemas/DekDTO'
+                    title: Keys
+                    type: array
+                  platformPrincipals:
+                    additionalProperties:
+                      type: string
+                    title: Platformprincipals
+                    type: object
+                  success:
+                    title: Success
+                    type: boolean
+                  supportedProviders:
+                    items:
+                      type: string
+                    title: Supportedproviders
+                    type: array
+                required:
+                - success
+                - config
+                - keys
+                - supportedProviders
+                - platformPrincipals
+                title: KmsStatusResponse
+                type: object
+          description: Response DTO for `GET /kms`.
+      summary: Return the tenant's KMS config and a no-secrets DEK summary (not entitlement-gated).
+    put:
+      description: ''
+      operationId: put_put_kms_config
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO for `PUT /kms`: where the customer''s key
+                lives (no secrets).
+
+
+                Lengths are capped at the boundary (the request body limit is sized
+                for bundle uploads, not
+
+                for a key identifier); the provider-specific validators then apply
+                strict patterns.'
+              properties:
+                keyRef:
+                  maxLength: 2048
+                  minLength: 1
+                  title: Keyref
+                  type: string
+                principal:
+                  anyOf:
+                  - maxLength: 2048
+                    type: string
+                  - type: 'null'
+                  default: null
+                  title: Principal
+                provider:
+                  maxLength: 64
+                  minLength: 1
+                  title: Provider
+                  type: string
+                region:
+                  anyOf:
+                  - maxLength: 64
+                    type: string
+                  - type: 'null'
+                  default: null
+                  title: Region
+              required:
+              - provider
+              - keyRef
+              title: KmsConfigRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `PUT /kms`.
+                properties:
+                  config:
+                    $ref: '#/components/schemas/KmsConfigDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - config
+                title: KmsConfigResponse
+                type: object
+          description: Response DTO for `PUT /kms`.
+      summary: Record the customer key as `pending` (Enterprise-gated); moves no key
+        material.
+  /api/v1/tenant/{tenant_slug}/kms/activate:
+    post:
+      description: ''
+      operationId: post_activate_kms
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `POST /kms/activate`.
+                properties:
+                  config:
+                    $ref: '#/components/schemas/KmsConfigDTO'
+                  rewrap:
+                    $ref: '#/components/schemas/RewrapDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - config
+                - rewrap
+                title: KmsActivateResponse
+                type: object
+          description: Response DTO for `POST /kms/activate`.
+      summary: Verify the customer key, re-wrap every DEK onto it, and activate (Enterprise-gated).
   /api/v1/tenant/{tenant_slug}/modules:
     get:
       description: ''

@@ -247,6 +247,14 @@ convention = "google"
 # bundle_approvals.py above -- no tenant_middleware assert here (this
 # endpoint is deliberately cross-tenant), so only N815 is needed.
 "blueprints/v1/bundle_admin.py" = ["N815"]
+# Enterprise external KMS / BYOK (services/envelope/) -- camelCase DTO fields
+# (keyRef, externalId, dekVersion, ...) follow the v1 wire contract every other
+# blueprint's DTOs use; S101 is the same tenant_middleware postcondition assert
+# as bundle_tenant_availability.py above.
+"blueprints/v1/tenant_kms.py" = ["N815", "S101"]
+# Opt-in real-SeaweedFS E2E (`make test-seaweedfs-sse-kms`): drives docker/helm through
+# fixed-argv subprocess calls (no shell, no untrusted input) -- S603/S607 are noise here.
+"tests/envelope/test_seaweedfs_sse_kms_e2e.py" = ["S603", "S607", "D107"]
 
 [tool.mypy]
 python_version = "3.13"
