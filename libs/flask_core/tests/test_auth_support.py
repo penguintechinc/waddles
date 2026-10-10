@@ -95,7 +95,9 @@ class TestVerifyApiKeyAsync:
         assert "last_used_at" in dal.updated[0]
 
     async def test_missing_permissions_default_to_empty(self) -> None:
-        result = await auth.verify_api_key_async("wa-x", _FakeDal([_key_row(permissions=None)], [USER]))
+        result = await auth.verify_api_key_async(
+            "wa-x", _FakeDal([_key_row(permissions=None)], [USER])
+        )
         assert result is not None and result["permissions"] == []
 
 
@@ -152,7 +154,9 @@ class TestSetupAuth:
         assert app.config["SECRET_KEY"] == "k" * 40
         assert app.config["SECURITY_REGISTERABLE"] is False
 
-    def test_only_providers_with_credentials_are_registered(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_only_providers_with_credentials_are_registered(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         from flask import Flask
 
         app = Flask("t")

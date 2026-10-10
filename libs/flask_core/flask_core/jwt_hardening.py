@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 #: Verifier identities -- the ``verifier`` metric label (closed set).
 VERIFIER_PLATFORM_HS256: Final = "platform_hs256"
 VERIFIER_SERVICE_EDDSA: Final = "service_eddsa"
-VERIFIER_OIDC_ID_TOKEN: Final = "oidc_id_token"
+VERIFIER_OIDC_ID_TOKEN: Final = "oidc_id_token"  # noqa: S105 - metric label, not a secret
 
 #: Verification outcome / rejection reasons -- the ``outcome`` metric label and the only
 #: free-form-looking text ever logged about a rejection (closed set).
@@ -273,7 +273,7 @@ def _build_instruments(meter_provider: Any = None) -> _Instruments:
         duration=meter.create_histogram(
             "waddles_jwt_verification_seconds",
             unit="s",
-            description="Wall time spent verifying one JWT, by verifier and header algorithm label.",
+            description="Wall time verifying one JWT, by verifier and header algorithm label.",
         ),
     )
 
@@ -287,9 +287,7 @@ def use_meter_provider(meter_provider: Any = None) -> None:
     _instruments = _build_instruments(meter_provider)
 
 
-def record_verification(
-    *, verifier: str, alg: str | None, outcome: str, started: float
-) -> None:
+def record_verification(*, verifier: str, alg: str | None, outcome: str, started: float) -> None:
     """Emit the per-algorithm verification counter and latency histogram.
 
     ``started`` is a ``time.perf_counter()`` reading taken before verification.
@@ -298,9 +296,7 @@ def record_verification(
     """
     label = alg_label(alg)
     try:
-        _instruments.verifications.add(
-            1, {"verifier": verifier, "alg": label, "outcome": outcome}
-        )
+        _instruments.verifications.add(1, {"verifier": verifier, "alg": label, "outcome": outcome})
         _instruments.duration.record(
             max(time.perf_counter() - started, 0.0), {"verifier": verifier, "alg": label}
         )

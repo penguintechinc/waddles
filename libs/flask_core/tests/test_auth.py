@@ -15,7 +15,7 @@ import base64
 import hashlib
 import hmac
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
@@ -37,7 +37,7 @@ SECRET = "test-secret-key-not-for-production-use-only"
 
 def _payload(**overrides: Any) -> dict[str, Any]:
     """A fully valid platform payload; a value of None in `overrides` drops that claim."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload: dict[str, Any] = {
         "sub": "u1",
         "username": "alice",
@@ -66,10 +66,8 @@ def _sign(payload: dict[str, Any], *, kid: str | None = DEFAULT_JWT_KID) -> str:
 
 
 def _sign_raw(payload: dict[str, Any], *, secret: str = SECRET) -> str:
-    """Sign `payload` verbatim -- bypassing PyJWT's encode-side type checks (iss must be str, ...)."""
-    claims = {
-        k: int(v.timestamp()) if isinstance(v, datetime) else v for k, v in payload.items()
-    }
+    """Sign `payload` verbatim, bypassing PyJWT's encode-side type checks (iss must be str)."""
+    claims = {k: int(v.timestamp()) if isinstance(v, datetime) else v for k, v in payload.items()}
     return jwt.api_jws.PyJWS().encode(
         json.dumps(claims).encode(), secret, algorithm="HS256", headers={"kid": DEFAULT_JWT_KID}
     )
@@ -97,7 +95,10 @@ class TestCreateJwtToken:
 
     def test_teams_claim_passed_through(self) -> None:
         decoded = jwt.decode(
-            _mint(teams=["team-a", "team-b"]), SECRET, algorithms=["HS256"], options={"verify_aud": False}
+            _mint(teams=["team-a", "team-b"]),
+            SECRET,
+            algorithms=["HS256"],
+            options={"verify_aud": False},
         )
         assert decoded["teams"] == ["team-a", "team-b"]
 
@@ -122,7 +123,9 @@ class TestCreateJwtToken:
     def test_custom_kid_stamped(self) -> None:
         assert jwt.get_unverified_header(_mint(kid="hs256-v2"))["kid"] == "hs256-v2"
 
-    @pytest.mark.parametrize("bad_kid", ["", "../../etc/passwd", "a b", "x" * 65, "kid\nX: y", "'; DROP--"])
+    @pytest.mark.parametrize(
+        "bad_kid", ["", "../../etc/passwd", "a b", "x" * 65, "kid\nX: y", "'; DROP--"]
+    )
     def test_malformed_kid_refused_at_mint(self, bad_kid: str) -> None:
         with pytest.raises(ValueError, match="kid"):
             _mint(kid=bad_kid)
@@ -133,19 +136,25 @@ class TestCreateJwtToken:
         with pytest.raises(ValueError, match="secret_key"):
             _mint(secret_key=empty)
 
-    def test_iat_is_utc_correct_regardless_of_process_timezone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_iat_is_utc_correct_regardless_of_process_timezone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import time
 
         monkeypatch.setenv("TZ", "Pacific/Kiritimati")  # UTC+14
         time.tzset()
         try:
-            decoded = jwt.decode(_mint(), SECRET, algorithms=["HS256"], options={"verify_aud": False})
+            decoded = jwt.decode(
+                _mint(), SECRET, algorithms=["HS256"], options={"verify_aud": False}
+            )
         finally:
             monkeypatch.delenv("TZ")
             time.tzset()
-        assert abs(decoded["iat"] - datetime.now(timezone.utc).timestamp()) < 5
+        assert abs(decoded["iat"] - datetime.now(UTC).timestamp()) < 5
 
-    def test_creation_log_carries_no_username_email_or_token(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_creation_log_carries_no_username_email_or_token(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         with caplog.at_level("DEBUG", logger="flask_core.auth"):
             token = _mint(username="alice-the-streamer", email="alice@example.com")
         rendered = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
@@ -197,13 +206,18 @@ class TestIssuerAudienceEnforced:
     def test_custom_expected_issuer_and_audience_enforced(self) -> None:
         """A verifier expecting non-default iss/aud rejects the platform default."""
         assert (
-            verify_jwt_token(_sign(_payload()), SECRET, issuer="other-issuer", audience="other-audience")
+            verify_jwt_token(
+                _sign(_payload()), SECRET, issuer="other-issuer", audience="other-audience"
+            )
             is None
         )
 
     def test_custom_expected_issuer_and_audience_accepted_when_matching(self) -> None:
         token = _sign(_payload(iss="other-issuer", aud="other-audience"))
-        assert verify_jwt_token(token, SECRET, issuer="other-issuer", audience="other-audience") is not None
+        assert (
+            verify_jwt_token(token, SECRET, issuer="other-issuer", audience="other-audience")
+            is not None
+        )
 
     @pytest.mark.parametrize(
         "missing",
@@ -255,13 +269,13 @@ class TestRequiredClaims:
 
 class TestTimeValidation:
     def test_expired_token_rejected(self) -> None:
-        past = datetime.now(timezone.utc) - timedelta(hours=2)
+        past = datetime.now(UTC) - timedelta(hours=2)
         token = _sign(_payload(iat=past - timedelta(hours=1), exp=past))
         assert verify_jwt_token(token, SECRET) is None
 
     def test_expiry_is_strict_not_widened_by_the_iat_skew_allowance(self) -> None:
-        """Skew applies to iat/nbf only: a token that expired 5 s ago is expired, not 'within leeway'."""
-        now = datetime.now(timezone.utc)
+        """Skew applies to iat/nbf only: a token that expired 5 s ago is expired."""
+        now = datetime.now(UTC)
         just_expired = now - timedelta(seconds=5)
         token = _sign(_payload(iat=now - timedelta(hours=1), exp=just_expired))
         assert verify_jwt_token(token, SECRET) is None
@@ -273,22 +287,24 @@ class TestTimeValidation:
         monkeypatch.setenv("TZ", "America/Los_Angeles")
         time.tzset()
         try:
-            soon = datetime.now(timezone.utc) + timedelta(minutes=5)
+            soon = datetime.now(UTC) + timedelta(minutes=5)
             assert verify_jwt_token(_sign(_payload(exp=soon)), SECRET) is not None
         finally:
             monkeypatch.delenv("TZ")
             time.tzset()
 
     def test_iat_within_skew_accepted(self) -> None:
-        near_future = datetime.now(timezone.utc) + timedelta(seconds=JWT_CLOCK_SKEW_SECONDS // 3)
+        near_future = datetime.now(UTC) + timedelta(seconds=JWT_CLOCK_SKEW_SECONDS // 3)
         assert verify_jwt_token(_sign(_payload(iat=near_future)), SECRET) is not None
 
     def test_iat_far_in_future_rejected(self) -> None:
-        far = datetime.now(timezone.utc) + timedelta(minutes=10)
-        assert verify_jwt_token(_sign(_payload(iat=far, exp=far + timedelta(hours=1))), SECRET) is None
+        far = datetime.now(UTC) + timedelta(minutes=10)
+        assert (
+            verify_jwt_token(_sign(_payload(iat=far, exp=far + timedelta(hours=1))), SECRET) is None
+        )
 
     def test_nbf_in_future_rejected(self) -> None:
-        nbf = datetime.now(timezone.utc) + timedelta(hours=1)
+        nbf = datetime.now(UTC) + timedelta(hours=1)
         assert verify_jwt_token(_sign(_payload(nbf=nbf)), SECRET) is None
 
     def test_non_numeric_iat_rejected(self) -> None:
@@ -306,10 +322,14 @@ class TestSignatureAndKey:
         assert body != forged
 
     @pytest.mark.parametrize("empty", ["", None, b""])
-    def test_empty_verifier_secret_refused_even_for_a_token_signed_with_it(self, empty: Any) -> None:
+    def test_empty_verifier_secret_refused_even_for_a_token_signed_with_it(
+        self, empty: Any
+    ) -> None:
         """An unset secret must not turn into 'anyone can forge a token with the empty key'."""
         # PyJWT >= 2.15 refuses to sign with an empty key, so forge the HMAC by hand.
-        claims = {k: int(v.timestamp()) if isinstance(v, datetime) else v for k, v in _payload().items()}
+        claims = {
+            k: int(v.timestamp()) if isinstance(v, datetime) else v for k, v in _payload().items()
+        }
         head = _b64(json.dumps({"alg": "HS256", "typ": "JWT", "kid": DEFAULT_JWT_KID}).encode())
         body = _b64(json.dumps(claims).encode())
         sig = hmac.new(b"", f"{head}.{body}".encode(), hashlib.sha256).digest()

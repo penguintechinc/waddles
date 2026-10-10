@@ -22,7 +22,7 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +63,7 @@ def _b64(raw: bytes) -> str:
 
 def _claims(**overrides: Any) -> dict[str, Any]:
     """Valid platform claims as JSON-ready ints; a None override drops that claim."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     claims: dict[str, Any] = {
         "sub": "u1",
         "username": SENTINEL_USER,
@@ -81,7 +81,13 @@ def _claims(**overrides: Any) -> dict[str, Any]:
     return {k: v for k, v in claims.items() if v is not None}
 
 
-def _forge(header: dict[str, Any], claims: dict[str, Any], *, signature: bytes | None = None, key: bytes | str = SECRET) -> str:
+def _forge(
+    header: dict[str, Any],
+    claims: dict[str, Any],
+    *,
+    signature: bytes | None = None,
+    key: bytes | str = SECRET,
+) -> str:
     """Hand-assemble a compact JWT: arbitrary header, HMAC-SHA256 (or caller) signature."""
     head = _b64(json.dumps(header).encode())
     body = _b64(json.dumps(claims).encode())
@@ -131,7 +137,21 @@ class TestKid:
 
     @pytest.mark.parametrize(
         "kid",
-        ["", "-lead", ".lead", "a b", "a/b", "../etc/passwd", "a;b", "x" * 65, "k\n1", "k\x00", "é", None, 7],
+        [
+            "",
+            "-lead",
+            ".lead",
+            "a b",
+            "a/b",
+            "../etc/passwd",
+            "a;b",
+            "x" * 65,
+            "k\n1",
+            "k\x00",
+            "é",
+            None,
+            7,
+        ],
     )
     def test_invalid(self, kid: object) -> None:
         assert not is_valid_kid(kid)
@@ -144,7 +164,9 @@ class TestKid:
 
 class TestInspectHeader:
     def test_valid_header_returns_vetted_subset(self) -> None:
-        header = inspect_header(_forge(_valid_header(), _claims()), allowed_algs=HS256, validate_kid=True)
+        header = inspect_header(
+            _forge(_valid_header(), _claims()), allowed_algs=HS256, validate_kid=True
+        )
         assert (header.alg, header.kid) == ("HS256", DEFAULT_JWT_KID)
 
     def test_missing_kid_is_allowed_unless_required(self) -> None:
@@ -163,7 +185,9 @@ class TestInspectHeader:
         assert exc.value.alg == ALG_LABEL_NONE
 
     def test_alg_none_wins_over_a_forbidden_param(self) -> None:
-        token = _forge({"alg": "none", "jku": "https://evil.example/jwks"}, _claims(), signature=b"")
+        token = _forge(
+            {"alg": "none", "jku": "https://evil.example/jwks"}, _claims(), signature=b""
+        )
         with pytest.raises(JwtRejection) as exc:
             inspect_header(token, allowed_algs=HS256)
         assert exc.value.reason == hardening.REASON_ALG_NONE
@@ -177,9 +201,13 @@ class TestInspectHeader:
         assert exc.value.alg == "hs256"
 
     def test_forbidden_param_set_is_the_audited_one(self) -> None:
-        assert {"jku", "jwk", "x5u"} <= FORBIDDEN_HEADER_PARAMS == {"jku", "jwk", "x5u", "x5c", "crit"}
+        assert (
+            {"jku", "jwk", "x5u"} <= FORBIDDEN_HEADER_PARAMS == {"jku", "jwk", "x5u", "x5c", "crit"}
+        )
 
-    @pytest.mark.parametrize("alg", ["HS384", "HS512", "RS256", "ES256", "EdDSA", "PS256", "hs256", "HS256 ", ""])
+    @pytest.mark.parametrize(
+        "alg", ["HS384", "HS512", "RS256", "ES256", "EdDSA", "PS256", "hs256", "HS256 ", ""]
+    )
     def test_any_other_alg_rejected_one_alg_per_verifier(self, alg: str) -> None:
         with pytest.raises(JwtRejection) as exc:
             inspect_header(_forge({"alg": alg}, _claims()), allowed_algs=HS256)
@@ -219,7 +247,9 @@ class TestInspectHeader:
         token = _forge(_valid_header(kid=42), _claims())
         assert inspect_header(token, allowed_algs=HS256).kid is None
 
-    @pytest.mark.parametrize("junk", ["", "garbage", "a.b", "a.b.c", "....", None, 7, b"x.y.z", ["a.b.c"]])
+    @pytest.mark.parametrize(
+        "junk", ["", "garbage", "a.b", "a.b.c", "....", None, 7, b"x.y.z", ["a.b.c"]]
+    )
     def test_malformed_tokens(self, junk: object) -> None:
         with pytest.raises(JwtRejection) as exc:
             inspect_header(junk, allowed_algs=HS256)
@@ -239,7 +269,9 @@ class TestInspectHeader:
             inspect_header(_forge(huge, _claims()), allowed_algs=HS256)
         assert exc.value.reason == hardening.REASON_MALFORMED
 
-    @pytest.mark.parametrize("token", ["a.b", "a.b.c.d", ".b.c", "!!!.b.c", "e30.b.c.", "\u00e9.b.c"])
+    @pytest.mark.parametrize(
+        "token", ["a.b", "a.b.c.d", ".b.c", "!!!.b.c", "e30.b.c.", "\u00e9.b.c"]
+    )
     def test_wrong_segment_shape_or_undecodable_header_is_malformed(self, token: str) -> None:
         with pytest.raises(JwtRejection) as exc:
             inspect_header(token, allowed_algs=HS256)
@@ -258,7 +290,7 @@ class TestInspectHeader:
         assert exc.value.reason == hardening.REASON_MALFORMED
 
     def test_rejection_text_is_the_reason_only(self) -> None:
-        """str(exc) can never carry header values -- handlers that stringify stay PII/attacker-text free."""
+        """str(exc) can never carry header values, so a handler that stringifies it stays clean."""
         token = _forge(_valid_header(jku="https://evil.example/SECRET-PATH"), _claims())
         with pytest.raises(JwtRejection) as exc:
             inspect_header(token, allowed_algs=HS256)
@@ -284,13 +316,18 @@ class TestPlatformVerifierAttacks:
         assert ("platform_hs256", "none", "alg_none") in metrics_capture.verifications()
 
     def test_alg_none_with_garbage_signature_rejected(self) -> None:
-        assert verify_jwt_token(_forge({"alg": "none"}, _claims(), signature=b"anything"), SECRET) is None
+        assert (
+            verify_jwt_token(_forge({"alg": "none"}, _claims(), signature=b"anything"), SECRET)
+            is None
+        )
 
     def test_alg_none_via_pyjwt_encode_rejected(self) -> None:
         unsigned = jwt.encode(_claims(), key=None, algorithm="none")  # type: ignore[arg-type]
         assert verify_jwt_token(unsigned, SECRET) is None
 
-    def test_other_hmac_variant_with_the_correct_secret_rejected(self, metrics_capture: Any) -> None:
+    def test_other_hmac_variant_with_the_correct_secret_rejected(
+        self, metrics_capture: Any
+    ) -> None:
         """HS512 signed with the REAL secret is a valid signature -- only the alg pin refuses it."""
         token = jwt.encode(_claims(), SECRET, algorithm="HS512", headers={"kid": DEFAULT_JWT_KID})
         assert verify_jwt_token(token, SECRET) is None
@@ -316,7 +353,9 @@ class TestPlatformVerifierAttacks:
         public_pem = (
             rsa.generate_private_key(public_exponent=65537, key_size=2048)
             .public_key()
-            .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+            .public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+            )
         )
         forged = _forge(_valid_header(), _claims(), key=public_pem)
         assert verify_jwt_token(forged, public_pem.decode()) is None
@@ -333,7 +372,9 @@ class TestPlatformVerifierAttacks:
         """Classic `jwk` injection: self-signed RS256 token carrying its own public key."""
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(key.public_key()))
-        token = jwt.encode(_claims(), key, algorithm="RS256", headers={"jwk": jwk, "kid": DEFAULT_JWT_KID})
+        token = jwt.encode(
+            _claims(), key, algorithm="RS256", headers={"jwk": jwk, "kid": DEFAULT_JWT_KID}
+        )
         assert verify_jwt_token(token, SECRET) is None
 
     @pytest.mark.parametrize("bad_kid", ["../../../dev/null", "k' OR '1'='1", "x" * 200])
@@ -389,10 +430,20 @@ class TestVerificationMetrics:
             (_claims(tenant=None), "missing_claim"),
             (_claims(tenant=""), "invalid_claim"),
             (_claims(exp=1), "expired"),
-            (_claims(iat=int(datetime.now(timezone.utc).timestamp()) + 3600), "immature"),
+            (_claims(iat=int(datetime.now(UTC).timestamp()) + 3600), "immature"),
             (_claims(sub=7), "invalid_claim"),
         ],
-        ids=["iss", "aud", "no-iss", "no-aud", "no-tenant", "blank-tenant", "expired", "iat-future", "int-sub"],
+        ids=[
+            "iss",
+            "aud",
+            "no-iss",
+            "no-aud",
+            "no-tenant",
+            "blank-tenant",
+            "expired",
+            "iat-future",
+            "int-sub",
+        ],
     )
     def test_each_rejection_has_its_own_outcome(
         self, claims: dict[str, Any], outcome: str, metrics_capture: Any
@@ -411,7 +462,10 @@ class TestVerificationMetrics:
         assert ("platform_hs256", "absent", "no_key") in metrics_capture.verifications()
 
     def test_dead_exporter_never_changes_the_verdict(
-        self, metrics_capture: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self,
+        metrics_capture: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         class _Boom:
             def add(self, *a: Any, **k: Any) -> None:
@@ -425,7 +479,9 @@ class TestVerificationMetrics:
         good = _forge(_valid_header(), _claims())
         with caplog.at_level(logging.WARNING, logger="flask_core.jwt_hardening"):
             assert verify_jwt_token(good, SECRET) is not None  # success survives a dead exporter
-            assert verify_jwt_token(_forge({"alg": "none"}, _claims(), signature=b""), SECRET) is None  # so does denial
+            assert (
+                verify_jwt_token(_forge({"alg": "none"}, _claims(), signature=b""), SECRET) is None
+            )  # so does denial
         warnings = [r for r in caplog.records if "metric emit failed" in r.getMessage()]
         assert warnings, "a metric failure must be logged, not silently swallowed"
         assert "SHOULD-NOT-LEAK" not in caplog.text  # only the exception TYPE is logged
@@ -440,16 +496,33 @@ class TestRejectionLogging:
     def _verify_logged(self, token: str, caplog: pytest.LogCaptureFixture) -> str:
         with caplog.at_level(logging.DEBUG, logger="flask_core"):
             assert verify_jwt_token(token, SECRET) is None
-        return " | ".join(f"{r.levelname} {r.getMessage()} {sorted(r.__dict__.items())}" for r in caplog.records)
+        return " | ".join(
+            f"{r.levelname} {r.getMessage()} {sorted(r.__dict__.items())}" for r in caplog.records
+        )
 
-    def test_logs_never_contain_token_claims_or_secret(self, caplog: pytest.LogCaptureFixture) -> None:
-        token = _forge(_valid_header(), _claims(iss="attacker-issuer-7731"), key="wrong-secret-yyyyyyyyyyyyyyyyyyyy")
+    def test_logs_never_contain_token_claims_or_secret(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        token = _forge(
+            _valid_header(),
+            _claims(iss="attacker-issuer-7731"),
+            key="wrong-secret-yyyyyyyyyyyyyyyyyyyy",
+        )
         rendered = self._verify_logged(token, caplog)
-        for forbidden in (token, SENTINEL_USER, SENTINEL_EMAIL, "attacker-issuer-7731", SECRET, token.split(".")[1]):
+        for forbidden in (
+            token,
+            SENTINEL_USER,
+            SENTINEL_EMAIL,
+            "attacker-issuer-7731",
+            SECRET,
+            token.split(".")[1],
+        ):
             assert forbidden not in rendered
         assert "reason=bad_signature" in rendered
 
-    def test_header_attack_logs_only_the_closed_vocabulary(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_header_attack_logs_only_the_closed_vocabulary(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         token = _forge(_valid_header(jku="https://evil.example/SECRET-PATH-31337"), _claims())
         rendered = self._verify_logged(token, caplog)
         assert "SECRET-PATH-31337" not in rendered and "evil.example" not in rendered
@@ -476,7 +549,9 @@ class TestRejectionLogging:
     def test_unset_secret_is_critical(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.DEBUG, logger="flask_core"):
             assert verify_jwt_token(_forge(_valid_header(), _claims()), "") is None
-        assert [r.levelname for r in caplog.records if "JWT rejected" in r.getMessage()] == ["CRITICAL"]
+        assert [r.levelname for r in caplog.records if "JWT rejected" in r.getMessage()] == [
+            "CRITICAL"
+        ]
 
     def test_success_logs_at_debug_only(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.DEBUG, logger="flask_core"):
@@ -485,7 +560,9 @@ class TestRejectionLogging:
         assert [r.levelname for r in verified] == ["DEBUG"]
         assert SENTINEL_USER not in caplog.text
 
-    def test_every_rejection_is_stamped_for_the_audit_pipeline(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_every_rejection_is_stamped_for_the_audit_pipeline(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         self._verify_logged("garbage", caplog)
         record = next(r for r in caplog.records if "JWT rejected" in r.getMessage())
         assert (record.event_type, record.result) == ("AUTH", "FAILURE")  # type: ignore[attr-defined]
@@ -521,7 +598,12 @@ class TestClassifyDecodeError:
 
     def test_every_outcome_is_in_the_closed_vocabulary(self) -> None:
         reasons = {v for k, v in vars(hardening).items() if k.startswith(("REASON_", "OUTCOME_"))}
-        for exc in (jwt.ExpiredSignatureError(), jwt.DecodeError(), jwt.PyJWTError(), jwt.InvalidAlgorithmError()):
+        for exc in (
+            jwt.ExpiredSignatureError(),
+            jwt.DecodeError(),
+            jwt.PyJWTError(),
+            jwt.InvalidAlgorithmError(),
+        ):
             assert classify_decode_error(exc) in reasons
 
 
@@ -546,7 +628,14 @@ class TestJwtKidEnvValidation:
             env["JWT_KID"] = kid
         pkg_parent = str(Path(hardening.__file__).resolve().parent.parent)
         return subprocess.run(  # noqa: S603 - fixed argv, test-controlled env
-            [sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import flask_core.auth as a; print(a.DEFAULT_JWT_KID)", pkg_parent],
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "import flask_core.auth as a; print(a.DEFAULT_JWT_KID)",
+                pkg_parent,
+            ],
             env=env,
             capture_output=True,
             text=True,
