@@ -15,7 +15,9 @@
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod flags;
 pub mod http;
+pub mod images;
 pub mod overlay;
 pub mod telemetry;
 
