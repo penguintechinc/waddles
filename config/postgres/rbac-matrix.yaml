@@ -48,6 +48,8 @@ tables:
   - tenant_platform_apps
   - platform_connections
   - community_connection_access
+  - sso_connections
+  - sso_identities
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -740,4 +742,57 @@ grants:
     privileges: []
   - role: migration_runner
     table: community_connection_access
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0048_sso_connections: hub-api-owned control-plane tables for enterprise SSO.
+  # sso_identities.subject may be an email (SAML NameID) -- PII, hub_api only;
+  # every other role gets an explicit empty row (spec D28).
+  - role: hub_api
+    table: sso_connections
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: sso_connections
+    privileges: []
+  - role: svc_ingest
+    table: sso_connections
+    privileges: []
+  - role: svc_process
+    table: sso_connections
+    privileges: []
+  - role: svc_action
+    table: sso_connections
+    privileges: []
+  - role: svc_streaming
+    table: sso_connections
+    privileges: []
+  - role: webui
+    table: sso_connections
+    privileges: []
+  - role: migration_runner
+    table: sso_connections
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: sso_identities
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: sso_identities
+    privileges: []
+  - role: svc_ingest
+    table: sso_identities
+    privileges: []
+  - role: svc_process
+    table: sso_identities
+    privileges: []
+  - role: svc_action
+    table: sso_identities
+    privileges: []
+  - role: svc_streaming
+    table: sso_identities
+    privileges: []
+  - role: webui
+    table: sso_identities
+    privileges: []
+  - role: migration_runner
+    table: sso_identities
     privileges: [SELECT, INSERT, UPDATE, DELETE]
