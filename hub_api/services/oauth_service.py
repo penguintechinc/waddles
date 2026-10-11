@@ -28,6 +28,7 @@ from urllib.parse import urlencode
 import httpx
 
 from config import HubAPIConfig
+from services import session_service
 from services.auth_service import SessionUser, create_session_token
 from services.errors import bad_request, conflict
 
@@ -482,8 +483,20 @@ async def link_callback(
     )
 
 
-async def unlink_account(async_dal: Any, dal: Any, *, user_id: int, platform: str) -> None:
-    """Unlink account."""
+async def unlink_account(
+    async_dal: Any,
+    dal: Any,
+    *,
+    user_id: int,
+    platform: str,
+    keep_session_id: int | None = None,
+) -> None:
+    """Unlink a linked platform identity and sign the user out everywhere else.
+
+    A login method removed because it is compromised (a hijacked Discord account) must not leave
+    the sessions that method opened alive, so every OTHER login session ends -- `keep_session_id`
+    (the caller's own) stays signed in.
+    """
     user_rows = await async_dal.select_async(dal(dal.hub_users.id == user_id))
     has_password = bool(user_rows) and user_rows.first().password_hash
 
@@ -494,7 +507,15 @@ async def unlink_account(async_dal: Any, dal: Any, *, user_id: int, platform: st
                 "Cannot unlink last platform without a password. Please set a password first."
             )
 
-    await async_dal.delete_async(
+    removed = await async_dal.delete_async(
         (dal.hub_user_identities.hub_user_id == user_id)
         & (dal.hub_user_identities.platform == platform)
     )
+    if removed:
+        await session_service.revoke_other_sessions(
+            async_dal,
+            dal,
+            user_id=user_id,
+            keep_session_id=keep_session_id,
+            reason="identity_unlinked",
+        )

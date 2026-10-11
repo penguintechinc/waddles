@@ -35,6 +35,7 @@ from flask_core.service_jwt import (
     load_identities_from_env,
     load_issuer_from_env,
 )
+from flask_core.token_revocation import get_token_revocation
 from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
@@ -304,6 +305,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # flask_core.rate_limiter.RateLimiter.connect()'s own fail-open
         # doc comment. Never blocks startup on Redis being down.
         await rate_limiter.connect()
+        # Build the JWT revocation store NOW (from VALKEY_URL/REDIS_URL + JWT_REVOCATION_*) so a
+        # bad setting stops startup loudly instead of surfacing as a 500 on the first
+        # authenticated request. Construction does not connect; a store that is down at boot is
+        # handled by the documented outage policy, never by refusing to start.
+        revocation = get_token_revocation()
+        logger.info(
+            f"JWT revocation store ready: backend={revocation.backend_name} "
+            f"cache_ttl_s={revocation.policy.cache_ttl_seconds} "
+            f"grace_s={revocation.policy.grace_seconds}"
+        )
         async_dal = init_database(
             cfg.database_url,
             pool_size=cfg.db_pool_size,
@@ -450,6 +461,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             await rate_limiter.disconnect()
         except Exception as exc:  # noqa: BLE001 - shutdown must not raise
             logger.warning(f"Error closing rate limiter on shutdown: {exc}")
+        try:
+            get_token_revocation().close()
+        except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+            logger.warning(f"Error closing JWT revocation store on shutdown: {type(exc).__name__}")
         grpc_server = app.config.get("grpc_server")
         if grpc_server is not None:
             try:

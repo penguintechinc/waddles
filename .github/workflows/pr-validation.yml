@@ -73,6 +73,18 @@ jobs:
   python-unit:
     name: Python unit tests
     runs-on: ubuntu-latest
+    # A REAL Valkey for libs/flask_core/tests/test_token_revocation_valkey.py (JWT revocation
+    # store: Lua put_max, MGET, TTL expiry, cross-replica visibility). Same image + digest the
+    # chart deploys (values.yaml). That suite FAILS -- never skips -- when CI=true and the
+    # server is missing, so this service cannot silently go away.
+    services:
+      valkey:
+        image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="valkey-cli ping"
+          --health-interval=5s --health-timeout=5s --health-retries=10
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -134,6 +146,7 @@ jobs:
         env:
           PYTHON_BIN: python
           SKIP_UNIT_TEST_DEPS_INSTALL: "1"
+          WADDLES_TEST_VALKEY_URL: redis://localhost:6379/0
         run: make test-unit
 
   alembic-migration-chain:

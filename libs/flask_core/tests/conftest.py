@@ -45,6 +45,21 @@ if str(_LIBS_DIR) not in sys.path:
 
 
 
+@pytest.fixture(autouse=True)
+def _isolated_token_revocation():
+    """Give every test its own empty, process-local revocation store.
+
+    `flask_core.auth.verify_jwt_token` consults a process-wide `TokenRevocation`; without this a
+    user-wide cutoff written by one test (same `sub`, same second) would reject the tokens of the
+    next. Tests that exercise the Valkey backend or an outage build their own and install it.
+    """
+    from flask_core import token_revocation as tr
+
+    previous = tr.configure_token_revocation(tr.TokenRevocation(tr.MemoryBackend()))
+    yield
+    tr.configure_token_revocation(previous)
+
+
 def _load_stream_pipeline_module():
     """Load stream_pipeline.py directly, bypassing flask_core/__init__.py.
 
@@ -232,3 +247,54 @@ async def pipeline(fake_redis: FakeAsyncRedis):
     p._connected = True
     yield p
     p._connected = False
+
+
+class JwtMetrics:
+    """In-memory OTel reader bound to the REAL ``flask_core.jwt_hardening`` instruments.
+
+    Lets a test count emitted verification metrics without a collector; an empty result is the
+    caller's to assert against (a zero denominator is a failure, never a pass).
+    """
+
+    def __init__(self) -> None:
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+        from flask_core import jwt_hardening
+
+        self.reader = InMemoryMetricReader()
+        jwt_hardening.use_meter_provider(MeterProvider(metric_readers=[self.reader]))
+
+    def _points(self, name: str) -> list[Any]:
+        data = self.reader.get_metrics_data()
+        points: list[Any] = []
+        for resource in data.resource_metrics if data else []:
+            for scope in resource.scope_metrics:
+                for metric in scope.metrics:
+                    if metric.name == name:
+                        points.extend(metric.data.data_points)
+        return points
+
+    def verifications(self) -> dict[tuple[str, str, str], int]:
+        """``(verifier, alg, outcome) -> count`` for ``waddles_jwt_verifications_total``."""
+        return {
+            (p.attributes["verifier"], p.attributes["alg"], p.attributes["outcome"]): int(p.value)
+            for p in self._points("waddles_jwt_verifications_total")
+        }
+
+    def duration_counts(self) -> dict[tuple[str, str], int]:
+        """``(verifier, alg) -> observations`` for ``waddles_jwt_verification_seconds``."""
+        return {
+            (p.attributes["verifier"], p.attributes["alg"]): int(p.count)
+            for p in self._points("waddles_jwt_verification_seconds")
+        }
+
+
+@pytest.fixture
+def metrics_capture():
+    """Rebind the JWT verification metrics to an in-memory reader for one test."""
+    from flask_core import jwt_hardening
+
+    capture = JwtMetrics()
+    yield capture
+    jwt_hardening.use_meter_provider(None)

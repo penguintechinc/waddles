@@ -119,6 +119,7 @@ class AuditAction(StrEnum):
 
     AUTHZ_DENIED = "authz.denied"
     SESSION_ISSUED = "authn.session_issued"
+    SESSION_REVOKED = "authn.session_revoked"
     TENANT_CREATED = "tenant.created"
     TENANT_UPDATED = "tenant.updated"
     TENANT_DELETED = "tenant.deleted"
@@ -334,6 +335,13 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ),
     ("DELETE", "/api/v1/superadmin/tenants/<int:tenant_id>"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_DELETED
+    ),
+    # --- session revocation (admin) ---
+    ("POST", "/api/v1/superadmin/users/<int:user_id>/revoke-sessions"): RouteAudit(
+        AuditCategory.AUTHN, AuditAction.SESSION_REVOKED
+    ),
+    ("POST", "/api/v1/superadmin/users/<int:user_id>/sessions/<int:session_id>/revoke"): RouteAudit(
+        AuditCategory.AUTHN, AuditAction.SESSION_REVOKED
     ),
     # --- role / privilege changes ---
     ("POST", "/api/v1/superadmin/users/<int:user_id>/super-admin-role"): RouteAudit(
