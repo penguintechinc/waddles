@@ -19,9 +19,9 @@ ledger row is written. A DB without that ledger is the minimal CI bootstrap
 (`alembic/tests/pg_docker.py`, stamped at `0019_kick_app`, no legacy baseline): there is no
 table to alter, so the DDL is skipped with a WARNING and no ledger row is invented.
 
-**Downgrade** drops the five columns (their CHECK constraints go with them) and removes the
-ledger row. Unlike 0060 the columns are new, additive, and carry no pre-existing data to
-protect; re-upgrading re-adds them idempotently.
+**Downgrade** is a NO-OP on the columns, exactly like 0060: it only removes the ledger row.
+The five columns are retained so any operator-set codec/protocol data survives a rollback
+(dropping them would silently destroy it); re-upgrading is idempotent and re-ledgers 103.
 
 Revision ID: 0061_port_legacy_sql_103_codec
 Revises: 0060_port_legacy_sql_097_102
@@ -89,20 +89,6 @@ _SQL_103 = (
     """,
 )
 
-_SQL_DOWNGRADE = (
-    """
-    ALTER TABLE IF EXISTS streaming_targets
-        DROP COLUMN IF EXISTS audio_codec,
-        DROP COLUMN IF EXISTS video_codec,
-        DROP COLUMN IF EXISTS protocol
-    """,
-    """
-    ALTER TABLE IF EXISTS streaming_configs
-        DROP COLUMN IF EXISTS audio_codec,
-        DROP COLUMN IF EXISTS video_codec
-    """,
-)
-
 
 def _legacy_ledger_present(conn: Connection) -> bool:
     """True when `schema_migrations` exists with at least one row (0001's own test)."""
@@ -133,7 +119,8 @@ def _missing_legacy_tables(conn: Connection) -> list[str]:
         table
         for table in _REQUIRED_LEGACY_TABLES
         if not conn.execute(
-            sa.text("SELECT to_regclass(:name) IS NOT NULL"), {"name": f"public.{table}"}
+            sa.text("SELECT to_regclass(:name) IS NOT NULL"),
+            {"name": f"public.{table}"},
         ).scalar()
     ]
 
@@ -189,9 +176,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the five 103 columns and remove the ledger row (down to 0060_port_legacy_sql_097_102)."""
-    for statement in _SQL_DOWNGRADE:
-        op.execute(sa.text(statement))
+    """Remove the ledger row only; the five columns are retained so operator data survives."""
     conn = op.get_bind()
     exists = conn.execute(
         sa.text("SELECT to_regclass('public.schema_migrations') IS NOT NULL")
