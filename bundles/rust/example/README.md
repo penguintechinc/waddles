@@ -31,7 +31,7 @@ inside their host services. They are neither installable bundles nor this fixtur
 |---|---|
 | `{"message": "hello"}`, actor `viewer-1`, 3rd event | `{"message":"hello","greeting":"welcome back, viewer-1! (seen 3 events)","seen_count":3}` |
 | no actor | greeting uses `unknown` |
-| unparseable / wrongly shaped payload | `message` degrades to `""` -- never fails the pipeline |
+| unparseable / wrongly shaped payload | `build_reply` returns an error; the stage answers `UNSUPPORTED_STAGE` -- fails loud, never substitutes an empty message |
 
 ## Host imports used (what a manifest would declare)
 

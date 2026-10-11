@@ -56,19 +56,18 @@ fn greeting(actor: &str, seen_count: i64) -> String {
 }
 
 /// Rewrites `event` into the greeting reply: the inbound `message` is
-/// echoed (an unparseable payload degrades to an empty message rather than
-/// failing the pipeline) alongside the greeting and the post-increment
-/// `seen_count`.
+/// echoed alongside the greeting and the post-increment `seen_count`. A
+/// payload without a string `message` fails loudly rather than being
+/// papered over with an empty message.
 ///
 /// # Errors
 ///
-/// Returns [`SdkError`] if the outbound payload cannot be serialized as a
+/// Returns [`SdkError`] if the inbound payload is not a JSON object with a
+/// string `message`, or if the outbound payload cannot be serialized as a
 /// JSON object.
 #[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
 fn build_reply(event: PlatformEvent, seen_count: i64) -> Result<PlatformEvent, SdkError> {
-    let payload: InboundPayload = event.payload().unwrap_or_else(|_| InboundPayload {
-        message: String::new(),
-    });
+    let payload: InboundPayload = event.payload()?;
     let actor = event.actor.clone().unwrap_or_else(|| "unknown".to_string());
     let outbound = OutboundPayload {
         message: payload.message,
@@ -177,15 +176,13 @@ mod tests {
         assert_eq!(updated.actor, None);
     }
 
+    // Fail-loud (no-stubs gate): a malformed inbound payload is an error, never a
+    // silently substituted empty message.
     #[test]
-    fn unparseable_or_wrongly_shaped_payload_degrades_to_an_empty_message() {
+    fn unparseable_or_wrongly_shaped_payload_is_an_error() {
         for bad in ["{not json", "{}", r#"{"message":42}"#, "[]", ""] {
-            let (_, payload) = reply(event(Some("viewer-1"), bad), 2);
-            assert_eq!(
-                payload.message, "",
-                "payload {bad:?} should degrade to empty"
-            );
-            assert_eq!(payload.seen_count, 2);
+            let result = build_reply(event(Some("viewer-1"), bad), 2);
+            assert!(result.is_err(), "payload {bad:?} must be rejected");
         }
     }
 
