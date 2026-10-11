@@ -15,10 +15,16 @@ import asyncio
 
 import httpx
 
+from ._log_safety import describe_error, install_httpx_log_guards
 from .base_provider import BaseMusicProvider, MusicTrack
 
 
 logger = logging.getLogger(__name__)
+
+# httpx logs every request URL at INFO -- ``q=`` search text and device ids in the query,
+# caller-supplied track/playlist ids in the path. Pin the httpx logger to WARNING (and strip
+# the query as defence in depth) so none of it reaches the log stream. Idempotent.
+install_httpx_log_guards()
 
 
 class SpotifyAuthError(Exception):
@@ -29,6 +35,16 @@ class SpotifyAuthError(Exception):
 class SpotifyAPIError(Exception):
     """Raised when Spotify API requests fail."""
     pass
+
+
+# Provider-owned exceptions: their messages are static or built from `describe_error`,
+# so `describe_error` may carry their text through (httpx errors never are).
+_OWN_ERRORS = (SpotifyAuthError, SpotifyAPIError)
+
+
+def _describe(exc: BaseException) -> str:
+    """Describe `exc` for a log line / raised error: type, status, reason -- never its text."""
+    return describe_error(exc, own_errors=_OWN_ERRORS)
 
 
 class SpotifyProvider(BaseMusicProvider):
@@ -147,11 +163,13 @@ class SpotifyProvider(BaseMusicProvider):
 
             return token_data
         except httpx.HTTPStatusError as e:
-            logger.error(f"Token exchange failed: {e.response.text}")
-            raise SpotifyAuthError(f"Failed to exchange code: {e}")
+            desc = _describe(e)
+            logger.error("Spotify token exchange failed: %s", desc)
+            raise SpotifyAuthError(f"Failed to exchange code: {desc}") from None
         except Exception as e:
-            logger.error(f"Unexpected error during token exchange: {e}")
-            raise SpotifyAuthError(f"Token exchange error: {e}")
+            desc = _describe(e)
+            logger.error("Unexpected error during Spotify token exchange: %s", desc)
+            raise SpotifyAuthError(f"Token exchange error: {desc}") from None
 
     async def refresh_access_token(self) -> bool:
         """Refresh the access token using the refresh token.
@@ -189,11 +207,13 @@ class SpotifyProvider(BaseMusicProvider):
             logger.info("Access token refreshed successfully")
             return True
         except httpx.HTTPStatusError as e:
-            logger.error(f"Token refresh failed: {e.response.text}")
-            raise SpotifyAuthError(f"Failed to refresh token: {e}")
+            desc = _describe(e)
+            logger.error("Spotify token refresh failed: %s", desc)
+            raise SpotifyAuthError(f"Failed to refresh token: {desc}") from None
         except Exception as e:
-            logger.error(f"Unexpected error during token refresh: {e}")
-            raise SpotifyAuthError(f"Token refresh error: {e}")
+            desc = _describe(e)
+            logger.error("Unexpected error during Spotify token refresh: %s", desc)
+            raise SpotifyAuthError(f"Token refresh error: {desc}") from None
 
     async def _ensure_valid_token(self):
         """Ensure we have a valid access token, refreshing if necessary.
@@ -261,11 +281,13 @@ class SpotifyProvider(BaseMusicProvider):
 
             return response.json()
         except httpx.HTTPStatusError as e:
-            logger.error(f"Spotify API error: {e.response.status_code} - {e.response.text}")
-            raise SpotifyAPIError(f"API request failed: {e}")
+            desc = _describe(e)
+            logger.error("Spotify API error: %s", desc)
+            raise SpotifyAPIError(f"API request failed: {desc}") from None
         except Exception as e:
-            logger.error(f"Unexpected error during API request: {e}")
-            raise SpotifyAPIError(f"Request error: {e}")
+            desc = _describe(e)
+            logger.error("Unexpected error during Spotify API request: %s", desc)
+            raise SpotifyAPIError(f"Request error: {desc}") from None
 
     @staticmethod
     def parse_track_url(url: str) -> Optional[str]:
@@ -386,7 +408,8 @@ class SpotifyProvider(BaseMusicProvider):
             await self._make_request("PUT", "/me/player/play", params=params, json_data=json_data)
             return True
         except SpotifyAPIError as e:
-            logger.error(f"Failed to start playback: {e}")
+            desc = _describe(e)
+            logger.error("Failed to start playback: %s", desc)
             return False
 
     async def pause(self) -> bool:
@@ -403,7 +426,8 @@ class SpotifyProvider(BaseMusicProvider):
             await self._make_request("PUT", "/me/player/pause", params=params)
             return True
         except SpotifyAPIError as e:
-            logger.error(f"Failed to pause: {e}")
+            desc = _describe(e)
+            logger.error("Failed to pause: %s", desc)
             return False
 
     async def resume(self) -> bool:
@@ -420,7 +444,8 @@ class SpotifyProvider(BaseMusicProvider):
             await self._make_request("PUT", "/me/player/play", params=params)
             return True
         except SpotifyAPIError as e:
-            logger.error(f"Failed to resume: {e}")
+            desc = _describe(e)
+            logger.error("Failed to resume: %s", desc)
             return False
 
     async def skip(self) -> bool:
@@ -437,7 +462,8 @@ class SpotifyProvider(BaseMusicProvider):
             await self._make_request("POST", "/me/player/next", params=params)
             return True
         except SpotifyAPIError as e:
-            logger.error(f"Failed to skip: {e}")
+            desc = _describe(e)
+            logger.error("Failed to skip: %s", desc)
             return False
 
     async def get_now_playing(self) -> Optional[MusicTrack]:
@@ -506,7 +532,8 @@ class SpotifyProvider(BaseMusicProvider):
                 logger.error("Invalid credentials format")
                 return False
         except Exception as e:
-            logger.error(f"Authentication failed: {e}")
+            desc = _describe(e)
+            logger.error("Spotify authentication failed: %s", desc)
             return False
 
     async def health_check(self) -> bool:
@@ -520,7 +547,8 @@ class SpotifyProvider(BaseMusicProvider):
             await self._make_request("GET", "/me")
             return True
         except Exception as e:
-            logger.error(f"Health check failed: {e}")
+            desc = _describe(e)
+            logger.error("Spotify health check failed: %s", desc)
             return False
 
     # Additional Spotify-specific methods
@@ -553,7 +581,8 @@ class SpotifyProvider(BaseMusicProvider):
             self.active_device_id = device_id
             return True
         except SpotifyAPIError as e:
-            logger.error(f"Failed to set device: {e}")
+            desc = _describe(e)
+            logger.error("Failed to set device: %s", desc)
             return False
 
     async def get_playlists(self, limit: int = 20) -> List[Dict[str, Any]]:
@@ -618,7 +647,8 @@ class SpotifyProvider(BaseMusicProvider):
             await self._make_request("POST", "/me/player/queue", params=params)
             return True
         except SpotifyAPIError as e:
-            logger.error(f"Failed to add to queue: {e}")
+            desc = _describe(e)
+            logger.error("Failed to add to queue: %s", desc)
             return False
 
     async def get_playback_state(self) -> Optional[Dict[str, Any]]:
@@ -652,7 +682,8 @@ class SpotifyProvider(BaseMusicProvider):
             await self._make_request("PUT", "/me/player/volume", params=params)
             return True
         except SpotifyAPIError as e:
-            logger.error(f"Failed to set volume: {e}")
+            desc = _describe(e)
+            logger.error("Failed to set volume: %s", desc)
             return False
 
     async def seek(self, position_ms: int) -> bool:
@@ -673,5 +704,6 @@ class SpotifyProvider(BaseMusicProvider):
             await self._make_request("PUT", "/me/player/seek", params=params)
             return True
         except SpotifyAPIError as e:
-            logger.error(f"Failed to seek: {e}")
+            desc = _describe(e)
+            logger.error("Failed to seek: %s", desc)
             return False

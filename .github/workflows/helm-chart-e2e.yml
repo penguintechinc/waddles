@@ -488,6 +488,40 @@ jobs:
           echo "images built and loaded: ${built}"
           [ "${built}" -gt 0 ] || { echo "::error::zero images built"; exit 1; }
 
+          # The BASE chart must run against the base ref's OWN DB-coupled images, never the PR's.
+          # A PR that adds an alembic revision needing chart-provided env/Secret keys (e.g.
+          # 0055_per_service_db_roles + WADDLES_DB_SERVICE_ROLE_PASSWORDS) makes the PR's
+          # migrations image refuse to run under the base chart's db-migrate Job -- the base
+          # install itself failed that way (run 38093158814) and the upgrade step never ran,
+          # i.e. the harness, not the live upgrade, was the thing under test. migrations and
+          # hub-api are the only images that bake in alembic/ revisions (hub_api/Dockerfile
+          # COPYs alembic/versions for its head check), so rebuild just those two from the
+          # merge-base worktree as :ci-base. Every other image is retagged :ci-base from the PR
+          # build (same layers, no rebuild -- the Rust builds are the 25+ min cost); a PR that
+          # changes those images' behaviour against the base chart is outside this job's scope.
+          declare -a BASE_DB_IMAGES=(
+            "waddlebot-migrations:ci-base:migrations/Dockerfile:."
+            "hub-api:ci-base:hub_api/Dockerfile:."
+          )
+          base_built=0
+          for entry in "${BASE_DB_IMAGES[@]}"; do
+            IFS=":" read -r name tag dockerfile context <<< "${entry}"
+            (cd /tmp/base-chart && docker build -f "${dockerfile}" -t "${name}:${tag}" "${context}")
+            kind load docker-image "${name}:${tag}" --name waddlebot-upgrade
+            base_built=$((base_built + 1))
+          done
+          retagged=0
+          for entry in "${IMAGES[@]}"; do
+            IFS=":" read -r name tag _ _ <<< "${entry}"
+            case "${name}" in waddlebot-migrations|hub-api) continue ;; esac
+            docker tag "${name}:${tag}" "${name}:ci-base"
+            kind load docker-image "${name}:ci-base" --name waddlebot-upgrade
+            retagged=$((retagged + 1))
+          done
+          echo "base-ref images built: ${base_built}, PR images retagged ci-base: ${retagged}"
+          [ "${base_built}" -eq "${#BASE_DB_IMAGES[@]}" ] || { echo "::error::base-ref DB images not all built"; exit 1; }
+          [ "$((base_built + retagged))" -eq "${built}" ] || { echo "::error::ci-base image set does not cover the ci set (${base_built}+${retagged} != ${built})"; exit 1; }
+
       - name: helm install base ref chart
         run: |
           set -euo pipefail
@@ -513,10 +547,13 @@ jobs:
             --from-literal=DISCORD_BOT_TOKEN="ci-dummy-discord-bot-token-never-real" \
             --from-literal=TWITCH_OAUTH_TOKEN="oauth:ci-dummy-twitch-irc-token-never-real"
           helm dependency build "/tmp/base-chart/${CHART_DIR}"
+          # global.imageTag=ci-base: the base-ref images built/retagged in the step above (the
+          # PR's values-ci.yaml otherwise pins every image to the PR-built :ci tag).
           helm install waddlebot "/tmp/base-chart/${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
             -f "/tmp/base-chart/${CHART_DIR}/values-alpha.yaml" \
             -f "${CHART_DIR}/values-ci.yaml" \
+            --set global.imageTag=ci-base \
             --timeout "${HELM_TIMEOUT}"
           wait_rollouts
 

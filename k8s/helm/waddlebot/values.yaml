@@ -292,6 +292,63 @@ infrastructure:
     # real traffic.
     bundleMigratorPassword: ""
     bundleRuntimePassword: ""
+    # ---- Per-service database accounts (security findings H-1 / H-3) -----------------
+    # `username`/`password` above are the database OWNER (superuser) credential. It is
+    # rendered into <release>-db-admin (consumed ONLY by the Postgres Deployment's
+    # POSTGRES_PASSWORD) and the db-migrate hook Secret -- NOT into waddlebot-secrets,
+    # which ~40 pods envFrom. Every other workload connects as ITS OWN least-privilege role
+    # from config/postgres/service-roles.yaml (provisioned by alembic 0055 and re-asserted
+    # on every db-migrate Job run); see docs/DATABASE_CREDENTIALS.md.
+    admin:
+      # Operator/ExternalSecret-managed Secret with a POSTGRES_PASSWORD key. Empty =>
+      # the chart renders <release>-db-admin (alpha/local: generated; beta/gamma/prod:
+      # `password` above must be set explicitly, or the Secret pre-populated).
+      existingSecret: ""
+    serviceRoles:
+      # Operator/ExternalSecret-managed Secret with a PW_<ROLE_UPPERCASE> key for EVERY
+      # role below (e.g. PW_WADDLES_HUB_API). Empty => the chart renders
+      # <release>-db-credentials: passwords are generated in alpha/local (and KEPT across
+      # upgrades), and REQUIRED -- via `passwords` below or a pre-populated Secret -- in
+      # beta/gamma/production. Values must be >=16 chars of [A-Za-z0-9._~-]; placeholder /
+      # `changeme`-style values are rejected at render time. Never commit real values.
+      existingSecret: ""
+      passwords: {}   # {waddles_hub_api: "<secret>", ...} -- out-of-git override file only
+      # MUST equal the role names in config/postgres/service-roles.yaml (drift-tested by
+      # alembic/tests/test_service_roles_catalog.py). Order is irrelevant to the chart.
+      roles:
+        - waddles_hub_api
+        - waddles_svc_ingest
+        - waddles_svc_process
+        - waddles_svc_core
+        - waddles_svc_action
+        - waddles_svc_presentation
+        - waddles_svc_streaming
+        - waddles_reputation
+        - waddles_legacy_discord_collector
+        - waddles_legacy_googlechat_collector
+        - waddles_legacy_kick_collector
+        - waddles_legacy_mattermost_collector
+        - waddles_legacy_slack_collector
+        - waddles_legacy_teams_collector
+        - waddles_legacy_twitch_collector
+        - waddles_legacy_youtube_live_collector
+        - waddles_legacy_ai_researcher
+        - waddles_legacy_core_community
+        - waddles_legacy_core_data
+        - waddles_legacy_core_identity
+        - waddles_legacy_hub
+        - waddles_legacy_marketplace
+        - waddles_legacy_router
+        - waddles_legacy_interactive_ai
+        - waddles_legacy_interactive_gaming
+        - waddles_legacy_interactive_media
+        - waddles_legacy_interactive_productivity
+        - waddles_legacy_interactive_social
+        - waddles_legacy_interactive_loyalty
+        - waddles_legacy_action_platforms
+        - waddles_legacy_action_serverless
+        - waddles_legacy_trigger_streaming
+        - waddles_legacy_trigger_webhooks
     readReplicas:
       enabled: false
       count: 2

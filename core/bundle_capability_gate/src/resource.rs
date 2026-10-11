@@ -76,12 +76,16 @@ pub struct ReputationTarget {
 /// wager's player, the transfer's SENDER, a balance read's subject) -- `None`
 /// for a community-wide read (leaderboard). `counterparty` is the transfer's
 /// recipient. `amount` is `Some(abs)` for a money-moving call (a wager's
-/// STAKE, a transfer's amount) and `None` for a read.
+/// STAKE, a transfer's amount) and `None` for a read. `payout` is `Some` only
+/// for `economy.wager`: the amount the call CREDITS to the player, which is the
+/// currency the call mints and so is metered against its own daily aggregates
+/// (separately from the stake). A wager with no payout is refused fail-closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EconomyTarget {
     pub target_user: Option<Uuid>,
     pub counterparty: Option<Uuid>,
     pub amount: Option<i64>,
+    pub payout: Option<i64>,
 }
 
 /// What a capability implementation passes to `authorize()` (spec SS5).

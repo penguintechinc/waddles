@@ -23,6 +23,7 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from services import session_service
 from services.errors import bad_request, not_found
 
 _VALID_ROLES: tuple[str | None, ...] = ("platform-admin", "support", None)
@@ -162,10 +163,8 @@ async def deactivate_user(
         is_active=False,
         deactivated_at=datetime.now(UTC),
     )
-    await async_dal.update_async(
-        dal.hub_sessions.user_id == user_id,
-        is_active=False,
-        revoked_at=datetime.now(UTC),
+    await session_service.revoke_user_sessions(
+        async_dal, dal, user_id=user_id, reason="user_deactivated"
     )
 
 

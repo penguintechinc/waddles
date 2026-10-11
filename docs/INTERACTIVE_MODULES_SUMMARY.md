@@ -442,7 +442,7 @@ dal = init_database(Config.DATABASE_URL)
 All modules use AAA (Audit, Analytics, Alerts) logging:
 ```python
 logger = setup_aaa_logging(module_name, version)
-logger.audit(action="...", result="SUCCESS", ...)
+logger.audit(action="...", user="<actor id or \"system\">", community="<id or \"\">", result="SUCCESS", ...)  # all four required
 logger.error(f"Error: {e}", ...)
 logger.system("Starting module", action="startup")
 ```

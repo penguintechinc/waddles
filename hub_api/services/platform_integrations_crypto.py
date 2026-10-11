@@ -45,20 +45,29 @@ class PlatformCredentialCryptoError(Exception):
     """Raised when `CREDENTIAL_ENCRYPTION_KEY` is missing/malformed, or decryption fails."""
 
 
+class PlatformCredentialKeyError(PlatformCredentialCryptoError):
+    """The key itself is unusable (unset or malformed) -- as opposed to a ciphertext that failed.
+
+    A subclass, so every existing `except PlatformCredentialCryptoError` still catches it. Lets a
+    caller tell "operator must fix configuration" (503) from "this row was tampered with"
+    (`Failed to decrypt`) without parsing exception text.
+    """
+
+
 def _encryption_key() -> bytes:
     raw = os.getenv("CREDENTIAL_ENCRYPTION_KEY")
     if not raw:
-        raise PlatformCredentialCryptoError(
+        raise PlatformCredentialKeyError(
             "CREDENTIAL_ENCRYPTION_KEY environment variable is not set"
         )
     try:
         key = bytes.fromhex(raw)
     except ValueError as exc:
-        raise PlatformCredentialCryptoError(
+        raise PlatformCredentialKeyError(
             "CREDENTIAL_ENCRYPTION_KEY must be a 64-character hex string (32 bytes)"
         ) from exc
     if len(key) != 32:
-        raise PlatformCredentialCryptoError(
+        raise PlatformCredentialKeyError(
             "CREDENTIAL_ENCRYPTION_KEY must be a 64-character hex string (32 bytes)"
         )
     return key

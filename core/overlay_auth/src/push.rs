@@ -95,10 +95,49 @@ pub struct PushPathParams {
     pub surface: String,
 }
 
+/// Verifies the PUSH credential on `headers` against `state` for
+/// `community_id`: extracts `Authorization: Bearer <jwt>`, then runs
+/// `service_auth::verify` with `required_scope = push_scope(community_id)`.
+///
+/// This is the whole of PUSH authorization, separated from path parsing so a
+/// caller that resolves the community some other way than a numeric `{community}`
+/// path segment (svc-presentation maps an unguessable overlay code to the id)
+/// reuses the exact same verification instead of re-implementing it.
+/// [`require_push_credential`] is this function plus numeric path parsing.
+pub async fn authorize_push<S>(
+    state: &S,
+    headers: &axum::http::HeaderMap,
+    community_id: i64,
+) -> Result<PushCredential, OverlayAuthError>
+where
+    S: PushTrustSource + ?Sized,
+{
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(OverlayAuthError::MissingBearer)?;
+
+    let required_scope = push_scope(community_id);
+    let claims = service_auth::verify(
+        token,
+        state.trust_bundle(),
+        state.expected_audience(),
+        &state.trusted_issuers(),
+        &required_scope,
+    )
+    .await?;
+
+    Ok(PushCredential {
+        claims,
+        community_id,
+    })
+}
+
 /// `axum::middleware::from_fn_with_state` guard for the overlay PUSH
-/// route. Extracts `Authorization: Bearer <jwt>`, verifies it against
-/// `state`'s trust bundle with `required_scope = push_scope(community_id)`,
-/// and on success inserts [`PushCredential`] as a request extension.
+/// route. Parses the numeric `{community}` path segment, then delegates to
+/// [`authorize_push`] and, on success, inserts [`PushCredential`] as a
+/// request extension.
 ///
 /// P4/P5 wiring: `Router::new().route("/{community}/{surface}/push",
 /// post(push_handler)).layer(from_fn_with_state(state,
@@ -117,28 +156,10 @@ where
         .parse()
         .map_err(|_| OverlayAuthError::InvalidCommunityId)?;
 
-    let token = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(OverlayAuthError::MissingBearer)?;
-
-    let required_scope = push_scope(community_id);
-    let claims = service_auth::verify(
-        token,
-        state.trust_bundle(),
-        state.expected_audience(),
-        &state.trusted_issuers(),
-        &required_scope,
-    )
-    .await?;
+    let credential = authorize_push(&state, request.headers(), community_id).await?;
 
     let (mut parts, body) = request.into_parts();
-    parts.extensions.insert(PushCredential {
-        claims,
-        community_id,
-    });
+    parts.extensions.insert(credential);
     let request = Request::from_parts(parts, body);
     Ok(next.run(request).await)
 }
@@ -386,5 +407,59 @@ mod tests {
             .unwrap();
         let response = test_router(source).oneshot(request).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    // -- `authorize_push`: the verification core a non-numeric-path caller reuses --
+
+    fn bearer(token: &str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        headers
+    }
+
+    #[tokio::test]
+    async fn authorize_push_accepts_a_token_scoped_to_the_resolved_community() {
+        let source = trust_source();
+        let token = sign(&claims_for(42));
+        let credential = authorize_push(&source, &bearer(&token), 42)
+            .await
+            .expect("correctly-scoped token authorizes");
+        assert_eq!(credential.community_id, 42);
+        assert_eq!(credential.claims.scope, "presentation.overlay:push:42");
+    }
+
+    #[tokio::test]
+    async fn authorize_push_rejects_a_token_scoped_to_another_community() {
+        let source = trust_source();
+        let token = sign(&claims_for(42));
+        let err = authorize_push(&source, &bearer(&token), 91)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OverlayAuthError::ServiceAuth(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn authorize_push_rejects_missing_and_malformed_authorization_headers() {
+        let source = trust_source();
+        let empty = axum::http::HeaderMap::new();
+        assert!(matches!(
+            authorize_push(&source, &empty, 42).await.unwrap_err(),
+            OverlayAuthError::MissingBearer
+        ));
+        let mut basic = axum::http::HeaderMap::new();
+        basic.insert(AUTHORIZATION, "Basic abc".parse().unwrap());
+        assert!(matches!(
+            authorize_push(&source, &basic, 42).await.unwrap_err(),
+            OverlayAuthError::MissingBearer
+        ));
+    }
+
+    #[tokio::test]
+    async fn authorize_push_rejects_a_garbage_token() {
+        let source = trust_source();
+        let err = authorize_push(&source, &bearer("not-a-jwt"), 42)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OverlayAuthError::ServiceAuth(_)), "{err:?}");
     }
 }

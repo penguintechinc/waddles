@@ -195,7 +195,7 @@ in service code.
 ### Authentication
 
 ```python
-from libs.flask_core import setup_auth, create_jwt_token
+from libs.flask_core import setup_auth, create_jwt_token, verify_jwt_token
 from quart import Quart
 
 app = Quart(__name__)
@@ -210,9 +210,40 @@ token = create_jwt_token(
     username='john',
     email='john@example.com',
     roles=['user', 'moderator'],
-    secret_key=app.config['SECRET_KEY']
+    secret_key=app.config['SECRET_KEY'],
+    tenant='global',   # mandatory -- there is no untenanted token
+    scope='community:read',
 )
+
+# Verify (returns the payload, or None -- never raises for a bad token)
+payload = verify_jwt_token(token, app.config['SECRET_KEY'])
 ```
+
+`verify_jwt_token` pins one algorithm (HS256), rejects `alg: none` and `jku`/`jwk`/`x5u`/`x5c`
+headers, and requires `sub iss aud iat exp scope tenant`; each call emits
+`waddles_jwt_verifications_total{verifier,alg,outcome}`. See
+[`docs/JWT_VERIFICATION.md`](../../docs/JWT_VERIFICATION.md).
+
+Tokens live **15 minutes** by default (`JWT_ACCESS_TTL_SECONDS`, 300-900; machine tokens may ask
+for `expiration_hours=1`, nothing longer is minted or accepted) and carry a random `jti` plus an
+optional `sid` (login session). Every verification also consults the **revocation store**
+(`flask_core.token_revocation`): a token revoked by `jti`, by session, or by a per-user cutoff is
+rejected before its `exp`. The store is Valkey when `VALKEY_URL`/`REDIS_URL` is set (process-local
+otherwise, with a WARNING) behind a 5 s local cache; if Valkey is unreachable the service keeps
+serving for 60 s, then fails closed.
+
+```python
+from flask_core.token_revocation import get_token_revocation
+
+revocation = get_token_revocation()           # built from the environment on first use
+revocation.revoke_token(payload['jti'], exp=payload['exp'])   # this token, before its exp
+revocation.revoke_session(payload['sid'])                     # every token of a login session
+revocation.revoke_user(payload['sub'])                        # every token issued so far
+await revocation.arevoke_user('42')                           # off-loop variants: a-prefixed
+```
+
+See [`docs/TOKEN_REVOCATION.md`](../../docs/TOKEN_REVOCATION.md) for the key layout, the outage
+policy and tuning knobs.
 
 ### API Endpoints
 

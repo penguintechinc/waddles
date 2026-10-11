@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the platform tenant KEK, closed `ban`/`auto_ban` enum, expiry) and a returning banned user is re-caught at join approval,
   OAuth signup and identity link. Operator tooling `make suppression-check|lift|purge|stats`; chart `suppression.maxRetentionDays`;
   draft `docs/compliance/suppression-LIA.md` / `suppression-DPIA.md`
+- Standard provider/connection framework (hub-api), Twitch first: per-community connection API (`/api/v1/communities/{id}/provider-connections`, install descriptors at `/api/v1/connection-providers`), provider adapter interface + registry, Twitch adapter (bot account, channel resolution, refresh), AES-256-GCM encrypted per-community token store with refresh-under-lock, and machine-JWT data-plane routes (`/api/v1/internal/provider-connections`, `.../resolve`) so `svc-ingest` can resolve connections dynamically instead of static env. Scope `connections:admin`, flag `waddles.integrations.provider_connections` (Professional, default OFF). Migration `0058_provider_connections`. See `docs/PROVIDER_CONNECTIONS.md`.
+- Real OTel metrics for the Rust data plane (replacing the `penguin_spine::NoopMetrics` stubs and the executor's
+  unexported atomics): svc-process / svc-action emit stage latency, executor-call and host-call latency histograms,
+  bundle load, drain batch size, consumer-group backlog, sandbox trips, dispatch attempts, DLQ / tenant-boundary counters;
+  bundle-executor emits load phases (fetch / verify / precompile), invoke / guest / instantiate latency, host-call round
+  trips, sandbox trips, resident-bundle and in-flight gauges and host-API session health, exported over OTLP/gRPC **only**
+  when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (default off: no new executor egress). The capability gate's grant/denial
+  counters (`waddles_bundle_capability_{authorized,denied}_total`), which were silently dropped by an uninstalled
+  `metrics`-facade recorder, now export through an OTel-backed recorder. New dashboard `waddles-stage-pipeline`. See
+  `docs/observability/data-plane-metrics.md`.
 - Enterprise SSO for hub-api: SAML 2.0 and OpenID Connect (Enterprise tier, `waddles.auth.sso_saml`) and Google OAuth2 (Professional tier, `waddles.auth.sso_google`). Per-tenant connections with admin API, JIT provisioning keyed on (connection, subject) with no email adoption, PKCE + nonce + local ID-token validation, signature-wrapping/replay/XXE-hardened SAML SP, SSRF-guarded IdP HTTP, AES-256-GCM secret storage, login-CSRF binder cookie, OTel metrics/traces. Migration `0049_sso_connections`; auto-provisioned `SSO_ENCRYPTION_KEY` (alpha/local) that never fails the chart elsewhere. See `docs/SSO.md`.
 - Enterprise tamper-evident audit logging (GRC audit finding #3): append-only per-tenant SHA-256 hash chain
   (`audit_events`, migration `0053_audit_events_hash_chain`), `GET /api/v1/compliance/audit/{events,head,verify,export}`,
@@ -22,16 +32,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admin actions and license/subscription changes via an app-wide hook (`hub_api/services/audit_http.py`)
 - `flask_core.authz.AuthzDecision`: `require_scope` publishes its verdict as `request.authz_decision`
 
+### Security
+- JWT verification hardening, H-2 Phase 0 + MED-5 (`docs/JWT_VERIFICATION.md`): one algorithm per verifier
+  (`HS256` platform, `EdDSA` service, asymmetric allow-list for OIDC ID tokens), `alg: none` and
+  `jku`/`jwk`/`x5u`/`x5c`/`crit` headers rejected, `kid` charset pinned; `iss`/`aud` now ENFORCED (previously a
+  token without them still verified) and `sub iss aud iat exp scope tenant` are mandatory; the
+  `TENANT_CLAIM_MIGRATION_CUTOFF` default-tenant fallback is removed (a token with no `tenant` is rejected);
+  an empty signing secret is refused at mint and at verify. Minted HS256 tokens carry a `kid` header
+  (`JWT_KID`, default `hs256-v1`). New metrics `waddles_jwt_verifications_total{verifier,alg,outcome}` and
+  `waddles_jwt_verification_seconds`. Minting stays HS256 (asymmetric cutover is a later phase).
+  `/internal/service-token` no longer decodes its own token with signature verification disabled
+  (`ServiceJwtIssuer.issue_with_claims`).
+- Session revocation + short-lived access tokens (`docs/TOKEN_REVOCATION.md`, SOC 2 / OWASP session
+  management): a server-side revocation store (`flask_core.token_revocation`; Valkey behind a 5 s
+  local cache, bounded grace then fail closed on an outage) is consulted on **every**
+  `verify_jwt_token` and rejects a token before its `exp` by `jti`, by login session `sid`, or by a
+  per-user `iat` cutoff ("revoke all"). Access tokens now live **15 minutes**
+  (`JWT_ACCESS_TTL_SECONDS` 300-900), carry a random `jti` (+ `sid` for login sessions), nothing may
+  live over 1 h (refused at mint **and** at verify, `lifetime_exceeded`), and are renewed by a
+  rotating HttpOnly refresh token (`wb_refresh`) with reuse detection, a 10 s parallel-refresh
+  grace, 7 d idle / 30 d absolute limits and a digest (not the bearer) in `hub_sessions`. Triggers:
+  logout, `POST /auth/logout-all`, password change (all sessions), passkey removal / identity unlink
+  (other sessions), user deactivate / delete / super-admin demotion / DSAR erasure, and the new
+  superadmin `GET .../users/{id}/sessions`, `POST .../revoke-sessions`,
+  `POST .../sessions/{sid}/revoke`. New metrics `waddles_jwt_revocation_*` and
+  `waddles_hub_session_events_total`; audit action `authn.session_revoked`. **Deploy note:** 24 h
+  tokens minted before this are refused - every browser session signs in once. `/auth/refresh` now
+  needs the refresh cookie (an access token no longer renews itself). The Rust verifiers must check
+  the same store (paired follow-up; contract in the doc).
+
 ### Changed
 - **Erasure keeps nothing for a user without an active ban.** `community_members` rows (with their reputation), `reputation_events`,
   `reputation_tenant`, bundle reputation, the `ephemeral_pseudonyms` mapping and `hub_user_identities` are now DELETED instead of
   nulled-and-retained (supersedes the "retained reputation / identity anchor" posture); a returning user starts fresh. The admin
   DSAR console answers a repeat erase of an already-erased user with `not_found`
+- `platform_integrations_crypto` raises `PlatformCredentialKeyError` (a subclass of `PlatformCredentialCryptoError`) for an unset/malformed key, so callers can tell a configuration fault from a tampered ciphertext
 - `compliance.audit_logs` now requires scope `compliance.audit:admin` (was `compliance.audit:read`, which every session's
   `*:read` wildcard satisfied); the tenant-owner scope bundle grants it
 - `bundle_audit.record` is fail-loud: a failed `audit_log` insert raises `AuditWriteError` instead of being swallowed
 
 ### Fixed
+- `AAALogger.audit()` / `.auth()` call sites that did not match the real signature (`audit(action, user, community, result, **extras)`) raised `TypeError` on their SUCCESS path, after the work was already done: 91 `audit` calls across analytics-core (incl. `HealthService.calculate_health_score` and the `bot_score_calculator` batch job), reputation, security-core, labels, the interactive action modules, the consolidated `services/*` apps and the trigger receivers, plus two `auth` calls on the Kick webhook invalid-signature path. Visible effects included 500s after committed writes, `disable_auto_ban` / `update_weights` reporting failure after committing, an auto-ban applied on the platform but reported `success=False`, and `SpamDetector.check_spam` failing OPEN for spam it had just detected. The message text moved to `detail=`; the actor is the caller's opaque id where the handler has one, else the literal `"system"`. New `libs/flask_core/tests/test_aaa_logger_call_sites.py` executes every `logger.audit()` / `.auth()` call in the repo against the real `AAALogger`, so a mis-signatured call can no longer merge.
 - Removed the `except Exception: pass` that silently dropped audit-log write failures (`bundle_audit.record`), and the two
   sibling swallows on the consent-proof trail (`cookie_consent_service.log_audit_event`) and the failed-deletion record
   (`data_privacy_service`); all now go through `audit_service.report_write_failure`

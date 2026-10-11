@@ -168,6 +168,14 @@ pub struct CliConfig {
     #[arg(long, env = "IMAGE_SIGNED_URL_TTL_SECONDS", default_value_t = 300)]
     pub image_signed_url_ttl_seconds: u64,
 
+    /// How long (seconds) an overlay-code -> community mapping is cached
+    /// (`overlay::code`). This is also the worst-case delay before a rotated
+    /// (leaked) overlay code stops resolving on this replica; absent codes are
+    /// cached for at most 5s regardless. `0` disables caching (every request
+    /// reads the database).
+    #[arg(long, env = "OVERLAY_CODE_CACHE_TTL_SECONDS", default_value_t = 30)]
+    pub overlay_code_cache_ttl_seconds: u64,
+
     /// Local-development mode: relaxes the fail-fast requirement for
     /// `IMAGE_BUCKET_ACCESS_KEY_ID`/`IMAGE_BUCKET_SECRET_ACCESS_KEY`.
     /// Off by default -- every deployed (non-dev) process must have a

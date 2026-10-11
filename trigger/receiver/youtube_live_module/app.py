@@ -140,10 +140,12 @@ async def register_channel():
         )
 
     logger.audit(
-        f"Registered channel: {channel_id}",
         action="register_channel",
-        channel_id=channel_id,
-        result="SUCCESS"
+        user="system",
+        community="",
+        result="SUCCESS",
+        detail=f"Registered channel: {channel_id}",
+        channel_id=channel_id
     )
 
     return success_response({
@@ -171,10 +173,12 @@ async def unregister_channel(channel_id: str):
     await youtube_client.unsubscribe_from_channel(channel_id)
 
     logger.audit(
-        f"Unregistered channel: {channel_id}",
         action="unregister_channel",
-        channel_id=channel_id,
-        result="SUCCESS"
+        user="system",
+        community="",
+        result="SUCCESS",
+        detail=f"Unregistered channel: {channel_id}",
+        channel_id=channel_id
     )
 
     return success_response({

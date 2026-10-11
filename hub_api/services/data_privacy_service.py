@@ -47,7 +47,7 @@ import bcrypt
 from flask_core.db_errors import describe_db_error, log_db_error
 from opentelemetry import trace
 
-from services import ban_suppression
+from services import ban_suppression, session_service
 from services.audit_service import report_write_failure
 from services.bundle_telemetry import get_meter, get_tracer
 from services.errors import bad_request, not_found, unauthorized
@@ -819,5 +819,8 @@ async def anonymize_user_data(
                 exc=record_exc,
             )
         raise
+    # The session rows are gone (no refresh possible); also cut off the access tokens already
+    # issued to the erased subject instead of letting them run out their remaining <= 15 minutes.
+    await session_service.revoke_user_access_tokens(user_id=user_id, reason="erasure")
     _record_erasure_metrics("completed", started, counts)
     logger.info("dsar.erasure_completed", extra={"hub_user_id": user_id, "deleted_counts": counts})

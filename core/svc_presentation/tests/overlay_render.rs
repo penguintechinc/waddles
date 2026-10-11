@@ -30,7 +30,7 @@ const USER_A: &str = "11111111-1111-1111-1111-111111111111";
 const USER_B: &str = "22222222-2222-2222-2222-222222222222";
 const WAIT: Duration = Duration::from_secs(5);
 
-/// A viewer connected to `/overlay/42/{surface}/live` through the real router.
+/// A viewer connected to `/{CODE_42}/{surface}/live` through the real router.
 struct Viewer {
     body: Body,
 }
@@ -88,7 +88,7 @@ async fn connect_viewer(
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/overlay/{COMMUNITY}/{surface}/live?key={token}"))
+                .uri(format!("/{CODE_42}/{surface}/live?key={token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -100,6 +100,9 @@ async fn connect_viewer(
     };
     let (_, connected) = viewer.next_json().await;
     assert_eq!(connected["surface"], surface);
+    // The opaque overlay code is the slug; the integer community id never
+    // appears on the wire.
+    assert_eq!(connected["community"], CODE_42);
     assert!(
         connected.get("content_type").is_none(),
         "the first frame is the Connected frame, not content"
@@ -109,7 +112,7 @@ async fn connect_viewer(
 
 async fn post_push(
     app: &axum::Router,
-    community_in_path: i64,
+    code_in_path: &str,
     credential_community: i64,
     surface: &str,
     body: Value,
@@ -119,7 +122,7 @@ async fn post_push(
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/overlay/{community_in_path}/{surface}/push"))
+                .uri(format!("/{code_in_path}/{surface}/push"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(
                     header::AUTHORIZATION,
@@ -178,7 +181,7 @@ async fn a_hostile_chat_push_reaches_the_viewer_detokenized_and_escaped() {
 
     let (status, body) = post_push(
         &app,
-        COMMUNITY,
+        CODE_42,
         COMMUNITY,
         "chat",
         json!({"chat_message": {
@@ -216,7 +219,7 @@ async fn a_hostile_alert_push_reaches_the_viewer_detokenized_and_escaped() {
 
     let (status, body) = post_push(
         &app,
-        COMMUNITY,
+        CODE_42,
         COMMUNITY,
         "alert_box",
         json!({"alert": {
@@ -255,7 +258,7 @@ async fn every_text_surface_streams_only_sanitized_frames() {
     ];
     for (surface, push) in cases {
         let (app, mut viewer, _) = connect_viewer(surface, resolver()).await;
-        let (status, body) = post_push(&app, COMMUNITY, COMMUNITY, surface, push).await;
+        let (status, body) = post_push(&app, CODE_42, COMMUNITY, surface, push).await;
         assert_eq!(status, StatusCode::OK, "{surface}: {body}");
         let (wire, frame) = viewer.next_json().await;
         assert_clean(&wire);
@@ -273,7 +276,7 @@ async fn an_unresolvable_user_streams_the_neutral_label_never_the_token() {
     let (app, mut viewer, _) = connect_viewer("chat", Arc::new(TableResolver::failing())).await;
     let (status, body) = post_push(
         &app,
-        COMMUNITY,
+        CODE_42,
         COMMUNITY,
         "chat",
         json!({"chat_message": {
@@ -300,7 +303,7 @@ async fn a_rejected_push_is_a_400_and_streams_nothing() {
     // A `javascript:` image_url is refused by the renderer.
     let (status, body) = post_push(
         &app,
-        COMMUNITY,
+        CODE_42,
         COMMUNITY,
         "media",
         json!({"image_url": "javascript:alert(1)"}),
@@ -319,7 +322,7 @@ async fn a_push_only_reaches_viewers_of_its_own_surface() {
     let (app, mut chat_viewer, _) = connect_viewer("chat", resolver()).await;
     let (status, _) = post_push(
         &app,
-        COMMUNITY,
+        CODE_42,
         COMMUNITY,
         "ticker",
         json!({"text": "not for chat"}),
@@ -332,10 +335,10 @@ async fn a_push_only_reaches_viewers_of_its_own_surface() {
 #[tokio::test]
 async fn a_credential_for_another_community_cannot_push_here() {
     let (app, mut viewer, _) = connect_viewer("chat", resolver()).await;
-    // Path names 42 but the verified credential is for 99.
+    // The code names community 42 but the verified credential is for 99.
     let (status, _) = post_push(
         &app,
-        COMMUNITY,
+        CODE_42,
         99,
         "chat",
         json!({"chat_message": {"user": USER_A, "display_name": "x", "platform": "twitch", "text": "hi"}}),
@@ -353,7 +356,7 @@ async fn a_push_without_a_bearer_is_401_and_streams_nothing() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/overlay/{COMMUNITY}/ticker/push"))
+                .uri(format!("/{CODE_42}/ticker/push"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(json!({"text": "x"}).to_string()))
                 .unwrap(),
@@ -373,7 +376,7 @@ async fn get_page(surface: &str, key_ok: bool) -> (StatusCode, axum::http::Heade
     let response = router(state)
         .oneshot(
             Request::builder()
-                .uri(format!("/overlay/{COMMUNITY}/{surface}?key={used}"))
+                .uri(format!("/{CODE_42}/{surface}?key={used}"))
                 .body(Body::empty())
                 .unwrap(),
         )

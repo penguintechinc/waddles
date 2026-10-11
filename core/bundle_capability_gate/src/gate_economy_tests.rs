@@ -62,12 +62,20 @@ fn gate(entries: &[(&str, serde_json::Value)], members: &[Uuid]) -> CapabilityGa
     )
 }
 
-fn wager(user: Uuid, stake: i64) -> ResourceRef {
+/// A wager that pays `payout` on `stake`.
+fn wager_paying(user: Uuid, stake: i64, payout: i64) -> ResourceRef {
     ResourceRef::EconomyScoped(EconomyTarget {
         target_user: Some(user),
         counterparty: None,
         amount: Some(stake),
+        payout: Some(payout),
     })
+}
+
+/// A LOSING wager (payout 0): meters only the stake, so the stake-oriented
+/// tests below isolate the stake aggregate from the mint cap.
+fn wager(user: Uuid, stake: i64) -> ResourceRef {
+    wager_paying(user, stake, 0)
 }
 
 fn transfer(from: Uuid, to: Uuid, amount: i64) -> ResourceRef {
@@ -75,6 +83,7 @@ fn transfer(from: Uuid, to: Uuid, amount: i64) -> ResourceRef {
         target_user: Some(from),
         counterparty: Some(to),
         amount: Some(amount),
+        payout: None,
     })
 }
 
@@ -83,6 +92,7 @@ fn read(user: Option<Uuid>) -> ResourceRef {
         target_user: user,
         counterparty: None,
         amount: None,
+        payout: None,
     })
 }
 
@@ -132,6 +142,7 @@ fn wager_for_a_member_within_bounds_authorizes_and_resolves_the_target() {
             target_user: Some(user),
             counterparty: None,
             amount: Some(100),
+            payout: Some(0),
         })
     );
 }
@@ -400,6 +411,7 @@ fn a_money_moving_call_without_an_acting_user_fails_closed() {
                 target_user: None,
                 counterparty: None,
                 amount: Some(5),
+                payout: Some(0),
             }),
         )
         .unwrap_err();
@@ -549,4 +561,139 @@ fn a_metered_wager_then_amountless_calls_do_not_poison_each_others_windows() {
             .unwrap_err(),
         Denied::QuotaExceeded
     );
+}
+
+/// Regression (#751 review, mint cap): the daily aggregate that bounds how much
+/// a wager can MINT used to sum the STAKE, so a stake-1 wager paying 100 only
+/// ever spent 1 of the budget -- unbounded creation for a bundle that picks its
+/// own payout. The mint budget is the PAYOUT.
+#[test]
+fn the_mint_cap_is_metered_on_the_payout_not_the_stake() {
+    let user = Uuid::new_v4();
+    let g = gate(&[("economy.wager", serde_json::json!({}))], &[user]);
+    // stake 100, payout 10_000 = the whole per-user daily mint budget in one
+    // call (the stake aggregate sees only 100 of its 10_000).
+    g.authorize(
+        &scope(),
+        PermissionId::EconomyWager,
+        wager_paying(user, 100, 10_000),
+    )
+    .expect("the payout fits the daily mint budget exactly");
+    // A stake-1 wager paying 1 would sail through a stake-metered cap
+    // (100 + 1 << 10_000) but is over the PAYOUT budget.
+    assert_eq!(
+        g.authorize(
+            &scope(),
+            PermissionId::EconomyWager,
+            wager_paying(user, 1, 1)
+        )
+        .unwrap_err(),
+        Denied::QuotaExceeded
+    );
+}
+
+#[test]
+fn a_losing_stake_does_not_spend_the_mint_budget_and_a_win_does_not_spend_the_stake_budget() {
+    let user = Uuid::new_v4();
+    let g = gate(&[("economy.wager", serde_json::json!({}))], &[user]);
+    // 10 x 1_000 losing stakes exhaust the STAKE budget (10_000) but mint 0 ...
+    for _ in 0..10 {
+        g.authorize(&scope(), PermissionId::EconomyWager, wager(user, 1_000))
+            .unwrap();
+    }
+    // ... so the stake budget is gone (even for a tiny paying wager) ...
+    assert_eq!(
+        g.authorize(
+            &scope(),
+            PermissionId::EconomyWager,
+            wager_paying(user, 1, 5)
+        )
+        .unwrap_err(),
+        Denied::QuotaExceeded
+    );
+    // ... while a different member's mint budget is untouched by that.
+    let other = Uuid::new_v4();
+    let g2 = gate(&[("economy.wager", serde_json::json!({}))], &[user, other]);
+    g2.authorize(
+        &scope(),
+        PermissionId::EconomyWager,
+        wager_paying(other, 10, 9_999),
+    )
+    .expect("a fresh member has the full mint budget");
+}
+
+#[test]
+fn the_per_community_mint_budget_exhausts_across_users() {
+    // 250_000 per-community wager ceiling; each user mints <= 10_000/day, so
+    // 26 users are needed to cross the community ceiling.
+    let users: Vec<Uuid> = (0..26).map(|_| Uuid::new_v4()).collect();
+    let g = gate(&[("economy.wager", serde_json::json!({}))], &users);
+    let mut minted = 0_i64;
+    let mut denied = None;
+    for u in &users {
+        // Spend the user's whole 10_000 payout budget in 10 calls.
+        for _ in 0..10 {
+            match g.authorize(
+                &scope(),
+                PermissionId::EconomyWager,
+                wager_paying(*u, 1, 1_000),
+            ) {
+                Ok(_) => minted += 1_000,
+                Err(e) => {
+                    denied = Some(e);
+                    break;
+                }
+            }
+        }
+        if denied.is_some() {
+            break;
+        }
+    }
+    assert_eq!(minted, 250_000, "exactly the per-community mint ceiling");
+    assert_eq!(denied, Some(Denied::QuotaExceeded));
+}
+
+#[test]
+fn a_wager_without_a_valid_payout_is_out_of_bounds_and_consumes_nothing() {
+    let user = Uuid::new_v4();
+    let g = gate(&[("economy.wager", serde_json::json!({}))], &[user]);
+    for payout in [None, Some(-1), Some(i64::MIN)] {
+        let call = ResourceRef::EconomyScoped(EconomyTarget {
+            target_user: Some(user),
+            counterparty: None,
+            amount: Some(1_000),
+            payout,
+        });
+        assert_eq!(
+            g.authorize(&scope(), PermissionId::EconomyWager, call)
+                .unwrap_err(),
+            Denied::AmountOutOfBounds,
+            "{payout:?}"
+        );
+    }
+    // The malformed attempts ate none of the 10 x 1_000 stake budget.
+    for _ in 0..10 {
+        g.authorize(&scope(), PermissionId::EconomyWager, wager(user, 1_000))
+            .expect("malformed payouts consumed no stake budget");
+    }
+}
+
+#[test]
+fn a_transfer_is_not_metered_on_a_payout() {
+    // Transfers carry no payout; a stray one must neither be required nor
+    // consume a mint budget.
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let g = gate(&[("economy.transfer", serde_json::json!({}))], &[a, b]);
+    let with_stray_payout = ResourceRef::EconomyScoped(EconomyTarget {
+        target_user: Some(a),
+        counterparty: Some(b),
+        amount: Some(10),
+        payout: Some(i64::MAX),
+    });
+    assert!(g
+        .authorize(&scope(), PermissionId::EconomyTransfer, with_stray_payout)
+        .is_ok());
+    assert!(g
+        .authorize(&scope(), PermissionId::EconomyTransfer, transfer(a, b, 10))
+        .is_ok());
 }

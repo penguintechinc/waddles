@@ -1,9 +1,12 @@
 //! HTTP layer: axum router wiring for the control-plane surface (health,
 //! readiness, Prometheus metrics) plus P3/P4's live overlay viewer
 //! (SSE + websocket) and push routes (see [`overlay`]) and P6's
-//! PUSH-guarded image-upload route. Every overlay route group is mounted
-//! already wrapped by `crate::overlay::router::with_view_guard`/
-//! `with_push_guard` -- see that module's doc for why each guard is
+//! PUSH-guarded image-upload route. Overlay routes are addressed by the
+//! community's unguessable overlay code -- `/{overlay_code}/{surface}[/...]`
+//! (see [`crate::overlay::code`]) -- never its integer id. Every overlay route
+//! group is mounted already wrapped by `crate::overlay::router::with_view_guard`/
+//! `with_push_guard`, which resolve the code to the real community id first --
+//! see that module's doc for the check order and for why each guard is
 //! applied per already-populated sub-router rather than once globally.
 
 pub mod captions;
@@ -28,8 +31,9 @@ use crate::images::{AssetStore, ImageStore, SeaOrmImageAssetStore};
 use crate::overlay::detok::{register_detok_metrics, DetokMetrics, OverlayDetokenizer};
 use crate::overlay::render::{register_render_metrics, RenderMetrics, RenderedFrame};
 use crate::overlay::{
-    AppPushTrustSource, CaptionStore, CommunityContextStore, PresentationHub, SeaOrmCaptionStore,
-    SeaOrmCommunityContextStore, SeaOrmViewCredentialStore,
+    AppPushTrustSource, CaptionStore, CommunityContextStore, OverlayCodeResolver, PresentationHub,
+    SeaOrmCaptionStore, SeaOrmCommunityContextStore, SeaOrmOverlayCodeResolver,
+    SeaOrmViewCredentialStore,
 };
 use crate::telemetry::{CaptionMetrics, ImageMetrics, PushMetrics, RequestMetrics};
 
@@ -90,6 +94,11 @@ pub struct AppState {
     pub push_metrics: PushMetrics,
     /// Credential-community -> tenant + theme lookup for the push route.
     pub community_ctx: Arc<dyn CommunityContextStore>,
+    /// Maps the overlay code in a URL (`/{overlay_code}/{surface}`) to the real
+    /// community id; consulted by every route guard before any credential
+    /// check. Production reads `communities.overlay_code` through a TTL cache;
+    /// tests inject [`crate::overlay::StaticOverlayCodes`].
+    pub overlay_codes: Arc<dyn OverlayCodeResolver>,
     /// Caption overlay (`crate::http::captions`): the reconnect-replay
     /// history store, its feature flag (OFF by default -- the Python
     /// `browser_source_core_module` stays the live caption path until it is
@@ -145,6 +154,14 @@ impl AppState {
             Arc::new(OverlayDetokenizer::unconfigured().with_metrics(detok_metrics.clone()));
         let community_ctx: Arc<dyn CommunityContextStore> =
             Arc::new(SeaOrmCommunityContextStore::new(db.clone()));
+        let overlay_code_metrics = crate::telemetry::register_overlay_code_metrics(&metrics);
+        let overlay_codes: Arc<dyn OverlayCodeResolver> = Arc::new(
+            SeaOrmOverlayCodeResolver::with_ttl(
+                db.clone(),
+                std::time::Duration::from_secs(config.cli.overlay_code_cache_ttl_seconds),
+            )
+            .with_metrics(overlay_code_metrics),
+        );
         Self {
             config: Arc::new(config),
             metrics: Arc::new(metrics),
@@ -164,6 +181,7 @@ impl AppState {
             render_metrics,
             push_metrics,
             community_ctx,
+            overlay_codes,
             caption_store,
             captions_flag,
             caption_metrics,
@@ -185,6 +203,14 @@ impl AppState {
     #[must_use]
     pub fn with_detokenizer(mut self, detokenizer: OverlayDetokenizer) -> Self {
         self.detokenizer = Arc::new(detokenizer);
+        self
+    }
+
+    /// Swaps in an arbitrary overlay-code resolver (tests inject a fixed table
+    /// instead of standing up Postgres).
+    #[must_use]
+    pub fn with_overlay_codes(mut self, codes: Arc<dyn OverlayCodeResolver>) -> Self {
+        self.overlay_codes = codes;
         self
     }
 
@@ -245,10 +271,24 @@ async fn record_http_metrics(State(state): State<AppState>, req: Request, next: 
 
 /// Builds the control-plane router: public health/readiness (no auth), plus
 /// P3/P4's overlay routes, P6's image-upload route
-/// (`POST /overlay/{community}/image/push`) and the caption routes
-/// ([`captions::routes`]), each wrapped by its own `overlay_auth` guard
+/// (`POST /{overlay_code}/image/push`) and the caption routes
+/// ([`captions::routes`]), each wrapped by its own code-resolving guard
 /// (or, for the caption viewer routes, validating the VIEW key in the
 /// handler) before being merged in.
+///
+/// # URL scheme
+///
+/// Overlay routes live at `/{overlay_code}/{surface}[/...]`, where
+/// `overlay_code` is the community's random 16-hex-char handle
+/// ([`crate::overlay::code`]) -- never its sequential integer id. axum cannot
+/// regex-constrain a path parameter, so the first segment is a plain capture
+/// and the guards are the constraint: a segment that is not exactly
+/// `[0-9a-f]{16}` (or names no community) is a `404` before any handler or
+/// credential check runs. That also makes the root-level capture harmless to
+/// its neighbours: `/health` and `/readyz` are literal one-segment routes that
+/// win on specificity, `/overlay/...` and `/ws/...` are literal first
+/// segments, and none of those words is 16 hex characters. `tests/routing.rs`
+/// pins every pair.
 ///
 /// Route specificity: the literal `image`/`caption` segments of the two
 /// upload/ingest PUSH routes sit where the generic routes have a
@@ -256,30 +296,23 @@ async fn record_http_metrics(State(state): State<AppState>, req: Request, next: 
 /// capture and backtracks to the capture when the literal's remaining path
 /// doesn't match, so `.../image/live` and `.../caption/live` still reach the
 /// generic VIEW routes while `.../image/push` and `.../caption/push` reach
-/// their own handlers. `tests/routing.rs` pins every one of those pairs.
+/// their own handlers.
 ///
-/// The browser overlay page (`GET /overlay/{community}/{surface}`, no
+/// The browser overlay page (`GET /{overlay_code}/{surface}`, no
 /// `/live`/`/push` suffix -- [`overlay_page`]) is mounted behind the same VIEW
-/// guard as the live channels. It sits beside the literal
-/// `/overlay/captions/{key}` caption page: matchit prefers the literal
-/// `captions` segment, and a community id is numeric, so the two never
-/// collide (`tests/routing.rs` pins it).
+/// guard as the live channels.
 pub fn router(state: AppState) -> Router {
     let overlay_view = crate::overlay::router::with_view_guard(
         Router::new()
-            .route("/overlay/{community}/{surface}", get(overlay_page::page))
-            .route(
-                "/overlay/{community}/{surface}/live",
-                get(overlay::live_sse),
-            )
-            .route(
-                "/overlay/{community}/{surface}/live/ws",
-                get(overlay::live_ws),
-            ),
+            .route("/{overlay_code}/{surface}", get(overlay_page::page))
+            .route("/{overlay_code}/{surface}/live", get(overlay::live_sse))
+            .route("/{overlay_code}/{surface}/live/ws", get(overlay::live_ws)),
+        state.overlay_codes.clone(),
         state.view_store.clone(),
     );
     let overlay_push = crate::overlay::router::with_push_guard(
-        Router::new().route("/overlay/{community}/{surface}/push", post(overlay::push)),
+        Router::new().route("/{overlay_code}/{surface}/push", post(overlay::push)),
+        state.overlay_codes.clone(),
         state.push_trust_source.clone(),
     );
 
@@ -295,9 +328,10 @@ pub fn router(state: AppState) -> Router {
     // (`crate::images::upload`'s own module doc).
     let image_upload = crate::overlay::router::with_push_guard(
         Router::new().route(
-            "/overlay/{community}/image/push",
+            "/{overlay_code}/image/push",
             post(crate::images::upload::upload_image),
         ),
+        state.overlay_codes.clone(),
         state.push_trust_source.clone(),
     )
     // Bounds the raw request body independently of the post-decode

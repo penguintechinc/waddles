@@ -132,7 +132,43 @@ x509-parser = "=0.18.1"
 # version to the dependency tree. No networking/HTTP dependency of its own.
 socket2 = { version = "=0.6.5", features = ["all"] }
 
+# OTel metrics (`src/metrics.rs` instruments, `src/telemetry.rs` provider/
+# exporter). Exact pins match `penguin-logging`'s own so the OTel crates are
+# one version across every Rust data-plane service.
+#
+# **Why these three crates are allowed here although `penguin-logging` is
+# not:** the exclusion above is about `reqwest`, which `penguin-logging`
+# drags in via `opentelemetry-otlp`'s DEFAULT `http-proto`/
+# `reqwest-blocking-client` features. Here `opentelemetry-otlp` is taken
+# with `default-features = false` and ONLY `grpc-tonic` + `metrics`: gRPC to
+# one fixed, env-configured endpoint, no free-form HTTP client, so
+# `tests/dependency_policy.rs` and `deny.toml`'s `reqwest` ban still hold
+# (and still fail the build if that ever regresses). Metrics only -- never
+# spans (spec SS13.2: the executor creates no spans, the stage records the
+# durations it returns) and never logs. Export is OFF unless
+# `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so a default deployment opens no new
+# egress; enabling it is an explicit operator act that must also allow the
+# collector in the pod's egress policy. See `docs/observability/
+# data-plane-metrics.md`.
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["metrics"] }
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics"] }
+opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["grpc-tonic", "metrics"] }
+
 [dev-dependencies]
+# `InMemoryMetricExporter` (the SDK's `testing` feature) so tests read back
+# the metric data points a collector would actually receive -- proving the
+# instruments EMIT, not merely exist.
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics", "testing"] }
+# `src/telemetry.rs`'s end-to-end test stands up a minimal in-process OTLP/gRPC
+# collector (raw HTTP/2 via `h2`, request bodies decoded with the OTLP
+# message types) so the exporter's real wire path is exercised without
+# pulling a gRPC server framework -- and its router/axum -- into the lockfile.
+# Every crate here is already resolved in this Cargo.lock via `tonic`.
+h2 = "=0.4.20"
+http = "=1.5.0"
+bytes = "=1.12.1"
+prost = "=0.14.4"
+opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "metrics"] }
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
 # Test-only: generates throwaway self-signed CA/client cert+key pairs at
 # test run time (`src/tls.rs`'s tests) so `tests/dependency_policy.rs`'s
