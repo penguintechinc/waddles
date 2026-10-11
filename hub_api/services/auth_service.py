@@ -179,13 +179,13 @@ async def _issued_at_after_revocations(user: SessionUser | None) -> int | None:
     """
     if user is None:
         return None
-    floor = await get_token_revocation().aissue_floor(str(user.id))
+    floor: int | None = await get_token_revocation().aissue_floor(str(user.id))
     if floor is None:
         return None
     now = int(time.time())
     if floor + 1 <= now:
         return None
-    return min(floor + 1, now + JWT_CLOCK_SKEW_SECONDS)
+    return int(min(floor + 1, now + int(JWT_CLOCK_SKEW_SECONDS)))
 
 
 def _mint_access_token(
