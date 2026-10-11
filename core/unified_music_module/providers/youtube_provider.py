@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
+from ._log_safety import install_httpx_query_redaction
 from .base_provider import BaseMusicProvider, MusicTrack
 
 
@@ -34,38 +35,7 @@ class YouTubeAPIError(YouTubeProviderError):
     pass
 
 
-class _StripHttpxQueryFilter(logging.Filter):
-    """Remove the query string from httpx's ``HTTP Request: GET <url>`` INFO lines.
-
-    The YouTube API takes the user's search text (``q=``) and the API key (``key=``)
-    in the query string, and httpx logs the full URL for every request at INFO.
-    Query strings are user data / secrets, so none may reach the log stream.
-    """
-
-    @staticmethod
-    def _strip(value: Any) -> Any:
-        """Return `value` without its query string if it is a URL, else unchanged."""
-        if isinstance(value, httpx.URL):
-            return value.copy_with(query=None)
-        if isinstance(value, str) and value.startswith(("http://", "https://")):
-            return value.split("?", 1)[0]
-        return value
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        """Rewrite the record's URL argument(s) in place; never drops the record."""
-        if isinstance(record.args, tuple):
-            record.args = tuple(self._strip(arg) for arg in record.args)
-        return True
-
-
-def _install_httpx_query_redaction() -> None:
-    """Attach `_StripHttpxQueryFilter` to the ``httpx`` logger exactly once."""
-    httpx_logger = logging.getLogger("httpx")
-    if not any(isinstance(f, _StripHttpxQueryFilter) for f in httpx_logger.filters):
-        httpx_logger.addFilter(_StripHttpxQueryFilter())
-
-
-_install_httpx_query_redaction()
+install_httpx_query_redaction()
 
 _REASON_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 

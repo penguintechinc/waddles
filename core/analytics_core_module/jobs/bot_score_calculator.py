@@ -92,13 +92,15 @@ async def calculate_all_communities():
         duration = (datetime.utcnow() - start_time).total_seconds()
 
         logger.audit(
-            "Bot score calculation completed",
             action="batch_complete",
+            user="system",
+            community="",
+            result="SUCCESS",
+            detail="Bot score calculation completed",
             total=total,
             success=success_count,
             errors=error_count,
-            duration_seconds=duration,
-            result="SUCCESS"
+            duration_seconds=duration
         )
 
         return {

@@ -61,12 +61,13 @@ class RetentionService:
             await self._store_cohort_data(community_id, cohorts, cohort_period)
 
             self.logger.audit(
-                "Retention cohorts calculated",
-                community_id=community_id,
                 action="calculate_retention",
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Retention cohorts calculated",
                 cohort_period=cohort_period,
-                cohort_count=len(cohorts),
-                result="SUCCESS"
+                cohort_count=len(cohorts)
             )
 
             return {

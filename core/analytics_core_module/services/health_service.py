@@ -99,10 +99,11 @@ class HealthService:
             )
 
             self.logger.audit(
-                "Community health calculated",
-                community_id=community_id,
                 action="calculate_health_score",
-                result="SUCCESS"
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Community health calculated"
             )
 
             return {

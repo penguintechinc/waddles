@@ -60,6 +60,7 @@ use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::egress::EgressGuard;
 use crate::flags::FeatureFlag;
+use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
 /// The `(tenant, community, app_id)` an in-flight `invoke` belongs to,
@@ -813,6 +814,11 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// received from the bundle (the degraded, but never-PII-leaking,
     /// fallback -- see that method's doc).
     detokenize: Option<DetokenizeWiring>,
+    /// The OTel instruments every `host-call` served by this value is timed
+    /// into (`waddles_host_call_latency_seconds`). Always the process-wide
+    /// set in production; tests swap it via `with_stage_metrics` so they can
+    /// read back exactly what this call emitted.
+    stage_metrics: Arc<StageMetrics>,
 }
 
 /// The outbound PII-detokenization dependency: a live resolver over
@@ -855,7 +861,17 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             gate,
             db: None,
             detokenize: None,
+            stage_metrics: stage_metrics::stage_metrics(),
         }
+    }
+
+    /// Test seam: routes this value's host-call timings into `metrics`
+    /// instead of the process-wide set, so an assertion sees only the calls
+    /// made through this instance.
+    #[cfg(test)]
+    pub(crate) fn with_stage_metrics(mut self, metrics: Arc<StageMetrics>) -> Self {
+        self.stage_metrics = metrics;
+        self
     }
 
     /// Overrides how long a queued Discord op waits for the drain's
@@ -2193,36 +2209,56 @@ impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> 
         call: HostCallBody,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, HostResultError>> + Send + 'a>> {
         Box::pin(async move {
-            match call.capability {
-                CapabilityKind::Relay => self.handle_relay(scope, &call.args).await,
-                CapabilityKind::Clock => self.handle_clock(scope, &call.op),
-                CapabilityKind::Context => self.handle_context(scope),
-                CapabilityKind::Log => self.handle_log(scope, &call.args),
-                CapabilityKind::Http => {
-                    let host = extract_http_host(&call.args).ok_or_else(|| {
-                        denied("invalid_args", "http.send requires a 'url' string")
-                    })?;
-                    self.gate
-                        .authorize(
-                            &scope.gate_scope(),
-                            classify_net_http_permission(&host),
-                            ResourceRef::AppScoped(AppScopedResource::None),
-                        )
-                        .map_err(denied_from_gate)?;
-                    self.egress.send(&scope.app_id, &call.args).await
-                }
-                CapabilityKind::Kv => self.handle_kv(scope, &call).await,
-                // `db` is wired below (mirrors svc_process); `handle_db`
-                // itself gate-checks FIRST (spec SS5) before consulting its
-                // own feature-flag/wiring state.
-                CapabilityKind::Db => self.handle_db(scope, &call).await,
-                // `enabled` is wired to a real `penguin_licensing::
-                // LicenseClient` (`crate::flags::resolve_flag`) -- see
-                // `handle_flags`'s doc for the fallback semantics.
-                // `handle_flags` itself gate-checks FIRST (spec SS5).
-                CapabilityKind::Flags => self.handle_flags(scope, &call).await,
-            }
+            let (capability, op) = stage_metrics::host_call_labels(call.capability, &call.op);
+            let started = std::time::Instant::now();
+            let outcome = self.dispatch(scope, call).await;
+            let result =
+                stage_metrics::host_call_result(outcome.as_ref().err().map(|e| e.code.as_str()));
+            self.stage_metrics
+                .record_host_call(capability, op, result, started.elapsed());
+            outcome
         })
+    }
+}
+
+impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
+    /// Routes one `host-call` to its capability arm. Split out of
+    /// [`CapabilityHandler::handle`] so that wrapper can time the whole call
+    /// (early `?` returns included) and label its outcome without every arm
+    /// touching telemetry; routing and behavior are unchanged.
+    async fn dispatch(
+        &self,
+        scope: &InvokeScope,
+        call: HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        match call.capability {
+            CapabilityKind::Relay => self.handle_relay(scope, &call.args).await,
+            CapabilityKind::Clock => self.handle_clock(scope, &call.op),
+            CapabilityKind::Context => self.handle_context(scope),
+            CapabilityKind::Log => self.handle_log(scope, &call.args),
+            CapabilityKind::Http => {
+                let host = extract_http_host(&call.args)
+                    .ok_or_else(|| denied("invalid_args", "http.send requires a 'url' string"))?;
+                self.gate
+                    .authorize(
+                        &scope.gate_scope(),
+                        classify_net_http_permission(&host),
+                        ResourceRef::AppScoped(AppScopedResource::None),
+                    )
+                    .map_err(denied_from_gate)?;
+                self.egress.send(&scope.app_id, &call.args).await
+            }
+            CapabilityKind::Kv => self.handle_kv(scope, &call).await,
+            // `db` is wired below (mirrors svc_process); `handle_db`
+            // itself gate-checks FIRST (spec SS5) before consulting its
+            // own feature-flag/wiring state.
+            CapabilityKind::Db => self.handle_db(scope, &call).await,
+            // `enabled` is wired to a real `penguin_licensing::
+            // LicenseClient` (`crate::flags::resolve_flag`) -- see
+            // `handle_flags`'s doc for the fallback semantics.
+            // `handle_flags` itself gate-checks FIRST (spec SS5).
+            CapabilityKind::Flags => self.handle_flags(scope, &call).await,
+        }
     }
 }
 
@@ -4377,6 +4413,157 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "unknown_op");
+    }
+
+    /// Builds an isolated OTel harness plus a `StageMetrics` on it, so a
+    /// test reads back exactly the host calls made through the capability
+    /// set it injects the metrics into.
+    fn isolated_metrics() -> (
+        crate::stage_metrics::test_support::Harness,
+        Arc<StageMetrics>,
+    ) {
+        let harness = crate::stage_metrics::test_support::Harness::new();
+        let metrics = Arc::new(StageMetrics::new(&harness.meter()));
+        (harness, metrics)
+    }
+
+    #[tokio::test]
+    async fn host_calls_are_timed_per_capability_op_and_result() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps(FakeRelayQueue::default()).with_stage_metrics(metrics);
+        let call_clock = |op: &'static str| call(CapabilityKind::Clock, op, serde_json::json!({}));
+
+        c.handle(&scope(), call_clock("now-millis"))
+            .await
+            .expect("clock succeeds");
+        c.handle(&scope(), call_clock("now-millis"))
+            .await
+            .expect("clock succeeds");
+        c.handle(
+            &scope(),
+            call(CapabilityKind::Context, "get", serde_json::json!({})),
+        )
+        .await
+        .expect("context succeeds");
+        // An unknown clock op is an operational error, not a policy denial.
+        c.handle(&scope(), call_clock("bogus")).await.unwrap_err();
+
+        let name = "waddles_host_call_latency_seconds";
+        let count = |capability: &str, op: &str, result: &str| {
+            h.count(
+                name,
+                &[
+                    ("stage", "action"),
+                    ("capability", capability),
+                    ("op", op),
+                    ("result", result),
+                ],
+            )
+        };
+        assert_eq!(count("clock", "now-millis", "ok"), 2.0);
+        assert_eq!(count("context", "get", "ok"), 1.0);
+        assert_eq!(count("clock", "other", "error"), 1.0);
+        let timed = h.last(name, &[("capability", "clock"), ("op", "now-millis")]);
+        assert!(timed.expect("series exported").sum >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_gate_denial_is_labeled_denied_not_error() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps_denied(FakeRelayQueue::default()).with_stage_metrics(metrics);
+        c.handle(
+            &scope(),
+            call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            h.count(
+                "waddles_host_call_latency_seconds",
+                &[("capability", "kv"), ("op", "get"), ("result", "denied")]
+            ),
+            1.0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hostile_op_string_never_becomes_a_label_value() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps(FakeRelayQueue::default()).with_stage_metrics(metrics);
+        for i in 0..20 {
+            let hostile = format!("evil-op-{i}; drop table users");
+            c.handle(
+                &scope(),
+                call(CapabilityKind::Clock, &hostile, serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        }
+        let points: Vec<_> = h
+            .points()
+            .into_iter()
+            .filter(|p| p.name == "waddles_host_call_latency")
+            .collect();
+        assert_eq!(points.len(), 1, "20 hostile ops must fold into one series");
+        assert_eq!(points[0].attrs.get("op").map(String::as_str), Some("other"));
+        assert_eq!(points[0].value, 20.0);
+    }
+
+    /// The reason `crate::metrics_facade` exists: the gate's own `authorize()`
+    /// audit counters (recorded through the `metrics` facade) must reach OTel.
+    #[test]
+    fn the_real_gate_audit_counters_reach_otel_through_the_bridge() {
+        let harness = crate::stage_metrics::test_support::Harness::new();
+        let recorder = crate::metrics_facade::OtelRecorder::new(harness.meter());
+        let granted = caps(FakeRelayQueue::default());
+        let denying = caps_denied(FakeRelayQueue::default());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                granted
+                    .handle(
+                        &scope(),
+                        call(CapabilityKind::Clock, "now-millis", serde_json::json!({})),
+                    )
+                    .await
+                    .expect("clock is always granted");
+                let denied = denying
+                    .handle(
+                        &scope(),
+                        call(
+                            CapabilityKind::Http,
+                            "send",
+                            serde_json::json!({"url": "https://hostile-1.example/x"}),
+                        ),
+                    )
+                    .await;
+                assert!(denied.is_err(), "ungranted http must be denied");
+            });
+        });
+
+        assert!(
+            harness.count(
+                "waddles_bundle_capability_authorized_total",
+                &[("app_id", "waddles.bot.commands.default")]
+            ) >= 1.0,
+            "the gate's authorize() audit counter must reach OTel"
+        );
+        assert_eq!(
+            harness.count(
+                "waddles_bundle_capability_denied_total",
+                &[
+                    ("app_id", "waddles.bot.commands.default"),
+                    ("permission", "net.http.fqdn"),
+                    ("reason", "not_granted"),
+                ]
+            ),
+            1.0,
+            "the gate's denial must reach OTel with the host folded away"
+        );
     }
 
     #[tokio::test]

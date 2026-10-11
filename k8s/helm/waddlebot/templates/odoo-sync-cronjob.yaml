@@ -63,6 +63,10 @@ spec:
                 name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
                 optional: true
             env:
+            # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+            # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+            # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 12 }}
             # Odoo creds ONLY from the operator-managed Secret (never rendered by this chart).
             - name: WADDLES_ODOO_SYNC_ENABLED
               value: {{ .Values.pipeline.odooSync.envBaseline | default false | quote }}

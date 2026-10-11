@@ -299,9 +299,11 @@ class WeightManager:
             self.invalidate_cache(community_id)
 
             self.logger.audit(
-                "Reputation weights updated",
-                community_id=community_id,
-                admin_id=admin_id,
+                action="update_weights",
+                user=str(admin_id),
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Reputation weights updated",
                 updated_fields=list(weights.keys())
             )
             return True

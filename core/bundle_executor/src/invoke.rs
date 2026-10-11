@@ -45,6 +45,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use penguin_bundle_host::wire::{
     ErrorBody, ErrorCode, ExportKind, HelloBody, InvokeBody, LoadBody, LoadedBody, ResultBody,
@@ -60,6 +61,7 @@ use crate::config::CliConfig;
 use crate::engine::{ticks_for_deadline, Stage};
 use crate::error::ExecutorError;
 use crate::host::{ExecState, HostBridge};
+use crate::metrics::{self, ExecutorMetrics};
 use crate::signing::PlatformPublicKeys;
 use crate::wire::{Connection, RequestHandler};
 
@@ -196,6 +198,11 @@ pub struct Executor<S: ComponentSource> {
     /// `Config` error from this constructor, same as any other malformed
     /// config field.
     signing_keys: PlatformPublicKeys,
+    /// The OTel instruments every load/unload/invoke is recorded into
+    /// (`crate::metrics`). Always the process-wide set in production; tests
+    /// swap it via `with_metrics` so they can read back exactly what this
+    /// executor emitted.
+    metrics: Arc<ExecutorMetrics>,
 }
 
 impl<S: ComponentSource> Executor<S> {
@@ -222,7 +229,17 @@ impl<S: ComponentSource> Executor<S> {
             orphaned_unload_total: AtomicU64::new(0),
             epoch_ticker,
             signing_keys,
+            metrics: metrics::executor_metrics(),
         })
+    }
+
+    /// Test seam: routes this executor's load/unload/invoke metrics into
+    /// `metrics` instead of the process-wide set, so an assertion sees only
+    /// what this instance emitted.
+    #[cfg(test)]
+    pub(crate) fn with_metrics(mut self, metrics: Arc<ExecutorMetrics>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// The `hello` frame this executor opens every connection with (spec
@@ -290,6 +307,14 @@ fn resolve_memory_limit_mb(requested_mb: u32, default_mb: u32, max_mb: u32) -> u
     .max(1)
 }
 
+/// The stable `export` label for an invoke's [`ExportKind`].
+fn export_label(kind: &ExportKind) -> &'static str {
+    match kind {
+        ExportKind::Transform => "transform",
+        ExportKind::Dispatch => "dispatch",
+    }
+}
+
 fn error_body(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
     ErrorBody {
         code,
@@ -329,8 +354,12 @@ fn new_bounded_store(engine: &Engine, exec_state: ExecState, deadline_ms: u64) -
     store
 }
 
-impl<S: ComponentSource> RequestHandler for Executor<S> {
-    async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
+impl<S: ComponentSource> Executor<S> {
+    /// The body of `on_load`, recording the per-outcome counter and the
+    /// per-phase (fetch / verify / precompile) histograms as it goes. The
+    /// `on_load` wrapper adds the end-to-end `total` phase. Behavior is
+    /// unchanged from before the metrics existed.
+    async fn load_inner(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
         let start = std::time::Instant::now();
         let app_id = body.app_id.clone();
         let digest = body.digest.clone();
@@ -390,6 +419,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     referencing_scopes = existing.scopes.len(),
                     "bundle already resident, scope registered"
                 );
+                self.metrics.record_load("already_resident");
                 return Ok(LoadedBody {
                     app_id,
                     digest,
@@ -421,11 +451,20 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         };
         let compiled: Result<&Component, ExecutorError> = cell
             .get_or_try_init(|| async {
-                let (bytes, sidecar_bytes) = self
+                let fetch_started = Instant::now();
+                let fetched = self
                     .source
                     .fetch(&body.component_key, &body.sidecar_key)
-                    .await?;
-                verify_digest(&bytes, &body.digest)?;
+                    .await;
+                self.metrics.record_load_phase(
+                    &app_id,
+                    "fetch",
+                    if fetched.is_ok() { "ok" } else { "error" },
+                    fetch_started.elapsed(),
+                );
+                let (bytes, sidecar_bytes) = fetched?;
+                let verify_started = Instant::now();
+                let verified = verify_digest(&bytes, &body.digest);
 
                 // Artifact integrity (spec SS5.6/Gemini review condition 9):
                 // refuse to instantiate a component whose signed sidecar
@@ -438,17 +477,35 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                 // own doc. Lives inside the single-flight closure so a
                 // concurrent `load` for the same digest never bypasses
                 // verification via the shared `OnceCell`.
-                if !self.signing_keys.is_empty() {
+                let verified = verified.and_then(|()| {
+                    if self.signing_keys.is_empty() {
+                        return Ok(());
+                    }
                     crate::signing::verify_artifact_signature(
                         &sidecar_bytes,
                         &self.signing_keys,
                         &body.app_id,
                         &body.version,
                         &body.digest,
-                    )?;
-                }
+                    )
+                });
+                self.metrics.record_load_phase(
+                    &app_id,
+                    "verify",
+                    if verified.is_ok() { "ok" } else { "error" },
+                    verify_started.elapsed(),
+                );
+                verified?;
 
-                Component::new(&self.engine, &bytes).map_err(ExecutorError::from)
+                let compile_started = Instant::now();
+                let compiled = Component::new(&self.engine, &bytes).map_err(ExecutorError::from);
+                self.metrics.record_load_phase(
+                    &app_id,
+                    "precompile",
+                    if compiled.is_ok() { "ok" } else { "error" },
+                    compile_started.elapsed(),
+                );
+                compiled
             })
             .await;
         let component = match compiled {
@@ -463,6 +520,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     ExecutorError::DigestMismatch { .. } => ErrorCode::DigestMismatch,
                     _ => ErrorCode::LoadFailed,
                 };
+                self.metrics.record_load(metrics::error_code_label(code));
                 return Err(error_body(code, err.to_string()));
             }
         };
@@ -521,7 +579,9 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                 "bundle loaded"
             );
         }
+        self.metrics.set_bundles_loaded(bundles.len());
         drop(bundles);
+        self.metrics.record_load("ok");
 
         Ok(LoadedBody {
             app_id,
@@ -534,6 +594,18 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
             exports: vec!["transform".to_string(), "dispatch".to_string()],
         })
     }
+}
+
+impl<S: ComponentSource> RequestHandler for Executor<S> {
+    async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
+        let started = Instant::now();
+        let app_id = body.app_id.clone();
+        let outcome = self.load_inner(body).await;
+        let result = if outcome.is_ok() { "ok" } else { "error" };
+        self.metrics
+            .record_load_phase(&app_id, "total", result, started.elapsed());
+        outcome
+    }
 
     async fn on_unload(&self, body: UnloadBody) -> Result<UnloadedBody, ErrorBody> {
         let scope: Scope = (body.tenant_id, body.community_id, body.app_id.clone());
@@ -543,6 +615,8 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                 if loaded.scopes.remove(&scope) {
                     if loaded.scopes.is_empty() {
                         bundles.remove(&body.digest);
+                        self.metrics.record_unload("evicted");
+                        self.metrics.set_bundles_loaded(bundles.len());
                         info!(
                             app_id = body.app_id,
                             digest = body.digest,
@@ -551,6 +625,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                             "bundle unloaded (last referencing scope)"
                         );
                     } else {
+                        self.metrics.record_unload("still_referenced");
                         info!(
                             app_id = body.app_id,
                             digest = body.digest,
@@ -569,6 +644,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     // `LoadedBundle::scopes`'s doc for the exact failure
                     // mode this prevents).
                     self.orphaned_unload_total.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.record_unload("orphaned");
                     warn!(
                         app_id = body.app_id,
                         digest = body.digest,
@@ -584,14 +660,75 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     digest: body.digest,
                 })
             }
-            None => Err(error_body(
-                ErrorCode::UnknownBundle,
-                format!("digest {} is not loaded", body.digest),
-            )),
+            None => {
+                self.metrics.record_unload("unknown_bundle");
+                Err(error_body(
+                    ErrorCode::UnknownBundle,
+                    format!("digest {} is not loaded", body.digest),
+                ))
+            }
         }
     }
 
     async fn on_invoke(
+        &self,
+        body: InvokeBody,
+        invoke_id: u64,
+        connection: Arc<Connection>,
+    ) -> Result<ResultBody, ErrorBody> {
+        let app_id = body.app_id.clone();
+        let export = export_label(&body.export);
+        let _active = self.metrics.invocation_started();
+        let started = Instant::now();
+        let outcome = self.invoke_inner(body, invoke_id, connection).await;
+        let (result, trip) = match &outcome {
+            Ok(_) => ("ok", None),
+            Err(e) => (
+                metrics::error_code_label(e.code),
+                metrics::sandbox_limit(e.code),
+            ),
+        };
+        self.metrics
+            .record_invoke(&app_id, export, result, trip, started.elapsed());
+        outcome
+    }
+
+    async fn on_shutdown(&self, body: ShutdownBody) {
+        warn!(grace_ms = body.grace_ms, "stage requested shutdown");
+    }
+
+    /// Wipes the ENTIRE bundle registry and any in-flight compiles (gh
+    /// security review item 4 on PR #406) -- see the trait method's own doc
+    /// for why a full wipe, rather than per-scope bookkeeping, is both
+    /// sufficient and correct for this executor's single-active-connection
+    /// architecture. `self.orphaned_unload_total` is deliberately NOT reset
+    /// -- it's a lifetime counter, not per-connection state.
+    async fn on_disconnect(&self) {
+        let evicted = {
+            let mut bundles = self.bundles.write().await;
+            let evicted = bundles.len();
+            bundles.clear();
+            evicted
+        };
+        self.metrics.set_bundles_loaded(0);
+        self.compiling.lock().await.clear();
+        if evicted > 0 {
+            info!(
+                evicted_digests = evicted,
+                "host-api connection closed; wiped the bundle registry \
+                 (the reconnecting stage resends its full authoritative active set)"
+            );
+        }
+    }
+}
+
+impl<S: ComponentSource> Executor<S> {
+    /// The body of `on_invoke`, recording the instantiate and guest-execution
+    /// histograms as it goes. The `on_invoke` wrapper adds the in-flight
+    /// gauge, the end-to-end histogram and the sandbox-trip counter around
+    /// every exit path. Behavior is unchanged from before the metrics
+    /// existed.
+    async fn invoke_inner(
         &self,
         body: InvokeBody,
         invoke_id: u64,
@@ -620,6 +757,9 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         let stage = Stage::instantiate_async(&mut store, &component, &self.linker)
             .await
             .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
+        self.metrics
+            .record_instantiate(&body.app_id, start.elapsed());
+        let guest_started = Instant::now();
 
         let result = match body.export {
             ExportKind::Transform => {
@@ -629,6 +769,8 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     .waddle_bundle_process_stage()
                     .call_transform(&mut store, &event)
                     .await;
+                self.metrics
+                    .record_guest(&body.app_id, "transform", guest_started.elapsed());
                 match outcome {
                     Ok(Ok(reply)) => serde_json::to_value(reply),
                     Ok(Err(unsupported)) => serde_json::to_value(unsupported)
@@ -646,6 +788,8 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     .waddle_bundle_action_stage()
                     .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
                     .await;
+                self.metrics
+                    .record_guest(&body.app_id, "dispatch", guest_started.elapsed());
                 match outcome {
                     Ok(Ok(reply)) => serde_json::to_value(reply),
                     Ok(Err(transport_error)) => serde_json::to_value(transport_error)
@@ -664,33 +808,6 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
             duration_ms: start.elapsed().as_millis() as u64,
             fuel_used: 0,
         })
-    }
-
-    async fn on_shutdown(&self, body: ShutdownBody) {
-        warn!(grace_ms = body.grace_ms, "stage requested shutdown");
-    }
-
-    /// Wipes the ENTIRE bundle registry and any in-flight compiles (gh
-    /// security review item 4 on PR #406) -- see the trait method's own doc
-    /// for why a full wipe, rather than per-scope bookkeeping, is both
-    /// sufficient and correct for this executor's single-active-connection
-    /// architecture. `self.orphaned_unload_total` is deliberately NOT reset
-    /// -- it's a lifetime counter, not per-connection state.
-    async fn on_disconnect(&self) {
-        let evicted = {
-            let mut bundles = self.bundles.write().await;
-            let evicted = bundles.len();
-            bundles.clear();
-            evicted
-        };
-        self.compiling.lock().await.clear();
-        if evicted > 0 {
-            info!(
-                evicted_digests = evicted,
-                "host-api connection closed; wiped the bundle registry \
-                 (the reconnecting stage resends its full authoritative active set)"
-            );
-        }
     }
 }
 
@@ -2118,5 +2235,489 @@ mod tests {
             })
         ));
         Ok(())
+    }
+
+    /// Metric-emission tests: each drives a REAL `on_load`/`on_unload`/
+    /// `on_invoke` against the committed hostile fixture component and reads
+    /// the data points back out of an in-memory OTel exporter -- proving the
+    /// instruments emit under real wasmtime execution, not that they merely
+    /// exist. Every test owns an isolated provider (`Executor::with_metrics`),
+    /// so assertions are exact.
+    mod metrics_emission {
+        use super::*;
+        use crate::metrics::test_support::Harness;
+
+        fn executor_with<S: ComponentSource>(source: S) -> (Harness, Executor<S>) {
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let executor = Executor::new(&test_config(), source)
+                .expect("executor builds")
+                .with_metrics(metrics);
+            (harness, executor)
+        }
+
+        async fn invoke_event(
+            executor: &Executor<impl ComponentSource>,
+            app_id: &str,
+            export: ExportKind,
+            payload: serde_json::Value,
+            deadline_ms: u64,
+        ) -> Result<ResultBody, ErrorBody> {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let connection = crate::wire::Connection::new(tx);
+            executor
+                .on_invoke(
+                    InvokeBody {
+                        app_id: app_id.to_string(),
+                        digest: fixture_digest(),
+                        export,
+                        payload,
+                        deadline_ms,
+                        trace: None,
+                    },
+                    1,
+                    connection,
+                )
+                .await
+        }
+
+        fn event(kind: &str) -> serde_json::Value {
+            serde_json::json!({
+                "platform": "test",
+                "event_type": kind,
+                "actor": null,
+                "payload_json": "{}",
+                "occurred_at": "2026-09-22T00:00:00.000Z",
+            })
+        }
+
+        #[tokio::test]
+        async fn a_cold_load_records_every_phase_and_the_resident_gauge() {
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.load"))
+                .await
+                .expect("load succeeds");
+
+            for phase in ["fetch", "verify", "precompile", "total"] {
+                assert_eq!(
+                    h.count(
+                        "waddles_executor_load_seconds",
+                        &[
+                            ("app_id", "waddles.mx.load"),
+                            ("phase", phase),
+                            ("result", "ok")
+                        ]
+                    ),
+                    1.0,
+                    "phase {phase} must be recorded exactly once"
+                );
+            }
+            // The compile is the expensive phase: real wasmtime work, so its
+            // recorded time is genuinely non-zero.
+            let compile = h
+                .last("waddles_executor_load_seconds", &[("phase", "precompile")])
+                .expect("precompile exported");
+            assert!(compile.sum > 0.0, "compile time was {}", compile.sum);
+            assert_eq!(
+                h.count("waddles_executor_loads_total", &[("result", "ok")]),
+                1.0
+            );
+            assert_eq!(
+                h.last("waddles_executor_bundles_loaded", &[])
+                    .expect("gauge exported")
+                    .value,
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_second_scope_on_a_resident_digest_is_counted_without_redoing_the_phases() {
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body_scoped("waddles.mx.shared", 1, 0))
+                .await
+                .expect("first load");
+            executor
+                .on_load(fixture_load_body_scoped("waddles.mx.shared", 2, 0))
+                .await
+                .expect("second scope, same digest");
+
+            assert_eq!(
+                h.count(
+                    "waddles_executor_loads_total",
+                    &[("result", "already_resident")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count("waddles_executor_loads_total", &[("result", "ok")]),
+                1.0
+            );
+            // One real compile; the fast path adds only a `total` sample.
+            assert_eq!(
+                h.count("waddles_executor_load_seconds", &[("phase", "precompile")]),
+                1.0
+            );
+            assert_eq!(
+                h.count("waddles_executor_load_seconds", &[("phase", "total")]),
+                2.0
+            );
+            assert_eq!(
+                h.last("waddles_executor_bundles_loaded", &[])
+                    .expect("gauge exported")
+                    .value,
+                1.0,
+                "two scopes share one resident digest"
+            );
+        }
+
+        #[tokio::test]
+        async fn unloads_are_classified_and_the_gauge_follows_eviction() {
+            let (h, executor) = executor_with(FixtureSource);
+            let digest = fixture_digest();
+            executor
+                .on_load(fixture_load_body_scoped("waddles.mx.unload", 1, 0))
+                .await
+                .expect("load a");
+            executor
+                .on_load(fixture_load_body_scoped("waddles.mx.unload", 2, 0))
+                .await
+                .expect("load b");
+
+            // A scope that never referenced the digest: orphaned, no effect.
+            executor
+                .on_unload(fixture_unload_body("waddles.mx.unload", 9, 9, &digest))
+                .await
+                .expect("orphaned unload is a no-op, not an error");
+            executor
+                .on_unload(fixture_unload_body("waddles.mx.unload", 1, 0, &digest))
+                .await
+                .expect("unload a");
+            executor
+                .on_unload(fixture_unload_body("waddles.mx.unload", 2, 0, &digest))
+                .await
+                .expect("unload b (last)");
+            // Now fully evicted: another unload names an unknown digest.
+            executor
+                .on_unload(fixture_unload_body("waddles.mx.unload", 2, 0, &digest))
+                .await
+                .expect_err("unknown digest fails closed");
+
+            for (result, want) in [
+                ("orphaned", 1.0),
+                ("still_referenced", 1.0),
+                ("evicted", 1.0),
+                ("unknown_bundle", 1.0),
+            ] {
+                assert_eq!(
+                    h.count("waddles_executor_unloads_total", &[("result", result)]),
+                    want,
+                    "{result}"
+                );
+            }
+            assert_eq!(h.count("waddles_executor_orphaned_unloads_total", &[]), 1.0);
+            assert_eq!(
+                executor.orphaned_unload_total.load(Ordering::Relaxed),
+                1,
+                "the pre-existing atomic must keep counting alongside the OTel counter"
+            );
+            assert_eq!(
+                h.last("waddles_executor_bundles_loaded", &[])
+                    .expect("gauge exported")
+                    .value,
+                0.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_digest_mismatch_records_a_failed_verify_and_no_compile() {
+            let (h, executor) = executor_with(FixtureSource);
+            let mut body = fixture_load_body("waddles.mx.mismatch");
+            body.digest = format!("sha256:{}", "0".repeat(64));
+            executor
+                .on_load(body)
+                .await
+                .expect_err("a digest mismatch fails the load");
+
+            let count = |phase: &str, result: &str| {
+                h.count(
+                    "waddles_executor_load_seconds",
+                    &[("phase", phase), ("result", result)],
+                )
+            };
+            assert_eq!(count("fetch", "ok"), 1.0);
+            assert_eq!(count("verify", "error"), 1.0);
+            assert_eq!(
+                count("precompile", "ok") + count("precompile", "error"),
+                0.0
+            );
+            assert_eq!(count("total", "error"), 1.0);
+            assert_eq!(
+                h.count(
+                    "waddles_executor_loads_total",
+                    &[("result", "digest_mismatch")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_failed_fetch_records_a_failed_fetch_phase_and_load_failed() {
+            let (h, executor) = executor_with(UnimplementedBucketSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.fetchfail"))
+                .await
+                .expect_err("the unimplemented bucket source fails closed");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_load_seconds",
+                    &[("phase", "fetch"), ("result", "error")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count("waddles_executor_load_seconds", &[("phase", "verify")]),
+                0.0,
+                "nothing was fetched, so nothing was verified"
+            );
+            assert_eq!(
+                h.count("waddles_executor_loads_total", &[("result", "load_failed")]),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_successful_invoke_records_instantiate_guest_and_total_and_clears_the_gauge() {
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.invoke"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.invoke",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("noop invoke succeeds");
+
+            assert_eq!(
+                h.count(
+                    "waddles_executor_invoke_seconds",
+                    &[
+                        ("app_id", "waddles.mx.invoke"),
+                        ("export", "transform"),
+                        ("result", "ok")
+                    ]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_executor_instantiate_seconds",
+                    &[("app_id", "waddles.mx.invoke")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_executor_guest_seconds",
+                    &[("app_id", "waddles.mx.invoke"), ("export", "transform")]
+                ),
+                1.0
+            );
+            let total = h
+                .last("waddles_executor_invoke_seconds", &[("result", "ok")])
+                .expect("invoke exported");
+            let guest = h
+                .last("waddles_executor_guest_seconds", &[])
+                .expect("guest exported");
+            assert!(total.sum >= guest.sum, "end-to-end >= guest-only");
+            assert_eq!(
+                h.last("waddles_executor_invocations_active", &[])
+                    .expect("gauge exported")
+                    .value,
+                0.0,
+                "the in-flight gauge must return to zero"
+            );
+            assert_eq!(h.count("waddles_executor_sandbox_trip_total", &[]), 0.0);
+        }
+
+        #[tokio::test]
+        async fn an_unknown_digest_is_an_unknown_bundle_result_not_a_trip() {
+            let (h, executor) = executor_with(FixtureSource);
+            // Nothing loaded: the digest lookup fails closed before any guest runs.
+            invoke_event(
+                &executor,
+                "waddles.mx.unknown",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect_err("unknown bundle");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_invoke_seconds",
+                    &[
+                        ("app_id", "waddles.mx.unknown"),
+                        ("result", "unknown_bundle")
+                    ]
+                ),
+                1.0
+            );
+            assert_eq!(h.count("waddles_executor_sandbox_trip_total", &[]), 0.0);
+            assert_eq!(h.count("waddles_executor_instantiate_seconds", &[]), 0.0);
+            assert_eq!(
+                h.last("waddles_executor_invocations_active", &[])
+                    .expect("gauge exported")
+                    .value,
+                0.0
+            );
+        }
+
+        /// Multi-threaded on purpose (same as the pre-existing deadline test):
+        /// the epoch ticker is a runtime task, and a current-thread runtime
+        /// would starve it while the guest's tight loop owns the only thread.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_runaway_guest_records_a_timeout_trip() {
+            crate::init_test_tracing();
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.busy"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.busy",
+                ExportKind::Transform,
+                event("busy-loop"),
+                200,
+            )
+            .await
+            .expect_err("the epoch deadline must interrupt the loop");
+
+            assert_eq!(
+                h.count(
+                    "waddles_executor_sandbox_trip_total",
+                    &[("app_id", "waddles.mx.busy"), ("limit", "timeout")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_executor_invoke_seconds",
+                    &[
+                        ("app_id", "waddles.mx.busy"),
+                        ("result", "executor_deadline")
+                    ]
+                ),
+                1.0
+            );
+            // The guest ran (and was cut off), so its time was still recorded.
+            let guest = h
+                .last(
+                    "waddles_executor_guest_seconds",
+                    &[("app_id", "waddles.mx.busy")],
+                )
+                .expect("guest time recorded even when trapped");
+            // The epoch deadline is enforced at `EPOCH_TICK` (50 ms) granularity
+            // from an arbitrary phase within a tick, so a 200 ms deadline lets
+            // the guest run roughly 150-200 ms; assert a floor with margin
+            // that still proves real execution time was recorded.
+            assert!(
+                guest.sum >= 0.1,
+                "guest ran for a deadline of ~200ms, recorded {}",
+                guest.sum
+            );
+        }
+
+        #[tokio::test]
+        async fn a_memory_hog_records_a_memory_trip() {
+            crate::init_test_tracing();
+            let (h, executor) = executor_with(FixtureSource);
+            let mut body = fixture_load_body("waddles.mx.hog");
+            body.limits = penguin_bundle_host::wire::LoadLimits {
+                timeout_ms: 10_000,
+                memory_mb: 8,
+            };
+            executor.on_load(body).await.expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.hog",
+                ExportKind::Transform,
+                event("memory-hog"),
+                10_000,
+            )
+            .await
+            .expect_err("the memory cap must trap the hog");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_sandbox_trip_total",
+                    &[("app_id", "waddles.mx.hog"), ("limit", "memory")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_malformed_dispatch_payload_is_labeled_by_export_and_code() {
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.dispatch"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.dispatch",
+                ExportKind::Dispatch,
+                serde_json::json!({"not": "an envelope"}),
+                1000,
+            )
+            .await
+            .expect_err("malformed dispatch payload");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_invoke_seconds",
+                    &[
+                        ("app_id", "waddles.mx.dispatch"),
+                        ("export", "dispatch"),
+                        ("result", "malformed_frame")
+                    ]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_disconnect_wipes_the_registry_and_zeroes_the_gauge() {
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.disconnect"))
+                .await
+                .expect("load");
+            assert_eq!(
+                h.last("waddles_executor_bundles_loaded", &[])
+                    .expect("gauge exported")
+                    .value,
+                1.0
+            );
+            executor.on_disconnect().await;
+            assert_eq!(
+                h.last("waddles_executor_bundles_loaded", &[])
+                    .expect("gauge exported")
+                    .value,
+                0.0
+            );
+        }
+
+        #[test]
+        fn export_labels_are_stable() {
+            assert_eq!(export_label(&ExportKind::Transform), "transform");
+            assert_eq!(export_label(&ExportKind::Dispatch), "dispatch");
+        }
     }
 }

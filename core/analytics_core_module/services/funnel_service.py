@@ -68,11 +68,12 @@ class FunnelService:
             await self._store_funnel_data(community_id, 'new_user_activation', funnel_data, period_start, period_end)
 
             self.logger.audit(
-                "Engagement funnel tracked",
-                community_id=community_id,
                 action="track_engagement_funnel",
-                funnel_name="new_user_activation",
-                result="SUCCESS"
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Engagement funnel tracked",
+                funnel_name="new_user_activation"
             )
 
             return {

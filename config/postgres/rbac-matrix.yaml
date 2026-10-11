@@ -48,6 +48,8 @@ tables:
   - tenant_platform_apps
   - platform_connections
   - community_connection_access
+  - keystore.tenant_encryption_keys
+  - tenant_kms_configs
   - sso_connections
   - sso_identities
 grants:
@@ -742,6 +744,62 @@ grants:
     privileges: []
   - role: migration_runner
     table: community_connection_access
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # Per-tenant envelope encryption key store + Enterprise BYOK config (migration
+  # 0054_tenant_external_kms; design 2026-09-28-tenant-envelope-encryption Sec4/Sec6).
+  # hub_api is the sole reader/writer. Every data-plane role gets an explicit
+  # empty row: a compromised svc_* credential must not read even a *wrapped* DEK.
+  # keystore.tenant_encryption_keys: SELECT/INSERT/UPDATE only -- keys are retired,
+  # never hard-deleted by application code.
+  - role: hub_api
+    table: keystore.tenant_encryption_keys
+    privileges: [SELECT, INSERT, UPDATE]
+  - role: waddles_publisher
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_ingest
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_process
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_action
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_streaming
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: webui
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: migration_runner
+    table: keystore.tenant_encryption_keys
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: tenant_kms_configs
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: tenant_kms_configs
+    privileges: []
+  - role: svc_ingest
+    table: tenant_kms_configs
+    privileges: []
+  - role: svc_process
+    table: tenant_kms_configs
+    privileges: []
+  - role: svc_action
+    table: tenant_kms_configs
+    privileges: []
+  - role: svc_streaming
+    table: tenant_kms_configs
+    privileges: []
+  - role: webui
+    table: tenant_kms_configs
+    privileges: []
+  - role: migration_runner
+    table: tenant_kms_configs
     privileges: [SELECT, INSERT, UPDATE, DELETE]
 
   # 0049_sso_connections: hub-api-owned control-plane tables for enterprise SSO.
