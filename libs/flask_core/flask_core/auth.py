@@ -20,6 +20,21 @@ import jwt
 import os
 import secrets
 import logging
+import time
+
+from .jwt_hardening import (
+    OUTCOME_OK,
+    REASON_EXPIRED,
+    REASON_INVALID_CLAIM,
+    REASON_NO_KEY,
+    VERIFIER_PLATFORM_HS256,
+    JwtRejection,
+    classify_decode_error,
+    inspect_header,
+    is_valid_kid,
+    log_rejection,
+    record_verification,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +49,35 @@ logger = logging.getLogger(__name__)
 DEFAULT_JWT_ISSUER = os.getenv("JWT_ISSUER", "waddlebot")
 DEFAULT_JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "waddlebot-services")
 
-#: Slug of the tenant every pre-Task-0.4 token and every single-tenant
-#: (Free/Professional, capped) deployment resolves to. Matches
-#: `tenants.slug = 'global'` seeded by migration 058 -- not a bypass, the
-#: identical tenant-scoping code in tenancy.py runs for it with N=1. See
-#: security.md Tenant Isolation.
+#: The ONE algorithm the platform verifier accepts and the minter uses (RFC
+#: 8725 one-alg-per-verifier). H-2 Phase 0 only hardens HS256; the ES256/JWKS
+#: cutover adds a *second verifier* with its own single algorithm, it does not
+#: widen this list.
+PLATFORM_JWT_ALGORITHM = "HS256"
+
+#: `kid` stamped into every minted HS256 header (forward-compat for the JWKS/ES256
+#: phase, where `kid` selects the verification key). Rotation of the shared
+#: secret bumps this value. Validated at import so a malformed `JWT_KID` stops the
+#: service at startup instead of minting tokens every verifier would refuse.
+DEFAULT_JWT_KID = os.getenv("JWT_KID") or "hs256-v1"  # empty (e.g. a blank Helm value) = unset
+if not is_valid_kid(DEFAULT_JWT_KID):
+    raise ValueError("JWT_KID must match [A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}")
+
+#: Claims every platform token must carry (security.md JWT Claims; MED-5). `scope`
+#: may be the empty string (no scopes granted) but must be present.
+REQUIRED_JWT_CLAIMS = ("sub", "iss", "aud", "iat", "exp", "scope", "tenant")
+
+#: Allowed `iat`/`nbf` clock skew between the minting and verifying pod -- matches
+#: `service_jwt.CLOCK_SKEW_SECONDS`. NOT applied to `exp`: expiry stays strict to the
+#: second, exactly as before this change (see `_verify_platform_token`).
+JWT_CLOCK_SKEW_SECONDS = 30
+
+#: Slug of the platform's default tenant (`tenants.slug = 'global'`, seeded by
+#: migration 058) -- single-tenant (Free/Professional, capped) deployments
+#: *mint* tokens for it, and tenancy.py resolves it with the identical
+#: tenant-scoping code as every other tenant. It is NOT a verification
+#: fallback: a token with no `tenant` claim is rejected, never defaulted to
+#: this slug. See security.md Tenant Isolation.
 DEFAULT_TENANT_SLUG = "global"
 
 #: OIDC scope guarding tenant-admin management of enterprise SSO connections
@@ -47,15 +86,6 @@ DEFAULT_TENANT_SLUG = "global"
 #: enforced by `hub_api/blueprints/v1/sso.py`. Granted to the tenant `admin`
 #: bundle below; global admins already hold it via the `*:admin` wildcard.
 SCOPE_SSO_ADMIN = "auth.sso:admin"
-
-# TODO(tenancy-migration, tracking: v3.0.x Task 0.4): tokens minted before
-# this cutoff predate the mandatory `tenant` claim and are treated as
-# DEFAULT_TENANT_SLUG by verify_jwt_token() below. create_jwt_token() has
-# required `tenant` since this change landed, so any token issued *after*
-# the cutoff that is still missing the claim is rejected outright, not
-# defaulted. Extend only with explicit sign-off -- a permanently open
-# cutoff is the untenanted backdoor in a different shape.
-TENANT_CLAIM_MIGRATION_CUTOFF = datetime(2026, 11, 26, tzinfo=timezone.utc)
 
 
 @dataclass(slots=True)
@@ -223,6 +253,7 @@ def create_jwt_token(
     teams: list[str] | None = None,
     issuer: str = DEFAULT_JWT_ISSUER,
     audience: str = DEFAULT_JWT_AUDIENCE,
+    kid: str = DEFAULT_JWT_KID,
 ) -> str:
     """
     Create JWT token for user authentication.
@@ -249,20 +280,32 @@ def create_jwt_token(
             data to attach yet.
         issuer: `iss` claim; defaults to `DEFAULT_JWT_ISSUER`.
         audience: `aud` claim; defaults to `DEFAULT_JWT_AUDIENCE`.
+        kid: JOSE header `kid` identifying the signing key; defaults to
+            `DEFAULT_JWT_KID`. Selects the verification key once the JWKS
+            (ES256) phase lands; the HS256 verifier only vets its charset.
 
     Returns:
         JWT token string
 
     Raises:
-        ValueError: If tenant is empty -- there is no untenanted token.
+        ValueError: If tenant or secret_key is empty, or kid is malformed --
+            there is no untenanted token, and a token signed with an empty
+            secret is forgeable by anyone.
     """
     if not tenant:
         raise ValueError(
             "tenant is mandatory on every JWT (security.md Tenant Isolation) -- "
             "pass DEFAULT_TENANT_SLUG for single-tenant deployments, never empty"
         )
+    if not secret_key:
+        raise ValueError(
+            "secret_key is empty -- refusing to mint a token anyone could forge "
+            "(the signing secret is unset or unresolved)"
+        )
+    if not is_valid_kid(kid):
+        raise ValueError("kid must match [A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expiration = now + timedelta(hours=expiration_hours)
 
     payload = {
@@ -280,11 +323,76 @@ def create_jwt_token(
         'type': 'access'
     }
 
-    token = jwt.encode(payload, secret_key, algorithm='HS256')
+    token = jwt.encode(
+        payload, secret_key, algorithm=PLATFORM_JWT_ALGORITHM, headers={'kid': kid}
+    )
 
-    logger.info(f"JWT token created for user {username} (tenant={tenant}, expires in {expiration_hours}h)")
+    # PII-free: the subject id and tenant slug only -- never username/email/token.
+    logger.info(
+        "JWT token created (alg=%s kid=%s expires_in_h=%s)",
+        PLATFORM_JWT_ALGORITHM,
+        kid,
+        expiration_hours,
+        extra={
+            'event_type': 'AUTH',
+            'action': 'create_jwt_token',
+            'result': 'SUCCESS',
+            'user_id': user_id,
+            'tenant': tenant,
+        },
+    )
 
     return token
+
+
+def _verify_platform_token(
+    token: str, secret_key: str, issuer: str, audience: str
+) -> tuple[Dict[str, Any], str]:
+    """
+    Run every platform-token check; raise `JwtRejection` on the first failure.
+
+    Returns the decoded payload and the (vetted) header `alg`. Kept free of
+    logging/metrics so the policy is one readable sequence; the side effects
+    live in `verify_jwt_token()`.
+    """
+    if not isinstance(secret_key, (str, bytes)) or not secret_key:
+        # Deployment bug (unset/unresolved secret), not attacker input -- but an
+        # empty HMAC key would otherwise *verify* tokens anyone can forge.
+        raise JwtRejection(REASON_NO_KEY)
+
+    header = inspect_header(
+        token, allowed_algs=(PLATFORM_JWT_ALGORITHM,), validate_kid=True
+    )
+
+    try:
+        payload: Dict[str, Any] = jwt.decode(
+            token,
+            secret_key,
+            algorithms=[PLATFORM_JWT_ALGORITHM],
+            audience=audience,
+            issuer=issuer,
+            leeway=JWT_CLOCK_SKEW_SECONDS,
+            options={'require': list(REQUIRED_JWT_CLAIMS)},
+        )
+    except jwt.PyJWTError as exc:
+        raise JwtRejection(classify_decode_error(exc), alg=header.alg) from exc
+
+    # PyJWT applies `leeway` to `exp` too; expiry must not be widened by this
+    # change (iat/nbf need the skew allowance, exp does not), so re-check strictly.
+    if payload['exp'] <= time.time():
+        raise JwtRejection(REASON_EXPIRED, alg=header.alg)
+
+    # PyJWT's `require` only proves the claim is present and non-null; the
+    # identity-bearing ones must also be the right shape. An empty `sub`/`tenant`
+    # is "missing" by another name, and `authz` space-splits a string `scope`.
+    for name in ('sub', 'tenant'):
+        value = payload[name]
+        if not isinstance(value, str) or not value.strip():
+            raise JwtRejection(REASON_INVALID_CLAIM, alg=header.alg)
+    if not isinstance(payload['scope'], str):
+        raise JwtRejection(REASON_INVALID_CLAIM, alg=header.alg)
+
+    return payload, header.alg
 
 
 def verify_jwt_token(
@@ -295,22 +403,24 @@ def verify_jwt_token(
     audience: str = DEFAULT_JWT_AUDIENCE,
 ) -> Optional[Dict[str, Any]]:
     """
-    Verify and decode JWT token.
+    Verify and decode a platform (HS256) JWT.
 
-    Rejects tokens with no `tenant` claim, per security.md Tenant Isolation
-    -- except during the bounded migration window (TENANT_CLAIM_MIGRATION_CUTOFF),
-    where a legacy token (issued before the cutoff, before this claim
-    existed) is defaulted to DEFAULT_TENANT_SLUG rather than rejected. This
-    fallback is time-bounded, not a permanent bypass: a claim missing on a
-    token issued after the cutoff is rejected outright.
+    H-2 Phase 0 / MED-5 hardening (RFC 8725). Every check fails closed:
 
-    Also rejects a token whose `iss`/`aud` claim is PRESENT but does not
-    match `issuer`/`audience` (security.md JWT Claims; cross-service replay
-    / audience-confusion). Absence of either claim alone is not rejected --
-    mirroring the bounded tenant-claim handling above, a token minted before
-    `create_jwt_token()` started emitting `iss`/`aud` still verifies (it
-    naturally drains out within the JWT's max-24h lifetime rather than
-    requiring a second timed migration cutoff).
+    * One algorithm per verifier: the header `alg` must be exactly
+      `PLATFORM_JWT_ALGORITHM`; `alg: none` (any case), any other algorithm,
+      and the key-material header parameters `jku`/`jwk`/`x5u`/`x5c`/`crit`
+      are rejected before any signature work.
+    * `iss` and `aud` are ENFORCED, not merely compared when present -- a token
+      without them (or with the wrong ones) is rejected.
+    * Every claim in `REQUIRED_JWT_CLAIMS` must be present, and `sub`/`tenant`
+      must be non-empty strings. There is no default-tenant fallback: a token
+      with no `tenant` is rejected, never treated as `DEFAULT_TENANT_SLUG`.
+    * An empty `secret_key` is refused (a CRITICAL log, not a pass).
+
+    Each call emits `waddles_jwt_verifications_total{verifier,alg,outcome}` and
+    a latency histogram. Logs carry only closed-vocabulary fields -- never the
+    token, its claims or the JWT library's error text.
 
     Args:
         token: JWT token string
@@ -319,103 +429,34 @@ def verify_jwt_token(
         audience: Expected `aud` claim.
 
     Returns:
-        Decoded token payload (always carrying a `tenant` key on success),
-        or None if invalid, expired, missing a mandatory claim, or carrying
-        a mismatched `iss`/`aud`.
+        Decoded token payload (always carrying non-empty `sub` and `tenant`),
+        or None if the token is invalid for any reason above.
     """
+    started = time.perf_counter()
     try:
-        # verify_aud=False: PyJWT auto-rejects a payload that carries a
-        # non-empty `aud` claim when `audience=` isn't passed to decode()
-        # -- every token minted after this fix always carries one. The
-        # explicit mismatch check below (not PyJWT's built-in one) is what
-        # lets an `aud`-less legacy token still verify.
-        payload = jwt.decode(
-            token, secret_key, algorithms=['HS256'], options={'verify_aud': False}
+        payload, alg = _verify_platform_token(token, secret_key, issuer, audience)
+    except JwtRejection as rejection:
+        record_verification(
+            verifier=VERIFIER_PLATFORM_HS256,
+            alg=rejection.alg,
+            outcome=rejection.reason,
+            started=started,
         )
-
-        # Required-claims enforcement (security.md JWT Claims): a token
-        # missing `sub`/`iat`/`exp` previously reached the exp comparison
-        # below and raised an uncaught KeyError (a 500, not a clean 401/403)
-        # instead of failing closed here.
-        for required_claim in ('sub', 'iat', 'exp'):
-            if required_claim not in payload:
-                logger.error(
-                    f"JWT missing mandatory claim '{required_claim}' -- rejecting",
-                    extra={
-                        'event_type': 'AUTH',
-                        'action': 'verify_jwt_token',
-                        'result': 'FAILURE'
-                    }
-                )
-                return None
-
-        # Check expiration. Timezone-aware on both sides -- the previous
-        # `fromtimestamp(exp) < utcnow()` compared local-time-interpreted
-        # exp against naive-UTC now, which falsely expired short-lived
-        # tokens in any timezone behind UTC (and the inverse security bug --
-        # falsely valid past real expiry -- ahead of UTC). Found while
-        # adding the tenant-claim check below; fixed in place since a
-        # broken expiry check undermines everything else in this function.
-        if datetime.fromtimestamp(payload['exp'], tz=timezone.utc) < datetime.now(timezone.utc):
-            logger.warning("JWT token expired")
-            return None
-
-        token_iss = payload.get('iss')
-        if token_iss is not None and token_iss != issuer:
-            logger.error(
-                f"JWT issuer mismatch (got {token_iss!r}, expected {issuer!r}) -- rejecting",
-                extra={
-                    'event_type': 'AUTH',
-                    'action': 'verify_jwt_token',
-                    'result': 'FAILURE'
-                }
-            )
-            return None
-
-        token_aud = payload.get('aud')
-        if token_aud is not None and token_aud != audience:
-            logger.error(
-                f"JWT audience mismatch (got {token_aud!r}, expected {audience!r}) -- rejecting",
-                extra={
-                    'event_type': 'AUTH',
-                    'action': 'verify_jwt_token',
-                    'result': 'FAILURE'
-                }
-            )
-            return None
-
-        if not payload.get('tenant'):
-            issued_at = datetime.fromtimestamp(payload['iat'], tz=timezone.utc)
-            if issued_at < TENANT_CLAIM_MIGRATION_CUTOFF:
-                logger.warning(
-                    f"JWT missing tenant claim -- applying migration-window "
-                    f"default tenant fallback (cutoff {TENANT_CLAIM_MIGRATION_CUTOFF.isoformat()})",
-                    extra={
-                        'event_type': 'AUTH',
-                        'action': 'verify_jwt_token',
-                        'result': 'DEFAULT_TENANT_FALLBACK'
-                    }
-                )
-                payload = {**payload, 'tenant': DEFAULT_TENANT_SLUG}
-            else:
-                logger.error(
-                    "JWT missing mandatory tenant claim past migration cutoff -- rejecting",
-                    extra={
-                        'event_type': 'AUTH',
-                        'action': 'verify_jwt_token',
-                        'result': 'FAILURE'
-                    }
-                )
-                return None
-
-        return payload
-
-    except jwt.ExpiredSignatureError:
-        logger.warning("JWT token expired")
+        log_rejection(
+            verifier=VERIFIER_PLATFORM_HS256, reason=rejection.reason, alg=rejection.alg
+        )
         return None
-    except jwt.InvalidTokenError as e:
-        logger.error(f"Invalid JWT token: {e}")
-        return None
+
+    record_verification(
+        verifier=VERIFIER_PLATFORM_HS256, alg=alg, outcome=OUTCOME_OK, started=started
+    )
+    logger.debug(
+        "JWT verified: verifier=%s alg=%s",
+        VERIFIER_PLATFORM_HS256,
+        alg,
+        extra={'event_type': 'AUTH', 'action': 'verify_jwt_token', 'result': 'SUCCESS'},
+    )
+    return payload
 
 
 def create_api_key(prefix: str = "wa", length: int = 64) -> str:
