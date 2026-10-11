@@ -271,7 +271,9 @@ def test_existing_rows_keep_pre_103_behaviour(existing_db: SeededDb) -> None:
 
 
 @requires_docker
-def test_check_constraints_pin_the_codec_and_protocol_vocabulary(existing_db: SeededDb) -> None:
+def test_check_constraints_pin_the_codec_and_protocol_vocabulary(
+    existing_db: SeededDb,
+) -> None:
     """Valid values are accepted; an out-of-vocabulary value is rejected by Postgres."""
     dsn = existing_db.db.dsn
     _execute(
@@ -326,25 +328,34 @@ def test_existing_and_fresh_paths_converge_on_one_schema(
 
 @requires_docker
 @pytest.mark.parametrize("which", ["fresh", "existing"])
-def test_downgrade_drops_columns_and_ledger_then_upgrade_restores(
+def test_downgrade_retains_columns_and_drops_only_ledger_then_upgrade_restores(
     which: str, fresh_db: PgTestDatabase, existing_db: SeededDb
 ) -> None:
-    """Downgrade removes the five columns + ledger row (rows intact); re-upgrade restores them."""
+    """Downgrade keeps the five columns (+ data); only the ledger row goes; re-upgrade re-ledgers."""
     dsn = fresh_db.dsn if which == "fresh" else existing_db.db.dsn
+    if _scalar(dsn, "SELECT count(*) FROM streaming_configs") == 0:
+        _seed_pre_103(dsn)  # fresh DB has no rows; seed one so there is data to protect
+    config_id = int(str(_scalar(dsn, "SELECT min(id) FROM streaming_configs")))
+    # Operator data in a 103 column must survive the rollback.
+    _execute(dsn, "UPDATE streaming_configs SET video_codec = 'av1' WHERE id = %s", (config_id,))
     schema_before = _snapshot(dsn)
     configs_before = _scalar(dsn, "SELECT count(*) FROM streaming_configs")
     targets_before = _scalar(dsn, "SELECT count(*) FROM streaming_targets")
 
     alembic_cli("downgrade", _PRE_REVISION, dsn=dsn)
-    assert _present_columns(dsn) == set(), "downgrade must drop all five 103 columns"
+    assert _present_columns(dsn) == set(_COLUMNS), "downgrade must RETAIN all five 103 columns"
     assert not (set(_LEGACY_VERSIONS) & _ledger(dsn)), "downgrade must remove the ledger row"
     assert _scalar(dsn, "SELECT count(*) FROM streaming_configs") == configs_before
     assert _scalar(dsn, "SELECT count(*) FROM streaming_targets") == targets_before
+    stored = _scalar(dsn, "SELECT video_codec FROM streaming_configs WHERE id = %s", (config_id,))
+    assert stored == "av1", "operator data in a 103 column must survive the downgrade"
+    assert _snapshot(dsn) == schema_before
 
     alembic_cli("upgrade", "head", dsn=dsn)
     assert _present_columns(dsn) == set(_COLUMNS)
-    assert set(_LEGACY_VERSIONS) <= _ledger(dsn)
+    assert set(_LEGACY_VERSIONS) <= _ledger(dsn), "re-upgrade must restore the ledger row"
     assert _snapshot(dsn) == schema_before
+    _execute(dsn, "UPDATE streaming_configs SET video_codec = 'h264' WHERE id = %s", (config_id,))
 
 
 @requires_docker
