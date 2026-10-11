@@ -856,7 +856,7 @@ grants:
     table: sso_identities
     privileges: [SELECT, INSERT, UPDATE, DELETE]
 
-  # 0060_suppression_records: ban-evasion suppression (per-tenant keyed one-way codes).
+  # 0059_suppression_records: ban-evasion suppression (per-tenant keyed one-way codes).
   # The HMAC key never leaves hub-api, so no other role can compute or test a code --
   # explicit empty rows keep the live-grants equality check honest (no unexamined gap).
   - role: hub_api

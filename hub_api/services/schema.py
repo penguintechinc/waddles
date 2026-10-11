@@ -1147,9 +1147,9 @@ def bind_privacy_tables(dal: Any, *, migrate: bool = False) -> None:
 
 
 def bind_suppression_tables(dal: Any, *, migrate: bool = False) -> None:
-    """Bind `suppression_records` (alembic 0060): per-tenant keyed ban-evasion codes.
+    """Bind `suppression_records` (alembic 0059): per-tenant keyed ban-evasion codes.
 
-    Columns match `0060_suppression_records.py` exactly. There is deliberately no column
+    Columns match `0059_suppression_records.py` exactly. There is deliberately no column
     naming a person, a community or an offence; `hmac` is the keyed one-way code from
     `services/suppression_keys.py`. Idempotent per DAL instance.
     """

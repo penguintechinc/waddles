@@ -15,7 +15,7 @@
 | Data subjects | Users whose account is erased while a `community_members` row of theirs has `role = 'banned'` |
 | Roles (proposed) | Tenant = controller of its own ban list; Waddles = processor (Art. 28). **Open question 1** |
 | Scope | Per tenant. A code never matches outside the tenant that wrote it |
-| Code / tests | `hub_api/services/ban_suppression.py`, `suppression_keys.py`, `data_privacy_service.py`; migration `0060_suppression_records` |
+| Code / tests | `hub_api/services/ban_suppression.py`, `suppression_keys.py`, `data_privacy_service.py`; migration `0059_suppression_records` |
 
 ## 1. What changed and why
 
@@ -93,7 +93,7 @@ continued exclusion from the community that banned them -- the intended effect o
 |---|---|
 | Keyed, not salted; key in `hub-api` only, never in the DB | `suppression_keys.py`; chart mounts `TENANT_KEK_HEX` into hub-api only (`test_suppression_hub_api_env_render.py`) |
 | Per tenant: HKDF per-tenant key, tenant-scoped queries, platform bound into the MAC | `test_ban_suppression.py::TestReturnRecatch` |
-| Closed restriction vocabulary (DB CHECK), no free text | migration 0060 + `alembic/tests/test_0060_suppression_records.py::TestClosedVocabulary` |
+| Closed restriction vocabulary (DB CHECK), no free text | migration 0059 + `alembic/tests/test_0059_suppression_records.py::TestClosedVocabulary` |
 | Written only for an *active ban*; benign erasure keeps nothing and never touches the key | `TestErasureBranching` |
 | Same transaction as erasure; a missing key aborts the whole erasure (no silent un-suppressed erasure) | `TestFailLoud` |
 | Expiry honoured at lookup even before the purge job runs; hourly purge; operator `purge` | `TestReturnRecatch`, `TestPurgeLoop`, `cli/suppression.py` |

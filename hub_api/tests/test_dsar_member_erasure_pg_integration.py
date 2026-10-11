@@ -61,7 +61,7 @@ LEGACY_SQL_DIR = Path(__file__).resolve().parents[2] / "config" / "postgres" / "
 
 @pytest.fixture(scope="module")
 def pg_db() -> Iterator[PgTestDatabase]:
-    """One real Postgres 17 container migrated to head (0045/0048 trigger, 0050, 0060)."""
+    """One real Postgres 17 container migrated to head (0045/0048 trigger, 0050, 0059)."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
     with migrated_postgres("hub-api-suppression-pg") as db:
