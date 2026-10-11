@@ -56,7 +56,7 @@ The numbered SQL files are replayed **only** by `0001_baseline` on a *fresh* dat
 |---|---|
 | 084-096 | `0014_wave1a_bundle_seeds` |
 | 097, 099-102 (098: ledger row only -- DDL is `0039_event_sync_enabled`) | `0060_port_legacy_sql_097_102` |
-| 103 `streaming_codec_columns` (PR #799) | **pending** -- port as a new revision once #799 lands |
+| 103 `streaming_codec_columns` | `0061_port_legacy_sql_103_codec` (downgrade drops the 5 columns + ledger row) |
 
 ### Initialization Flow
 
