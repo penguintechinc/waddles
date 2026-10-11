@@ -262,6 +262,7 @@ async fn ffmpeg_error_lines_never_leak_relay_urls_into_logs_or_pipeline_status()
             stall_timeout: Duration::from_secs(30),
             stop_grace_timeout: Duration::from_millis(200),
             term_grace_timeout: Duration::from_millis(200),
+            reap_timeout: Duration::from_millis(500),
         },
     );
     let id = Uuid::new_v4();
@@ -331,7 +332,6 @@ fn debug_renderings_of_ingest_credentials_never_contain_the_raw_value() {
         kind: IngestKind::Rtmp,
         key: KEY.to_string(),
         stream: Box::new(tokio::io::empty()),
-        span: tracing::Span::none(),
     };
     let inputs = vec![
         InputSpec::Rtmp {
