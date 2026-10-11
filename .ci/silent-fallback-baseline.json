@@ -3,12 +3,6 @@
   "tracking_issue": "gh-605",
   "entries": [
     {
-      "rule_id": "rust-silent-unwrap-or-default",
-      "path": "bundles/rust/example/src/lib.rs",
-      "line": 33,
-      "line_hash": "ca372531513a93f5"
-    },
-    {
       "rule_id": "python-capability-silent-denial",
       "path": "core/ai_researcher_module/services/bot_detection.py",
       "line": 504,

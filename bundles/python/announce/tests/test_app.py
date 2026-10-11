@@ -635,3 +635,69 @@ def test_validate_key_accepts_good_input(key: str) -> None:
 def test_key_allowed_chars_excludes_space_and_colon() -> None:
     assert " " not in _KEY_ALLOWED_CHARS
     assert ":" not in _KEY_ALLOWED_CHARS
+
+
+# -- PII-free logs (gh-674) ----------------------------------------------------------
+
+_PII_ACTOR = "PIIACTOR_alice"
+_PII_TEXT = "PIITEXT_secret_phrase"
+
+
+def _roundtrip(text: str, **role: bool) -> Any:
+    """Run `transform()` then `dispatch()` -- the real two-stage path -- with PII sentinels."""
+    event = _sample_event(text, **role)
+    event.actor = _PII_ACTOR
+    out = _run(transform(event))
+    assert out is not None
+    envelope = StageEnvelope(
+        tenant="tenant-1",
+        community="comm-1",
+        app_id="waddles.core.example.announce",
+        stage="action",
+        event=out,
+        ts="2026-10-05T00:00:00.000Z",
+    )
+    return _run(dispatch(envelope, {}, http_client=None))
+
+
+def _assert_logs_pii_free(host: _FakeHost, *sentinels: str) -> int:
+    """Assert no sentinel appears in any recorded log call; return how many were examined."""
+    assert host.log_calls, "no log calls recorded -- the PII check would pass vacuously"
+    for _lvl, message, fields_json in host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in sentinels:
+            assert sentinel.lower() not in blob
+    return len(host.log_calls)
+
+
+# regression: gh-674 -- bundles must never log raw user input (keys/messages) or raw identity.
+def test_logs_never_contain_actor_key_or_message_text(fake_host: _FakeHost) -> None:
+    _roundtrip(f"!announce set PIIKEY_{_PII_TEXT} {_PII_TEXT}", is_mod=True)  # key invalid chars
+    _roundtrip(f"!announce set piikey {_PII_TEXT}", is_mod=True)  # applied
+    _roundtrip(f"!announce set piikey {_PII_TEXT}")  # denied: no role signal
+    _roundtrip("!announce piikey")  # get
+    _roundtrip("!announce list")
+    _roundtrip("!announce remove piikey", is_mod=True)  # applied
+    _roundtrip(f"!announce remove piikey {_PII_TEXT}", is_mod=True)  # malformed
+    _roundtrip(f"!announce bogus {_PII_TEXT}")  # usage
+    assert _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TEXT, "piikey") >= 8
+
+
+# regression: gh-674 -- error paths log the error class / reason, never typed text.
+def test_error_path_logs_never_contain_actor_key_or_message_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _FakeHost()
+    _install(monkeypatch, host, kv_set_raises=_KvError())
+    with pytest.raises(RuntimeError, match="kv set failed"):
+        _roundtrip(f"!announce set piikey {_PII_TEXT}", is_mod=True)
+    assert any(m == "announce.kv_error" for _lvl, m, _f in host.log_calls)
+    _assert_logs_pii_free(host, _PII_ACTOR, _PII_TEXT, "piikey")
+
+    host2 = _FakeHost()
+    _install(monkeypatch, host2)
+    host2.store[_scoped_registry_key()] = b"\xff\xfe not valid utf-8"
+    with pytest.raises(RuntimeError, match="corrupt registry"):
+        _roundtrip("!announce piikey")
+    assert any(m == "announce.state_corrupt" for _lvl, m, _f in host2.log_calls)
+    _assert_logs_pii_free(host2, _PII_ACTOR, "piikey")

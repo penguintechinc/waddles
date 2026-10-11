@@ -163,3 +163,91 @@ def test_transform_and_dispatch_never_log_the_raw_option_text_or_actor(fake_host
         fields = json.loads(fields_json)
         assert "actor" not in fields
         assert "text" not in fields
+
+
+# regression: gh-674 -- bundles must never log raw user input or raw identity, on ANY branch
+# (pipe-separated pick, whitespace pick, usage, too-many, too-long).
+def test_logs_never_contain_actor_or_option_text_on_any_branch(fake_host) -> None:
+    for text in (
+        "!choose PIIOPT_a PIIOPT_b",
+        "!choose PIIOPT_a | PIIOPT_b | PIIOPT_c",
+        "!choose PIIOPT_only",
+        "!choose " + " ".join(f"PIIOPT_{i}" for i in range(MAX_OPTIONS + 1)),
+        "!choose PIIOPT_a | " + "x" * (MAX_OPTION_LEN + 1),
+    ):
+        event = _sample_event(text)
+        event.actor = "PIIACTOR_alice"
+        out = _run(transform(event))
+        assert out is not None
+        envelope = _sample_envelope("twitch", out.payload["text"])
+        envelope.event.actor = "PIIACTOR_alice"
+        _run(dispatch(envelope, {}, http_client=None))
+
+    assert len(fake_host.log_calls) >= 10, "too few log calls -- PII check would be vacuous"
+    for _level, message, fields_json in fake_host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        assert "piiactor_alice" not in blob
+        assert "piiopt_" not in blob
+
+
+def test_flag_is_queried_default_off_so_it_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bundle must ask the host for `waddles.command-choose` with `default_value=False`."""
+    asked: list[tuple[str, bool]] = []
+
+    def _enabled(key: str, default_value: bool) -> bool:
+        asked.append((key, default_value))
+        return default_value
+
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
+        flags=types.SimpleNamespace(enabled=_enabled)
+    )
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+
+    assert _run(transform(_sample_event("!choose a b"))) is None
+    assert asked == [("waddles.command-choose", False)]
+
+
+def test_exactly_max_options_and_max_len_are_accepted(fake_host) -> None:
+    options = [f"o{i}" for i in range(MAX_OPTIONS)]
+    result = _run(transform(_sample_event("!choose " + " ".join(options))))
+    assert result is not None
+    assert result.payload["text"] in options
+
+    edge = "x" * MAX_OPTION_LEN
+    result = _run(transform(_sample_event(f"!choose {edge} | b")))
+    assert result is not None
+    assert result.payload["text"] in (edge, "b")
+
+
+@pytest.mark.parametrize("text", ["!choose a |", "!choose | a", "!choose a | | ", "!choose |||"])
+def test_empty_pipe_segments_are_dropped_and_too_few_options_reply_usage(
+    text: str, fake_host
+) -> None:
+    result = _run(transform(_sample_event(text)))
+    assert result is not None
+    assert result.payload["text"] == _USAGE
+
+
+def test_empty_pipe_segments_between_valid_options_are_ignored(fake_host) -> None:
+    result = _run(transform(_sample_event("!choose a | | b")))
+    assert result is not None
+    assert result.payload["text"] in ("a", "b")
+
+
+def test_pick_is_drawn_via_random_choice_over_the_parsed_options(
+    monkeypatch: pytest.MonkeyPatch, fake_host
+) -> None:
+    import app
+
+    seen: list[list[str]] = []
+
+    def _pick_last(options: list[str]) -> str:
+        seen.append(list(options))
+        return options[-1]
+
+    monkeypatch.setattr(app.random, "choice", _pick_last)
+    result = _run(transform(_sample_event("!choose pizza night | movie night")))
+    assert result is not None
+    assert seen == [["pizza night", "movie night"]]
+    assert result.payload["text"] == "movie night"
