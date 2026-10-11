@@ -1,13 +1,14 @@
 //! P4 routes: the live overlay viewer channel (SSE + websocket, `GET
-//! .../live` and `GET .../live/ws`) and the push endpoint (`POST
-//! .../push`) action-stage adapters call. Both route groups are mounted
-//! already wrapped by `overlay_auth`'s guard middleware (see
+//! /{overlay_code}/{surface}/live` and `.../live/ws`) and the push endpoint
+//! (`POST /{overlay_code}/{surface}/push`) action-stage adapters call. Both
+//! route groups are mounted already wrapped by the code-resolving guards (see
 //! `crate::overlay::router::with_view_guard`/`with_push_guard`, wired in
 //! `crate::http::router`) -- every handler in this module runs only after
-//! that guard has validated the caller's credential and inserted the
-//! matching `Extension<ViewCredential>`/`Extension<PushCredential>`, so
-//! handlers trust `credential.community_id` instead of re-parsing/
-//! re-trusting the raw path segment.
+//! that guard has resolved the overlay code to a community, validated the
+//! caller's credential for *that* community and inserted the matching
+//! `Extension<ViewCredential>`/`Extension<PushCredential>`, so handlers trust
+//! `credential.community_id` and never re-parse or re-trust the raw path
+//! segment (which is only the public overlay code).
 //!
 //! Fan-out itself is `crate::overlay::hub::PresentationHub` (P3) -- this
 //! module owns only the HTTP/SSE/websocket framing on top of it.
@@ -55,21 +56,23 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// Path params shared by every route in this module.
 #[derive(Debug, Deserialize)]
 pub struct OverlayRouteParams {
-    /// The raw URL-path segment -- echoed back verbatim into
-    /// [`ConnectedFrame::community`] (see that type's doc on why this is
-    /// the slug, not the resolved numeric id). Never used for
-    /// authorization: `Extension<ViewCredential>`/`Extension<
-    /// PushCredential>`'s already-validated `community_id` is what gates
-    /// access, not this string.
-    pub community: String,
+    /// The raw URL-path segment: the community's overlay code. Echoed back
+    /// verbatim into [`ConnectedFrame::community`] (see that type's doc on why
+    /// this is the slug, not the resolved numeric id -- it now genuinely is an
+    /// opaque slug, so the integer id never leaves the service). Never used for
+    /// authorization: `Extension<ViewCredential>`/`Extension<PushCredential>`'s
+    /// already-validated `community_id` is what gates access, not this string.
+    pub overlay_code: String,
     pub surface: String,
 }
 
-/// `POST /overlay/{community}/{surface}/push`'s response body.
+/// `POST /{overlay_code}/{surface}/push`'s response body.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PushResponseBody {
     pub status: &'static str,
-    pub community: String,
+    /// The overlay code the caller addressed, echoed back (the caller already
+    /// holds it; the integer community id is never exposed).
+    pub overlay_code: String,
     pub surface: &'static str,
 }
 
@@ -97,7 +100,7 @@ fn render_error_to_api(err: RenderError) -> ApiError {
     }
 }
 
-/// `POST /overlay/{community}/{surface}/push` -- renders one push and
+/// `POST /{overlay_code}/{surface}/push` -- renders one push and
 /// publishes the sanitized frame to every current subscriber of this
 /// community/surface.
 ///
@@ -141,13 +144,10 @@ pub async fn push(
 ) -> Result<Json<PushResponseBody>, ApiError> {
     let started = Instant::now();
     let surface = parse_surface(&params.surface).ok_or_else(|| unknown_surface(&params.surface))?;
-    // Never echo or trust the unvalidated path segment: it must match the
-    // community the verified credential was issued for.
-    if params.community != credential.community_id.to_string() {
-        return Err(ApiError::Forbidden(
-            "path community does not match credential".to_string(),
-        ));
-    }
+    // No path/credential comparison here: the PUSH guard resolved
+    // `params.overlay_code` to a community and verified the credential is
+    // scoped to exactly that community, so `credential.community_id` is
+    // authoritative and the path segment is just the public handle.
     // `image` and `caption` have their own PUSH routes (literal path
     // segments that win over this generic one). Reaching here with either
     // means a routing regression; refuse loudly rather than render it with
@@ -219,7 +219,7 @@ pub async fn push(
     );
     Ok(Json(PushResponseBody {
         status: "published",
-        community: params.community,
+        overlay_code: params.overlay_code,
         surface: surface.as_str(),
     }))
 }
@@ -238,7 +238,7 @@ enum LiveEnvelope<'a> {
     Rendered(&'a RenderedFrame),
 }
 
-/// `GET /overlay/{community}/{surface}/live` -- SSE live-update channel.
+/// `GET /{overlay_code}/{surface}/live` -- SSE live-update channel.
 /// First frame is always the [`ConnectedFrame`]; every frame after is a
 /// fanned-out, already-sanitized [`RenderedFrame`]. Keep-alive comments (axum's
 /// built-in [`KeepAlive`]) are sent every [`HEARTBEAT_INTERVAL`] of
@@ -257,7 +257,7 @@ pub async fn live_sse(
         "overlay SSE subscriber connected"
     );
     let connected = ConnectedFrame {
-        community: params.community,
+        community: params.overlay_code,
         surface,
     };
     Ok(Sse::new(live_event_stream(subscription, connected))
@@ -330,7 +330,7 @@ fn live_event_stream(
     )
 }
 
-/// `GET /overlay/{community}/{surface}/live/ws` -- websocket equivalent of
+/// `GET /{overlay_code}/{surface}/live/ws` -- websocket equivalent of
 /// [`live_sse`]: same Connected-frame-then-rendered-frames contract, same JSON
 /// frame shape per message (a websocket text frame instead of SSE's
 /// `data: ...\n\n` wrapping -- the JSON itself is identical across both
@@ -351,7 +351,7 @@ pub async fn live_ws(
         "overlay websocket subscriber connected"
     );
     let connected = ConnectedFrame {
-        community: params.community,
+        community: params.overlay_code,
         surface,
     };
     Ok(ws.on_upgrade(move |socket| {
@@ -447,6 +447,9 @@ mod tests {
     use futures::StreamExt;
     use overlay_schema::{AlertPayload, ChatMessagePayload, GoalPayload};
     use std::sync::Arc;
+
+    /// An arbitrary well-formed overlay code (the handlers only echo it).
+    const CODE: &str = "a1b2c3d4e5f60718";
 
     fn test_hub() -> PresentationHub<RenderedFrame> {
         PresentationHub::new(register_hub_metrics(&prometheus::Registry::new()))
@@ -550,7 +553,7 @@ mod tests {
 
     async fn do_push(
         state: &AppState,
-        community: &str,
+        overlay_code: &str,
         credential_community: i64,
         surface: &str,
         body: OverlayPush,
@@ -559,7 +562,7 @@ mod tests {
             State(state.clone()),
             Extension(fake_push_credential(credential_community)),
             Path(OverlayRouteParams {
-                community: community.to_string(),
+                overlay_code: overlay_code.to_string(),
                 surface: surface.to_string(),
             }),
             Json(body),
@@ -591,7 +594,7 @@ mod tests {
         let (state, resolver) = test_state();
         let mut sub = state.frame_hub.subscribe(42, Surface::Chat);
 
-        let Json(response) = do_push(&state, "42", 42, "chat", hostile_chat())
+        let Json(response) = do_push(&state, CODE, 42, "chat", hostile_chat())
             .await
             .expect("push succeeds");
         assert_eq!(response.status, "published");
@@ -631,7 +634,7 @@ mod tests {
     async fn push_does_not_touch_the_raw_hub() {
         let (state, _) = test_state();
         let mut raw = state.hub.subscribe(42, Surface::Chat);
-        let _ = do_push(&state, "42", 42, "chat", hostile_chat())
+        let _ = do_push(&state, CODE, 42, "chat", hostile_chat())
             .await
             .expect("push succeeds");
         let waited = tokio::time::timeout(Duration::from_millis(100), raw.recv()).await;
@@ -651,7 +654,7 @@ mod tests {
         let mut sub = state.frame_hub.subscribe(42, Surface::Media);
         let _ = do_push(
             &state,
-            "42",
+            CODE,
             42,
             "media",
             OverlayPush {
@@ -673,7 +676,7 @@ mod tests {
         state.detokenizer = Arc::new(OverlayDetokenizer::new(Arc::new(FakeResolver::failing())));
         state.community_ctx = Arc::new(StaticCommunityContextStore::ok("7"));
         let mut sub = state.frame_hub.subscribe(42, Surface::Chat);
-        let _ = do_push(&state, "42", 42, "chat", hostile_chat())
+        let _ = do_push(&state, CODE, 42, "chat", hostile_chat())
             .await
             .expect("a hub-api outage must not drop the push");
         let frame = match sub.recv().await {
@@ -694,7 +697,7 @@ mod tests {
         let (mut state, resolver) = test_state();
         state.community_ctx = Arc::new(StaticCommunityContextStore::failing(StaticFailure::Db));
         let mut sub = state.frame_hub.subscribe(42, Surface::Chat);
-        let _ = do_push(&state, "42", 42, "chat", hostile_chat())
+        let _ = do_push(&state, CODE, 42, "chat", hostile_chat())
             .await
             .expect("a lookup failure must not drop the push");
         let frame = match sub.recv().await {
@@ -719,7 +722,7 @@ mod tests {
             StaticFailure::NotFound,
         ));
         let mut sub = state.frame_hub.subscribe(42, Surface::Chat);
-        let err = do_push(&state, "42", 42, "chat", hostile_chat())
+        let err = do_push(&state, CODE, 42, "chat", hostile_chat())
             .await
             .expect_err("unknown community");
         assert_eq!(
@@ -736,7 +739,7 @@ mod tests {
         let (state, _) = test_state();
         let mut sub = state.frame_hub.subscribe(42, Surface::Chat);
         // `chat` with no `chat_message` is a missing-field rejection.
-        let err = do_push(&state, "42", 42, "chat", OverlayPush::default())
+        let err = do_push(&state, CODE, 42, "chat", OverlayPush::default())
             .await
             .expect_err("empty chat push");
         assert_eq!(
@@ -756,7 +759,7 @@ mod tests {
         let mut sub = state.frame_hub.subscribe(42, Surface::Media);
         let err = do_push(
             &state,
-            "42",
+            CODE,
             42,
             "media",
             OverlayPush {
@@ -775,15 +778,38 @@ mod tests {
             .is_err());
     }
 
+    /// The path segment is only the public handle: the frame is published
+    /// under the *credential's* community, and the response echoes the code the
+    /// caller already holds -- never the integer community id.
     #[tokio::test]
-    async fn push_handler_rejects_community_mismatch_with_403() {
+    async fn push_publishes_under_the_credentials_community_and_echoes_only_the_code() {
         let (state, _) = test_state();
-        let err = do_push(&state, "43", 42, "media", OverlayPush::default())
-            .await
-            .expect_err("mismatched community must be rejected");
-        assert_eq!(
-            err.into_response().status(),
-            axum::http::StatusCode::FORBIDDEN
+        let mut sub_42 = state.frame_hub.subscribe(42, Surface::Media);
+        let mut sub_43 = state.frame_hub.subscribe(43, Surface::Media);
+        let Json(response) = do_push(
+            &state,
+            CODE,
+            42,
+            "media",
+            OverlayPush {
+                title: Some("hello".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("push succeeds");
+        assert_eq!(response.overlay_code, CODE);
+        let json = serde_json::to_string(&response).expect("response serializes");
+        assert!(
+            !json.contains("community"),
+            "response leaks a community field: {json}"
+        );
+        assert!(matches!(sub_42.recv().await, Some(RecvOutcome::Push(_))));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), sub_43.recv())
+                .await
+                .is_err(),
+            "another community's subscriber must not see this push"
         );
     }
 
@@ -792,7 +818,7 @@ mod tests {
         let (state, _) = test_state();
         let err = do_push(
             &state,
-            "42",
+            CODE,
             42,
             "not-a-real-surface",
             OverlayPush::default(),
@@ -810,7 +836,7 @@ mod tests {
     async fn push_handler_refuses_surfaces_that_own_a_dedicated_route() {
         let (state, _) = test_state();
         for surface in ["image", "caption"] {
-            let err = do_push(&state, "42", 42, surface, OverlayPush::default())
+            let err = do_push(&state, CODE, 42, surface, OverlayPush::default())
                 .await
                 .expect_err("dedicated-route surface must be refused here");
             assert_eq!(
@@ -955,11 +981,13 @@ mod tests {
         // The pusher-facing response is a stable contract.
         let body = serde_json::to_value(PushResponseBody {
             status: "published",
-            community: "42".to_string(),
+            overlay_code: CODE.to_string(),
             surface: "chat",
         })
         .unwrap();
         assert_eq!(body["status"], "published");
+        assert_eq!(body["overlay_code"], CODE);
+        assert!(body.get("community").is_none());
         // And an alert push renders through the same path (no panics on the
         // optional-field shapes callers send).
         let alert = OverlayPush {

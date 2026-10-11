@@ -115,6 +115,7 @@ cascade into immutable history.
 |---|---|---|
 | authz | `authz.denied` | any authenticated 403 (scope check or inline authz); unauthenticated 401/403 are *not* recorded (no identity; cannot bloat the chain) |
 | authn | `authn.session_issued` (`auth_method`: password, admin_password, register, email_verification, temp_password, refresh, passkey, `oauth_<platform>`) | `create_session_token`, the single mint site of every login path; the audit write happens **before** the session row is persisted |
+| authn | `authn.session_revoked` (`reason`: logout, logout_all, password_changed, refresh_reuse; `kind`: session / user) | `record_session_revoked` from `auth_service` / `session_service` (best-effort: the revocation has already taken effect, so an unrecordable event is logged at ERROR and counted but never undoes it) and, for the superadmin revoke routes, the route map |
 | tenant | `tenant.created/updated/deleted/settings_changed/modules_changed` | route map `SEMANTIC_ROUTES` |
 | role | `tenant.admin_added/removed`, `role.super_admin_changed/vendor_changed/analytics_consumer_changed/member_changed/platform_user_changed/definition_changed` | route map |
 | user | `user.created/updated/deleted/password_reset` | route map |

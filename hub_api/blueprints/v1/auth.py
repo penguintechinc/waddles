@@ -22,6 +22,7 @@ docstring for why `tenant_middleware`/`require_scope` alone don't expose
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -31,16 +32,24 @@ from quart_schema import validate_request, validate_response
 
 from config import HubAPIConfig
 from services import auth_service, branding_service, oauth_service, passkey_service
-from services.current_user import get_current_user_id, get_optional_current_user_id
+from services.current_user import (
+    get_current_session_id,
+    get_current_user_id,
+    get_optional_current_user_id,
+)
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.session_cookie import (
     clear_session_cookie_after_request,
+    issue_refresh_cookie,
     issue_session_cookie,
+    refresh_token_from_cookie,
     set_session_cookie,
 )
 
 auth_bp = Blueprint("v1_auth", __name__, url_prefix="/api/v1/auth")
+
+logger = logging.getLogger(__name__)
 
 
 def _cfg() -> HubAPIConfig:
@@ -575,31 +584,81 @@ async def link_oauth_legacy() -> tuple[dict[str, object], int]:
 @auth_bp.route("/refresh", methods=["POST"])
 @validate_response(RefreshResponse)
 async def refresh() -> RefreshResponse | tuple[dict[str, object], int]:
-    """Refresh."""
+    """Renew the session: the HttpOnly refresh cookie in, a fresh 15-minute access token out.
+
+    The refresh token rotates on every use (the browser takes the new `Set-Cookie`); presenting
+    one that was already rotated away revokes the whole session. The response body still carries
+    the new access `token` (the SPA ignores it -- it lives in the cookie).
+    """
     async_dal, dal = _dal()
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header[7:] if auth_header.startswith("Bearer ") else None
-    if not token:
-        body = await request.get_json(silent=True) or {}
-        token = body.get("token")
+    cfg = _cfg()
     try:
-        new_token = await auth_service.refresh_token(async_dal, dal, _cfg(), token=token or "")
+        renewed = await auth_service.refresh_session(
+            async_dal, dal, cfg, refresh_token=refresh_token_from_cookie(request) or ""
+        )
     except ApiError as exc:
+        logger.info("%s refused: status=%s code=%s", "refresh", exc.status_code, exc.code)
         return _err(exc)
-    issue_session_cookie(new_token)
-    return RefreshResponse(success=True, token=new_token)
+    issue_session_cookie(renewed.access_token)
+    if renewed.refresh_token is not None:
+        issue_refresh_cookie(renewed.refresh_token, max_age=cfg.refresh_token_ttl_seconds)
+    return RefreshResponse(success=True, token=renewed.access_token)
 
 
 @auth_bp.route("/logout", methods=["POST"])
 @validate_response(SimpleSuccessResponse)
 async def logout() -> SimpleSuccessResponse:
-    """Logout."""
+    """End this login session: its refresh token, its access tokens, and both cookies."""
     async_dal, dal = _dal()
     auth_header = request.headers.get("Authorization", "")
-    token = auth_header[7:] if auth_header.startswith("Bearer ") else None
-    await auth_service.logout(async_dal, dal, token=token)
+    access_token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+    await auth_service.logout(
+        async_dal,
+        dal,
+        _cfg(),
+        access_token=access_token,
+        refresh_token=refresh_token_from_cookie(request),
+    )
     clear_session_cookie_after_request()
     return SimpleSuccessResponse(success=True)
+
+
+@auth_bp.route("/logout-all", methods=["POST"])
+@validate_response(SimpleSuccessResponse)
+async def logout_all() -> SimpleSuccessResponse | tuple[dict[str, object], int]:
+    """Sign out everywhere: every login session of the caller ends and every token issued dies."""
+    async_dal, dal = _dal()
+    try:
+        user_id = get_current_user_id(request)
+        await auth_service.logout_all(async_dal, dal, user_id=user_id)
+    except ApiError as exc:
+        logger.info("%s refused: status=%s code=%s", "logout_all", exc.status_code, exc.code)
+        return _err(exc)
+    clear_session_cookie_after_request()
+    return SimpleSuccessResponse(success=True)
+
+
+async def _renew_from_refresh_cookie(async_dal: Any, dal: Any) -> int | None:
+    """Silently renew an expired access token from the refresh cookie (SPA load after 15 minutes).
+
+    `/me` answers "not logged in" (200, `user: null`) rather than 401 for a missing/expired
+    access token, so the SPA's 401 interceptor never fires for it -- without this a user would
+    look signed out every 15 minutes while holding a perfectly good refresh cookie. Any refusal
+    (no cookie, revoked, expired, reused) is simply "not logged in".
+    """
+    cookie = refresh_token_from_cookie(request)
+    if not cookie:
+        return None
+    cfg = _cfg()
+    try:
+        renewed = await auth_service.refresh_session(async_dal, dal, cfg, refresh_token=cookie)
+    except ApiError as exc:
+        logger.debug("silent renewal declined: status=%s code=%s", exc.status_code, exc.code)
+        return None
+    issue_session_cookie(renewed.access_token)
+    if renewed.refresh_token is not None:
+        issue_refresh_cookie(renewed.refresh_token, max_age=cfg.refresh_token_ttl_seconds)
+    return renewed.user_id
 
 
 @auth_bp.route("/me", methods=["GET"])
@@ -608,6 +667,8 @@ async def me() -> MeResponse:
     """Me."""
     async_dal, dal = _dal()
     user_id = get_optional_current_user_id(request)
+    if user_id is None:
+        user_id = await _renew_from_refresh_cookie(async_dal, dal)
     result = await auth_service.get_current_user(async_dal, dal, user_id=user_id)
     if result is None:
         return MeResponse(success=True, user=None)
@@ -657,6 +718,8 @@ async def set_password(
         )
     except ApiError as exc:
         return _err(exc)
+    # Every session -- this one included -- ended with the old password; the caller signs in again.
+    clear_session_cookie_after_request()
     return SimpleSuccessResponse(success=True)
 
 
@@ -829,8 +892,15 @@ async def oauth_unlink(platform: str) -> SimpleSuccessResponse | tuple[dict[str,
     async_dal, dal = _dal()
     try:
         user_id = get_current_user_id(request)
-        await oauth_service.unlink_account(async_dal, dal, user_id=user_id, platform=platform)
+        await oauth_service.unlink_account(
+            async_dal,
+            dal,
+            user_id=user_id,
+            platform=platform,
+            keep_session_id=get_current_session_id(request),
+        )
     except ApiError as exc:
+        logger.info("%s refused: status=%s code=%s", "oauth_unlink", exc.status_code, exc.code)
         return _err(exc)
     return SimpleSuccessResponse(success=True)
 

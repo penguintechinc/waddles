@@ -104,11 +104,17 @@ class TestNormalize:
         assert event.payload["is_owner"] is False
         assert event.payload["is_sponsor"] is False
 
-    async def test_truthy_non_bool_flags_are_coerced_to_bool(self) -> None:
+    async def test_truthy_non_bool_flags_fail_closed(self) -> None:
+        """Only a real `True` grants a role -- a truthy non-bool must NOT (mod-gate bypass).
+
+        Previously asserted the opposite (`bool(1)`/`bool("yes")` -> True), which locked in the
+        same defect that promoted a `"false"`-string non-moderator to a moderator. See
+        `test_badge_flags_regression.py` for the full hostile-value matrix.
+        """
         raw = {"live_chat_id": "chat123", "text": "hi", "is_mod": 1, "is_owner": "yes"}
         event = await normalize(raw)
-        assert event.payload["is_mod"] is True
-        assert event.payload["is_owner"] is True
+        assert event.payload["is_mod"] is False
+        assert event.payload["is_owner"] is False
 
     async def test_platform_defaults_to_youtube_when_absent(self) -> None:
         raw = {"live_chat_id": "chat123", "text": "hi"}

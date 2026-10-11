@@ -26,6 +26,24 @@ use svc_presentation::overlay::caption_store::{
 
 pub const AUTHOR: &str = "11111111-1111-1111-1111-111111111111";
 
+/// Overlay codes the shared fixtures resolve (`overlay::code`): the unguessable
+/// first path segment of every overlay URL. Deliberately unrelated to the
+/// community ids they name, so a test that confuses the two fails.
+pub const CODE_42: &str = "a1b2c3d4e5f60718";
+pub const CODE_43: &str = "b2c3d4e5f6071829";
+pub const CODE_7: &str = "c3d4e5f607182930";
+/// Well-formed, but names no community.
+pub const CODE_UNKNOWN: &str = "ffffffffffffffff";
+
+/// The fixed code -> community table every fixture state resolves through.
+pub fn test_overlay_codes() -> Arc<dyn svc_presentation::overlay::OverlayCodeResolver> {
+    Arc::new(svc_presentation::overlay::StaticOverlayCodes::new([
+        (CODE_42, 42),
+        (CODE_43, 43),
+        (CODE_7, 7),
+    ]))
+}
+
 pub fn config_with(extra_args: &[&str]) -> Config {
     let mut args = vec!["svc-presentation"];
     args.extend_from_slice(extra_args);
@@ -54,6 +72,7 @@ pub fn state_with_view_credential(community_id: i64, token: &str, enabled: bool)
         .into_connection();
     let mut state = AppState::new(config_with(&[]), prometheus::Registry::new(), db);
     state.captions_flag = boxed(StaticFlag(enabled));
+    state.overlay_codes = test_overlay_codes();
     state
 }
 
@@ -62,6 +81,7 @@ pub fn state_with_no_queries(enabled: bool) -> AppState {
     let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
     let mut state = AppState::new(config_with(&[]), prometheus::Registry::new(), db);
     state.captions_flag = boxed(StaticFlag(enabled));
+    state.overlay_codes = test_overlay_codes();
     state
 }
 
@@ -140,8 +160,8 @@ pub fn caption_push(original: &str) -> OverlayPush {
     }
 }
 
-/// A `PushCredential` as `overlay_auth::require_push_credential` would have
-/// inserted it, for handler-level tests that bypass the guard.
+/// A `PushCredential` as the PUSH guard would have inserted it, for
+/// handler-level tests that bypass the guard.
 pub fn push_credential(community_id: i64) -> PushCredential {
     PushCredential {
         claims: service_auth::ServiceClaims {
@@ -246,8 +266,8 @@ pub fn sign_push_token(community_id: i64) -> String {
     .expect("sign test JWT")
 }
 
-/// State wired to a live local JWKS server, so the real
-/// `overlay_auth::require_push_credential` guard verifies real signatures.
+/// State wired to a live local JWKS server, so the real code-resolving PUSH
+/// guard verifies real signatures.
 pub async fn state_with_real_push_trust(enabled: bool) -> AppState {
     let jwks_url = spawn_jwks_server().await;
     let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
@@ -257,6 +277,7 @@ pub async fn state_with_real_push_trust(enabled: bool) -> AppState {
         db,
     );
     state.captions_flag = boxed(StaticFlag(enabled));
+    state.overlay_codes = test_overlay_codes();
     state
 }
 
@@ -285,6 +306,7 @@ pub async fn state_with_real_push_trust_and_view(
         db,
     );
     state.captions_flag = boxed(StaticFlag(enabled));
+    state.overlay_codes = test_overlay_codes();
     state
 }
 

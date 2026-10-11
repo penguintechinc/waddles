@@ -33,6 +33,15 @@ _TABLE_MODEL_PAIRS = [
 ]
 
 
+#: Columns later migrations ADDed to these tables (so the models carry them but 0035's own
+#: ``CREATE TABLE`` never did). ``test_0058_provider_connections.py`` proves this set equals what
+#: 0058 actually adds, so it cannot silently grow stale.
+_COLUMNS_ADDED_LATER = {
+    "platform_connections": {"resource_metadata", "expires_at", "status_reason"},  # 0058
+    "community_connection_access": {"enabled"},  # 0058
+}
+
+
 def _load_migration() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         "migration_0035_connection_model_layers", _MIGRATION_PATH
@@ -126,7 +135,7 @@ class TestNoDriftBetweenMigrationAndModels:
     @pytest.mark.parametrize("table,model_name", _TABLE_MODEL_PAIRS)
     def test_migration_columns_match_model_columns(self, table: str, model_name: str) -> None:
         sql = _migration_sql()
-        sql_columns = _sql_columns_for_table(sql, table)
+        sql_columns = _sql_columns_for_table(sql, table) | _COLUMNS_ADDED_LATER[table]
         model_columns = _model_columns(model_name)
 
         missing_from_model = sql_columns - model_columns

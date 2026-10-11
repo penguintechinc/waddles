@@ -183,7 +183,18 @@ class AAALogger:
         self.logger.info(f"Authorization: {action} - {result}", extra=extra)
 
     def audit(self, action: str, user: str, community: str, result: str, **kwargs):
-        """Log audit event"""
+        """Log audit event.
+
+        All four of ``action``, ``user``, ``community`` and ``result`` are REQUIRED -- a
+        missing one (or a message passed as the first positional alongside ``action=``)
+        raises ``TypeError``, which on a handler's success path surfaces as a 500 / a swallowed
+        failure after the work was already done. ``user`` is the actor: an opaque id (never a
+        username/email/display name), or the literal ``"system"`` when no end-user principal is
+        in scope. ``community`` is ``""`` for events that are not community-scoped. Free-text
+        context goes in an extra such as ``detail=``; extras must not be named ``event_type``
+        (reserved by ``_build_extra``). ``tests/test_aaa_logger_call_sites.py`` executes every
+        call site in the repo against this signature.
+        """
         extra = self._build_extra("AUDIT", user=user, community=community, action=action, result=result, **kwargs)
         self.logger.info(f"Audit: {action} - {result}", extra=extra)
 

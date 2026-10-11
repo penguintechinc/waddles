@@ -292,6 +292,63 @@ infrastructure:
     # real traffic.
     bundleMigratorPassword: ""
     bundleRuntimePassword: ""
+    # ---- Per-service database accounts (security findings H-1 / H-3) -----------------
+    # `username`/`password` above are the database OWNER (superuser) credential. It is
+    # rendered into <release>-db-admin (consumed ONLY by the Postgres Deployment's
+    # POSTGRES_PASSWORD) and the db-migrate hook Secret -- NOT into waddlebot-secrets,
+    # which ~40 pods envFrom. Every other workload connects as ITS OWN least-privilege role
+    # from config/postgres/service-roles.yaml (provisioned by alembic 0055 and re-asserted
+    # on every db-migrate Job run); see docs/DATABASE_CREDENTIALS.md.
+    admin:
+      # Operator/ExternalSecret-managed Secret with a POSTGRES_PASSWORD key. Empty =>
+      # the chart renders <release>-db-admin (alpha/local: generated; beta/gamma/prod:
+      # `password` above must be set explicitly, or the Secret pre-populated).
+      existingSecret: ""
+    serviceRoles:
+      # Operator/ExternalSecret-managed Secret with a PW_<ROLE_UPPERCASE> key for EVERY
+      # role below (e.g. PW_WADDLES_HUB_API). Empty => the chart renders
+      # <release>-db-credentials: passwords are generated in alpha/local (and KEPT across
+      # upgrades), and REQUIRED -- via `passwords` below or a pre-populated Secret -- in
+      # beta/gamma/production. Values must be >=16 chars of [A-Za-z0-9._~-]; placeholder /
+      # `changeme`-style values are rejected at render time. Never commit real values.
+      existingSecret: ""
+      passwords: {}   # {waddles_hub_api: "<secret>", ...} -- out-of-git override file only
+      # MUST equal the role names in config/postgres/service-roles.yaml (drift-tested by
+      # alembic/tests/test_service_roles_catalog.py). Order is irrelevant to the chart.
+      roles:
+        - waddles_hub_api
+        - waddles_svc_ingest
+        - waddles_svc_process
+        - waddles_svc_core
+        - waddles_svc_action
+        - waddles_svc_presentation
+        - waddles_svc_streaming
+        - waddles_reputation
+        - waddles_legacy_discord_collector
+        - waddles_legacy_googlechat_collector
+        - waddles_legacy_kick_collector
+        - waddles_legacy_mattermost_collector
+        - waddles_legacy_slack_collector
+        - waddles_legacy_teams_collector
+        - waddles_legacy_twitch_collector
+        - waddles_legacy_youtube_live_collector
+        - waddles_legacy_ai_researcher
+        - waddles_legacy_core_community
+        - waddles_legacy_core_data
+        - waddles_legacy_core_identity
+        - waddles_legacy_hub
+        - waddles_legacy_marketplace
+        - waddles_legacy_router
+        - waddles_legacy_interactive_ai
+        - waddles_legacy_interactive_gaming
+        - waddles_legacy_interactive_media
+        - waddles_legacy_interactive_productivity
+        - waddles_legacy_interactive_social
+        - waddles_legacy_interactive_loyalty
+        - waddles_legacy_action_platforms
+        - waddles_legacy_action_serverless
+        - waddles_legacy_trigger_streaming
+        - waddles_legacy_trigger_webhooks
     readReplicas:
       enabled: false
       count: 2
@@ -2936,6 +2993,79 @@ autoProvisionedKeys:
     secretKey: "ONE_TIME_SECRET_ENCRYPTION_KEY"
     externalSecret: false
 
+# Enterprise external KMS / BYOK (customer-managed keys) -- the Enterprise-tier upsell ON TOP OF
+# the platform-managed at-rest baseline, NEVER a substitute (security.md Encryption: Storage).
+# Default OFF: with kms.enabled=false NOTHING below renders and the baseline keeps working with
+# zero KMS configuration. Design + per-provider setup: docs/guides/external-kms-byok.md.
+#
+# All provider credentials are `existingSecret` references to Secrets you create out-of-band
+# (kubectl / ExternalSecret / SealedSecret) -- no credential value ever lives in this file. The
+# Secret KEY NAMES are fixed (they are the env var names hub-api reads), listed per provider
+# below. Licence gating (`compliance.external_kms`, Enterprise) is enforced at RUNTIME per tenant
+# by hub-api; Helm cannot ask the licence server, so this chart only wires the providers.
+# Misconfiguration (a sub-feature on without kms.enabled, missing credentials, a bad key id)
+# fails the render loudly -- see templates/_kms.tpl `waddlebot.kms.validate`.
+kms:
+  # Master switch. Must be true for either sub-feature below.
+  enabled: false
+
+  # Per-tenant customer-managed keys wrapping each tenant's data-encryption keys (hub-api,
+  # hub_api/services/envelope/). Tenants opt in via PUT /api/v1/tenant/<slug>/kms.
+  tenantKeys:
+    enabled: false
+    # Which providers hub-api accepts tenant keys for: any of aws_kms, gcp_kms, azure_key_vault.
+    providers: []
+    timeoutSeconds: 10
+    aws:
+      # The AWS principal customers put in their key role's trust policy (Waddles' own role/user
+      # ARN, e.g. the IRSA role hub-api runs as). Public identifier shown by GET .../kms.
+      platformPrincipal: ""
+      # Optional https:// overrides (VPC / FIPS / GovCloud endpoints). Empty = AWS default.
+      kmsEndpointUrl: ""
+      stsEndpointUrl: ""
+      # Optional Secret (keys AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) for clusters WITHOUT IRSA /
+      # Pod Identity. Empty = the ambient identity (IRSA / Pod Identity) -- preferred.
+      credentialsSecret: ""
+    gcp:
+      kmsEndpoint: ""             # empty = https://cloudkms.googleapis.com/v1
+      # Service-account email customers grant on their key. Derived automatically when a
+      # service-account key is supplied; set it here only for Workload Identity / metadata auth.
+      platformPrincipal: ""
+      # Optional Secret with key ENVELOPE_GCP_CREDENTIALS_JSON (a service-account key document).
+      # Empty = GKE Workload Identity / the GCE metadata-server identity -- preferred.
+      credentialsSecret: ""
+    azure:
+      authority: ""               # empty = https://login.microsoftonline.com
+      # REQUIRED when azure_key_vault is enabled: Secret with keys ENVELOPE_AZURE_CLIENT_ID and
+      # ENVELOPE_AZURE_CLIENT_SECRET (the multi-tenant Entra application customers consent to).
+      credentialsSecret: ""
+
+  # SeaweedFS object-storage SSE-KMS under the OPERATOR's key (deployment-wide, not per tenant).
+  #   off   baseline only: SSE-S3 (AES256) via WEED_S3_SSE_KEK -- the default
+  #   kms   bucket default + hub-api uploads use the KMS key (hub-api enforces the Enterprise
+  #         entitlement of `entitlementTenant`; unentitled writes FAIL LOUDLY, never fall back)
+  #   drain exit ramp (never entitlement-gated): bucket default and new uploads return to the
+  #         baseline while the KMS provider stays LOADED so objects already written under KMS
+  #         remain readable. Re-encrypt them (docs/guides/external-kms-byok.md), then set `off`.
+  # SeaweedFS ships aws and gcp KMS providers only (no native Azure Key Vault provider).
+  objectStorage:
+    mode: "off"
+    provider: ""                  # aws_kms | gcp_kms
+    keyId: ""                     # AWS key ARN/alias, or GCP CryptoKey resource name
+    entitlementTenant: "system"   # tenant slug whose Enterprise entitlement gates `kms` mode
+    aws:
+      region: ""
+      endpoint: ""                # optional https:// (VPC endpoint); empty = AWS default
+      credentialsSecret:
+        name: ""                  # existingSecret with the KMS client's access key pair
+        accessKeyIdKey: "AWS_ACCESS_KEY_ID"
+        secretAccessKeyKey: "AWS_SECRET_ACCESS_KEY"
+    gcp:
+      projectId: ""
+      credentialsSecret:
+        name: ""                  # existingSecret holding a service-account key JSON
+        key: "credentials.json"
+
 # Enterprise SSO (SAML 2.0 / OIDC -- Enterprise tier, Google OAuth2 -- Professional tier).
 # Backend: hub_api/services/sso_*.py, migration 0049_sso_connections. Entitlement is
 # enforced in code by the two-gate feature check (flags `waddles.auth.sso_saml` /
@@ -2948,6 +3078,16 @@ autoProvisionedKeys:
 # alpha/local: SSO is entitlement-gated, so an unentitled deployment must still install.
 # hub-api's `secretKeyRef` is `optional: true` and SSO then fails loudly at request time
 # (503 `SSO_UNAVAILABLE`, log code `sso_key_missing`) instead of the chart failing.
+# Ban-evasion suppression (GDPR Art. 6(1)(f), counsel to verify -- docs/compliance/suppression-LIA.md).
+# An erased user with an ACTIVE ban leaves one `suppression_records` row: a per-tenant keyed
+# one-way code of the platform id (HMAC under an HKDF key derived from the platform tenant KEK,
+# `autoProvisionedKeys.tenantKek`, mounted into hub-api only), a closed restriction enum and an
+# expiry. A user with no active ban leaves nothing behind.
+suppression:
+  # Optional ceiling, in days, on how long ANY suppression row lives (1-3650). Empty (default) =
+  # a ban with no expiry is kept until a moderator lifts it. Set it to bound retention
+  # (Art. 5(1)(e) storage limitation) once counsel has chosen a period.
+  maxRetentionDays: ""
 sso:
   # false -> render nothing and inject no SSO env into hub-api.
   enabled: true

@@ -233,3 +233,59 @@ async def record_session_issued(
         },
     )
     await service.record(event)
+
+
+async def record_session_revoked(
+    *,
+    user_id: int | None,
+    tenant_slug: str | None,
+    reason: str,
+    kind: str,
+    sessions: int,
+    session_id: int | None = None,
+) -> None:
+    """Audit a session revocation (logout, sign-out-everywhere, credential change, reuse).
+
+    Unlike :func:`record_session_issued` this never raises: the revocation has ALREADY taken
+    effect, and failing the request after it would tell the user a password change or logout
+    failed when it did not. An unrecordable event is not silent -- ``AuditService.record``
+    already logged it at ERROR and counted it (``report_write_failure``); this adds the
+    revocation context. ``reason`` is a closed identifier (``logout``, ``password_changed``,
+    ``logout_all``, ``refresh_reuse``), ``kind`` is ``session`` or ``user``, ``user_id`` is
+    ``None`` for system-initiated revocations (actor kind ``system``); ``session_id`` names the
+    revoked session when exactly one was ended.
+    """
+    service = get_service()
+    if service is None:
+        logger.debug("session revocation audit: no AuditService wired; revocation not audited")
+        return
+    try:
+        known = (
+            await service.find_tenant(tenant_id=None, tenant_slug=tenant_slug)
+            if tenant_slug
+            else None
+        )
+        await service.record(
+            AuditEvent(
+                category=AuditCategory.AUTHN,
+                action=AuditAction.SESSION_REVOKED,
+                outcome=AuditOutcome.SUCCESS,
+                actor_kind=ActorKind.USER if user_id is not None else ActorKind.SYSTEM,
+                actor_user_id=user_id,
+                tenant_id=known[0] if known is not None else None,
+                target_type="session",
+                target_id=str(session_id) if session_id is not None else None,
+                details={
+                    "reason": reason,
+                    "kind": kind,
+                    "sessions": sessions,
+                    "tenant_known": known is not None,
+                },
+            )
+        )
+    except AuditWriteError:
+        logger.error(
+            "session revocation took effect, audit event NOT recorded: reason=%s kind=%s",
+            reason,
+            kind,
+        )

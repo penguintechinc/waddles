@@ -188,10 +188,10 @@ async def allowed(client: EntitlementClient, flag: str, **kwargs: object) -> boo
 # ---------------------------------------------------------------------------
 class TestCatalogMatchesContracts:
     def test_denominator_is_the_full_catalog(self) -> None:
-        # 56 contracts, 25 non-free -- a gate over zero examined items is a fail.
-        assert len(ALL_CONTRACTS) == 56
-        assert len(LICENSED_CONTRACTS) == 25
-        assert len(FEATURE_MIN_TIERS) == 25
+        # 57 contracts, 26 non-free -- a gate over zero examined items is a fail.
+        assert len(ALL_CONTRACTS) == 57
+        assert len(LICENSED_CONTRACTS) == 26
+        assert len(FEATURE_MIN_TIERS) == 26
 
     @pytest.mark.parametrize("contract", ALL_CONTRACTS, ids=lambda c: c.id)
     def test_required_tier_equals_contract_min_tier_from_catalog_alone(
@@ -265,7 +265,7 @@ class TestTierEnforcement:
     async def test_every_contract_at_every_tier(
         self, contract: FeatureContract, held_tier: str
     ) -> None:
-        """Flag ON everywhere; the decision must be exactly `held >= min_tier`, for all 56 contracts."""
+        """Flag ON everywhere; the decision must be exactly `held >= min_tier`, for all 57 contracts."""
         client, _, _ = make_client(tier=held_tier, flag=True)
         expected = tier_level(held_tier) >= required_level(contract.min_tier)
         assert await allowed(client, contract.flag) is expected, (
@@ -829,21 +829,21 @@ class TestRealLicenseClientIntegration:
     async def test_mcp_tool_listing_no_longer_leaks_licensed_features_to_a_free_tenant(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`entitled_features` (the per-tenant MCP tool source) over the REAL 56-contract registry."""
+        """`entitled_features` (the per-tenant MCP tool source) over the REAL 57-contract registry."""
         free_lic = _real_license_client(key="")
         client, registry = _wire_real_stack(free_lic)
         monkeypatch.setattr(feature_flags_module, "get_entitlement_client", lambda: client)
-        assert len(registry.all_contracts()) == 56
+        assert len(registry.all_contracts()) == 57
 
         visible = await entitled_features(tenant=TENANT, contracts=registry.all_contracts())
         assert {c.id for c in visible} == {c.id for c in ALL_CONTRACTS if c.min_tier == "free"}
-        assert len(visible) == 56 - 25
+        assert len(visible) == 57 - 26
 
         ent_lic = _real_license_client(key="PENG-TEST-0000")
         ent_lic.session.post = lambda *a, **k: _FakeHttpResponse(200, _license_payload("enterprise"))  # type: ignore[method-assign,assignment]
         ent_client, _ = _wire_real_stack(ent_lic)
         monkeypatch.setattr(feature_flags_module, "get_entitlement_client", lambda: ent_client)
-        assert len(await entitled_features(tenant=TENANT, contracts=registry.all_contracts())) == 56
+        assert len(await entitled_features(tenant=TENANT, contracts=registry.all_contracts())) == 57
 
     async def test_default_singleton_client_enforces_without_any_registry_or_wiring(
         self, monkeypatch: pytest.MonkeyPatch

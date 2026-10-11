@@ -40,6 +40,7 @@ def _run(coro):
 def host(monkeypatch: pytest.MonkeyPatch) -> FakeEconomyHost:
     h = install_fake_economy_host(monkeypatch, {ALICE, BOB})
     h.balances[ALICE] = 100
+    h.actor = ALICE  # the invocation was triggered by alice
     return h
 
 
@@ -108,6 +109,7 @@ def test_insufficient_funds_carries_the_balance_and_moves_nothing(host: FakeEcon
     with pytest.raises(economy.InsufficientFundsError) as ei:
         _run(economy.wager(ALICE, 101, 0))
     assert ei.value.balance == 100
+    host.actor = BOB  # bob's own invocation: he can only spend what HE holds
     with pytest.raises(economy.InsufficientFundsError) as ei2:
         _run(economy.transfer(BOB, ALICE, 1))
     assert ei2.value.balance == 0
@@ -118,6 +120,7 @@ def test_insufficient_funds_carries_the_balance_and_moves_nothing(host: FakeEcon
 def test_you_cannot_stake_what_you_do_not_hold_even_with_a_huge_payout(
     host: FakeEconomyHost,
 ) -> None:
+    host.actor = BOB
     with pytest.raises(economy.InsufficientFundsError):
         _run(economy.wager(BOB, 1, 100))
 
@@ -307,3 +310,47 @@ def test_wire_ops_match_the_executor_and_stage() -> None:
     for op in ("balance", "wager", "transfer", "max_bet", "leaderboard"):
         assert f'"economy.{op}"' in executor, op
         assert f'"economy.{op}"' in stage, op
+
+
+# --- #751 money-safety: only the invocation's actor's money moves -------------
+
+
+def test_a_wager_on_another_members_account_is_refused_actor_mismatch(
+    host: FakeEconomyHost,
+) -> None:
+    host.balances[BOB] = 300
+    with pytest.raises(economy.DeniedError) as ei:
+        _run(economy.wager(BOB, 50, 0))  # alice triggered this; bob is the victim
+    assert ei.value.code == "actor_mismatch"
+    assert host.balances[BOB] == 300
+    assert host.ledger == []
+
+
+def test_a_transfer_from_another_members_account_is_refused_actor_mismatch(
+    host: FakeEconomyHost,
+) -> None:
+    host.balances[BOB] = 300
+    with pytest.raises(economy.DeniedError) as ei:
+        _run(economy.transfer(BOB, ALICE, 100))  # steal INTO the actor
+    assert ei.value.code == "actor_mismatch"
+    assert host.balances == {ALICE: 100, BOB: 300}
+    assert host.ledger == []
+
+
+def test_the_actor_can_pay_anyone_and_reads_are_not_bound(host: FakeEconomyHost) -> None:
+    host.balances[BOB] = 300
+    _run(economy.transfer(ALICE, BOB, 30))
+    assert _run(economy.balance(BOB)) == 330  # a read of another member is fine
+    assert _run(economy.max_bet(BOB)) == 330
+
+
+def test_an_unlinked_actor_cannot_move_money_at_all(host: FakeEconomyHost) -> None:
+    host.actor = None
+    for call in (
+        lambda: economy.wager(ALICE, 1, 0),
+        lambda: economy.transfer(ALICE, BOB, 1),
+    ):
+        with pytest.raises(economy.DeniedError) as ei:
+            _run(call())
+        assert ei.value.code == "not_linked"
+    assert host.ledger == []

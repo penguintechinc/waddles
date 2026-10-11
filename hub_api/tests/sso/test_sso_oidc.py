@@ -348,6 +348,21 @@ class TestIdTokenValidation:
     async def test_hmac_alg_confusion_is_rejected(self) -> None:
         await self._expect(FakeOidcIdp(alg="HS256"), "oidc_alg_rejected")
 
+    @pytest.mark.parametrize("param", ["jku", "jwk", "x5u", "x5c", "crit"])
+    async def test_key_material_header_params_are_rejected(self, param: str) -> None:
+        """A token naming its own verification key is rejected (H-2 Phase 0).
+
+        Hostile even when it is otherwise perfectly valid and signed by the IdP's real key.
+        """
+        idp = FakeOidcIdp(extra_headers={param: "https://evil.example/jwks.json"})
+        err = await self._expect(idp, "oidc_header_rejected")
+        assert "evil.example" not in err.message
+
+    async def test_header_control_valid_token_with_the_same_kid_logs_in(self) -> None:
+        idp = FakeOidcIdp(extra_headers={"typ": "JWT"})
+        identity = await _login(idp, _settings_for(idp))
+        assert identity.subject == "idp-subject-1"
+
     async def test_token_signed_by_an_attacker_key_is_rejected(self) -> None:
         attacker = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         await self._expect(FakeOidcIdp(signing_key_override=attacker), "oidc_id_token_invalid")
@@ -517,3 +532,83 @@ def test_allowed_algorithms_never_include_symmetric_or_none() -> None:
     assert not [a for a in sso_oidc.ALLOWED_ID_TOKEN_ALGS if a.startswith("HS") or a == "none"]
     assert "RS256" in sso_oidc.ALLOWED_ID_TOKEN_ALGS
     assert jwt.get_algorithm_by_name("RS256") is not None
+
+
+class TestVerificationTelemetry:
+    """Per-algorithm verification metric for ID tokens (H-2 Phase 0): counted, never zero."""
+
+    @pytest.fixture
+    def capture(self) -> Any:
+        from flask_core import jwt_hardening
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+        reader = InMemoryMetricReader()
+        jwt_hardening.use_meter_provider(MeterProvider(metric_readers=[reader]))
+
+        def points() -> dict[tuple[str, str, str], int]:
+            data = reader.get_metrics_data()
+            found: dict[tuple[str, str, str], int] = {}
+            for resource in data.resource_metrics if data else []:
+                for scope in resource.scope_metrics:
+                    for metric in scope.metrics:
+                        if metric.name == "waddles_jwt_verifications_total":
+                            for p in metric.data.data_points:
+                                a = p.attributes
+                                found[(a["verifier"], a["alg"], a["outcome"])] = int(p.value)
+            return found
+
+        yield points
+        jwt_hardening.use_meter_provider(None)
+
+    async def _attempt(self, idp: FakeOidcIdp) -> None:
+        if idp.kid == "rotated-away":  # sign with a kid the advertised JWKS does not carry
+            idp.jwks_keys_override = [idp.public_jwk(idp.key, "kid-1")]
+        try:
+            await _login(idp, _settings_for(idp))
+        except SsoProtocolError:
+            pass
+
+    async def test_success_is_counted_with_its_algorithm(self, capture: Any) -> None:
+        await self._attempt(FakeOidcIdp())
+        assert capture() == {("oidc_id_token", "rs256", "ok"): 1}
+
+    @pytest.mark.parametrize(
+        ("idp_kwargs", "key"),
+        [
+            ({"alg": "none"}, ("oidc_id_token", "none", "alg_none")),
+            ({"alg": "HS256"}, ("oidc_id_token", "hs256", "alg_mismatch")),
+            (
+                {"extra_headers": {"jku": "https://evil.example/k"}},
+                ("oidc_id_token", "rs256", "forbidden_header"),
+            ),
+            ({"claims": {"aud": "someone-else"}}, ("oidc_id_token", "rs256", "bad_audience")),
+            (
+                {"claims": {"iss": "https://evil.example.com"}},
+                ("oidc_id_token", "rs256", "bad_issuer"),
+            ),
+            ({"id_token_ttl": -3600}, ("oidc_id_token", "rs256", "expired")),
+            ({"claims": {"sub": None}}, ("oidc_id_token", "rs256", "missing_claim")),
+            ({"kid": "rotated-away"}, ("oidc_id_token", "rs256", "unknown_kid")),
+        ],
+        ids=["none", "hs256", "jku", "aud", "iss", "expired", "no-sub", "unknown-kid"],
+    )
+    async def test_each_rejection_is_counted_under_its_own_outcome(
+        self, capture: Any, idp_kwargs: dict[str, Any], key: tuple[str, str, str]
+    ) -> None:
+        await self._attempt(FakeOidcIdp(**idp_kwargs))
+        points = capture()
+        assert points, "no verification metric was emitted"
+        assert points.get(key) == 1, points
+
+    async def test_nothing_sensitive_is_logged_for_a_rejected_token(
+        self, capture: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        idp = FakeOidcIdp(extra_headers={"jku": "https://evil.example/SECRET-PATH-4242"})
+        with caplog.at_level(logging.DEBUG):
+            await self._attempt(idp)
+        assert "reason=forbidden_header" in caplog.text
+        assert "SECRET-PATH-4242" not in caplog.text
+        assert "idp-subject-1" not in caplog.text

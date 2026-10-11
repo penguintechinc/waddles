@@ -387,10 +387,12 @@ class MattermostBotService:
 
             if post:
                 self.logger.audit(
-                    "Relayed message sent to channel",
                     action="relay_send",
-                    channel=channel_id,
-                    result="SUCCESS"
+                    user="system",
+                    community="",
+                    result="SUCCESS",
+                    detail="Relayed message sent to channel",
+                    channel=channel_id
                 )
                 return True
 
@@ -411,10 +413,11 @@ class MattermostBotService:
                 )
 
                 self.logger.audit(
-                    "Event sent to router",
                     action="router_forward",
                     user=event_data.get('user_id'),
-                    result="SUCCESS" if response.status_code < 400 else "FAILED"
+                    community=str(event_data.get("community_id") or ""),
+                    result="SUCCESS" if response.status_code < 400 else "FAILED",
+                    detail="Event sent to router"
                 )
 
                 if response.status_code == 200:

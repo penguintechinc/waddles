@@ -1495,6 +1495,42 @@ components:
       - updatedByUserId
       title: CredentialDTO
       type: object
+    CredentialFieldDTO:
+      description: One credential input a provider takes (a descriptor, never a value).
+      properties:
+        description:
+          title: Description
+          type: string
+        name:
+          title: Name
+          type: string
+        required:
+          title: Required
+          type: boolean
+      required:
+      - name
+      - required
+      - description
+      title: CredentialFieldDTO
+      type: object
+    CredentialsBody:
+      additionalProperties: false
+      description: Token pair as supplied by an admin. Unknown fields are a 400; secrets
+        never reach a repr.
+      properties:
+        access_token:
+          title: Access Token
+          type: string
+        refresh_token:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Refresh Token
+      required:
+      - access_token
+      title: CredentialsBody
+      type: object
     DashboardStatsDTO:
       description: Dashboard stats DTO.
       properties:
@@ -1519,6 +1555,102 @@ components:
       - totalMembers
       - adminCount
       title: DashboardStatsDTO
+      type: object
+    DataPlaneBindingDTO:
+      description: One (community, connection) pair the data plane should run. Carries
+        no token.
+      properties:
+        capabilities:
+          items:
+            type: string
+          title: Capabilities
+          type: array
+        communityId:
+          title: Communityid
+          type: integer
+        connectionId:
+          title: Connectionid
+          type: integer
+        expiresAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Expiresat
+        grantId:
+          title: Grantid
+          type: integer
+        metadata:
+          additionalProperties: true
+          title: Metadata
+          type: object
+        provider:
+          title: Provider
+          type: string
+        resourceId:
+          title: Resourceid
+          type: string
+        resourceType:
+          title: Resourcetype
+          type: string
+        tenantId:
+          title: Tenantid
+          type: integer
+        updatedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updatedat
+      required:
+      - grantId
+      - connectionId
+      - communityId
+      - tenantId
+      - provider
+      - resourceType
+      - resourceId
+      - capabilities
+      - expiresAt
+      - updatedAt
+      - metadata
+      title: DataPlaneBindingDTO
+      type: object
+    DekDTO:
+      description: 'Response DTO: a no-secrets summary of one DEK version.'
+      properties:
+        activatedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Activatedat
+        dekVersion:
+          title: Dekversion
+          type: integer
+        kekKind:
+          title: Kekkind
+          type: string
+        kekRef:
+          title: Kekref
+          type: string
+        retiredAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Retiredat
+        status:
+          title: Status
+          type: string
+        usageCount:
+          title: Usagecount
+          type: integer
+      required:
+      - dekVersion
+      - kekKind
+      - kekRef
+      - status
+      - usageCount
+      - activatedAt
+      - retiredAt
+      title: DekDTO
       type: object
     DeletionRequestDTO:
       description: Deletion request DTO.
@@ -1958,6 +2090,59 @@ components:
       - email
       - avatarUrl
       title: JoinRequestListItemDTO
+      type: object
+    KmsConfigDTO:
+      description: 'Response DTO: one tenant KMS config. `externalId` is the proof-of-control
+        token.'
+      properties:
+        externalId:
+          title: Externalid
+          type: string
+        keyRef:
+          title: Keyref
+          type: string
+        lastErrorCode:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lasterrorcode
+        lastVerifiedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lastverifiedat
+        principal:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Principal
+        provider:
+          title: Provider
+          type: string
+        region:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Region
+        status:
+          title: Status
+          type: string
+        updatedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updatedat
+      required:
+      - provider
+      - keyRef
+      - region
+      - principal
+      - externalId
+      - status
+      - lastVerifiedAt
+      - lastErrorCode
+      - updatedAt
+      title: KmsConfigDTO
       type: object
     KnowledgeChunkDTO:
       description: Nested response field -- Knowledge Chunk.
@@ -2601,6 +2786,34 @@ components:
       - reputation
       - joinedAt
       title: MemberDTO
+      type: object
+    MetadataFieldDTO:
+      description: One metadata input a provider takes.
+      properties:
+        description:
+          title: Description
+          type: string
+        maxLength:
+          title: Maxlength
+          type: integer
+        name:
+          title: Name
+          type: string
+        pattern:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Pattern
+        required:
+          title: Required
+          type: boolean
+      required:
+      - name
+      - required
+      - description
+      - pattern
+      - maxLength
+      title: MetadataFieldDTO
       type: object
     ModuleDTO:
       description: Module summary DTO.
@@ -3375,6 +3588,134 @@ components:
       - memberSince
       title: ProfileDTO
       type: object
+    ProviderConnectionDTO:
+      description: Admin view of one connection. Has no token field of any kind.
+      properties:
+        access:
+          title: Access
+          type: string
+        capabilities:
+          items:
+            type: string
+          title: Capabilities
+          type: array
+        createdAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Createdat
+        enabled:
+          title: Enabled
+          type: boolean
+        expiresAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Expiresat
+        hasRefreshToken:
+          title: Hasrefreshtoken
+          type: boolean
+        id:
+          title: Id
+          type: integer
+        metadata:
+          additionalProperties: true
+          title: Metadata
+          type: object
+        provider:
+          title: Provider
+          type: string
+        resourceType:
+          title: Resourcetype
+          type: string
+        shared:
+          title: Shared
+          type: boolean
+        status:
+          title: Status
+          type: string
+        statusReason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Statusreason
+        updatedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updatedat
+        usable:
+          title: Usable
+          type: boolean
+      required:
+      - id
+      - provider
+      - resourceType
+      - status
+      - statusReason
+      - enabled
+      - access
+      - usable
+      - shared
+      - hasRefreshToken
+      - expiresAt
+      - capabilities
+      - metadata
+      - createdAt
+      - updatedAt
+      title: ProviderConnectionDTO
+      type: object
+    ProviderDTO:
+      description: 'Install descriptor: everything a UI/CLI needs to render the connect
+        form, generically.'
+      properties:
+        capabilities:
+          items:
+            type: string
+          title: Capabilities
+          type: array
+        credentialFields:
+          items:
+            $ref: '#/components/schemas/CredentialFieldDTO'
+          title: Credentialfields
+          type: array
+        displayName:
+          title: Displayname
+          type: string
+        installKind:
+          title: Installkind
+          type: string
+        metadataFields:
+          items:
+            $ref: '#/components/schemas/MetadataFieldDTO'
+          title: Metadatafields
+          type: array
+        provider:
+          title: Provider
+          type: string
+        refreshable:
+          title: Refreshable
+          type: boolean
+        requiredScopes:
+          items:
+            type: string
+          title: Requiredscopes
+          type: array
+        resourceType:
+          title: Resourcetype
+          type: string
+      required:
+      - provider
+      - displayName
+      - installKind
+      - resourceType
+      - capabilities
+      - requiredScopes
+      - refreshable
+      - credentialFields
+      - metadataFields
+      title: ProviderDTO
+      type: object
     PublicCommunityDTO:
       description: Public community DTO (list row).
       properties:
@@ -3783,6 +4124,43 @@ components:
       - createdAt
       title: ReviewDTO
       type: object
+    RewrapDTO:
+      description: 'Response DTO: outcome of re-wrapping every DEK version onto a
+        target KEK.'
+      properties:
+        alreadyCurrent:
+          title: Alreadycurrent
+          type: integer
+        failedVersions:
+          items:
+            type: integer
+          title: Failedversions
+          type: array
+        ok:
+          title: Ok
+          type: boolean
+        rewrapped:
+          title: Rewrapped
+          type: integer
+        targetKind:
+          title: Targetkind
+          type: string
+        targetRef:
+          title: Targetref
+          type: string
+        total:
+          title: Total
+          type: integer
+      required:
+      - targetKind
+      - targetRef
+      - total
+      - rewrapped
+      - alreadyCurrent
+      - failedVersions
+      - ok
+      title: RewrapDTO
+      type: object
     RoleSyncBinding:
       description: One `community_role_sync_bindings` row -- the wire-shape DTO for
         blueprint/API responses.
@@ -3990,6 +4368,39 @@ components:
       - is_active
       - metadata
       title: ServerMemberView
+      type: object
+    SessionDTO:
+      description: One login session -- identifiers and timestamps only, never a token
+        or digest.
+      properties:
+        createdAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Createdat
+        expiresAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Expiresat
+        id:
+          title: Id
+          type: integer
+        isActive:
+          title: Isactive
+          type: boolean
+        revokedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Revokedat
+      required:
+      - id
+      - createdAt
+      - expiresAt
+      - isActive
+      - revokedAt
+      title: SessionDTO
       type: object
     SettingDTO:
       description: Tenant setting DTO.
@@ -12544,7 +12955,30 @@ paths:
                 title: SimpleSuccessResponse
                 type: object
           description: Response DTO for simple success endpoints.
-      summary: Logout.
+      summary: 'End this login session: its refresh token, its access tokens, and
+        both cookies.'
+  /api/v1/auth/logout-all:
+    post:
+      description: ''
+      operationId: post_logout_all
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for simple success endpoints.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: SimpleSuccessResponse
+                type: object
+          description: Response DTO for simple success endpoints.
+      summary: 'Sign out everywhere: every login session of the caller ends and every
+        token issued dies.'
   /api/v1/auth/me:
     get:
       description: ''
@@ -12818,7 +13252,15 @@ paths:
       summary: Set password.
   /api/v1/auth/refresh:
     post:
-      description: ''
+      description: '
+
+        The refresh token rotates on every use (the browser takes the new `Set-Cookie`);
+        presenting
+
+        one that was already rotated away revokes the whole session. The response
+        body still carries
+
+        the new access `token` (the SPA ignores it -- it lives in the cookie).'
       operationId: post_refresh
       parameters: []
       responses:
@@ -12840,7 +13282,8 @@ paths:
                 title: RefreshResponse
                 type: object
           description: Response DTO for refresh endpoints.
-      summary: Refresh.
+      summary: 'Renew the session: the HttpOnly refresh cookie in, a fresh 15-minute
+        access token out.'
   /api/v1/auth/register:
     post:
       description: ''
@@ -13810,6 +14253,228 @@ paths:
           description: Response DTO for a single-ingest-source result (create/update).
       summary: '`PATCH .../ingest-sources/<id>` -- update `label` and/or `enabled`
         only.'
+  /api/v1/communities/{community_id}/provider-connections:
+    get:
+      description: ''
+      operationId: get_list_provider_connections
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response wrapping a community's connections.
+                properties:
+                  connections:
+                    items:
+                      $ref: '#/components/schemas/ProviderConnectionDTO'
+                    title: Connections
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: ProviderConnectionListResponse
+                type: object
+          description: Response wrapping a community's connections.
+      summary: '``GET`` -- this community''s connections. No secret is loaded to build
+        the response.'
+    post:
+      description: ''
+      operationId: post_create_provider_connection
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Body of ``POST``. ``metadata`` keys are the provider's
+                ``metadataFields``.
+              properties:
+                credentials:
+                  $ref: '#/components/schemas/CredentialsBody'
+                enabled:
+                  default: true
+                  title: Enabled
+                  type: boolean
+                metadata:
+                  additionalProperties:
+                    type: string
+                  title: Metadata
+                  type: object
+                provider:
+                  title: Provider
+                  type: string
+              required:
+              - provider
+              - credentials
+              title: CreateConnectionRequest
+              type: object
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Response wrapping one connection.
+                properties:
+                  connection:
+                    $ref: '#/components/schemas/ProviderConnectionDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - connection
+                title: ProviderConnectionResponse
+                type: object
+          description: Response wrapping one connection.
+      summary: '``POST`` -- verify the credential upstream, resolve the resource,
+        store it sealed.'
+  /api/v1/communities/{community_id}/provider-connections/{connection_id}:
+    delete:
+      description: ''
+      operationId: delete_delete_provider_connection
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: connection_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response for DELETE; ``purged`` is true when the shared
+                  link and its tokens were removed.
+                properties:
+                  purged:
+                    title: Purged
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - purged
+                title: DeleteResponse
+                type: object
+          description: Response for DELETE; ``purged`` is true when the shared link
+            and its tokens were removed.
+      summary: '``DELETE`` -- disconnect this community; tokens are purged when no
+        one else uses the link.'
+    get:
+      description: ''
+      operationId: get_get_provider_connection
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: connection_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response wrapping one connection.
+                properties:
+                  connection:
+                    $ref: '#/components/schemas/ProviderConnectionDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - connection
+                title: ProviderConnectionResponse
+                type: object
+          description: Response wrapping one connection.
+      summary: '``GET`` -- one connection of this community.'
+    patch:
+      description: ''
+      operationId: patch_update_provider_connection
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: connection_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Body of ``PATCH``. Omitted fields are unchanged; the provider
+                is immutable.
+              properties:
+                credentials:
+                  anyOf:
+                  - $ref: '#/components/schemas/CredentialsBody'
+                  - type: 'null'
+                  default: null
+                enabled:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Enabled
+                metadata:
+                  anyOf:
+                  - additionalProperties:
+                      type: string
+                    type: object
+                  - type: 'null'
+                  default: null
+                  title: Metadata
+              title: UpdateConnectionRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response wrapping one connection.
+                properties:
+                  connection:
+                    $ref: '#/components/schemas/ProviderConnectionDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - connection
+                title: ProviderConnectionResponse
+                type: object
+          description: Response wrapping one connection.
+      summary: '``PATCH`` -- enable/disable for this community, re-target the resource,
+        rotate the token.'
   /api/v1/communities/{community_id}/streams:
     get:
       description: ''
@@ -14834,6 +15499,33 @@ paths:
             ``intact`` is ``ok``.'
       summary: '`GET /api/v1/compliance/audit/verify` -- recompute the whole chain
         (409 if tampered).'
+  /api/v1/connection-providers:
+    get:
+      description: ''
+      operationId: get_list_connection_providers
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response for ``GET /connection-providers``.
+                properties:
+                  providers:
+                    items:
+                      $ref: '#/components/schemas/ProviderDTO'
+                    title: Providers
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: ProviderListResponse
+                type: object
+          description: Response for ``GET /connection-providers``.
+      summary: '``GET /connection-providers`` -- the install descriptor of every registered
+        provider.'
   /api/v1/connections/callback/{provider}:
     get:
       description: '
@@ -15296,6 +15988,66 @@ paths:
         default:
           description: Undocumented response
       summary: '`GET /api/v1/internal/communities/<id>/connections/<provider>/token`.'
+  /api/v1/internal/communities/{community_id}/provider-connections/{connection_id}/resolve:
+    post:
+      description: ''
+      operationId: post_internal_resolve
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: connection_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: A fresh access token for the data plane (the only secret-bearing
+                  response in this API).
+                properties:
+                  accessToken:
+                    title: Accesstoken
+                    type: string
+                  communityId:
+                    title: Communityid
+                    type: integer
+                  connectionId:
+                    title: Connectionid
+                    type: integer
+                  expiresAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Expiresat
+                  metadata:
+                    additionalProperties: true
+                    title: Metadata
+                    type: object
+                  provider:
+                    title: Provider
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - connectionId
+                - communityId
+                - provider
+                - accessToken
+                title: ResolvedCredentialsDTO
+                type: object
+          description: A fresh access token for the data plane (the only secret-bearing
+            response in this API).
+      summary: '``POST .../resolve`` -- a fresh access token for one usable binding
+        (refresh under lock).'
   /api/v1/internal/live:
     get:
       description: ''
@@ -15573,6 +16325,41 @@ paths:
           description: Undocumented response
       summary: '`GET /api/v1/internal/music/status?community_id=<id>` -- service-to-service
         only.'
+  /api/v1/internal/provider-connections:
+    get:
+      description: ''
+      operationId: get_internal_list
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response for the internal list; ``nextAfter`` is the
+                  cursor for the next page, if any.
+                properties:
+                  items:
+                    items:
+                      $ref: '#/components/schemas/DataPlaneBindingDTO'
+                    title: Items
+                    type: array
+                  nextAfter:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    default: null
+                    title: Nextafter
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: DataPlaneListResponse
+                type: object
+          description: Response for the internal list; ``nextAfter`` is the cursor
+            for the next page, if any.
+      summary: '``GET`` -- usable bindings for one provider across all tenants (no
+        tokens).'
   /api/v1/internal/relay/incoming:
     post:
       description: ''
@@ -19617,6 +20404,153 @@ paths:
                 type: object
           description: Response DTO for password reset endpoints.
       summary: Generate password reset.
+  /api/v1/superadmin/users/{user_id}/revoke-sessions:
+    post:
+      description: ''
+      operationId: post_revoke_user_sessions
+      parameters:
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO for the revoke endpoints.
+
+
+                  `accessTokensRevokedImmediately` is `False` when the shared revocation
+                  store could not be
+
+                  written: refresh is cut off regardless (database), but already-issued
+                  access tokens survive
+
+                  until their own expiry (<= 15 minutes) on other replicas -- the
+                  operator should retry.'
+                properties:
+                  accessTokensRevokedImmediately:
+                    title: Accesstokensrevokedimmediately
+                    type: boolean
+                  sessionsRevoked:
+                    title: Sessionsrevoked
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - sessionsRevoked
+                - accessTokensRevokedImmediately
+                title: RevokeSessionsResponse
+                type: object
+          description: 'Response DTO for the revoke endpoints.
+
+
+            `accessTokensRevokedImmediately` is `False` when the shared revocation
+            store could not be
+
+            written: refresh is cut off regardless (database), but already-issued
+            access tokens survive
+
+            until their own expiry (<= 15 minutes) on other replicas -- the operator
+            should retry.'
+      summary: 'Revoke every session of a user: refresh stops now, every access token
+        issued so far dies.'
+  /api/v1/superadmin/users/{user_id}/sessions:
+    get:
+      description: ''
+      operationId: get_list_user_sessions
+      parameters:
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the list-sessions endpoint.
+                properties:
+                  sessions:
+                    items:
+                      $ref: '#/components/schemas/SessionDTO'
+                    title: Sessions
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - sessions
+                title: SessionsResponse
+                type: object
+          description: Response DTO for the list-sessions endpoint.
+      summary: List a user's login sessions (newest first) so one can be revoked by
+        id.
+  /api/v1/superadmin/users/{user_id}/sessions/{session_id}/revoke:
+    post:
+      description: ''
+      operationId: post_revoke_user_session
+      parameters:
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: session_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO for the revoke endpoints.
+
+
+                  `accessTokensRevokedImmediately` is `False` when the shared revocation
+                  store could not be
+
+                  written: refresh is cut off regardless (database), but already-issued
+                  access tokens survive
+
+                  until their own expiry (<= 15 minutes) on other replicas -- the
+                  operator should retry.'
+                properties:
+                  accessTokensRevokedImmediately:
+                    title: Accesstokensrevokedimmediately
+                    type: boolean
+                  sessionsRevoked:
+                    title: Sessionsrevoked
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - sessionsRevoked
+                - accessTokensRevokedImmediately
+                title: RevokeSessionsResponse
+                type: object
+          description: 'Response DTO for the revoke endpoints.
+
+
+            `accessTokensRevokedImmediately` is `False` when the shared revocation
+            store could not be
+
+            written: refresh is cut off regardless (database), but already-issued
+            access tokens survive
+
+            until their own expiry (<= 15 minutes) on other replicas -- the operator
+            should retry.'
+      summary: Revoke one login session of a user (404 if the session is not theirs).
   /api/v1/superadmin/users/{user_id}/super-admin-role:
     post:
       description: ''
@@ -20382,6 +21316,193 @@ paths:
                 type: object
           description: Response DTO for `GET /<tenant_slug>/communities`.
       summary: Get tenant communities.
+  /api/v1/tenant/{tenant_slug}/kms:
+    delete:
+      description: '
+
+        409 when some DEKs could not be re-wrapped (e.g. the customer key is already
+
+        revoked): the config is kept so they stay addressable, and the body lists
+        them.'
+      operationId: delete_disable_kms
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `DELETE /kms`.
+                properties:
+                  rewrap:
+                    $ref: '#/components/schemas/RewrapDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - rewrap
+                title: KmsDisableResponse
+                type: object
+          description: Response DTO for `DELETE /kms`.
+      summary: 'Exit ramp: re-wrap every DEK back to the platform baseline (never
+        entitlement-gated).'
+    get:
+      description: ''
+      operationId: get_get_kms_status
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /kms`.
+                properties:
+                  config:
+                    anyOf:
+                    - $ref: '#/components/schemas/KmsConfigDTO'
+                    - type: 'null'
+                  keys:
+                    items:
+                      $ref: '#/components/schemas/DekDTO'
+                    title: Keys
+                    type: array
+                  platformPrincipals:
+                    additionalProperties:
+                      type: string
+                    title: Platformprincipals
+                    type: object
+                  success:
+                    title: Success
+                    type: boolean
+                  supportedProviders:
+                    items:
+                      type: string
+                    title: Supportedproviders
+                    type: array
+                required:
+                - success
+                - config
+                - keys
+                - supportedProviders
+                - platformPrincipals
+                title: KmsStatusResponse
+                type: object
+          description: Response DTO for `GET /kms`.
+      summary: Return the tenant's KMS config and a no-secrets DEK summary (not entitlement-gated).
+    put:
+      description: ''
+      operationId: put_put_kms_config
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO for `PUT /kms`: where the customer''s key
+                lives (no secrets).
+
+
+                Lengths are capped at the boundary (the request body limit is sized
+                for bundle uploads, not
+
+                for a key identifier); the provider-specific validators then apply
+                strict patterns.'
+              properties:
+                keyRef:
+                  maxLength: 2048
+                  minLength: 1
+                  title: Keyref
+                  type: string
+                principal:
+                  anyOf:
+                  - maxLength: 2048
+                    type: string
+                  - type: 'null'
+                  default: null
+                  title: Principal
+                provider:
+                  maxLength: 64
+                  minLength: 1
+                  title: Provider
+                  type: string
+                region:
+                  anyOf:
+                  - maxLength: 64
+                    type: string
+                  - type: 'null'
+                  default: null
+                  title: Region
+              required:
+              - provider
+              - keyRef
+              title: KmsConfigRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `PUT /kms`.
+                properties:
+                  config:
+                    $ref: '#/components/schemas/KmsConfigDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - config
+                title: KmsConfigResponse
+                type: object
+          description: Response DTO for `PUT /kms`.
+      summary: Record the customer key as `pending` (Enterprise-gated); moves no key
+        material.
+  /api/v1/tenant/{tenant_slug}/kms/activate:
+    post:
+      description: ''
+      operationId: post_activate_kms
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `POST /kms/activate`.
+                properties:
+                  config:
+                    $ref: '#/components/schemas/KmsConfigDTO'
+                  rewrap:
+                    $ref: '#/components/schemas/RewrapDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - config
+                - rewrap
+                title: KmsActivateResponse
+                type: object
+          description: Response DTO for `POST /kms/activate`.
+      summary: Verify the customer key, re-wrap every DEK onto it, and activate (Enterprise-gated).
   /api/v1/tenant/{tenant_slug}/modules:
     get:
       description: ''

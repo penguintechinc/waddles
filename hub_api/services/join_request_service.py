@@ -22,8 +22,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from services import ban_suppression
 from services.community_authz import require_community_scope
-from services.errors import bad_request, conflict, not_found
+from services.errors import bad_request, conflict, forbidden, not_found
 
 #: OR-check, mirrors `requireCommunityAdmin`'s own
 #: `scopes.includes('community:manage_members') || scopes.includes('community:manage_channels')`.
@@ -226,6 +227,23 @@ async def approve_request(
     if not rows:
         raise not_found("Pending request not found")
     applicant_id = rows.first().user_id
+
+    # Ban-evasion suppression: an applicant whose platform identity matches a non-expired
+    # `suppression_records` row in THIS community's tenant (a banned user who erased their
+    # account and came back) is not admitted -- the restriction is re-applied (membership
+    # written banned + inactive) and the request is closed. Fails closed: a key/database
+    # error propagates and the request stays pending rather than admitting a banned user.
+    match = await ban_suppression.check_and_ban_membership(
+        async_dal, dal, community_id=community_id, hub_user_id=applicant_id
+    )
+    if match is not None:
+        await async_dal.update_async(
+            dal.community_join_requests.id == request_id,
+            status="rejected",
+            reviewed_by=reviewer_id,
+            reviewed_at=datetime.now(UTC),
+        )
+        raise forbidden("Applicant is restricted from joining this tenant")
 
     existing_member = await async_dal.select_async(
         dal(

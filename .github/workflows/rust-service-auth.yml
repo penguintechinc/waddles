@@ -1,0 +1,40 @@
+name: Rust service-auth (lint + test)
+
+# Until now core/service_auth's own tests (the EdDSA machine-JWT verifier every
+# overlay PUSH and egress call is authenticated by) ran in NO workflow: the
+# dependents' workflows only build and test their own crate. This runs fmt +
+# clippy + cargo-deny + the full unit suite with a >=90% coverage gate.
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/service_auth/**'
+      - '.github/workflows/rust-service-auth.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/service_auth/**'
+      # Self-test: a change to this workflow must prove it still gates.
+      - '.github/workflows/rust-service-auth.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: service-auth
+      working_directory: core/service_auth
+      # aws-lc-sys (the jsonwebtoken aws_lc_rs backend) needs cmake + a
+      # C/C++ compiler to build -- same rationale as rust-egress-proxy.yml.
+      extra_apt_packages: cmake build-essential
+      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain)'

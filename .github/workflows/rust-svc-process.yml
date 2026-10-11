@@ -11,6 +11,8 @@ on:
       - 'core/bundle_host_economy/**'
       - 'core/hub_client/**'
       - 'scripts/db/bundle_identity_resolve.sql'
+      - 'scripts/db/bundle_economy_store.sql'
+      - 'scripts/db/bundle_economy_idempotency.sql'
       - '.github/workflows/rust-svc-process.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
@@ -23,6 +25,8 @@ on:
       - 'core/bundle_host_economy/**'
       - 'core/hub_client/**'
       - 'scripts/db/bundle_identity_resolve.sql'
+      - 'scripts/db/bundle_economy_store.sql'
+      - 'scripts/db/bundle_economy_idempotency.sql'
   workflow_dispatch:
 
 permissions:

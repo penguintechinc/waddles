@@ -367,7 +367,7 @@ async fn a_signed_push_reaches_a_connected_viewer_end_to_end() {
     wait_for_channels(&state, 1).await;
 
     let response = reqwest::Client::new()
-        .post(format!("http://{addr}/overlay/42/caption/push"))
+        .post(format!("http://{addr}/{CODE_42}/caption/push"))
         .bearer_auth(sign_push_token(42))
         .json(&caption_push("end to end"))
         .send()
