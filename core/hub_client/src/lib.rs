@@ -836,7 +836,7 @@ mod client_tests {
             identity: IdentityServiceClient::new(channel.clone()),
             key: KeyServiceClient::new(channel),
             token_client: Arc::new(MachineJwtClient::new(token_endpoint, sa_path, "scope")),
-            circuit: Arc::new(CircuitBreaker::new(threshold, Duration::from_secs(60))),
+            circuits: Circuits::new(threshold, Duration::from_secs(60)),
             deadline: Duration::from_millis(500),
             max_retries: 2,
         }
@@ -1015,7 +1015,7 @@ mod client_tests {
         let client = client_with("http://t", "/sa", 100);
         let calls = AtomicUsize::new(0);
         let out = client
-            .call_with_retry(|| async {
+            .call_with_retry(&client.circuits.identity, client.max_retries, || async {
                 if calls.fetch_add(1, Ordering::SeqCst) < 2 {
                     Err(HubClientError::Grpc(Status::unavailable("flap")))
                 } else {
@@ -1033,7 +1033,7 @@ mod client_tests {
         let client = client_with("http://t", "/sa", 100);
         let calls = AtomicUsize::new(0);
         let err = client
-            .call_with_retry(|| async {
+            .call_with_retry(&client.circuits.identity, client.max_retries, || async {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err::<(), _>(HubClientError::Grpc(Status::deadline_exceeded("slow")))
             })
@@ -1048,7 +1048,7 @@ mod client_tests {
         let client = client_with("http://t", "/sa", 100);
         let calls = AtomicUsize::new(0);
         let err = client
-            .call_with_retry(|| async {
+            .call_with_retry(&client.circuits.identity, client.max_retries, || async {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err::<(), _>(HubClientError::Grpc(Status::permission_denied("no")))
             })
@@ -1065,7 +1065,7 @@ mod client_tests {
         let client = client_with("http://t", "/sa", 100);
         let calls = AtomicUsize::new(0);
         let err = client
-            .call_with_retry(|| async {
+            .call_with_retry(&client.circuits.identity, client.max_retries, || async {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err::<(), _>(HubClientError::Auth(ServiceAuthError::BootstrapRejected(
                     "x".into(),
@@ -1080,10 +1080,10 @@ mod client_tests {
     #[tokio::test]
     async fn call_with_retry_fails_fast_when_circuit_open() {
         let client = client_with("http://t", "/sa", 1);
-        client.circuit.record_failure();
+        client.circuits.identity.record_failure();
         let calls = AtomicUsize::new(0);
         let err = client
-            .call_with_retry(|| async {
+            .call_with_retry(&client.circuits.identity, client.max_retries, || async {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, HubClientError>(())
             })
