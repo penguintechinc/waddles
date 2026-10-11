@@ -241,10 +241,13 @@ spec:
                 wd2="$(mktemp -d)"
                 trap 'shred -u -f "'"${wd2}"'"/* 2>/dev/null || true; rm -rf "'"${wd2}"'"' RETURN
                 umask 077
+                # jsonpath keys use the quoted bracket form {.data['<name>']} -- an unquoted
+                # {.data.<name>} treats a '.' inside an operator-chosen KID as a path
+                # separator and would resolve empty (a spurious FATAL below).
                 # Resolve the private-key data field. format=pem: from the Secret's own
                 # active KID (see contract above); format=raw: the literal name.
                 local derive_priv_key="${priv_key}" secret_kid
-                secret_kid="$(kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data.${kid_key}}" | base64 -d)"
+                secret_kid="$(kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data['${kid_key}']}" | base64 -d)"
                 if [ "${format}" = "pem" ]; then
                   if [ -n "${secret_kid}" ]; then
                     echo "resolve: secret/${secret} active KID '${secret_kid}' (from ${kid_key}); chart keyId '${key_id}' ignored"
@@ -255,7 +258,7 @@ spec:
                   fi
                 fi
                 local priv_b64_in
-                priv_b64_in="$(kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data.${derive_priv_key}}")"
+                priv_b64_in="$(kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data['${derive_priv_key}']}")"
                 if [ -z "${priv_b64_in}" ]; then
                   echo "FATAL: secret/${secret} has no non-empty data key '${derive_priv_key}' (expected from ${kid_key}='${secret_kid}', chart keyId='${key_id}', format=${format}). Keys present: $(kubectl -n "${NAMESPACE}" get secret "${secret}" -o go-template='{{ `{{range $k, $_ := .data}}{{$k}} {{end}}` }}')" >&2
                   exit 1
