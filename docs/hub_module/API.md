@@ -128,7 +128,11 @@ OAuth callback handler (handled automatically by OAuth providers).
 ---
 
 ### POST /auth/refresh
-Refresh an expired JWT token.
+Renew the session. Access tokens live 15 minutes; the **rotating refresh token** (HttpOnly cookie
+`wb_refresh`, path `/api/v1/auth`) renews them with no forced logout. The refresh token is rotated
+on every call (the browser takes the new `Set-Cookie`); presenting one that was already rotated
+away revokes the whole session. `400` when there is no refresh cookie, `401` when it is invalid,
+expired or revoked. See [Session Revocation](../TOKEN_REVOCATION.md).
 
 **Response:** `200 OK`
 ```json
@@ -141,9 +145,15 @@ Refresh an expired JWT token.
 ---
 
 ### POST /auth/logout
-Logout and invalidate current session.
+Logout: ends the login session (refresh token, every access token of the session, and the access
+token presented) and clears both cookies. Works from the refresh cookie alone when the access cookie
+has already expired.
 
-**Headers:** `Authorization: Bearer <token>`
+**Headers:** `Authorization: Bearer <token>` (or the `wb_session` cookie)
+
+### POST /auth/logout-all
+Sign out everywhere: every session of the caller ends and every access token issued so far is
+revoked. Requires authentication.
 
 **Response:** `200 OK`
 ```json

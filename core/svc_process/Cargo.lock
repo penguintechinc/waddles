@@ -3938,7 +3938,9 @@ name = "service_auth"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "jsonwebtoken",
+ "opentelemetry",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4349,7 +4351,9 @@ dependencies = [
  "http-body-util",
  "hub_client",
  "hyper",
+ "metrics",
  "opentelemetry",
+ "opentelemetry_sdk",
  "penguin-bundle-host",
  "penguin-licensing",
  "penguin-logging",

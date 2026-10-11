@@ -2,6 +2,8 @@
 //! `/metrics` router -- exercised through the real axum `Router`, not the
 //! handler functions directly.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use clap::Parser;
@@ -23,6 +25,7 @@ fn test_state() -> AppState {
     };
     let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
     AppState::new(config, prometheus::Registry::new(), db)
+        .with_overlay_codes(common::test_overlay_codes())
 }
 
 #[tokio::test]
@@ -143,7 +146,7 @@ async fn unknown_route_on_main_router_is_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-/// The plain full-page surface route (`GET /overlay/{community}/{surface}`)
+/// The plain full-page surface route (`GET /{overlay_code}/{surface}`)
 /// is mounted behind the VIEW guard like `/live`: without a `?key=` the guard
 /// answers 400 (never a 404 -- the route exists -- and never the page).
 #[tokio::test]
@@ -152,7 +155,7 @@ async fn overlay_page_route_is_mounted_behind_the_view_guard() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/overlay/42/media")
+                .uri(format!("/{}/media", common::CODE_42))
                 .body(Body::empty())
                 .unwrap(),
         )

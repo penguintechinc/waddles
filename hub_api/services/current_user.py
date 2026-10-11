@@ -46,6 +46,24 @@ def get_current_user_id(request: Request) -> int:
         raise unauthorized("Token missing subject claim") from exc
 
 
+def get_current_session_id(request: Request) -> int | None:
+    """Return the caller's login-session id (the token's `sid` claim), or `None` if it has none.
+
+    Raises 401 exactly like `get_current_user_id` when the bearer token is absent or invalid.
+    A token minted outside a login session (service tokens, the temp-password pending-link
+    session) carries no `sid` and yields `None`.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise unauthorized("Authentication required")
+
+    payload = verify_jwt_token(auth_header[7:], require_secret_key())
+    if payload is None:
+        raise unauthorized("Invalid or expired token")
+    sid = payload.get("sid")
+    return int(sid) if isinstance(sid, str) and sid.isdigit() else None
+
+
 def get_optional_current_user_id(request: Request) -> int | None:
     """Same as `get_current_user_id`, but returns `None` instead of raising.
 

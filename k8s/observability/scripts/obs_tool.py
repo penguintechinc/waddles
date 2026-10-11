@@ -1345,8 +1345,9 @@ def bundle_executor_board() -> Board:
     b = Board(
         "waddles-bundle-executor",
         "Waddles / bundle executor and capability gate",
-        "The bundle-executor binary exports no metrics of its own; this board shows its link as seen by svc-process / "
-        "svc-action, the host-capability (kv, db, http) call latency, and every capability / quota / egress denial.",
+        "The executor link as seen by svc-process / svc-action, the host-capability (kv, db, http) call latency, and "
+        "every capability / quota / egress denial. The executor's own series (opt-in OTLP export) are on the "
+        "stage pipeline board.",
     )
     b.row("Executor link (observed from svc-process / svc-action)")
     b.stat(
@@ -1480,9 +1481,8 @@ def bundle_executor_board() -> Board:
         "Total denial rate",
         [(union, "all denials")],
         "ops",
-        "Sum of every denial counter below. waddles_bundle_capability_denied_total (central gate) is a "
-        "`metrics`-facade counter with no recorder installed in svc-process/svc-action yet, so it contributes 0 "
-        "until one is wired - the per-capability counters carry the signal.",
+        "Sum of every denial counter below, including waddles_bundle_capability_denied_total (the central gate's "
+        "audit counter, exported through the OTel-backed `metrics` recorder svc-process / svc-action install).",
         w=24,
     )
     b.ts(
@@ -1562,12 +1562,271 @@ def bundle_executor_board() -> Board:
     return b
 
 
+def stage_pipeline_board() -> Board:
+    """Stage latency / executor call / host call / sandbox trips, plus the executor's own (opt-in OTLP) series."""
+    b = Board(
+        "waddles-stage-pipeline",
+        "Waddles / stage pipeline and executor (OTel)",
+        "The OTel metrics of svc-process, svc-action (scraped from /metrics) and the bundle-executor's own series "
+        "(OTLP push only when OTEL_EXPORTER_OTLP_ENDPOINT is set on the executor - those panels stay empty "
+        "otherwise). See docs/observability/data-plane-metrics.md.",
+    )
+    lat = "waddles_stage_latency_seconds"
+    call = "waddles_executor_call_seconds"
+    host = "waddles_host_call_latency_seconds"
+    load = "waddles_bundle_load_seconds"
+
+    b.row("Stage latency and outcomes (svc-process / svc-action)")
+    b.ts(
+        "Stage latency p50/p95/p99 by stage",
+        quantiles(lat, by="stage"),
+        "s",
+        "Take-to-terminal-outcome time per delivered entry.",
+    )
+    b.ts(
+        "Entries by stage and result",
+        [(sumrate(lat + "_count", by="stage, result"), "{{stage}} {{result}}")],
+        "ops",
+        "dead_lettered / spine_error are the failure outcomes; delivered / success the healthy ones.",
+        stack=True,
+    )
+    b.stat(
+        "Dead-letter ratio (process)",
+        ratio(
+            sumrate(lat + "_count", 'stage="process"', 'result="dead_lettered"'),
+            sumrate(lat + "_count", 'stage="process"'),
+        ),
+        "percentunit",
+        "Share of process-stage entries dead-lettered.",
+        [(None, "green"), (0.01, "yellow"), (0.05, "red")],
+    )
+    b.stat(
+        "Non-success ratio (action)",
+        ratio(
+            sumrate(lat + "_count", 'stage="action"', 'result!="success"'),
+            sumrate(lat + "_count", 'stage="action"'),
+        ),
+        "percentunit",
+        "Share of action-stage entries that did not succeed (retry-exhausted, non-retryable, dead-lettered).",
+        [(None, "green"), (0.02, "yellow"), (0.1, "red")],
+    )
+    b.ts(
+        "Dead letters and boundary violations",
+        [
+            (
+                sumrate("waddles_spine_dlq_total", by="stage, reason"),
+                "dlq {{stage}} {{reason}}",
+            ),
+            (
+                sumrate("waddles_tenant_boundary_violations_total", by="stage, reason"),
+                "boundary {{stage}} {{reason}}",
+            ),
+        ],
+        "ops",
+        "DLQ writes by the record's error kind; hop-verification (tenant boundary) failures by reason.",
+    )
+    b.ts(
+        "Consumer-group backlog p95 (lag / pending)",
+        [
+            (hq(0.95, "waddles_spine_queue_depth", by="stage"), "lag p95 {{stage}}"),
+            (
+                hq(0.95, "waddles_group_pending", by="stage"),
+                "pending p95 {{stage}}",
+            ),
+        ],
+        "short",
+        "Sampled from XINFO GROUPS every SPINE_STATS_INTERVAL_MS; a pending (PEL) p95 that keeps climbing is a "
+        "bundle that is not acking.",
+    )
+    b.ts(
+        "Drain batch size p95",
+        [(hq(0.95, "waddles_spine_batch_size", by="stage"), "p95 {{stage}}")],
+        "short",
+        "Entries per XREADGROUP pass; a p95 pinned at the batch cap means the consumer is saturated.",
+    )
+
+    b.row("Executor calls, host calls and sandbox (stage view)")
+    b.ts(
+        "Executor call latency p50/p95/p99 by stage",
+        quantiles(call, by="stage"),
+        "s",
+        "One invoke as the stage measures it (action: per attempt).",
+    )
+    b.ts(
+        "Executor calls by result",
+        [(sumrate(call + "_count", by="stage, result"), "{{stage}} {{result}}")],
+        "ops",
+        "executor_error = the executor answered with an error frame; host_api_error = no reply at all.",
+        stack=True,
+    )
+    b.ts(
+        "Host call latency p95 by capability",
+        [(hq(0.95, host, by="capability"), "p95 {{capability}}")],
+        "s",
+        "kv, db, reputation, economy, identity, http, flags, clock, context, log, relay.",
+    )
+    b.ts(
+        "Host calls by capability and result",
+        [
+            (
+                sumrate(host + "_count", by="capability, result"),
+                "{{capability}} {{result}}",
+            )
+        ],
+        "ops",
+        "denied = gate / egress / quota refusal; error = operational failure.",
+        stack=True,
+    )
+    b.ts(
+        "Sandbox trips by limit",
+        [
+            (
+                sumrate("waddles_sandbox_trip_total", by="stage, limit"),
+                "{{stage}} {{limit}}",
+            )
+        ],
+        "ops",
+        "timeout / memory / trap / denied, as reported by the executor.",
+    )
+    b.ts(
+        "Bundle load latency p95 by phase",
+        [(hq(0.95, load, by="phase"), "p95 {{phase}}")],
+        "s",
+        "phase=load is the stage-observed round trip; phase=precompile the executor-reported load time.",
+    )
+    b.ts(
+        "Dispatch attempts p95 (action)",
+        [(hq(0.95, "waddles_action_dispatch_attempts", by="result"), "p95 {{result}}")],
+        "short",
+        "Attempts one entry consumed (1 = first try succeeded).",
+    )
+    b.ts(
+        "Capability gate: grants and denials",
+        [
+            (
+                sumrate("waddles_bundle_capability_authorized_total"),
+                "authorized",
+            ),
+            (
+                sumrate("waddles_bundle_capability_denied_total", by="reason"),
+                "denied {{reason}}",
+            ),
+        ],
+        "ops",
+        "The gate's audit counters (previously dropped: the metrics-facade had no recorder).",
+    )
+
+    b.row("bundle-executor process (own series; OTLP opt-in)")
+    b.stat(
+        "Executor session up",
+        "max(waddles_executor_connection_up)",
+        "short",
+        "1 while the host-API session is established; an explicit 0 means down (absent = not exporting).",
+        [(None, "red"), (1, "green")],
+    )
+    b.stat(
+        "Bundles resident",
+        "sum(waddles_executor_bundles_loaded)",
+        "short",
+        "Compiled components currently held (distinct digests).",
+    )
+    b.stat(
+        "Invocations active",
+        "sum(waddles_executor_invocations_active)",
+        "short",
+        "Guests executing right now.",
+    )
+    inv = "waddles_executor_invoke_seconds"
+    b.ts(
+        "Invoke latency p50/p95/p99",
+        quantiles(inv),
+        "s",
+        "One invoke end to end inside the executor (lookup, instantiate, guest, encode).",
+    )
+    b.ts(
+        "Instantiate vs guest p95",
+        [
+            (hq(0.95, "waddles_executor_instantiate_seconds"), "instantiate p95"),
+            (hq(0.95, "waddles_executor_guest_seconds"), "guest p95"),
+        ],
+        "s",
+        "Guest time includes host-call waits; recorded for trapped guests too.",
+    )
+    b.ts(
+        "Invocations by result",
+        [(sumrate(inv + "_count", by="result"), "{{result}}")],
+        "ops",
+        "Wire error code per failure (executor_deadline, memory_limit, wasm_trap, unknown_bundle, ...).",
+        stack=True,
+    )
+    b.ts(
+        "Load phases p95",
+        [
+            (
+                hq(0.95, "waddles_executor_load_seconds", by="phase"),
+                "p95 {{phase}}",
+            )
+        ],
+        "s",
+        "fetch (bucket GET), verify (digest + signature), precompile (wasmtime compile), total.",
+    )
+    b.ts(
+        "Loads and unloads by result",
+        [
+            (
+                sumrate("waddles_executor_loads_total", by="result"),
+                "load {{result}}",
+            ),
+            (
+                sumrate("waddles_executor_unloads_total", by="result"),
+                "unload {{result}}",
+            ),
+        ],
+        "ops",
+    )
+    b.ts(
+        "Executor host-call round trip p95 by capability",
+        [
+            (
+                hq(0.95, "waddles_executor_host_call_seconds", by="capability"),
+                "p95 {{capability}}",
+            )
+        ],
+        "s",
+        "executor -> stage -> executor; the stage-side latency plus the wire.",
+    )
+    b.ts(
+        "Executor sandbox trips by limit",
+        [
+            (
+                sumrate("waddles_executor_sandbox_trip_total", by="limit"),
+                "{{limit}}",
+            )
+        ],
+        "ops",
+    )
+    b.ts(
+        "Session health: reconnects, heartbeat timeouts, outage p95",
+        [
+            (sumrate("waddles_executor_reconnects_total"), "reconnects/s"),
+            (
+                sumrate("waddles_executor_heartbeat_timeouts_total"),
+                "heartbeat timeouts/s",
+            ),
+            (hq(0.95, "waddles_executor_outage_seconds"), "outage p95 (s)"),
+        ],
+        "short",
+    )
+    return b
+
+
 BOARDS = {
     "waddles-hub-api.json": hub_api_board,
     "waddles-data-plane.json": data_plane_board,
     "waddles-streaming.json": streaming_board,
     "waddles-presentation.json": presentation_board,
     "waddles-bundle-executor.json": bundle_executor_board,
+    "waddles-stage-pipeline.json": stage_pipeline_board,
 }
 
 

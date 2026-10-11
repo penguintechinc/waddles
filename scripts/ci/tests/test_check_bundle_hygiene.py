@@ -48,6 +48,25 @@ def make_bundle_src(root: Path, body: str, *, rel: str = "bundles/python/demo/sr
     return path
 
 
+SAFE_INGEST_SRC = """\
+def normalize(raw):
+    return raw.get("is_mod") is True
+"""
+
+
+def make_ingest_src(
+    root: Path,
+    body: str = SAFE_INGEST_SRC,
+    *,
+    rel: str = "core/svc_ingest/builtin_handlers/demo_ingest.py",
+) -> Path:
+    """Writes a svc-ingest source file (dedented `body`) into a throwaway tree and returns its path."""
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(textwrap.dedent(body), encoding="utf-8")
+    return path
+
+
 def make_manifest(root: Path, content: str, *, name: str = "demo") -> Path:
     """Writes a `hub-manifest.yaml` for bundle `name` into a throwaway tree and returns its path."""
     path = root / "bundles" / "python" / name / "hub-manifest.yaml"
@@ -273,6 +292,7 @@ def test_badge_truthiness_safe_shapes_pass(tmp_path: Path) -> None:
             ok = payload.get("is_mod") is True or payload.get("is_broadcaster") is True
             return is_mod is True or is_broadcaster is True or ok
         ''')
+    make_ingest_src(tmp_path)
     proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "findings=0 -> PASS" in proc.stdout
@@ -288,6 +308,7 @@ def test_badge_truthiness_ignores_unrelated_booleans(tmp_path: Path) -> None:
                 return x
             return payload.get("is_mod") is True
         ''')
+    make_ingest_src(tmp_path)
     proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
@@ -298,6 +319,7 @@ def test_badge_truthiness_pragma_with_reason_suppresses_and_is_reported(tmp_path
         def gate(is_mod):
             return bool(is_mod)  # badge-ok: value is a bool produced by our own parser
         ''')
+    make_ingest_src(tmp_path)
     proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "suppressed=1" in proc.stdout
@@ -333,6 +355,152 @@ def test_badge_truthiness_fails_the_original_pre_fix_shapes(tmp_path: Path) -> N
     assert proc.stderr.count("[badge-truthiness]") == 5
 
 
+# --- badge-truthiness: svc-ingest scope ------------------------------------------------------
+
+INGEST_VIOLATIONS = {
+    "bool_get_is_mod": 'return bool(raw.get("is_mod"))',
+    "bool_get_subscriber": 'return bool(raw.get("is_subscriber"))',
+    "bool_get_vip": 'return bool(raw.get("is_vip"))',
+    "bool_get_broadcaster": 'return bool(raw.get("is_broadcaster"))',
+    "bool_kick_moderator": 'return bool(sender.get("is_moderator")) or "moderator" in badges',
+    "bool_kick_channel_owner": 'return bool(sender.get("is_channel_owner"))',
+    "bool_owner": 'return bool(raw.get("is_owner"))',
+    "bool_sponsor": 'return bool(raw.get("is_sponsor"))',
+    "bool_youtube_moderator": 'return bool(author.get("isChatModerator"))',
+    "bool_youtube_owner": 'return bool(author.get("isChatOwner"))',
+    "bool_youtube_sponsor": 'return bool(author.get("isChatSponsor"))',
+    "bare_if_owner": 'if raw.get("is_owner"):\n        return True',
+    "or_chain": 'return raw.get("is_mod") or raw.get("is_owner")',
+}
+
+CLEAN_BUNDLE_SRC = 'def clean(p):\n    return p.get("is_mod") is True\n'
+
+
+@pytest.mark.parametrize("snippet", INGEST_VIOLATIONS.values(), ids=INGEST_VIOLATIONS.keys())
+def test_badge_truthiness_scans_the_svc_ingest_tree(tmp_path: Path, snippet: str) -> None:
+    """regression: ingest `bool(raw.get("is_mod"))` mod-gate bypass -- planted in svc-ingest it must fail."""
+    make_bundle_src(tmp_path, CLEAN_BUNDLE_SRC)
+    make_ingest_src(
+        tmp_path,
+        f"def normalize(raw, sender, author, badges):\n    {snippet}\n",
+        rel="core/svc_ingest/builtin_handlers/kick_ingest.py",
+    )
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "core/svc_ingest/builtin_handlers/kick_ingest.py:2" in proc.stderr
+    assert "[badge-truthiness]" in proc.stderr
+    assert "[badge-truthiness:svc-ingest]:" in proc.stdout
+    assert "FAIL" in proc.stdout
+
+
+def test_badge_truthiness_scans_ingest_receivers_too(tmp_path: Path) -> None:
+    """The `receivers/` that build the raw event are in scope, not just the `builtin_handlers/`."""
+    make_bundle_src(tmp_path, CLEAN_BUNDLE_SRC)
+    make_ingest_src(
+        tmp_path,
+        'def parse(author):\n    return bool(author.get("isChatModerator"))\n',
+        rel="core/svc_ingest/receivers/youtube_live_poll.py",
+    )
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 1
+    assert "core/svc_ingest/receivers/youtube_live_poll.py:2" in proc.stderr
+
+
+def test_badge_truthiness_ingest_safe_shapes_pass_and_are_counted(tmp_path: Path) -> None:
+    """The strict shapes the fixed ingest code uses (`strict_flag(raw.get(..))`, `is True`) don't fire."""
+    make_bundle_src(tmp_path, CLEAN_BUNDLE_SRC)
+    make_ingest_src(tmp_path, '''
+        def normalize(raw, sender, author, badges, strict_flag):
+            return {
+                "is_mod": strict_flag(raw.get("is_mod"), field="is_mod", platform="twitch"),
+                "is_owner": raw.get("is_owner") is True,
+                "kick": strict_flag(sender.get("is_moderator"), field="m", platform="kick")
+                or "moderator" in badges,
+                "yt": strict_flag(author.get("isChatModerator"), field="m", platform="youtube"),
+            }
+        ''')
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "[badge-truthiness:svc-ingest]: files_scanned=1 badge_reads_examined=4 " in proc.stdout
+    assert "findings=0 -> PASS" in proc.stdout
+
+
+def test_badge_truthiness_ingest_pragma_with_reason_suppresses(tmp_path: Path) -> None:
+    """`# badge-ok:` works in the ingest scope exactly as it does for bundles."""
+    make_bundle_src(tmp_path, CLEAN_BUNDLE_SRC)
+    make_ingest_src(
+        tmp_path,
+        'def f(raw):\n    return bool(raw.get("is_owner"))  # badge-ok: bool from our own parser\n',
+    )
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "core/svc_ingest/builtin_handlers/demo_ingest.py:2 badge-ok:" in proc.stdout
+
+
+def test_badge_truthiness_missing_ingest_tree_is_a_failure_not_a_pass(tmp_path: Path) -> None:
+    """Bundles clean but no `core/svc_ingest` at all (tree moved/renamed) must FAIL on its own denominator."""
+    make_bundle_src(tmp_path, CLEAN_BUNDLE_SRC)
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 1
+    assert "zero denominator" in proc.stderr
+    assert "[badge-truthiness:svc-ingest]: FAIL" in proc.stderr
+
+
+def test_badge_truthiness_ingest_with_no_badge_reads_is_a_failure(tmp_path: Path) -> None:
+    """Ingest files present but zero badge reads examined is a vacuous pass -> FAIL."""
+    make_bundle_src(tmp_path, CLEAN_BUNDLE_SRC)
+    make_ingest_src(tmp_path, "def normalize(raw):\n    return raw\n")
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 1
+    assert "badge_reads_examined=0" in proc.stderr
+
+
+def test_badge_truthiness_ingest_ignores_its_tests(tmp_path: Path) -> None:
+    """svc-ingest `tests/`, `test_*.py` and build output are not shipped code."""
+    make_bundle_src(tmp_path, CLEAN_BUNDLE_SRC)
+    make_ingest_src(tmp_path)
+    bad = 'def f(raw):\n    return bool(raw.get("is_mod"))\n'
+    make_ingest_src(tmp_path, bad, rel="core/svc_ingest/tests/test_x.py")
+    make_ingest_src(tmp_path, bad, rel="core/svc_ingest/receivers/test_helper.py")
+    make_ingest_src(tmp_path, bad, rel="core/svc_ingest/target/gen.py")
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "[badge-truthiness:svc-ingest]: files_scanned=1 " in proc.stdout
+
+
+def test_badge_truthiness_ingest_syntax_error_fails(tmp_path: Path) -> None:
+    """An unparseable ingest file cannot be proven clean."""
+    make_bundle_src(tmp_path, CLEAN_BUNDLE_SRC)
+    make_ingest_src(tmp_path, "def broken(:\n")
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 1
+    assert "cannot parse" in proc.stderr
+
+
+def test_bundle_local_is_owner_comparison_is_not_a_badge(tmp_path: Path) -> None:
+    """The ingest-only owner/sponsor names must not leak into the bundle scope (music's `is_owner = a == b`)."""
+    make_bundle_src(tmp_path, '''
+        def remove(match, pseudonym, payload):
+            is_owner = match == pseudonym
+            if not (is_owner or payload.get("is_mod") is True):
+                return "no"
+            return "ok"
+        ''')
+    make_ingest_src(tmp_path)
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness", root=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_real_tree_ingest_scope_has_its_own_nonzero_denominator() -> None:
+    """The committed svc-ingest tree is clean AND the ingest scope genuinely examined badge reads."""
+    proc = run(SOURCE_SCRIPT, "--check", "badge-truthiness")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    line = next(ln for ln in proc.stdout.splitlines() if "[badge-truthiness:svc-ingest]" in ln)
+    assert "files_scanned=0 " not in line
+    assert "badge_reads_examined=0 " not in line
+    assert "findings=0 -> PASS" in line
+
+
 # --- denominator / scoping (shared by the source checks) -------------------------------------
 
 @pytest.mark.parametrize("check", ["log-pii", "silent-except", "badge-truthiness"])
@@ -366,6 +534,7 @@ def test_source_checks_ignore_tests_and_non_src_dirs(tmp_path: Path) -> None:
     make_bundle_src(tmp_path, bad, rel="bundles/python/demo/src/test_helpers.py")
     make_bundle_src(tmp_path, bad, rel="bundles/python/demo/scripts/tool.py")
     make_bundle_src(tmp_path, bad, rel="bundles/build_tool.py")
+    make_ingest_src(tmp_path)
     proc = run(SOURCE_SCRIPT, root=tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "files_scanned=1" in proc.stdout

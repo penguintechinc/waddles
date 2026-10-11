@@ -8,6 +8,7 @@ OIDC-native equivalent of Node's `requireSuperAdmin` boolean check.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -26,6 +27,8 @@ from services.pagination import parse_limit
 user_management_bp = Blueprint(
     "v1_superadmin_users", __name__, url_prefix="/api/v1/superadmin/users"
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -162,6 +165,39 @@ class PasswordResetResponse:
     message: str
     resetToken: str
     resetExpires: str
+
+
+@dataclass(slots=True, frozen=True)
+class SessionDTO:
+    """One login session -- identifiers and timestamps only, never a token or digest."""
+
+    id: int
+    createdAt: str | None
+    expiresAt: str | None
+    isActive: bool
+    revokedAt: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class SessionsResponse:
+    """Response DTO for the list-sessions endpoint."""
+
+    success: bool
+    sessions: list[SessionDTO]
+
+
+@dataclass(slots=True, frozen=True)
+class RevokeSessionsResponse:
+    """Response DTO for the revoke endpoints.
+
+    `accessTokensRevokedImmediately` is `False` when the shared revocation store could not be
+    written: refresh is cut off regardless (database), but already-issued access tokens survive
+    until their own expiry (<= 15 minutes) on other replicas -- the operator should retry.
+    """
+
+    success: bool
+    sessionsRevoked: int
+    accessTokensRevokedImmediately: bool
 
 
 def _iso(value: Any) -> str | None:
@@ -369,6 +405,83 @@ async def generate_password_reset(
         message="Password reset token generated",
         resetToken=reset_token,
         resetExpires=reset_expires.isoformat(),
+    )
+
+
+@user_management_bp.route("/<int:user_id>/sessions", methods=["GET"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@validate_response(SessionsResponse)
+async def list_user_sessions(user_id: int) -> SessionsResponse | tuple[dict[str, object], int]:
+    """List a user's login sessions (newest first) so one can be revoked by id."""
+    async_dal, dal = _dal()
+    try:
+        sessions = await svc.list_user_sessions(async_dal, dal, user_id=user_id)
+    except ApiError as exc:
+        logger.info(
+            "%s refused: status=%s code=%s", "list_user_sessions", exc.status_code, exc.code
+        )
+        return _err(exc)
+    return SessionsResponse(
+        success=True,
+        sessions=[
+            SessionDTO(
+                id=s.session_id,
+                createdAt=_iso(s.created_at),
+                expiresAt=_iso(s.expires_at),
+                isActive=s.is_active,
+                revokedAt=_iso(s.revoked_at),
+            )
+            for s in sessions
+        ],
+    )
+
+
+@user_management_bp.route("/<int:user_id>/revoke-sessions", methods=["POST"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@validate_response(RevokeSessionsResponse)
+async def revoke_user_sessions(
+    user_id: int,
+) -> RevokeSessionsResponse | tuple[dict[str, object], int]:
+    """Revoke every session of a user: refresh stops now, every access token issued so far dies."""
+    async_dal, dal = _dal()
+    try:
+        outcome = await svc.revoke_user_sessions(async_dal, dal, user_id=user_id)
+    except ApiError as exc:
+        logger.info(
+            "%s refused: status=%s code=%s", "revoke_user_sessions", exc.status_code, exc.code
+        )
+        return _err(exc)
+    return RevokeSessionsResponse(
+        success=True,
+        sessionsRevoked=outcome.sessions_revoked,
+        accessTokensRevokedImmediately=outcome.access_tokens_recorded,
+    )
+
+
+@user_management_bp.route("/<int:user_id>/sessions/<int:session_id>/revoke", methods=["POST"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@validate_response(RevokeSessionsResponse)
+async def revoke_user_session(
+    user_id: int, session_id: int
+) -> RevokeSessionsResponse | tuple[dict[str, object], int]:
+    """Revoke one login session of a user (404 if the session is not theirs)."""
+    async_dal, dal = _dal()
+    try:
+        outcome = await svc.revoke_user_session(
+            async_dal, dal, user_id=user_id, session_id=session_id
+        )
+    except ApiError as exc:
+        logger.info(
+            "%s refused: status=%s code=%s", "revoke_user_session", exc.status_code, exc.code
+        )
+        return _err(exc)
+    return RevokeSessionsResponse(
+        success=True,
+        sessionsRevoked=outcome.sessions_revoked,
+        accessTokensRevokedImmediately=outcome.access_tokens_recorded,
     )
 
 

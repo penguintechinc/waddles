@@ -51,6 +51,8 @@ from flask_core import PlatformEvent
 from flask_core.app_manifest import AppManifest
 from flask_core.app_registry import AppRegistry
 
+from receivers.badge_flags import strict_flag
+
 #: The `consumes` tag `receivers/youtube_live_poll.py` fans out under --
 #: this handler's half of that contract (mirrors `CONSUMES_TAG` in that
 #: module).
@@ -124,9 +126,11 @@ async def normalize(raw: dict[str, Any]) -> PlatformEvent:
             "live_chat_id": live_chat_id,
             "author_id": _as_str_or_none(raw.get("author_id")),
             "display_name": _as_str_or_none(raw.get("display_name")),
-            "is_mod": bool(raw.get("is_mod")),
-            "is_owner": bool(raw.get("is_owner")),
-            "is_sponsor": bool(raw.get("is_sponsor")),
+            "is_mod": strict_flag(raw.get("is_mod"), field="is_mod", platform="youtube"),
+            "is_owner": strict_flag(raw.get("is_owner"), field="is_owner", platform="youtube"),
+            "is_sponsor": strict_flag(
+                raw.get("is_sponsor"), field="is_sponsor", platform="youtube"
+            ),
             "message_id": _as_str_or_none(raw.get("message_id")),
             "published_at": _as_str_or_none(raw.get("published_at")),
         },

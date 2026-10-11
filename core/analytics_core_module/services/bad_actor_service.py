@@ -59,11 +59,12 @@ class BadActorService:
             summary = self._summarize_alerts(unique_alerts)
 
             self.logger.audit(
-                "Bad actor detection completed",
-                community_id=community_id,
                 action="detect_bad_actors",
-                alerts_count=len(unique_alerts),
-                result="SUCCESS"
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Bad actor detection completed",
+                alerts_count=len(unique_alerts)
             )
 
             return {

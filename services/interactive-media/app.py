@@ -83,8 +83,8 @@ async def create_clip(community_id: int):
 
         logger.audit(
             action="create_clip",
+            user=user_id,
             community=community_id,
-            user_id=user_id,
             result="STARTED",
         )
 
@@ -95,6 +95,7 @@ async def create_clip(community_id: int):
         if result.get('error'):
             logger.audit(
                 action="create_clip",
+                user=user_id,
                 community=community_id,
                 result="FAILED",
                 error=result['error'],
@@ -103,6 +104,7 @@ async def create_clip(community_id: int):
 
         logger.audit(
             action="create_clip",
+            user=user_id,
             community=community_id,
             result="SUCCESS",
         )
@@ -154,9 +156,10 @@ async def bookmark_clip(community_id: int):
 
         logger.audit(
             action="bookmark_clip",
+            user="system",
             community=community_id,
-            clip_id=clip_id,
             result="SUCCESS",
+            clip_id=clip_id,
         )
         return success_response(result)
 
@@ -224,9 +227,10 @@ async def update_tags(community_id: int, clip_id: str):
 
         logger.audit(
             action="update_tags",
+            user="system",
             community=community_id,
-            clip_id=clip_id,
             result="SUCCESS",
+            clip_id=clip_id,
         )
         return success_response(result)
 
@@ -262,10 +266,11 @@ async def mark_highlight(community_id: int, clip_id: str):
 
         logger.audit(
             action="mark_highlight",
+            user="system",
             community=community_id,
+            result="SUCCESS",
             clip_id=clip_id,
             is_highlight=is_highlight,
-            result="SUCCESS",
         )
         return success_response(result)
 
@@ -311,9 +316,10 @@ async def create_reel(community_id: int):
 
         logger.audit(
             action="create_reel",
+            user="system",
             community=community_id,
-            reel_name=name,
             result="SUCCESS",
+            reel_name=name,
         )
         return success_response(result)
 
@@ -355,9 +361,10 @@ async def publish_reel(community_id: int, reel_id: int):
 
         logger.audit(
             action="publish_reel",
+            user="system",
             community=community_id,
-            reel_id=reel_id,
             result="SUCCESS",
+            reel_id=reel_id,
         )
         return success_response(result)
 

@@ -50,9 +50,11 @@ pub mod host_api;
 pub mod http;
 pub mod identity;
 pub mod license;
+pub mod metrics_facade;
 pub mod pii_tokenize;
 pub mod source_supervisor;
 pub mod spine;
+pub mod stage_metrics;
 pub mod telemetry;
 
 use std::net::SocketAddr;
@@ -346,6 +348,15 @@ where
     host_api::ensure_crypto_provider_installed();
 
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
+    // Build the stage's OTel instruments NOW, strictly after `telemetry::init`
+    // installed the global meter provider: an instrument created earlier
+    // would bind to the no-op default provider and silently record nothing.
+    // Every later `stage_metrics::stage_metrics()` call returns this same set.
+    let _ = stage_metrics::stage_metrics();
+    // Route `bundle-capability-gate`'s `metrics`-facade audit counters
+    // (grants and denials) into the same OTel pipeline; without a recorder
+    // the facade drops them.
+    metrics_facade::install();
 
     tracing::info!(
         http_port = config.cli.http_port,
@@ -1145,7 +1156,7 @@ fn try_start_process_loop(
             Vec::new()
         };
 
-        let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
+        let metrics: Arc<dyn penguin_spine::SpineMetrics> = stage_metrics::stage_metrics();
         // Env-only mode has no `BUNDLE_SCOPE_TENANT_ID`/DB reader to resolve
         // a real tenant from (that CLI flag was removed with the
         // multi-tenant redesign, `crate::source_supervisor`'s module doc) --
@@ -1932,7 +1943,7 @@ async fn build_source_supervisor_deps(
     };
 
     let approved_targets = builtins::parse_approved_targets(&config.cli.process_routes_to_approved);
-    let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
+    let metrics: Arc<dyn penguin_spine::SpineMetrics> = stage_metrics::stage_metrics();
     // Reuses the SAME reader `db` connection `crate::changelog_consumer`
     // already opened (a read-only pool handle, cheap to clone) rather than
     // opening a second one -- see this function's own doc.

@@ -392,7 +392,16 @@ if response.status_code == 401 and retry_auth:
 2. **HTTPS Only**: All API communication over HTTPS
 3. **CSRF Protection**: State parameter in OAuth flow
 4. **Token Expiration**: Automatic refresh before expiration
-5. **Error Messages**: No token exposure in error logs
+5. **Error Messages**: No token exposure in error logs or raised errors
+6. **Log Redaction**: SoundCloud sends `oauth_token=` and the search text (`q=`) in the query
+   string of every API call, and `str(httpx.HTTPStatusError)` / httpx's INFO request line
+   embed the full URL, so failures are logged and raised only as exception **type**, HTTP
+   **status** and the provider's plain-identifier **reason** enum
+   (`providers/_log_safety.py:describe_error`), raised `from None` so a caller's `exc_info`
+   cannot re-print the URL. Importing the provider pins the `httpx` logger to WARNING and
+   installs a query-stripping filter as a backstop. Caller-supplied track ids and track
+   titles are not logged. Regression tests:
+   `providers/test_soundcloud_provider_log_redaction.py`.
 
 ## Limitations
 

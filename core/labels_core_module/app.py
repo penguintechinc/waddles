@@ -269,10 +269,11 @@ async def create_label():
         dal.commit()
 
         logger.audit(
-            f"Label created: {name}",
-            user=created_by,
             action="create_label",
-            result="SUCCESS"
+            user=created_by,
+            community="",
+            result="SUCCESS",
+            detail=f"Label created: {name}"
         )
 
         return success_response({
@@ -457,10 +458,11 @@ async def apply_label():
         dal.commit()
 
         logger.audit(
-            f"Label applied: {label.name} to {entity_type}:{entity_id}",
-            user=applied_by,
             action="apply_label",
-            result="SUCCESS"
+            user=applied_by,
+            community=str(community_id),
+            result="SUCCESS",
+            detail=f"Label applied: {label.name} to {entity_type}:{entity_id}"
         )
 
         return success_response({

@@ -94,12 +94,14 @@ spec:
             aws --endpoint-url "$ENDPOINT" s3 mb "s3://${bucket}" --region us-east-1 2>&1 | grep -qi "already" && true || true
             aws --endpoint-url "$ENDPOINT" s3api head-bucket --bucket "${bucket}" 2>/dev/null \
               || aws --endpoint-url "$ENDPOINT" s3api create-bucket --bucket "${bucket}" --region us-east-1
-          {{- if and .Values.infrastructure.seaweedfs.encryption.enabled .Values.infrastructure.seaweedfs.encryption.autoEncryptBucket .Values.infrastructure.seaweedfs.encryption.secretName }}
+          {{- if and .Values.infrastructure.seaweedfs.encryption.enabled .Values.infrastructure.seaweedfs.encryption.autoEncryptBucket (or .Values.infrastructure.seaweedfs.encryption.secretName (include "waddlebot.kms.objectStorageActive" .)) }}
             # Default bucket encryption (SSE-S3) -- objects written without an
             # explicit ServerSideEncryption header are still encrypted at rest,
             # requires WEED_S3_SSE_KEK to already be configured on the server.
+            # kms.objectStorage.mode=kms (templates/_kms.tpl) swaps the default to
+            # SSE-KMS under the operator's key, ON TOP of the baseline above.
             aws --endpoint-url "$ENDPOINT" s3api put-bucket-encryption --bucket "${bucket}" \
-              --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+              --server-side-encryption-configuration '{{ include "waddlebot.kms.bucketEncryptionConfig" . }}'
           {{- end }}
           done
           aws --endpoint-url "$ENDPOINT" s3 ls
@@ -230,6 +232,7 @@ spec:
                 "actions": ["Read:recordings", "Write:recordings"]
               }
             ]
+            {{- with (include "waddlebot.kms.seaweedfsConfigBlock" .) }}{{ . | nindent 12 }}{{- end }}
           }
           EOF
           exec weed server \
@@ -297,6 +300,7 @@ spec:
               name: {{ .Values.infrastructure.seaweedfs.encryption.secretName }}
               key: {{ .Values.infrastructure.seaweedfs.encryption.secretKey }}
         {{- end }}
+        {{- with (include "waddlebot.kms.seaweedfsEnv" .) }}{{ . | nindent 8 }}{{- end }}
         volumeMounts:
         - name: seaweedfs-data
           mountPath: /data
@@ -304,6 +308,7 @@ spec:
           mountPath: /etc/seaweedfs
         - name: tmp
           mountPath: /tmp
+        {{- with (include "waddlebot.kms.seaweedfsVolumeMounts" .) }}{{ . | nindent 8 }}{{- end }}
         resources:
           requests:
             memory: {{ .Values.infrastructure.seaweedfs.resources.requests.memory }}
@@ -357,6 +362,7 @@ spec:
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      {{- with (include "waddlebot.kms.seaweedfsVolumes" .) }}{{ . | nindent 6 }}{{- end }}
 ---
 apiVersion: v1
 kind: Service

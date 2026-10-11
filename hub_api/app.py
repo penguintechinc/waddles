@@ -35,6 +35,7 @@ from flask_core.service_jwt import (
     load_identities_from_env,
     load_issuer_from_env,
 )
+from flask_core.token_revocation import get_token_revocation
 from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
@@ -50,7 +51,9 @@ from services.audit_service import get_audit_service
 from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
+from services.envelope.runtime import build_envelope_runtime
 from services.identity_resolution_service import run_uuid_availability_monitor
+from services.object_storage_kms import get_object_storage_sse
 from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
@@ -302,6 +305,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # flask_core.rate_limiter.RateLimiter.connect()'s own fail-open
         # doc comment. Never blocks startup on Redis being down.
         await rate_limiter.connect()
+        # Build the JWT revocation store NOW (from VALKEY_URL/REDIS_URL + JWT_REVOCATION_*) so a
+        # bad setting stops startup loudly instead of surfacing as a 500 on the first
+        # authenticated request. Construction does not connect; a store that is down at boot is
+        # handled by the documented outage policy, never by refusing to start.
+        revocation = get_token_revocation()
+        logger.info(
+            f"JWT revocation store ready: backend={revocation.backend_name} "
+            f"cache_ttl_s={revocation.policy.cache_ttl_seconds} "
+            f"grace_s={revocation.policy.grace_seconds}"
+        )
         async_dal = init_database(
             cfg.database_url,
             pool_size=cfg.db_pool_size,
@@ -328,6 +341,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # Published under the key `services/audit_http.py` reads; tests/test_audit_http.py
         # pins that startup wires it, so a regression cannot silently disable auditing.
         app.config[AUDIT_SERVICE_CONFIG_KEY] = get_audit_service(install_dal)
+
+        # Enterprise external KMS / BYOK (services/envelope/runtime.py). Inert by
+        # default: the provider registry is empty unless ENVELOPE_KMS_PROVIDERS is
+        # set and the platform KEK is resolved lazily, so the platform-managed
+        # baseline needs zero configuration. An ENABLED provider with bad platform
+        # credentials raises here -- a loud startup failure, not a first-request one.
+        app.config["envelope_runtime"] = build_envelope_runtime(install_dal)
+        # Object-storage SSE posture (baseline AES256 unless kms.objectStorage.mode=kms): a
+        # misconfigured KMS mode raises here; an unentitled one logs a loud ERROR (never silent).
+        await get_object_storage_sse().startup_check()
 
         # data-plane scale design rev4 Sec7 -- the bundle_active_set_watermark
         # safe_seq publisher. Postgres-only: pg_snapshot_xmin() has no sqlite
@@ -422,6 +445,12 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
                 await async_dal.close_async()
             except Exception as exc:  # noqa: BLE001 - shutdown must not raise
                 logger.warning(f"Error closing DAL on shutdown: {exc}")
+        envelope_runtime = app.config.get("envelope_runtime")
+        if envelope_runtime is not None:
+            try:
+                await envelope_runtime.aclose()
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                logger.warning(f"Error closing envelope runtime on shutdown: {type(exc).__name__}")
         install_dal = app.config.get("install_dal")
         if install_dal is not None:
             try:
@@ -432,6 +461,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             await rate_limiter.disconnect()
         except Exception as exc:  # noqa: BLE001 - shutdown must not raise
             logger.warning(f"Error closing rate limiter on shutdown: {exc}")
+        try:
+            get_token_revocation().close()
+        except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+            logger.warning(f"Error closing JWT revocation store on shutdown: {type(exc).__name__}")
         grpc_server = app.config.get("grpc_server")
         if grpc_server is not None:
             try:

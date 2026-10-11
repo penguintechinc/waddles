@@ -159,10 +159,11 @@ class SecurityService:
             self.dal.commit()
 
             self.logger.audit(
-                "Security config updated",
-                community_id=community_id,
                 action="update_security_config",
-                result="SUCCESS"
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Security config updated"
             )
 
             return await self.get_config(community_id)
@@ -275,14 +276,14 @@ class SecurityService:
                 )
 
             self.logger.audit(
-                "Moderation action synced",
-                community_id=community_id,
+                action="sync_moderation_action",
+                user=str(moderator_id or "system"),
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Moderation action synced",
                 platform=platform,
                 platform_user_id=platform_user_id,
-                action_type=action_type,
-                moderator_id=moderator_id,
-                action="sync_moderation_action",
-                result="SUCCESS"
+                action_type=action_type
             )
 
             return {
@@ -322,15 +323,16 @@ class SecurityService:
             # This would call the reputation module API
             # For now, just log it
             self.logger.audit(
-                "Reputation impact applied",
-                community_id=community_id,
+                action="apply_reputation_impact",
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Reputation impact applied",
                 hub_user_id=hub_user_id,
                 platform=platform,
                 platform_user_id=platform_user_id,
                 impact=impact,
-                reason=reason,
-                action="apply_reputation_impact",
-                result="SUCCESS"
+                reason=reason
             )
         except Exception as e:
             self.logger.error(f"Failed to apply reputation impact: {e}")
@@ -382,13 +384,14 @@ class SecurityService:
                             'reason': reason or f'Cross-platform {action_type}',
                         })
                         self.logger.audit(
-                            f"Game server {endpoint} synced",
-                            community_id=community_id,
+                            action="sync_to_game_server",
+                            user="system",
+                            community=str(community_id),
+                            result="SUCCESS",
+                            detail=f"Game server {endpoint} synced",
                             server_id=server_id,
                             server_type=server_type,
                             player=platform_user_id,
-                            action="sync_to_game_server",
-                            result="SUCCESS",
                         )
                     except Exception as exc:
                         self.logger.error(
