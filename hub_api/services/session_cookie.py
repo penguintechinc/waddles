@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from flask_core.auth import ACCESS_TOKEN_TTL_SECONDS
 from quart import Response, after_this_request
 from werkzeug.wrappers import Response as WerkzeugResponse
 
@@ -46,11 +47,19 @@ _AnyResponse = Response | WerkzeugResponse
 #: payload can no longer read the session out of client-side storage.
 SESSION_COOKIE_NAME = "wb_session"
 
-#: Cosmetic upper bound matching `flask_core.auth.create_jwt_token`'s
-#: default `expiration_hours=24` -- the JWT's own `exp` claim is what is
-#: actually enforced server-side; this just keeps the cookie from
-#: outliving a token that will never be honored anyway.
-SESSION_COOKIE_MAX_AGE = 24 * 60 * 60
+#: The access-token cookie lives exactly as long as the JWT inside it (15 minutes by default):
+#: the browser drops it the moment it expires instead of replaying a dead token, and the next
+#: request's 401 triggers the silent refresh. The JWT's own `exp` is what the server enforces;
+#: this only keeps the cookie from outliving it.
+SESSION_COOKIE_MAX_AGE = ACCESS_TOKEN_TTL_SECONDS
+
+#: HttpOnly cookie carrying the rotating REFRESH token. Scoped to `/api/v1/auth` so the browser
+#: sends it only to the login/refresh/logout endpoints -- never on an ordinary API call, which
+#: keeps the long-lived credential off the hot path (and out of every proxy/access log line that
+#: records a non-auth request). `SameSite=Lax` for the same OAuth-redirect reason as
+#: `SESSION_COOKIE_NAME`; a cross-site POST to `/refresh` carries no Lax cookie.
+REFRESH_COOKIE_NAME = "wb_refresh"
+REFRESH_COOKIE_PATH = "/api/v1/auth"
 
 
 def set_session_cookie(response: Response, token: str) -> Response:
@@ -72,9 +81,37 @@ def set_session_cookie(response: Response, token: str) -> Response:
 
 
 def clear_session_cookie(response: Response) -> Response:
-    """Clear the session cookie on `response` -- logout."""
+    """Clear the session cookie (and the refresh cookie) on `response` -- logout."""
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH)
     return response
+
+
+def set_refresh_cookie(response: Response, token: str, *, max_age: int) -> Response:
+    """Set the HttpOnly refresh cookie on `response`, valid for `max_age` seconds."""
+    response.set_cookie(
+        REFRESH_COOKIE_NAME,
+        token,
+        max_age=max_age,
+        path=REFRESH_COOKIE_PATH,
+        secure=True,
+        httponly=True,
+        samesite="Lax",
+    )
+    return response
+
+
+def issue_refresh_cookie(token: str, *, max_age: int) -> None:
+    """Register an `after_this_request` hook that sets the refresh cookie.
+
+    Called from the single place every login path mints a session
+    (`auth_service.create_session_token`), so password / OAuth / passkey / SSO / registration
+    all deliver the refresh token without each route having to remember to.
+    """
+
+    @after_this_request
+    def _attach_refresh(response: _AnyResponse) -> _AnyResponse:
+        return set_refresh_cookie(cast(Response, response), token, max_age=max_age)
 
 
 def issue_session_cookie(token: str) -> None:
@@ -100,6 +137,11 @@ def clear_session_cookie_after_request() -> None:
     @after_this_request
     def _detach(response: _AnyResponse) -> _AnyResponse:
         return clear_session_cookie(cast(Response, response))
+
+
+def refresh_token_from_cookie(request: Any) -> str | None:
+    """Return the refresh cookie's raw token, or `None` if absent."""
+    return request.cookies.get(REFRESH_COOKIE_NAME) or None
 
 
 def bearer_token_from_cookie(request: Any) -> str | None:

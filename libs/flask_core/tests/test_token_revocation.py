@@ -511,6 +511,57 @@ class TestStoreOutage:
         assert metrics.counts("waddles_jwt_revocation_store_errors_total", "backend") == {"valkey": 2}
 
 
+class TestIssueFloor:
+    """`issue_floor` lets a minter stamp `iat` past an earlier revoke-all (same-second safety)."""
+
+    def test_none_when_nothing_was_revoked(self) -> None:
+        rev, *_ = make()
+        assert rev.issue_floor("42") is None
+
+    def test_returns_the_cutoff_after_a_revoke_all(self) -> None:
+        rev, *_ = make()
+        rev.revoke_user("42")
+        assert rev.issue_floor("42") == NOW
+        assert rev.issue_floor("43") is None
+
+    def test_sees_a_cutoff_written_by_another_replica_once_the_cache_expires(self) -> None:
+        wall, mono = Clock(NOW), Clock(1000.0)
+        store = MemoryBackend(clock=wall)
+        a, *_ = make(store, clock=wall, mono=mono, cache_ttl_seconds=5.0)
+        b, *_ = make(store, clock=wall, mono=mono, cache_ttl_seconds=5.0)
+        assert b.issue_floor("42") is None
+        a.revoke_user("42")
+        assert b.issue_floor("42") is None  # inside b's cache window
+        mono.advance(5.1)
+        assert b.issue_floor("42") == NOW
+
+    def test_a_cached_answer_does_not_hit_the_store_again(self) -> None:
+        wall, mono = Clock(NOW), Clock(1000.0)
+        backend = ToggleBackend(wall)
+        rev, *_ = make(backend, clock=wall, mono=mono)
+        rev.issue_floor("42")
+        reads = backend.reads
+        rev.issue_floor("42")
+        assert backend.reads == reads
+
+    @pytest.mark.parametrize("bad", ["", "x" * 129])
+    def test_invalid_subject_is_none_not_an_error(self, bad: str) -> None:
+        rev, *_ = make()
+        assert rev.issue_floor(bad) is None
+
+    def test_dead_store_yields_none_so_minting_never_blocks_on_it(self) -> None:
+        wall = Clock(NOW)
+        backend = ToggleBackend(wall)
+        rev, *_ = make(backend, clock=wall)
+        backend.down = True
+        assert rev.issue_floor("42") is None
+
+    async def test_async_variant(self) -> None:
+        rev, *_ = make()
+        rev.revoke_user("42")
+        assert await rev.aissue_floor("42") == NOW
+
+
 class TestMarkers:
     def test_marker_round_trip_and_expiry(self) -> None:
         rev, wall, *_ = make()

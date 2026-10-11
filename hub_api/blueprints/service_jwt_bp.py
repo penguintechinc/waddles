@@ -100,6 +100,7 @@ async def issue_service_token() -> tuple[Response, int]:
             matched.service_id, scope, ttl_seconds=DEFAULT_TOKEN_TTL_SECONDS
         )
     except BootstrapRejected:
+        current_app.logger.warning("service_jwt.issue_rejected")
         return jsonify({"error": "unauthorized"}), 401
 
     # security.md audit logging -- record the issuance (who, what scope,

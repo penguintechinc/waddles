@@ -447,6 +447,31 @@ class TokenRevocation:
             return self._finish(CHECK_OK)
         return self._finish(self._outage_outcome(now))
 
+    def issue_floor(self, sub: str) -> int | None:
+        """The per-user revocation cutoff for ``sub`` (``None`` if none is known), for minters.
+
+        A token must never be swept by a revoke-all that happened BEFORE it was minted: ``iat``
+        has one-second resolution, so a login in the same second as the revocation would carry
+        ``iat == cutoff`` and be rejected. A minter that cares (user logins) takes
+        ``max(now, floor + 1)`` as the new token's ``iat`` -- at most one second ahead, well inside
+        the verifier's 30 s skew. A store outage yields ``None`` (mint with ``now``; the sweep
+        ambiguity only exists within the revoking second and a dead store cannot sweep anyway).
+        """
+        if not isinstance(sub, str) or not sub or len(sub) > MAX_IDENTIFIER_LENGTH:
+            return None
+        key = revocation_key(RevocationKind.USER, sub)
+        now = self._monotonic()
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is not None and entry.fresh_until > now:
+                return entry.value
+        fetched = self._fetch([key], now)
+        return fetched[key] if fetched is not None else None
+
+    async def aissue_floor(self, sub: str) -> int | None:
+        """:meth:`issue_floor` off the event loop."""
+        return await asyncio.to_thread(self.issue_floor, sub)
+
     def _revoked_outcome(
         self, keys: Mapping[RevocationKind, str], values: Mapping[str, int | None], issued_at: Any
     ) -> str | None:

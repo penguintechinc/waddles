@@ -193,6 +193,23 @@ class TestShortAccessTtl:
         assert "sentinel" not in caplog.text
 
 
+class TestLifetimeGuardIsDefensive:
+    def test_an_unreadable_exp_is_an_invalid_claim_not_a_crash(
+        self, monkeypatch: pytest.MonkeyPatch, metrics_capture: Any
+    ) -> None:
+        """PyJWT already vets `exp`/`iat`; if a library change ever lets NaN through, it is refused."""
+        real_decode = jwt.decode
+
+        def nan_exp(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            payload: dict[str, Any] = real_decode(*args, **kwargs)
+            payload["exp"] = float("nan")  # NaN <= now is False, so only the lifetime guard sees it
+            return payload
+
+        monkeypatch.setattr(auth.jwt, "decode", nan_exp)
+        assert verify_jwt_token(mint(), SECRET) is None
+        assert ("platform_hs256", "hs256", "invalid_claim") in metrics_capture.verifications()
+
+
 class TestMintedClaims:
     def test_every_token_carries_a_unique_valid_jti(self) -> None:
         jtis = {claims_of(mint())["jti"] for _ in range(50)}
@@ -300,6 +317,31 @@ class TestRevokeAllCutsOffPriorTokens:
         assert verify_jwt_token(token, SECRET) is not None
         tr.get_token_revocation().revoke_user("svc-ingest", cutoff=now)
         assert verify_jwt_token(token, SECRET) is None
+
+
+class TestIssuedAtFloor:
+    """A token minted after a revoke-all must never be swept by it, even in the same second."""
+
+    def test_issued_at_is_honoured_and_exp_follows_it(self) -> None:
+        iat = int(time.time()) + 1
+        claims = claims_of(mint(issued_at=iat))
+        assert claims["iat"] == iat
+        assert claims["exp"] - claims["iat"] == ACCESS_TOKEN_TTL_SECONDS
+
+    @pytest.mark.parametrize("offset", [JWT_CLOCK_SKEW_SECONDS + 5, -(JWT_CLOCK_SKEW_SECONDS + 5)])
+    def test_issued_at_far_from_now_is_refused(self, offset: int) -> None:
+        with pytest.raises(ValueError, match="issued_at"):
+            mint(issued_at=int(time.time()) + offset)
+
+    def test_a_login_in_the_revoke_second_survives_when_stamped_past_the_cutoff(self) -> None:
+        rev = tr.get_token_revocation()
+        cutoff = rev.revoke_user("55")
+        swept = mint(sub="55", issued_at=cutoff)  # what an unaware minter would produce
+        floor = rev.issue_floor("55")
+        assert floor == cutoff
+        safe = mint(sub="55", issued_at=floor + 1)
+        assert verify_jwt_token(swept, SECRET) is None
+        assert verify_jwt_token(safe, SECRET) is not None  # iat one second ahead is inside the skew
 
 
 class TestStoreOutageBehavesAsDocumented:

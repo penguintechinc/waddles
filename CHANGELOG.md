@@ -37,6 +37,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `waddles_jwt_verification_seconds`. Minting stays HS256 (asymmetric cutover is a later phase).
   `/internal/service-token` no longer decodes its own token with signature verification disabled
   (`ServiceJwtIssuer.issue_with_claims`).
+- Session revocation + short-lived access tokens (`docs/TOKEN_REVOCATION.md`, SOC 2 / OWASP session
+  management): a server-side revocation store (`flask_core.token_revocation`; Valkey behind a 5 s
+  local cache, bounded grace then fail closed on an outage) is consulted on **every**
+  `verify_jwt_token` and rejects a token before its `exp` by `jti`, by login session `sid`, or by a
+  per-user `iat` cutoff ("revoke all"). Access tokens now live **15 minutes**
+  (`JWT_ACCESS_TTL_SECONDS` 300-900), carry a random `jti` (+ `sid` for login sessions), nothing may
+  live over 1 h (refused at mint **and** at verify, `lifetime_exceeded`), and are renewed by a
+  rotating HttpOnly refresh token (`wb_refresh`) with reuse detection, a 10 s parallel-refresh
+  grace, 7 d idle / 30 d absolute limits and a digest (not the bearer) in `hub_sessions`. Triggers:
+  logout, `POST /auth/logout-all`, password change (all sessions), passkey removal / identity unlink
+  (other sessions), user deactivate / delete / super-admin demotion / DSAR erasure, and the new
+  superadmin `GET .../users/{id}/sessions`, `POST .../revoke-sessions`,
+  `POST .../sessions/{sid}/revoke`. New metrics `waddles_jwt_revocation_*` and
+  `waddles_hub_session_events_total`; audit action `authn.session_revoked`. **Deploy note:** 24 h
+  tokens minted before this are refused - every browser session signs in once. `/auth/refresh` now
+  needs the refresh cookie (an access token no longer renews itself). The Rust verifiers must check
+  the same store (paired follow-up; contract in the doc).
 
 ### Changed
 - `compliance.audit_logs` now requires scope `compliance.audit:admin` (was `compliance.audit:read`, which every session's

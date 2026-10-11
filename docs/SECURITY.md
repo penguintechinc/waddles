@@ -123,8 +123,8 @@ token = create_jwt_token(
     secret_key=os.getenv('JWT_SECRET'),
     tenant='global',            # mandatory -- there is no untenanted token
     scope='community:read',
-    expiration_hours=24
-)
+    session_id='42',   # `sid` claim -- the login session (omit for service tokens)
+)                      # default lifetime 15 min; every token also carries a random `jti`
 ```
 
 **Token Verification**:
@@ -146,15 +146,18 @@ else:
   [JWT Verification](JWT_VERIFICATION.md)
 - `iss`, `aud`, `sub`, `iat`, `exp`, `scope` and `tenant` enforced on every verification; no
   default-tenant fallback
-- Short expiration windows (1-24 hours)
-- Refresh token rotation with grace periods
-- Automatic revocation on logout
+- Access tokens live 15 minutes (`JWT_ACCESS_TTL_SECONDS`, 300-900); no token may live over 1 h
+- Rotating, HttpOnly refresh token (digest at rest, reuse detection, parallel-refresh grace)
+- Server-side revocation before `exp`: by `jti`, by login session, or per-user "revoke all"
+  (logout, admin revoke, password / authenticator change) -- see
+  [Session Revocation](TOKEN_REVOCATION.md)
 - Role claims for authorization decisions
 
 **Token Lifecycle**:
-1. **Login**: User authenticates → JWT issued with 24h expiration
-2. **Refresh**: Before expiration → New token issued, old token grace period (7 days)
-3. **Logout**: Token added to blacklist (Redis TTL = remaining token lifetime)
+1. **Login**: User authenticates → 15-minute access JWT (`jti`, `sid`) + rotating refresh cookie
+2. **Refresh**: Refresh cookie → new access token, refresh token rotated; a reused token revokes the session
+3. **Logout / revoke**: session ended in the database and `sid`/`jti`/per-user cutoff written to the
+   revocation store (Valkey, TTL = remaining token lifetime); checked on every verification
 4. **Rotation**: JWT signing keys rotated annually with 7-day grace period
 
 ### 3. OAuth 2.0 Flows

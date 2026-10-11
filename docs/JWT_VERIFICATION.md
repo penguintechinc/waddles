@@ -38,9 +38,17 @@ correct secret is still refused.
 | Any of `sub iss aud iat exp scope tenant` missing | `missing_claim` |
 | `sub` / `tenant` empty or not a string, or `scope` not a string | `invalid_claim` |
 | `exp` passed (strict, no skew) / `iat` or `nbf` in the future beyond 30 s skew | `expired` / `immature` |
+| Lived longer than 1 h (`exp - iat > 3600 + 30 s skew`) | `lifetime_exceeded` (ERROR) |
+| `jti` / `sid` present but not `[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}`, or `sub` longer than 128 chars | `invalid_claim` |
+| Revoked (by `jti`, login-session `sid`, or per-user `iat` cutoff) | `revoked` (WARNING) |
+| Revocation store unreachable beyond its grace window (fail closed) | `revocation_unavailable` (ERROR) |
 | Verifier has no secret configured (empty / unset) | `no_key` (logged CRITICAL) |
 
 `scope` may be the empty string (no scopes granted) but the claim must be present.
+
+The last four rows are session revocation and the short-TTL ceiling -- see
+[Session Revocation](TOKEN_REVOCATION.md). Revocation is checked **last**, so only an otherwise
+valid token costs a store lookup.
 
 ### MED-5: `iss` / `aud` are enforced, not optional
 
@@ -59,16 +67,20 @@ accepted when it contains the expected audience.
 ### Rollout note
 
 Tokens minted by `create_jwt_token` have carried every required claim (including `iss`/`aud`,
-since 2026-09-01) and live at most 24 h, so no live session or service token is affected and no
-re-mint tooling is needed. `create_jwt_token` also now refuses an empty `secret_key` (a token
-signed with an empty key is forgeable), so a service whose secret is unset fails loudly at mint
-time instead of issuing it.
+since 2026-09-01), so no live session or service token was affected by the Phase 0 hardening.
+`create_jwt_token` also refuses an empty `secret_key` (a token signed with an empty key is
+forgeable), so a service whose secret is unset fails loudly at mint time instead of issuing it.
+
+The short-TTL change that followed (access tokens now live 15 minutes, nothing may live over 1 h)
+*does* refuse the 24 h tokens minted before it: every browser session signs in once more at
+deploy time. Service tokens are minted fresh on every call (`expiration_hours=1`) and are
+unaffected.
 
 ## `kid` on minted tokens
 
 `create_jwt_token` stamps `kid` into every HS256 header (`JWT_KID`, default `hs256-v1`; blank =
 default; a malformed value stops the service at import). The HS256 verifier only *vets* `kid` and
-tolerates its absence (tokens minted before this change live for up to 24 h); in the JWKS phase
+tolerates its absence (tokens minted before that change); in the JWKS phase
 `kid` selects the verification key. Bump `JWT_KID` when rotating the shared secret.
 
 ## No unverified decodes
@@ -100,6 +112,9 @@ sum by (outcome) (rate(waddles_jwt_verifications_total{outcome!="ok"}[5m])) # re
 waddles_jwt_verifications_total{alg=~"none|other"} > 0                      # probing - should be zero
 ```
 
+Revocation adds its own instruments (`waddles_jwt_revocation_checks_total`, `..._lookup_seconds`,
+...); see [Session Revocation](TOKEN_REVOCATION.md#observability).
+
 A telemetry failure is logged (exception type only) and never changes the verdict.
 
 ## Logging
@@ -111,6 +126,9 @@ CRITICAL (`no_key`). The token, its claims, header values and the JWT library's 
 
 ## Follow-ups (not in this change)
 
+- **Rust `svc_*` verifiers need the revocation check** (paired follow-up, contract in
+  [Session Revocation](TOKEN_REVOCATION.md#rust-verifiers-paired-follow-up-not-built-here)): the
+  same Valkey keys, the 1 h lifetime ceiling and the same outage policy.
 - **Rust `svc_*` verifiers need the same Phase 0 hygiene**: pin one algorithm per verifier, reject
   `alg: none` and `jku`/`jwk`/`x5u`/`x5c`/`crit`, enforce `iss`/`aud`/required claims, drop any
   default-tenant fallback, and emit the same per-algorithm metric (identical metric and label

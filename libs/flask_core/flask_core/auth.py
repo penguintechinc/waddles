@@ -294,6 +294,7 @@ def create_jwt_token(
     kid: str = DEFAULT_JWT_KID,
     expiration_seconds: int | None = None,
     session_id: str | None = None,
+    issued_at: int | None = None,
 ) -> str:
     """
     Create JWT token for user authentication.
@@ -319,6 +320,9 @@ def create_jwt_token(
             `ACCESS_TOKEN_TTL_SECONDS` (15 minutes by default) and is renewed by the refresh
             flow. Mutually exclusive with `expiration_seconds`.
         expiration_seconds: Token lifetime in seconds (same rules as `expiration_hours`).
+        issued_at: `iat` as epoch seconds, for a minter that must not be swept by a revoke-all
+            from the same second (`token_revocation.TokenRevocation.issue_floor`). Must be within
+            `JWT_CLOCK_SKEW_SECONDS` of now; default is now.
         session_id: `sid` claim -- the login session this token belongs to, so revoking the
             session (logout, admin revoke) rejects every access token it ever minted. Omitted
             from the payload when None (service tokens have no login session).
@@ -372,6 +376,10 @@ def create_jwt_token(
         raise ValueError("session_id must match [A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")
 
     now = datetime.now(timezone.utc)
+    if issued_at is not None:
+        if abs(issued_at - now.timestamp()) > JWT_CLOCK_SKEW_SECONDS:
+            raise ValueError("issued_at must be within the clock-skew allowance of now")
+        now = datetime.fromtimestamp(issued_at, tz=timezone.utc)
     expiration = now + timedelta(seconds=expiration_seconds)
 
     payload: Dict[str, Any] = {

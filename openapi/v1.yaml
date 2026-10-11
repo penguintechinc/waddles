@@ -4119,6 +4119,39 @@ components:
       - metadata
       title: ServerMemberView
       type: object
+    SessionDTO:
+      description: One login session -- identifiers and timestamps only, never a token
+        or digest.
+      properties:
+        createdAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Createdat
+        expiresAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Expiresat
+        id:
+          title: Id
+          type: integer
+        isActive:
+          title: Isactive
+          type: boolean
+        revokedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Revokedat
+      required:
+      - id
+      - createdAt
+      - expiresAt
+      - isActive
+      - revokedAt
+      title: SessionDTO
+      type: object
     SettingDTO:
       description: Tenant setting DTO.
       properties:
@@ -12672,7 +12705,30 @@ paths:
                 title: SimpleSuccessResponse
                 type: object
           description: Response DTO for simple success endpoints.
-      summary: Logout.
+      summary: 'End this login session: its refresh token, its access tokens, and
+        both cookies.'
+  /api/v1/auth/logout-all:
+    post:
+      description: ''
+      operationId: post_logout_all
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for simple success endpoints.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: SimpleSuccessResponse
+                type: object
+          description: Response DTO for simple success endpoints.
+      summary: 'Sign out everywhere: every login session of the caller ends and every
+        token issued dies.'
   /api/v1/auth/me:
     get:
       description: ''
@@ -12946,7 +13002,15 @@ paths:
       summary: Set password.
   /api/v1/auth/refresh:
     post:
-      description: ''
+      description: '
+
+        The refresh token rotates on every use (the browser takes the new `Set-Cookie`);
+        presenting
+
+        one that was already rotated away revokes the whole session. The response
+        body still carries
+
+        the new access `token` (the SPA ignores it -- it lives in the cookie).'
       operationId: post_refresh
       parameters: []
       responses:
@@ -12968,7 +13032,8 @@ paths:
                 title: RefreshResponse
                 type: object
           description: Response DTO for refresh endpoints.
-      summary: Refresh.
+      summary: 'Renew the session: the HttpOnly refresh cookie in, a fresh 15-minute
+        access token out.'
   /api/v1/auth/register:
     post:
       description: ''
@@ -19745,6 +19810,153 @@ paths:
                 type: object
           description: Response DTO for password reset endpoints.
       summary: Generate password reset.
+  /api/v1/superadmin/users/{user_id}/revoke-sessions:
+    post:
+      description: ''
+      operationId: post_revoke_user_sessions
+      parameters:
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO for the revoke endpoints.
+
+
+                  `accessTokensRevokedImmediately` is `False` when the shared revocation
+                  store could not be
+
+                  written: refresh is cut off regardless (database), but already-issued
+                  access tokens survive
+
+                  until their own expiry (<= 15 minutes) on other replicas -- the
+                  operator should retry.'
+                properties:
+                  accessTokensRevokedImmediately:
+                    title: Accesstokensrevokedimmediately
+                    type: boolean
+                  sessionsRevoked:
+                    title: Sessionsrevoked
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - sessionsRevoked
+                - accessTokensRevokedImmediately
+                title: RevokeSessionsResponse
+                type: object
+          description: 'Response DTO for the revoke endpoints.
+
+
+            `accessTokensRevokedImmediately` is `False` when the shared revocation
+            store could not be
+
+            written: refresh is cut off regardless (database), but already-issued
+            access tokens survive
+
+            until their own expiry (<= 15 minutes) on other replicas -- the operator
+            should retry.'
+      summary: 'Revoke every session of a user: refresh stops now, every access token
+        issued so far dies.'
+  /api/v1/superadmin/users/{user_id}/sessions:
+    get:
+      description: ''
+      operationId: get_list_user_sessions
+      parameters:
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the list-sessions endpoint.
+                properties:
+                  sessions:
+                    items:
+                      $ref: '#/components/schemas/SessionDTO'
+                    title: Sessions
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - sessions
+                title: SessionsResponse
+                type: object
+          description: Response DTO for the list-sessions endpoint.
+      summary: List a user's login sessions (newest first) so one can be revoked by
+        id.
+  /api/v1/superadmin/users/{user_id}/sessions/{session_id}/revoke:
+    post:
+      description: ''
+      operationId: post_revoke_user_session
+      parameters:
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: session_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO for the revoke endpoints.
+
+
+                  `accessTokensRevokedImmediately` is `False` when the shared revocation
+                  store could not be
+
+                  written: refresh is cut off regardless (database), but already-issued
+                  access tokens survive
+
+                  until their own expiry (<= 15 minutes) on other replicas -- the
+                  operator should retry.'
+                properties:
+                  accessTokensRevokedImmediately:
+                    title: Accesstokensrevokedimmediately
+                    type: boolean
+                  sessionsRevoked:
+                    title: Sessionsrevoked
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - sessionsRevoked
+                - accessTokensRevokedImmediately
+                title: RevokeSessionsResponse
+                type: object
+          description: 'Response DTO for the revoke endpoints.
+
+
+            `accessTokensRevokedImmediately` is `False` when the shared revocation
+            store could not be
+
+            written: refresh is cut off regardless (database), but already-issued
+            access tokens survive
+
+            until their own expiry (<= 15 minutes) on other replicas -- the operator
+            should retry.'
+      summary: Revoke one login session of a user (404 if the session is not theirs).
   /api/v1/superadmin/users/{user_id}/super-admin-role:
     post:
       description: ''
