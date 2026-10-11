@@ -173,6 +173,22 @@ def test_logging_method_denominator() -> None:
     assert len(LOGGING_METHODS) >= 40, f"only {len(LOGGING_METHODS)} logging methods found"
 
 
+def _audit_sink_fails(capture: Capture, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the audit sink raise a driver-shaped error.
+
+    `AnalyticsService.process_events` / `run_aggregation` are placeholders that never query the
+    DB, so a `FailingDal` cannot fail them. They only "failed" in these sweeps because their
+    `logger.audit(...)` call was mis-signatured (a TypeError) -- masking the bug the other way
+    round. With the call fixed they succeed, so the failure is injected at the one seam they do
+    touch: the audit write. The handler's redaction is exercised exactly as before.
+    """
+
+    def _raise(*args: Any, **kwargs: Any) -> None:
+        raise FakePgError()
+
+    monkeypatch.setattr(capture.logger, "audit", _raise)
+
+
 @pytest.mark.parametrize(
     ("cls", "method"), LOGGING_METHODS, ids=[f"{c.__name__}.{m}" for c, m in LOGGING_METHODS]
 )
@@ -185,6 +201,7 @@ def test_service_failure_never_logs_bound_values(
         return True
 
     monkeypatch.setattr(health_service, "feature_enabled", _enabled)
+    _audit_sink_fails(capture, monkeypatch)
     service = _build(cls, FailingDal(), capture.logger)
     if method == "calculate_health_score":
         # premium + feature-enabled so the outer try block (not an early return) is exercised
@@ -323,6 +340,7 @@ def test_route_failure_logs_and_responds_without_bound_values(
 ) -> None:
     """Routes log type + SQLSTATE and return a static 500 body, never exception text."""
     dal = FailingDal()
+    _audit_sink_fails(capture, monkeypatch)
     monkeypatch.setattr(analytics_app, "logger", capture.logger)
     monkeypatch.setattr(Config, "SERVICE_API_KEY", "test-key")
     for attr, cls in (
@@ -400,10 +418,6 @@ def test_job_gather_failure_logs_type_only(
 ) -> None:
     """The batch job logs per-community failures (a returned exception) without its message."""
     monkeypatch.setattr(bot_score_calculator, "logger", capture.logger)
-    # The job's completion call `logger.audit("msg", action=...)` collides with
-    # AAALogger.audit's positional `action` (pre-existing, unrelated bug); no-op it so
-    # the per-community failure path under test is what the assertions observe.
-    monkeypatch.setattr(capture.logger, "audit", lambda *args, **kwargs: None)
 
     class OneCommunityDal(FailingDal):
         """Lists one active community, then fails every per-community query."""
