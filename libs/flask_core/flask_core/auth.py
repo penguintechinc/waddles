@@ -23,10 +23,14 @@ import logging
 import time
 
 from .jwt_hardening import (
+    MAX_JWT_LIFETIME_SECONDS,
     OUTCOME_OK,
     REASON_EXPIRED,
     REASON_INVALID_CLAIM,
+    REASON_LIFETIME_EXCEEDED,
     REASON_NO_KEY,
+    REASON_REVOCATION_UNAVAILABLE,
+    REASON_REVOKED,
     VERIFIER_PLATFORM_HS256,
     JwtRejection,
     classify_decode_error,
@@ -34,6 +38,12 @@ from .jwt_hardening import (
     is_valid_kid,
     log_rejection,
     record_verification,
+)
+from .token_revocation import (
+    CHECK_UNAVAILABLE_REJECTED,
+    MAX_IDENTIFIER_LENGTH,
+    get_token_revocation,
+    is_valid_identifier,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +81,34 @@ REQUIRED_JWT_CLAIMS = ("sub", "iss", "aud", "iat", "exp", "scope", "tenant")
 #: `service_jwt.CLOCK_SKEW_SECONDS`. NOT applied to `exp`: expiry stays strict to the
 #: second, exactly as before this change (see `_verify_platform_token`).
 JWT_CLOCK_SKEW_SECONDS = 30
+
+#: User access-token lifetime window (security.md: short-lived access tokens; the H-2 plan's
+#: 5-15 minute target). Access tokens are renewed by the refresh-token flow, never by running
+#: long: `JWT_ACCESS_TTL_SECONDS` may tune the default *inside* this window and nothing outside
+#: it is accepted -- a mis-set value stops the service at import instead of minting tokens
+#: that live for hours.
+MIN_ACCESS_TOKEN_TTL_SECONDS = 300
+MAX_ACCESS_TOKEN_TTL_SECONDS = 900
+
+
+def _load_access_token_ttl(raw: Optional[str]) -> int:
+    """`JWT_ACCESS_TTL_SECONDS` (blank == unset == the 15-minute maximum), range-checked."""
+    if raw is None or not raw.strip():
+        return MAX_ACCESS_TOKEN_TTL_SECONDS
+    try:
+        ttl = int(raw)
+    except ValueError as exc:
+        raise ValueError("JWT_ACCESS_TTL_SECONDS must be an integer number of seconds") from exc
+    if not MIN_ACCESS_TOKEN_TTL_SECONDS <= ttl <= MAX_ACCESS_TOKEN_TTL_SECONDS:
+        raise ValueError(
+            f"JWT_ACCESS_TTL_SECONDS must be within "
+            f"[{MIN_ACCESS_TOKEN_TTL_SECONDS}, {MAX_ACCESS_TOKEN_TTL_SECONDS}]"
+        )
+    return ttl
+
+
+#: Lifetime `create_jwt_token` gives a token that names no explicit expiry.
+ACCESS_TOKEN_TTL_SECONDS = _load_access_token_ttl(os.getenv("JWT_ACCESS_TTL_SECONDS"))
 
 #: Slug of the platform's default tenant (`tenants.slug = 'global'`, seeded by
 #: migration 058) -- single-tenant (Free/Professional, capped) deployments
@@ -249,11 +287,13 @@ def create_jwt_token(
     secret_key: str,
     tenant: str,
     scope: str = "",
-    expiration_hours: int = 24,
+    expiration_hours: float | None = None,
     teams: list[str] | None = None,
     issuer: str = DEFAULT_JWT_ISSUER,
     audience: str = DEFAULT_JWT_AUDIENCE,
     kid: str = DEFAULT_JWT_KID,
+    expiration_seconds: int | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Create JWT token for user authentication.
@@ -273,7 +313,15 @@ def create_jwt_token(
             default (no scopes granted), never omitted from the payload, so
             downstream scope checks always see an explicit claim to parse
             rather than a missing key.
-        expiration_hours: Token expiration in hours
+        expiration_hours: Token lifetime in hours -- for machine/service tokens that
+            deliberately outlive a user access token (security.md's 1 h ceiling). Omit it
+            (and `expiration_seconds`) for a user access token: it then lives
+            `ACCESS_TOKEN_TTL_SECONDS` (15 minutes by default) and is renewed by the refresh
+            flow. Mutually exclusive with `expiration_seconds`.
+        expiration_seconds: Token lifetime in seconds (same rules as `expiration_hours`).
+        session_id: `sid` claim -- the login session this token belongs to, so revoking the
+            session (logout, admin revoke) rejects every access token it ever minted. Omitted
+            from the payload when None (service tokens have no login session).
         teams: Team/OU slugs the subject belongs to (security.md JWT
             Claims). Empty list by default -- like `scope`, always present
             in the payload rather than omitted when the caller has no team
@@ -287,10 +335,14 @@ def create_jwt_token(
     Returns:
         JWT token string
 
+    Every token carries a random `jti` (revocation by token id) and a lifetime of at most
+    `MAX_JWT_LIFETIME_SECONDS` -- the verifier refuses anything longer-lived.
+
     Raises:
         ValueError: If tenant or secret_key is empty, or kid is malformed --
             there is no untenanted token, and a token signed with an empty
-            secret is forgeable by anyone.
+            secret is forgeable by anyone -- or the requested lifetime is not
+            within (0, MAX_JWT_LIFETIME_SECONDS], or `session_id` is not a valid identifier.
     """
     if not tenant:
         raise ValueError(
@@ -305,10 +357,24 @@ def create_jwt_token(
     if not is_valid_kid(kid):
         raise ValueError("kid must match [A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}")
 
-    now = datetime.now(timezone.utc)
-    expiration = now + timedelta(hours=expiration_hours)
+    if expiration_hours is not None and expiration_seconds is not None:
+        raise ValueError("pass expiration_hours or expiration_seconds, not both")
+    if expiration_seconds is None:
+        expiration_seconds = (
+            ACCESS_TOKEN_TTL_SECONDS if expiration_hours is None else int(expiration_hours * 3600)
+        )
+    if not 0 < expiration_seconds <= MAX_JWT_LIFETIME_SECONDS:
+        raise ValueError(
+            f"token lifetime must be within (0, {MAX_JWT_LIFETIME_SECONDS}] seconds "
+            "(security.md: short-lived tokens; long sessions renew via the refresh flow)"
+        )
+    if session_id is not None and not is_valid_identifier(session_id):
+        raise ValueError("session_id must match [A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")
 
-    payload = {
+    now = datetime.now(timezone.utc)
+    expiration = now + timedelta(seconds=expiration_seconds)
+
+    payload: Dict[str, Any] = {
         'sub': user_id,
         'username': username,
         'email': email,
@@ -320,8 +386,11 @@ def create_jwt_token(
         'aud': audience,
         'iat': now,
         'exp': expiration,
+        'jti': secrets.token_hex(16),
         'type': 'access'
     }
+    if session_id is not None:
+        payload['sid'] = session_id
 
     token = jwt.encode(
         payload, secret_key, algorithm=PLATFORM_JWT_ALGORITHM, headers={'kid': kid}
@@ -329,10 +398,10 @@ def create_jwt_token(
 
     # PII-free: the subject id and tenant slug only -- never username/email/token.
     logger.info(
-        "JWT token created (alg=%s kid=%s expires_in_h=%s)",
+        "JWT token created (alg=%s kid=%s ttl_s=%s)",
         PLATFORM_JWT_ALGORITHM,
         kid,
-        expiration_hours,
+        expiration_seconds,
         extra={
             'event_type': 'AUTH',
             'action': 'create_jwt_token',
@@ -391,6 +460,35 @@ def _verify_platform_token(
             raise JwtRejection(REASON_INVALID_CLAIM, alg=header.alg)
     if not isinstance(payload['scope'], str):
         raise JwtRejection(REASON_INVALID_CLAIM, alg=header.alg)
+    # The revocation store keys on `sub`/`jti`/`sid`: bound their shape so a hostile value can
+    # never reach a key, log line or metric label.
+    if len(payload['sub']) > MAX_IDENTIFIER_LENGTH:
+        raise JwtRejection(REASON_INVALID_CLAIM, alg=header.alg)
+    for name in ('jti', 'sid'):
+        if name in payload and not is_valid_identifier(payload[name]):
+            raise JwtRejection(REASON_INVALID_CLAIM, alg=header.alg)
+
+    # Short TTL, enforced where it matters: a token lived longer than the platform ceiling is
+    # refused even though its signature and `exp` are fine (a mis-configured or compromised
+    # minter must not be able to hand out day-long bearer tokens). Tokens minted before the
+    # short-TTL rollout (24 h) are refused here -- their holders sign in once more.
+    try:
+        lifetime = int(payload['exp']) - int(payload['iat'])
+    except (TypeError, ValueError):
+        raise JwtRejection(REASON_INVALID_CLAIM, alg=header.alg) from None
+    if lifetime > MAX_JWT_LIFETIME_SECONDS + JWT_CLOCK_SKEW_SECONDS:
+        raise JwtRejection(REASON_LIFETIME_EXCEEDED, alg=header.alg)
+
+    # Server-side revocation: a logged-out / admin-revoked / credential-changed token dies
+    # here, before its `exp`. Last, so only a token that is otherwise acceptable costs a lookup.
+    verdict = get_token_revocation().check(payload)
+    if not verdict.allowed:
+        reason = (
+            REASON_REVOCATION_UNAVAILABLE
+            if verdict.outcome == CHECK_UNAVAILABLE_REJECTED
+            else REASON_REVOKED
+        )
+        raise JwtRejection(reason, alg=header.alg)
 
     return payload, header.alg
 
@@ -417,6 +515,11 @@ def verify_jwt_token(
       must be non-empty strings. There is no default-tenant fallback: a token
       with no `tenant` is rejected, never treated as `DEFAULT_TENANT_SLUG`.
     * An empty `secret_key` is refused (a CRITICAL log, not a pass).
+    * A token lived longer than `MAX_JWT_LIFETIME_SECONDS` (`exp - iat`) is refused.
+    * A revoked token is refused before its `exp`: by `jti`, by login session `sid`, or by the
+      per-user `iat` cutoff written by "revoke all sessions" (`token_revocation`). When the
+      revocation store is unreachable the outage policy applies -- bounded grace, then fail
+      closed (`docs/TOKEN_REVOCATION.md`).
 
     Each call emits `waddles_jwt_verifications_total{verifier,alg,outcome}` and
     a latency histogram. Logs carry only closed-vocabulary fields -- never the

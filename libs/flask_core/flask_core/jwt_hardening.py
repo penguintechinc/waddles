@@ -70,7 +70,20 @@ REASON_BAD_AUDIENCE: Final = "bad_audience"
 REASON_MISSING_CLAIM: Final = "missing_claim"
 REASON_INVALID_CLAIM: Final = "invalid_claim"
 REASON_SCOPE_DENIED: Final = "scope_denied"
+REASON_REVOKED: Final = "revoked"
+REASON_REVOCATION_UNAVAILABLE: Final = "revocation_unavailable"
+REASON_LIFETIME_EXCEEDED: Final = "lifetime_exceeded"
 REASON_INVALID: Final = "invalid"
+
+#: Longest lifetime (``exp - iat``) any platform token may have -- security.md's machine-token
+#: ceiling. User access tokens are far shorter (``auth.ACCESS_TOKEN_TTL_SECONDS``); this is the
+#: hard upper bound the verifier enforces and the bound that lets revocation records expire.
+MAX_JWT_LIFETIME_SECONDS: Final = 3600
+
+#: How long a revocation record must live: a token issued at or before a cutoff has at most
+#: ``MAX_JWT_LIFETIME_SECONDS`` (+ the 30 s ``iat``/``exp`` skew) left, so a record older than
+#: this can no longer match any live token. Five minutes of margin.
+REVOCATION_RECORD_TTL_SECONDS: Final = MAX_JWT_LIFETIME_SECONDS + 300
 
 #: JOSE header parameters that let a token pick its own verification key (see module doc).
 FORBIDDEN_HEADER_PARAMS: Final[frozenset[str]] = frozenset({"jku", "jwk", "x5u", "x5c", "crit"})
@@ -117,6 +130,8 @@ _ALARMING_REASONS: Final[frozenset[str]] = frozenset(
         REASON_BAD_AUDIENCE,
         REASON_MISSING_CLAIM,
         REASON_INVALID_CLAIM,
+        REASON_REVOCATION_UNAVAILABLE,
+        REASON_LIFETIME_EXCEEDED,
     }
 )
 

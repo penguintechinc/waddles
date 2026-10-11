@@ -45,6 +45,21 @@ if str(_LIBS_DIR) not in sys.path:
 
 
 
+@pytest.fixture(autouse=True)
+def _isolated_token_revocation():
+    """Give every test its own empty, process-local revocation store.
+
+    `flask_core.auth.verify_jwt_token` consults a process-wide `TokenRevocation`; without this a
+    user-wide cutoff written by one test (same `sub`, same second) would reject the tokens of the
+    next. Tests that exercise the Valkey backend or an outage build their own and install it.
+    """
+    from flask_core import token_revocation as tr
+
+    previous = tr.configure_token_revocation(tr.TokenRevocation(tr.MemoryBackend()))
+    yield
+    tr.configure_token_revocation(previous)
+
+
 def _load_stream_pipeline_module():
     """Load stream_pipeline.py directly, bypassing flask_core/__init__.py.
 
