@@ -107,52 +107,125 @@ Returns the name of the service account to use.
 {{- end }}
 
 {{/*
-PostgreSQL connection URL
-Constructs the PostgreSQL connection URL from values.
-Supports both external and internal PostgreSQL instances.
-Format: postgresql://user:password@host:port/database
+Per-service PostgreSQL access (security findings H-1 / H-3)
+===========================================================================
+Every workload connects as exactly ONE least-privilege LOGIN role from
+config/postgres/service-roles.yaml (role names mirrored in
+infrastructure.postgresql.serviceRoles.roles, drift-tested), NEVER as the database
+owner/superuser (infrastructure.postgresql.username). The owner credential lives in its
+own Secret (waddlebot.db.adminSecretName), referenced ONLY by the Postgres Deployment and
+the db-migrate hook Job; it is not a key of the shared waddlebot-secrets Secret that ~40
+pods `envFrom`. Per-role passwords live in waddlebot.db.credentialsSecretName under
+PW_<ROLE> keys and reach a pod only through a `secretKeyRef` for that pod's own role.
+These two helpers replace the former `waddlebot.postgres.url` / `readReplicaUrl`, which
+rendered the superuser password into a URL.
 */}}
-{{- define "waddlebot.postgres.url" -}}
-{{- if .Values.postgresql.enabled }}
-{{- $host := printf "%s-postgresql" (include "waddlebot.fullname" .) }}
-{{- $port := .Values.postgresql.service.port | default 5432 }}
-{{- $user := .Values.postgresql.auth.username | default "waddlebot" }}
-{{- $password := .Values.postgresql.auth.password | required "postgresql.auth.password is required" }}
-{{- $database := .Values.postgresql.auth.database | default "waddlebot" }}
-{{- printf "postgresql://%s:%s@%s:%v/%s" $user $password $host $port $database }}
-{{- else }}
-{{- $host := .Values.postgresql.external.host | required "postgresql.external.host is required when postgresql.enabled is false" }}
-{{- $port := .Values.postgresql.external.port | default 5432 }}
-{{- $user := .Values.postgresql.external.username | required "postgresql.external.username is required" }}
-{{- $password := .Values.postgresql.external.password | required "postgresql.external.password is required" }}
-{{- $database := .Values.postgresql.external.database | default "waddlebot" }}
-{{- printf "postgresql://%s:%s@%s:%v/%s" $user $password $host $port $database }}
+
+{{/* Owner/superuser Secret (Postgres Deployment + db-migrate Job only). */}}
+{{- define "waddlebot.db.adminSecretName" -}}
+{{- .Values.infrastructure.postgresql.admin.existingSecret | default (printf "%s-db-admin" (include "waddlebot.fullname" .)) }}
 {{- end }}
+
+{{/* Secret holding one PW_<ROLE> key per service role (generated, or operator-managed). */}}
+{{- define "waddlebot.db.credentialsSecretName" -}}
+{{- .Values.infrastructure.postgresql.serviceRoles.existingSecret | default (printf "%s-db-credentials" (include "waddlebot.fullname" .)) }}
+{{- end }}
+
+{{/* Secret data key for a role: waddles_hub_api -> PW_WADDLES_HUB_API. */}}
+{{- define "waddlebot.db.passwordKey" -}}
+{{- printf "PW_%s" (upper .) -}}
 {{- end }}
 
 {{/*
-PostgreSQL read replica connection URL
-Constructs the PostgreSQL read replica connection URL from values.
-Falls back to primary database URL if read replica is not configured.
+Fail the render unless `role` is one of infrastructure.postgresql.serviceRoles.roles --
+a typo'd role would otherwise render a pod that can never authenticate.
+Args (dict): root (the root "."), role.
 */}}
-{{- define "waddlebot.postgres.readReplicaUrl" -}}
-{{- if and .Values.postgresql.enabled .Values.postgresql.readReplica.enabled }}
-{{- $host := printf "%s-postgresql-read" (include "waddlebot.fullname" .) }}
-{{- $port := .Values.postgresql.readReplica.service.port | default 5432 }}
-{{- $user := .Values.postgresql.auth.username | default "waddlebot" }}
-{{- $password := .Values.postgresql.auth.password | required "postgresql.auth.password is required" }}
-{{- $database := .Values.postgresql.auth.database | default "waddlebot" }}
-{{- printf "postgresql://%s:%s@%s:%v/%s" $user $password $host $port $database }}
-{{- else if and (not .Values.postgresql.enabled) .Values.postgresql.external.readReplica.enabled }}
-{{- $host := .Values.postgresql.external.readReplica.host | required "postgresql.external.readReplica.host is required" }}
-{{- $port := .Values.postgresql.external.readReplica.port | default 5432 }}
-{{- $user := .Values.postgresql.external.username | required "postgresql.external.username is required" }}
-{{- $password := .Values.postgresql.external.password | required "postgresql.external.password is required" }}
-{{- $database := .Values.postgresql.external.database | default "waddlebot" }}
-{{- printf "postgresql://%s:%s@%s:%v/%s" $user $password $host $port $database }}
-{{- else }}
-{{- include "waddlebot.postgres.url" . }}
+{{- define "waddlebot.db.requireRole" -}}
+{{- if not (has .role .root.Values.infrastructure.postgresql.serviceRoles.roles) -}}
+{{- fail (printf "unknown PostgreSQL service role %q -- add it to config/postgres/service-roles.yaml AND infrastructure.postgresql.serviceRoles.roles in values.yaml" .role) -}}
+{{- end -}}
 {{- end }}
+
+{{/*
+Resolve + validate one role's password (secrets.yaml calls this exactly once per role).
+Args (dict): ctx (root "."), role. Precedence: explicit infrastructure.postgresql.
+serviceRoles.passwords.<role> > existing key in the credentials Secret (KEEP) > generate
+(alpha/local only) > fail closed -- the shared waddlebot.autoSecretValue policy. The value
+must be URL-safe ([A-Za-z0-9._~-], it is embedded in DATABASE_URL) and >= 16 chars, and
+must not look like a placeholder / repo default: the same rules scripts/db/
+service_roles.py enforces at migration time, so a bad value fails here, at render.
+*/}}
+{{- define "waddlebot.db.rolePassword" -}}
+{{- $ctx := .ctx -}}
+{{- $role := .role -}}
+{{- $key := include "waddlebot.db.passwordKey" $role -}}
+{{- $explicit := index ($ctx.Values.infrastructure.postgresql.serviceRoles.passwords | default dict) $role | default "" | toString -}}
+{{- $explicit = ternary "" $explicit (hasPrefix "REPLACE_ME" $explicit) -}}
+{{- $value := include "waddlebot.autoSecretValue" (dict "ctx" $ctx "key" $key "explicit" $explicit "length" 32 "secret" (include "waddlebot.db.credentialsSecretName" $ctx)) -}}
+{{- if not (regexMatch "^[A-Za-z0-9._~-]{16,}$" $value) -}}
+{{- fail (printf "PostgreSQL password for role %q must be >=16 chars of [A-Za-z0-9._~-] (it is embedded in DATABASE_URL)" $role) -}}
+{{- end -}}
+{{- if regexMatch "(?i)(changeme|change_me|replace_me|example|password|dev_)" $value -}}
+{{- fail (printf "PostgreSQL password for role %q looks like a placeholder / repo default -- refusing" $role) -}}
+{{- end -}}
+{{- $value -}}
+{{- end }}
+
+{{/* Connection target pieces (the in-chart Postgres Service). */}}
+{{- define "waddlebot.postgres.host" -}}
+{{- .Values.infrastructure.postgresql.service.name -}}
+{{- end }}
+{{- define "waddlebot.postgres.port" -}}
+{{- .Values.infrastructure.postgresql.service.port -}}
+{{- end }}
+{{- define "waddlebot.postgres.database" -}}
+{{- .Values.infrastructure.postgresql.database -}}
+{{- end }}
+
+{{/*
+Connection URL for a service role with the password left to Kubernetes' own `$(DB_PASSWORD)`
+env expansion -- NEVER the secret itself, so nothing credential-bearing is rendered into a
+manifest. Only valid inside a container whose earlier `env` entry defines DB_PASSWORD
+(waddlebot.dbEnv does). Args (dict): root, role.
+*/}}
+{{- define "waddlebot.db.url" -}}
+{{- printf "postgresql://%s:$(DB_PASSWORD)@%s:%v/%s" .role (include "waddlebot.postgres.host" .root) (include "waddlebot.postgres.port" .root) (include "waddlebot.postgres.database" .root) -}}
+{{- end }}
+
+{{/*
+Container `env` entries giving a workload ITS OWN database identity (replaces the shared
+superuser DB_USER/DB_PASS/DATABASE_URL the pods used to inherit through envFrom).
+Emits DB_USER / DATABASE_USER, DB_PASSWORD / DB_PASS / DATABASE_PASSWORD (secretKeyRef to
+the role's own PW_<ROLE> key) and DATABASE_URL (see waddlebot.db.url). Explicit `env`
+entries override `envFrom`, and DB_PASSWORD is defined before DATABASE_URL because
+Kubernetes only expands $(VAR) references to EARLIER entries.
+Usage inside a container's `env:` list:
+  {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
+*/}}
+{{- define "waddlebot.dbEnv" -}}
+{{- include "waddlebot.db.requireRole" . -}}
+- name: DB_USER
+  value: {{ .role | quote }}
+- name: DATABASE_USER
+  value: {{ .role | quote }}
+- name: DB_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "waddlebot.db.credentialsSecretName" .root }}
+      key: {{ include "waddlebot.db.passwordKey" .role }}
+- name: DB_PASS
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "waddlebot.db.credentialsSecretName" .root }}
+      key: {{ include "waddlebot.db.passwordKey" .role }}
+- name: DATABASE_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "waddlebot.db.credentialsSecretName" .root }}
+      key: {{ include "waddlebot.db.passwordKey" .role }}
+- name: DATABASE_URL
+  value: {{ include "waddlebot.db.url" . | quote }}
 {{- end }}
 
 {{/*
@@ -217,54 +290,6 @@ Usage: {{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}
 {{- printf "%s:%s" $repository $tag }}
-{{- end }}
-{{- end }}
-
-{{/*
-Database host
-Returns the PostgreSQL host name.
-*/}}
-{{- define "waddlebot.postgres.host" -}}
-{{- if .Values.postgresql.enabled }}
-{{- printf "%s-postgresql" (include "waddlebot.fullname" .) }}
-{{- else }}
-{{- .Values.postgresql.external.host | required "postgresql.external.host is required when postgresql.enabled is false" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Database port
-Returns the PostgreSQL port.
-*/}}
-{{- define "waddlebot.postgres.port" -}}
-{{- if .Values.postgresql.enabled }}
-{{- .Values.postgresql.service.port | default 5432 }}
-{{- else }}
-{{- .Values.postgresql.external.port | default 5432 }}
-{{- end }}
-{{- end }}
-
-{{/*
-Database name
-Returns the PostgreSQL database name.
-*/}}
-{{- define "waddlebot.postgres.database" -}}
-{{- if .Values.postgresql.enabled }}
-{{- .Values.postgresql.auth.database | default "waddlebot" }}
-{{- else }}
-{{- .Values.postgresql.external.database | default "waddlebot" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Database username
-Returns the PostgreSQL username.
-*/}}
-{{- define "waddlebot.postgres.username" -}}
-{{- if .Values.postgresql.enabled }}
-{{- .Values.postgresql.auth.username | default "waddlebot" }}
-{{- else }}
-{{- .Values.postgresql.external.username | required "postgresql.external.username is required" }}
 {{- end }}
 {{- end }}
 
@@ -941,7 +966,11 @@ therefore never routed through this helper.
 
 Args (dict): ctx (the root "."), key (Secret data key name, e.g. "JWT_SECRET"),
 explicit (the value already resolved from .Values, "" if unset/placeholder), length
-(random byte-string length, default 32).
+(random byte-string length, default 32), optional secret (the Secret to look the key up
+in; default "waddlebot-secrets"), optional legacySecret/legacyKey (a SECOND Secret/key
+read ONLY as a one-way migration source when `secret` has no value yet -- how
+POSTGRES_PASSWORD moves out of waddlebot-secrets into waddlebot-db-admin on `helm upgrade`
+without minting a new password that the Postgres PVC's initdb-time password would reject).
 
 Precedence: explicit non-placeholder value from .Values wins outright (operator/
 ExternalSecret already deliberately set it) > existing Secret key (KEEP, never
@@ -953,14 +982,22 @@ rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
 {{- $explicit := .explicit | default "" -}}
 {{- $length := .length | default 32 -}}
 {{- $hex := .hex | default false -}}
+{{- $secretName := .secret | default "waddlebot-secrets" -}}
 {{- if ne $explicit "" -}}
 {{- $explicit -}}
 {{- else -}}
 {{- $tier := $ctx.Values.global.deploymentTier -}}
 {{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") -}}
-{{- $existing := lookup "v1" "Secret" $ctx.Values.namespace "waddlebot-secrets" -}}
+{{- $existing := lookup "v1" "Secret" $ctx.Values.namespace $secretName -}}
+{{- $legacy := dict -}}
+{{- if .legacySecret -}}
+{{- $legacy = lookup "v1" "Secret" $ctx.Values.namespace .legacySecret | default dict -}}
+{{- end -}}
+{{- $legacyKey := .legacyKey | default $key -}}
 {{- if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $existing "key" $key)) -}}
 {{- index $existing.data $key | b64dec -}}
+{{- else if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $legacy "key" $legacyKey)) -}}
+{{- index $legacy.data $legacyKey | b64dec -}}
 {{- else if $canGenerate -}}
 {{- if $hex -}}
 {{- sha256sum (randBytes 32) -}}
@@ -968,7 +1005,7 @@ rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
 {{- randAlphaNum (int $length) -}}
 {{- end -}}
 {{- else -}}
-{{- fail (printf "waddlebot-secrets: key %q has no value and global.deploymentTier=%q is outside alpha/local -- auto-generation is alpha/local only. Set the corresponding value explicitly (or pre-populate this Secret via ExternalSecret/SealedSecret) before deploying." $key $tier) -}}
+{{- fail (printf "%s: key %q has no value and global.deploymentTier=%q is outside alpha/local -- auto-generation is alpha/local only. Set the corresponding value explicitly (or pre-populate this Secret via ExternalSecret/SealedSecret) before deploying." $secretName $key $tier) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

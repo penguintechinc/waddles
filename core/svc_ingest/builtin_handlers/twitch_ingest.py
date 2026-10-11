@@ -33,10 +33,15 @@ parses the tag segment `IrcTransport.receive()` yields (see that
 receiver's own module docstring), so the raw event carries `author_id`/
 `user_id` (numeric, duplicated under both keys), `display_name`,
 `message_id`, `room_id`, `badges`, and `is_mod`/`is_subscriber`/
-`is_vip`/`is_broadcaster`. This handler passes them straight through onto
-`PlatformEvent.payload` unchanged -- CAP not granted (or a non-tagged
-line) means every one of these is `None`/`False`/`[]` on the raw event
-already, so no extra guarding is needed here beyond a type check.
+`is_vip`/`is_broadcaster`. This handler passes them through onto
+`PlatformEvent.payload` -- CAP not granted (or a non-tagged line) means
+every one of these is `None`/`False`/`[]` on the raw event already.
+
+ROLE FLAGS ARE FAIL-CLOSED: the raw event is `json.loads`-ed off a Valkey
+list, so `is_mod` & co. can be any JSON type, and `bool("false")` is `True`
+(a non-moderator promoted to a moderator -- the mod-gate bypass fixed here).
+Each flag is read through `receivers.badge_flags.strict_flag`: only the real
+boolean `True` grants a role; every other value yields `False`.
 """
 
 from __future__ import annotations
@@ -45,6 +50,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from flask_core import PlatformEvent
+
+from receivers.badge_flags import strict_flag
 
 
 def _as_str_or_none(value: object) -> str | None:
@@ -84,10 +91,14 @@ async def normalize(raw: dict[str, Any]) -> PlatformEvent:
             "message_id": _as_str_or_none(raw.get("message_id")),
             "room_id": _as_str_or_none(raw.get("room_id")),
             "badges": raw_badges if isinstance(raw_badges, list) else [],
-            "is_mod": bool(raw.get("is_mod")),
-            "is_subscriber": bool(raw.get("is_subscriber")),
-            "is_vip": bool(raw.get("is_vip")),
-            "is_broadcaster": bool(raw.get("is_broadcaster")),
+            "is_mod": strict_flag(raw.get("is_mod"), field="is_mod", platform="twitch"),
+            "is_subscriber": strict_flag(
+                raw.get("is_subscriber"), field="is_subscriber", platform="twitch"
+            ),
+            "is_vip": strict_flag(raw.get("is_vip"), field="is_vip", platform="twitch"),
+            "is_broadcaster": strict_flag(
+                raw.get("is_broadcaster"), field="is_broadcaster", platform="twitch"
+            ),
         },
         occurred_at=raw.get("occurred_at") or datetime.now(UTC).isoformat(),
     )

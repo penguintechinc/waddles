@@ -1,7 +1,7 @@
 {
   "uid": "waddles-bundle-executor",
   "title": "Waddles / bundle executor and capability gate",
-  "description": "The bundle-executor binary exports no metrics of its own; this board shows its link as seen by svc-process / svc-action, the host-capability (kv, db, http) call latency, and every capability / quota / egress denial.",
+  "description": "The executor link as seen by svc-process / svc-action, the host-capability (kv, db, http) call latency, and every capability / quota / egress denial. The executor's own series (opt-in OTLP export) are on the stage pipeline board.",
   "tags": [
     "waddles",
     "observability-as-code"
@@ -1045,7 +1045,7 @@
       "id": 18,
       "type": "timeseries",
       "title": "Total denial rate",
-      "description": "Sum of every denial counter below. waddles_bundle_capability_denied_total (central gate) is a `metrics`-facade counter with no recorder installed in svc-process/svc-action yet, so it contributes 0 until one is wired - the per-capability counters carry the signal.",
+      "description": "Sum of every denial counter below, including waddles_bundle_capability_denied_total (the central gate's audit counter, exported through the OTel-backed `metrics` recorder svc-process / svc-action install).",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

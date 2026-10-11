@@ -36,3 +36,8 @@ uuid = { version = "=1.26.1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+# Test-only: builds hostile claim sets (a claim removed, retyped or emptied)
+# that the typed `EgressAssertion` signer can never produce. Already in the
+# lockfile transitively via jsonwebtoken (same exact version).
+serde_json = "=1.0.151"
+base64 = "=0.22.1"

@@ -25,6 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::ExecutorError;
 use crate::heartbeat::{self, ActivityTracker, Heartbeat};
+use crate::metrics::{self, ExecutorMetrics};
 
 /// What the caller (`crate::invoke`, or a test double) does for every kind
 /// of request the stage may send on this connection. `on_ping`/
@@ -109,6 +110,10 @@ pub struct Connection {
     /// decides whether anything actually watches it (`Heartbeat::cfg.
     /// enabled`).
     activity: Arc<ActivityTracker>,
+    /// Where every `host-call` round trip on this connection is timed
+    /// (`waddles_executor_host_call_seconds`). The process-wide set in
+    /// production; tests inject their own via [`Connection::with_metrics`].
+    metrics: Arc<ExecutorMetrics>,
 }
 
 impl Connection {
@@ -118,11 +123,21 @@ impl Connection {
     /// `run_connection` normally requires -- production code never calls
     /// this from outside `wire`/`invoke`.
     pub(crate) fn new(writer_tx: mpsc::UnboundedSender<Frame>) -> Arc<Self> {
+        Self::with_metrics(writer_tx, metrics::executor_metrics())
+    }
+
+    /// [`Connection::new`] with the metrics sink supplied -- the seam tests
+    /// use to read back exactly the host calls made through one connection.
+    pub(crate) fn with_metrics(
+        writer_tx: mpsc::UnboundedSender<Frame>,
+        metrics: Arc<ExecutorMetrics>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             ids: IdAllocator::new(),
             pending: CorrelationTable::new(),
             writer_tx,
             activity: Arc::new(ActivityTracker::new()),
+            metrics,
         })
     }
 
@@ -431,6 +446,24 @@ where
 /// The single entry point every WIT `Host` trait impl in `crate::host`
 /// funnels through (see `crate::host::bridge`).
 pub async fn host_call(
+    connection: &Connection,
+    body: penguin_bundle_host::wire::HostCallBody,
+    capability: &'static str,
+    op: &'static str,
+) -> Result<serde_json::Value, ExecutorError> {
+    let started = std::time::Instant::now();
+    let outcome = host_call_round_trip(connection, body, capability, op).await;
+    let result = metrics::host_call_result(&outcome.as_ref().map(|_| ()));
+    connection
+        .metrics
+        .record_host_call(capability, op, result, started.elapsed());
+    outcome
+}
+
+/// The `host-call` request/reply exchange behind [`host_call`], split out so
+/// the wrapper can time the whole round trip (denials and lost connections
+/// included) and label its outcome.
+async fn host_call_round_trip(
     connection: &Connection,
     body: penguin_bundle_host::wire::HostCallBody,
     capability: &'static str,
@@ -1428,5 +1461,164 @@ mod tests {
             error_seen,
             "expected an ERROR probe-failure log once past grace, got {captured:?}"
         );
+    }
+
+    /// `waddles_executor_host_call_seconds`: each test drives a REAL
+    /// `host_call` round trip over a `Connection` whose stage side is a task
+    /// answering from the writer channel, then reads the data points back out
+    /// of an isolated in-memory exporter.
+    mod host_call_metrics {
+        use super::*;
+        use crate::metrics::test_support::Harness;
+        use penguin_bundle_host::wire::{CapabilityKind, HostResultBody, HostResultError};
+
+        fn call_body(capability: CapabilityKind, op: &str) -> HostCallBody {
+            HostCallBody {
+                app_id: "waddles.t.hostcall".to_string(),
+                capability,
+                op: op.to_string(),
+                args: serde_json::json!({}),
+                call_id: 1,
+            }
+        }
+
+        /// A connection on an isolated harness whose "stage" answers the next
+        /// `host-call` with `result`/`error` (both `None` -> a malformed reply).
+        fn connection_answering(
+            result: Option<serde_json::Value>,
+            error: Option<HostResultError>,
+        ) -> (Harness, Arc<Connection>) {
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
+            let connection = Connection::with_metrics(tx, metrics);
+            let stage = Arc::clone(&connection);
+            tokio::spawn(async move {
+                if let Some(frame) = rx.recv().await {
+                    let _ = stage.deliver(Frame::new(
+                        frame.id,
+                        Message::HostResult(HostResultBody { result, error }),
+                    ));
+                }
+            });
+            (harness, connection)
+        }
+
+        #[tokio::test]
+        async fn an_answered_call_is_timed_as_ok() {
+            let (h, connection) = connection_answering(Some(serde_json::json!({"v": 1})), None);
+            let out = host_call(
+                &connection,
+                call_body(CapabilityKind::Kv, "get"),
+                "kv",
+                "get",
+            )
+            .await
+            .expect("host call succeeds");
+            assert_eq!(out, serde_json::json!({"v": 1}));
+            assert_eq!(
+                h.count(
+                    "waddles_executor_host_call_seconds",
+                    &[("capability", "kv"), ("op", "get"), ("result", "ok")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_policy_refusal_is_timed_as_denied() {
+            let (h, connection) = connection_answering(
+                None,
+                Some(HostResultError {
+                    code: "not_granted".to_string(),
+                    message: "no".to_string(),
+                }),
+            );
+            host_call(
+                &connection,
+                call_body(CapabilityKind::Kv, "set"),
+                "kv",
+                "set",
+            )
+            .await
+            .expect_err("denied");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_host_call_seconds",
+                    &[("capability", "kv"), ("op", "set"), ("result", "denied")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn any_other_stage_error_is_timed_as_error() {
+            let (h, connection) = connection_answering(
+                None,
+                Some(HostResultError {
+                    code: "backend".to_string(),
+                    message: "valkey down".to_string(),
+                }),
+            );
+            host_call(
+                &connection,
+                call_body(CapabilityKind::Kv, "get"),
+                "kv",
+                "get",
+            )
+            .await
+            .expect_err("backend failure");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_host_call_seconds",
+                    &[("capability", "kv"), ("result", "error")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_reply_with_neither_result_nor_error_is_timed_as_malformed() {
+            let (h, connection) = connection_answering(None, None);
+            host_call(
+                &connection,
+                call_body(CapabilityKind::Clock, "now-millis"),
+                "clock",
+                "now-millis",
+            )
+            .await
+            .expect_err("malformed reply");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_host_call_seconds",
+                    &[("capability", "clock"), ("result", "malformed")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_lost_connection_is_timed_as_connection_lost() {
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let (tx, rx) = mpsc::unbounded_channel::<Frame>();
+            let connection = Connection::with_metrics(tx, metrics);
+            drop(rx); // the writer half is gone: nothing can be sent.
+            host_call(
+                &connection,
+                call_body(CapabilityKind::Db, "execute"),
+                "db",
+                "execute",
+            )
+            .await
+            .expect_err("no stage to answer");
+            assert_eq!(
+                harness.count(
+                    "waddles_executor_host_call_seconds",
+                    &[("capability", "db"), ("result", "connection_lost")]
+                ),
+                1.0
+            );
+        }
     }
 }

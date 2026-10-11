@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Real OTel metrics for the Rust data plane (replacing the `penguin_spine::NoopMetrics` stubs and the executor's
+  unexported atomics): svc-process / svc-action emit stage latency, executor-call and host-call latency histograms,
+  bundle load, drain batch size, consumer-group backlog, sandbox trips, dispatch attempts, DLQ / tenant-boundary counters;
+  bundle-executor emits load phases (fetch / verify / precompile), invoke / guest / instantiate latency, host-call round
+  trips, sandbox trips, resident-bundle and in-flight gauges and host-API session health, exported over OTLP/gRPC **only**
+  when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (default off: no new executor egress). The capability gate's grant/denial
+  counters (`waddles_bundle_capability_{authorized,denied}_total`), which were silently dropped by an uninstalled
+  `metrics`-facade recorder, now export through an OTel-backed recorder. New dashboard `waddles-stage-pipeline`. See
+  `docs/observability/data-plane-metrics.md`.
 - Enterprise SSO for hub-api: SAML 2.0 and OpenID Connect (Enterprise tier, `waddles.auth.sso_saml`) and Google OAuth2 (Professional tier, `waddles.auth.sso_google`). Per-tenant connections with admin API, JIT provisioning keyed on (connection, subject) with no email adoption, PKCE + nonce + local ID-token validation, signature-wrapping/replay/XXE-hardened SAML SP, SSRF-guarded IdP HTTP, AES-256-GCM secret storage, login-CSRF binder cookie, OTel metrics/traces. Migration `0049_sso_connections`; auto-provisioned `SSO_ENCRYPTION_KEY` (alpha/local) that never fails the chart elsewhere. See `docs/SSO.md`.
 - Enterprise tamper-evident audit logging (GRC audit finding #3): append-only per-tenant SHA-256 hash chain
   (`audit_events`, migration `0053_audit_events_hash_chain`), `GET /api/v1/compliance/audit/{events,head,verify,export}`,
@@ -32,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   activation signing + Valkey provisioning, tenant permission restriction invalidations) finish that work before an audit
   failure is raised (`bundle_audit.DeferredAudit`), so fail-loud cannot leave the platform half-changed
 - **Mod-gate bypass in 40 app bundles:** `bool(is_mod)` / `bool(payload.get("is_mod"))` treated the string badge `"false"` as truthy, so a non-moderator whose normalizer emitted a string passed every moderator gate, and `transform()` laundered the string into a real `True` for `dispatch`. All badge reads are now strict identity checks (`is True`, fail closed on anything else); versions bumped. New CI gates: `check-bundle-source-hygiene.py --check badge-truthiness` and `scripts/ci/tests/test_bundle_badge_gate.py`
+- **Mod-gate bypass in the legacy ingest path:** `builtin_handlers/{kick,youtube_live,twitch}_ingest.normalize` read role flags with `bool(raw.get("is_mod"))` (also `is_subscriber`/`is_vip`/`is_broadcaster`/`is_owner`/`is_sponsor`), and the Kick/YouTube receivers did the same on the upstream payload. A raw event is decoded from Valkey JSON, so the string `"false"` is truthy and promoted a non-moderator to a moderator downstream. All role flags now go through `receivers.badge_flags.strict_flag` (real `True` only, fail closed, non-boolean values logged by platform/field/type without the value). The `badge-truthiness` CI gate (`check-bundle-source-hygiene.py`) now also scans `core/svc_ingest/**` with its own denominator, and `make check-bundle-hygiene` runs it; regression: `core/svc_ingest/tests/test_badge_flags_regression.py`
 - `poll` bundle (1.0.2) was dead (`ImportError: cannot import name 'create_dal'`, so it could neither load nor build); ported onto the structured `db` + `community_kv` APIs (one `poll_records` table, atomic kv tallies and one-vote markers), create/vote/close verified end to end. Refs #675
 - `loyalty` (1.0.3) integrity: atomic first-grant claim (no lost/duplicate rows under concurrency), bounded amounts and a balance cap, accurate clamped replies, no junk rows from `sub`, caller identity normalized like a typed target, orphan-row compensation
 - `inventory` (1.0.3) integrity: `give` no longer destroys the item when the credit fails (refund), per-user directory lock (no lost updates), item-name / distinct-item / quantity bounds, caller identity normalized, orphan-row compensation

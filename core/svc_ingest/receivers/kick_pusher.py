@@ -78,6 +78,8 @@ from waddle_transports import (
 from waddle_transports.url_guard import SSRFError, guarded_request, is_private_host
 from websockets.exceptions import ConnectionClosed, InvalidURI, WebSocketException
 
+from receivers.badge_flags import strict_flag
+
 logger = logging.getLogger(__name__)
 
 #: The `consumes` tag every ingest bundle wanting a raw Kick chat message
@@ -371,9 +373,16 @@ class KickPusherReceiver(Transport):  # type: ignore[misc]
             "author_id": str(sender_id) if has_sender_id else None,
             "display_name": sender.get("username") or None,
             "badges": badges,
-            "is_mod": bool(sender.get("is_moderator")) or "moderator" in badges,
-            "is_subscriber": bool(sender.get("is_subscriber")) or "subscriber" in badges,
-            "is_owner": bool(sender.get("is_channel_owner")) or "broadcaster" in badges,
+            "is_mod": strict_flag(sender.get("is_moderator"), field="is_moderator", platform="kick")
+            or "moderator" in badges,
+            "is_subscriber": strict_flag(
+                sender.get("is_subscriber"), field="is_subscriber", platform="kick"
+            )
+            or "subscriber" in badges,
+            "is_owner": strict_flag(
+                sender.get("is_channel_owner"), field="is_channel_owner", platform="kick"
+            )
+            or "broadcaster" in badges,
             "message_id": data.get("id") or None,
             "created_at": data.get("created_at") or None,
         }
