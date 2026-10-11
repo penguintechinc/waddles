@@ -5,12 +5,16 @@ can reach it. Service details: `core/svc_presentation/README.md`.
 
 ## Add an overlay to OBS
 
-1. Get the community's VIEW key (hub-api overlay settings).
+1. Get the community's overlay code and VIEW key (hub-api overlay settings).
 2. Add a **Browser Source** with the URL
 
    ```text
-   https://<svc-presentation host>/overlay/<community_id>/<surface>?key=<VIEW key>
+   https://<svc-presentation host:port>/<overlay_code>/<surface>?key=<VIEW key>
    ```
+
+   `<overlay_code>` is a random 16-character hex string unique to the
+   community (for example `a1b2c3d4e5f60718`) -- not the community's numeric
+   id, which no longer works in overlay URLs.
 
 3. Set width/height to the canvas; leave "Shutdown source when not visible"
    off so the live connection stays up. The page background is transparent.
@@ -26,13 +30,18 @@ can reach it. Service details: `core/svc_presentation/README.md`.
 | `media` | title / body / image, corner card | |
 
 `music`, `image` and `caption` have no page at this URL (`caption` keeps its
-own `/overlay/captions/{key}` page). The key is in the URL: treat it like a
-password and rotate it from hub-api if it leaks.
+own `/overlay/captions/{key}` page). Both the overlay code and the key are in
+the URL: treat the whole URL like a password. The code makes the URL
+unguessable (overlays can no longer be found by counting community ids); the
+key is still required on top of it. If a URL leaks, rotate the key from
+hub-api; regenerating the overlay code (to invalidate the old path) is a
+tracked follow-up.
 
 ## Pushing to an overlay
 
-Action-stage adapters `POST /overlay/<community_id>/<surface>/push` with a
-hub-api-issued PUSH machine JWT scoped to that community and an
+Action-stage adapters `POST /<overlay_code>/<surface>/push` with a
+hub-api-issued PUSH machine JWT scoped to that community (the JWT is still
+scoped by community id; the URL carries the community's overlay code) and an
 `overlay_schema::OverlayPush` body. Reference users by tokenized UUID only:
 write `{user:<uuid>}` in text, or set `chat_message.user` / `alert.user`.
 

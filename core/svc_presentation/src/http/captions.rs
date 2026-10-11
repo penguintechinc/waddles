@@ -5,7 +5,7 @@
 //! |---|---|
 //! | `GET /overlay/captions/<overlay_key>` (OBS page) | [`caption_page`] -- same URL |
 //! | `WS /ws/captions/<community_id>?key=` | [`caption_ws`] -- same URL |
-//! | `POST /api/v1/internal/captions` (`X-Service-Key`) | [`push_caption`] -- `POST /overlay/{community}/caption/push` (PUSH JWT) |
+//! | `POST /api/v1/internal/captions` (`X-Service-Key`) | [`push_caption`] -- `POST /{overlay_code}/caption/push` (PUSH JWT) |
 //!
 //! The viewer URLs are unchanged, so an already-configured OBS browser source
 //! keeps working across the cutover. The ingest route intentionally is NOT
@@ -40,7 +40,10 @@
 //! the path segment on the page). They call it directly instead of mounting
 //! the `with_view_guard` middleware because the legacy URLs name their
 //! parameters differently (`{key}`, `{community_id}`) than the guard's
-//! `{community}`/`{surface}` extraction expects.
+//! `{overlay_code}`/`{surface}` extraction expects. (These two legacy-compatible
+//! viewer URLs still carry the integer community id, by design -- existing OBS
+//! sources must keep working -- but both require the VIEW key; moving them to
+//! the overlay code is a tracked follow-up.)
 //!
 //! Every route is gated on [`crate::flags::CAPTIONS_FLAG`] (OFF by default),
 //! so the Python path stays the live one until the flag is deliberately
@@ -118,7 +121,7 @@ impl IntoResponse for CaptionRouteError {
 ///
 /// The ingest route spells the surface as the literal `caption` segment --
 /// like P6's `image/push` -- so it takes precedence over the generic
-/// `/overlay/{community}/{surface}/push` for exactly that surface (a caption
+/// `/{overlay_code}/{surface}/push` for exactly that surface (a caption
 /// is validated, persisted and broadcast, never passed through raw), while
 /// every other surface still reaches the generic route. Specificity is
 /// pinned by `tests/routing.rs`.
@@ -128,7 +131,8 @@ pub fn routes(state: &AppState) -> Router<AppState> {
         .route("/ws/captions/{community_id}", get(caption_ws));
 
     let ingest = crate::overlay::router::with_push_guard(
-        Router::new().route("/overlay/{community}/caption/push", post(push_caption)),
+        Router::new().route("/{overlay_code}/caption/push", post(push_caption)),
+        state.overlay_codes.clone(),
         state.push_trust_source.clone(),
     )
     .layer(DefaultBodyLimit::max(MAX_PUSH_BODY_BYTES));
@@ -461,11 +465,13 @@ pub async fn run_caption_ws(
     }
 }
 
-/// `POST /overlay/{community}/caption/push`'s response body.
+/// `POST /{overlay_code}/caption/push`'s response body.
 #[derive(Debug, Serialize)]
 pub struct CaptionPushResponse {
     pub status: &'static str,
-    pub community: String,
+    /// The overlay code the caller addressed, echoed back (the caller already
+    /// holds it; the integer community id is never exposed).
+    pub overlay_code: String,
     pub surface: &'static str,
     /// `false` when the caption was broadcast live but could not be written
     /// to history (the database failed). Surfaced rather than hidden so the
@@ -473,7 +479,7 @@ pub struct CaptionPushResponse {
     pub persisted: bool,
 }
 
-/// `POST /overlay/{community}/caption/push` -- validates one caption (see
+/// `POST /{overlay_code}/caption/push` -- validates one caption (see
 /// `crate::overlay::render::render_caption`), broadcasts it to every
 /// connected viewer of this community, and persists it for reconnect replay.
 ///
@@ -489,7 +495,7 @@ pub struct CaptionPushResponse {
 pub async fn push_caption(
     State(state): State<AppState>,
     Extension(credential): Extension<PushCredential>,
-    Path(community): Path<String>,
+    Path(overlay_code): Path<String>,
     Json(body): Json<OverlayPush>,
 ) -> Result<Json<CaptionPushResponse>, ApiError> {
     let started = Instant::now();
@@ -499,14 +505,10 @@ pub async fn push_caption(
         metrics.ingest_total.with_label_values(&["disabled"]).inc();
         return Err(err);
     }
-    // Never trust the path segment: it must name the community the verified
-    // credential was issued for.
-    if community != credential.community_id.to_string() {
-        return Err(ApiError::Forbidden(
-            "path community does not match credential".to_string(),
-        ));
-    }
-
+    // The PUSH guard already resolved `overlay_code` to a community and
+    // verified the credential is scoped to exactly that community, so
+    // `credential.community_id` is authoritative; the path segment is not
+    // consulted again.
     let content = match render_caption(&body) {
         Ok(content) => content,
         Err(err) => {
@@ -556,7 +558,7 @@ pub async fn push_caption(
 
     Ok(Json(CaptionPushResponse {
         status: "published",
-        community,
+        overlay_code,
         surface: Surface::Caption.as_str(),
         persisted,
     }))
