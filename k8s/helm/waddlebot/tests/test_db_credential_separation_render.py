@@ -352,3 +352,24 @@ def test_unknown_role_in_a_template_fails_the_render(helm_available: None) -> No
     )
     assert result.returncode != 0
     assert "unknown PostgreSQL service role" in result.stderr
+
+
+@pytest.mark.parametrize("env_name", ["alpha", "beta"])  # values-local runs no in-cluster Postgres
+def test_postgres_deployment_is_recreate_never_rolling(
+    renders: dict[str, list[dict[str, Any]]], env_name: str
+) -> None:
+    """Postgres must never surge a second pod onto its single ReadWriteOnce data volume.
+
+    # regression: kind upgrade-path (base->PR) -- the H-1/H-3 change to the Postgres pod's
+    # POSTGRES_PASSWORD secretKeyRef rolled the Deployment; RollingUpdate (maxSurge 1) ran two
+    # postmasters on one PGDATA and the survivor PANICed "could not locate a valid checkpoint
+    # record", failing the post-upgrade hooks with ConnectionRefused.
+    """
+    found = [
+        d
+        for d in renders[env_name]
+        if d.get("kind") == "Deployment" and d["metadata"]["name"] == "postgres"
+    ]
+    assert len(found) == 1, f"expected exactly one postgres Deployment, found {len(found)}"
+    strategy = found[0]["spec"]["strategy"]
+    assert strategy == {"type": "Recreate"}, strategy

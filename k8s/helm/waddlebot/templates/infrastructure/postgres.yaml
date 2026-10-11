@@ -62,11 +62,16 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 spec:
   replicas: 1
+  # Recreate, never RollingUpdate: one single-writer Postgres on one ReadWriteOnce PVC. A
+  # RollingUpdate surge starts the replacement pod while the old one still has PGDATA open --
+  # two postmasters on one data directory (each is PID 1 in its own container, so
+  # postmaster.pid never detects the other), then the old pod is killed mid-write and the
+  # survivor PANICs "could not locate a valid checkpoint record" (kind upgrade-path, run
+  # 38098458861). Any pod-template change (this chart's H-1/H-3 move of POSTGRES_PASSWORD to
+  # the <release>-db-admin Secret is one) rolls Postgres on `helm upgrade`, so this is a
+  # live-upgrade data-integrity requirement. Same strategy redis/seaweedfs/qdrant/ollama use.
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: postgres
