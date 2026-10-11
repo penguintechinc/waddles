@@ -126,6 +126,9 @@ done
 info() { echo "[INFO] $*"; }
 err()  { echo "[ERROR] $*" >&2; }
 
+# shellcheck source=scripts/lib/helm-pending-recover.sh
+source "${SCRIPT_DIR}/lib/helm-pending-recover.sh"
+
 # ---------------------------------------------------------------------------
 # KUBE_CONTEXT allowlist -- alpha-deploy.sh may only ever target local-alpha
 # or microk8s. values-alpha.yaml auto-generates platform secrets on upgrade;
@@ -558,7 +561,21 @@ HELM_ARGS=(
     --values "${HELM_CHART}/values-alpha.yaml"
     --set-string "global.imageTag=${SHA8}"
     --timeout 60m
+    # helm v4 Server-Side Apply: take over fields owned by another field
+    # manager (a seaweedfs SSA ownership conflict wedged revs 56/57).
+    --force-conflicts
 )
+
+# Self-heal a release wedged in pending-upgrade/-install/-rollback by an
+# interrupted upgrade (Helm refuses every further upgrade until cleared). Acts
+# ONLY on pending-* states, only against the allowlist-validated KUBE_CONTEXT;
+# fails loud (exit 1) if the release is still pending afterwards. Contract:
+# scripts/lib/helm-pending-recover.sh, test: scripts/test-helm-pending-recover.sh
+info "Preflight: checking for a stuck pending helm release"
+helm_recover_pending_release "${RELEASE}" "${NAMESPACE}" "${KUBE_CONTEXT}" || {
+    err "stuck helm release ${RELEASE} could not be recovered -- aborting before upgrade"
+    exit 1
+}
 
 info "helm upgrade --dry-run validation"
 helm "${HELM_ARGS[@]}" --dry-run=server >/dev/null

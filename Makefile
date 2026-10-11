@@ -6,7 +6,7 @@
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
         check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
-        test-seaweedfs-sse-kms \
+        test-seaweedfs-sse-kms test-helm-pending-recover \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check
 
@@ -60,6 +60,11 @@ check-wait-for-hub-api:
 # Deployments). See scripts/check_alpha_deploy_no_wait.py's module docstring.
 check-alpha-deploy-no-wait:
 	@python3 scripts/check_alpha_deploy_no_wait.py
+
+# alpha-deploy.sh self-heals a release stuck in pending-* (interrupted upgrade);
+# stub-driven test of that recovery logic, no cluster touched.
+test-helm-pending-recover:
+	@bash scripts/test-helm-pending-recover.sh
 
 # No-stubs / no-silent-fallbacks gate (gh-regression: a `flags capability not
 # wired -- TODO(M4+)` stub returned a silent default and shipped as "done",
