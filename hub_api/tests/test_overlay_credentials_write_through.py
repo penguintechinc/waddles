@@ -10,6 +10,7 @@ compares fails here, not in production.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -373,3 +374,143 @@ class TestOverlayCode:
         assert response.status_code == 200
         key = (await response.get_json())["overlay"]["overlay_key"]
         assert _creds(overlay_db, community_id).key_hash == _sha256_hex(key)
+
+
+def _flaky_executesql(
+    dal: Any, monkeypatch: pytest.MonkeyPatch, *, match: tuple[str, ...], msg: str
+) -> None:
+    """Make `dal.executesql` raise `RuntimeError(msg)` for SQL containing any `match` token."""
+    real_executesql = dal.executesql
+
+    def _flaky(sql: str, *args: Any, **kwargs: Any) -> Any:
+        if any(token in sql for token in match):
+            raise RuntimeError(msg)
+        return real_executesql(sql, *args, **kwargs)
+
+    monkeypatch.setattr(dal, "executesql", _flaky)
+
+
+class TestOverlayCodeFailsLoud:
+    """Only a verified-absent column degrades; every other DB error must propagate."""
+
+    async def test_non_absence_error_on_overlay_code_read_propagates(
+        self, overlay_db: Any, owner: tuple[dict[str, str], int], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, community_id = owner
+        _add_overlay_code_column(overlay_db)
+        _flaky_executesql(
+            overlay_db.dal, monkeypatch, match=("SELECT overlay_code",), msg="connection reset"
+        )
+        with pytest.raises(RuntimeError, match="connection reset"):
+            overlay_service._ensure_overlay_code_sync(overlay_db.dal, community_id)
+
+    async def test_non_absence_error_fails_the_mint_instead_of_degrading(
+        self, overlay_db: Any, owner: tuple[dict[str, str], int], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, community_id = owner
+        _add_overlay_code_column(overlay_db)
+        _flaky_executesql(
+            overlay_db.dal, monkeypatch, match=("SELECT overlay_code",), msg="permission denied"
+        )
+        with pytest.raises(RuntimeError, match="permission denied"):
+            await overlay_service.get_or_create_overlay(
+                overlay_db, overlay_db.dal, _test_config(), community_id=community_id
+            )
+        assert _token_row(overlay_db, community_id) is None
+        assert _creds(overlay_db, community_id) is None
+
+    async def test_catalog_probe_error_propagates(
+        self, overlay_db: Any, owner: tuple[dict[str, str], int], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing existence probe is not mistaken for 'column absent'."""
+        _, community_id = owner
+        _flaky_executesql(
+            overlay_db.dal,
+            monkeypatch,
+            match=("table_info", "information_schema"),
+            msg="catalog unavailable",
+        )
+        with pytest.raises(RuntimeError, match="catalog unavailable"):
+            overlay_service._ensure_overlay_code_sync(overlay_db.dal, community_id)
+
+    async def test_absent_column_still_degrades_with_a_warning(
+        self,
+        overlay_db: Any,
+        owner: tuple[dict[str, str], int],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _, community_id = owner  # column deliberately NOT added (pre-0057)
+        with caplog.at_level("WARNING"):
+            result = overlay_service._ensure_overlay_code_sync(overlay_db.dal, community_id)
+        assert result is None
+        assert any("overlay_code unavailable" in r.getMessage() for r in caplog.records)
+
+
+def _upsert(overlay_db: Any, community_id: int, key: str, *, overwrite: bool = True) -> None:
+    """Run `_upsert_credentials` for `key` and commit (mirrors one `_run_atomic` job)."""
+    overlay_service._upsert_credentials(
+        overlay_db.dal,
+        community_id=community_id,
+        key_hash=_sha256_hex(key),
+        previous_key_hash=None,
+        is_active=True,
+        rotated_at=None,
+        now=datetime.now(UTC),
+        overwrite=overwrite,
+    )
+    overlay_db.dal.commit()
+
+
+class TestCredentialUpsertIsAtomic:
+    """`ON CONFLICT (community_id) DO UPDATE` -- concurrent first GETs must not IntegrityError."""
+
+    async def test_two_upserts_converge_on_one_row_without_integrity_error(
+        self, overlay_db: Any, owner: tuple[dict[str, str], int]
+    ) -> None:
+        _, community_id = owner
+        overlay_service._bind(overlay_db.dal)
+        _upsert(overlay_db, community_id, "first-key")
+        _upsert(overlay_db, community_id, "second-key")  # same community_id: no IntegrityError
+        dal = overlay_db.dal
+        assert dal(dal.overlay_view_credentials.community_id == community_id).count() == 1
+        assert _creds(overlay_db, community_id).key_hash == _sha256_hex("second-key")
+
+    async def test_upsert_preserves_created_at(
+        self, overlay_db: Any, owner: tuple[dict[str, str], int]
+    ) -> None:
+        _, community_id = owner
+        overlay_service._bind(overlay_db.dal)
+        _upsert(overlay_db, community_id, "first-key")
+        created = _creds(overlay_db, community_id).created_at
+        _upsert(overlay_db, community_id, "second-key")
+        assert _creds(overlay_db, community_id).created_at == created
+
+    async def test_heal_style_upsert_never_overwrites_an_existing_row(
+        self, overlay_db: Any, owner: tuple[dict[str, str], int]
+    ) -> None:
+        """A heal racing a concurrent rotate (row already present) must not clobber it."""
+        _, community_id = owner
+        overlay_service._bind(overlay_db.dal)
+        _upsert(overlay_db, community_id, "rotated-key")
+        _upsert(overlay_db, community_id, "stale-key", overwrite=False)
+        assert _creds(overlay_db, community_id).key_hash == _sha256_hex("rotated-key")
+
+    async def test_concurrent_first_gets_leave_exactly_one_credentials_row(
+        self, overlay_db: Any, owner: tuple[dict[str, str], int]
+    ) -> None:
+        """Two simultaneous first GETs never raise a credentials-table IntegrityError."""
+        _, community_id = owner
+        results = await asyncio.gather(
+            *(
+                overlay_service.get_or_create_overlay(
+                    overlay_db, overlay_db.dal, _test_config(), community_id=community_id
+                )
+                for _ in range(2)
+            ),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                assert "overlay_view_credentials" not in str(result)
+        dal = overlay_db.dal
+        assert dal(dal.overlay_view_credentials.community_id == community_id).count() == 1

@@ -196,30 +196,39 @@ def _upsert_credentials(
     is_active: bool,
     rotated_at: datetime | None,
     now: datetime,
+    overwrite: bool = True,
 ) -> None:
-    """UPDATE-then-INSERT the `overlay_view_credentials` row svc-presentation validates against.
+    """Atomically `INSERT ... ON CONFLICT (community_id) DO UPDATE` the credentials row.
 
-    Stores only hashes (never the plaintext key). Must run inside `_run_atomic` alongside the
-    `community_overlay_tokens` write so the two tables never diverge.
+    `overwrite=False` (used by `_heal_credentials`) turns the conflict action into DO NOTHING so
+    a heal that loses a race to a concurrent mint/rotate never clobbers the newer row.
+
+    Stores only hashes (never the plaintext key). A single-statement upsert (not
+    check-then-insert) so two concurrent first GETs converge on one row instead of one raising
+    `IntegrityError` on `community_id`'s UNIQUE constraint. Must run inside `_run_atomic`
+    alongside the `community_overlay_tokens` write so the two tables commit/roll back together
+    -- no savepoint or mid-transaction rollback is used. The INSERT text comes from pydal's own
+    value escaping (`Table._insert`); `created_at` is deliberately absent from the update set so
+    a rotate never rewrites it.
     """
     table = dal.overlay_view_credentials
-    updated = dal(table.community_id == community_id).update(
+    insert_sql = table._insert(  # noqa: SLF001 -- pydal's SQL builder, values escaped by pydal
+        community_id=community_id,
         key_hash=key_hash,
         previous_key_hash=previous_key_hash,
         is_active=is_active,
         rotated_at=rotated_at,
+        created_at=now,
         updated_at=now,
+    ).rstrip("; \n")
+    if not overwrite:
+        dal.executesql(f'{insert_sql} ON CONFLICT ("community_id") DO NOTHING')  # noqa: S608
+        return
+    update_cols = ("key_hash", "previous_key_hash", "is_active", "rotated_at", "updated_at")
+    set_clause = ", ".join(f'"{col}" = excluded."{col}"' for col in update_cols)
+    dal.executesql(
+        f'{insert_sql} ON CONFLICT ("community_id") DO UPDATE SET {set_clause}'  # noqa: S608
     )
-    if not updated:
-        table.insert(
-            community_id=community_id,
-            key_hash=key_hash,
-            previous_key_hash=previous_key_hash,
-            is_active=is_active,
-            rotated_at=rotated_at,
-            created_at=now,
-            updated_at=now,
-        )
 
 
 def _heal_credentials(dal: Any, *, community_id: int, token_row: Any, is_active: bool) -> None:
@@ -241,30 +250,60 @@ def _heal_credentials(dal: Any, *, community_id: int, token_row: Any, is_active:
         is_active=is_active,
         rotated_at=token_row.rotated_at,
         now=now,
+        overwrite=False,
     )
 
 
+def _overlay_code_column_exists(dal: Any) -> bool:
+    """Return whether `communities.overlay_code` exists (alembic 0057 applied).
+
+    Probes the catalog (`information_schema.columns`; SQLite's `PRAGMA table_info` for the
+    file-backed test DB, which has no `information_schema`) instead of attempting the column
+    read, so "column absent" is told apart from every other failure. Probe errors propagate.
+    """
+    try:
+        if getattr(dal, "_dbname", "") == "sqlite":
+            rows = dal.executesql("PRAGMA table_info(communities)")
+            present = any(row[1] == "overlay_code" for row in rows or [])
+        else:
+            rows = dal.executesql(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'communities' AND column_name = 'overlay_code'"
+            )
+            present = bool(rows)
+    except Exception:
+        dal.rollback()
+        raise
+    dal.commit()
+    return present
+
+
 def _ensure_overlay_code_sync(dal: Any, community_id: int) -> str | None:
-    """Make sure `communities.overlay_code` is set; return it (`None` if unavailable).
+    """Make sure `communities.overlay_code` is set; return it (`None` if the column is absent).
 
     The column (alembic 0057) is `NOT NULL DEFAULT encode(gen_random_bytes(8), 'hex')` so a
     post-0057 row always has one; this only generates a code if it is somehow null/empty. It
     uses raw SQL because the column is deliberately NOT mapped on the shared `communities`
-    pydal table (mapping it would break every community query on a pre-0057 database). If the
-    column does not exist yet, this logs a warning and returns `None` rather than failing the
-    mint. Commits/rolls back its own work.
+    pydal table (mapping it would break every community query on a pre-0057 database).
+
+    Fails loud: ONLY a verified-absent column (pre-0057 database) degrades -- a warning and
+    `None`, the mint still succeeds. Any other database error is rolled back and re-raised,
+    never swallowed. Commits/rolls back its own work.
     """
     cid = int(community_id)
-    try:
-        rows = dal.executesql(f"SELECT overlay_code FROM communities WHERE id = {cid}")  # noqa: S608 -- int-cast id
-    except Exception:  # noqa: BLE001 -- pre-0057 database: column absent, degrade not fail
-        dal.rollback()
+    if not _overlay_code_column_exists(dal):
         logger.warning(
             "communities.overlay_code unavailable (alembic 0057 not applied?); "
             "skipping overlay_code backfill",
             extra={"community_id": cid},
         )
         return None
+    try:
+        rows = dal.executesql(f"SELECT overlay_code FROM communities WHERE id = {cid}")  # noqa: S608 -- int-cast id
+    except Exception:
+        dal.rollback()
+        raise
     dal.commit()
     if not rows:
         return None
