@@ -176,14 +176,19 @@ async fn every_session_failure_reason_is_counted_and_none_is_recorded_as_started
             enabled INTEGER NOT NULL DEFAULT 1,
             record_enabled INTEGER NOT NULL DEFAULT 0,
             transcode_enabled INTEGER NOT NULL DEFAULT 0,
-            transcode_bitrate_kbps INTEGER NOT NULL DEFAULT 4000
+            transcode_bitrate_kbps INTEGER NOT NULL DEFAULT 4000,
+            video_codec TEXT NOT NULL DEFAULT 'h264',
+            audio_codec TEXT NOT NULL DEFAULT 'copy'
         );
         CREATE TABLE streaming_targets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             config_id INTEGER NOT NULL,
             platform TEXT NOT NULL,
             forward_url TEXT NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1
+            enabled INTEGER NOT NULL DEFAULT 1,
+            protocol TEXT NOT NULL DEFAULT 'rtmp',
+            video_codec TEXT,
+            audio_codec TEXT
         );
         INSERT INTO tenants (id, slug) VALUES (1, 'tenant-1');
         -- Communities 42-44 exist; 99 deliberately has no `communities` row.

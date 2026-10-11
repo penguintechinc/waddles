@@ -270,6 +270,7 @@ async fn relay_targets_emit_one_session_lifetime_each_when_the_pipeline_stops() 
                 url_secret_ref: SecretRef::Env {
                     var: rtmp_var.into(),
                 },
+                profile: None,
             },
         )
         .await
@@ -281,6 +282,7 @@ async fn relay_targets_emit_one_session_lifetime_each_when_the_pipeline_stops() 
                 url_secret_ref: SecretRef::Env {
                     var: srt_var.into(),
                 },
+                profile: None,
             },
         )
         .await

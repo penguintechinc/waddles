@@ -946,11 +946,11 @@ mod tests {
     async fn tick_clamps_a_slightly_early_mtime_to_zero_instead_of_dropping_the_sample() {
         // The kernel's coarse file-timestamp clock lags `SystemTime::now()`,
         // so a segment written right after acceptance can look a few ms
-        // *older* than the acceptance stamp. Model it: accepted 20ms "after"
+        // *older* than the acceptance stamp. Model it: accepted 80ms "after" (inside MTIME_SKEW_TOLERANCE, wide enough to absorb scheduler delay under a loaded parallel test run)
         // the file is written.
         let origin = IngestOrigin {
             protocol: IngestKind::Rtmp,
-            accepted_at: SystemTime::now() + Duration::from_millis(20),
+            accepted_at: SystemTime::now() + Duration::from_millis(80),
             accepted_instant: Instant::now(),
         };
         let mut fx = poller_fixture(Some(origin)).await;
