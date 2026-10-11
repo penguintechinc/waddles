@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bundle_audit.record` is fail-loud: a failed `audit_log` insert raises `AuditWriteError` instead of being swallowed
 
 ### Fixed
+- Legacy `config/postgres` SQL migrations 097/099/100/101/102 never reached existing databases (the baseline replays
+  SQL only on a fresh DB). Alembic revision `0060_port_legacy_sql_097_102` re-applies them idempotently and ledgers them
+  in `schema_migrations`; `alembic/tests/test_legacy_sql_ownership.py` now fails CI for any un-bridged `NNN_*.sql`
+  (103, PR #799, is the pending follow-up port; see `docs/DATABASE.md` "SQL vs Alembic ownership")
 - Removed the `except Exception: pass` that silently dropped audit-log write failures (`bundle_audit.record`), and the two
   sibling swallows on the consent-proof trail (`cookie_consent_service.log_audit_event`) and the failed-deletion record
   (`data_privacy_service`); all now go through `audit_service.report_write_failure`

@@ -251,6 +251,20 @@ jobs:
             "flask-security-too==5.8.2" \
             "PyYAML>=6.0.2,<7.0.0"
 
+      # Legacy `config/postgres/migrations/NNN_*.sql` files reach an EXISTING database only
+      # through an Alembic bridge (0001_baseline replays them on a fresh DB only). This proves
+      # 0060_port_legacy_sql_097_102 on real Postgres (fresh replay, an existing DB baselined
+      # before 097 with seeded data, re-run, minimal CI bootstrap) and that no new numbered SQL
+      # file lands un-bridged. No `|| true`: pytest exits 5 on zero collected, failing the step.
+      - name: Legacy SQL -> Alembic bridge (real Postgres)
+        if: steps.changes.outputs.any == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m pytest \
+            alembic/tests/test_legacy_sql_ownership.py \
+            alembic/tests/test_0060_port_legacy_sql_097_102.py \
+            -v -rs -p no:cacheprovider
+
       # This repo's real-Postgres alembic history starts at migration 0020 --
       # everything before it is a 96-file legacy SQL baseline replay
       # (`0001_baseline_from_sql_migrations`) that depends on roles/seed data
