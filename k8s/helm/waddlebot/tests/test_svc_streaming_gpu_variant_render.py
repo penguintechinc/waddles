@@ -29,6 +29,16 @@ import yaml
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _AMD_GROUPS = "streaming.amd.supplementalGroups[0]=992"
 _GPU_RESOURCE = "nvidia.com/gpu"
+_AMD_VENDOR = "amd.com"
+
+
+def _resource_vendor(resource_name: str) -> str:
+    """Return the vendor domain of a K8s extended resource name (``amd.com/gpu`` -> ``amd.com``).
+
+    Compares the vendor segment by exact equality instead of a prefix/substring match so a
+    lookalike such as ``amd.com.evil/gpu`` can never satisfy a vendor check.
+    """
+    return resource_name.partition("/")[0]
 
 
 def _helm_template(
@@ -103,7 +113,7 @@ class TestCpuVariant:
         assert "runtimeClassName" not in pod
         assert "tolerations" not in pod
         assert _GPU_RESOURCE not in _limits(container)
-        assert not any(k.startswith("amd.com/") for k in _limits(container))
+        assert not any(_resource_vendor(k) == _AMD_VENDOR for k in _limits(container))
         assert _dri_volumes(pod) == []
         assert "supplementalGroups" not in pod["securityContext"]
         mounts = [m["mountPath"] for m in container.get("volumeMounts", [])]
