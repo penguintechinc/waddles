@@ -104,12 +104,13 @@ class BotScoreService:
             await self._upsert_bot_score(community_id, result)
 
             self.logger.audit(
-                "Bot score calculated",
-                community_id=community_id,
                 action="calculate_score",
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Bot score calculated",
                 score=overall_score,
-                grade=grade,
-                result="SUCCESS"
+                grade=grade
             )
 
             return result
@@ -218,11 +219,12 @@ class BotScoreService:
                 })
 
             self.logger.audit(
-                "Suspected bots queried",
-                community_id=community_id,
                 action="get_suspected_bots",
-                count=len(bots),
-                result="SUCCESS"
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Suspected bots queried",
+                count=len(bots)
             )
 
             return bots
@@ -296,13 +298,13 @@ class BotScoreService:
             }
 
             self.logger.audit(
-                "Suspected bot reviewed",
-                community_id=community_id,
                 action="mark_bot_reviewed",
+                user=str(reviewer_id),
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Suspected bot reviewed",
                 bot_id=bot_id,
-                reviewer_id=reviewer_id,
-                is_false_positive=is_false_positive,
-                result="SUCCESS"
+                is_false_positive=is_false_positive
             )
 
             return result

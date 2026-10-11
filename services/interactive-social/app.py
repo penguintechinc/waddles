@@ -237,9 +237,10 @@ async def create_shoutout():
 
         logger.audit(
             action="create_shoutout",
+            user="system",
             community=community_id,
-            target_user=username,
-            result="STARTED"
+            result="STARTED",
+            target_user=username
         )
 
         twitch_data = await twitch_service.get_full_shoutout_data(username)
@@ -257,9 +258,10 @@ async def create_shoutout():
 
         logger.audit(
             action="create_shoutout",
+            user="system",
             community=community_id,
-            target_user=username,
-            result="SUCCESS"
+            result="SUCCESS",
+            target_user=username
         )
 
         return success_response(shoutout)
@@ -330,6 +332,7 @@ async def save_shoutout_template():
         if success:
             logger.audit(
                 action="save_template",
+                user="system",
                 community=community_id,
                 result="SUCCESS"
             )
@@ -405,9 +408,10 @@ async def execute_video_shoutout():
         if not result.success:
             logger.audit(
                 action="video_shoutout",
+                user="system",
                 community=community_id,
-                target_user=target_username,
                 result="FAILED",
+                target_user=target_username,
                 error=result.error
             )
             return error_response(result.error, status_code=400)
@@ -456,9 +460,10 @@ async def update_presence():
         logger.audit(
             action="presence_update",
             user=user_id,
+            community="",
+            result="STARTED",
             platform=source_platform,
             status=canonical_status,
-            result="STARTED",
         )
 
         result = await presence_service.process_presence_update(
@@ -472,9 +477,10 @@ async def update_presence():
         logger.audit(
             action="presence_update",
             user=user_id,
+            community="",
+            result="SUCCESS",
             platform=source_platform,
             status=canonical_status,
-            result="SUCCESS",
         )
         return success_response(result)
 
@@ -550,6 +556,7 @@ async def update_user_settings(user_id: str):
         logger.audit(
             action="update_presence_settings",
             user=user_id,
+            community="",
             result="SUCCESS",
         )
         return success_response(updated)

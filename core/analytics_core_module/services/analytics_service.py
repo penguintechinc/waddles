@@ -119,10 +119,11 @@ class AnalyticsService:
             self.dal.commit()
 
             self.logger.audit(
-                "Analytics config updated",
-                community_id=community_id,
                 action="update_config",
-                result="SUCCESS"
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Analytics config updated"
             )
 
             return await self.get_config(community_id)
@@ -226,10 +227,12 @@ class AnalyticsService:
             processed = len(events)
 
             self.logger.audit(
-                "Events processed",
                 action="process_events",
-                events_count=processed,
-                result="SUCCESS"
+                user="system",
+                community="",
+                result="SUCCESS",
+                detail="Events processed",
+                events_count=processed
             )
 
             return {
@@ -256,11 +259,12 @@ class AnalyticsService:
         try:
             # Placeholder - full implementation would aggregate data
             self.logger.audit(
-                "Aggregation triggered",
-                community_id=community_id,
-                force=force,
                 action="run_aggregation",
-                result="SUCCESS"
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Aggregation triggered",
+                force=force
             )
 
             return {
