@@ -22,6 +22,7 @@ case "$1" in
     status)
         st="$(cat "${STUB_STATE}/status")"
         if [[ "${st}" == "notfound" ]]; then echo "Error: release: not found" >&2; exit 1; fi
+        [[ "${STATUS_WARN:-0}" == "1" ]] && echo "WARNING: kubeconfig is group-readable { not json" >&2
         printf '{"info":{"status":"%s"},"version":5}\n' "${st}" ;;
     history) cat "${STUB_STATE}/history.json" ;;
     rollback)
@@ -66,7 +67,7 @@ setup() {
     echo "$1" > "${STUB_STATE}/status"
     echo "$2" > "${STUB_STATE}/history.json"
     echo "$3" > "${STUB_STATE}/secrets.json"
-    unset FIX_ON_ROLLBACK FIX_ON_DELETE
+    unset FIX_ON_ROLLBACK FIX_ON_DELETE STATUS_WARN
 }
 run() { local rc=0; helm_recover_pending_release waddlebot waddlebot local-alpha >/dev/null 2>&1 || rc=$?; echo "${rc}"; }
 
@@ -124,7 +125,17 @@ called "no secrets found: nothing deleted" no "delete secret"
 setup pending-upgrade "${HIST_NONE}" "${SECRETS}"
 check "still pending after delete: rc 1" 1 "$(run)"
 
-echo "Examined ${ASSERTS} assertion(s), ${FAILS} failure(s)."
+# 9. helm status emits a stderr warning alongside valid JSON => no false abort
+setup deployed "${HIST_DEPLOYED}" "${SECRETS}"
+export STATUS_WARN=1
+check "stderr warning + deployed: rc 0" 0 "$(run)"
+called "stderr warning + deployed: no rollback" no "helm rollback"
+setup pending-upgrade "${HIST_DEPLOYED}" "${SECRETS}"
+export STATUS_WARN=1 FIX_ON_ROLLBACK=1
+check "stderr warning + pending: recovers rc 0" 0 "$(run)"
+called "stderr warning + pending: rollback to rev 4" yes "helm rollback waddlebot 4 "
+
+echo "Examined${ASSERTS} assertion(s), ${FAILS} failure(s)."
 if [[ ${ASSERTS} -eq 0 || ${FAILS} -ne 0 ]]; then
     exit 1
 fi

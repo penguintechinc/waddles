@@ -26,13 +26,18 @@
 # Prints the release's .info.status on stdout and returns 0; returns 2 if the
 # release does not exist, 1 on any other failure.
 _helm_release_status() {
-    local release="$1" ns="$2" ctx="$3" out rc=0 status
-    out="$(helm status "${release}" --kube-context "${ctx}" -n "${ns}" -o json 2>&1)" || rc=$?
+    local release="$1" ns="$2" ctx="$3" out rc=0 status errfile errtxt
+    # stderr goes to a separate file so a benign helm warning can never corrupt
+    # the JSON parsed below; it is surfaced only when helm itself fails.
+    errfile="$(mktemp)" || return 1
+    out="$(helm status "${release}" --kube-context "${ctx}" -n "${ns}" -o json 2>"${errfile}")" || rc=$?
+    errtxt="$(cat "${errfile}" 2>/dev/null || true)"
+    rm -f "${errfile}"
     if [[ ${rc} -ne 0 ]]; then
-        if [[ "${out}" == *"not found"* ]]; then
+        if [[ "${out}${errtxt}" == *"not found"* ]]; then
             return 2
         fi
-        err "helm status ${release} failed: ${out}"
+        err "helm status ${release} failed: ${out}${errtxt}"
         return 1
     fi
     status="$(printf '%s' "${out}" | jq -r '.info.status // empty')" || return 1
