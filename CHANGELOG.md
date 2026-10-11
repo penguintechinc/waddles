@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Standard provider/connection framework (hub-api), Twitch first: per-community connection API (`/api/v1/communities/{id}/provider-connections`, install descriptors at `/api/v1/connection-providers`), provider adapter interface + registry, Twitch adapter (bot account, channel resolution, refresh), AES-256-GCM encrypted per-community token store with refresh-under-lock, and machine-JWT data-plane routes (`/api/v1/internal/provider-connections`, `.../resolve`) so `svc-ingest` can resolve connections dynamically instead of static env. Scope `connections:admin`, flag `waddles.integrations.provider_connections` (Professional, default OFF). Migration `0058_provider_connections`. See `docs/PROVIDER_CONNECTIONS.md`.
 - Real OTel metrics for the Rust data plane (replacing the `penguin_spine::NoopMetrics` stubs and the executor's
   unexported atomics): svc-process / svc-action emit stage latency, executor-call and host-call latency histograms,
   bundle load, drain batch size, consumer-group backlog, sandbox trips, dispatch attempts, DLQ / tenant-boundary counters;
@@ -56,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same store (paired follow-up; contract in the doc).
 
 ### Changed
+- `platform_integrations_crypto` raises `PlatformCredentialKeyError` (a subclass of `PlatformCredentialCryptoError`) for an unset/malformed key, so callers can tell a configuration fault from a tampered ciphertext
 - `compliance.audit_logs` now requires scope `compliance.audit:admin` (was `compliance.audit:read`, which every session's
   `*:read` wildcard satisfied); the tenant-owner scope bundle grants it
 - `bundle_audit.record` is fail-loud: a failed `audit_log` insert raises `AuditWriteError` instead of being swallowed
