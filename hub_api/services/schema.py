@@ -638,7 +638,8 @@ def bind_overlay_tables(dal: Any, *, migrate: bool = False) -> None:
     documents for the M-automation/M7-music groups).
 
     Column provenance: `config/postgres/migrations/000_create_base_schema.sql`
-    ("community_overlay_tokens", "overlay_access_log").
+    ("community_overlay_tokens", "overlay_access_log") and
+    `100_overlay_view_credentials.sql` ("overlay_view_credentials").
 
     Deliberately NOT wired into `app.py::_bind_reference_tables()` the way
     `bind_auth_tables()` is -- this port's task scope explicitly forbids
@@ -653,34 +654,49 @@ def bind_overlay_tables(dal: Any, *, migrate: bool = False) -> None:
     A future group that gets an `app.py` edit in scope should fold this
     into `_bind_reference_tables()` the normal way and delete this note.
     """
-    if "community_overlay_tokens" in dal.tables:
-        return
+    if "community_overlay_tokens" not in dal.tables:
+        dal.define_table(
+            "community_overlay_tokens",
+            Field("community_id", "integer", notnull=True, unique=True),
+            Field("overlay_key", "string", length=64, notnull=True, unique=True),
+            Field("previous_key", "string", length=64),
+            Field("is_active", "boolean", default=True),
+            Field("theme_config", "json"),
+            Field("enabled_sources", "json"),
+            Field("last_accessed", "datetime"),
+            Field("access_count", "integer", default=0),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            Field("rotated_at", "datetime"),
+            migrate=migrate,
+        )
 
-    dal.define_table(
-        "community_overlay_tokens",
-        Field("community_id", "integer", notnull=True, unique=True),
-        Field("overlay_key", "string", length=64, notnull=True, unique=True),
-        Field("previous_key", "string", length=64),
-        Field("is_active", "boolean", default=True),
-        Field("theme_config", "json"),
-        Field("enabled_sources", "json"),
-        Field("last_accessed", "datetime"),
-        Field("access_count", "integer", default=0),
-        Field("created_at", "datetime"),
-        Field("updated_at", "datetime"),
-        Field("rotated_at", "datetime"),
-        migrate=migrate,
-    )
+    if "overlay_access_log" not in dal.tables:
+        dal.define_table(
+            "overlay_access_log",
+            Field("community_id", "integer", notnull=True),
+            Field("overlay_key", "string", length=64),
+            Field("ip_address", "string", length=45),
+            Field("user_agent", "text"),
+            Field("accessed_at", "datetime"),
+            migrate=migrate,
+        )
 
-    dal.define_table(
-        "overlay_access_log",
-        Field("community_id", "integer", notnull=True),
-        Field("overlay_key", "string", length=64),
-        Field("ip_address", "string", length=45),
-        Field("user_agent", "text"),
-        Field("accessed_at", "datetime"),
-        migrate=migrate,
-    )
+    # `config/postgres/migrations/100_overlay_view_credentials.sql` -- the table svc-presentation
+    # validates overlay views against (SHA-256 of the key only, never the plaintext). hub-api
+    # write-throughs to it on every mint/rotate so it never drifts from the table above.
+    if "overlay_view_credentials" not in dal.tables:
+        dal.define_table(
+            "overlay_view_credentials",
+            Field("community_id", "integer", notnull=True, unique=True),
+            Field("key_hash", "string", length=64, notnull=True, unique=True),
+            Field("previous_key_hash", "string", length=64),
+            Field("is_active", "boolean", default=True),
+            Field("rotated_at", "datetime"),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
 
 
 def bind_streaming_tables(dal: Any, *, migrate: bool = False) -> None:
