@@ -51,6 +51,38 @@
 //! row locks. Only APPLIED movements count (a refused call writes no ledger
 //! row and so consumes no budget).
 //!
+//! # The mint cap is on the PAYOUT
+//!
+//! A wager is the one call that creates currency: the bundle chooses the
+//! payout. The same two ceilings therefore bound it twice, in independent
+//! rolling-24h windows: the STAKE (throughput -- how much a user can put at
+//! risk, which also bounds ledger growth) and the PAYOUT (what the wager
+//! CREDITS -- the mint). A stake-1 wager paying 100 spends 100 of the mint
+//! budget, and a large losing stake spends none of it. (The cap used to sum
+//! the stake only, so a bundle picking its own payouts could mint without
+//! bound.) A transfer moves existing money and is metered on the amount sent,
+//! against the SENDER.
+//!
+//! # Idempotency (no double-credit, no double-spend)
+//!
+//! Every money-moving call carries a host-derived [`IdempotencyKey`], stored
+//! on the ledger row that originates the movement (the `wager` row, or the
+//! `transfer_out` row) under a partial UNIQUE index scoped to
+//! `(tenant, community, app)`. Inside the write transaction, after the
+//! advisory lock and BEFORE any cap or balance check:
+//!
+//! * no row has the key: the call applies and writes its keyed ledger row in
+//!   the same statement as the balance move;
+//! * a row has the key and the SAME parameters: the call is a replay -- the
+//!   original result is returned, nothing moves, no budget is consumed;
+//! * a row has the key and DIFFERENT parameters (or a different kind of
+//!   movement): [`EconomyError::IdempotencyConflict`] -- never applied. A
+//!   replayed bundle that re-rolls its payout cannot credit twice.
+//!
+//! A refused or failed call writes no ledger row, so it records no key and a
+//! later retry under the same key applies normally. The unique index is the
+//! database's backstop for a race the advisory lock does not serialize.
+//!
 //! # Scope derivation
 //!
 //! The bundle supplies only target user UUID(s) and amounts. `tenant_id`,
@@ -90,16 +122,70 @@ pub const MAX_PAYOUT_MULTIPLE: i64 = 100;
 /// `i64`s so they can never be transposed at a call site.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct EconomyCaps {
-    /// Max rolling-24h sum of stakes (wager) / amounts sent (transfer) for one
-    /// acting user within one app and community.
+    /// Max rolling-24h sum for one acting user within one app and community:
+    /// of stakes AND (separately) of payouts credited for a wager, of amounts
+    /// sent for a transfer.
     pub per_user_daily_max: i64,
-    /// Max rolling-24h sum of stakes (wager) / amounts sent (transfer) by one
-    /// app across the whole (tenant, community).
+    /// Max rolling-24h sum by one app across the whole (tenant, community),
+    /// measured the same way as [`Self::per_user_daily_max`].
     pub per_scope_daily_max: i64,
 }
 
 /// Largest accepted leaderboard page.
 pub const MAX_LEADERBOARD_LIMIT: u32 = 100;
+
+/// Longest accepted idempotency key (the `economy_ledger.idempotency_key`
+/// column is `VARCHAR(128)`).
+pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 128;
+
+/// The replay-stable identity of ONE money-moving call, scoped by the store to
+/// `(tenant, community, app)`. Built by the HOST (never taken from a guest) so
+/// a retried or replayed call presents the same key and is applied at most
+/// once; see the module docs. Opaque and validated: ASCII alphanumerics and
+/// `:_.-` only, `1..=`[`MAX_IDEMPOTENCY_KEY_LEN`] bytes -- no whitespace, no
+/// control characters, nothing that could be mistaken for SQL or a log line.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IdempotencyKey(String);
+
+impl IdempotencyKey {
+    /// Validates `raw` as a key. The error never echoes the offending value.
+    pub fn new(raw: impl Into<String>) -> Result<Self, EconomyError> {
+        let raw = raw.into();
+        if raw.is_empty() || raw.len() > MAX_IDEMPOTENCY_KEY_LEN {
+            return Err(EconomyError::Invalid(format!(
+                "idempotency key must be 1..={MAX_IDEMPOTENCY_KEY_LEN} bytes"
+            )));
+        }
+        if !raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'.' | b'-'))
+        {
+            return Err(EconomyError::Invalid(
+                "idempotency key may contain only [A-Za-z0-9:_.-]".to_string(),
+            ));
+        }
+        Ok(Self(raw))
+    }
+
+    /// The key of the `ordinal`-th `kind` mutation (`wager` | `transfer`) made
+    /// while handling the event `event_id`: `"<event_id>:<kind>:<ordinal>"`.
+    /// An event redelivered after a crash replays the same ordinals, so each
+    /// call maps to the same key it had the first time.
+    pub fn for_event(event_id: &str, kind: &str, ordinal: u32) -> Result<Self, EconomyError> {
+        Self::new(format!("{event_id}:{kind}:{ordinal}"))
+    }
+
+    /// The key text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for IdempotencyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// The host-derived scope of one economy call (never guest-supplied).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,6 +227,11 @@ pub enum EconomyError {
     /// pass `cap`. Same `quota_exceeded` code as the gate's per-scope check.
     #[error("rolling-24h per-scope economy cap ({cap}) would be exceeded")]
     ScopeQuotaExceeded { cap: i64 },
+    /// The call's idempotency key was already used by a DIFFERENT movement
+    /// (other parameters or another kind of call). Never applied: a replay
+    /// must present the same parameters it had the first time.
+    #[error("idempotency key was already used by a different economy operation")]
+    IdempotencyConflict,
     /// Malformed argument (non-positive amount, self-transfer, bad limit, ...).
     #[error("invalid argument: {0}")]
     Invalid(String),
@@ -157,6 +248,7 @@ impl EconomyError {
             Self::InsufficientFunds { .. } => "insufficient_funds",
             Self::OverCap { .. } => "over_cap",
             Self::UserQuotaExceeded { .. } | Self::ScopeQuotaExceeded { .. } => "quota_exceeded",
+            Self::IdempotencyConflict => "idempotency_conflict",
             Self::Invalid(_) => "invalid_args",
             Self::Backend(_) => "backend",
         }
@@ -196,7 +288,12 @@ pub trait EconomyStore: Send + Sync {
     /// and returns the NEW balance. `max_bet` is the host-computed stake cap;
     /// `caps` the durable daily aggregates. Requires `1 <= stake <= max_bet`,
     /// `0 <= payout <= stake * `[`MAX_PAYOUT_MULTIPLE`], `balance >= stake`,
-    /// and the stake to fit both rolling-24h caps.
+    /// the stake to fit both rolling-24h STAKE caps and the payout to fit both
+    /// rolling-24h PAYOUT (mint) caps. `key` makes the call idempotent: a
+    /// replay with identical parameters returns the original balance and moves
+    /// nothing; the same key with different parameters is
+    /// [`EconomyError::IdempotencyConflict`].
+    #[allow(clippy::too_many_arguments)]
     fn wager<'a>(
         &'a self,
         scope: &'a EconomyScope,
@@ -205,11 +302,14 @@ pub trait EconomyStore: Send + Sync {
         payout: i64,
         max_bet: i64,
         caps: EconomyCaps,
+        key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, EconomyError>>;
 
     /// Atomically moves `amount` from `from` to `to` (both must be active
     /// members, `from != to`). `max_amount` is the host-computed per-call cap;
-    /// `caps` the durable daily aggregates, charged against the SENDER.
+    /// `caps` the durable daily aggregates, charged against the SENDER. `key`
+    /// makes the call idempotent exactly as for [`Self::wager`].
+    #[allow(clippy::too_many_arguments)]
     fn transfer<'a>(
         &'a self,
         scope: &'a EconomyScope,
@@ -218,6 +318,7 @@ pub trait EconomyStore: Send + Sync {
         amount: i64,
         max_amount: i64,
         caps: EconomyCaps,
+        key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<(), EconomyError>>;
 
     /// The community's top `limit` (`1..=`[`MAX_LEADERBOARD_LIMIT`]) active
@@ -354,6 +455,14 @@ mod tests {
             "invalid_args"
         );
         assert_eq!(EconomyError::Backend(String::new()).wire_code(), "backend");
+        assert_eq!(
+            EconomyError::IdempotencyConflict.wire_code(),
+            "idempotency_conflict"
+        );
+        assert_eq!(
+            EconomyError::IdempotencyConflict.wire_message(),
+            "idempotency key was already used by a different economy operation"
+        );
         // The numeric variants carry the bare number for the executor to parse.
         assert_eq!(
             EconomyError::InsufficientFunds { balance: 7 }.wire_message(),
@@ -364,5 +473,56 @@ mod tests {
             EconomyError::NotAMember.wire_message(),
             "target user is not an active member of this community"
         );
+    }
+
+    #[test]
+    fn idempotency_keys_accept_the_host_shape_and_reject_everything_else() {
+        let ok = IdempotencyKey::for_event("3fa85f64-5717-4562-b3fc-2c963f66afa6", "wager", 0)
+            .expect("the host shape is valid");
+        assert_eq!(ok.as_str(), "3fa85f64-5717-4562-b3fc-2c963f66afa6:wager:0");
+        assert_eq!(ok.to_string(), ok.as_str());
+        assert!(IdempotencyKey::new("a").is_ok());
+        assert!(IdempotencyKey::new("A-b_c.d:9").is_ok());
+        assert!(IdempotencyKey::new("x".repeat(MAX_IDEMPOTENCY_KEY_LEN)).is_ok());
+        for bad in [
+            String::new(),
+            "x".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1),
+            "has space".to_string(),
+            "tab\there".to_string(),
+            "line\nbreak".to_string(),
+            "nul\0byte".to_string(),
+            "quote'; DROP TABLE economy_ledger;--".to_string(),
+            "unicode-\u{e9}".to_string(),
+            "slash/path".to_string(),
+        ] {
+            assert!(
+                matches!(
+                    IdempotencyKey::new(bad.clone()),
+                    Err(EconomyError::Invalid(_))
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejected_key_error_never_echoes_the_offending_value() {
+        let Err(EconomyError::Invalid(msg)) = IdempotencyKey::new("secret value!") else {
+            panic!("expected Invalid");
+        };
+        assert!(!msg.contains("secret"), "{msg}");
+    }
+
+    #[test]
+    fn event_keys_differ_by_event_kind_and_ordinal() {
+        let k = |e: &str, kind: &str, n: u32| IdempotencyKey::for_event(e, kind, n).unwrap();
+        let base = k("e1", "wager", 0);
+        assert_eq!(base, k("e1", "wager", 0), "the same call keys the same way");
+        assert_ne!(base, k("e2", "wager", 0));
+        assert_ne!(base, k("e1", "transfer", 0));
+        assert_ne!(base, k("e1", "wager", 1));
+        // An over-long event id is refused rather than truncated (truncation
+        // could make two events collide).
+        assert!(IdempotencyKey::for_event(&"e".repeat(200), "wager", 0).is_err());
     }
 }

@@ -91,6 +91,12 @@ fn numeric_message(code: &str, message: &str) -> Result<u64, economy::Error> {
 /// `rate_limited`, `instance_denied`, ...) all surface as `denied(<code>)` so
 /// a bundle can branch on the stable code; `user_not_in_scope` (gate) and
 /// `not_a_member` (store) both mean "a named user is not in this community".
+/// The money-safety refusals are `denied(<code>)` too: `actor_mismatch` (the
+/// account named as payer is not the invocation's actor), `idempotency_conflict`
+/// (a replayed call's parameters differ from the original) and the identity
+/// resolution refusals that can stop an actor from being bound (`not_linked`,
+/// `not_found`, `ambiguous`); an identity backend outage (`unavailable`) is
+/// `unavailable`, like every other wiring state.
 fn economy_error_from(err: ExecutorError) -> economy::Error {
     match &err {
         ExecutorError::HostCallDenied { code, message, .. } => match code.as_str() {
@@ -104,7 +110,9 @@ fn economy_error_from(err: ExecutorError) -> economy::Error {
                 Err(e) => e,
             },
             "invalid_args" => economy::Error::Invalid(message.clone()),
-            "not_implemented" | "feature_disabled" => economy::Error::Unavailable(message.clone()),
+            "not_implemented" | "feature_disabled" | "unavailable" => {
+                economy::Error::Unavailable(message.clone())
+            }
             "backend" => economy::Error::Backend(message.clone()),
             other => economy::Error::Denied(other.to_string()),
         },
@@ -218,7 +226,7 @@ mod tests {
 
     #[test]
     fn wiring_codes_are_unavailable_and_gate_codes_are_denied() {
-        for code in ["not_implemented", "feature_disabled"] {
+        for code in ["not_implemented", "feature_disabled", "unavailable"] {
             assert!(matches!(
                 economy_error_from(denied(code, "m")),
                 economy::Error::Unavailable(m) if m == "m"
@@ -230,6 +238,9 @@ mod tests {
             "quota_exceeded",
             "rate_limited",
             "instance_denied",
+            "actor_mismatch",
+            "idempotency_conflict",
+            "not_linked",
         ] {
             assert!(matches!(
                 economy_error_from(denied(code, "m")),

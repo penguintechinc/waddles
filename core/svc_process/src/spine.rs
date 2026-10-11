@@ -1126,7 +1126,10 @@ async fn handle_delivered_inner<S: SpineOps>(
                     None => {
                         crate::identity::InvocationIdentity::for_untokenized_event(&d.env.event)
                     }
-                };
+                }
+                // The hop-verified envelope id: identical across redeliveries
+                // of this event, the anchor of the economy's idempotency keys.
+                .with_event_id(d.env.event_id.clone());
                 caps.with_identity(identity.clone(), Arc::new(invocation))
             }
             None => caps,
