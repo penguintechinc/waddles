@@ -83,6 +83,21 @@ def derive_data_subkey(dek: bytes, tenant_id: int) -> bytes:
     )
 
 
+def derive_kek_subkey(kek: bytes, info: bytes) -> bytes:
+    """HKDF-SHA256 a 32-byte, domain-separated key from a KEK (no salt; `info` names the use).
+
+    For features that need a keyed primitive under the platform KEK without a second copy of the
+    Secret and without ever handling the KEK itself (ban-evasion suppression derives per-tenant
+    HMAC keys this way). `info` MUST be unique per use and per scope -- two uses sharing an
+    `info` share a key.
+    """
+    if len(kek) != KEY_LENGTH:
+        raise EnvelopeInputError("KEK must be exactly 32 bytes")
+    if not info:
+        raise EnvelopeInputError("info (the domain-separation label) is required")
+    return HKDF(algorithm=hashes.SHA256(), length=KEY_LENGTH, salt=None, info=info).derive(kek)
+
+
 def field_aad(
     tenant_id: int, table: str, column: str, row_uuid: str | uuid.UUID, dek_version: int
 ) -> bytes:

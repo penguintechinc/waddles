@@ -67,7 +67,7 @@ A `Sec-GPC: 1` (Global Privacy Control) request header is honoured server-side: 
 
 ## Data Deletion (GDPR Article 17 — Right to Erasure)
 
-Users can request deletion of their personal data from the **Your privacy rights** page (`/privacy-rights` → *Delete my data*), which calls `DELETE /api/v1/user/me/data`. An account with a password must re-confirm it; the page tells the user, before they confirm, that linked platform identities and reputation history are kept.
+Users can request deletion of their personal data from the **Your privacy rights** page (`/privacy-rights` → *Delete my data*), which calls `DELETE /api/v1/user/me/data`. An account with a password must re-confirm it; the page tells the user, before they confirm, that **everything is deleted** — profile, memberships, linked platform accounts and reputation — with one exception: a user under an *active ban* leaves a one-way coded suppression record (see *What Is Retained* §1).
 
 ### What Gets Deleted
 
@@ -82,11 +82,16 @@ The deletion runs as a single, **all-or-nothing** database transaction (`service
 | `activity_message_events` | Hard delete |
 | `activity_watch_sessions` | Hard delete |
 | `hub_chat_messages` | Hard delete (rows the user *sent*, every community) |
-| `community_members` | **PII columns nulled in place** — `display_name`, `avatar_url`, `bio`, `social_links`, `platform_user_id`; the row itself is kept (see *What Is Retained* §3) |
+| `community_members` | **Hard delete** — every membership row of the account, in every community, **including its reputation** (hub-linked rows and platform-keyed rows matching a linked identity) |
+| `hub_user_identities` | **Hard delete** — the Discord/Twitch/… account links (there is no "identity anchor" any more; see *Returning After Deletion*) |
+| `reputation_events`, `reputation_tenant` | **Hard delete** — the reputation score and its audit trail |
+| `bundle_reputation_scores`, `bundle_reputation_adjustments` | **Hard delete** — the app-bundle reputation balance and ledger, keyed on the account's pseudonymous `user_uuid`s |
+| `ephemeral_pseudonyms` | **Hard delete** — the platform-id → pseudonym mapping (and its raw handle) for the account's linked platform ids, in every tenant |
+| `suppression_records` | **Written only if the account had an active ban** — one keyed one-way code per (tenant, platform account); see *What Is Retained* §1 |
 | `hub_users` | **Anonymized in-place** (see below) |
 | `data_deletion_requests` | Completion row inserted (see *Deletion Audit Trail*) |
 
-**Atomicity.** Every delete, the `community_members` PII nulling, the `hub_users` anonymization and the `completed` ledger row are issued in one executor job and committed once. If any statement fails, everything is rolled back — the account is left exactly as it was, never half-erased — a separate `failed` ledger row records the attempt, and the original error is returned (a `500`; the request can simply be retried). Erasure never ends in a state where the data is gone but the proof of erasure is missing, or vice versa.
+**Atomicity.** Every delete, the suppression record (when the account has an active ban), the `hub_users` anonymization and the `completed` ledger row are issued in one executor job and committed once. If any statement fails, everything is rolled back — the account is left exactly as it was, never half-erased — a separate `failed` ledger row records the attempt, and the original error is returned (a `500`; the request can simply be retried). Erasure never ends in a state where the data is gone but the proof of erasure is missing, or vice versa. A banned user's erasure also needs the platform key to compute the suppression code: if it is unavailable the whole erasure fails and rolls back (a `failed` ledger row, a `500`, retry once fixed) rather than erasing without suppressing — a user with no active ban never touches the key.
 
 **Export/erasure symmetry.** Everything the Art. 15 export discloses from the message/activity tables (`message_activity`, `watch_activity`, `chat_messages`) is removed by Art. 17 erasure. `hub_chat_messages` was previously exported but not erased (GRC finding #1, fixed).
 
@@ -114,59 +119,59 @@ The anonymized `hub_users` row contains no PII: the email and username are non-i
 
 ### What Is Retained (and Why)
 
-Four categories of data are deliberately **not** deleted, each with a distinct legal basis under GDPR Article 6 or accountability duty under Article 5(2):
+Two categories of data are deliberately **not** deleted, each with a distinct legal basis under GDPR Article 6 or accountability duty under Article 5(2).
+
+> **Status — counsel to verify.** §1 below is a *draft* disclosure for the ban-evasion suppression record. The legitimate-interest assessment, DPIA and the appeal / human-review process are drafts or open items: see [Suppression LIA](compliance/suppression-LIA.md) and [Suppression DPIA](compliance/suppression-DPIA.md). Nothing here is a final legal artifact.
 
 #### 0. Consent and audit logs — `cookie_consent`, `cookie_audit_log`, `audit_log`, `data_deletion_requests`
 *Legal basis: Legal obligation / accountability (Article 6(1)(c), Article 5(2))*
 
 Consent records, the consent change log, the platform audit trail and the deletion-request ledger are **never** deleted by erasure. They are the controller's proof that consent was lawfully obtained and that the erasure request was honoured; deleting them would destroy the evidence the regulator can demand. They hold identifiers and technical metadata (user id, consent choices, IP, user agent) but not the profile, credentials, or message content that erasure removes. This is pinned in code (`ERASURE_RETAINED_TABLES`) and by regression tests (`hub_api/tests/test_data_privacy_erasure.py::TestRetention`).
 
-#### 1. `hub_user_identities` — Platform Account Links
-*Legal basis: User's own legitimate interest (Article 6(1)(f)) — account reclaim*
+#### 1. `suppression_records` — Ban-Evasion Suppression (only for a user with an active ban)
+*Legal basis: Legitimate interest (Article 6(1)(f)) — preventing evasion of a community ban. This is **not** an Article 17(3) exemption: it is a separate, narrowly-scoped retention with its own lawful basis, necessity and balancing test (counsel to verify).*
 
-The rows linking a user's Discord ID, Twitch ID, etc. to their `hub_user_id` are kept. This serves two purposes:
+**When anything is kept.** Only if, at the moment of erasure, the account had an **active ban** — a `community_members` row whose `role` is `banned` (set by the reputation policy enforcer's auto-ban, or a moderator). For every other user **nothing at all is kept**: no reputation, no score, no tombstone, no platform-identity link. A user with no active ban who returns gets a fresh start.
 
-- **Account reclaim**: If a user returns and logs in via their platform account, the OAuth flow (`_find_or_create_user_from_oauth` in `services/oauth_service.py`) finds the existing identity link and reconnects them to their original `hub_user_id` — including their full reputation history. See *Account Reclaim After Deletion* below.
-- **Platform identity belongs to the platform**: Discord/Twitch user IDs are owned and managed by those platforms. Deleting them from our records does not erase them from the source platform.
+**What is kept.** One `suppression_records` row per (tenant, platform account):
 
-The retained row is the whole `hub_user_identities` record: `platform`, `platform_user_id`, **`platform_username`**, **`avatar_url`**, `is_primary` and the `linked_at` / `last_used` timestamps. The username and avatar are the platform's public handle and picture and are refreshed from the platform on the user's next login.
+| Column | Content |
+|---|---|
+| `tenant_id` | The tenant (the controller) that banned them — a code only ever matches inside this tenant |
+| `platform` | The platform *name* (`discord`, `twitch`) — never an id |
+| `key_ver` | Which master key version produced the code (key rotation) |
+| `hmac` | **A keyed one-way code** of the platform id: `HMAC-SHA256(HKDF(K_master, tenant_id), platform ‖ platform_user_id)` |
+| `reason_enum` | A **closed** list of restriction types — `ban` or `auto_ban`. No free text, no offence detail (Art. 9/10) |
+| `expires_at` | The restriction's expiry, or empty = until a moderator lifts it |
+| `created_at` | When retention began |
 
-The identity link is the only reclaim anchor. The copy of the platform id on `community_members` is not needed for reclaim and **is** cleared by erasure (see §3).
+**What is not kept:** the platform id, username, e-mail, display name, hub user id, community, the offence, the moderator, any reason text.
 
-#### 2. `reputation_tenant` + `reputation_events` — Score & Audit Trail
-*Legal basis: Legitimate interest (Article 6(1)(f)) — platform integrity / anti-gaming*
+**Why a keyed code and not a salted hash.** A Discord/Twitch id is a short numeric string; an unkeyed or statically-salted hash of one is a lookup table an attacker enumerates in seconds. The code is an HMAC under a secret per-tenant key derived from the platform tenant KEK, which is mounted into `hub-api` only and never stored in the database: a database dump alone can neither reverse nor even test a guess against it (pinned by `hub_api/tests/test_suppression_keys.py::TestNotReversibleWithoutTheKey` and an enumeration test). It is deterministic, so a returning user's id recomputes to the same code and matches. The platform name is bound into the MAC input so equal ids on two platforms are not linkable either.
 
-Reputation scores and their audit trail are retained. **This is disclosed to users before they confirm deletion.**
+**It is still personal data.** A pseudonymised code is personal data (Recital 26): it is covered by the access, objection and erasure rights, it is deleted at expiry (an hourly purge deletes expired rows; lookups ignore an expired row regardless) or when a moderator lifts the restriction, and an optional operator ceiling (`suppression.maxRetentionDays`) bounds how long even an indefinite ban is kept. The Art. 15 export of the deletion ledger discloses that a suppression record was written (`suppression_records_written`).
 
-Allowing reputation reset via deletion would be a trivially exploitable loophole (farm score → delete → repeat). Reputation is also a community-wide signal that affects other users' experiences and community health calculations. The `reputation_events` trail justifies the retained score — without it, the score would be an unexplained number with no audit basis.
+**Per tenant only.** Each tenant is the controller of its own bans; Waddles is the processor. The same platform id has a **different** code in every tenant and a code is never matched outside the tenant that wrote it — a platform-wide ban list would make Waddles a controller (pinned by `test_ban_suppression.py::TestReturnRecatch::test_the_same_platform_id_in_another_tenant_never_matches`).
 
-#### 3. `community_members` — Membership Row (PII columns nulled)
-*Legal basis: Same as above — FK integrity + reputation retention*
+**How a return is re-caught.** When a user is about to be admitted to a community — a join request is approved, an account is created through OAuth, or a platform account is linked — the code for the incoming platform id is recomputed with the *destination tenant's* key; a non-expired match re-applies the restriction (the membership is written `banned` + inactive and the request is refused). If the tenant has no live suppression row the key is never read; if it has one and the key is unavailable the check fails closed.
 
-The row itself is kept for FK integrity and the reputation signal above, but in the same transaction as the rest of erasure every personal column is set to `NULL`: `display_name`, `avatar_url`, `bio`, `social_links` and `platform_user_id`. This applies in **every** community (the hub identity is global). Two kinds of row belong to the account and are both cleared:
+**Your rights.** You may object (Art. 21) or ask for human review of the restriction (Art. 22 for automated `auto_ban` decisions) by contacting the community or tenant administrator, who can lift it — which deletes the row at once. **Process follow-ups, not yet built:** a DSA Art. 17 statement of reasons and an internal appeal for platform-level restrictions, and a documented human-review path for automated bans.
 
-- rows linked to it — `user_id` equals the account's `hub_users.id`; and
-- rows keyed only by platform identity (no `user_id`, as the reputation service creates them) whose `(platform, platform_user_id)` matches one of the account's linked `hub_user_identities`.
+#### No longer retained (changed from earlier versions of this document)
 
-A row linked to a *different* account is never touched, even if it names the same platform id. The retained columns are `community_id`, `user_id` (the pseudonymous id of the now-anonymized `hub_users` row), `platform` (the platform name only), `reputation`, `role`, `is_active` and timestamps. Consequence: lookups by `(platform, platform_user_id)` no longer match a cleared row — the retained reputation stays reachable through its hub link (`user_id` / `user_uuid`), while a platform-keyed row has no hub link to keep and becomes unattributable by design (the identity-resolution trigger records it as `unresolvable`).
+Earlier versions kept three things for every erased user — the platform account links (`hub_user_identities`, as a "permanent identity anchor" for account reclaim), the reputation score and its audit trail (`reputation_tenant` + `reputation_events`, as an anti-gaming signal), and the membership rows with only their personal columns nulled (`community_members`). **All three are now deleted** for every user. The anti-gaming purpose is served instead — and only for users with an active ban — by the suppression record in §1, which is far narrower than retaining every user's score and identity. The visible consequence: a user who deletes their data and returns starts with a fresh account and fresh reputation.
 
-This is pinned in code (`COMMUNITY_MEMBER_PII_COLUMNS`) and by `hub_api/tests/test_data_privacy_erasure.py::TestCommunityMemberErasure` / `TestMemberErasureAtomicity`, plus a real-Postgres test against the production trigger (`hub_api/tests/test_dsar_member_erasure_pg_integration.py`). A schema drift that leaves one of these columns unbound fails the erasure loudly (and rolls it back) rather than reporting success with PII left behind.
+### Pseudonym Mapping — Erased With The Account
 
-### Also Not Reached by Self-Service Erasure: `ephemeral_pseudonyms.handle`
+Unlinked platform accounts are represented by a pseudonym UUID; the raw platform handle behind it is stored in `ephemeral_pseudonyms.handle`. For every platform account **linked to the erased hub user**, the mapping and its handle are now deleted in every tenant, together with any bundle reputation keyed on that pseudonym. For a platform account that was never linked to a hub user there is no `hub_users` row to erase; wiping its handle remains an operator/DSAR operation (`identity_resolution_service.erase_pseudonym_handles`, deliberately not exposed on the gRPC surface), recorded in `identity_resolution_events` without PII.
 
-Unlinked platform accounts are represented by a pseudonym UUID; the raw platform handle behind it is stored in `ephemeral_pseudonyms.handle`. Self-service erasure does not reach it (there is no `hub_users` row to erase for these accounts). Wiping a handle is an operator/DSAR operation (`identity_resolution_service.erase_pseudonym_handles`, deliberately not exposed on the gRPC surface), recorded in `identity_resolution_events` without PII.
-
-### Account Reclaim After Deletion
+### Returning After Deletion
 
 If a user deletes their data and later returns:
 
-1. They log in via a linked platform account (Discord, Twitch, etc.)
-2. `_find_or_create_user_from_oauth()` queries `hub_user_identities` by `(platform, platform_user_id)` and finds the retained record
-3. The record resolves to the original `hub_user_id`, and a new session is minted for it
-4. Their reputation score is intact, and the retained membership rows (still keyed by `user_id`) keep their reputation and role; the display name, avatar, bio, social links and platform id on those rows were erased and are **not** restored
-5. The identity row's `platform_username`, `avatar_url` and `last_used` are refreshed from the platform. **The anonymized `hub_users` row is not re-populated and is not re-activated** — it keeps its `deleted_{id}` placeholders and `is_active = false` until the user sets new profile details
-
-The platform identity (Discord snowflake, Twitch ID) acts as the **permanent identity anchor** across the entire account lifecycle — including through deletion and return. A login by email never adopts an existing account: an email match with no linked identity is refused with a conflict, so the retained anonymous row cannot be claimed by e-mail.
+1. They log in via a platform account (Discord, Twitch, etc.). No `hub_user_identities` link exists any more, so `_find_or_create_user_from_oauth()` creates a **new** hub account — new `hub_users.id`, new `uuid`, a fresh reputation. (A login by e-mail never adopts an existing account: an e-mail match with no linked identity is refused with a conflict, so the anonymized row cannot be claimed.)
+2. The anonymized `hub_users` row of the old account is never re-populated or re-activated.
+3. If the platform account had an active ban in a tenant, its suppression record matches when the new account is linked or admitted to a community of that tenant, and the restriction is re-applied there (and only there). A user with no active ban is not matched by anything.
 
 ### Deletion Audit Trail
 
@@ -180,7 +185,7 @@ Every deletion attempt is recorded in `data_deletion_requests`. This table store
 | `requested_at` | Timestamp of request |
 | `completed_at` | Timestamp of completion |
 | `status` | `pending`, `completed`, or `failed` |
-| `deletion_scope` | JSONB: row counts deleted per table (no field values), including `chat_messages`, plus `community_members_anonymized` (rows nulled in place, not deleted) |
+| `deletion_scope` | JSONB: row counts deleted per table (no field values) — `chat_messages`, `community_members`, `hub_user_identities`, the reputation tables, `ephemeral_pseudonyms` — plus `suppression_records_written` (rows *written*, not deleted; `0` for a user with no active ban) |
 | `error_detail` | Failure category if status = `failed` — exception type / SQLSTATE only, never the driver message (which can echo row values) |
 
 Superadmins can view `{ requested_at, completed_at, status }` at `GET /api/v1/superadmin/users/:userId/deletion-request` for support inquiries. No PII is returned.
@@ -196,7 +201,7 @@ Self-service data-subject rights (`GET`/`DELETE /api/v1/user/me/data`, above) ar
 | `PUT` | `/users/<id>/do-not-sell` | CCPA/CPRA Do-Not-Sell opt-out |
 | `POST` | `/bulk` `{"action", "userIds", "confirm"}` | Any of the three over many users |
 
-Bulk requests return `200` with a per-user `status` (`completed`, `already_done`, `not_found`, `conflict`, `failed`, `audit_unavailable`) — one user's failure never aborts the rest. Caps per request: 100 users (25 for `export`, which returns data inline).
+Bulk requests return `200` with a per-user `status` (`completed`, `already_done`, `not_found`, `conflict`, `failed`, `audit_unavailable`) — one user's failure never aborts the rest. Erasure deletes the target's memberships, which are what proves a user belongs to the admin's tenant, so a *repeat* erase of an already-erased user returns `not_found` (never a second erasure and never an existence oracle). Caps per request: 100 users (25 for `export`, which returns data inline).
 
 **Guardrails** (all enforced in `hub_api/services/admin_data_privacy_service.py`):
 

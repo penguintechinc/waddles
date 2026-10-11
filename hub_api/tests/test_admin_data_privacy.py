@@ -214,6 +214,13 @@ def _member_pii_rows(db: Any, *, user_id: int) -> list[tuple[Any, ...]]:
     return [(r.display_name, r.avatar_url, r.bio, r.social_links, r.platform_user_id) for r in rows]
 
 
+def db_deletion_requests(db: Any, user_id: int) -> int:
+    """Number of `data_deletion_requests` ledger rows for `user_id`."""
+    count = db.dal(db.dal.data_deletion_requests.hub_user_id == user_id).count()
+    db.dal.commit()
+    return int(count)
+
+
 def _audit_rows(db: Any) -> list[Any]:
     rows = db.dal(db.dal.audit_log.id > 0).select(orderby=db.dal.audit_log.id)
     db.dal.commit()
@@ -395,7 +402,10 @@ class TestEnterpriseGate:
             license_gate=FakeLicenseGate("enterprise"),
         )
 
-        for method, path, body in self.ROUTES[:3]:
+        # Erase last: it deletes the membership rows the console proves tenant scope with, so any
+        # later call on the same target is (correctly) `not_found`.
+        export, erase, do_not_sell = self.ROUTES[:3]
+        for method, path, body in (export, do_not_sell, erase):
             response = await self._call(client, world, method, path, body)
             assert response.status_code == 200, (method, path)
 
@@ -842,10 +852,10 @@ class TestErase:
         assert db.dal(db.dal.cookie_consent.user_id == alice).count() == 1
         assert [r.action for r in _audit_rows(db)] == ["dsar.erase"]
 
-    async def test_erase_nulls_member_pii_in_every_community_and_spares_others(
+    async def test_erase_deletes_memberships_in_every_community_and_spares_others(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
-        """Art. 17 gap: the console erased the account but left the membership profile PII."""
+        """Art. 17: memberships (PII AND reputation) are deleted, not nulled-and-kept."""
         alice = world["alice"]
         second = _community(db, tenant_id=ACME_ID, name="acme-second")
         _member(db, community_id=second, user_id=alice)  # erasure spans every community
@@ -860,11 +870,12 @@ class TestErase:
         )
 
         assert response.status_code == 200
-        assert _member_pii_rows(db, user_id=alice) == [(None,) * 5, (None,) * 5]
+        assert _member_pii_rows(db, user_id=alice) == []
         [mallory_row] = _member_pii_rows(db, user_id=world["mallory"])
         assert mallory_row[0] == "Sentinel Name"  # a bystander's membership is untouched
         [deletion] = db.dal(db.dal.data_deletion_requests.hub_user_id == alice).select()
-        assert deletion.deletion_scope["community_members_anonymized"] == 2
+        assert deletion.deletion_scope["community_members"] == 2
+        assert deletion.deletion_scope["suppression_records_written"] == 0  # benign: nothing kept
 
     async def test_erase_needs_no_password_for_an_account_that_has_one(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
@@ -883,15 +894,18 @@ class TestErase:
         assert _user_row(db, carol).password_hash is None
 
     async def test_erase_is_idempotent(
-        self, client: Any, world: dict[str, int], gate_on: Any
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         url = _base() + f"/users/{world['alice']}/erase"
         first = await client.post(url, headers=_headers(world["admin"]), json={"confirm": True})
         second = await client.post(url, headers=_headers(world["admin"]), json={"confirm": True})
 
         assert first.status_code == 200
-        assert second.status_code == 200
-        assert (await second.get_json())["result"]["status"] == "already_done"
+        # The first erase deleted the memberships the console proves tenant scope with, so a
+        # repeat is `not_found` (never an existence oracle, never a second erasure) -- before
+        # suppression-only retention the retained member rows kept it `already_done`.
+        assert second.status_code == 404
+        assert db_deletion_requests(db, world["alice"]) == 1
 
     async def test_admin_cannot_erase_themself(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
@@ -1204,7 +1218,7 @@ class TestBulk:
         assert (_chat_count(db, world["alice"]), _chat_count(db, bob)) == (0, 0)
         assert _chat_count(db, bystander) == 1
 
-    async def test_bulk_erase_nulls_every_targets_member_pii(
+    async def test_bulk_erase_deletes_every_targets_memberships(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         bob = _user(db, name="bob-members")
@@ -1222,8 +1236,8 @@ class TestBulk:
 
         assert response.status_code == 200
         assert (await response.get_json())["succeeded"] == 2
-        assert _member_pii_rows(db, user_id=world["alice"]) == [(None,) * 5]
-        assert _member_pii_rows(db, user_id=bob) == [(None,) * 5]
+        assert _member_pii_rows(db, user_id=world["alice"]) == []
+        assert _member_pii_rows(db, user_id=bob) == []
         assert _member_pii_rows(db, user_id=bystander)[0][0] == "Sentinel Name"
 
     async def test_bulk_success_flag_and_dedup(

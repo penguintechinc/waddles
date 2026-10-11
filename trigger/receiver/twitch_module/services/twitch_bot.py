@@ -162,10 +162,11 @@ class TwitchBotService(commands.Bot):
                 )
 
                 self.logger.audit(
-                    "Event sent to router",
                     action="router_forward",
                     user=event_data.get('user_id'),
-                    result="SUCCESS" if response.status_code < 400 else "FAILED"
+                    community=str(event_data.get("community_id") or ""),
+                    result="SUCCESS" if response.status_code < 400 else "FAILED",
+                    detail="Event sent to router"
                 )
 
                 if response.status_code == 200:

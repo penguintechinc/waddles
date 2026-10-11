@@ -1,11 +1,12 @@
-//! P6: `POST /overlay/{community}/image/push` -- authenticated (PUSH-guard,
-//! `overlay_auth::require_push_credential`) multipart upload of one overlay
-//! image asset. The literal `image` path segment plays the generic
-//! PUSH route's `{surface}` role (`overlay_auth::push::push_scope` is keyed
-//! on `community_id` alone, not surface, so this reuses the exact same
-//! guard/scope machinery `crate::overlay::router::with_push_guard` already
-//! wires for every other surface's push route -- no changes needed in
-//! `overlay_auth`).
+//! P6: `POST /{overlay_code}/image/push` -- authenticated (code-resolving PUSH
+//! guard, `crate::overlay::router::with_push_guard`, which applies
+//! `overlay_auth::authorize_push`) multipart upload of one overlay image asset.
+//! The literal `image` path segment plays the generic PUSH route's `{surface}`
+//! role (`overlay_auth::push::push_scope` is keyed on `community_id` alone,
+//! not surface, so this reuses the exact same guard/scope machinery every
+//! other surface's push route uses). The guard resolves the overlay code to the
+//! community and the handler trusts only the verified credential's
+//! `community_id`.
 //!
 //! Gated on [`crate::flags::IMAGE_UPLOAD_FLAG`] (default OFF for a
 //! never-seen flag) -- `rules/general.md` Red Flags: every merged feature
@@ -63,7 +64,7 @@ fn extension_for(content_type: &str) -> Option<&'static str> {
         .map(|(_, ext)| *ext)
 }
 
-/// `POST /overlay/{community}/image/push` response body.
+/// `POST /{overlay_code}/image/push` response body.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UploadImageResponse {
     /// Opaque reference a later `Surface::image` push's `OverlayPush.
@@ -138,7 +139,7 @@ async fn parse_multipart(mut multipart: Multipart) -> Result<ParsedUpload, ApiEr
 /// The P6 handler.
 #[utoipa::path(
     post,
-    path = "/overlay/{community}/image/push",
+    path = "/{overlay_code}/image/push",
     responses(
         (status = 201, description = "Image asset stored", body = UploadImageResponse),
         (status = 400, description = "Invalid content type, size, or multipart body"),

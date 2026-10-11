@@ -35,7 +35,7 @@
 //! - [`asset_store`]: the `AssetStore` trait + its production SeaORM-backed
 //!   implementation (`SeaOrmImageAssetStore`) -- `overlay_images` metadata
 //!   rows, always queried scoped to `(community_id, asset_id)`.
-//! - [`upload`]: P6's axum handler (`POST /overlay/{community}/image/push`,
+//! - [`upload`]: P6's axum handler (`POST /{overlay_code}/image/push`,
 //!   PUSH-guarded, gated on `crate::flags::IMAGE_UPLOAD_FLAG`).
 //! - [`render`]: P9's pure transform, `render_image_push`.
 

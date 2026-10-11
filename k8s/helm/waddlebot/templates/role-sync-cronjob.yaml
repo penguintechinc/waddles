@@ -92,6 +92,10 @@ spec:
                 name: {{ include "waddlebot.platformCredentialsSecretName" . }}
                 optional: true
             env:
+            # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+            # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+            # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 12 }}
             # services/platform_integrations_crypto.py::_get_key() -- decrypts per-tenant
             # tenant_platform_apps/platform_connections rows this worker's credential
             # resolver reads for every non-global-tenant pairing. Explicit secretKeyRef

@@ -47,9 +47,11 @@ import bcrypt
 from flask_core.db_errors import describe_db_error, log_db_error
 from opentelemetry import trace
 
+from services import ban_suppression, session_service
 from services.audit_service import report_write_failure
 from services.bundle_telemetry import get_meter, get_tracer
 from services.errors import bad_request, not_found, unauthorized
+from services.suppression_keys import PlatformKekKeySource, SuppressionKeySource
 
 logger = logging.getLogger(__name__)
 
@@ -67,23 +69,10 @@ ERASURE_RETAINED_TABLES: tuple[str, ...] = (
     "data_deletion_requests",
 )
 
-#: `community_members` columns holding the data subject's own PII. Erasure
-#: NULLs every one of them (GDPR Art. 17) on the member rows that belong to
-#: the subject, while the row itself survives for FK integrity and the
-#: retained reputation (`user_id`, `community_id`, `reputation`, `role`,
-#: timestamps). Pinned by `tests/test_data_privacy_erasure.py::
-#: TestCommunityMemberErasure`; a new PII column on that table belongs here.
-COMMUNITY_MEMBER_PII_COLUMNS: tuple[str, ...] = (
-    "display_name",
-    "avatar_url",
-    "bio",
-    "social_links",
-    "platform_user_id",
-)
-
-#: `deletion_scope` keys that count rows ANONYMIZED IN PLACE, not hard-deleted.
-_ANONYMIZED_COUNT_KEYS: frozenset[str] = frozenset(
-    {"hub_users_anonymized", "community_members_anonymized"}
+#: `deletion_scope` keys that are NOT hard-deleted row counts: the in-place `hub_users`
+#: anonymization, and the suppression rows WRITTEN for an erased user with an active ban.
+_NON_DELETE_COUNT_KEYS: frozenset[str] = frozenset(
+    {"hub_users_anonymized", "suppression_records_written"}
 )
 
 
@@ -458,9 +447,10 @@ async def request_data_deletion(
     account has one, then `anonymize_user_data()` -- the all-or-nothing
     erasure core (deletes across every table holding this user's PII,
     in-place anonymization of `hub_users`, and the `data_deletion_requests`
-    audit record, in ONE database transaction). The membership rows in
-    `community_members` keep their reputation/role but lose their personal
-    columns (`COMMUNITY_MEMBER_PII_COLUMNS`) in that same transaction.
+    audit record, in ONE database transaction). Memberships, platform
+    identity links and every reputation store are DELETED, not kept: a user
+    with no active ban leaves nothing behind, and a user WITH one leaves only
+    a keyed `suppression_records` code (`services/ban_suppression.py`).
     """
     rows = await async_dal.select_async(
         dal(dal.hub_users.id == user_id), dal.hub_users.email, dal.hub_users.password_hash
@@ -523,7 +513,7 @@ def _instruments() -> _ErasureInstruments:
 
 def _rows_deleted(counts: dict[str, int]) -> int:
     """Total rows hard-deleted (the in-place anonymizations are not deletes)."""
-    return sum(v for k, v in counts.items() if k not in _ANONYMIZED_COUNT_KEYS)
+    return sum(v for k, v in counts.items() if k not in _NON_DELETE_COUNT_KEYS)
 
 
 def _record_erasure_metrics(result: str, started: float, counts: dict[str, int] | None) -> None:
@@ -539,60 +529,134 @@ def _record_erasure_metrics(result: str, started: float, counts: dict[str, int] 
         logger.exception("dsar.erasure_metrics_failed")
 
 
-def _erase_community_member_pii(dal: Any, *, user_id: int, now: datetime) -> int:
-    """NULL `COMMUNITY_MEMBER_PII_COLUMNS` on every `community_members` row of `user_id`.
+@dataclass(slots=True, frozen=True)
+class _ErasureScope:
+    """Everything erasure needs to know about the subject, gathered BEFORE any delete.
 
-    Runs INSIDE `_sync_erase()`'s transaction and never commits or rolls back
-    itself -- the caller owns that. A member row belongs to the subject two
-    ways, and both are cleared (every community, matching the other
-    erasure deletes -- `hub_users` is one global identity):
-
-    1. `user_id == str(hub_users.id)` -- the hub-linked membership. `user_id`
-       stays, so the row keeps its FK-style link, `reputation` and `role`
-       (the retained anti-gaming signal, PRIVACY.md).
-    2. Rows keyed ONLY by platform identity (`user_id` NULL/empty, as the
-       reputation service creates them) whose `(platform, platform_user_id)`
-       matches one of the subject's linked `hub_user_identities`. A row whose
-       `user_id` names a DIFFERENT hub user is never touched.
-
-    Returns the number of member rows anonymized. Raises (and so rolls the
-    whole erasure back) if a column is missing from the bound table: pydal's
-    `update()` silently DROPS an unknown field name, so without this check a
-    schema drift would report a "completed" erasure that left PII behind.
+    `identities` are the subject's linked platform pairs as stored. `member_rows` are the
+    `community_members` rows that belong to them (hub-linked + platform-keyed arms).
+    `user_uuids` are the PII-free tokens bundle reputation is keyed on. `restrictions` are
+    the active bans -- empty for a benign user, which is what makes the erasure
+    "delete everything, keep nothing".
     """
-    members = dal.community_members
-    unbound = [c for c in COMMUNITY_MEMBER_PII_COLUMNS if c not in members.fields]
-    if unbound:
-        raise RuntimeError(
-            f"community_members is not bound with PII column(s) {unbound}; "
-            "refusing a partial erasure"
-        )
-    blank: dict[str, Any] = {column: None for column in COMMUNITY_MEMBER_PII_COLUMNS}
-    keyed = dal(members.user_id == str(user_id)).update(updated_at=now, **blank) or 0
-    identities = dal(dal.hub_user_identities.hub_user_id == user_id).select(
-        dal.hub_user_identities.platform, dal.hub_user_identities.platform_user_id
+
+    identities: tuple[tuple[str, str], ...]
+    member_rows: tuple[Any, ...]
+    user_uuids: tuple[str, ...]
+    restrictions: tuple[ban_suppression.ActiveRestriction, ...]
+
+
+def _collect_erasure_scope(dal: Any, *, user_id: int) -> _ErasureScope:
+    """Read the subject's identities, memberships, bundle-reputation tokens and active bans.
+
+    Pure reads, so it can run first inside the erasure transaction: afterwards the rows
+    that say who the subject is (identity links, member rows) are gone, and so is the
+    ban state, so an active ban must be captured here or never.
+    """
+    identities = ban_suppression.identities_of(dal, user_id)
+    members = ban_suppression.subject_member_rows(dal, hub_user_id=user_id, identities=identities)
+    restrictions = ban_suppression.collect_active_restrictions(
+        dal, hub_user_id=user_id, identities=identities, members=members
     )
-    platform_keyed = 0
-    for identity in identities:
-        if not identity.platform or not identity.platform_user_id:
-            continue
-        platform_keyed += (
+    uuids: set[str] = set()
+    hub_row = dal(dal.hub_users.id == user_id).select(dal.hub_users.uuid).first()
+    if hub_row is not None and hub_row.uuid:
+        uuids.add(str(hub_row.uuid))
+    uuids.update(str(m.user_uuid) for m in members if m.user_uuid)
+    pseudonyms = dal.ephemeral_pseudonyms
+    for platform, platform_user_id in identities:
+        for row in dal(
+            (pseudonyms.platform == platform) & (pseudonyms.platform_user_id == platform_user_id)
+        ).select(pseudonyms.pseudonym):
+            uuids.add(str(row.pseudonym))
+    return _ErasureScope(
+        identities=tuple(identities),
+        member_rows=tuple(members),
+        user_uuids=tuple(sorted(uuids)),
+        restrictions=tuple(restrictions),
+    )
+
+
+def _delete_memberships(dal: Any, scope: _ErasureScope, *, now: datetime) -> int:
+    """DELETE the subject's `community_members` rows (PII AND reputation) and fix member counts.
+
+    Replaces the earlier "NULL the PII columns, keep the row and its reputation": a retained
+    score is exactly the tombstone this erasure no longer keeps. A banned user's restriction
+    survives only as a `suppression_records` code written earlier in the same transaction.
+    """
+    if not scope.member_rows:
+        return 0
+    members = dal.community_members
+    ids = [int(m.id) for m in scope.member_rows]
+    deleted = dal(members.id.belongs(ids)).delete() or 0
+    active_per_community: dict[int, int] = {}
+    for member in scope.member_rows:
+        if member.is_active is None or bool(member.is_active):
+            cid = int(member.community_id)
+            active_per_community[cid] = active_per_community.get(cid, 0) + 1
+    for community_id, removed in active_per_community.items():
+        community = (
+            dal(dal.communities.id == community_id).select(dal.communities.member_count).first()
+        )
+        if community is not None:
+            dal(dal.communities.id == community_id).update(
+                member_count=max(0, int(community.member_count or 0) - removed), updated_at=now
+            )
+    return int(deleted)
+
+
+def _delete_reputation_and_identity(
+    dal: Any, scope: _ErasureScope, *, user_id: int
+) -> dict[str, int]:
+    """DELETE every reputation store, the pseudonym mapping and the identity anchors.
+
+    The platform identity link (`hub_user_identities`) used to be kept as the "permanent
+    identity anchor" so a returning user got their reputation back. That is the tombstone
+    this erasure no longer keeps: a returning benign user starts fresh, a returning banned
+    user is re-caught by `suppression_records`, never by a retained raw platform id.
+    """
+    counts: dict[str, int] = {}
+    events = dal.reputation_events
+    who = events.hub_user_id == user_id
+    for platform, platform_user_id in scope.identities:
+        who = who | ((events.platform == platform) & (events.platform_user_id == platform_user_id))
+    counts["reputation_events"] = dal(who).delete() or 0
+    counts["reputation_tenant"] = dal(dal.reputation_tenant.hub_user_id == user_id).delete() or 0
+    uuids = list(scope.user_uuids)
+    scores = dal.bundle_reputation_scores
+    ledger = dal.bundle_reputation_adjustments
+    counts["bundle_reputation_scores"] = (
+        (dal(scores.user_uuid.belongs(uuids)).delete() or 0) if uuids else 0
+    )
+    counts["bundle_reputation_adjustments"] = (
+        (dal(ledger.target_user_uuid.belongs(uuids)).delete() or 0) if uuids else 0
+    )
+    pseudonyms = dal.ephemeral_pseudonyms
+    removed_pseudonyms = 0
+    for platform, platform_user_id in scope.identities:
+        removed_pseudonyms += (
             dal(
-                (members.platform == identity.platform)
-                & (members.platform_user_id == identity.platform_user_id)
-                & ((members.user_id == None) | (members.user_id == ""))  # noqa: E711 - pydal query
-            ).update(updated_at=now, **blank)
+                (pseudonyms.platform == platform)
+                & (pseudonyms.platform_user_id == platform_user_id)
+            ).delete()
             or 0
         )
-    logger.debug(
-        "dsar.erasure_community_members",
-        extra={"hub_user_id": user_id, "keyed_rows": keyed, "platform_keyed_rows": platform_keyed},
+    counts["ephemeral_pseudonyms"] = removed_pseudonyms
+    counts["hub_user_identities"] = (
+        dal(dal.hub_user_identities.hub_user_id == user_id).delete() or 0
     )
-    return int(keyed) + platform_keyed
+    return counts
 
 
-def _sync_erase(dal: Any, *, user_id: int, email: str | None, now: datetime) -> dict[str, int]:
-    """Erase `user_id` in ONE transaction: every delete, the anonymization and the audit row.
+def _sync_erase(
+    dal: Any,
+    *,
+    user_id: int,
+    email: str | None,
+    now: datetime,
+    keys: SuppressionKeySource,
+) -> dict[str, int]:
+    """Erase `user_id` in ONE transaction: suppression (if banned), every delete, anonymize, audit.
 
     Synchronous on purpose -- it MUST run as a single `run_in_executor()`
     job so every statement lands on the same pool thread and therefore the
@@ -606,11 +670,28 @@ def _sync_erase(dal: Any, *, user_id: int, email: str | None, now: datetime) -> 
     all-or-nothing). `AsyncDAL.transaction_async()`'s own docstring and
     `services/community_loyalty.py` document this same pattern.
 
+    Branching, decided from state captured BEFORE the first delete:
+
+    * no active ban/flag -> delete everything incl. reputation; nothing retained;
+    * active ban -> write exactly one `suppression_records` row per (tenant, platform
+      identity) -- a per-tenant keyed code + restriction enum + expiry, never the raw
+      id -- then delete everything exactly as above. A missing master key aborts the
+      whole erasure (rolled back, `failed` ledger row) rather than erasing without
+      suppressing; a benign user never touches the key.
+
     Does NOT touch `ERASURE_RETAINED_TABLES` (consent / audit retention,
     Art. 5(2)). Returns the per-table row counts written to the audit row.
     """
     try:
         counts: dict[str, int] = {}
+        scope = _collect_erasure_scope(dal, user_id=user_id)
+        counts["suppression_records_written"] = ban_suppression.record_suppressions(
+            dal,
+            scope.restrictions,
+            keys=keys,
+            now=now,
+            retention_days=ban_suppression.max_retention_days() if scope.restrictions else None,
+        )
         counts["profiles"] = dal(dal.hub_user_profiles.hub_user_id == user_id).delete()
         counts["sessions"] = dal(dal.hub_sessions.user_id == user_id).delete()
         # Node's own WHERE (`user_identifier = (SELECT email FROM hub_users
@@ -627,13 +708,12 @@ def _sync_erase(dal: Any, *, user_id: int, email: str | None, now: datetime) -> 
         # deleted them, leaving the subject's message bodies, platform username
         # and avatar behind after a "completed" erasure.
         counts["chat_messages"] = dal(dal.hub_chat_messages.sender_hub_user_id == user_id).delete()
-        # Art. 17 gap closed alongside GRC#1: the membership rows used to keep the
-        # subject's display name, avatar, bio, social links and platform id after a
-        # "completed" erasure. Nulled in place (the row itself is retained, see
-        # `COMMUNITY_MEMBER_PII_COLUMNS`) in the SAME transaction as everything else.
-        counts["community_members_anonymized"] = _erase_community_member_pii(
-            dal, user_id=user_id, now=now
-        )
+        # Suppression-only retention: memberships (PII + reputation), every reputation store,
+        # the pseudonym mapping and the platform identity anchors are DELETED. The earlier
+        # "null the PII, keep the row + reputation + identity link" retained a tombstone for
+        # every erased user, banned or not.
+        counts["community_members"] = _delete_memberships(dal, scope, now=now)
+        counts.update(_delete_reputation_and_identity(dal, scope, user_id=user_id))
         dal(dal.hub_users.id == user_id).update(
             email=f"deleted_{user_id}@deleted.waddlebot",
             username=f"deleted_{user_id}",
@@ -660,7 +740,14 @@ def _sync_erase(dal: Any, *, user_id: int, email: str | None, now: datetime) -> 
         raise
 
 
-async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: str | None) -> None:
+async def anonymize_user_data(
+    async_dal: Any,
+    dal: Any,
+    *,
+    user_id: int,
+    email: str | None,
+    suppression_keys: SuppressionKeySource | None = None,
+) -> None:
     """Delete/anonymize every PII-bearing row for `user_id`, atomically, and record the outcome.
 
     The shared erasure core: `request_data_deletion()` (self-service, after
@@ -671,6 +758,10 @@ async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: 
     owns that, and MUST have already proven the caller may erase
     `user_id`.
 
+    `suppression_keys` is the seam for the ban-suppression master key (default:
+    the platform tenant KEK from the environment, see `services/suppression_keys.py`);
+    it is only ever read when the subject has an active ban.
+
     All-or-nothing (see `_sync_erase()`): on failure the data subject's
     rows are exactly as they were, a separate best-effort `"failed"` row is
     written to `data_deletion_requests`, and the ORIGINAL error is
@@ -680,6 +771,7 @@ async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: 
     now = datetime.now(UTC)
     started = time.perf_counter()
     loop = asyncio.get_running_loop()
+    keys = suppression_keys or PlatformKekKeySource()
     logger.debug("dsar.erasure_started", extra={"hub_user_id": user_id, "has_email": bool(email)})
     try:
         # record_exception / set_status_on_exception OFF: the SDK would otherwise
@@ -690,15 +782,16 @@ async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: 
             try:
                 counts = await loop.run_in_executor(
                     async_dal.executor,
-                    lambda: _sync_erase(dal, user_id=user_id, email=email, now=now),
+                    lambda: _sync_erase(dal, user_id=user_id, email=email, now=now, keys=keys),
                 )
             except Exception as exc:
                 # Value-free status text (exception type / SQLSTATE only).
                 span.set_status(trace.Status(trace.StatusCode.ERROR, describe_db_error(exc)))
                 raise
             span.set_attribute("rows_deleted", _rows_deleted(counts))
+            span.set_attribute("community_members_deleted", counts.get("community_members", 0))
             span.set_attribute(
-                "community_members_anonymized", counts.get("community_members_anonymized", 0)
+                "suppression_records_written", counts.get("suppression_records_written", 0)
             )
     except Exception as exc:
         # `log_db_error` / `describe_db_error` emit the exception TYPE + SQLSTATE
@@ -726,5 +819,8 @@ async def anonymize_user_data(async_dal: Any, dal: Any, *, user_id: int, email: 
                 exc=record_exc,
             )
         raise
+    # The session rows are gone (no refresh possible); also cut off the access tokens already
+    # issued to the erased subject instead of letting them run out their remaining <= 15 minutes.
+    await session_service.revoke_user_access_tokens(user_id=user_id, reason="erasure")
     _record_erasure_metrics("completed", started, counts)
     logger.info("dsar.erasure_completed", extra={"hub_user_id": user_id, "deleted_counts": counts})

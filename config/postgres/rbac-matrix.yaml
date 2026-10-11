@@ -52,6 +52,7 @@ tables:
   - tenant_kms_configs
   - sso_connections
   - sso_identities
+  - suppression_records
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -853,4 +854,32 @@ grants:
     privileges: []
   - role: migration_runner
     table: sso_identities
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0059_suppression_records: ban-evasion suppression (per-tenant keyed one-way codes).
+  # The HMAC key never leaves hub-api, so no other role can compute or test a code --
+  # explicit empty rows keep the live-grants equality check honest (no unexamined gap).
+  - role: hub_api
+    table: suppression_records
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: suppression_records
+    privileges: []
+  - role: svc_ingest
+    table: suppression_records
+    privileges: []
+  - role: svc_process
+    table: suppression_records
+    privileges: []
+  - role: svc_action
+    table: suppression_records
+    privileges: []
+  - role: svc_streaming
+    table: suppression_records
+    privileges: []
+  - role: webui
+    table: suppression_records
+    privileges: []
+  - role: migration_runner
+    table: suppression_records
     privileges: [SELECT, INSERT, UPDATE, DELETE]

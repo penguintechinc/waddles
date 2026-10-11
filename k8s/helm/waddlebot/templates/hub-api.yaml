@@ -105,6 +105,10 @@ spec:
         # kms.enabled -- the platform-managed baseline needs none of it.
         {{- with (include "waddlebot.kms.hubApiEnvFrom" .) }}{{ . | nindent 8 }}{{- end }}
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
         # `flask_core.service_jwt.load_issuer_from_env` also reads
         # SERVICE_JWT_PUBLIC_KEY_<kid> for every still-valid-for-verification
         # rotation key -- these are public keys, safe to render directly
@@ -204,6 +208,9 @@ spec:
         # Enterprise SSO (hub_api/services/sso_*.py) -- encryption key (optional: SSO is
         # entitlement-gated), tuning, SSRF allowlist, shared Google client. See templates/_sso.tpl.
         {{- include "waddlebot.sso.hubApiEnv" . | nindent 8 }}
+        # Ban-evasion suppression (hub_api/services/ban_suppression.py): K_master (the platform
+        # tenant KEK) -- hub-api only -- and the optional retention ceiling. See templates/_suppression.tpl.
+        {{- include "waddlebot.suppression.hubApiEnv" . | nindent 8 }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- hub-api itself
         # calls hub_api/services/valkey_admin_client.py::build_client() (via

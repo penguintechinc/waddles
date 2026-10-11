@@ -11,6 +11,8 @@
 //! can't drive a genuine HTTP Upgrade, only its non-upgraded guard-reject
 //! paths.
 
+mod common;
+
 use std::time::Duration;
 
 use axum::body::Body;
@@ -45,6 +47,7 @@ fn state_with_view_credential(community_id: i64, token: &str) -> AppState {
         }]])
         .into_connection();
     AppState::new(config, prometheus::Registry::new(), db)
+        .with_overlay_codes(common::test_overlay_codes())
 }
 
 fn state_with_no_queries_expected() -> AppState {
@@ -58,6 +61,7 @@ fn state_with_no_queries_expected() -> AppState {
     };
     let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
     AppState::new(config, prometheus::Registry::new(), db)
+        .with_overlay_codes(common::test_overlay_codes())
 }
 
 #[tokio::test]
@@ -68,7 +72,7 @@ async fn live_sse_route_rejects_the_wrong_key_with_403() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/overlay/42/media/live?key=wrong-token")
+                .uri(format!("/{}/media/live?key=wrong-token", common::CODE_42))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -79,14 +83,14 @@ async fn live_sse_route_rejects_the_wrong_key_with_403() {
 
 #[tokio::test]
 async fn live_sse_route_rejects_a_missing_key_query_param_with_400() {
-    // axum's own `Query` extractor rejects this before `overlay_auth`'s
-    // guard logic runs at all -- no DB query is ever issued, matching
-    // `overlay_auth::view`'s own documented precedent for this exact case.
+    // The guard rejects a missing `key` before any credential lookup runs --
+    // no DB query is ever issued, matching `overlay_auth::view`'s own
+    // documented precedent for this exact case.
     let app = router(state_with_no_queries_expected());
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/overlay/42/media/live")
+                .uri(format!("/{}/media/live", common::CODE_42))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -103,7 +107,7 @@ async fn live_sse_route_with_the_correct_key_streams_the_connected_frame_first()
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/overlay/42/media/live?key={token}"))
+                .uri(format!("/{}/media/live?key={token}", common::CODE_42))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -124,7 +128,9 @@ async fn live_sse_route_with_the_correct_key_streams_the_connected_frame_first()
         .expect("no body-level error");
     let bytes = frame.into_data().expect("a data frame, not trailers");
     let text = String::from_utf8(bytes.to_vec()).expect("utf8 SSE payload");
-    assert!(text.contains("\"community\":\"42\""));
+    // The slug on the wire is the opaque overlay code, never the integer id.
+    assert!(text.contains(&format!("\"community\":\"{}\"", common::CODE_42)));
+    assert!(!text.contains("\"community\":\"42\""));
     assert!(text.contains("\"surface\":\"media\""));
 }
 
@@ -135,7 +141,7 @@ async fn push_route_rejects_a_missing_bearer_header_with_401() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/overlay/42/media/push")
+                .uri(format!("/{}/media/push", common::CODE_42))
                 .body(Body::empty())
                 .unwrap(),
         )

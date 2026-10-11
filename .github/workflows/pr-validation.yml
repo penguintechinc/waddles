@@ -73,6 +73,18 @@ jobs:
   python-unit:
     name: Python unit tests
     runs-on: ubuntu-latest
+    # A REAL Valkey for libs/flask_core/tests/test_token_revocation_valkey.py (JWT revocation
+    # store: Lua put_max, MGET, TTL expiry, cross-replica visibility). Same image + digest the
+    # chart deploys (values.yaml). That suite FAILS -- never skips -- when CI=true and the
+    # server is missing, so this service cannot silently go away.
+    services:
+      valkey:
+        image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="valkey-cli ping"
+          --health-interval=5s --health-timeout=5s --health-retries=10
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -134,6 +146,7 @@ jobs:
         env:
           PYTHON_BIN: python
           SKIP_UNIT_TEST_DEPS_INSTALL: "1"
+          WADDLES_TEST_VALKEY_URL: redis://localhost:6379/0
         run: make test-unit
 
   alembic-migration-chain:
@@ -360,6 +373,9 @@ jobs:
       # waddles_bundle_reader with no usable password). This generic chain
       # smoke test has no chart/Secret involved, so it needs its own throwaway
       # value -- never a real credential, this DB is destroyed at job end.
+      # H-1/H-3 -- 0055_per_service_db_roles refuses to provision the per-service LOGIN roles
+      # without credentials (fail loud, never a silent skip). This generic chain smoke test has
+      # no chart/Secret, so it mints throwaway per-role passwords for this disposable DB.
       - name: alembic upgrade head from empty baseline
         if: steps.changes.outputs.any == 'true'
         env:
@@ -367,6 +383,18 @@ jobs:
           DB_READER_PASSWORD: ci-smoke-test-reader-pw
         run: |
           set -euo pipefail
+          WADDLES_DB_SERVICE_ROLE_PASSWORDS="$(python3 - <<'PY'
+          import json, secrets, string
+
+          import yaml
+
+          alphabet = string.ascii_letters + string.digits
+          with open("config/postgres/service-roles.yaml", encoding="utf-8") as handle:
+              roles = yaml.safe_load(handle)["roles"]
+          print(json.dumps({r: "".join(secrets.choice(alphabet) for _ in range(32)) for r in roles}))
+          PY
+          )"
+          export WADDLES_DB_SERVICE_ROLE_PASSWORDS
           python3 -m alembic stamp 0019_kick_app
 
           echo "== upgrade head =="
@@ -445,6 +473,20 @@ jobs:
           DB_READER_PASSWORD: ci-smoke-test-reader-pw
         run: |
           set -euo pipefail
+          # 0055 re-runs on the second upgrade (and its downgrade drops the roles) -- see the
+          # "empty baseline" step above for why the passwords are minted here.
+          WADDLES_DB_SERVICE_ROLE_PASSWORDS="$(python3 - <<'PY'
+          import json, secrets, string
+
+          import yaml
+
+          alphabet = string.ascii_letters + string.digits
+          with open("config/postgres/service-roles.yaml", encoding="utf-8") as handle:
+              roles = yaml.safe_load(handle)["roles"]
+          print(json.dumps({r: "".join(secrets.choice(alphabet) for _ in range(32)) for r in roles}))
+          PY
+          )"
+          export WADDLES_DB_SERVICE_ROLE_PASSWORDS
           base_rev="${PRIOR_BASE_REVISION}"
           # Redundant with the producing step's own check -- cheap, and this
           # step is the one that actually splices base_rev into an `alembic`
@@ -484,6 +526,29 @@ jobs:
           fi
 
           echo "::notice::alembic migration chain verified -- ${revision_count} revision(s) applied from ${base_rev} to head, round-tripped via downgrade/upgrade. Final revision: ${current_2}"
+
+
+      # H-1/H-3 -- per-service database accounts, proven on real Postgres: a TRUE fresh
+      # `alembic upgrade head` replay in throwaway containers (docker is preinstalled on
+      # ubuntu-latest), then the full privilege matrix, cross-service denial, RLS, the closed
+      # hub_admin escalation chain, rotation, downgrade round-trip and the dev opt-in guard
+      # (alembic/tests/test_0055_per_service_db_roles.py), plus the no-docker catalog/password/
+      # repo-credential guards. No `|| true`: a collected-zero state exits 5 and fails the step.
+      - name: Install Helm (chart <-> database credential round trip)
+        if: steps.changes.outputs.any == 'true'
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5
+        with:
+          version: 'v3.13.0'
+
+      - name: Per-service DB role isolation (real Postgres)
+        if: steps.changes.outputs.any == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m pytest \
+            alembic/tests/test_service_roles_catalog.py \
+            alembic/tests/test_0055_per_service_db_roles.py \
+            alembic/tests/test_chart_credentials_roundtrip.py \
+            -v -p no:cacheprovider
 
   marketplace-refunds:
     name: Marketplace refund authorization tests

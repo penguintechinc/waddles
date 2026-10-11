@@ -367,6 +367,10 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         # real columns in 000_create_base_schema.sql.
         Field("platform", "string", length=50),
         Field("platform_user_id", "string", length=255),
+        # `user_uuid` (alembic 0045/0048): the PII-free token the data plane keys bundle state
+        # on. Bound read-only so Art. 17 erasure can collect it BEFORE the row is deleted and
+        # remove the reputation rows keyed on it; never written (the 0048 trigger derives it).
+        Field("user_uuid", "string", length=36),
         Field("display_name", "string", length=255),
         # Profile PII the member row carries (000_create_base_schema.sql:
         # `avatar_url TEXT, bio TEXT, social_links JSONB DEFAULT '{}'`). Bound
@@ -479,6 +483,12 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("setting_value", "text"),
         migrate=migrate,
     )
+
+    # Art. 17 erasure and ban-evasion suppression (`services/ban_suppression.py`) run from the
+    # privacy, join-request and OAuth paths alike, so their tables are bound with the identity
+    # tables every one of those paths already depends on (idempotent; same `migrate` flag).
+    bind_erasure_reputation_tables(dal, migrate=migrate)
+    bind_suppression_tables(dal, migrate=migrate)
 
 
 def bind_support_token_tables(dal: Any, *, migrate: bool = False) -> None:
@@ -1134,6 +1144,107 @@ def bind_privacy_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("created_at", "datetime"),
         migrate=migrate,
     )
+
+
+def bind_suppression_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind `suppression_records` (alembic 0059): per-tenant keyed ban-evasion codes.
+
+    Columns match `0059_suppression_records.py` exactly. There is deliberately no column
+    naming a person, a community or an offence; `hmac` is the keyed one-way code from
+    `services/suppression_keys.py`. Idempotent per DAL instance.
+    """
+    if "suppression_records" in dal.tables:
+        return
+    dal.define_table(
+        "suppression_records",
+        Field("tenant_id", "integer", notnull=True),
+        Field("platform", "string", length=50, notnull=True),
+        Field("key_ver", "string", length=32, notnull=True),
+        Field("hmac", "string", length=64, notnull=True),
+        Field("reason_enum", "string", length=16, notnull=True),
+        Field("expires_at", "datetime"),
+        Field("created_at", "datetime"),
+        migrate=migrate,
+    )
+
+
+def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind the reputation / pseudonym stores Art. 17 erasure deletes from.
+
+    Each is defined only if no other service module already bound it on this DAL
+    (`community_reputation_service` binds `reputation_tenant` itself). Columns are the subset
+    erasure filters on. Deliberately NO `primarykey=`: erasure only DELETEs here (and
+    SELECTs named fields), which never needs pydal's `id`, while a keyed pydal table
+    cannot be `.delete()`d on the sqlite test backend (`SQLite.delete` reads `table._id`).
+    The schema is owned by
+    `config/postgres/migrations/080|097_*.sql` (reputation), alembic 0041/0050 (bundle
+    reputation ledger + scores) and alembic 0045 (`ephemeral_pseudonyms`).
+    """
+    if "reputation_events" not in dal.tables:
+        dal.define_table(
+            "reputation_events",
+            Field("community_id", "integer", notnull=True),
+            Field("hub_user_id", "integer"),
+            Field("platform", "string", length=50, notnull=True),
+            Field("platform_user_id", "string", length=255, notnull=True),
+            Field("event_type", "string", length=50, notnull=True),
+            Field("score_change", "double", default=0),
+            Field("score_before", "integer", notnull=True),
+            Field("score_after", "integer", notnull=True),
+            Field("reason", "text"),
+            Field("metadata", "json"),
+            Field("created_at", "datetime"),
+            migrate=migrate,
+        )
+    if "reputation_tenant" not in dal.tables:
+        dal.define_table(
+            "reputation_tenant",
+            Field("tenant_id", "integer", notnull=True),
+            Field("hub_user_id", "integer", notnull=True),
+            Field("score", "integer", default=600),
+            Field("total_events", "integer", default=0),
+            Field("last_event_at", "datetime"),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+    if "bundle_reputation_scores" not in dal.tables:
+        dal.define_table(
+            "bundle_reputation_scores",
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("user_uuid", "string", length=36, notnull=True),
+            Field("balance", "bigint", default=0),
+            Field("adjustment_count", "bigint", default=0),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+    if "bundle_reputation_adjustments" not in dal.tables:
+        dal.define_table(
+            "bundle_reputation_adjustments",
+            Field("app_id", "string", length=255, notnull=True),
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer"),
+            Field("target_user_uuid", "string", length=36, notnull=True),
+            Field("scope", "string", length=20, notnull=True),
+            Field("delta", "integer", notnull=True),
+            Field("reason_code", "string", length=100, notnull=True),
+            Field("occurred_at", "datetime"),
+            Field("reversal_of", "bigint"),
+            migrate=migrate,
+        )
+    if "ephemeral_pseudonyms" not in dal.tables:
+        dal.define_table(
+            "ephemeral_pseudonyms",
+            Field("pseudonym", "string", length=36, notnull=True),
+            Field("tenant_id", "integer", notnull=True),
+            Field("platform", "string", length=50, notnull=True),
+            Field("platform_user_id", "string", length=255, notnull=True),
+            Field("handle", "string", length=255),
+            Field("created_at", "datetime"),
+            migrate=migrate,
+        )
 
 
 def _define_audit_log(dal: Any, *, migrate: bool) -> None:
@@ -2917,6 +3028,13 @@ def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("refresh_token", "text"),
         Field("status", "string", length=20, notnull=True, default="active"),
         Field("installed_by_user_id", "integer"),
+        # migration 0058_provider_connections -- provider/connection framework columns.
+        # `resource_metadata` (not `metadata`: reserved on SQLAlchemy models) holds the
+        # adapter-validated, never-secret facts about the link; `expires_at` drives
+        # refresh-before-use; `status_reason` is a fixed machine code, never provider text.
+        Field("resource_metadata", "json"),
+        Field("expires_at", "datetime"),
+        Field("status_reason", "string", length=40),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         migrate=migrate,
@@ -2927,6 +3045,8 @@ def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("community_id", "integer", notnull=True),
         Field("connection_id", "bigint", notnull=True),
         Field("status", "string", length=20, notnull=True, default="pending"),
+        # migration 0058 -- per-community on/off switch (DB default TRUE).
+        Field("enabled", "boolean", notnull=True, default=True),
         Field("requested_by_user_id", "integer"),
         Field("approved_by_user_id", "integer"),
         Field("created_at", "datetime"),

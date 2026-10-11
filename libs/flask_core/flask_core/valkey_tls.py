@@ -29,6 +29,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -83,3 +84,21 @@ def build_tls_kwargs(redis_url: str | None, ca_file: str | None = None) -> dict[
         _warned_missing_ca = True
 
     return kwargs
+
+
+def with_password(url: str, password: str) -> str:
+    """Inject `password` as the URL's userinfo (password-only auth, empty username).
+
+    The chart's credential-free `VALKEY_URL_TLS` (what hub-api's `VALKEY_URL` is wired to)
+    carries the password in a separate `VALKEY_PASSWORD` env var so the URL never needs
+    rewriting when the password rotates -- clients that only read the URL must rebuild the
+    equivalent at connect time. A no-op when `url` already carries credentials (an
+    operator-supplied URL with embedded auth always wins) or `password` is empty. The password
+    is never logged and never returned anywhere but inside the rebuilt URL.
+    """
+    if not password:
+        return url
+    parts = urlsplit(url)
+    if "@" in parts.netloc:
+        return url
+    return urlunsplit((parts.scheme, f":{password}@{parts.netloc}", parts.path, parts.query, parts.fragment))

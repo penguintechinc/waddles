@@ -159,6 +159,21 @@ convention = "google"
 # SSO test suite: embedded SAML/XML payload strings and long assertion messages read better
 # unwrapped (same rationale as the per-file test ignores above).
 "tests/sso/*" = ["E501"]
+# Ban-suppression suite re-imports the shared erasure fixtures (`db`, `module_db`, `otel`,
+# `block_anonymization`) from `tests/test_data_privacy_erasure.py`; a pytest fixture used as a
+# test parameter is, to ruff, a redefinition of the imported name.
+"tests/test_ban_suppression.py" = ["F811"]
+# Provider/connection framework (migration 0058) -- request/response DTO fields are camelCase to
+# match every other v1 blueprint's JSON contract (security.md Output Validation: the JSON key IS
+# the field name); S101 is the standard tenant_middleware postcondition assert.
+"blueprints/v1/provider_connections.py" = ["N815", "S101"]
+# The framework's error classes are domain nouns mapped one-to-one onto HTTP statuses in the
+# blueprint (`UnknownProvider`, `ConnectionNotFound`, ...) -- an `Error` suffix on every one would
+# only add noise to `except` clauses (same rationale as services/music_providers/errors.py).
+"services/provider_connections/errors.py" = ["N818"]
+# Its test suite: fake-socket fixtures, secret-shaped literals built at runtime, long scenario
+# assertions and private-attribute pokes (SLF001 is not selected) read better unwrapped.
+"tests/provider_connections/*" = ["E501", "N818", "S105", "S106", "S107", "S608"]
 # Marketplace-catalog port group: `CatalogEntry`/`ModuleEntry`/`ModuleDetail`/
 # `ModuleSubscription`/etc DTO fields are deliberately camelCase to byte-match
 # `catalogService.js`'s `formatCatalogEntry`/`moduleService.js`'s `formatModule`

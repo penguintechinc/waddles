@@ -24,6 +24,7 @@ hub_api/
       user_management.py       v1 `superadmin users` group (M1): platform user CRUD
       compliance_audit.py      v1 `compliance audit` group: Enterprise read/verify/export of the audit chain
       sso.py                    v1 enterprise SSO: public login flows (SAML/OIDC/Google) + tenant-admin connection CRUD
+      provider_connections.py    v1 provider connections: per-community CRUD + data-plane list/resolve (machine JWT)
     v2/
       platform.py          example v2 group: tenant -> scope -> DTO chain, exposes BLUEPRINTS
   routers/
@@ -42,6 +43,7 @@ hub_api/
     sso_service.py           enterprise SSO orchestration: entitlement-gated connection CRUD, login start/complete, JIT provisioning
     sso_oidc.py / sso_saml.py  protocol layers: OIDC code+PKCE with local ID-token validation; SAML 2.0 SP (XSW/replay/XXE defences)
     sso_http.py / sso_state.py / sso_crypto.py / sso_settings.py / sso_telemetry.py / sso_types.py  SSRF-guarded IdP HTTP, Redis single-use state, AES-GCM secrets, operator settings, OTel + PII-safe logging, shared types
+    provider_connections/   standard provider/connection framework: adapter contract, Twitch adapter, registry, vault, store, service
     current_user.py         resolve the caller's user id from the bearer JWT
     audit_chain.py          tamper-evident audit hash chain: canonical form, seal, verify (stdlib only)
     audit_events.py         audit vocabulary, PII-free event validation, request classification
@@ -128,6 +130,22 @@ IdPs -- only the IdP socket and Redis are replaced) plus a real-Postgres migrati
 `alembic/tests/test_0049_sso_connections.py`; run with
 `python3 -m pytest tests/sso -q --cov=services --cov=blueprints.v1.sso`.
 
+## Provider connections (Twitch first)
+
+One adapter interface, one connection API and one encrypted per-community token store for every
+external platform. Builds on the three-layer connection tables from migration 0035 (adds
+`0058_provider_connections`: per-link `resource_metadata` / `expires_at` / `status_reason`, per-grant
+`enabled`). Gated by scope `connections:admin`, flag `waddles.integrations.provider_connections`
+(default OFF) and the Professional tier. Tokens are AES-256-GCM ciphertext under
+`CREDENTIAL_ENCRYPTION_KEY` and are decrypted only at the point of use; the data plane
+(`svc-ingest`) gets a fresh access token through machine-JWT-authenticated `/api/v1/internal/...`
+routes. Full guide, API, security model, data-plane contract and "adding a provider" checklist:
+[`docs/PROVIDER_CONNECTIONS.md`](../docs/PROVIDER_CONNECTIONS.md). Tests: `tests/provider_connections/`
+(only the Twitch socket is faked) plus real-Postgres tests in `tests/provider_connections/
+test_pg_integration.py` and `alembic/tests/test_0058_provider_connections.py`; run with
+`python3 -m pytest tests/provider_connections -q --cov=services.provider_connections
+--cov=blueprints.v1.provider_connections --cov-branch`.
+
 ## OpenAPI (two documents, per backend.md)
 
 - `GET /openapi/v1-public.json` -- unauthenticated, exactly one path (`POST /api/v1/auth/login`).
@@ -150,7 +168,8 @@ Gates are `flask_core.feature_flags.feature_enabled` (PostHog flag AND license t
 
 - **All-or-nothing** -- every delete, the `hub_users` anonymization and the `completed` `data_deletion_requests` row run as ONE executor job with ONE commit (rollback on any failure). `AsyncDAL.delete_async()` & co. commit per call, so they are deliberately not used here. A failed erasure leaves the account untouched, records a `failed` ledger row (exception type only) and re-raises.
 - **Erases `hub_chat_messages`** the user sent (previously exported, never deleted -- GRC#1).
-- **Nulls `community_members` PII** (`display_name`, `avatar_url`, `bio`, `social_links`, `platform_user_id`; `COMMUNITY_MEMBER_PII_COLUMNS`) on the subject's membership rows in every community -- hub-linked rows (`user_id == str(hub_users.id)`) and platform-keyed rows matching a linked `hub_user_identities`. The rows stay (reputation/role retention); a bound-column drift fails the erasure instead of leaving PII behind. Counted as `community_members_anonymized` in the ledger and the `hub.dsar.erase` span (not as deleted rows).
+- **Deletes everything, reputation included -- suppression-only retention.** The subject's `community_members` rows (every community; hub-linked and platform-keyed arms), `reputation_events` / `reputation_tenant`, the bundle reputation (`bundle_reputation_scores` / `_adjustments`, keyed on the subject's `user_uuid`s), the `ephemeral_pseudonyms` mapping and the `hub_user_identities` links are all hard-deleted (no tombstone, no "identity anchor"). Counted individually in the ledger and the `hub.dsar.erase` span; `communities.member_count` is decremented for the active rows removed.
+- **Active ban -> exactly one keyed `suppression_records` row per (tenant, platform account), in the SAME transaction** (`services/ban_suppression.py`, `services/suppression_keys.py`, migration `0059`): `HMAC-SHA256(HKDF(K_master, tenant_id), platform || platform_user_id)` + closed `reason_enum` (`ban`/`auto_ban`) + expiry; no platform id, no offence text. `K_master` is the platform tenant KEK (`TENANT_KEK_HEX` / `TENANT_KEK_HEX_PREVIOUS`, mounted into hub-api only). A user with no active ban never touches the key; a banned user's erasure with no key aborts and rolls back. A return (join approval, OAuth signup, either identity-link callback) recomputes the code in the DESTINATION tenant and re-applies the restriction; per tenant only, expiry honoured at lookup, hourly purge loop. Operator tooling: `make suppression-check|lift|purge|stats` (`cli/suppression.py`). Draft legal artifacts: `docs/compliance/suppression-LIA.md`, `suppression-DPIA.md` (counsel to verify).
 - **Telemetry (OTLP via the standard `OTEL_*` env vars)** -- span `hub.dsar.erase`, counter `waddles_hub_dsar_erasure_total{result}`, histograms `waddles_hub_dsar_erasure_duration_ms` / `waddles_hub_dsar_erasure_rows`. Labels/attributes carry no user id; failure spans carry the exception type only (never the driver message). A broken exporter is logged, never fails an erasure.
 - **Retains consent + audit evidence** (`cookie_consent`, `cookie_audit_log`, `audit_log`, `data_deletion_requests`; `ERASURE_RETAINED_TABLES`) for GDPR Art. 5(2). See `docs/PRIVACY.md` "Data Deletion". Regression tests: `tests/test_data_privacy_erasure.py`.
 

@@ -13,7 +13,10 @@ data:
   DB_HOST: {{ .Values.infrastructure.postgresql.service.name | quote }}
   DB_PORT: {{ .Values.infrastructure.postgresql.service.port | quote }}
   DB_NAME: {{ .Values.infrastructure.postgresql.database | quote }}
-  DB_USER: {{ .Values.infrastructure.postgresql.username | quote }}
+  # H-1/H-3 -- NO DB_USER / DATABASE_USER here. The database owner (superuser) name used
+  # to be handed to every pod through this shared ConfigMap; each workload now sets its OWN
+  # role via waddlebot.dbEnv (_helpers.tpl). POSTGRES_USER below is read only by the
+  # Postgres Deployment (initdb) and is the owner, not an application identity.
   DB_TYPE: "postgres"
   POSTGRES_USER: {{ .Values.infrastructure.postgresql.username | quote }}
   POSTGRES_DB: {{ .Values.infrastructure.postgresql.database | quote }}
@@ -21,7 +24,6 @@ data:
   DATABASE_HOST: {{ .Values.infrastructure.postgresql.service.name | quote }}
   DATABASE_PORT: {{ .Values.infrastructure.postgresql.service.port | quote }}
   DATABASE_NAME: {{ .Values.infrastructure.postgresql.database | quote }}
-  DATABASE_USER: {{ .Values.infrastructure.postgresql.username | quote }}
 
   # Redis Configuration
   REDIS_HOST: {{ .Values.infrastructure.redis.service.name | quote }}

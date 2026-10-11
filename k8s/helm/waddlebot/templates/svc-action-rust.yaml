@@ -106,6 +106,10 @@ spec:
             name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
             optional: true
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_action;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_action") | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcAction.port | quote }}
         - name: METRICS_PORT
@@ -165,11 +169,6 @@ spec:
         - name: PII_DETOKENIZATION_ENABLED
           value: "false"
         {{- end }}
-        - name: DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: DB_PASSWORD
         # fix/helm-platform-credentials -- core/svc_action/src/config.rs reads
         # this directly (`std::env::var("DISCORD_BOT_TOKEN").ok()`) and already
         # degrades gracefully (relay provider disabled, clear log line) when

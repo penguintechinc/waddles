@@ -169,6 +169,22 @@ def bundle_signing_sidecar_upload_mock(monkeypatch: Any) -> Any:
     return mock
 
 
+@pytest.fixture(autouse=True)
+def isolated_token_revocation() -> Any:
+    """Every test gets its own empty process-local JWT revocation store.
+
+    `flask_core.auth.verify_jwt_token` consults a process-wide `TokenRevocation`; a user-wide
+    cutoff written by one test (same `sub`, same second) would otherwise reject the tokens of the
+    next. Yields the live instance so a test can assert on / drive revocations directly.
+    """
+    from flask_core import token_revocation as tr
+
+    instance = tr.TokenRevocation(tr.MemoryBackend())
+    previous = tr.configure_token_revocation(instance)
+    yield instance
+    tr.configure_token_revocation(previous)
+
+
 @pytest.fixture
 def tenant_db() -> Any:
     """In-memory pydal DB with one active tenant -- `tenants.slug`/`is_active` only."""

@@ -250,10 +250,11 @@ class EventSubHandler:
                 )
 
                 self.logger.audit(
-                    f"EventSub event sent: {event_data.get('message_type')}",
                     action="router_forward",
                     user=event_data.get('user_id'),
-                    result="SUCCESS" if response.status_code < 400 else "FAILED"
+                    community=str(event_data.get("community_id") or ""),
+                    result="SUCCESS" if response.status_code < 400 else "FAILED",
+                    detail=f"EventSub event sent: {event_data.get('message_type')}"
                 )
 
         except Exception as e:
