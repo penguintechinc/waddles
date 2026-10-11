@@ -442,6 +442,30 @@ class TestProviderOrgFetch:
         assert len(got) == 1
         assert any("snapshot_short" in r.getMessage() for r in caplog.records)
 
+    async def test_roster_partially_unparseable_page_is_surfaced(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A dropped entry would diff as a departure -- it must be logged (counts only)."""
+        caplog.set_level(logging.WARNING, logger="receivers.spectrum_poll")
+        pages = {
+            1: _page("members", [{"id": "1"}, {"displayname": "secret-handle"}, "junk"], 1),
+            2: _page("members", [], 1),
+        }
+        got = await _provider(lambda r: pages[json.loads(r.content)["page"]]).fetch_roster("c")
+        assert [m.member_id for m in got] == ["1"]
+        msgs = [r.getMessage() for r in caplog.records if "entries_unparseable" in r.getMessage()]
+        assert len(msgs) == 1 and "dropped=2 of=3" in msgs[0]
+        assert "secret-handle" not in msgs[0]
+
+    def test_string_false_cancelled_is_not_cancelled(self) -> None:
+        """Strict flag read: the string "false" is truthy under bool() (mod-gate bug class)."""
+        for value in ("false", "0", "no", [], None, 0, False):
+            e = sp._event_from_mapping({"id": "1", "cancelled": value})  # noqa: SLF001
+            assert e is not None and e.status == so.STATUS_SCHEDULED, value
+        for value in (True, 1):
+            e = sp._event_from_mapping({"id": "1", "cancelled": value})  # noqa: SLF001
+            assert e is not None and e.status == so.STATUS_CANCELLED, value
+
     async def test_roster_unparseable_entries_fail_loud(self) -> None:
         resp = _page("members", [{"displayname": "no id"}, "junk"])
         with pytest.raises(SpectrumEndpointError, match="none parseable"):

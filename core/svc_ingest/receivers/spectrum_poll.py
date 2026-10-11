@@ -336,7 +336,9 @@ def _event_from_mapping(raw: Mapping[str, Any]) -> SpectrumEvent | None:
         attending = _count_or_none(raw.get("attending_count"))
     organizer = raw.get("member")
     organizer = organizer if isinstance(organizer, Mapping) else {}
-    cancelled = bool(raw.get("cancelled")) or _s(raw.get("status")) == STATUS_CANCELLED
+    # Strict: a string "false" is truthy under bool() and would fabricate an
+    # org_event_cancelled; only a real True / 1 counts (fail closed on anything else).
+    cancelled = raw.get("cancelled") in (True, 1) or _s(raw.get("status")) == STATUS_CANCELLED
     description = _s(raw.get("description")) or _s(raw.get("body"))
     return SpectrumEvent(
         event_id=event_id,
@@ -476,6 +478,19 @@ class RsiRestProvider:
             if not parsed:
                 raise SpectrumEndpointError(
                     f"spectrum endpoint {path} returned {len(raw_items)} entries, none parseable"
+                )
+            if len(parsed) < len(raw_items):
+                # Dropped entries are invisible to the diff (a dropped member reads as "left"),
+                # so surface them: counts only, never the entries (upstream content).
+                _errors_counter.add(1, {"kind": kind, "reason": "entries_unparseable"})
+                logger.warning(
+                    "receiver.spectrum_entries_unparseable kind=%s source=%s page=%d "
+                    "dropped=%d of=%d",
+                    kind,
+                    source_id,
+                    page,
+                    len(raw_items) - len(parsed),
+                    len(raw_items),
                 )
             fresh = 0
             for item in parsed:
