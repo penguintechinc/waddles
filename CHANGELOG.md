@@ -72,6 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bundle_audit.record` is fail-loud: a failed `audit_log` insert raises `AuditWriteError` instead of being swallowed
 
 ### Fixed
+- Legacy `config/postgres` SQL migrations 097/099/100/101/102 never reached existing databases (the baseline replays
+  SQL only on a fresh DB). Alembic revision `0060_port_legacy_sql_097_102` re-applies them idempotently and ledgers them
+  in `schema_migrations`; `alembic/tests/test_legacy_sql_ownership.py` now fails CI for any un-bridged `NNN_*.sql`
+  (103, PR #799, is the pending follow-up port; see `docs/DATABASE.md` "SQL vs Alembic ownership")
 - `AAALogger.audit()` / `.auth()` call sites that did not match the real signature (`audit(action, user, community, result, **extras)`) raised `TypeError` on their SUCCESS path, after the work was already done: 91 `audit` calls across analytics-core (incl. `HealthService.calculate_health_score` and the `bot_score_calculator` batch job), reputation, security-core, labels, the interactive action modules, the consolidated `services/*` apps and the trigger receivers, plus two `auth` calls on the Kick webhook invalid-signature path. Visible effects included 500s after committed writes, `disable_auto_ban` / `update_weights` reporting failure after committing, an auto-ban applied on the platform but reported `success=False`, and `SpamDetector.check_spam` failing OPEN for spam it had just detected. The message text moved to `detail=`; the actor is the caller's opaque id where the handler has one, else the literal `"system"`. New `libs/flask_core/tests/test_aaa_logger_call_sites.py` executes every `logger.audit()` / `.auth()` call in the repo against the real `AAALogger`, so a mis-signatured call can no longer merge.
 - Removed the `except Exception: pass` that silently dropped audit-log write failures (`bundle_audit.record`), and the two
   sibling swallows on the consent-proof trail (`cookie_consent_service.log_audit_event`) and the failed-deletion record
