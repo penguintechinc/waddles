@@ -261,7 +261,7 @@ class AnalyticsService:
             self.logger.audit(
                 action="run_aggregation",
                 user="system",
-                community=str(community_id),
+                community="" if community_id is None else str(community_id),
                 result="SUCCESS",
                 detail="Aggregation triggered",
                 force=force
