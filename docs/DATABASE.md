@@ -51,6 +51,7 @@ The numbered SQL files are replayed **only** by `0001_baseline` on a *fresh* dat
 - **Ledger rule**: a DB with a populated `schema_migrations` is a real legacy DB -- a missing pre-097 table raises, ledger rows are written. A DB without one is the minimal CI bootstrap (`alembic/tests/pg_docker.py`): only self-contained DDL applies and no ledger is invented.
 - **Downgrade** of a port removes its ledger rows only; the DDL stays (on a fresh DB it belongs to the baseline replay, and dropping tables would lose data).
 - **Per-service DB roles** (`0055`) skip catalog tables that do not exist yet. After `alembic upgrade head`, the deploy-time `python3 scripts/db/service_roles.py reconcile --strict` grants the tables a port creates (097 `reputation_tenant`, 100 `overlay_view_credentials`, 101 `overlay_images`, 102 `caption_events`) and fails loud if any is still missing.
+- **Overlay credentials write-through**: hub-api's overlay mint/rotate/disable (`hub_api/services/overlay_service.py`) writes `community_overlay_tokens` AND `overlay_view_credentials` (SHA-256 of the key, previous hash + `rotated_at` on rotate) in one transaction, and ensures `communities.overlay_code` (0057) is set -- svc-presentation only validates against `overlay_view_credentials`, so a mint that skips it hands out a dead key.
 
 | SQL files | Alembic bridge |
 |---|---|
