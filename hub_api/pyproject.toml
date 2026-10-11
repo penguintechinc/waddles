@@ -159,6 +159,10 @@ convention = "google"
 # SSO test suite: embedded SAML/XML payload strings and long assertion messages read better
 # unwrapped (same rationale as the per-file test ignores above).
 "tests/sso/*" = ["E501"]
+# Ban-suppression suite re-imports the shared erasure fixtures (`db`, `module_db`, `otel`,
+# `block_anonymization`) from `tests/test_data_privacy_erasure.py`; a pytest fixture used as a
+# test parameter is, to ruff, a redefinition of the imported name.
+"tests/test_ban_suppression.py" = ["F811"]
 # Provider/connection framework (migration 0058) -- request/response DTO fields are camelCase to
 # match every other v1 blueprint's JSON contract (security.md Output Validation: the JSON key IS
 # the field name); S101 is the standard tenant_middleware postcondition assert.

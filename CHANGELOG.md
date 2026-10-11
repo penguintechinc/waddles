@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Ban-evasion suppression (GDPR Art. 6(1)(f), counsel to verify): an erased user with an ACTIVE ban leaves one per-tenant keyed
+  one-way code (`suppression_records`, migration `0059_suppression_records`; HMAC-SHA256 under an HKDF key derived per tenant
+  from the platform tenant KEK, closed `ban`/`auto_ban` enum, expiry) and a returning banned user is re-caught at join approval,
+  OAuth signup and identity link. Operator tooling `make suppression-check|lift|purge|stats`; chart `suppression.maxRetentionDays`;
+  draft `docs/compliance/suppression-LIA.md` / `suppression-DPIA.md`
 - Standard provider/connection framework (hub-api), Twitch first: per-community connection API (`/api/v1/communities/{id}/provider-connections`, install descriptors at `/api/v1/connection-providers`), provider adapter interface + registry, Twitch adapter (bot account, channel resolution, refresh), AES-256-GCM encrypted per-community token store with refresh-under-lock, and machine-JWT data-plane routes (`/api/v1/internal/provider-connections`, `.../resolve`) so `svc-ingest` can resolve connections dynamically instead of static env. Scope `connections:admin`, flag `waddles.integrations.provider_connections` (Professional, default OFF). Migration `0058_provider_connections`. See `docs/PROVIDER_CONNECTIONS.md`.
 - Real OTel metrics for the Rust data plane (replacing the `penguin_spine::NoopMetrics` stubs and the executor's
   unexported atomics): svc-process / svc-action emit stage latency, executor-call and host-call latency histograms,
@@ -57,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same store (paired follow-up; contract in the doc).
 
 ### Changed
+- **Erasure keeps nothing for a user without an active ban.** `community_members` rows (with their reputation), `reputation_events`,
+  `reputation_tenant`, bundle reputation, the `ephemeral_pseudonyms` mapping and `hub_user_identities` are now DELETED instead of
+  nulled-and-retained (supersedes the "retained reputation / identity anchor" posture); a returning user starts fresh. The admin
+  DSAR console answers a repeat erase of an already-erased user with `not_found`
 - `platform_integrations_crypto` raises `PlatformCredentialKeyError` (a subclass of `PlatformCredentialCryptoError`) for an unset/malformed key, so callers can tell a configuration fault from a tampered ciphertext
 - `compliance.audit_logs` now requires scope `compliance.audit:admin` (was `compliance.audit:read`, which every session's
   `*:read` wildcard satisfied); the tenant-owner scope bundle grants it

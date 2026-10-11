@@ -3047,6 +3047,16 @@ kms:
 # alpha/local: SSO is entitlement-gated, so an unentitled deployment must still install.
 # hub-api's `secretKeyRef` is `optional: true` and SSO then fails loudly at request time
 # (503 `SSO_UNAVAILABLE`, log code `sso_key_missing`) instead of the chart failing.
+# Ban-evasion suppression (GDPR Art. 6(1)(f), counsel to verify -- docs/compliance/suppression-LIA.md).
+# An erased user with an ACTIVE ban leaves one `suppression_records` row: a per-tenant keyed
+# one-way code of the platform id (HMAC under an HKDF key derived from the platform tenant KEK,
+# `autoProvisionedKeys.tenantKek`, mounted into hub-api only), a closed restriction enum and an
+# expiry. A user with no active ban leaves nothing behind.
+suppression:
+  # Optional ceiling, in days, on how long ANY suppression row lives (1-3650). Empty (default) =
+  # a ban with no expiry is kept until a moderator lifts it. Set it to bound retention
+  # (Art. 5(1)(e) storage limitation) once counsel has chosen a period.
+  maxRetentionDays: ""
 sso:
   # false -> render nothing and inject no SSO env into hub-api.
   enabled: true

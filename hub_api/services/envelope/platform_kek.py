@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping
 
 from services.envelope.crypto import (
     KEY_LENGTH,
+    derive_kek_subkey,
     kek_id,
     local_unwrap,
     local_wrap,
@@ -88,6 +89,28 @@ class PlatformKekAdapter:
     def key_ref(self) -> str:
         """``platform:<kek-id>`` -- identifies the current KEK without revealing it."""
         return f"platform:{self._current_id}"
+
+    @property
+    def kek_ids(self) -> tuple[str, ...]:
+        """Ids of every loaded KEK, current first (a previous KEK only during a rotation window)."""
+        return (self._current_id, *(i for i in self._by_id if i != self._current_id))
+
+    def derive_key(self, info: bytes, *, key_id: str | None = None) -> bytes:
+        """HKDF a domain-separated 32-byte key from a loaded KEK (the current one by default).
+
+        The KEK itself never leaves this adapter: other features (ban-evasion suppression's
+        per-tenant HMAC keys) get a derived key, not the Secret. `key_id` selects a previous KEK
+        by its :func:`~services.envelope.crypto.kek_id` during a rotation window.
+
+        Raises:
+            PlatformKekError: no loaded KEK has that id.
+            EnvelopeInputError: empty `info`.
+        """
+        wanted = self._current_id if key_id is None else key_id
+        kek = self._by_id.get(wanted)
+        if kek is None:
+            raise PlatformKekError("no platform KEK with that id is loaded")
+        return derive_kek_subkey(kek, info)
 
     async def wrap(self, plaintext_dek: bytes, *, context: Mapping[str, str]) -> bytes:
         """Wrap under the current KEK (CPU-only, microseconds -- no thread hop)."""

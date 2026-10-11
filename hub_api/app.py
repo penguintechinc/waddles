@@ -48,6 +48,7 @@ from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_
 from openapi.routes import register_openapi_docs
 from services.audit_http import AUDIT_SERVICE_CONFIG_KEY, install_audit_hooks
 from services.audit_service import get_audit_service
+from services.ban_suppression import run_purge_loop
 from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
@@ -400,6 +401,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             app.config["identity_uuid_monitor"] = asyncio.create_task(
                 run_uuid_availability_monitor(async_dal, is_ready=lambda: bootstrap_status.is_ready)
             )
+        # Deletes expired ban-suppression rows (GDPR storage limitation). Lookups already ignore
+        # an expired row, so a late/failed pass never changes a decision; a dead pass is logged
+        # and retried. Waits for schema readiness.
+        app.config["suppression_purge_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["suppression_purge_task"] = asyncio.create_task(
+                run_purge_loop(async_dal, dal, is_ready=lambda: bootstrap_status.is_ready)
+            )
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
     @app.after_serving
@@ -433,6 +442,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping identity uuid monitor on shutdown: {exc}")
+        purge_task = app.config.get("suppression_purge_task")
+        if purge_task is not None:
+            purge_task.cancel()
+            try:
+                await purge_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping suppression purge task on shutdown: {exc}")
         watermark_job = app.config.get("bundle_active_set_watermark_job")
         if watermark_job is not None:
             try:
