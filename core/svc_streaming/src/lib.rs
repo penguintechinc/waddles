@@ -16,6 +16,7 @@ pub mod ingest;
 pub mod orchestrator;
 pub mod pipeline;
 pub mod rtc;
+pub mod spec_builder;
 pub mod store;
 pub mod telemetry;
 
@@ -96,13 +97,33 @@ where
         .map(|(start, _end)| start)
         .unwrap_or(40000); // unreachable in practice: already validated at Config::load time
 
-    let supervisor = Arc::new(pipeline::FfmpegSupervisor::new(
-        config.cli.ffmpeg_path.clone(),
-        config.cli.stream_data_dir.clone(),
-        rtp_base_port,
-        Arc::new(store::DefaultSecretResolver),
-        pipeline::SupervisorConfig::default(),
-    ));
+    // GPU-preferred, CPU-fallback: probe once at startup which encoders this
+    // host + ffmpeg build can actually use (a device node alone proves
+    // nothing -- see `pipeline::encoder`). Never fails: any problem degrades
+    // to the CPU encoders with a log line saying why.
+    let device_hints = pipeline::DeviceHints::detect(config.cli.stream_vaapi_device.as_deref());
+    let encoders = pipeline::detect_encoders(
+        &config.cli.ffmpeg_path,
+        config.cli.stream_encoder,
+        &device_hints,
+    )
+    .await;
+
+    // One policy for both layers: the sink tracks relay targets, the
+    // supervisor enforces the same cap in the ffmpeg argv itself.
+    let relay_policy = egress::relay::RelayPolicy::default();
+
+    let supervisor = Arc::new(
+        pipeline::FfmpegSupervisor::new(
+            config.cli.ffmpeg_path.clone(),
+            config.cli.stream_data_dir.clone(),
+            rtp_base_port,
+            Arc::new(store::DefaultSecretResolver),
+            pipeline::SupervisorConfig::default(),
+        )
+        .with_encoders(encoders)
+        .with_relay_policy(relay_policy),
+    );
     let engine: api::SharedEngine = supervisor.clone();
 
     let hls = Arc::new(egress::hls::HlsSink::new(
@@ -117,7 +138,8 @@ where
 
     let relay_metrics = egress::relay::register_relay_metrics(&state.metrics)
         .expect("relay metrics registered exactly once per process");
-    let relay = Arc::new(egress::relay::RelaySink::new().with_metrics(relay_metrics));
+    let relay =
+        Arc::new(egress::relay::RelaySink::with_policy(relay_policy).with_metrics(relay_metrics));
 
     let record_metrics = egress::record::register_metrics(&state.metrics);
     let record = match egress::record::RecordSink::from_env(

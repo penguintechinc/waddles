@@ -23,9 +23,12 @@
 //! 4. A [`crate::pipeline::PipelineSpec`] is built: HLS is always an output
 //!    (so `/live/{community_id}` and the HLS file-serving router have
 //!    something to show); each enabled `streaming_targets` row becomes an
-//!    `RtmpPush` output; a `Record` output is added (on its own dedicated
-//!    always-copy profile -- see [`build_pipeline_spec_for_ingest`]'s doc
-//!    comment for why) when `record_enabled`.
+//!    `RtmpPush` or `SrtPush` output according to its `protocol`, encoded
+//!    with the codec the config/target select
+//!    ([`crate::spec_builder::plan_push_outputs`]); a `Record` output is
+//!    added (on its own dedicated always-copy profile -- see
+//!    [`build_pipeline_spec_for_ingest`]'s doc comment for why) when
+//!    `record_enabled`.
 //! 5. Egress sinks are registered/started *before* the ffmpeg process spawns
 //!    ([`Orchestrator::start_egress_sinks`]) so their output directories
 //!    exist and relay/record policy checks run before ffmpeg would start
@@ -70,11 +73,7 @@ use crate::pipeline::{
     PipelineEngine, PipelineId, PipelineSpec, TranscodeProfile, VideoCodec,
 };
 use crate::rtc::ingest_auth::{IngestAuthError, WhipTokenAuthorizer};
-use crate::store::SecretRef;
-
-/// Profile name every HLS/relay output shares -- MVP is single-profile
-/// (spec §2: "MVP = separate pipelines, one per source", no ladder).
-const DEFAULT_PROFILE: &str = "default";
+use crate::spec_builder::{plan_push_outputs, DEFAULT_PROFILE};
 /// Dedicated profile for `Record` outputs -- always `Copy`/`Copy`
 /// regardless of `streaming_configs.transcode_enabled`, deliberately never
 /// sharing a name with `DEFAULT_PROFILE`. Two *transcoded* (non-`Copy`)
@@ -367,6 +366,13 @@ async fn resolve_tenant_slug(db: &DatabaseConnection, community_id: i32) -> anyh
 /// connects) and gives `Record` its own always-`Copy` profile -- see
 /// [`RECORD_PROFILE`]'s doc comment for why.
 ///
+/// The default profile (HLS, and every push without an override) carries
+/// the config's selected codec; pushes that need a different codec -- an
+/// RTMP push on an H.265 config, which must stay H.264 -- get their own
+/// profile and are encoded off a shared decode. The codec rules (and the
+/// loud rejection of combinations ffmpeg cannot mux) live in
+/// [`plan_push_outputs`].
+///
 /// **No transcode-token admission here, deliberately**: unlike
 /// `api::lifecycle::start` (which holds the caller's bearer JWT from the
 /// `/start` HTTP request), an ingest-triggered publish has no end-user JWT
@@ -390,40 +396,17 @@ async fn build_pipeline_spec_for_ingest(
         .await
         .context("querying streaming_targets")?;
 
-    let mut outputs = Vec::with_capacity(targets.len() + 2);
+    // Not wrapped in `.context(..)`: the plan error already names the row
+    // and the reason, and must reach the log intact.
+    let plan = plan_push_outputs(config, &targets, config.transcode_enabled)?;
+
+    let mut outputs = Vec::with_capacity(plan.outputs.len() + 2);
     outputs.push(OutputSpec::Hls {
         variant: HlsVariant::Std,
         profile: DEFAULT_PROFILE.into(),
     });
-
-    for target in targets {
-        let url_secret_ref: SecretRef =
-            serde_json::from_str(&target.forward_url).with_context(|| {
-                format!(
-                    "stored streaming_target {} has a non-secret_ref forward_url",
-                    target.id
-                )
-            })?;
-        outputs.push(OutputSpec::RtmpPush { url_secret_ref });
-    }
-
-    let video = if config.transcode_enabled {
-        VideoCodec::H264 {
-            preset: "veryfast".into(),
-            crf: None,
-            bitrate_kbps: Some(config.transcode_bitrate_kbps.max(0) as u32),
-        }
-    } else {
-        VideoCodec::Copy
-    };
-
-    let mut profiles = vec![TranscodeProfile {
-        name: DEFAULT_PROFILE.into(),
-        video,
-        audio: AudioCodec::Copy,
-        resolution: None,
-        fps: None,
-    }];
+    outputs.extend(plan.outputs);
+    let mut profiles = plan.profiles;
 
     if config.record_enabled {
         profiles.push(TranscodeProfile {
@@ -735,6 +718,7 @@ async fn pump_ingest_to_stdin(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::SecretRef;
     use sea_orm::ConnectionTrait;
     use uuid::Uuid;
 
@@ -776,14 +760,19 @@ mod tests {
                 enabled INTEGER NOT NULL DEFAULT 1,
                 record_enabled INTEGER NOT NULL DEFAULT 0,
                 transcode_enabled INTEGER NOT NULL DEFAULT 0,
-                transcode_bitrate_kbps INTEGER NOT NULL DEFAULT 4000
+                transcode_bitrate_kbps INTEGER NOT NULL DEFAULT 4000,
+                video_codec TEXT NOT NULL DEFAULT 'h264',
+                audio_codec TEXT NOT NULL DEFAULT 'copy'
             );
             CREATE TABLE streaming_targets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 config_id INTEGER NOT NULL,
                 platform TEXT NOT NULL,
                 forward_url TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1
+                enabled INTEGER NOT NULL DEFAULT 1,
+                protocol TEXT NOT NULL DEFAULT 'rtmp',
+                video_codec TEXT,
+                audio_codec TEXT
             );
             INSERT INTO tenants (id, slug) VALUES (1, 'tenant-1');
             INSERT INTO communities (id, tenant_id) VALUES (42, 1);
@@ -864,6 +853,8 @@ mod tests {
             record_enabled,
             transcode_enabled,
             transcode_bitrate_kbps: 4000,
+            video_codec: "h264".into(),
+            audio_codec: "copy".into(),
         }
     }
 
@@ -1028,6 +1019,175 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("forward_url"));
+    }
+
+    // --- codec selection (H.265 / AV1), protocol, loud rejection ---
+
+    fn codec_config(transcode: bool, video: &str, audio: &str) -> streaming_config::Model {
+        streaming_config::Model {
+            transcode_enabled: transcode,
+            video_codec: video.into(),
+            audio_codec: audio.into(),
+            ..sample_config(1, 42, false, transcode)
+        }
+    }
+
+    async fn insert_target(
+        db: &DatabaseConnection,
+        var: &str,
+        protocol: &str,
+        video: Option<&str>,
+    ) {
+        let secret = serde_json::to_string(&SecretRef::Env { var: var.into() })
+            .unwrap()
+            .replace('\'', "''");
+        let video = video.map_or("NULL".to_string(), |v| format!("'{v}'"));
+        db.execute_unprepared(&format!(
+            "INSERT INTO streaming_targets (config_id, platform, forward_url, enabled, protocol, video_codec) \
+             VALUES (1, 'custom', '{secret}', 1, '{protocol}', {video});"
+        ))
+        .await
+        .expect("insert target");
+    }
+
+    fn rtmp_input() -> InputSpec {
+        InputSpec::Rtmp {
+            stream_key: "sk_enabled".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_spec_wires_an_srt_target_from_the_db_as_an_srt_push() {
+        let db = seed_db().await;
+        insert_target(&db, "SRT_URL", "srt", None).await;
+        let spec = build_pipeline_spec_for_ingest(
+            &db,
+            &codec_config(false, "h264", "copy"),
+            "tenant-1",
+            rtmp_input(),
+        )
+        .await
+        .expect("builds");
+        assert!(matches!(
+            spec.outputs[1],
+            OutputSpec::SrtPush {
+                profile: Some(ref p),
+                ..
+            } if p == DEFAULT_PROFILE
+        ));
+    }
+
+    #[tokio::test]
+    async fn build_spec_h265_config_keeps_hls_and_srt_on_h265_and_rtmp_on_an_h264_rung() {
+        let db = seed_db().await;
+        insert_target(&db, "RTMP_URL", "rtmp", None).await;
+        insert_target(&db, "SRT_URL", "srt", None).await;
+        let config = codec_config(true, "h265", "aac");
+        let spec = build_pipeline_spec_for_ingest(&db, &config, "tenant-1", rtmp_input())
+            .await
+            .expect("builds");
+
+        assert_eq!(spec.profiles.len(), 2);
+        assert!(matches!(spec.profiles[0].video, VideoCodec::H265 { .. }));
+        assert!(matches!(spec.profiles[1].video, VideoCodec::H264 { .. }));
+
+        // The spec turns into an argv the muxers can actually carry.
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            crate::pipeline::secret_ref_key(&SecretRef::Env {
+                var: "RTMP_URL".into(),
+            }),
+            "rtmps://live.example/app/key".to_string(),
+        );
+        resolved.insert(
+            crate::pipeline::secret_ref_key(&SecretRef::Env {
+                var: "SRT_URL".into(),
+            }),
+            "srt://srt.example:9000?streamid=k".to_string(),
+        );
+        let paths = crate::pipeline::Paths {
+            stream_data_dir: std::path::PathBuf::from("/data"),
+            resolved_secrets: resolved,
+            ..Default::default()
+        };
+        let argv = crate::pipeline::build_argv(&spec, &paths).expect("argv builds");
+        assert!(argv.iter().any(|a| a == "libx265"));
+        assert!(argv.iter().any(|a| a == "libx264"));
+        assert!(argv
+            .iter()
+            .any(|a| a.contains("[f=mpegts:onfail=ignore]srt://srt.example:9000")));
+        assert!(argv
+            .iter()
+            .any(|a| a.starts_with("[f=flv:onfail=ignore]rtmps://live.example/app/key|[f=null]-")));
+    }
+
+    #[tokio::test]
+    async fn build_spec_rejects_an_rtmp_target_requesting_hevc_with_the_flv_message() {
+        let db = seed_db().await;
+        insert_target(&db, "RTMP_URL", "rtmp", Some("h265")).await;
+        let err = build_pipeline_spec_for_ingest(
+            &db,
+            &codec_config(true, "h264", "copy"),
+            "tenant-1",
+            rtmp_input(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "FLV/RTMP cannot carry HEVC/AV1 (needs enhanced-RTMP); use HLS/SRT or H.264"
+            ),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_spec_rejects_an_srt_target_inheriting_av1() {
+        let db = seed_db().await;
+        insert_target(&db, "SRT_URL", "srt", None).await;
+        let err = build_pipeline_spec_for_ingest(
+            &db,
+            &codec_config(true, "av1", "copy"),
+            "tenant-1",
+            rtmp_input(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("MPEG-TS/SRT cannot carry AV1"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_spec_rejects_a_codec_without_transcoding() {
+        let db = seed_db().await;
+        let err = build_pipeline_spec_for_ingest(
+            &db,
+            &codec_config(false, "h265", "copy"),
+            "tenant-1",
+            rtmp_input(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("transcode_enabled"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn build_spec_av1_hls_with_no_targets_is_a_single_av1_profile() {
+        let db = seed_db().await;
+        let spec = build_pipeline_spec_for_ingest(
+            &db,
+            &codec_config(true, "av1", "opus"),
+            "tenant-1",
+            rtmp_input(),
+        )
+        .await
+        .expect("builds");
+        assert_eq!(spec.profiles.len(), 1);
+        assert!(matches!(spec.profiles[0].video, VideoCodec::Av1Svt { .. }));
+        assert!(matches!(spec.profiles[0].audio, AudioCodec::Opus { .. }));
+        assert_eq!(spec.outputs.len(), 1);
     }
 
     // --- Orchestrator sink lifecycle (no DB/ffmpeg process involved) ---

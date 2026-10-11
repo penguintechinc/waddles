@@ -301,8 +301,19 @@ service_image_repo() {
 # stale-mutable-`:alpha`-tag bug this fix addresses.
 service_image_tag() {
     case "$1" in
-        reputation-module|svc-streaming) echo "alpha" ;;
+        reputation-module) echo "alpha" ;;
+        # svc-streaming publishes per-variant tags (<tag>-<variant>, streaming.gpuVariant in
+        # values.yaml); alpha builds the cpu variant only. GPU variants: core/svc_streaming/README.md.
+        svc-streaming) echo "alpha-cpu" ;;
         *) echo "${SHA8}" ;;
+    esac
+}
+
+# Docker build target per service (Dockerfile.rust multi-stage). Empty = default (last stage).
+service_build_target_args() {
+    case "$1" in
+        svc-streaming) echo "--target cpu" ;;
+        *) echo "" ;;
     esac
 }
 
@@ -375,11 +386,12 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
         dockerfile="$(service_dockerfile "${svc}")"
         context="$(service_context "${svc}")"
         extra_build_context_args="$(service_build_context_args "${svc}")"
+        extra_build_target_args="$(service_build_target_args "${svc}")"
         cache_ref="${REGISTRY}/buildcache/${repo}"
         info "Building ${img} (${dockerfile}), cache ${cache_ref}"
-        # shellcheck disable=SC2086 # extra_build_context_args is either empty or a
-        # fixed, space-free "--build-context proto=proto" literal -- intentional
-        # word-splitting, never user/env-controlled content.
+        # shellcheck disable=SC2086 # extra_build_context_args / extra_build_target_args are
+        # either empty or fixed, space-free literals ("--build-context proto=proto",
+        # "--target cpu") -- intentional word-splitting, never user/env-controlled content.
         docker buildx build --builder "${CACHE_BUILDER}" --pull=false \
             --cache-from "type=registry,ref=${cache_ref}" \
             --cache-to "type=registry,ref=${cache_ref},mode=max,image-manifest=true,oci-mediatypes=true" \
@@ -388,6 +400,7 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
             -t "${img}" \
             --label "org.opencontainers.image.revision=${SHA}" \
             ${extra_build_context_args} \
+            ${extra_build_target_args} \
             "${context}"
 
         info "Pushing ${img}"

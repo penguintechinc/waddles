@@ -64,6 +64,8 @@ use opentelemetry::{global, KeyValue};
 use tokio::sync::{mpsc, Mutex as TokioMutex, Notify, RwLock as TokioRwLock};
 use tokio::task::JoinHandle;
 
+use crate::egress::relay::RelayPolicy;
+use crate::pipeline::encoder::EncoderSelection;
 use crate::pipeline::ffmpeg;
 use crate::pipeline::model::{
     OutputSpec, PipelineEngine, PipelineError, PipelineHandle, PipelineId, PipelineSpec,
@@ -224,6 +226,7 @@ struct Metrics {
     output_failures_total: Counter<u64>,
     teardown_duration_ms: Histogram<u64>,
     teardown_failures_total: Counter<u64>,
+    encodes_started_total: Counter<u64>,
 }
 
 impl Metrics {
@@ -269,6 +272,10 @@ impl Metrics {
                     "Teardown steps that failed or timed out, labeled by stage (signal/reap/join/stop_deadline) and signal",
                 )
                 .build(),
+            encodes_started_total: meter
+                .u64_counter("encodes_started_total")
+                .with_description("Video encodes started, labeled by codec and encoder backend (cpu/nvenc/vaapi)")
+                .build(),
         }
     }
 }
@@ -284,6 +291,12 @@ pub struct FfmpegSupervisor {
     rtp_base_port: u16,
     resolver: Arc<dyn SecretResolver>,
     config: SupervisorConfig,
+    /// Encoder backend per codec family (GPU when proven usable at
+    /// startup, else CPU). Defaults to all-software.
+    encoders: EncoderSelection,
+    /// Destination cap enforced in the argv path. Defaults to the Free
+    /// tier -- fail-closed until license-tier resolution is wired.
+    relay_policy: Option<RelayPolicy>,
     registry: Arc<TokioRwLock<HashMap<PipelineId, Arc<Slot>>>>,
     metrics: Arc<Metrics>,
     active_count: Arc<AtomicI64>,
@@ -307,10 +320,25 @@ impl FfmpegSupervisor {
             rtp_base_port,
             resolver,
             config,
+            encoders: EncoderSelection::default(),
+            relay_policy: Some(RelayPolicy::default()),
             registry: Arc::new(TokioRwLock::new(HashMap::new())),
             metrics: Arc::new(Metrics::new()),
             active_count: Arc::new(AtomicI64::new(0)),
         }
+    }
+
+    /// Sets the per-codec encoder backends (see
+    /// [`crate::pipeline::encoder::detect_encoders`]).
+    pub fn with_encoders(mut self, encoders: EncoderSelection) -> Self {
+        self.encoders = encoders;
+        self
+    }
+
+    /// Sets the relay destination cap enforced on every pipeline's argv.
+    pub fn with_relay_policy(mut self, policy: RelayPolicy) -> Self {
+        self.relay_policy = Some(policy);
+        self
     }
 
     /// Returns a handle listeners (`ingest::rtmp`/`ingest::srt`) use to
@@ -382,8 +410,8 @@ impl FfmpegSupervisor {
         let mut resolved_secrets = HashMap::new();
         for output in &spec.outputs {
             let secret_ref: Option<&SecretRef> = match output {
-                OutputSpec::RtmpPush { url_secret_ref }
-                | OutputSpec::SrtPush { url_secret_ref } => Some(url_secret_ref),
+                OutputSpec::RtmpPush { url_secret_ref, .. }
+                | OutputSpec::SrtPush { url_secret_ref, .. } => Some(url_secret_ref),
                 _ => None,
             };
             if let Some(secret_ref) = secret_ref {
@@ -403,6 +431,8 @@ impl FfmpegSupervisor {
             resolved_secrets,
             whip_sdp_paths: HashMap::new(),
             rtp_base_port: self.rtp_base_port,
+            encoders: self.encoders.clone(),
+            relay_policy: self.relay_policy,
         })
     }
 }
@@ -444,7 +474,26 @@ impl FfmpegSupervisor {
         paths.whip_sdp_paths.extend(extra_whip_sdp_paths);
 
         let argv = match ffmpeg::build_argv(&spec, &paths) {
-            Ok(argv) => argv,
+            Ok(argv) => {
+                for encode in ffmpeg::encode_summary(&spec, &paths) {
+                    tracing::info!(
+                        pipeline_id = %id,
+                        profile = %encode.profile,
+                        codec = encode.family.as_str(),
+                        backend = encode.backend.as_str(),
+                        encoder = encode.backend.encoder_name(encode.family),
+                        "pipeline encode"
+                    );
+                    self.metrics.encodes_started_total.add(
+                        1,
+                        &[
+                            KeyValue::new("codec", encode.family.as_str()),
+                            KeyValue::new("backend", encode.backend.as_str()),
+                        ],
+                    );
+                }
+                argv
+            }
             Err(PipelineError::NoFfmpegNeeded) => {
                 // A pure-copy WHIP->WHEP leg needs no ffmpeg process at all
                 // -- webrtc-rs forwards RTP directly (SFU-style). Register
@@ -1203,6 +1252,7 @@ mod tests {
             url_secret_ref: crate::store::SecretRef::Env {
                 var: "SVC_STREAMING_SUPERVISOR_TEST_MISSING".into(),
             },
+            profile: None,
         });
         let err = sup.start(spec).await.unwrap_err();
         assert!(matches!(err, PipelineError::InvalidSpec(_)));
@@ -1330,9 +1380,11 @@ mod tests {
         };
         spec.outputs.push(ModelOutputSpec::RtmpPush {
             url_secret_ref: shared_ref.clone(),
+            profile: None,
         });
         spec.outputs.push(ModelOutputSpec::RtmpPush {
             url_secret_ref: shared_ref,
+            profile: None,
         });
         let id = spec.id;
         // start() only resolves secrets + builds argv synchronously; the
@@ -1343,6 +1395,193 @@ mod tests {
             .expect("secret dedup resolves once, no error");
         sup.stop(id).await.expect("stop succeeds");
         unsafe { std::env::remove_var("SVC_STREAMING_SUPERVISOR_TEST_SHARED_SECRET") };
+    }
+
+    /// Resolves every secret to the same push URL, so these tests need no
+    /// process-global environment variables (parallel tests would race on
+    /// setting/removing them).
+    struct FixedResolver;
+
+    impl crate::store::SecretResolver for FixedResolver {
+        fn resolve(
+            &self,
+            _secret_ref: &crate::store::SecretRef,
+        ) -> Result<crate::config::Secret, crate::store::SecretError> {
+            Ok(crate::config::Secret::new("rtmp://push/fixed".to_string()))
+        }
+    }
+
+    fn fixed_supervisor() -> FfmpegSupervisor {
+        FfmpegSupervisor::new(
+            PathBuf::from("/nonexistent/ffmpeg-binary-for-supervisor-argv-tests"),
+            PathBuf::from("/tmp"),
+            40000,
+            Arc::new(FixedResolver),
+            SupervisorConfig::default(),
+        )
+    }
+
+    fn pushes_spec(count: usize) -> PipelineSpec {
+        let mut spec = copy_spec(Uuid::new_v4());
+        for i in 0..count {
+            spec.outputs.push(ModelOutputSpec::RtmpPush {
+                url_secret_ref: crate::store::SecretRef::Env {
+                    var: format!("PUSH_{i}"),
+                },
+                profile: None,
+            });
+        }
+        spec
+    }
+
+    // The tests below exercise `build_paths` + `build_argv` (what `start`
+    // does before it spawns) rather than `start` itself where success is
+    // expected: a successful `start` forks an ffmpeg child, and forking in
+    // the lib test binary races with the other tests that write-then-exec
+    // scripts (ETXTBSY). Rejections return before any spawn, so those go
+    // through `start` for real.
+
+    #[tokio::test]
+    async fn the_default_free_tier_cap_admits_three_destinations_in_the_argv_path() {
+        let sup = fixed_supervisor();
+        let spec = pushes_spec(3);
+        let paths = sup.build_paths(&spec).await.expect("paths");
+        ffmpeg::build_argv(&spec, &paths).expect("three destinations fit the Free tier");
+    }
+
+    #[tokio::test]
+    async fn start_refuses_a_fourth_destination_under_the_default_free_tier_cap() {
+        let sup = fixed_supervisor();
+        let err = sup.start(pushes_spec(4)).await.unwrap_err();
+        match err {
+            PipelineError::InvalidSpec(msg) => {
+                assert_eq!(msg, "relay limit: max 3 destinations on this tier")
+            }
+            other => panic!("expected InvalidSpec, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn with_relay_policy_raises_the_cap() {
+        let sup = fixed_supervisor().with_relay_policy(RelayPolicy::PROFESSIONAL);
+        let spec = pushes_spec(4);
+        let paths = sup.build_paths(&spec).await.expect("paths");
+        ffmpeg::build_argv(&spec, &paths).expect("the Professional tier allows ten");
+        let too_many = pushes_spec(11);
+        let paths = sup.build_paths(&too_many).await.expect("paths");
+        assert!(ffmpeg::build_argv(&too_many, &paths).is_err());
+    }
+
+    #[tokio::test]
+    async fn build_paths_carries_the_encoder_selection_and_cap_into_the_argv_inputs() {
+        use crate::pipeline::codec::VideoFamily;
+        use crate::pipeline::encoder::EncoderBackend;
+        let sup = fixed_supervisor();
+        let paths = sup
+            .build_paths(&copy_spec(Uuid::new_v4()))
+            .await
+            .expect("paths");
+        assert!(
+            paths.encoders.is_software_only(),
+            "CPU unless told otherwise"
+        );
+        assert_eq!(paths.relay_policy, Some(RelayPolicy::FREE));
+
+        let sup = sup
+            .with_encoders(
+                EncoderSelection::software().with(VideoFamily::H265, EncoderBackend::Nvenc),
+            )
+            .with_relay_policy(RelayPolicy::PROFESSIONAL);
+        let paths = sup
+            .build_paths(&copy_spec(Uuid::new_v4()))
+            .await
+            .expect("paths");
+        assert_eq!(
+            paths.encoders.backend_for(VideoFamily::H265),
+            EncoderBackend::Nvenc
+        );
+        assert_eq!(paths.relay_policy, Some(RelayPolicy::PROFESSIONAL));
+    }
+
+    fn h265_hls_spec() -> PipelineSpec {
+        PipelineSpec {
+            id: Uuid::new_v4(),
+            tenant: "tenant-1".into(),
+            community_id: "community-1".into(),
+            inputs: vec![InputSpec::Rtmp {
+                stream_key: "sk1".into(),
+            }],
+            profiles: vec![TranscodeProfile {
+                name: "default".into(),
+                video: crate::pipeline::codec::VideoFamily::H265.to_video_codec(Some(2500)),
+                audio: AudioCodec::Copy,
+                resolution: None,
+                fps: None,
+            }],
+            outputs: vec![ModelOutputSpec::Hls {
+                variant: crate::pipeline::model::HlsVariant::Std,
+                profile: "default".into(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn an_h265_hls_pipeline_builds_a_cpu_or_gpu_encode_per_the_supervisors_selection() {
+        use crate::pipeline::codec::VideoFamily;
+        use crate::pipeline::encoder::EncoderBackend;
+        let spec = h265_hls_spec();
+
+        // CPU branch (the default).
+        let cpu = fixed_supervisor();
+        let paths = cpu.build_paths(&spec).await.expect("paths");
+        let argv = ffmpeg::build_argv(&spec, &paths).expect("argv");
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "libx265"]));
+        let summary = ffmpeg::encode_summary(&spec, &paths);
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].backend, EncoderBackend::Software);
+
+        // GPU branch: the supervisor's selection reaches the argv.
+        let gpu = fixed_supervisor().with_encoders(
+            EncoderSelection::software().with(VideoFamily::H265, EncoderBackend::Nvenc),
+        );
+        let paths = gpu.build_paths(&spec).await.expect("paths");
+        let argv = ffmpeg::build_argv(&spec, &paths).expect("argv");
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "hevc_nvenc"]));
+        assert_eq!(
+            ffmpeg::encode_summary(&spec, &paths)[0].backend,
+            EncoderBackend::Nvenc
+        );
+    }
+
+    #[tokio::test]
+    async fn start_refuses_hevc_aimed_at_an_rtmp_push() {
+        let sup = fixed_supervisor();
+        let spec = PipelineSpec {
+            id: Uuid::new_v4(),
+            tenant: "tenant-1".into(),
+            community_id: "community-1".into(),
+            inputs: vec![InputSpec::Rtmp {
+                stream_key: "sk1".into(),
+            }],
+            profiles: vec![TranscodeProfile {
+                name: "default".into(),
+                video: crate::pipeline::codec::VideoFamily::H265.to_video_codec(None),
+                audio: AudioCodec::Copy,
+                resolution: None,
+                fps: None,
+            }],
+            outputs: vec![ModelOutputSpec::RtmpPush {
+                url_secret_ref: crate::store::SecretRef::Env { var: "X".into() },
+                profile: None,
+            }],
+        };
+        let err = sup.start(spec).await.unwrap_err();
+        match err {
+            PipelineError::InvalidSpec(msg) => {
+                assert!(msg.contains("FLV/RTMP cannot carry HEVC/AV1"), "{msg}")
+            }
+            other => panic!("expected InvalidSpec, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1380,21 +1619,34 @@ mod tests {
         }
     }
 
-    /// Writes an executable script that `exec`s a long `sleep` and returns
-    /// its path. Arguments (ffmpeg-sidecar prepends some) are ignored.
+    /// Writes (once per test process) an executable script that `exec`s a
+    /// long `sleep` and returns its path. Arguments (ffmpeg-sidecar
+    /// prepends some) are ignored.
+    ///
+    /// One shared script, written under `OnceLock`'s lock: every test that
+    /// needs a sleeper blocks until the single write has finished, so no
+    /// test forks while the file is still open for writing. Writing a fresh
+    /// script per test raced with sibling tests' `fork`s (the child inherits
+    /// the writable fd until it execs) and failed `spawn` with `ETXTBSY`
+    /// ("Text file busy") in roughly one run in seven.
     #[cfg(unix)]
     fn sleeper_script() -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
-        let path = std::env::temp_dir().join(format!(
-            "svc-streaming-unit-sleeper-{}-{}.sh",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
-        std::fs::write(&path, "#!/bin/sh\nexec sleep 300\n").expect("write sleeper");
-        let mut perms = std::fs::metadata(&path).expect("stat").permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod");
-        path
+        static SCRIPT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        SCRIPT
+            .get_or_init(|| {
+                let path = std::env::temp_dir().join(format!(
+                    "svc-streaming-unit-sleeper-{}-{}.sh",
+                    std::process::id(),
+                    Uuid::new_v4()
+                ));
+                std::fs::write(&path, "#!/bin/sh\nexec sleep 300\n").expect("write sleeper");
+                let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&path, perms).expect("chmod");
+                path
+            })
+            .clone()
     }
 
     /// Spawns the sleeper through `FfmpegCommand`, optionally as its own

@@ -1605,9 +1605,40 @@ presentation:
 # (core/svc_streaming/Dockerfile.rust), not the shared pipeline.pythonBaseImage
 # placeholder -- mirrors the presentation.image block's shape above.
 streaming:
+  # svc-streaming image variant for this deploy: cpu | amd | nvidia. The variant is appended to
+  # the image tag (<tag>-<variant>); CI publishes all three. Pick per node pool: cpu where no GPU,
+  # amd on Radeon/VA-API nodes, nvidia on NVIDIA nodes. Node-pool wiring and the degrade-to-CPU
+  # behavior per variant: core/svc_streaming/README.md "Choosing a variant".
+  gpuVariant: cpu
+  # STREAM_ENCODER handed to the service: auto | cpu | nvenc | vaapi.
+  encoder: auto
   image:
     repository: "waddlebot-svc-streaming"
     tag: ""
+  # Node selection for the svc-streaming Deployment (every variant).
+  nodeSelector: {}
+  amd:
+    # Device-plugin resource that exposes /dev/dri to the pod (AMD k8s-device-plugin). This is the
+    # working path for non-privileged pods: the runtime's device cgroup only allows devices the
+    # plugin declares. Requested as a limit; the pod is Pending on nodes without the resource.
+    deviceResource: "amd.com/gpu"
+    # hostPath mount of /dev/dri. Used ONLY when deviceResource is empty. Alone it is not enough
+    # for a non-privileged pod -- open(/dev/dri/renderD128) fails with EPERM (device cgroup),
+    # verified on penguin-frame. Also rejected by Pod Security Admission `restricted`.
+    devDri: true
+    # Pod supplementalGroups: the host GID(s) owning /dev/dri/renderD* (`getent group render`).
+    # REQUIRED when gpuVariant=amd -- render fails loudly when empty, never a silent CPU fallback.
+    supplementalGroups: []
+  nvidia:
+    # RuntimeClass selecting the NVIDIA container runtime (nvidia-container-toolkit). Empty = omit.
+    runtimeClassName: nvidia
+    # nvidia.com/gpu limit (NVIDIA device plugin). 0 = omit the limit: the pod is schedulable on
+    # any node and runs CPU-only unless the node's default runtime exposes GPUs.
+    gpuLimit: 1
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
 
 # feature/e2e-helm-rust-dataplane -- bundle-executor (M2, core/bundle_executor). Brand-new
 # module (not a rewrite of an existing Python image), so it needs its own image block same
