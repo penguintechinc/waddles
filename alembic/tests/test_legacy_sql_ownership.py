@@ -6,7 +6,7 @@
 an existing DB (alpha/beta/prod) never sees a file added after it was baselined. The
 bridge is an Alembic revision that re-applies the DDL idempotently and records the file in
 `schema_migrations` -- declared by a module-level `LEGACY_VERSIONS` tuple (0014 covers
-084-096, 0060 covers 097-102). This test fails when a new numbered SQL file lands with no
+084-096, 0060 covers 097-102, 0061 covers 103). This test fails when a new numbered SQL file lands with no
 such port, so the gap cannot silently reopen. See docs/DATABASE.md "SQL vs Alembic ownership".
 """
 
@@ -24,9 +24,7 @@ _FIRST_BRIDGED = 84
 
 #: SQL files known to be un-ported, each with the PR that owns the follow-up. An entry
 #: must be REMOVED once its port lands (asserted below), so this list can only shrink.
-PENDING_PORT: dict[str, str] = {
-    "103_streaming_codec_columns": "PR #799 -- port as a new revision once it lands",
-}
+PENDING_PORT: dict[str, str] = {}
 
 
 def _declared_ported_versions() -> dict[str, str]:
