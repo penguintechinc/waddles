@@ -5,7 +5,7 @@ code. Every metric name is verified against the source tree (see Validation), ne
 
 ```
 k8s/observability/
-├── dashboards/          5 Grafana dashboards (generated JSON, committed)
+├── dashboards/          6 Grafana dashboards (generated JSON, committed)
 ├── alerts/
 │   ├── waddles-slo.rules.yml        recording + alert rules (Prometheus rule-file format)
 │   └── waddles-slo.rules.test.yml   promtool unit tests (alerts must fire / stay silent)
@@ -38,8 +38,8 @@ rules carry no URLs or receivers - route on the `severity` (`warning` / `critica
 
 | Path | Services | Series |
 |---|---|---|
-| Scrape `/metrics` on port `metrics` (:9090) | svc-ingest, svc-process, svc-action, svc-presentation, svc-streaming, egress-proxy | `svc_*`, `host_api_*`, `dispatch_*`, `rtc_*`, `rtmp_*`, `hls_*`, `recording_*`, `egress_proxy_*`; OTel instruments in the same processes are bridged into the same registry (`penguin-logging` -> `opentelemetry-prometheus`), e.g. `waddles_bundle_kv_*`, `waddles_bundle_tables_*` |
-| OTLP push -> Collector/Prometheus OTLP receiver | hub-api (Python), svc-streaming `stream_*` (PR #758) | `grpc_server_*`, `hub_api_*`, `waddles_hub_*`, `waddles_bundle_active_set_*`, `odoo_sync_*`, `stream_*` |
+| Scrape `/metrics` on port `metrics` (:9090) | svc-ingest, svc-process, svc-action, svc-presentation, svc-streaming, egress-proxy | `svc_*`, `host_api_*`, `dispatch_*`, `rtc_*`, `rtmp_*`, `hls_*`, `recording_*`, `egress_proxy_*`; OTel instruments in the same processes are bridged into the same registry (`penguin-logging` -> `opentelemetry-prometheus`), e.g. `waddles_bundle_kv_*`, `waddles_bundle_tables_*`, and the stage pipeline series svc-process / svc-action now emit: `waddles_stage_latency_*`, `waddles_executor_call_*`, `waddles_host_call_latency_*`, `waddles_bundle_load_*`, `waddles_sandbox_trip_total`, `waddles_spine_*`, `waddles_bundle_capability_{authorized,denied}_total` (catalog: `docs/observability/data-plane-metrics.md`) |
+| OTLP push -> Collector/Prometheus OTLP receiver | hub-api (Python), svc-streaming `stream_*` (PR #758), bundle-executor (opt-in: only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set **and** the pod's egress policy allows the collector) | `grpc_server_*`, `hub_api_*`, `waddles_hub_*`, `waddles_bundle_active_set_*`, `odoo_sync_*`, `stream_*`, `waddles_executor_*` |
 
 Assumptions baked into the queries:
 
@@ -58,6 +58,7 @@ Assumptions baked into the queries:
 | `waddles-streaming.json` (`waddles-streaming`) | svc-streaming: sessions, stream latency histograms (PR #758), HLS segments, RTMP/WebRTC, relay, recording | `stream_*` (#758), `rtc_*`, `rtmp_*`, `hls_*`, `recording_*`, `svc_streaming_relay_*` |
 | `waddles-presentation.json` (`waddles-presentation`) | svc-presentation: overlay push latency, fan-out latency, subscribers, dropped frames, image uploads | `svc_presentation_overlay_fanout_latency_seconds`, `svc_presentation_http_request_duration_seconds{POST .../push}`, `svc_presentation_overlay_*`, `svc_presentation_image_*` |
 | `waddles-bundle-executor.json` (`waddles-bundle-executor`) | Executor link, host-capability call latency (kv, db), capability-gate / quota / egress denials | `host_api_*`, `svc_*_bundle_loads_total`, `waddles_bundle_kv_*`, `waddles_bundle_tables_*`, `waddles_bundle_quota_denied_total`, `svc_*_egress_denied_total` |
+| `waddles-stage-pipeline.json` (`waddles-stage-pipeline`) | Stage latency and outcomes, executor-call / host-call latency, sandbox trips, bundle load phases, dispatch attempts, DLQ, capability-gate grants and denials (svc-process / svc-action); the executor's own invoke / guest / load-phase / session series (empty unless the executor exports OTLP) | `waddles_stage_latency_*`, `waddles_executor_call_*`, `waddles_host_call_latency_*`, `waddles_bundle_load_*`, `waddles_action_dispatch_attempts_*`, `waddles_spine_*`, `waddles_sandbox_trip_total`, `waddles_bundle_capability_*`, `waddles_executor_*` |
 
 ## Alerts
 
@@ -136,9 +137,8 @@ Dashboards and alerts only use metrics the code emits; these are the holes, and 
 |---|---|---|
 | hub-api has no HTTP request-latency / error / throughput instrument, and its code only uses the OTel *API* (no SDK provider installed in `hub_api/`), so its instruments are no-ops until the deployment installs one | no hub-api HTTP RED | internal gRPC RED (`grpc_server_request_duration_seconds`) + domain counters |
 | OTel instruments without a bucket View (hub-api gRPC, kv, db) use the SDK's millisecond-oriented defaults | quantiles of these seconds histograms are coarse (all sub-5 s calls share one bucket) | "slower than 5 s" share panels / alerts |
-| `bundle-executor` binary exports no metrics (plain atomics, logged) | no executor-side invoke latency | executor link seen from svc-process/svc-action (`host_api_*`); kv/db host-capability latency as the invoke-path proxy |
-| `waddles_bundle_capability_denied/authorized_total` use the `metrics` facade with no recorder installed | the central gate counter is not exported | per-capability denial counters (`*_authorize_denied_total`, quota, egress) |
-| svc-process / svc-action wire `penguin_spine::NoopMetrics` | no `waddles_group_lag`, `waddles_group_pending`, `waddles_spine_dlq_total`, `waddles_tenant_boundary_violations_total`, per-event stream latency | change-log lag, consumer-loop gauges, dead-letter counter, EventSub latency |
+| `bundle-executor` exports OTel metrics **only** when `OTEL_EXPORTER_OTLP_ENDPOINT` is set and its default-deny pod egress allows the collector; the chart wires neither and deploys no collector | executor-side series (`waddles_executor_*`) are absent by default | executor link seen from svc-process / svc-action (`host_api_*`), and the stage-side view (`waddles_executor_call_seconds`, `waddles_host_call_latency_seconds`) |
+| OTel instruments named with the `_seconds` / `_total` suffix (`waddles_bundle_kv_*`, `waddles_bundle_tables_*`, `waddles_bundle_reputation_*`, `waddles_bundle_economy_*`, `waddles_bundle_identity_*`) are registered **with** the suffix, but the Prometheus exporter appends `_total` / the unit unconditionally | on the scrape path they appear as `..._seconds_seconds` / `..._total_total`, so panels querying the single-suffixed names read empty (OTLP->Prometheus translators that de-duplicate are unaffected). The stage-pipeline series register suffix-free names and are correct on both paths | rename the instruments (separate change) -- see `docs/observability/data-plane-metrics.md` *Naming* |
 | svc-streaming registers `srt_*` on `prometheus::default_registry()`, which `/metrics` does not serve | no SRT panels | RTMP / WebRTC / HLS series |
 | `svc_presentation_overlay_render*` registration helper is never called outside tests | render metrics absent | push + fan-out latency |
 | All five HTTP metric middlewares label `path` with the raw URI path (svc-streaming on this branch includes WHIP/WHEP tokens; #758 switches it to the route template) | unbounded label cardinality, and a secret in a label on svc-streaming | dashboards and alerts never group by `path` |

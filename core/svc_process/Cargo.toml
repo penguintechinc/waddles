@@ -170,6 +170,12 @@ uuid = { version = "=1.26.1" }
 # crate's `Cargo.lock` at this exact version (via the `bundle-host-*` crates);
 # declared directly so this crate does not depend on that staying true.
 opentelemetry = "=0.32.0"
+# `src/metrics_facade.rs`: `bundle-capability-gate` records its audit
+# counters (`waddles_bundle_capability_{denied,authorized}_total`) through
+# the `metrics` facade and installs no recorder itself; this service
+# installs an OTel-backed one so they are no longer silently dropped. Same
+# exact pin the gate crate uses, already resolved in this Cargo.lock.
+metrics = "=0.24.6"
 # `tonic::Code`, to classify a `hub_client` `ResolveHandle` failure
 # (`identity::hub_error_to_identity`): NOT_FOUND / FAILED_PRECONDITION /
 # INVALID_ARGUMENT are the caller's-input outcomes. Same exact pin
@@ -230,6 +236,11 @@ sha2 = "=0.10.9"
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
+# `InMemoryMetricExporter` (the SDK's `testing` feature) so tests read back
+# the metric data points a collector would actually receive -- proving the
+# instruments EMIT, not merely exist. Same exact version `penguin-logging`
+# pins, so no second copy enters the graph.
+opentelemetry_sdk = { version = "=0.32.1", features = ["testing"] }
 # Test-only: throwaway self-signed CA/client cert+key pairs generated at
 # test run time (`src/host_api.rs`'s TLS tests) -- same rationale as
 # `core/svc_action`'s identical dev-dependency: no private key material,

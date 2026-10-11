@@ -171,7 +171,24 @@ egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
 # `egress_detokenizer::HubClientResolver`.
 hub_client = { path = "../hub_client", version = "=0.1.0" }
 
+# `src/stage_metrics.rs`: OTel instruments built from the global meter
+# provider `penguin-logging` installs (never a provider of its own). Same
+# exact pin `penguin-logging` and the `bundle-host-*` crates use, already
+# resolved in this Cargo.lock.
+opentelemetry = "=0.32.0"
+# `src/metrics_facade.rs`: `bundle-capability-gate` records its audit
+# counters (`waddles_bundle_capability_{denied,authorized}_total`) through
+# the `metrics` facade and installs no recorder itself; this service
+# installs an OTel-backed one so they are no longer silently dropped. Same
+# exact pin the gate crate uses, already resolved in this Cargo.lock.
+metrics = "=0.24.6"
+
 [dev-dependencies]
+# `InMemoryMetricExporter` (the SDK's `testing` feature) so tests read back
+# the metric data points a collector would actually receive -- proving the
+# instruments EMIT, not merely exist. Same exact version `penguin-logging`
+# pins, so no second copy enters the graph.
+opentelemetry_sdk = { version = "=0.32.1", features = ["testing"] }
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
 # `tokio::time::{pause,advance}` for retry-backoff tests. Never linked into
 # the release binary.
