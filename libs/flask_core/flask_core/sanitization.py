@@ -295,10 +295,12 @@ def sanitize_json_string(text: str) -> str:
     if not text:
         return ''
 
-    # Escape JSON special characters
+    # Escape JSON special characters. Backslash MUST be first: escaping it after
+    # the quote would double the backslash just added to '"' (yielding '\\\\"'
+    # which terminates the JSON string early).
     replacements = {
-        '"': '\\"',
         '\\': '\\\\',
+        '"': '\\"',
         '\n': '\\n',
         '\r': '\\r',
         '\t': '\\t',

@@ -5,7 +5,7 @@ API Utilities
 Standardized API response formatting, error handling, and decorators.
 """
 
-from quart import jsonify, request, Blueprint
+from quart import jsonify, make_response, request, Blueprint
 from functools import wraps
 from typing import Any, Dict, Optional, Callable, List
 import time
@@ -564,7 +564,9 @@ def cors_headers(
 
             # Convert to Response object if needed
             if not hasattr(resp, 'headers'):
-                resp = jsonify(resp) if not isinstance(resp, str) else resp
+                # A bare str has no .headers either -- wrap it in a real Response too,
+                # otherwise the header assignment below raised AttributeError (500).
+                resp = jsonify(resp) if not isinstance(resp, str) else await make_response(resp)
 
             resp.headers['Access-Control-Allow-Origin'] = ', '.join(origins)
             resp.headers['Access-Control-Allow-Methods'] = ', '.join(methods)
