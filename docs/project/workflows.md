@@ -246,15 +246,19 @@ Response modules that execute commands and user interactions:
 - `module_path`: Path to module (e.g., "processing/router_module")
 - `port`: Service port number
 
-**Version Determination**:
+**Version Determination** (five-tier tag scheme, computed once in `determine-version`; `.version` is not used for tags):
 ```
-Branch Context               Tag Suffix    Latest Tag
-main + .version changed      (none)        ✓ latest
-main + regular commit        -beta         ✗
-develop + any commit         -alpha        ✗
-feature/* + any commit       -alpha        ✗
-bugfix/* + any commit        -alpha        ✗
+Tier   Trigger                                           Image tag
+alpha  push/dispatch on any non-release branch           alpha-<epoch>
+beta   push to release/v*.X (or main)                    beta-<epoch>
+gamma  GitHub release flagged pre-release (prereleased)  gamma-<epoch>
+prod   GitHub release published (released)               v{Major}.{Minor}.{Patch} + latest
 ```
+- `<epoch>` = unix seconds at `determine-version` time (shared by all matrix jobs).
+- Prod requires the release tag to match `v{Major}.{Minor}.{Patch}` or the build fails.
+- Gamma/prod run on the `release:` event (not a `tags: v*` push); every image workflow
+  carries `release: types: [released, prereleased]` and force-builds on it (path filters do not apply).
+- The same mapping is documented in the `determine-version` step of every image workflow.
 
 **Build Features**:
 - Multi-platform: Linux AMD64 + ARM64
