@@ -121,7 +121,7 @@ async fn main_router_records_request_metrics() {
         .to_bytes();
     let rendered = String::from_utf8(body.to_vec()).unwrap();
     assert!(rendered.contains("svc_streaming_http_requests_total"));
-    assert!(rendered.contains("path=\"/health\""));
+    assert!(rendered.contains("route=\"/health\""));
     assert!(rendered.contains("svc_streaming_http_request_duration_seconds"));
 }
 

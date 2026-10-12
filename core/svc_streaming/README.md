@@ -143,6 +143,23 @@ One ingest feeds HLS plus up to the tier cap of RTMP/SRT pushes through
 | 40000-40100 | UDP | WebRTC/WHIP-WHEP ICE candidate range (bound per-session by `rtc::PeerConnectionFactory`, not at startup) |
 | 50208 | gRPC | Reserved by the Helm chart; not yet implemented (no Tonic service in this scaffold) |
 
+## HTTP metrics (label safety)
+
+| Metric | Labels |
+|---|---|
+| `svc_streaming_http_requests_total` | `method`, `route`, `status` |
+| `svc_streaming_http_request_duration_seconds` | `method`, `route` |
+
+`route` is the matched route **template** (`/whip/{token}`,
+`/whip/{token}/{session_id}`, `/whip/{token}/...`), never the live URI path;
+requests that match no route collapse to the single value `unmatched`. WHIP puts
+its bearer token in the path, so a raw-path label would disclose it to
+telemetry and mint one series per token. The `TraceLayer` request span uses the
+same template (`method`, `route`), not the `uri`. Regression guard:
+`tests/http_metric_label_no_token.rs`. Any new metric label, span attribute, or
+log field must go through `http::route_template` / `redact::fingerprint`, never
+the raw path or an ingest credential.
+
 ## Environment
 
 | Var | Default | Notes |
