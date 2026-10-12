@@ -226,15 +226,6 @@ certs/grpc-dev/
 # Node.js
 node_modules/
 
-# Android and Gradle build outputs
-**/.gradle/
-mobile/android/app/build/
-mobile/android/.cxx/
-mobile/android/local.properties
-*.apk
-*.aab
-
-
 # Integration test OAuth2 tokens (local only — NEVER commit)
 *.token
 

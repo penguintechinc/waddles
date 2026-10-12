@@ -189,7 +189,7 @@ jobs:
         run: |
           set -euo pipefail
           bandit -r . -lll -iii \
-            --exclude ./node_modules,./.worktrees,./tests,./.venv,./mobile
+            --exclude ./node_modules,./.worktrees,./tests,./.venv
 
   # Slow static analysis (~17-21 min): CodeQL on go/javascript/python.
   # Runs in parallel with builds -- does NOT gate container builds or any other jobs.

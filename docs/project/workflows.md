@@ -201,7 +201,6 @@ Response modules that execute commands and user interactions:
 ├── version-release.yml                # Version release workflow
 ├── build-router.yml                   # Router module build
 ├── build-{module-name}.yml            # Individual module builds (24 files)
-├── android.yml                        # Android lint, tests, and debug build
 ├── containers.yml                     # Container orchestration
 ├── pr-validation.yml                  # Pull request and merge-queue tests
 └── security.yml                       # Dependency and code security checks
@@ -237,10 +236,6 @@ Response modules that execute commands and user interactions:
 - **Go** (if present):
   - `gosec` for security issues
   - `golangci-lint` for code quality
-
-- **Kotlin** (for mobile apps):
-  - Kotlin linting and static analysis
-  - Security vulnerability scanning
 
 ### Container Build Workflow (`build-container.yml` - Reusable Template)
 
@@ -315,13 +310,10 @@ jobs:
 - GitHub Release: `v0.2.0` (or current version)
 - Release artifacts and changelog
 
-### Mobile Workflow
+### Mobile / Desktop Clients
 
-**android.yml** validates the maintained Kotlin application under
-`mobile/android` with Gradle wrapper validation, lint, unit tests, and a debug
-assembly. **pr-validation.yml** provides the pull-request and merge-queue test
-gate. The former desktop workflows were removed when their source projects were
-retired.
+Mobile and desktop client code (and its CI) is not built from this repository.
+**pr-validation.yml** provides the pull-request and merge-queue test gate.
 
 ---
 

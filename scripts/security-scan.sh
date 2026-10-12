@@ -35,7 +35,7 @@ run_bandit() {
   # findings came from vendored site-packages and other branches; zero were
   # first-party. Same omission as CHECK_PRUNE_ARGS in scripts/lib/checks.sh.
   bandit -r . -lll -iii --quiet \
-    --exclude ./node_modules,./.worktrees,./.claude,./tests,./.venv,./venv,./mobile,./.git,*/.venv/*,*/site-packages/*
+    --exclude ./node_modules,./.worktrees,./.claude,./tests,./.venv,./venv,./.git,*/.venv/*,*/site-packages/*
 }
 run_check "bandit" bandit "$py_count" run_bandit
 

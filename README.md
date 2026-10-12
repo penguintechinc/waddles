@@ -109,6 +109,10 @@ See **[docs/QUICKSTART.md](docs/QUICKSTART.md)** for detailed deployment and fir
 
 **Browse all docs:** [/docs](docs/)
 
+## Client Applications
+
+Mobile and desktop client code does not live in this repository. Mobile apps (Android/iOS/Flutter) are owned by the **`penguinm`** repo; the desktop client is owned by **`penguind`** (the `penguin` repo). Waddles keeps only the server-side, client-facing APIs (hub-api).
+
 ## License
 
 **Open Source (GPL-3.0)** — free for personal, internal, and educational use. Commercial license required for SaaS hosting and embedded commercial deployments. See [LICENSE.md](LICENSE.md).
