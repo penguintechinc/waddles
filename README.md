@@ -4,7 +4,7 @@
 >
 > Twitch, Discord, Slack, YouTube, Kick, Teams, Mattermost, and Google Chat in one platform, extended by an App Bundle marketplace.
 
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](docs/LICENSE.md)
 [![Architecture](https://img.shields.io/badge/architecture-v3.0.x%20(alpha)-orange.svg)](docs/ARCHITECTURE.md)
 [![Rust Data Plane Spec](https://img.shields.io/badge/spec-Rust%20Data%20Plane%20%2B%20WASM-blueviolet.svg)](docs/superpowers/specs/2026-09-14-rust-data-plane-design.md)
 [![Kubernetes](https://img.shields.io/badge/kubernetes-Helm%20v3-blue.svg)](https://kubernetes.io/)
@@ -115,7 +115,7 @@ Mobile and desktop client code does not live in this repository. Mobile apps (An
 
 ## License
 
-**Open Source (GPL-3.0)** — free for personal, internal, and educational use. Commercial license required for SaaS hosting and embedded commercial deployments. See [LICENSE.md](LICENSE.md).
+**Open Source (AGPL-3.0, with PenguinTech exceptions)** — free for personal, internal, and non-commercial use. Commercial license required for SaaS hosting, resale, and embedded commercial deployments. SDKs/client libraries are MIT. See [docs/LICENSE.md](docs/LICENSE.md) and [docs/LICENSING.md](docs/LICENSING.md).
 
 ---
 

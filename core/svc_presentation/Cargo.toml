@@ -3,7 +3,7 @@ name = "svc-presentation"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Waddles overlay/presentation service (P1 scaffold) -- Axum/Tokio/SeaORM control plane for OBS browser-source overlays, replacing core/svc_presentation's Quart implementation (app.py/services/*) once P2-P9 land the render/push/hub routes on top of this skeleton. Depends on overlay_schema for every wire type and overlay_auth for the VIEW/PUSH axum guards -- no wire shape or auth logic is re-implemented in this crate."
 

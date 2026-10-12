@@ -3,7 +3,7 @@ name = "svc-ingest"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Waddles chat/event data-plane ingest service -- Rust rewrite (M5). Owns every inbound platform connection and HTTP intake surface; normalizes raw platform payloads, mints D30 workstream identity/binding, and writes each event exactly once onto the Valkey stream spine. No database: ingest has no SeaORM dependency, unlike svc_process/svc_action (see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md S4.1)."
 

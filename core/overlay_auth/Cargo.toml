@@ -3,7 +3,7 @@ name = "overlay_auth"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Unified overlay-auth contract (C4) for the streaming/overlay Rust rewrite: a per-community, rotatable, hashed-at-rest VIEW credential for browser-source GET routes, plus a community-scoped PUSH credential (built on `service_auth` machine JWTs) replacing the static `PRESENTATION_PUSH_TOKEN` bearer. Owned by the future svc-presentation-rust; P4/P5 (view routes) and the action-stage push path both consume this crate instead of re-implementing overlay auth."
 

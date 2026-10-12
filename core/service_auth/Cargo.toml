@@ -3,7 +3,7 @@ name = "service_auth"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Client + verifier for hub-api-issued per-service EdDSA machine JWTs (feature/eddsa-machine-jwt). Bootstraps with the pod's projected Kubernetes ServiceAccount token, caches and refreshes the resulting machine JWT, and verifies inbound machine JWTs against a JWKS-shaped trust bundle. SPIFFE/Skauswatch-ready: TrustBundle is a trait so a future JWT-SVID bundle source drops in without touching callers -- see docs comment in src/lib.rs."
 
