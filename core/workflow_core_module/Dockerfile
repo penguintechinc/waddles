@@ -18,8 +18,6 @@ COPY core/workflow_core_module/requirements.txt /app/
 COPY core/workflow_core_module /app/
 
 # Install module dependencies
-RUN uv pip install --system --no-cache -r requirements.txt
-
 # Compile Protobuf messages. Output MUST land in ./proto (not repo root) --
 # services/grpc_handler.py does `sys.path.insert(0, ".../proto")` then a
 # bare `import workflow_pb2`/`import workflow_pb2_grpc`; generating into
@@ -28,7 +26,8 @@ RUN uv pip install --system --no-cache -r requirements.txt
 # fallback (`workflow_pb2 = None`) on every container start, which then
 # crashed `class WorkflowGrpcService(workflow_pb2_grpc.WorkflowServiceServicer)`
 # at import time with AttributeError -- the gRPC service never actually ran.
-RUN python -m grpc_tools.protoc -I./proto --python_out=./proto --grpc_python_out=./proto ./proto/workflow.proto
+RUN uv pip install --system --no-cache -r requirements.txt && \
+    python -m grpc_tools.protoc -I./proto --python_out=./proto --grpc_python_out=./proto ./proto/workflow.proto
 
 # Create non-root user
 RUN useradd -m -u 1000 waddlebot && \

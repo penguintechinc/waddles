@@ -187,6 +187,8 @@ ENV HOME=/home/builder \
 ARG WASI_SDK_RELEASE=wasi-sdk-29
 ARG WASI_SDK_VERSION=29.0
 ARG WASI_SDK_SHA256=87d1d1a2879d139cdc624b968efad3d4a97b8078cdff95e63ac88ecafd1a0171
+# pipefail so a failed upstream stage of a piped RUN fails the build (DL4006)
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN curl -fsSL -o /tmp/wasi-sdk.tar.gz \
       "https://github.com/WebAssembly/wasi-sdk/releases/download/${WASI_SDK_RELEASE}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz" \
     && echo "${WASI_SDK_SHA256}  /tmp/wasi-sdk.tar.gz" | sha256sum -c - \
@@ -235,6 +237,8 @@ RUN pip install --no-cache-dir /app/libs/flask_core
 # this CLI (same WIT-conformance check hub-api's own onboarding endpoint uses); pinned +
 # checksum-verified identically to hub_api/Dockerfile's own install.
 ARG WASM_TOOLS_VERSION=1.259.0
+# pipefail so a failed upstream stage of a piped RUN fails the build (DL4006)
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \

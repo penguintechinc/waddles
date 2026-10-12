@@ -19,16 +19,14 @@ COPY trigger/receiver/googlechat_module/requirements.txt /app/
 COPY trigger/receiver/googlechat_module /app/
 
 # Install module dependencies
-RUN uv pip install --system --no-cache -r requirements.txt
-
 # Create log directory
-RUN mkdir -p /var/log/waddlebotlog
+RUN uv pip install --system --no-cache -r requirements.txt && \
+    mkdir -p /var/log/waddlebotlog
 
 # Create non-root user
-RUN useradd --create-home --shell /bin/bash appuser
-
 # Set proper permissions for app directory and log directory
-RUN chown -R appuser:appuser /app /var/log/waddlebotlog
+RUN useradd --create-home --shell /bin/bash appuser && \
+    chown -R appuser:appuser /app /var/log/waddlebotlog
 
 EXPOSE 8012
 

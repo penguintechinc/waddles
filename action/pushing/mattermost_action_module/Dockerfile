@@ -12,10 +12,9 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
-RUN uv pip install --system --no-cache -r requirements.txt
-
 # Create non-root user
-RUN useradd --create-home --shell /bin/bash appuser
+RUN uv pip install --system --no-cache -r requirements.txt && \
+    useradd --create-home --shell /bin/bash appuser
 
 # Copy application code with ownership
 COPY --chown=appuser:appuser . .

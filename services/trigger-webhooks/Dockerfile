@@ -26,10 +26,9 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # (pip-26.0.1.dist-info) that the COPY above doesn't remove (COPY merges,
 # it doesn't delete stale destination files) -- drop it so only the
 # builder's patched pip metadata (26.2.1) remains.
-RUN find /usr/local/lib/python3.13/site-packages -maxdepth 1 -name 'pip-*.dist-info' ! -name 'pip-26.2.1.dist-info' -exec rm -rf {} +
-
 # Create non-root user
-RUN useradd --create-home --shell /bin/bash appuser
+RUN find /usr/local/lib/python3.13/site-packages -maxdepth 1 -name 'pip-*.dist-info' ! -name 'pip-26.2.1.dist-info' -exec rm -rf {} + && \
+    useradd --create-home --shell /bin/bash appuser
 
 # Copy application code and module directories with ownership
 COPY --chown=appuser:appuser services/trigger-webhooks/app.py .
