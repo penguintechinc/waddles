@@ -67,7 +67,7 @@ async def test_mem0_service():
     try:
         result = await service.add_memory(
             content="The user prefers Python programming",
-            user_id="user123",
+            user_id=Mem0Service.user_key("00000000-0000-4000-8000-000000000123"),
             metadata={"category": "preference"}
         )
         logger.info(f"Added memory: {result}")
