@@ -130,6 +130,7 @@ class TestCheckPermission:
         svc, dal, logger = _service()
         svc._is_workflow_owner = MagicMock(side_effect=Exception("boom"))
         # _is_workflow_owner is awaited, so make it a coroutine function
+
         async def _raise(*a, **k):
             raise Exception("boom")
         svc._is_workflow_owner = _raise

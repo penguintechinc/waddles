@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in reputation_pb2_grpc.py depends on'
+        + ' but the generated code in reputation_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -80,8 +80,9 @@ def add_ReputationServiceServicer_to_server(servicer, server):
     server.add_generic_rpc_handlers((generic_handler,))
     server.add_registered_method_handlers('waddlebot.reputation.ReputationService', rpc_method_handlers)
 
-
  # This class is part of an EXPERIMENTAL API.
+
+
 class ReputationService(object):
     """Missing associated documentation comment in .proto file."""
 

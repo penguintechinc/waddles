@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from flask_core.secrets import require_secret_key
 load_dotenv()
 
+
 class Config:
     MODULE_NAME = 'server_manager_interaction_module'
     MODULE_VERSION = '1.0.0'

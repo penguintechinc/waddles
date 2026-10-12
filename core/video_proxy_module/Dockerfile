@@ -33,10 +33,9 @@ RUN uv pip install --system --no-cache -r requirements.txt
 COPY core/video_proxy_module /app/
 
 # Create log directory
-RUN mkdir -p /var/log/waddlebotlog
-
 # Create PyDAL migration log directory
-RUN mkdir -p /app/databases
+RUN mkdir -p /var/log/waddlebotlog && \
+    mkdir -p /app/databases
 
 # Copy standard healthcheck script
 COPY scripts/healthcheck.py /usr/local/bin/healthcheck.py
@@ -46,8 +45,6 @@ RUN chmod 755 /usr/local/bin/healthcheck.py
 RUN groupadd -r waddlebot && useradd -r -g waddlebot -m waddlebot
 
 # Set proper permissions for app directory and log directory
-RUN chown -R waddlebot:waddlebot /app /var/log/waddlebotlog
-
 # Switch to non-root user
 # Remove base image's own bundled pip + ensurepip wheel: pip vendors an
 # outdated msgpack (GHSA-6v7p-g79w-8964) and pkg_resources/setuptools
@@ -55,7 +52,8 @@ RUN chown -R waddlebot:waddlebot /app /var/log/waddlebotlog
 # hasn't picked up yet. Neither pip nor its vendor tree is imported by
 # any service at runtime (installs happen at build time via uv/pip
 # above), so removing them is a real fix, not a suppression.
-RUN rm -rf /usr/local/lib/python3.13/site-packages/pip \
+RUN chown -R waddlebot:waddlebot /app /var/log/waddlebotlog && \
+    rm -rf /usr/local/lib/python3.13/site-packages/pip \
     /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
     /usr/local/lib/python3.13/ensurepip
 

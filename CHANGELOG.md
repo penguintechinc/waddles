@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- CI verification integrity -- gates that could not fail now can: `scripts/lib/checks.sh` counters no longer turn a crashed
+  scanner into "0 findings" (`tool_capture`, non-numeric counter = FAIL); beta `rollout status` + smoke steps in `ci-cd.yml` and the
+  `security-scan` job in `containers.yml` no longer masked (`|| true` / `|| echo` / `continue-on-error`); `.checks-baseline`
+  ceilings re-measured and lowered; pytest suites now fail below 90% line coverage (`.coveragerc` `fail_under` + `addopts`);
+  seeded-failure proof in `scripts/ci/tests/test_checks_gate_integrity.sh` (`make test-gate-integrity`, CI job `gate-integrity`)
+
 ### Added
 - Ban-evasion suppression (GDPR Art. 6(1)(f), counsel to verify): an erased user with an ACTIVE ban leaves one per-tenant keyed
   one-way code (`suppression_records`, migration `0059_suppression_records`; HMAC-SHA256 under an HKDF key derived per tenant

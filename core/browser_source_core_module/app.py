@@ -151,6 +151,7 @@ async def receive_caption():
 
     return success_response({"received": True})
 
+
 app.register_blueprint(api_bp)
 
 overlay_bp = Blueprint('overlay', __name__, url_prefix='/overlay')

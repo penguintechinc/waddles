@@ -268,7 +268,7 @@ class InventoryService:
                 return current_item
 
             # Add updated_at timestamp
-            update_fields.append(f"updated_at = NOW()")
+            update_fields.append("updated_at = NOW()")
 
             # Add WHERE clause params
             params.append(item_id)

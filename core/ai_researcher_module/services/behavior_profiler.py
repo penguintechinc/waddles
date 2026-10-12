@@ -122,7 +122,7 @@ class BehaviorProfiler:
 
         try:
             logger.info(
-                f"Profiling user behavior",
+                "Profiling user behavior",
                 extra={
                     'community_id': community_id,
                     'platform': platform,
@@ -203,7 +203,7 @@ class BehaviorProfiler:
             processing_time = int((time.time() - start_time) * 1000)
 
             logger.info(
-                f"User behavior profile completed",
+                "User behavior profile completed",
                 extra={
                     'profile_id': profile_id,
                     'platform_user_id': platform_user_id,

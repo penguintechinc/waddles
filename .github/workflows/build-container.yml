@@ -49,34 +49,48 @@ jobs:
       - name: Determine version and suffix
         id: version
         run: |
-          if [ -f .version ]; then
-            VERSION=$(cat .version | tr -d '[:space:]')
+          set -euo pipefail
+          # Five-tier tag scheme (devops.md CI/CD Tag Naming) -- tier -> tag -> trigger:
+          #   alpha : any non-release branch push / dispatch -> alpha-<epoch>
+          #   beta  : push to release/v*.X (or main)         -> beta-<epoch>
+          #   gamma : GitHub release flagged pre-release     -> gamma-<epoch>   (release: prereleased)
+          #   prod  : GitHub release published as release    -> v{Major}.{Minor}.{Patch} + latest (release: released)
+          # <epoch> = unix seconds, computed once here so every matrix job shares it.
+          # .version is NOT used for tags. `suffix` is kept (always empty) so
+          # downstream ${version}${suffix} references keep resolving.
+          EPOCH="$(date +%s)"
+          IS_RELEASE=false
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            ACTION="$(jq -r '.action' "$GITHUB_EVENT_PATH")"
+            case "$ACTION" in
+              released)
+                SEMVER_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
+                if ! [[ "$GITHUB_REF_NAME" =~ $SEMVER_RE ]]; then
+                  echo "::error::release tag '$GITHUB_REF_NAME' is not v{Major}.{Minor}.{Patch}" >&2
+                  exit 1
+                fi
+                TAG="$GITHUB_REF_NAME"
+                IS_RELEASE=true
+                ;;
+              prereleased)
+                TAG="gamma-${EPOCH}"
+                ;;
+              *)
+                echo "::error::unsupported release action '$ACTION'" >&2
+                exit 1
+                ;;
+            esac
+          elif [[ "$GITHUB_REF" == refs/heads/release/v* ]] || [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            TAG="beta-${EPOCH}"
           else
-            VERSION="0.0.0"
+            TAG="alpha-${EPOCH}"
           fi
-
-          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
-
-          # Check if .version file changed (indicates a release)
-          if git diff HEAD^ HEAD --name-only | grep -q "^.version$"; then
-            IS_RELEASE="true"
-          else
-            IS_RELEASE="false"
-          fi
-
-          if [ "$IS_RELEASE" = "true" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "suffix=" >> $GITHUB_OUTPUT
-            echo "is_release=true" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == refs/heads/v* ]]; then
-            echo "suffix=-beta" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "suffix=-gamma" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-          else
-            echo "suffix=-alpha" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-          fi
+          {
+            echo "version=${TAG}"
+            echo "suffix="
+            echo "is_release=${IS_RELEASE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${TAG} (release=${IS_RELEASE})"
 
           # Derive the whole matrix object + multi_arch flag from the single
           # BUILD_PLATFORMS toggle (env, top of file). A comma means more

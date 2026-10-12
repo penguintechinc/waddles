@@ -86,6 +86,7 @@ async def execute_alias():
         return success_response({"command": command})
     return error_response("Alias not found", status_code=404)
 
+
 app.register_blueprint(api_bp)
 
 if __name__ == '__main__':

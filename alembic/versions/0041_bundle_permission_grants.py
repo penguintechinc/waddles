@@ -78,6 +78,7 @@ def _load_matrix_module():  # type: ignore[no-untyped-def]
     spec.loader.exec_module(module)  # type: ignore[union-attr]
     return module
 
+
 #: Not part of the hub-api-owned RBAC matrix (config/postgres/rbac-matrix.yaml)
 #: -- the Rust data-plane's own read-only role, provisioned by a separate
 #: migration (0025/0028's own precedent). Guarded by IF EXISTS so this

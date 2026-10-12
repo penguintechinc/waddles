@@ -28,7 +28,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: bundle-executor-action
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "bundleExecutorAction")) }}
   replicas: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -47,6 +49,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: bundle-executor-action
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       automountServiceAccountToken: false
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -62,6 +65,7 @@ spec:
         image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
         # Values-driven -- same as templates/bundle-executor.yaml (see svc-process-rust.yaml).
         imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001

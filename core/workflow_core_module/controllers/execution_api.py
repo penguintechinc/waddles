@@ -735,7 +735,7 @@ async def list_workflow_executions(workflow_id: str):
     query += f" ORDER BY {sort_by} {sort_order.upper()}"
 
     # Get total count
-    count_query = f"SELECT COUNT(*) FROM workflow_executions WHERE workflow_id = %s"
+    count_query = "SELECT COUNT(*) FROM workflow_executions WHERE workflow_id = %s"
     count_params = [workflow_id]
     if status_filter:
         count_query += " AND status = %s"
@@ -755,7 +755,7 @@ async def list_workflow_executions(workflow_id: str):
     offset = (page - 1) * per_page
 
     # Apply pagination
-    query += f" LIMIT %s OFFSET %s"
+    query += " LIMIT %s OFFSET %s"
     params.extend([per_page, offset])
 
     # Execute query

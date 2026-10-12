@@ -255,7 +255,7 @@ class TeamsBotService:
                 type=ActivityTypes.message,
                 text=message_text,
                 channel_id="msteams",
-                service_url=f"https://smba.trafficmanager.net/",
+                service_url="https://smba.trafficmanager.net/",
                 conversation={"id": channel_id},
                 recipient=ChannelAccount(id=channel_id, name="Teams"),
                 from_property=ChannelAccount(id=self.app_id, name="WaddleBot")

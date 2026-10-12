@@ -36,10 +36,9 @@ COPY action/pushing/googlechat_action_module/app.py /app/
 COPY action/pushing/googlechat_action_module/services /app/services/
 
 # Create log directory
-RUN mkdir -p /var/log/waddlebotlog
-
 # Create PyDAL migration log directory
-RUN mkdir -p /tmp/pydal
+RUN mkdir -p /var/log/waddlebotlog && \
+    mkdir -p /tmp/pydal
 
 # Copy standard healthcheck script
 COPY scripts/healthcheck.py /usr/local/bin/healthcheck.py

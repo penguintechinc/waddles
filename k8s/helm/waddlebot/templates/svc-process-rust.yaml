@@ -23,7 +23,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-process-rust
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcProcessRust")) }}
   replicas: {{ .Values.pipeline.rustDataPlane.svcProcess.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -49,6 +51,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-process-rust
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       # Dedicated identity (feature/eddsa-machine-jwt, security review HIGH
       # finding) -- distinguishes this deployment's pods from every other
       # workload in the namespace for `flask_core.service_jwt`'s TokenReview
@@ -74,6 +77,7 @@ spec:
         # satisfy, so the pod never becomes Ready). Set global.imagePullPolicy=Always per-env
         # only when deploying a mutable tag.
         imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_process/
         # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
         # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
@@ -313,6 +317,7 @@ spec:
           value: {{ $value | quote }}
         {{- end }}
         {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health

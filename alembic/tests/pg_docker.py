@@ -76,6 +76,7 @@ def throwaway_service_role_passwords() -> dict[str, str]:
 def _default_service_role_passwords_json() -> str:
     return json.dumps(throwaway_service_role_passwords())
 
+
 _BOOTSTRAP_SQL = """
 CREATE TABLE tenants (
     id SERIAL PRIMARY KEY,

@@ -93,6 +93,7 @@ def required_level(tier: str) -> int:
     """
     return TIER_LEVELS.get(normalize_tier(tier), UNKNOWN_REQUIRED_LEVEL)
 
+
 #: ``flag -> min_tier`` for every non-free Feature contract (26 as of the
 #: eight-module catalog). Keep alphabetical by flag within each tier so a
 #: drift-test failure diff is easy to read.

@@ -118,9 +118,13 @@ class AsyncDAL:
         """Define table on primary DAL (for migrations)"""
         table = self.dal.define_table(*args, **kwargs)
 
-        # Also define on read replica if exists
+        # Also define on read replica if exists. A pydal Field binds to exactly one table,
+        # so passing the same Field objects to the second DAL raised
+        # `ValueError: Field ... is already bound to a table` -- the replica gets clones.
         if self.read_dal:
-            self.read_dal.define_table(*args, **kwargs)
+            replica_args = [a.clone() if isinstance(a, Field) else a for a in args]
+            replica_kwargs = {k: (v.clone() if isinstance(v, Field) else v) for k, v in kwargs.items()}
+            self.read_dal.define_table(*replica_args, **replica_kwargs)
 
         return table
 
@@ -457,10 +461,21 @@ class AsyncDAL:
         """Close database connections and thread pool"""
         loop = asyncio.get_event_loop()
 
+        def _close_one(dal):
+            try:
+                dal.close()
+            except AttributeError:
+                # pydal registers each DAL in a THREAD-LOCAL `_pydal_db_instances_`
+                # at construction, so DAL.close() raised AttributeError when run on
+                # this executor thread (never the constructing one) and the
+                # connections were never released. Close this thread's adapter
+                # connection directly (a no-op if it never opened one).
+                dal._adapter.close()
+
         def _close():
-            self.dal.close()
+            _close_one(self.dal)
             if self.read_dal:
-                self.read_dal.close()
+                _close_one(self.read_dal)
 
         await loop.run_in_executor(self.executor, _close)
         self.executor.shutdown(wait=True)

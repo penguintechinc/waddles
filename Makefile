@@ -121,6 +121,11 @@ test-functional:
 test-security:
 	@bash scripts/security-scan.sh
 
+# Seeded-failure proof that the lint/security gates can fail (crashed scanner,
+# non-numeric counter, new finding above baseline) -- Verification Integrity.
+test-gate-integrity:
+	@bash scripts/ci/tests/test_checks_gate_integrity.sh
+
 # Supply-chain signing self-test (scripts/ci/supply-chain.sh) against a throwaway local
 # registry + ephemeral keys, plus the Kyverno admission render tests. Needs cosign, syft,
 # jq, docker, helm and pytest on PATH; a missing tool fails loudly, it never skips.

@@ -92,7 +92,7 @@ class WorkflowServiceServicer:
             platform = request.platform
 
             self.logger.info(
-                f"gRPC: TriggerWorkflow received",
+                "gRPC: TriggerWorkflow received",
                 extra={
                     "event_type": "AUDIT",
                     "action": "grpc_trigger_workflow",

@@ -477,6 +477,37 @@ class TestReuseDetection:
             await probe.post("/api/v1/auth/refresh", headers=_refresh_headers(winner_cookie))
         ).status_code == 200
 
+    async def test_parallel_refreshes_survive_a_slow_marker_store(
+        self,
+        browser: Any,
+        probe: Any,
+        auth_db: Any,
+        isolated_token_revocation: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: the rotation marker must exist before a losing racer looks for it.
+
+        The marker used to be written AFTER the winner's compare-and-swap committed, so a
+        loser racing that gap (a slow/remote store such as Valkey) found no marker, read the
+        parallel refresh as token theft and revoked the whole session -- a flaky 401 in CI.
+        A slow marker write makes that gap wide and deterministic.
+        """
+        _seed_user(auth_db)
+        token = _cookie_value(await _login(browser), REFRESH_COOKIE_NAME) or ""
+        real_put = isolated_token_revocation.aput_marker
+
+        async def slow_put(*args: Any, **kwargs: Any) -> Any:
+            await asyncio.sleep(0.3)
+            return await real_put(*args, **kwargs)
+
+        monkeypatch.setattr(isolated_token_revocation, "aput_marker", slow_put)
+        results = await asyncio.gather(
+            *(probe.post("/api/v1/auth/refresh", headers=_refresh_headers(token)) for _ in range(5))
+        )
+        assert [r.status_code for r in results] == [200] * 5
+        (row,) = _sessions(auth_db)
+        assert row.is_active and row.revoked_at is None
+
     async def test_a_grace_replay_hands_out_access_only_and_never_a_second_refresh_token(
         self, probe: Any, browser: Any, auth_db: Any
     ) -> None:

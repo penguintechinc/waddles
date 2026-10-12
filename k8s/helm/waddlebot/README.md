@@ -386,6 +386,26 @@ MinIO's own KMS backend configuration.
 | `securityContext.allowPrivilegeEscalation` | Allow privilege escalation | `false` |
 | `securityContext.readOnlyRootFilesystem` | Read-only root filesystem | `false` |
 
+### Availability: shutdown, startup, autoscaling, disruption budgets
+
+Helpers: `templates/_resilience.tpl`, `templates/_autoscaling.tpl`; HPA/PDB: `templates/autoscaling.yaml`.
+Tests: `tests/test_scale_and_shutdown_hardening_render.py`.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `shutdown.terminationGracePeriodSeconds` | Pod drain budget before SIGKILL, every Deployment (must exceed the preStop sleep) | `30` |
+| `shutdown.preStopSleepSeconds` | `preStop` sleep so the pod leaves Service endpoints before SIGTERM (`0` = off). Native `sleep` action on k8s >= 1.30, `exec sleep` below | `5` |
+| `startupProbe.periodSeconds` / `.failureThreshold` | Startup budget (30 x 5s = 150s) for hub-api, the Rust data-plane stages, the Python pipeline stages, svc-streaming, svc-presentation | `5` / `30` |
+| `autoscaling.defaults.*` | HPA defaults: `enabled` (off), `minReplicas`, `maxReplicas`, `targetCPUUtilizationPercentage`, optional `targetMemoryUtilizationPercentage` / `behavior` | off, `2`, `10`, `70` |
+| `autoscaling.services.<key>.*` | Per-service override (field-by-field over `defaults`); production enables it for hub-api, hub-webui, svc-{action,process}-rust, both bundle-executors, reputation | `{}` |
+| `podDisruptionBudget.enabled` / `.minAvailable` / `.maxUnavailable` | PDB for every registered service that effectively runs >1 replica (`services.<key>` overrides) | `true` / `1` / `""` |
+
+- HPA keys: `hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor bundleExecutorAction reputation router`. PDB-only (never an HPA): `svcIngest svcIngestRust egressProxy`. Needs metrics-server + container resource requests.
+- When a service's HPA is enabled its Deployment omits `spec.replicas`, so `helm upgrade` never resets the autoscaler.
+- A PDB is skipped for a single effective replica (it would block node drains), so alpha/beta/gamma render none.
+- **Singletons are never autoscaled or budgeted:** `svc-streaming` (stateful RTMP/SRT + stream dir, `strategy: Recreate`, replicas 1, 60s grace) and `svc-presentation` (overlay fan-out is in-process).
+- **svc-presentation must stay at 1 replica.** With >1, a pushed frame only reaches clients on the pod that received it. The chart fails the render for `pipeline.svcPresentation.replicas > 1` unless `pipeline.svcPresentation.sharedFanout.enabled=true` -- the shared fan-out backend is not built yet (roadmap), so do not set it.
+
 ## Installation
 
 ### Install from local chart

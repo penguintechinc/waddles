@@ -25,14 +25,17 @@ async def example_basic_mode_switching():
     class MockMusicPlayer:
         async def get_playback_state(self, community_id):
             return None
+
         async def pause(self, community_id):
             return True
+
         async def stop_playback(self, community_id):
             return True
 
     class MockRadioPlayer:
         async def get_current_station(self, community_id):
             return None
+
         async def stop_station(self, community_id):
             return True
 
@@ -86,16 +89,20 @@ async def example_mode_state_tracking():
     class MockMusicPlayer:
         async def get_playback_state(self, community_id):
             return None
+
         async def pause(self, community_id):
             return True
+
         async def resume(self, community_id):
             return True
+
         async def stop_playback(self, community_id):
             return True
 
     class MockRadioPlayer:
         async def get_current_station(self, community_id):
             return None
+
         async def stop_station(self, community_id):
             return True
 
@@ -138,14 +145,17 @@ async def example_mode_state_dict():
     class MockMusicPlayer:
         async def get_playback_state(self, community_id):
             return None
+
         async def pause(self, community_id):
             return True
+
         async def stop_playback(self, community_id):
             return True
 
     class MockRadioPlayer:
         async def get_current_station(self, community_id):
             return None
+
         async def stop_station(self, community_id):
             return True
 
@@ -184,8 +194,10 @@ async def example_stop_playback():
     class MockMusicPlayer:
         async def get_playback_state(self, community_id):
             return None
+
         async def pause(self, community_id):
             return True
+
         async def stop_playback(self, community_id):
             logger.info(f"[MockMusicPlayer] Stopping music playback for community {community_id}")
             return True
@@ -193,6 +205,7 @@ async def example_stop_playback():
     class MockRadioPlayer:
         async def get_current_station(self, community_id):
             return None
+
         async def stop_station(self, community_id):
             logger.info(f"[MockRadioPlayer] Stopping radio station for community {community_id}")
             return True

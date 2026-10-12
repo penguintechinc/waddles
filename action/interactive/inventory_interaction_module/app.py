@@ -38,6 +38,7 @@ async def startup():
 async def status():
     return success_response({"status": "operational", "module": Config.MODULE_NAME})
 
+
 app.register_blueprint(api_bp)
 
 if __name__ == '__main__':
