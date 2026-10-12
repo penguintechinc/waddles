@@ -95,6 +95,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bundle_audit.record` is fail-loud: a failed `audit_log` insert raises `AuditWriteError` instead of being swallowed
 
 ### Fixed
+- Rust data plane ops hardening (release-audit HIGHs): `egress-proxy` now handles SIGTERM/SIGINT -- stops accepting, drains in-flight
+  requests and CONNECT tunnels for at most `SHUTDOWN_DRAIN_SECONDS` (default 25s) and exits 0, so rollouts no longer end in SIGKILL.
+  `svc-action` / `svc-process` host-API writer channels are now bounded (`HOST_API_WRITER_CHANNEL_CAPACITY`, producer backpressure,
+  shed-with-metric after `HOST_API_WRITER_SEND_TIMEOUT_MS`), `host-call` handler concurrency is capped per connection
+  (`HOST_API_MAX_CONCURRENT_HOST_CALLS`, excess gets an `overloaded` reply) and accepted connections are capped
+  (`HOST_API_MAX_CONNECTIONS`); new counters `host_api_writer_backpressure_total`, `host_api_writer_shed_total`,
+  `host_api_host_calls_shed_total`, `host_api_connections_rejected_total`
 - Legacy `config/postgres` SQL migrations 097/099/100/101/102 never reached existing databases (the baseline replays
   SQL only on a fresh DB). Alembic revision `0060_port_legacy_sql_097_102` re-applies them idempotently and ledgers them
   in `schema_migrations`; `alembic/tests/test_legacy_sql_ownership.py` now fails CI for any un-bridged `NNN_*.sql`

@@ -164,6 +164,26 @@ pub struct CliConfig {
     /// rollouts (alpha 2026-10-02).
     #[arg(long, env = "EXECUTOR_GRACE_SECONDS", default_value_t = 60)]
     pub executor_grace_seconds: u64,
+    /// Capacity (frames) of each host-API connection's bounded writer
+    /// channel. A full channel applies backpressure to producers rather
+    /// than growing memory without limit.
+    #[arg(long, env = "HOST_API_WRITER_CHANNEL_CAPACITY", default_value_t = 1024)]
+    pub host_api_writer_channel_capacity: usize,
+    /// How long a producer awaits writer-channel capacity before the frame
+    /// is shed (logged + metriced, never silent).
+    #[arg(long, env = "HOST_API_WRITER_SEND_TIMEOUT_MS", default_value_t = 30000)]
+    pub host_api_writer_send_timeout_ms: u64,
+    /// Cap on concurrently running `host-call` handler tasks per
+    /// connection; the excess is shed with an `overloaded` error reply.
+    #[arg(
+        long,
+        env = "HOST_API_MAX_CONCURRENT_HOST_CALLS",
+        default_value_t = 256
+    )]
+    pub host_api_max_concurrent_host_calls: usize,
+    /// Cap on simultaneously accepted host-API connections.
+    #[arg(long, env = "HOST_API_MAX_CONNECTIONS", default_value_t = 64)]
+    pub host_api_max_connections: usize,
 
     /// Interim, env-driven substitute for the `GET /api/v1/distribution/
     /// bundles?stage=process` grant list (spec SS4.2/SS6.7) -- **TODO(M4+)**:
@@ -454,6 +474,30 @@ impl CliConfig {
                 reason: "must be positive".to_string(),
             });
         }
+        if self.host_api_writer_channel_capacity == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_writer_channel_capacity",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.host_api_writer_send_timeout_ms == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_writer_send_timeout_ms",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.host_api_max_concurrent_host_calls == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_max_concurrent_host_calls",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.host_api_max_connections == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_max_connections",
+                reason: "must be positive".to_string(),
+            });
+        }
         if self.executor_grace_seconds == 0 {
             return Err(ConfigError::InvalidValue {
                 field: "executor_grace_seconds",
@@ -729,6 +773,45 @@ mod tests {
         assert_eq!(cli.poll_interval_s, 5.0);
         assert_eq!(cli.process_app_id, "");
         cli.validate().expect("defaults must be valid");
+    }
+
+    /// The host-API bounds default to the documented values and each zero
+    /// value is a hard startup error (a zero-capacity channel or a zero
+    /// permit semaphore would deadlock every send / shed every call).
+    #[test]
+    fn host_api_bounds_default_and_reject_zero() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.host_api_writer_channel_capacity, 1024);
+        assert_eq!(cli.host_api_writer_send_timeout_ms, 30_000);
+        assert_eq!(cli.host_api_max_concurrent_host_calls, 256);
+        assert_eq!(cli.host_api_max_connections, 64);
+        assert!(cli.validate().is_ok());
+
+        for (flag, field) in [
+            (
+                "--host-api-writer-channel-capacity",
+                "host_api_writer_channel_capacity",
+            ),
+            (
+                "--host-api-writer-send-timeout-ms",
+                "host_api_writer_send_timeout_ms",
+            ),
+            (
+                "--host-api-max-concurrent-host-calls",
+                "host_api_max_concurrent_host_calls",
+            ),
+            ("--host-api-max-connections", "host_api_max_connections"),
+        ] {
+            let cli = CliConfig::parse_from(["svc-process", flag, "0"]);
+            assert_eq!(
+                cli.validate().unwrap_err(),
+                ConfigError::InvalidValue {
+                    field,
+                    reason: "must be positive".to_string(),
+                },
+                "{flag}=0 must be rejected"
+            );
+        }
     }
 
     #[test]

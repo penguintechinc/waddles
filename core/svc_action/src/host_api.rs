@@ -12,6 +12,24 @@
 //! `load`/`invoke`; here, the stage answers `hello` and sends `load`/
 //! `invoke`. `core/bundle_executor/src/tls.rs` is the client-TLS mirror of
 //! [`build_server_config`] below.
+//!
+//! # Bounds and backpressure
+//!
+//! Nothing on a host-API connection grows without limit (release-audit ops
+//! HIGH). Every bound is config-sized (`CliConfig::host_api_*`, env in
+//! parentheses) and every overflow is loud -- WARN/ERROR log plus a
+//! Prometheus counter -- never a silent drop:
+//!
+//! | Bound | Default | On overflow |
+//! |---|---|---|
+//! | Writer channel capacity (`HOST_API_WRITER_CHANNEL_CAPACITY`) | 1024 frames | Producer **awaits capacity** (`host_api_writer_backpressure_total`); after `HOST_API_WRITER_SEND_TIMEOUT_MS` (30s) the frame is shed with [`HostApiError::WriterBackpressure`] (`host_api_writer_shed_total`, ERROR) |
+//! | In-flight `host-call` handlers (`HOST_API_MAX_CONCURRENT_HOST_CALLS`) | 256 / connection | Excess call answered immediately with an `overloaded` error reply (`host_api_host_calls_shed_total`) -- the read loop never stalls |
+//! | Accepted connections (`HOST_API_MAX_CONNECTIONS`) | 64 | New TCP connection dropped before the TLS handshake (`host_api_connections_rejected_total`) |
+//!
+//! The read loop itself never awaits writer capacity (its `pong` replies and
+//! shed replies use a non-blocking send), so a peer that has stopped
+//! draining cannot deadlock the connection against itself; the heartbeat
+//! supervisor ([`run_heartbeat`]) then reaps it.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -31,7 +49,7 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use socket2::{SockRef, TcpKeepalive};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore, TryAcquireError};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
@@ -60,6 +78,58 @@ pub enum HostApiError {
     PeerError { code: ErrorCode, message: String },
     #[error("heartbeat timed out waiting for pong")]
     HeartbeatTimeout,
+    /// The bounded writer channel stayed full for the whole send timeout --
+    /// the peer is not draining frames. The frame is shed (never silently
+    /// dropped: counted in `host_api_writer_shed_total` and logged at
+    /// ERROR) rather than queued without bound.
+    #[error("writer channel full for {waited_ms}ms (peer not draining), frame shed")]
+    WriterBackpressure { waited_ms: u64 },
+}
+
+/// Default capacity of a connection's bounded writer channel (frames).
+pub const DEFAULT_WRITER_CHANNEL_CAPACITY: usize = 1024;
+/// Default time a producer waits for writer-channel capacity before the
+/// frame is shed.
+pub const DEFAULT_WRITER_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default cap on concurrently running `host-call` handlers per connection.
+pub const DEFAULT_MAX_CONCURRENT_HOST_CALLS: usize = 256;
+/// Default cap on simultaneously accepted host-API connections.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
+
+/// Resource bounds for one host-API connection -- all config-sized
+/// (`CliConfig::host_api_*`), never unbounded. See the module doc's
+/// "Bounds and backpressure" section.
+#[derive(Debug, Clone)]
+pub struct HostApiLimits {
+    /// Bounded writer-channel capacity (frames).
+    pub writer_channel_capacity: usize,
+    /// How long a producer awaits capacity on a full writer channel before
+    /// the frame is shed with [`HostApiError::WriterBackpressure`].
+    pub writer_send_timeout: Duration,
+    /// Max in-flight `host-call` handler tasks on this connection; the
+    /// excess is shed with a `overloaded` error reply.
+    pub max_concurrent_host_calls: usize,
+}
+
+impl Default for HostApiLimits {
+    fn default() -> Self {
+        Self {
+            writer_channel_capacity: DEFAULT_WRITER_CHANNEL_CAPACITY,
+            writer_send_timeout: DEFAULT_WRITER_SEND_TIMEOUT,
+            max_concurrent_host_calls: DEFAULT_MAX_CONCURRENT_HOST_CALLS,
+        }
+    }
+}
+
+impl HostApiLimits {
+    /// Builds the limits from the parsed CLI/env configuration.
+    pub fn from_cli(cli: &CliConfig) -> Self {
+        Self {
+            writer_channel_capacity: cli.host_api_writer_channel_capacity,
+            writer_send_timeout: Duration::from_millis(cli.host_api_writer_send_timeout_ms),
+            max_concurrent_host_calls: cli.host_api_max_concurrent_host_calls,
+        }
+    }
 }
 
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, HostApiError> {
@@ -135,20 +205,45 @@ pub fn build_server_config(cli: &CliConfig) -> Result<ServerConfig, HostApiError
 pub struct Connection {
     ids: IdAllocator,
     pending: CorrelationTable,
-    writer_tx: mpsc::UnboundedSender<Frame>,
+    /// Bounded: a slow/stuck peer applies backpressure to producers
+    /// ([`Connection::send`]) instead of growing memory without limit.
+    writer_tx: mpsc::Sender<Frame>,
+    send_timeout: Duration,
+    /// Caps in-flight `host-call` handler tasks (see [`read_loop`]).
+    host_call_permits: Arc<Semaphore>,
     closed: Arc<std::sync::atomic::AtomicBool>,
     scopes: std::sync::Mutex<std::collections::HashMap<u64, InvokeScope>>,
+    /// Wired once in production (`serve`) so writer-backpressure/shed
+    /// events are metriced; `OnceLock` so the many bare
+    /// `Connection::new` test call sites need no metrics plumbing.
+    metrics: std::sync::OnceLock<crate::telemetry::HostApiMetrics>,
 }
 
 impl Connection {
-    fn new(writer_tx: mpsc::UnboundedSender<Frame>) -> Arc<Self> {
+    /// A connection with the default [`HostApiLimits`] (test-only; production
+    /// always builds via [`Connection::with_limits`]).
+    #[cfg(test)]
+    fn new(writer_tx: mpsc::Sender<Frame>) -> Arc<Self> {
+        Self::with_limits(writer_tx, &HostApiLimits::default())
+    }
+
+    fn with_limits(writer_tx: mpsc::Sender<Frame>, limits: &HostApiLimits) -> Arc<Self> {
         Arc::new(Self {
             ids: IdAllocator::new(),
             pending: CorrelationTable::new(),
             writer_tx,
+            send_timeout: limits.writer_send_timeout,
+            host_call_permits: Arc::new(Semaphore::new(limits.max_concurrent_host_calls)),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scopes: std::sync::Mutex::new(std::collections::HashMap::new()),
+            metrics: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Wires the Prometheus handles in (production only -- called by
+    /// `serve` right after the handshake).
+    pub(crate) fn set_metrics(&self, metrics: crate::telemetry::HostApiMetrics) {
+        let _ = self.metrics.set(metrics);
     }
 
     /// Sends `message` under a freshly allocated id and awaits the peer's
@@ -163,7 +258,7 @@ impl Connection {
         }
         let id = self.ids.next_id();
         let rx = self.pending.register(id)?;
-        self.send(Frame::new(id, message))?;
+        self.send(Frame::new(id, message)).await?;
         rx.await.map_err(|_| HostApiError::ConnectionUnavailable)
     }
 
@@ -189,7 +284,7 @@ impl Connection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id, scope);
-        let send_result = self.send(Frame::new(id, Message::Invoke(body)));
+        let send_result = self.send(Frame::new(id, Message::Invoke(body))).await;
         if let Err(err) = send_result {
             self.scopes
                 .lock()
@@ -222,15 +317,66 @@ impl Connection {
     /// Sends `shutdown` without awaiting a reply (spec §6.6: "connection
     /// closed after in-flight calls drain or `grace_ms` elapses" -- no
     /// reply frame is defined for this message kind).
-    pub fn shutdown(&self, grace_ms: u64) -> Result<(), HostApiError> {
+    pub async fn shutdown(&self, grace_ms: u64) -> Result<(), HostApiError> {
         let id = self.ids.next_id();
         self.send(Frame::new(id, Message::Shutdown(ShutdownBody { grace_ms })))
+            .await
     }
 
-    fn send(&self, frame: Frame) -> Result<(), HostApiError> {
-        self.writer_tx
-            .send(frame)
-            .map_err(|_| HostApiError::ConnectionUnavailable)
+    /// Queues `frame` on the bounded writer channel. Fast path is a
+    /// non-blocking `try_send`; when the channel is full the producer
+    /// **awaits capacity** (backpressure, counted in
+    /// `host_api_writer_backpressure_total`) for at most the configured
+    /// send timeout, after which the frame is **shed loudly**
+    /// ([`HostApiError::WriterBackpressure`], ERROR log,
+    /// `host_api_writer_shed_total`) -- never an unbounded queue, never a
+    /// silent drop, never an indefinite hang.
+    async fn send(&self, frame: Frame) -> Result<(), HostApiError> {
+        let frame = match self.writer_tx.try_send(frame) {
+            Ok(()) => return Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err(HostApiError::ConnectionUnavailable)
+            }
+            Err(mpsc::error::TrySendError::Full(frame)) => frame,
+        };
+        if let Some(m) = self.metrics.get() {
+            m.writer_backpressure_total.inc();
+        }
+        debug!("host-api writer channel full, awaiting capacity");
+        match tokio::time::timeout(self.send_timeout, self.writer_tx.send(frame)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(HostApiError::ConnectionUnavailable),
+            Err(_) => {
+                let waited_ms = self.send_timeout.as_millis() as u64;
+                if let Some(m) = self.metrics.get() {
+                    m.writer_shed_total.inc();
+                }
+                error!(
+                    waited_ms,
+                    "host-api writer channel full for {waited_ms}ms (peer not draining): \
+                     frame shed"
+                );
+                Err(HostApiError::WriterBackpressure { waited_ms })
+            }
+        }
+    }
+
+    /// Non-blocking send for call sites that must never stall (the read
+    /// loop's `pong` / shed replies -- awaiting there could deadlock a
+    /// peer that is itself blocked writing to us). A full channel sheds the
+    /// frame loudly (WARN + `host_api_writer_shed_total`).
+    fn try_send(&self, frame: Frame) -> Result<(), HostApiError> {
+        match self.writer_tx.try_send(frame) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(HostApiError::ConnectionUnavailable),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if let Some(m) = self.metrics.get() {
+                    m.writer_shed_total.inc();
+                }
+                warn!("host-api writer channel full, non-blocking frame shed");
+                Err(HostApiError::WriterBackpressure { waited_ms: 0 })
+            }
+        }
     }
 
     fn deliver(&self, frame: Frame) -> Result<(), CorrelationError> {
@@ -257,7 +403,7 @@ impl Connection {
         }
         let id = self.ids.next_id();
         let rx = self.pending.register(id)?;
-        self.send(Frame::new(id, Message::Ping))?;
+        self.send(Frame::new(id, Message::Ping)).await?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(frame)) => match frame.message {
                 Message::Pong => Ok(()),
@@ -289,7 +435,7 @@ impl Connection {
 /// `ConnectionRegistry::set_active` without driving a full handshake.
 #[cfg(test)]
 pub(crate) fn test_connection() -> Arc<Connection> {
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
     Connection::new(tx)
 }
 
@@ -304,6 +450,7 @@ pub(crate) fn test_connection() -> Arc<Connection> {
 /// about); `crate::dispatch`'s own tests call this directly over a plain
 /// in-memory duplex to build a real, handshaken [`Connection`] without a
 /// TLS handshake or a live executor process.
+#[cfg(test)]
 pub(crate) async fn run_connection<S>(
     io: S,
     hello_ok: HelloOkBody,
@@ -319,9 +466,38 @@ pub(crate) async fn run_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    run_connection_with_limits(
+        io,
+        hello_ok,
+        expected_sandbox_gvisor,
+        capabilities,
+        HostApiLimits::default(),
+    )
+    .await
+}
+
+/// [`run_connection`] with explicit [`HostApiLimits`] -- the production
+/// path ([`accept_and_handshake`]) passes the config-sized bounds; tests
+/// pass tiny ones to exercise backpressure/shedding deterministically.
+pub(crate) async fn run_connection_with_limits<S>(
+    io: S,
+    hello_ok: HelloOkBody,
+    expected_sandbox_gvisor: bool,
+    capabilities: Arc<dyn CapabilityHandler>,
+    limits: HostApiLimits,
+) -> Result<
+    (
+        Arc<Connection>,
+        impl std::future::Future<Output = Result<(), HostApiError>>,
+    ),
+    HostApiError,
+>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (mut reader, mut writer) = tokio::io::split(io);
-    let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<Frame>();
-    let connection = Connection::new(writer_tx);
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Frame>(limits.writer_channel_capacity.max(1));
+    let connection = Connection::with_limits(writer_tx, &limits);
 
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = writer_rx.recv().await {
@@ -346,14 +522,16 @@ where
     };
     if hello.protocol_version != 1 {
         let message = format!("unsupported protocol_version {}", hello.protocol_version);
-        connection.send(Frame::new(
-            hello_frame.id,
-            Message::Error(ErrorBody {
-                code: ErrorCode::ProtocolVersion,
-                message: message.clone(),
-                detail: None,
-            }),
-        ))?;
+        connection
+            .send(Frame::new(
+                hello_frame.id,
+                Message::Error(ErrorBody {
+                    code: ErrorCode::ProtocolVersion,
+                    message: message.clone(),
+                    detail: None,
+                }),
+            ))
+            .await?;
         drop(connection);
         let _ = writer_task.await;
         return Err(HostApiError::PeerError {
@@ -363,17 +541,19 @@ where
     }
     let executor_gvisor = hello.sandbox.runtime == "gvisor";
     if expected_sandbox_gvisor && !executor_gvisor {
-        connection.send(Frame::new(
-            hello_frame.id,
-            Message::Error(ErrorBody {
-                code: ErrorCode::UnsandboxedExecutor,
-                message: format!(
-                    "stage expects WADDLES_SANDBOX_GVISOR=true but executor reported sandbox {:?}",
-                    hello.sandbox.runtime
-                ),
-                detail: None,
-            }),
-        ))?;
+        connection
+            .send(Frame::new(
+                hello_frame.id,
+                Message::Error(ErrorBody {
+                    code: ErrorCode::UnsandboxedExecutor,
+                    message: format!(
+                        "stage expects WADDLES_SANDBOX_GVISOR=true but executor reported sandbox {:?}",
+                        hello.sandbox.runtime
+                    ),
+                    detail: None,
+                }),
+            ))
+            .await?;
         // Flush the queued error frame, then close -- spec §6.6 test 12c:
         // "Connection refused with UNSANDBOXED_EXECUTOR".
         drop(connection);
@@ -384,7 +564,9 @@ where
         });
     }
     debug!(?hello, "host-api hello accepted");
-    connection.send(Frame::new(hello_frame.id, Message::HelloOk(hello_ok)))?;
+    connection
+        .send(Frame::new(hello_frame.id, Message::HelloOk(hello_ok)))
+        .await?;
 
     let read_loop = {
         let connection = Arc::clone(&connection);
@@ -441,9 +623,40 @@ where
             // `crate::capabilities`'s module doc; this is the fix for the
             // post-M3 review's connection-fixed-scope finding).
             Message::HostCall(body) => {
+                // Concurrency cap: at most `max_concurrent_host_calls`
+                // handler tasks per connection. Over the cap the call is
+                // shed *loudly* with an `overloaded` error reply (counted
+                // in `host_api_host_calls_shed_total`, WARN-logged) --
+                // never an unbounded task spawn, never a silent drop, and
+                // never a stalled read loop (which would also stop `pong`
+                // / reply delivery for every other in-flight call).
+                let permit = match Arc::clone(&connection.host_call_permits).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(TryAcquireError::NoPermits | TryAcquireError::Closed) => {
+                        if let Some(m) = connection.metrics.get() {
+                            m.host_calls_shed_total.inc();
+                        }
+                        warn!(
+                            call_id = body.call_id,
+                            "host-api host-call shed: concurrent host-call cap reached"
+                        );
+                        let reply = penguin_bundle_host::wire::HostResultBody {
+                            result: None,
+                            error: Some(denied(
+                                "overloaded",
+                                "stage host-call concurrency cap reached, retry later",
+                            )),
+                        };
+                        let _ =
+                            connection.try_send(Frame::new(frame.id, Message::HostResult(reply)));
+                        continue;
+                    }
+                };
                 let connection = Arc::clone(connection);
                 let capabilities = Arc::clone(&capabilities);
                 tokio::spawn(async move {
+                    // Held for the handler's whole lifetime; released on drop.
+                    let _permit = permit;
                     let scope = connection.scope_for(body.call_id);
                     let result = match scope {
                         Some(scope) => capabilities.handle(&scope, body).await,
@@ -462,7 +675,11 @@ where
                             error: Some(e),
                         },
                     };
-                    let _ = connection.send(Frame::new(frame.id, Message::HostResult(reply)));
+                    // Awaits writer capacity (backpressure) up to the send
+                    // timeout; a shed here is already logged + metriced.
+                    let _ = connection
+                        .send(Frame::new(frame.id, Message::HostResult(reply)))
+                        .await;
                 });
             }
             // Bidirectional heartbeat (fix/executor-link-heartbeat): this
@@ -476,7 +693,7 @@ where
             // happened to speak first.
             Message::Ping => {
                 debug!("host-api heartbeat: received ping, replying pong");
-                if let Err(e) = connection.send(Frame::new(frame.id, Message::Pong)) {
+                if let Err(e) = connection.try_send(Frame::new(frame.id, Message::Pong)) {
                     warn!(error = %e, "host-api failed to reply to ping");
                 }
             }
@@ -571,6 +788,7 @@ pub async fn accept_and_handshake(
     limits: penguin_bundle_host::wire::HelloLimits,
     expected_sandbox_gvisor: bool,
     capabilities: Arc<dyn CapabilityHandler>,
+    io_limits: HostApiLimits,
 ) -> Result<
     (
         Arc<Connection>,
@@ -579,7 +797,7 @@ pub async fn accept_and_handshake(
     HostApiError,
 > {
     let tls_stream = acceptor.accept(tcp).await?;
-    run_connection(
+    run_connection_with_limits(
         tls_stream,
         HelloOkBody {
             stage: stage_name.to_string(),
@@ -588,6 +806,7 @@ pub async fn accept_and_handshake(
         },
         expected_sandbox_gvisor,
         capabilities,
+        io_limits,
     )
     .await
 }
@@ -853,6 +1072,11 @@ pub async fn serve(
         max_concurrent_calls: 32,
     };
     let heartbeat_interval = cli.heartbeat_interval();
+    let io_limits = HostApiLimits::from_cli(&cli);
+    // Bounds simultaneously accepted connections (each holds a task, a TLS
+    // session and a bounded writer channel); the permit is held for the
+    // connection's whole lifetime.
+    let connection_permits = Arc::new(Semaphore::new(cli.host_api_max_connections));
     tokio::spawn(run_zero_executor_watchdog(
         Arc::clone(&registry),
         cli.executor_grace(),
@@ -884,6 +1108,20 @@ pub async fn serve(
                 ) {
                     warn!(%peer, error = %e, "host-api: failed to set TCP keepalive on accepted socket");
                 }
+                let conn_permit = match Arc::clone(&connection_permits).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        metrics.connections_rejected_total.inc();
+                        warn!(
+                            %peer,
+                            max = cli.host_api_max_connections,
+                            "host-api connection rejected: connection cap reached"
+                        );
+                        drop(tcp);
+                        continue;
+                    }
+                };
+                let io_limits = io_limits.clone();
                 let acceptor = acceptor.clone();
                 let registry = Arc::clone(&registry);
                 let capabilities = Arc::clone(&capabilities);
@@ -892,8 +1130,10 @@ pub async fn serve(
                 let limits = limits.clone();
                 let metrics = metrics.clone();
                 tokio::spawn(async move {
-                    match accept_and_handshake(tcp, &acceptor, &stage_name, limits, expected_gvisor, capabilities).await {
+                    let _conn_permit = conn_permit;
+                    match accept_and_handshake(tcp, &acceptor, &stage_name, limits, expected_gvisor, capabilities, io_limits).await {
                         Ok((connection, read_loop)) => {
+                            connection.set_metrics(metrics.clone());
                             info!(%peer, "host-api connection established with executor {peer}");
                             // Own id, not a slot overwrite (regression:
                             // alpha 2026-10-03 -- see `ConnectionRegistry`'s
@@ -1908,7 +2148,7 @@ mod tests {
     #[tokio::test]
     async fn connection_registry_returns_the_active_connection() {
         let (_a, _b) = tokio::io::duplex(1024);
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn = Connection::new(tx);
         let registry = ConnectionRegistry::new();
         registry.set_active(Arc::clone(&conn));
@@ -1917,7 +2157,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_registry_hides_a_closed_connection() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn = Connection::new(tx);
         conn.closed.store(true, Ordering::Release);
         let registry = ConnectionRegistry::new();
@@ -1941,7 +2181,7 @@ mod tests {
         let _ = registry.duration_without_executor();
         std::thread::sleep(Duration::from_millis(5));
         assert!(registry.duration_without_executor() > Duration::ZERO);
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         registry.set_active(Connection::new(tx));
         assert_eq!(registry.duration_without_executor(), Duration::ZERO);
     }
@@ -1958,11 +2198,11 @@ mod tests {
     #[tokio::test]
     async fn registry_keeps_a_live_session_when_a_different_one_is_removed() {
         let registry = ConnectionRegistry::new();
-        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_a, _rx_a) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn_a = Connection::new(tx_a);
         let id_a = registry.register(Arc::clone(&conn_a));
 
-        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn_b = Connection::new(tx_b);
         registry.register(Arc::clone(&conn_b));
 
@@ -1985,7 +2225,7 @@ mod tests {
         // Dropping the receiver end closes the channel, so every `ping`'s
         // `send` fails immediately -- simulating a half-open peer that
         // never replies, without waiting out real per-ping timeouts.
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         drop(rx);
         let conn = Connection::new(tx);
         let registry = Arc::new(ConnectionRegistry::new());
@@ -2025,11 +2265,11 @@ mod tests {
     #[tokio::test]
     async fn registry_selection_is_stable_across_two_concurrent_sessions() {
         let registry = ConnectionRegistry::new();
-        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_a, _rx_a) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn_a = Connection::new(tx_a);
         registry.register(Arc::clone(&conn_a));
 
-        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn_b = Connection::new(tx_b);
         registry.register(Arc::clone(&conn_b));
 
@@ -2051,14 +2291,14 @@ mod tests {
     async fn registry_connect_close_reconnect_leaves_count_one() {
         let registry = ConnectionRegistry::new();
 
-        let (tx1, _rx1) = mpsc::unbounded_channel();
+        let (tx1, _rx1) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn1 = Connection::new(tx1);
         let id1 = registry.register(Arc::clone(&conn1));
         conn1.mark_closed();
         registry.remove(id1);
         assert_eq!(registry.live_count(), 0);
 
-        let (tx2, _rx2) = mpsc::unbounded_channel();
+        let (tx2, _rx2) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn2 = Connection::new(tx2);
         registry.register(Arc::clone(&conn2));
 
@@ -2075,9 +2315,9 @@ mod tests {
     #[tokio::test]
     async fn live_session_ids_reports_every_live_session_not_just_the_newest() {
         let registry = ConnectionRegistry::new();
-        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_a, _rx_a) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let id_a = registry.register(Connection::new(tx_a));
-        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let id_b = registry.register(Connection::new(tx_b));
 
         let mut ids = registry.live_session_ids();
@@ -2094,7 +2334,7 @@ mod tests {
     #[tokio::test]
     async fn get_resolves_a_live_session_and_fails_closed_otherwise() {
         let registry = ConnectionRegistry::new();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn = Connection::new(tx);
         let id = registry.register(Arc::clone(&conn));
 
@@ -2459,6 +2699,7 @@ mod tests {
                 test_limits(),
                 false,
                 Arc::new(DenyAllCapabilities),
+                HostApiLimits::default(),
             )
             .await
             .expect("handshake succeeds");
@@ -2504,5 +2745,169 @@ mod tests {
         let _ = std::fs::remove_file(&ca_path);
         let _ = std::fs::remove_file(&server_cert_path);
         let _ = std::fs::remove_file(&server_key_path);
+    }
+
+    /// A full bounded writer channel applies BACKPRESSURE: the producer
+    /// awaits capacity (does not complete, does not grow the queue) until
+    /// the consumer drains a slot, then completes. Counted in
+    /// `host_api_writer_backpressure_total`.
+    #[tokio::test]
+    async fn bounded_writer_channel_applies_backpressure_when_full() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let conn = Connection::with_limits(
+            tx,
+            &HostApiLimits {
+                writer_channel_capacity: 2,
+                writer_send_timeout: Duration::from_secs(30),
+                max_concurrent_host_calls: 8,
+            },
+        );
+        let registry = prometheus::Registry::new();
+        let metrics = crate::telemetry::register_host_api_metrics(&registry);
+        conn.set_metrics(metrics.clone());
+
+        conn.send(Frame::new(1, Message::Ping)).await.unwrap();
+        conn.send(Frame::new(2, Message::Ping)).await.unwrap();
+        assert_eq!(metrics.writer_backpressure_total.get(), 0);
+
+        let producer = {
+            let conn = Arc::clone(&conn);
+            tokio::spawn(async move { conn.send(Frame::new(3, Message::Ping)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !producer.is_finished(),
+            "producer must await capacity while the bounded channel is full"
+        );
+        assert_eq!(metrics.writer_backpressure_total.get(), 1);
+
+        // Drain one slot -> the blocked producer completes successfully.
+        assert_eq!(rx.recv().await.unwrap().id, 1);
+        producer.await.unwrap().expect("send completes after drain");
+        assert_eq!(rx.recv().await.unwrap().id, 2);
+        assert_eq!(rx.recv().await.unwrap().id, 3);
+        assert_eq!(metrics.writer_shed_total.get(), 0);
+    }
+
+    /// A consumer that never drains must not stall a producer forever nor
+    /// grow memory: past the send timeout the frame is shed loudly with
+    /// `WriterBackpressure` and `host_api_writer_shed_total` increments.
+    #[tokio::test]
+    async fn stuck_writer_sheds_frame_after_send_timeout_with_metric() {
+        let (tx, _rx) = mpsc::channel(1);
+        let conn = Connection::with_limits(
+            tx,
+            &HostApiLimits {
+                writer_channel_capacity: 1,
+                writer_send_timeout: Duration::from_millis(50),
+                max_concurrent_host_calls: 8,
+            },
+        );
+        let registry = prometheus::Registry::new();
+        let metrics = crate::telemetry::register_host_api_metrics(&registry);
+        conn.set_metrics(metrics.clone());
+
+        conn.send(Frame::new(1, Message::Ping)).await.unwrap();
+        let err = conn.send(Frame::new(2, Message::Ping)).await.unwrap_err();
+        assert!(
+            matches!(err, HostApiError::WriterBackpressure { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(metrics.writer_shed_total.get(), 1);
+
+        let err = conn.try_send(Frame::new(3, Message::Ping)).unwrap_err();
+        assert!(matches!(
+            err,
+            HostApiError::WriterBackpressure { waited_ms: 0 }
+        ));
+        assert_eq!(metrics.writer_shed_total.get(), 2);
+    }
+
+    /// The per-connection host-call concurrency cap sheds the excess with
+    /// an `overloaded` error reply (never a silent drop, never an
+    /// unbounded spawn) and `host_api_host_calls_shed_total` increments;
+    /// once a permit frees up the next call is serviced normally.
+    #[tokio::test]
+    async fn host_call_concurrency_cap_sheds_excess_with_overloaded_reply() {
+        let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
+        let limits = HostApiLimits {
+            writer_channel_capacity: 16,
+            writer_send_timeout: Duration::from_secs(5),
+            max_concurrent_host_calls: 1,
+        };
+        let stage = tokio::spawn(async move {
+            run_connection_with_limits(
+                stage_io,
+                HelloOkBody {
+                    stage: "svc-action".to_string(),
+                    protocol_version: 1,
+                    limits: test_limits(),
+                },
+                false,
+                Arc::new(DenyAllCapabilities),
+                limits,
+            )
+            .await
+        });
+
+        let mut io = executor_io;
+        write_frame(&mut io, &Frame::new(1, Message::Hello(hello_body("runc"))))
+            .await
+            .unwrap();
+        let hello_ok = read_frame(&mut io).await.unwrap();
+        assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+        let (connection, read_loop) = stage.await.unwrap().expect("handshake succeeds");
+        let read_loop = tokio::spawn(read_loop);
+
+        let registry = prometheus::Registry::new();
+        let metrics = crate::telemetry::register_host_api_metrics(&registry);
+        connection.set_metrics(metrics.clone());
+
+        let call = |id: u64| {
+            Frame::new(
+                id,
+                Message::HostCall(penguin_bundle_host::wire::HostCallBody {
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    capability: penguin_bundle_host::wire::CapabilityKind::Clock,
+                    op: "now-millis".to_string(),
+                    args: serde_json::json!({}),
+                    call_id: 9999,
+                }),
+            )
+        };
+
+        // Saturate the single permit, standing in for one in-flight slow
+        // host-call handler.
+        let held = Arc::clone(&connection.host_call_permits)
+            .try_acquire_owned()
+            .expect("the single permit is free");
+
+        write_frame(&mut io, &call(10)).await.unwrap();
+        let shed = read_frame(&mut io).await.unwrap();
+        assert_eq!(shed.id, 10);
+        match shed.message {
+            Message::HostResult(b) => {
+                assert_eq!(b.error.expect("shed reply is an error").code, "overloaded")
+            }
+            other => panic!("expected host-result, got {other:?}"),
+        }
+        assert_eq!(metrics.host_calls_shed_total.get(), 1);
+
+        // Permit released -> the same call is now handled (unknown_invoke,
+        // since no invoke is in flight) instead of shed.
+        drop(held);
+        write_frame(&mut io, &call(11)).await.unwrap();
+        let handled = read_frame(&mut io).await.unwrap();
+        match handled.message {
+            Message::HostResult(b) => assert_eq!(
+                b.error.expect("unregistered call_id is refused").code,
+                "unknown_invoke"
+            ),
+            other => panic!("expected host-result, got {other:?}"),
+        }
+        assert_eq!(metrics.host_calls_shed_total.get(), 1);
+
+        drop(io);
+        let _ = tokio::time::timeout(Duration::from_secs(2), read_loop).await;
     }
 }
