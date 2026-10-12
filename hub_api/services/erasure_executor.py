@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid as uuidlib
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any
@@ -127,13 +128,32 @@ def _alias(dal: Any, table: str) -> Any:
     return dal[name]
 
 
+def _uuid_tokens(values: Collection[str]) -> list[str]:
+    """The well-formed uuids among `values`, canonicalised.
+
+    A uuid-typed column rejects any other literal, and that error would abort the whole erasure
+    transaction -- so a malformed token is dropped (and logged) instead of queried.
+    """
+    tokens: list[str] = []
+    for value in values:
+        try:
+            token = str(uuidlib.UUID(str(value)))
+        except ValueError:
+            logger.warning("dsar.erasure_uuid_token_skipped")
+            continue
+        if token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
 def _match_query(dal: Any, alias: Any, match: Match, subject: ErasureSubject) -> Any | None:
     """The pydal query selecting rows where `match` holds for `subject`; None if it cannot."""
     column = alias[match.column]
     if match.key is Key.HUB_USER:
         return column == subject.user_id
     if match.key is Key.USER_UUID:
-        return column.belongs(list(subject.user_uuids)) if subject.user_uuids else None
+        tokens = _uuid_tokens(subject.user_uuids)
+        return column.belongs(tokens) if tokens else None
     if match.key is Key.MEMBER:
         return column.belongs(list(subject.member_ids)) if subject.member_ids else None
     query: Any | None = None

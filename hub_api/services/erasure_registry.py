@@ -181,7 +181,6 @@ def review(table: str, *columns: str, reason: str) -> Rule:
 
 _ACTOR = "pseudonymous actor reference; the hub_users row is anonymized in place"
 _ORG_NAME = "organisation/product display name, not a person"
-_ASSUMED_HUB = "integer column without an FK, assumed to be hub_users.id (legacy module schema)"
 _AUDIT = (
     "append-only accountability trail (GDPR Art. 5(2)); pseudonymous once hub_users is anonymized"
 )
@@ -277,6 +276,7 @@ RULES: tuple[Rule, ...] = (
     delete("inventory_log", hub("user_id")),
     delete("lfg_joins", platform("platform", "user_id")),
     delete("lfg_posts", platform("platform", "user_id")),
+    delete("loyalty_giveaway_winners", platform("platform", "user_id")),
     delete("loyalty_redemptions", platform("platform", "platform_user_id")),
     delete(
         "loyalty_simple_game_results",
@@ -355,9 +355,17 @@ RULES: tuple[Rule, ...] = (
     ref("analytics_suspected_bots", "reviewed_by", reason=_ACTOR),
     ref("announcements", "updated_by", reason=_ACTOR),
     ref("app_activations", "activated_by", reason=_ACTOR),
-    ref("app_active_versions", "activated_by", reason=_ACTOR + "; UPDATE fires active-set log"),
+    ref(
+        "app_active_versions",
+        "activated_by",
+        reason=_ACTOR + "; any write logs an active-set change",
+    ),
     ref("app_global_installs", "installed_by", "revoked_by", reason=_ACTOR),
-    ref("app_install_approvals", "approved_by", reason=_ACTOR + "; UPDATE fires active-set log"),
+    ref(
+        "app_install_approvals",
+        "approved_by",
+        reason=_ACTOR + "; any write logs an active-set change",
+    ),
     ref("app_permission_requests", "approved_by", reason=_ACTOR),
     ref("app_stream_grants", "granted_by", reason=_ACTOR),
     ref("app_tenant_permission_restrictions", "restricted_by", reason=_ACTOR),
@@ -441,6 +449,11 @@ RULES: tuple[Rule, ...] = (
     exempt("hub_modules", "display_name", reason=_ORG_NAME),
     exempt("module_db_accounts", "db_username", reason="database role name"),
     exempt("modules", "display_name", reason=_ORG_NAME),
+    exempt(
+        "overlay_access_log",
+        "ip_address",
+        reason="anonymous overlay viewer log (overlay key + IP), no user id",
+    ),
     exempt("permission_scopes", "display_name", reason=_ORG_NAME),
     exempt("server_link_requests", "initiated_by", reason="enum: community | platform"),
     exempt("server_status_configs", "display_name", reason=_ORG_NAME),
@@ -472,6 +485,11 @@ RULES: tuple[Rule, ...] = (
         "live_activity_events",
         "actor",
         reason="free-text chat actor label with the message body, no stable id to match",
+    ),
+    review(
+        "loyalty_giveaway_keys",
+        "claimed_by_user_id",
+        reason="varchar id with no platform column; the winner row (platform + id) is deleted",
     ),
     review(
         "communities",
@@ -532,6 +550,30 @@ RULES: tuple[Rule, ...] = (
     ),
 )
 
+#: Integer columns matched as `hub_users.id` although the schema declares no FK to it (legacy
+#: module tables whose code only ever writes the hub id). If one of them ever held something else,
+#: a row of a different user with the same integer would be erased -- so each is listed here, for
+#: the doc and for review, instead of being an unremarked guess.
+ASSUMED_HUB_ID_COLUMNS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("bot_detection_results", "user_id"),
+        ("calendar_ticket_check_ins", "holder_hub_user_id"),
+        ("hub_module_reviews", "user_id"),
+        ("memories_bookmarks", "created_by_user_id"),
+        ("memories_quote_votes", "user_id"),
+        ("memories_quotes", "author_user_id"),
+        ("memories_quotes", "created_by_user_id"),
+        ("memories_reminders", "user_id"),
+        ("music_playback_history", "played_by_user_id"),
+        ("music_playlists", "created_by_user_id"),
+        ("music_song_request_votes", "user_id"),
+        ("music_song_requests", "requested_by_user_id"),
+        ("platform_admins", "user_id"),
+        ("support_ticket_comments", "author_user_id"),
+        ("support_tickets", "reporter_user_id"),
+    }
+)
+
 #: Uploaded-object (SeaweedFS/S3) URLs to delete, read BEFORE the rows that hold them are erased.
 #: Only URLs under this deployment's own public base are ever deleted (platform CDN avatars are
 #: not ours to delete) -- the filter lives in `services/storage_service.py`.
@@ -562,7 +604,7 @@ KEY_COLUMN = re.compile(
     r"|_user_id$|_user_uuid$|_hub_user_id$|_platform_user_id$|_by$|^player[0-9]_id$"
 )
 DESCRIPTOR_COLUMN = re.compile(
-    r"(^|_)username$|(^|_)email$|(^|_)display_name$|(^|_)avatar_url$|^ip_address$"
+    r"(^|_)username$|(^|_)email$|(^|_)display_name$|(^|_)avatar_url$|^ip_address$|^subject$"
     r"|^(author|owner|reporter|holder|guest|assigned_by|created_by)_name$|^user_display_name$"
 )
 

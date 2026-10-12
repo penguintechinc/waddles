@@ -95,6 +95,62 @@ The deletion runs as a single, **all-or-nothing** database transaction (`service
 
 **Export/erasure symmetry.** Everything the Art. 15 export discloses from the message/activity tables (`message_activity`, `watch_activity`, `chat_messages`) is removed by Art. 17 erasure. `hub_chat_messages` was previously exported but not erased (GRC finding #1, fixed).
 
+### Every Other User-Keyed Table — the Erasure Registry
+
+The table above is the hand-written core. It used to be the *whole* erasure: it covered ~16 tables while the schema holds well over a hundred that name a user (`user_id`, `hub_user_id`, `*_user_id`, `user_uuid`, `platform_user_id`, `*_by`, …), so a "completed" erasure left activity logs, SSO subjects, economy ledgers, bookings, labels, tokens and more behind (GRC audit, Art. 17). The rest is now driven by a **declarative registry** — `hub_api/services/erasure_registry.py` — executed by `services/erasure_executor.py` inside the same single transaction. Of the 178 user-keyed tables the migration chain defines, every one has a recorded decision:
+
+| Action | Meaning | Tables |
+|---|---|---|
+| **DELETE** | The row *is* the subject's data (their activity, content, tokens, balances, SSO subject): deleted. | 75 tables — activity, calendar/booking, call/poll/forum content, loyalty, marketplace reviews, memories/music/quotes, platform-keyed searches, `sso_identities`, `economy_balances`, `economy_ledger`, tokens, labels, … |
+| **SCRUB** | The row belongs to someone else (a booking's host, a quote's adder, the other side of an economy transfer) but names the subject: their raw PII columns are nulled/blanked, the row stays. | `bookings` (guest), `announcements`, `calendar_event_admins`, `calendar_ticket_check_ins`, `economy_ledger` (`counterparty_uuid`), `loyalty_transactions`, `marketplace_sellers`, `memories_quotes`, `music_playback_history`, `music_song_requests` |
+| **REF** | A pure pseudonymous reference (`created_by`, `approved_by`, `updated_by`, …) on a row the tenant/community owns — 60 tables hold only such references. Retained **by design**: the `hub_users` row it points at is anonymized in place and every identity link is deleted, so the integer identifies nobody; nulling it would destroy organisational records (approvals, attribution) and re-fire the bundle active-set triggers. | e.g. `app_install_approvals.approved_by`, `workflows.created_by`, `community_polls.created_by` |
+| **CORE** | Erased by the hand-written steps in the table above. | 15 tables |
+| **RETAIN** | Kept on purpose (Art. 5(2) / 17(3)(e)) — see *What Is Retained*. | `cookie_consent`, `cookie_audit_log`, `audit_log`, `data_deletion_requests`, `audit_events`, `workflow_audit_log`, `module_scope_audit`, `instance_permission_policy_audit`, `marketplace_tc_acceptance` |
+| **EXEMPT** | The column only looks user-keyed (an enum, a keyed hash, an organisation display name); each carries its reason in the registry. | 16 rules |
+| **REVIEW** | **Not erased** — a known gap, listed below. | 15 tables |
+
+Net: 94 of the 178 tables are erased (75 delete + 4 scrub-only + 15 core; 79 of them are driven by the registry — up from ~16 hand-listed), 60 hold only pseudonymous references, 9 are retained for legal reasons, and the remainder are exempt or listed below.
+
+**Subject keys.** A row is matched by the subject's integer hub id; by one of their PII-free uuid tokens (`hub_users.uuid`, member and pseudonym uuids — the key bundle economy/reputation/KV state uses); by a linked platform identity matched as a **pair** `(platform, platform_user_id)` — never the id alone, so the same id on another platform is never touched; or by one of their `community_members` ids.
+
+**Suppression-only design is unchanged.** Nothing in the registry branches on ban state. A benign user is erased completely; a user with an active ban is erased *identically* and keeps exactly the one salted one-way `suppression_records` code written before any delete (see *What Is Retained* §1).
+
+**Economy ledgers.** `economy_balances` and `economy_ledger` rows keyed to the subject's uuid are deleted. On the *other* side of a transfer, `economy_ledger.counterparty_uuid` is nulled, so a surviving row no longer names the erased user.
+
+**Bundle KV (Valkey).** Per-user bundle state lives under `bundlekv:{tenant}:{community}:{app_id}:data:{guest_key}`; a bundle that keeps per-user state puts the user's uuid token in `guest_key`. Erasure `SCAN`s that namespace for each of the subject's uuid tokens (dashed and hex spellings), `UNLINK`s every hit and lowers the app's live-key counter. State keyed by a free-form handle or name (not a uuid) cannot be located this way — a bundle that does so should key by uuid.
+
+**Uploaded objects (SeaweedFS/S3).** The avatar and banner the user uploaded (`avatars/…` in this deployment's bucket) are deleted; their URLs are read from the user's rows *before* those rows are erased. A platform-CDN avatar URL (Discord, Twitch, …) is not ours and is skipped.
+
+**SSO subject.** `sso_identities` (the IdP's stable `sub` / `NameID` for the person — PII on its own, sometimes an e-mail) is deleted. Its `ON DELETE CASCADE` from `hub_users` never fired because erasure anonymizes `hub_users` in place instead of deleting it; that is how the subject used to survive.
+
+**External stores fail loud.** Object and KV deletes run first and any failure aborts the whole erasure: the database transaction rolls back, a `failed` ledger row is written, and the retry re-runs everything (every operation is idempotent). Erasure never reports "completed" while leaving a user's upload or KV state behind. An environment with no Valkey configured (`VALKEY_URL`/`REDIS_URL` unset) has no bundle KV to erase; that is logged as a warning, not raised.
+
+**Every tier.** Erasure is a statutory right: nothing in the registry, the executor or the entry point consults a tier, a license or a feature flag (pinned by `test_erasure_is_never_tier_or_flag_gated`).
+
+**New tables cannot be forgotten.** `hub_api/tests/test_erasure_registry_coverage.py` reads the whole migration chain (legacy SQL + Alembic) as text, finds every column that names a person or carries raw PII about one, and **fails the build** if the registry does not classify it. Adding a user-keyed table without deciding what erasure does to it is a red CI run, not a silent hole. The gate proves it can fail (a synthetic unregistered table, and the real schema with one rule removed), asserts its denominators (≥150 files, ≥250 tables, ≥120 user-keyed tables examined), and pins the REVIEW set below so it cannot grow unnoticed. `test_erasure_registry_behavior.py` generates one check per registry rule (subject rows gone, decoys — another user, the same id on another platform — untouched), `test_erasure_registry_e2e.py` drives `anonymize_user_data()` for a benign and a banned user, and `test_erasure_registry_pg_integration.py` exercises the economy and SSO paths against a real migrated Postgres.
+
+**Known gaps (REVIEW) — not erased, listed for a human decision.**
+
+| Table | Columns | Why not |
+|---|---|---|
+| `platform_integrations` | `user_id` | User-level integration tokens; hub-api's DB role is *denied* this table by design (`service-roles.yaml` `deny_tables`). Needs a `SECURITY DEFINER` erase function or a credential-service call. |
+| `activity_stats_daily` | `platform_user_id`, `platform_username` | Hub-linked rows are deleted; rows keyed only by a platform id (no `platform` column) cannot be matched without risking a cross-platform collision. |
+| `hub_admins` | `email`, `username` | Legacy admin table with its own credentials, not keyed to `hub_users`. |
+| `live_activity_events` | `actor` | Free-text chat actor label stored with the message body; no stable id to match. |
+| `loyalty_giveaway_keys` | `claimed_by_user_id` | `varchar` id with no `platform` column (the winner row, which has one, *is* deleted). |
+| `communities` | `created_by`, `deleted_by`, `owner_id`, `owner_name` | Free-form `varchar` set by a superadmin, not a `hub_users` reference. |
+| `command_aliases` | `deleted_by` | `varchar` of unknown shape (hub id, username or `system`). |
+| `clip_bookmarks`, `clip_highlight_reels` | `bookmarked_by`, `created_by` | `varchar` of unknown shape (platform handle or id) with no `platform` column. |
+| `module_scopes`, `revoked_tokens` | `granted_by_user_id`, `revoked_by_user_id` | `varchar` of unknown shape; module-scope changes are audited by trigger into `module_scope_audit`. |
+| `server_link_requests` | `initiator_platform_user_id`, `initiator_platform_username` | Platform id/handle of the requester with no `platform` column on the row. |
+| `shoutout_creators` | `platform_username` | Creator handle with no id column to match on. |
+| `video_shoutout_history` | `triggered_by_user_id`, `triggered_by_username` | Platform id/handle of the trigger user with no `platform` column for the actor. |
+| `vendor_submissions` | `vendor_email`, `support_email` | Company contact e-mails typed on a submission, not linked to the submitting user. |
+
+**Assumed hub ids.** Fifteen legacy-module integer columns (`ASSUMED_HUB_ID_COLUMNS` in the registry — e.g. `memories_reminders.user_id`, `platform_admins.user_id`, `support_tickets.reporter_user_id`) declare no foreign key but are matched as `hub_users.id`, because the module code only ever writes the hub id. If any ever held another value, a different user's row with the same integer would be erased; each is listed (and a test fails if a new un-FK'd hub-id match is added without being listed) so the assumption is reviewable.
+
+**Cascade side effects.** Deleting a user's forum post cascades to other users' replies on it (`hub_forum_replies.post_id ON DELETE CASCADE`); deleting a call room they created cascades its participants and annotations; deleting a PvP match removes it from the opponent's history. These follow the schema's existing cascade semantics for "the owner's content is gone".
+
 ### Anonymize In-Place: Why Not Hard Delete `hub_users`?
 
 The `hub_users` row is anonymized rather than deleted:
@@ -126,7 +182,7 @@ Two categories of data are deliberately **not** deleted, each with a distinct le
 #### 0. Consent and audit logs — `cookie_consent`, `cookie_audit_log`, `audit_log`, `data_deletion_requests`
 *Legal basis: Legal obligation / accountability (Article 6(1)(c), Article 5(2))*
 
-Consent records, the consent change log, the platform audit trail and the deletion-request ledger are **never** deleted by erasure. They are the controller's proof that consent was lawfully obtained and that the erasure request was honoured; deleting them would destroy the evidence the regulator can demand. They hold identifiers and technical metadata (user id, consent choices, IP, user agent) but not the profile, credentials, or message content that erasure removes. This is pinned in code (`ERASURE_RETAINED_TABLES`) and by regression tests (`hub_api/tests/test_data_privacy_erasure.py::TestRetention`).
+Consent records, the consent change log, the platform audit trail and the deletion-request ledger are **never** deleted by erasure. They are the controller's proof that consent was lawfully obtained and that the erasure request was honoured; deleting them would destroy the evidence the regulator can demand. They hold identifiers and technical metadata (user id, consent choices, IP, user agent) but not the profile, credentials, or message content that erasure removes. This is pinned in code (`ERASURE_RETAINED_TABLES`) and by regression tests (`hub_api/tests/test_data_privacy_erasure.py::TestRetention`). The registry additionally retains the hash-chained `audit_events` log (a database trigger rejects `UPDATE`/`DELETE`), the append-only `workflow_audit_log`, `module_scope_audit` and `instance_permission_policy_audit` trails (their actor column is a pseudonymous id once `hub_users` is anonymized), and `marketplace_tc_acceptance` (terms-of-service acceptance evidence, Art. 17(3)(e) legal claims, like `cookie_consent`); `test_executable_rules_never_touch_a_retained_table` pins that no erasure statement can target any of them.
 
 #### 1. `suppression_records` — Ban-Evasion Suppression (only for a user with an active ban)
 *Legal basis: Legitimate interest (Article 6(1)(f)) — preventing evasion of a community ban. This is **not** an Article 17(3) exemption: it is a separate, narrowly-scoped retention with its own lawful basis, necessity and balancing test (counsel to verify).*
@@ -289,5 +345,5 @@ The services the platform itself calls with its own credentials:
 
 ---
 
-*Last updated: 2026-10-10 — cookies, consent, erasure, data access, analytics access and third-party sections reconciled against `hub_api`; the pseudonymous-identifier, rate-limit and service-to-service sections are unchanged from the earlier revision and have not been re-audited.*
+*Last updated: 2026-10-12 — Art. 17 erasure expanded from ~16 hand-listed tables to the full user-keyed schema via the erasure registry (economy ledgers, bundle KV, SeaweedFS objects, SSO subjects), with a CI coverage gate. 2026-10-10 — cookies, consent, erasure, data access, analytics access and third-party sections reconciled against `hub_api`; the pseudonymous-identifier, rate-limit and service-to-service sections are unchanged from the earlier revision and have not been re-audited.*
 *See also: [docs/SECURITY.md](SECURITY.md)*

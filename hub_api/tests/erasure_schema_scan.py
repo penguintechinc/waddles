@@ -59,6 +59,9 @@ _DROP_TABLE = re.compile(
 )
 _CREATE_VIEW = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+" + _TABLE_REF, re.I)
 
+_REFERENCES_HUB_USERS = re.compile(r"REFERENCES\s+(?:public\.)?\"?hub_users\"?\b", re.I)
+_FK_COLUMNS = re.compile(r"FOREIGN\s+KEY\s*\(([^)]*)\)", re.I)
+
 _OP_CREATE_TABLE = re.compile(r"op\.create_table\(\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']")
 _OP_ADD_COLUMN = re.compile(
     r"op\.add_column\(\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']"
@@ -77,6 +80,8 @@ class SchemaScan:
 
     tables: dict[str, dict[str, None]] = field(default_factory=dict)
     views: set[str] = field(default_factory=set)
+    #: `(table, column)` pairs declared `REFERENCES hub_users` (inline or table-level FOREIGN KEY).
+    hub_user_fks: set[tuple[str, str]] = field(default_factory=set)
     files_scanned: int = 0
 
     def columns(self, table: str) -> set[str]:
@@ -142,6 +147,24 @@ def _split_top_level(body: str) -> list[str]:
     return parts
 
 
+def _note_hub_user_fk(scan: SchemaScan, table: str, element: str) -> None:
+    """Record `(table, column)` if `element` declares an FK to `hub_users` (column/table level)."""
+    if not _REFERENCES_HUB_USERS.search(element):
+        return
+    fk = _FK_COLUMNS.search(element)
+    if fk:
+        for column in fk.group(1).split(","):
+            scan.hub_user_fks.add((table, column.strip().strip('"').lower()))
+        return
+    column_match = _ADD_COLUMN.search(element)
+    name = (
+        column_match.group(1)
+        if column_match
+        else (element.strip().split(None, 1) or [""])[0].strip('"')
+    )
+    scan.hub_user_fks.add((table, name.lower()))
+
+
 def _apply_create(scan: SchemaScan, text: str, match: re.Match[str]) -> None:
     """Record every column of one `CREATE TABLE` statement."""
     table = match.group(1).lower()
@@ -152,6 +175,7 @@ def _apply_create(scan: SchemaScan, text: str, match: re.Match[str]) -> None:
         if not tokens:
             continue
         name = tokens[0].strip('"')
+        _note_hub_user_fk(scan, table, element)
         if name.lower() in _NOT_A_COLUMN or not re.fullmatch(r"[A-Za-z_]\w*", name):
             continue
         scan.add(table, name)
@@ -165,6 +189,8 @@ def _apply_alter(scan: SchemaScan, match: re.Match[str]) -> None:
     if renamed and table in scan.tables:
         scan.tables[renamed.group(1).lower()] = scan.tables.pop(table)
         return
+    for segment in _split_top_level(clause):
+        _note_hub_user_fk(scan, table, segment)
     for col in _ADD_COLUMN.finditer(clause):
         if col.group(1).lower() not in _NOT_A_COLUMN:
             scan.add(table, col.group(1))

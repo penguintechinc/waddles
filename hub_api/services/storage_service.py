@@ -295,18 +295,20 @@ def delete_owned_objects_strict(urls: Iterable[str]) -> int:
     Returns how many objects were deleted (S3 treats a missing key as success).
     """
     base = _public_base_url().rstrip("/") + "/"
-    client = _client()
-    bucket = _bucket()
-    deleted = 0
+    keys: list[str] = []
     for url in urls:
         if not url.startswith(base):
             continue
         key = url[len(base) :].split("?", 1)[0].split("#", 1)[0]
-        if not key or ".." in key.split("/"):
-            continue
+        if key and ".." not in key.split("/"):
+            keys.append(key)
+    if not keys:
+        return 0  # nothing of ours: never build an S3 client (or need credentials) for no work
+    client = _client()
+    bucket = _bucket()
+    for key in keys:
         client.delete_object(Bucket=bucket, Key=key)
-        deleted += 1
-    return deleted
+    return len(keys)
 
 
 async def delete_object(url: str) -> None:

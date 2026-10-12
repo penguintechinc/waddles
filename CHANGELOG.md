@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- GDPR Art. 17 erasure now covers every user-keyed table, not ~16 of ~121 (GRC audit HIGH): a declarative erasure registry
+  (`hub_api/services/erasure_registry.py`, run by `erasure_executor.py` inside the single erasure transaction) deletes the
+  subject's rows in 75 further tables, scrubs their PII on rows kept for others, and records a reasoned decision for every
+  remaining user-keyed table (pseudonymous actor reference, legal retention, exempt, or a listed gap). Also erased: economy
+  ledgers/balances, per-user bundle KV in Valkey, the uploaded avatar/banner in SeaweedFS, and `sso_identities.subject`. External
+  stores fail loud (the erasure rolls back and is retryable). The suppression-only design (#804) is unchanged and erasure
+  stays ungated in every tier. A CI gate (`tests/test_erasure_registry_coverage.py`) scans the migration chain and fails when a
+  user-keyed table/column has no rule, so a future table cannot silently regress erasure. See `docs/PRIVACY.md`.
+
 ### Added
 - Ban-evasion suppression (GDPR Art. 6(1)(f), counsel to verify): an erased user with an ACTIVE ban leaves one per-tenant keyed
   one-way code (`suppression_records`, migration `0059_suppression_records`; HMAC-SHA256 under an HKDF key derived per tenant
