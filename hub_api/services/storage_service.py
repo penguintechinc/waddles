@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 import boto3
@@ -281,6 +282,31 @@ def _key_prefix(key: str) -> str:
     """
     prefix = key.split("/", 1)[0]
     return prefix if re.fullmatch(r"[a-z0-9_-]{1,32}", prefix) else "<unrecognized>"
+
+
+def delete_owned_objects_strict(urls: Iterable[str]) -> int:
+    """Delete the objects behind `urls` that live in THIS deployment's bucket; raise on failure.
+
+    The Art. 17 erasure path (`services/erasure_external.py`): unlike `delete_object()` -- the
+    best-effort cleanup for an avatar replaced mid-session -- an erasure that swallowed a failed
+    delete would report "completed" with the subject's upload still public, so every error here
+    propagates and the caller rolls the erasure back. URLs outside our public base (a platform CDN
+    avatar) are not ours to delete and are skipped. Blocking boto3: call from a worker thread.
+    Returns how many objects were deleted (S3 treats a missing key as success).
+    """
+    base = _public_base_url().rstrip("/") + "/"
+    client = _client()
+    bucket = _bucket()
+    deleted = 0
+    for url in urls:
+        if not url.startswith(base):
+            continue
+        key = url[len(base) :].split("?", 1)[0].split("#", 1)[0]
+        if not key or ".." in key.split("/"):
+            continue
+        client.delete_object(Bucket=bucket, Key=key)
+        deleted += 1
+    return deleted
 
 
 async def delete_object(url: str) -> None:
