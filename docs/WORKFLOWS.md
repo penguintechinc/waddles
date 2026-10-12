@@ -1420,7 +1420,10 @@ share `scripts/lib/checks.sh`. Rules, enforced by
   `RATCHET` line to lower it in the same PR.
 - Zero applicable checks, or a missing tool for files that exist, fails the suite.
 - Python unit suites (`hub_api`, `core/workflow_core_module`, `core/community_module`,
-  `libs/*`, `core/svc_*`) each carry a `.coveragerc` (`fail_under = 90`, tests omitted)
+  `libs/*`, `core/svc_ingest|presentation|streaming`) each carry a `.coveragerc` (`fail_under = 90`, tests omitted)
   and `addopts = --cov ...` in `pytest.ini`, so `make test-unit` / CI fail below 90%
   line coverage. Use `pytest --no-cov <file>` when iterating on a single test file.
+  `core/svc_action` and `core/svc_process` are not yet wired: touching their directory triggers the Rust
+  workflows, which currently fail `cargo deny` on RUSTSEC-2024-0449 (transitive `unsafe-libyaml` via
+  `penguin-bundle-host`) -- tracked as follow-up.
   Rust crates gate via `cargo llvm-cov --fail-under-lines 90` (`rust-crate-ci.yml`).
