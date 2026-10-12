@@ -369,4 +369,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-action-rust
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-action-rust" "ports" (list $.Values.pipeline.rustDataPlane.svcAction.port $.Values.pipeline.rustDataPlane.svcAction.metricsPort $.Values.pipeline.rustDataPlane.svcAction.hostApiPort) "runtime" "rust" "binaries" (list "/app/svc-action")) }}
 {{- end }}

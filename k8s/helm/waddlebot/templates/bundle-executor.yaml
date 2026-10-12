@@ -249,4 +249,6 @@ spec:
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
       {{- end }}
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "bundle-executor" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false) }}
 {{- end }}

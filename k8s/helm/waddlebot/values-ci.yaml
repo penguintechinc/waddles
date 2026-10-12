@@ -126,3 +126,8 @@ ingress:
   enabled: false          # no external LB/ingress controller on kind
 httproute:
   enabled: false
+
+# R5: kind has no Tetragon agent/CRD (only the CiliumNetworkPolicy CRD is installed -- see the workflow);
+# this job validates install/upgrade/hook lifecycle, not policy enforcement.
+tetragon:
+  enabled: false

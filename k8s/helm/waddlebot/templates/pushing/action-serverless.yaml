@@ -129,4 +129,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: action-serverless
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "action-serverless" "ports" (list 8103 50051 50052 50053) "runtime" "python") }}
 {{- end }}

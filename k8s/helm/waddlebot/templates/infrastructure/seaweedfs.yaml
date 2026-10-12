@@ -396,4 +396,6 @@ spec:
   selector:
     app.kubernetes.io/name: seaweedfs
     app.kubernetes.io/instance: {{ .Release.Name }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "storage" "name" "seaweedfs" "selector" (dict "app.kubernetes.io/name" "seaweedfs" "app.kubernetes.io/instance" $.Release.Name) "ports" (list $.Values.infrastructure.seaweedfs.s3Port $.Values.infrastructure.seaweedfs.masterPort) "egress" "internal" "tetragon" false) }}
 {{- end }}

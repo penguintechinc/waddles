@@ -123,4 +123,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-core
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-core" "ports" (list $.Values.pipeline.svcCore.port $.Values.pipeline.svcCore.grpcPort) "runtime" "python" "egress" "https") }}
 {{- end }}

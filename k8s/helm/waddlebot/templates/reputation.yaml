@@ -140,4 +140,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: reputation
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "reputation" "ports" (list $.Values.reputation.port $.Values.reputation.grpcPort) "runtime" "python" "binaries" (list "/app/entrypoint.sh") "egress" "https") }}
 {{- end }}

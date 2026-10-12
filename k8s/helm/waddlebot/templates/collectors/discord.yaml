@@ -24,6 +24,8 @@ spec:
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
       # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own /ready.
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 8 }}
@@ -32,6 +34,8 @@ spec:
           image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.modules.collectors.discord.image) "imageTag" .Values.modules.collectors.discord.imageTag) }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           {{- include "waddlebot.preStop" $ | nindent 10 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
             - name: http
               containerPort: 8003
@@ -121,4 +125,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: discord-collector
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "discord-collector" "ports" (list 8003) "runtime" "python") }}
 {{- end }}

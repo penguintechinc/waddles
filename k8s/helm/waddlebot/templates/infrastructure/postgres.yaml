@@ -84,11 +84,15 @@ spec:
         app.kubernetes.io/component: database
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.infrastructure.postgresql.podSecurityContext | nindent 8 }}
       containers:
       - name: postgres
         image: {{ .Values.infrastructure.postgresql.image }}
         imagePullPolicy: IfNotPresent
         {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          {{- toYaml .Values.infrastructure.postgresql.securityContext | nindent 10 }}
         args: ["-c", "max_connections=300"]
         ports:
         - name: postgres
@@ -126,6 +130,11 @@ spec:
         - name: init-script
           mountPath: /docker-entrypoint-initdb.d
           readOnly: true
+        # readOnlyRootFilesystem: the unix-socket dir and /tmp must be writable.
+        - name: pg-run
+          mountPath: /var/run/postgresql
+        - name: tmp
+          mountPath: /tmp
         resources:
           requests:
             memory: {{ .Values.infrastructure.postgresql.resources.requests.memory }}
@@ -160,6 +169,10 @@ spec:
       - name: init-script
         configMap:
           name: postgres-init-script
+      - name: pg-run
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -181,4 +194,6 @@ spec:
   selector:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/instance: {{ .Release.Name }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "database" "name" "postgres" "selector" (dict "app.kubernetes.io/name" "postgres" "app.kubernetes.io/instance" $.Release.Name) "ports" (list 5432) "egress" "internal" "tetragon" false) }}
 {{- end }}

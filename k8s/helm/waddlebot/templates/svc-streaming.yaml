@@ -317,4 +317,6 @@ spec:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-streaming
 {{- end }}
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-streaming" "ports" (list $.Values.pipeline.svcStreaming.port $.Values.pipeline.svcStreaming.metricsPort $.Values.pipeline.svcStreaming.grpcPort $.Values.pipeline.svcStreaming.rtmpPort (printf "%v/UDP" $.Values.pipeline.svcStreaming.srtPort) (printf "%v-%v/UDP" $.Values.pipeline.svcStreaming.webrtcRangeStart $.Values.pipeline.svcStreaming.webrtcRangeEnd)) "runtime" "rust" "binaries" (list "/app/svc-streaming" "/usr/bin/ffmpeg" "/usr/bin/ffprobe") "egress" "world") }}
 {{- end }}

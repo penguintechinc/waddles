@@ -108,4 +108,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: interactive-ai
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "interactive-ai" "ports" (list 8005) "runtime" "python" "shell" true "egress" "https") }}
 {{- end }}

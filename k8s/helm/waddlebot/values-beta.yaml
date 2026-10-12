@@ -813,6 +813,14 @@ presentation:
     repository: "waddlebot-svc-presentation"
     tag: "latest"
 
+# R5: the SPIRE agent DaemonSet is an approved ROOT EXCEPTION (uid 0 + hostPath Workload-API socket
+# dir) that neither PSA baseline nor restricted admits, and it lives in this namespace, so beta cannot
+# ENFORCE restricted while spire.enabled=true (the chart `fail`s if you try). audit/warn stay
+# `restricted` so every non-spire violation is still surfaced. Follow-up: move SPIRE to its own
+# namespace, then drop this override. gamma/production (spire off) enforce `restricted`.
+podSecurity:
+  enforce: privileged
+
 spire:
   enabled: true
   environment: "beta"

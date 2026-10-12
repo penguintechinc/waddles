@@ -46,11 +46,15 @@ spec:
         app.kubernetes.io/component: ai-inference
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.infrastructure.ollama.podSecurityContext | nindent 8 }}
       containers:
       - name: ollama
         image: {{ .Values.infrastructure.ollama.image }}
         imagePullPolicy: IfNotPresent
         {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          {{- toYaml .Values.infrastructure.ollama.securityContext | nindent 10 }}
         ports:
         - name: http
           containerPort: 11434
@@ -58,6 +62,9 @@ spec:
         env:
         - name: OLLAMA_HOST
           value: "0.0.0.0"
+        # Rootless: the model store lives under $HOME/.ollama (same PVC, mounted below).
+        - name: HOME
+          value: /home/ollama
         {{- if .Values.infrastructure.ollama.extraEnv }}
         {{- range $key, $value := .Values.infrastructure.ollama.extraEnv }}
         - name: {{ $key }}
@@ -66,7 +73,9 @@ spec:
         {{- end }}
         volumeMounts:
         - name: ollama-data
-          mountPath: /root/.ollama
+          mountPath: /home/ollama/.ollama
+        - name: tmp
+          mountPath: /tmp
         resources:
           requests:
             memory: {{ .Values.infrastructure.ollama.resources.requests.memory }}
@@ -100,6 +109,8 @@ spec:
       - name: ollama-data
         persistentVolumeClaim:
           claimName: {{ .Values.infrastructure.ollama.persistence.name }}
+      - name: tmp
+        emptyDir: {}
       {{- if .Values.infrastructure.ollama.gpu.enabled }}
       nodeSelector:
         nvidia.com/gpu: "true"
@@ -128,4 +139,6 @@ spec:
   selector:
     app.kubernetes.io/name: ollama
     app.kubernetes.io/instance: {{ .Release.Name }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "ai-inference" "name" "ollama" "selector" (dict "app.kubernetes.io/name" "ollama" "app.kubernetes.io/instance" $.Release.Name) "ports" (list 11434) "egress" "https" "tetragon" false) }}
 {{- end }}
