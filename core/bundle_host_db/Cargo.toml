@@ -3,7 +3,7 @@ name = "bundle-host-db"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Shared `db` bundle host-capability implementation (structured tables.* ops: insert/get/query/update/delete -- see crate doc for why this differs from stage.wit's current raw-SQL `execute` shape) for the data-plane's two invoke-side stages (svc_process + svc_action). A path dependency within this repo -- NOT a penguin-libs crate: table-identity resolution, quotas, and isolation rules here are this repo's own security boundary for untrusted vendor bundle data, evolved alongside the bundle-db-capability design doc and hub-api's app_core/app_community schema ownership. Backed by the shared `waddles` Postgres instance via SeaORM, under the least-privilege `waddles_bundle_runtime` role; every row is scoped server-side to the invocation's authenticated (tenant, community, app_id), never from guest input."
 

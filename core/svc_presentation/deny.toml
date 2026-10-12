@@ -34,7 +34,9 @@ allow = [
 exceptions = []
 
 [licenses.private]
-ignore = false
+# Workspace crate is AGPL-3.0-or-later (not in the permissive dep allowlist); skip
+# license-checking non-published crates. Third-party dep licenses still fully checked.
+ignore = true
 
 [bans]
 multiple-versions = "warn"

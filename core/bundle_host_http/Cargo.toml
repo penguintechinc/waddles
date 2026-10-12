@@ -3,7 +3,7 @@ name = "bundle-host-http"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Shared bundle `http` host-capability egress guard (SSRF-hardened allowlist/DNS-pinning/redirect-recheck/rate-limit pipeline, connector spec SS8.2) extracted from core/svc_action so core/svc_process's process-stage bundles can enforce the identical policy for their own http capability, with zero behavior change to svc_action. A same-repo path dependency, not a penguin-libs crate: this pipeline is specific to this repo's own bundle-host wire shapes (`penguin_bundle_host::wire::HostResultError`), not a general-purpose library."
 

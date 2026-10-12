@@ -3,7 +3,7 @@ name = "bundle-capability-gate"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "The standard host-side enforcement gate every bundle host import calls first (docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md SS5): PermissionId catalog, host-only InvokeScope construction, AppScoped/ReputationScoped resource derivation, and authorize(). A path dependency within this repo, not a penguin-libs crate -- this crate depends only on the grant-table shape another agent's migration owns (SS4), not on any published cross-repo schema. NOT YET wired into svc_process/svc_action's CapabilityHandler::handle -- that integration is a later task (spec SS12 Phase 4's third item)."
 

@@ -3,7 +3,7 @@ name = "twitch_helix"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Typed async Rust client for the Twitch Helix endpoints the provider framework needs for moderation + messaging (delete chat message, send chat message, send whisper). Mirrors core/svc_action/services/twitch_helix.py + platform_moderation.py error classification. Token refresh is the caller's concern."
 

@@ -3,7 +3,7 @@ name = "egress-proxy"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Network-level egress gateway (feature/bundle-egress-gateway PR #463 skeleton) -- the sole enforcement point data-plane pods (svc-ingest/svc-process/svc-action) dial outbound through. Re-validates the signed per-tenant/app/community net.http.{fqdn,public-ip,private-ip} assertion the in-process guard (core/bundle_host_http) already checked, re-resolves DNS itself, and always denies loopback/link-local/metadata/cluster CIDRs regardless of assertion."
 

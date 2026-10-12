@@ -3,7 +3,7 @@ name = "hub_client"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Rust client for hub-api's internal gRPC surface (waddles.hub.internal.v1: IdentityService, KeyService) -- feature/hub-api-internal-grpc. Wraps tonic-generated clients with core/service_auth's machine-JWT injector, connection pooling (a shared tonic Channel), per-RPC deadlines, retries on idempotent RPCs only, and a circuit breaker. Consumed by svc_ingest/svc_process/svc_action."
 

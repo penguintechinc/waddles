@@ -3,7 +3,7 @@ name = "egress-assertion"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Shared signed egress-allowlist assertion (EgressAssertion struct, EdDSA sign + verify, header names) used on both sides of the bundle-host -> egress-proxy hop -- core/bundle_host_http's client-side signer (PR #468) and core/egress_proxy's server-side verifier (PR #463/#469) -- so the wire format the two crates agree on can never drift apart."
 

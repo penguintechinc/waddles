@@ -3,7 +3,7 @@ name = "svc-process"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Waddles process-stage Rust data-plane service -- consumes each activated bundle's granted ingest-source Valkey streams, runs stage built-ins (moderation gate, enforcement routing, cross-app routing) around the bundle's `transform` call via bundle-executor, and enqueues the result onto the bundle's `:action` stream. M4 SKELETON ONLY: penguin-spine/penguin-bundle-host/penguin-connectors wiring, executor integration, built-ins, DB host capability and hop verification are TODO(M4), blocked on M1/M2 landing in parallel -- see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md SS4.2, SS16."
 

@@ -3,7 +3,7 @@ name = "bundle-executor"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Waddles credential-less WASM bundle sandbox host (M2). Holds a wasmtime engine, instantiates a bundle's WASI 0.2 component against the normative waddle:bundle/stage@1.0.0 world, services every WIT host import over the host-API wire protocol back to its stage, and natively denies wasi:sockets -- see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md SS4.5/SS7."
 

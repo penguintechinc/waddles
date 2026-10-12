@@ -3,7 +3,7 @@ name = "egress_detokenizer"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Single-pass, non-recursive {user:<token>} output detokenizer -- substitutes real display names back into egress text ONLY at the final chat/overlay send (core/svc_action), per-sink-escaped. The PII boundary's outbound half of core/svc_process/src/pii_tokenize.rs's inbound tokenization pass."
 

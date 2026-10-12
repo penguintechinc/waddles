@@ -3,7 +3,7 @@ name = "svc-action"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Waddles ACTION stage-runner -- terminal pipeline stage: dispatch outcomes to platform senders, retry-with-backoff, audit to action_dispatch_log."
 
