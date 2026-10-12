@@ -8,17 +8,16 @@ WORKDIR /app
 COPY libs/flask_core /app/libs/flask_core
 
 # Install shared library
-RUN cd /app/libs/flask_core && pip install --no-cache-dir .
+RUN pip install --no-cache-dir /app/libs/flask_core
 
 # Copy module files
 COPY core/ai_researcher_module/requirements.txt /app/
 COPY core/ai_researcher_module /app/
 
 # Install module dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
 # Create log directory
-RUN mkdir -p /var/log/waddlebotlog
+RUN pip install --no-cache-dir -r requirements.txt && \
+    mkdir -p /var/log/waddlebotlog
 
 # Copy standard healthcheck script
 COPY scripts/healthcheck.py /usr/local/bin/healthcheck.py

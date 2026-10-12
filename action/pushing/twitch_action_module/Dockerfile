@@ -22,10 +22,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY action/pushing/twitch_action_module /app/
 
 # Create log directory
-RUN mkdir -p /var/log/waddlebotlog
-
 # Create PyDAL migration log directory
-RUN mkdir -p /app/databases
+RUN mkdir -p /var/log/waddlebotlog && \
+    mkdir -p /app/databases
 
 # Copy standard healthcheck script
 COPY scripts/healthcheck.py /usr/local/bin/healthcheck.py

@@ -4,8 +4,8 @@ WORKDIR /app
 
 # Install migration dependencies
 RUN pip install --no-cache-dir \
-    alembic>=1.13 \
-    sqlalchemy>=2.0 \
+    "alembic>=1.13" \
+    "sqlalchemy>=2.0" \
     psycopg2-binary \
     flask-sqlalchemy \
     flask-security-too \
@@ -33,21 +33,19 @@ COPY scripts/db/ scripts/db/
 
 # Copy migration runner
 COPY migrations/run-alembic.sh ./run.sh
-RUN chmod +x ./run.sh
-
 # Create non-root user
-RUN useradd --create-home --shell /bin/bash appuser
+RUN chmod +x ./run.sh && \
+    useradd --create-home --shell /bin/bash appuser
 
 # Set proper permissions for migrations
-RUN chown -R appuser:appuser /app
-
 # Remove base image's own bundled pip + ensurepip wheel: pip vendors an
 # outdated msgpack (GHSA-6v7p-g79w-8964) and pkg_resources/setuptools
 # (CVE-2025-47273) that the upstream python:3.13-slim-bookworm rebuild
 # hasn't picked up yet. Neither pip nor its vendor tree is imported by
 # any service at runtime (installs happen at build time via uv/pip
 # above), so removing them is a real fix, not a suppression.
-RUN rm -rf /usr/local/lib/python3.13/site-packages/pip \
+RUN chown -R appuser:appuser /app && \
+    rm -rf /usr/local/lib/python3.13/site-packages/pip \
     /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
     /usr/local/lib/python3.13/ensurepip
 
