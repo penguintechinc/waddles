@@ -81,7 +81,11 @@ if [[ "$1" == "-n" && "$3" == "get" && "$4" == "secret" ]]; then
   name="$5"
   f="$STATE/secrets/$name"
   if [[ "${6:-}" == "-o" && "${7:-}" == jsonpath=* ]]; then
-    jp="${7#jsonpath=}"; jp="${jp#\{.data.}"; jp="${jp%\}}"
+    # Accept both the quoted bracket form {.data['<name>']} (what the chart now emits,
+    # so a '.' inside an operator-chosen KID is not a path separator) and the legacy
+    # unquoted {.data.<name>} form.
+    jp="${7#jsonpath=}"; jp="${jp#\{.data}"; jp="${jp%\}}"
+    if [[ "$jp" == "['"*"']" ]]; then jp="${jp#\[\'}"; jp="${jp%\'\]}"; else jp="${jp#.}"; fi
     [[ -f "$f/$jp" ]] || { echo ""; exit 1; }
     cat "$f/$jp"; exit 0
   fi
