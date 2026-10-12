@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -367,16 +368,23 @@ class TestListAndHead:
             (ListFilters(actor_uuid=USER_UUID), [3, 1]),
             (ListFilters(actor_uuid=OTHER_USER_UUID), [2]),
             (ListFilters(actor_uuid=uuid.uuid4()), []),
-            (ListFilters(since=datetime.now(UTC) - timedelta(minutes=5)), [3, 2, 1]),
-            (ListFilters(since=datetime.now(UTC) + timedelta(minutes=5)), []),
-            (ListFilters(until=datetime.now(UTC) + timedelta(minutes=5)), [3, 2, 1]),
-            (ListFilters(until=datetime.now(UTC) - timedelta(minutes=5)), []),
+            (lambda: ListFilters(since=datetime.now(UTC) - timedelta(minutes=5)), [3, 2, 1]),
+            (lambda: ListFilters(since=datetime.now(UTC) + timedelta(minutes=5)), []),
+            (lambda: ListFilters(until=datetime.now(UTC) + timedelta(minutes=5)), [3, 2, 1]),
+            (lambda: ListFilters(until=datetime.now(UTC) - timedelta(minutes=5)), []),
             (ListFilters(category="authz", outcome="success"), []),
         ],
     )
     async def test_filters(
-        self, audit_service: AuditService, filters: ListFilters, expected_seqs: list[int]
+        self,
+        audit_service: AuditService,
+        filters: ListFilters | Callable[[], ListFilters],
+        expected_seqs: list[int],
     ) -> None:
+        # Time-window filters are built lazily: a `datetime.now()` evaluated at parametrize time
+        # is the COLLECTION time, and a long suite (minutes) ran this test after "now + 5 min".
+        if callable(filters):
+            filters = filters()
         await self._seed(audit_service)
         records, total = await audit_service.list_events(
             TENANT_1_CHAIN, filters=filters, page=1, limit=50

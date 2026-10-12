@@ -169,3 +169,17 @@ def test_webhook_safe_evaluator_rejects_escapes_and_bombs(payload: str) -> None:
 
 def test_webhook_safe_evaluator_still_evaluates() -> None:
     assert SafeExpressionEvaluator({"x": 2}).evaluate("x * 3 + 1") == 7
+
+
+@pytest.mark.parametrize(
+    "name", ["__import__", "__builtins__", "__class__", "_private", "not_in_scope"]
+)
+def test_disallowed_or_unknown_names_reject_cleanly_never_keyerror(name: str) -> None:
+    """A name outside the allowlist/namespace is a typed rejection, not a raw KeyError."""
+    ctx = ExpressionContext({"ok": 1})
+    with pytest.raises(ExpressionEngineException) as excinfo:
+        ExpressionEvaluator.evaluate_expression(name, ctx)
+    assert not isinstance(excinfo.value, KeyError)
+    result = ExpressionEngine(ctx).evaluate(name)
+    assert result.success is False
+    assert result.error

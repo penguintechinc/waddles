@@ -332,6 +332,14 @@ async def complete_refresh(
                 now + timedelta(seconds=cfg.refresh_token_ttl_seconds),
                 ctx.created_at + timedelta(seconds=cfg.session_absolute_ttl_seconds),
             )
+            # Leave the "just rotated" marker BEFORE the compare-and-swap, not after. A caller
+            # that loses the CAS reads the marker immediately, and it can only lose once the
+            # winner's CAS has committed -- so a marker written first is always visible by then.
+            # Written after, a loser racing the winner's marker write found none, read a plain
+            # parallel refresh as theft, and revoked the whole session (flaky 401 under load).
+            # A marker left by a caller that then loses the CAS is harmless: its digest was
+            # rotated away by the winner anyway.
+            await _mark_rotated(revocation, ctx, cfg.refresh_reuse_grace_seconds)
             claimed = await async_dal.update_async(
                 (dal.hub_sessions.id == ctx.session_id)
                 & (dal.hub_sessions.session_token == ctx.presented_digest)
@@ -340,7 +348,6 @@ async def complete_refresh(
                 expires_at=new_expiry,
             )
             if claimed:
-                await _mark_rotated(revocation, ctx, cfg.refresh_reuse_grace_seconds)
                 _count("refreshed")
                 return RotatedSession(
                     session_id=ctx.session_id,
@@ -354,8 +361,8 @@ async def complete_refresh(
                     ),
                     expires_at=new_expiry,
                 )
-            # Lost the compare-and-swap to a concurrent rotation of this same token: the winner
-            # has just left its "rotated" marker, so fall through to the replay decision.
+            # Lost the compare-and-swap to a concurrent rotation of this same token: the marker
+            # was written before that rotation committed, so fall through to the replay decision.
 
         try:
             just_rotated = await revocation.ahas_marker(
