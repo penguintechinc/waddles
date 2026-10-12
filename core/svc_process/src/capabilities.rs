@@ -223,7 +223,7 @@ pub trait CapabilityHandler: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, HostResultError>> + Send + 'a>>;
 }
 
-fn denied(code: &str, message: impl Into<String>) -> HostResultError {
+pub(crate) fn denied(code: &str, message: impl Into<String>) -> HostResultError {
     HostResultError {
         code: code.to_string(),
         message: message.into(),

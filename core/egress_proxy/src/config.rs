@@ -2,7 +2,9 @@
 //! factor -- matches the env vars already wired into
 //! `k8s/helm/waddlebot/templates/infrastructure/egress-proxy.yaml` by
 //! feature/bundle-egress-gateway, plus the machine-JWT/limiter variables
-//! this crate adds on top of that skeleton).
+//! this crate adds on top of that skeleton). `SHUTDOWN_DRAIN_SECONDS`
+//! (default 25) bounds the SIGTERM/SIGINT graceful drain -- see the crate
+//! root doc.
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -42,6 +44,12 @@ pub struct Config {
     /// destination keeps trickling just enough traffic through to dodge
     /// the idle timeout forever.
     pub tunnel_max_duration: Duration,
+    /// On SIGTERM/SIGINT the proxy stops accepting new connections and
+    /// drains in-flight requests/tunnels for at most this long before
+    /// exiting 0 regardless (`SHUTDOWN_DRAIN_SECONDS`, default 25s -- kept
+    /// under the Kubernetes default 30s `terminationGracePeriodSeconds` so
+    /// the pod exits on its own instead of being SIGKILLed).
+    pub shutdown_drain: Duration,
     /// Defense-in-depth, operator-controlled kill switch for the
     /// `PrivateIp` assertion category: even a validly-signed, correctly
     /// destination-matched private-IP grant is refused unless this
@@ -174,6 +182,9 @@ impl Config {
             .map_err(|_| {
             ConfigError::Invalid("TUNNEL_MAX_DURATION_SECONDS", "not a u64".into())
         })?;
+        let shutdown_drain_secs: u64 = env_or("SHUTDOWN_DRAIN_SECONDS", "25")
+            .parse()
+            .map_err(|_| ConfigError::Invalid("SHUTDOWN_DRAIN_SECONDS", "not a u64".into()))?;
         let allow_private_ip: bool = env_or("EGRESS_PROXY_ALLOW_PRIVATE_IP", "false")
             .parse()
             .map_err(|_| {
@@ -198,6 +209,7 @@ impl Config {
             header_read_timeout: Duration::from_secs(header_read_timeout_secs),
             tunnel_idle_timeout: Duration::from_secs(tunnel_idle_timeout_secs),
             tunnel_max_duration: Duration::from_secs(tunnel_max_duration_secs),
+            shutdown_drain: Duration::from_secs(shutdown_drain_secs),
             allow_private_ip,
         })
     }
