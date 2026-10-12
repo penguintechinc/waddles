@@ -225,6 +225,28 @@ class TestSecurityContextRestricted:
         assert checked >= 4, "expected at least collectors/postgres/redis to be present"
 
 
+class TestRedisRootlessUpgrade:
+    """regression: kind upgrade-path -- pre-R5 redis ran as root and left root-owned AOF/RDB files in /data."""
+
+    @pytest.mark.parametrize("values", (*_SHIPPING, "values-alpha.yaml", "values-ci.yaml"))
+    def test_rootless_redis_uses_fresh_subdir_with_migration(self, values: str) -> None:
+        docs = _render(values)
+        redis = [d for d in _workloads(docs, ("Deployment",)) if d["metadata"]["name"] == "redis"]
+        assert len(redis) == 1, f"{values}: expected exactly one redis Deployment"
+        ps = _pod_spec(redis[0])
+        main = ps["containers"][0]
+        cmd = main["command"]
+        assert cmd[cmd.index("--dir") + 1] == "/data/valkey", "valkey must persist under a dir uid 999 can create"
+        inits = {c["name"]: c for c in ps.get("initContainers") or []}
+        mig = inits["migrate-data-dir"]
+        assert mig["securityContext"]["runAsNonRoot"] is True and mig["securityContext"]["runAsUser"] != 0
+        assert mig["securityContext"]["readOnlyRootFilesystem"] is True
+        script = mig["command"][-1]
+        assert "set -eu" in script and "/data/valkey" in script
+        assert "|| true" not in script, "migration failures must be loud"
+        assert {m["name"] for m in mig["volumeMounts"]} == {"redis-data"}
+
+
 class TestPodSecurityAdmission:
     """The chart-managed Namespace enforces/audits/warns `restricted`."""
 
