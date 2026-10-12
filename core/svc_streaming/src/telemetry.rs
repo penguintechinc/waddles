@@ -197,9 +197,9 @@ pub fn register_request_metrics(registry: &prometheus::Registry) -> RequestMetri
     let http_requests_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(
             "svc_streaming_http_requests_total",
-            "Total HTTP requests handled, labeled by method/path/status",
+            "Total HTTP requests handled, labeled by method/route-template/status",
         ),
-        &["method", "path", "status"],
+        &["method", "route", "status"],
     )
     .expect("valid metric definition");
     registry
@@ -209,9 +209,9 @@ pub fn register_request_metrics(registry: &prometheus::Registry) -> RequestMetri
     let http_request_duration_seconds = prometheus::HistogramVec::new(
         prometheus::HistogramOpts::new(
             "svc_streaming_http_request_duration_seconds",
-            "HTTP request duration in seconds, labeled by method/path",
+            "HTTP request duration in seconds, labeled by method/route-template",
         ),
-        &["method", "path"],
+        &["method", "route"],
     )
     .expect("valid metric definition");
     registry
