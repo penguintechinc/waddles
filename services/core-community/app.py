@@ -91,6 +91,7 @@ grpc_thread_browser = None
 # DATABASE INITIALIZATION
 # ============================================================================
 
+
 @app.before_serving
 async def startup():
     """Initialize all 4 modules on startup"""

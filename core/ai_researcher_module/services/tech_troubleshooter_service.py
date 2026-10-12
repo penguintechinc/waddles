@@ -319,7 +319,7 @@ class TechTroubleshooterService:
             lines = []
             for i, r in enumerate(searx_resp.results[:5], 1):
                 lines.append(f"{i}. **{r.title}**\n   {r.content}\n   {r.url}")
-            content = f"**Troubleshoot Results:**\n\n" + '\n'.join(lines)
+            content = "**Troubleshoot Results:**\n\n" + '\n'.join(lines)
             # Web snippets go straight to chat here: strip beacons / mass pings.
             content = sanitize_model_output(content)
 

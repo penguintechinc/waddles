@@ -146,7 +146,7 @@ class ResearchService:
             rate_limit_key = f"research:{community_id}:{user_id}"
             if not await self._check_rate_limit(rate_limit_key, 'research'):
                 logger.warning(
-                    f"Rate limit exceeded for research",
+                    "Rate limit exceeded for research",
                     extra={
                         'community_id': community_id,
                         'user_id': user_id
@@ -165,7 +165,7 @@ class ResearchService:
             safety_check = await self._check_safety(topic, community_id)
             if not safety_check['safe']:
                 logger.warning(
-                    f"Safety check failed for research topic",
+                    "Safety check failed for research topic",
                     extra={
                         'community_id': community_id,
                         'user_id': user_id,
@@ -186,7 +186,7 @@ class ResearchService:
             cached_result = await self._get_from_cache(cache_key)
             if cached_result:
                 logger.info(
-                    f"Research cache hit",
+                    "Research cache hit",
                     extra={
                         'community_id': community_id,
                         'topic': topic[:50]
@@ -210,7 +210,7 @@ class ResearchService:
                 )
                 if similar_result:
                     logger.info(
-                        f"Research semantic cache hit",
+                        "Research semantic cache hit",
                         extra={
                             'community_id': community_id,
                             'topic': topic[:50],
@@ -246,7 +246,7 @@ class ResearchService:
 
             if not response['success']:
                 logger.error(
-                    f"AI generation failed for research",
+                    "AI generation failed for research",
                     extra={
                         'community_id': community_id,
                         'error': response.get('error')
@@ -281,7 +281,7 @@ class ResearchService:
 
             processing_time = int((time.time() - start_time) * 1000)
             logger.info(
-                f"Research completed",
+                "Research completed",
                 extra={
                     'community_id': community_id,
                     'tokens_used': response['tokens_used'],
@@ -335,7 +335,7 @@ class ResearchService:
             rate_limit_key = f"ask:{community_id}:{user_id}"
             if not await self._check_rate_limit(rate_limit_key, 'research'):
                 logger.warning(
-                    f"Rate limit exceeded for ask",
+                    "Rate limit exceeded for ask",
                     extra={
                         'community_id': community_id,
                         'user_id': user_id
@@ -354,7 +354,7 @@ class ResearchService:
             safety_check = await self._check_safety(question, community_id)
             if not safety_check['safe']:
                 logger.warning(
-                    f"Safety check failed for question",
+                    "Safety check failed for question",
                     extra={
                         'community_id': community_id,
                         'user_id': user_id,
@@ -375,7 +375,7 @@ class ResearchService:
             cached_result = await self._get_from_cache(cache_key)
             if cached_result:
                 logger.info(
-                    f"Ask cache hit",
+                    "Ask cache hit",
                     extra={
                         'community_id': community_id,
                         'question': question[:50]
@@ -419,7 +419,7 @@ class ResearchService:
 
             if not response['success']:
                 logger.error(
-                    f"AI generation failed for ask",
+                    "AI generation failed for ask",
                     extra={
                         'community_id': community_id,
                         'error': response.get('error')
@@ -443,7 +443,7 @@ class ResearchService:
 
             processing_time = int((time.time() - start_time) * 1000)
             logger.info(
-                f"Ask completed",
+                "Ask completed",
                 extra={
                     'community_id': community_id,
                     'tokens_used': response['tokens_used'],
@@ -499,7 +499,7 @@ class ResearchService:
             rate_limit_key = f"recall:{community_id}:{user_id}"
             if not await self._check_rate_limit(rate_limit_key, 'memory'):
                 logger.warning(
-                    f"Rate limit exceeded for recall",
+                    "Rate limit exceeded for recall",
                     extra={
                         'community_id': community_id,
                         'user_id': user_id
@@ -519,7 +519,7 @@ class ResearchService:
             cached_result = await self._get_from_cache(cache_key)
             if cached_result:
                 logger.info(
-                    f"Recall cache hit",
+                    "Recall cache hit",
                     extra={
                         'community_id': community_id,
                         'topic': topic[:50]
@@ -544,7 +544,7 @@ class ResearchService:
             if not memories:
                 content = f"No memories found related to '{topic}'."
                 logger.info(
-                    f"Recall found no memories",
+                    "Recall found no memories",
                     extra={
                         'community_id': community_id,
                         'topic': topic[:50]
@@ -566,7 +566,7 @@ class ResearchService:
                 content = sanitize_model_output(content)
 
                 logger.info(
-                    f"Recall completed",
+                    "Recall completed",
                     extra={
                         'community_id': community_id,
                         'memories_found': len(memories)
@@ -630,7 +630,7 @@ class ResearchService:
             rate_limit_key = f"summarize:{community_id}:{user_id}"
             if not await self._check_rate_limit(rate_limit_key, 'research'):
                 logger.warning(
-                    f"Rate limit exceeded for summarize",
+                    "Rate limit exceeded for summarize",
                     extra={
                         'community_id': community_id,
                         'user_id': user_id
@@ -656,7 +656,7 @@ class ResearchService:
 
             if not context:
                 logger.info(
-                    f"No context found for summarize",
+                    "No context found for summarize",
                     extra={
                         'community_id': community_id,
                         'duration_minutes': duration_minutes
@@ -679,7 +679,7 @@ class ResearchService:
             cached_result = await self._get_from_cache(cache_key)
             if cached_result:
                 logger.info(
-                    f"Summarize cache hit",
+                    "Summarize cache hit",
                     extra={
                         'community_id': community_id,
                         'duration_minutes': duration_minutes
@@ -725,7 +725,7 @@ class ResearchService:
 
             if not response['success']:
                 logger.error(
-                    f"AI generation failed for summarize",
+                    "AI generation failed for summarize",
                     extra={
                         'community_id': community_id,
                         'error': response.get('error')
@@ -760,7 +760,7 @@ class ResearchService:
 
             processing_time = int((time.time() - start_time) * 1000)
             logger.info(
-                f"Summarize completed",
+                "Summarize completed",
                 extra={
                     'community_id': community_id,
                     'tokens_used': response['tokens_used'],

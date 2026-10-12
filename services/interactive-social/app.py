@@ -60,6 +60,7 @@ class Config:  # noqa: E302
         if not Config.REDIS_URL:
             raise ValueError('REDIS_URL environment variable is required')
 
+
 app = Quart(__name__)
 
 # Register health/metrics endpoints

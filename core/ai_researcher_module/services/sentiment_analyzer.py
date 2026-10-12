@@ -109,7 +109,7 @@ class SentimentAnalyzer:
 
         try:
             logger.info(
-                f"Analyzing community sentiment",
+                "Analyzing community sentiment",
                 extra={
                     'community_id': community_id,
                     'timeframe': timeframe
@@ -176,7 +176,7 @@ class SentimentAnalyzer:
             processing_time = int((time.time() - start_time) * 1000)
 
             logger.info(
-                f"Sentiment analysis completed",
+                "Sentiment analysis completed",
                 extra={
                     'community_id': community_id,
                     'overall_sentiment': overall_sentiment,

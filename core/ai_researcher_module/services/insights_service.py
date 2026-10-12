@@ -125,7 +125,7 @@ class InsightsService:
 
         try:
             logger.info(
-                f"Generating community insights",
+                "Generating community insights",
                 extra={
                     'community_id': community_id,
                     'timeframe': timeframe,
@@ -195,7 +195,7 @@ class InsightsService:
 
             processing_time = int((time.time() - start_time) * 1000)
             logger.info(
-                f"Insights generated successfully",
+                "Insights generated successfully",
                 extra={
                     'community_id': community_id,
                     'insight_id': insight_id,

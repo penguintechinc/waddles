@@ -22,8 +22,6 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-
-
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x10reputation.proto\x12\x14waddlebot.reputation\"\x85\x02\n\x12RecordEventRequest\x12\r\n\x05token\x18\x01 \x01(\t\x12\x14\n\x0c\x63ommunity_id\x18\x02 \x01(\x05\x12\x0f\n\x07user_id\x18\x03 \x01(\x05\x12\x10\n\x08platform\x18\x04 \x01(\t\x12\x18\n\x10platform_user_id\x18\x05 \x01(\t\x12\x12\n\nevent_type\x18\x06 \x01(\t\x12H\n\x08metadata\x18\x07 \x03(\x0b\x32\x36.waddlebot.reputation.RecordEventRequest.MetadataEntry\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"G\n\x0fGetScoreRequest\x12\r\n\x05token\x18\x01 \x01(\t\x12\x14\n\x0c\x63ommunity_id\x18\x02 \x01(\x05\x12\x0f\n\x07user_id\x18\x03 \x01(\x05\"P\n\x10GetScoreResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\r\n\x05score\x18\x02 \x01(\x05\x12\r\n\x05label\x18\x03 \x01(\t\x12\r\n\x05\x65rror\x18\x04 \x01(\t\"B\n\x0fSuccessResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\r\n\x05\x65rror\x18\x03 \x01(\t2\xce\x01\n\x11ReputationService\x12^\n\x0bRecordEvent\x12(.waddlebot.reputation.RecordEventRequest\x1a%.waddlebot.reputation.SuccessResponse\x12Y\n\x08GetScore\x12%.waddlebot.reputation.GetScoreRequest\x1a&.waddlebot.reputation.GetScoreResponseb\x06proto3')
 
 _globals = globals()
@@ -33,16 +31,16 @@ if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_RECORDEVENTREQUEST_METADATAENTRY']._loaded_options = None
   _globals['_RECORDEVENTREQUEST_METADATAENTRY']._serialized_options = b'8\001'
-  _globals['_RECORDEVENTREQUEST']._serialized_start=43
-  _globals['_RECORDEVENTREQUEST']._serialized_end=304
-  _globals['_RECORDEVENTREQUEST_METADATAENTRY']._serialized_start=257
-  _globals['_RECORDEVENTREQUEST_METADATAENTRY']._serialized_end=304
-  _globals['_GETSCOREREQUEST']._serialized_start=306
-  _globals['_GETSCOREREQUEST']._serialized_end=377
-  _globals['_GETSCORERESPONSE']._serialized_start=379
-  _globals['_GETSCORERESPONSE']._serialized_end=459
-  _globals['_SUCCESSRESPONSE']._serialized_start=461
-  _globals['_SUCCESSRESPONSE']._serialized_end=527
-  _globals['_REPUTATIONSERVICE']._serialized_start=530
-  _globals['_REPUTATIONSERVICE']._serialized_end=736
+  _globals['_RECORDEVENTREQUEST']._serialized_start = 43
+  _globals['_RECORDEVENTREQUEST']._serialized_end = 304
+  _globals['_RECORDEVENTREQUEST_METADATAENTRY']._serialized_start = 257
+  _globals['_RECORDEVENTREQUEST_METADATAENTRY']._serialized_end = 304
+  _globals['_GETSCOREREQUEST']._serialized_start = 306
+  _globals['_GETSCOREREQUEST']._serialized_end = 377
+  _globals['_GETSCORERESPONSE']._serialized_start = 379
+  _globals['_GETSCORERESPONSE']._serialized_end = 459
+  _globals['_SUCCESSRESPONSE']._serialized_start = 461
+  _globals['_SUCCESSRESPONSE']._serialized_end = 527
+  _globals['_REPUTATIONSERVICE']._serialized_start = 530
+  _globals['_REPUTATIONSERVICE']._serialized_end = 736
 # @@protoc_insertion_point(module_scope)

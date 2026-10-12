@@ -10,6 +10,7 @@ log.fileLogger("waddlebot-dbc.log")
 abs_path = os.path.abspath((inspect.stack()[0])[1])
 directory_of_1py = os.path.dirname(abs_path)
 
+
 # ---------------------
 # Dataclass for botconfig
 # ---------------------

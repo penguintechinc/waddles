@@ -279,7 +279,7 @@ class RateLimiter:
             ) + timedelta(hours=1)
 
             self.logger.info(
-                f"Rate limit check passed",
+                "Rate limit check passed",
                 extra={
                     'community_id': community_id,
                     'user_id': user_id,
@@ -417,7 +417,7 @@ class RateLimiter:
                 await self._delete_redis(key)
 
             self.logger.info(
-                f"User rate limits reset",
+                "User rate limits reset",
                 extra={
                     'community_id': community_id,
                     'user_id': user_id,

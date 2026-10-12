@@ -264,7 +264,7 @@ class ScopedTokenService:
             # Check expiration
             if token_data.is_expired():
                 logger.warning(
-                    f"Token expired",
+                    "Token expired",
                     extra={'jti': token_data.jti, 'expired_at': token_data.expires_at}
                 )
                 return None
@@ -272,13 +272,13 @@ class ScopedTokenService:
             # Check revocation
             if self._is_token_revoked(token):
                 logger.warning(
-                    f"Token has been revoked",
+                    "Token has been revoked",
                     extra={'jti': token_data.jti}
                 )
                 return None
 
             logger.debug(
-                f"Token validated successfully",
+                "Token validated successfully",
                 extra={
                     'community_id': token_data.community_id,
                     'module_name': token_data.module_name,
@@ -340,7 +340,7 @@ class ScopedTokenService:
             self._revoked_tokens.add(token_hash)
 
             logger.info(
-                f"Token revoked",
+                "Token revoked",
                 extra={
                     'jti': jti,
                     'community_id': payload.get('community_id'),
@@ -384,7 +384,7 @@ class ScopedTokenService:
 
             # Note: This is a placeholder. Actual implementation depends on dal setup
             logger.info(
-                f"Retrieving granted scopes",
+                "Retrieving granted scopes",
                 extra={'community_id': community_id, 'module_name': module_name}
             )
 
@@ -439,7 +439,7 @@ class ScopedTokenService:
                 raise ValueError(f"Invalid scope format: {scope}")
 
             logger.info(
-                f"Granting scope",
+                "Granting scope",
                 extra={
                     'community_id': community_id,
                     'module_name': module_name,
@@ -493,7 +493,7 @@ class ScopedTokenService:
             scope = self._sanitize_string(scope)
 
             logger.info(
-                f"Revoking scope",
+                "Revoking scope",
                 extra={
                     'community_id': community_id,
                     'module_name': module_name,
@@ -669,7 +669,7 @@ class ScopedTokenService:
 
             if existing:
                 logger.info(
-                    f"Scope already granted",
+                    "Scope already granted",
                     extra={
                         'community_id': community_id,
                         'module_name': module_name,
@@ -689,7 +689,7 @@ class ScopedTokenService:
             )
 
             logger.info(
-                f"Scope granted successfully",
+                "Scope granted successfully",
                 extra={
                     'community_id': community_id,
                     'module_name': module_name,
@@ -745,7 +745,7 @@ class ScopedTokenService:
 
             if deleted > 0:
                 logger.info(
-                    f"Scope revoked successfully",
+                    "Scope revoked successfully",
                     extra={
                         'community_id': community_id,
                         'module_name': module_name,
@@ -755,7 +755,7 @@ class ScopedTokenService:
                 return True
             else:
                 logger.warning(
-                    f"Scope not found for revocation",
+                    "Scope not found for revocation",
                     extra={
                         'community_id': community_id,
                         'module_name': module_name,
@@ -802,7 +802,7 @@ class ScopedTokenService:
             scopes = [row.scope for row in rows]
 
             logger.debug(
-                f"Retrieved granted scopes",
+                "Retrieved granted scopes",
                 extra={
                     'community_id': community_id,
                     'module_name': module_name,

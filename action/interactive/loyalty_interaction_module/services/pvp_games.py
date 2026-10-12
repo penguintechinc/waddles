@@ -644,7 +644,7 @@ class PvPGamesService:
 
         # Check win conditions
         if game_state[f'{opponent_prefix}_health'] <= 0:
-            message_parts.append(f"🏆 Victory! Opponent defeated!")
+            message_parts.append("🏆 Victory! Opponent defeated!")
             return await self._end_game(match, player_id, 'combat', message=' '.join(message_parts))
 
         # Check max turns
@@ -715,7 +715,7 @@ class PvPGamesService:
                 game_state[f'{opponent_prefix}_squad'] = max(1, opponent_squad - casualties)
                 message_parts.append(f"⚔️ Advanced and engaged! {damage} damage, {casualties} enemy casualties")
             else:
-                message_parts.append(f"🏃 Advanced position")
+                message_parts.append("🏃 Advanced position")
 
         elif action == GameAction.HOLD.value:
             # Hold position and fortify
@@ -749,7 +749,7 @@ class PvPGamesService:
 
         # Check win conditions
         if game_state[f'{opponent_prefix}_health'] <= 0 or game_state[f'{opponent_prefix}_squad'] <= 0:
-            message_parts.append(f"🏆 Victory! Enemy squad eliminated!")
+            message_parts.append("🏆 Victory! Enemy squad eliminated!")
             return await self._end_game(match, player_id, 'combat', message=' '.join(message_parts))
 
         # Check max turns
@@ -837,13 +837,13 @@ class PvPGamesService:
 
             game_state[f'{player_prefix}_upgrades'] += 1
             game_state[f'{player_prefix}_armor'] += 20
-            message_parts.append(f"⬆️ Upgrade complete! +20 armor")
+            message_parts.append("⬆️ Upgrade complete! +20 armor")
         else:
             return GameResult(success=False, message=f"Invalid action: {action}")
 
         # Check win conditions
         if game_state[f'{opponent_prefix}_health'] <= 0:
-            message_parts.append(f"🏆 Victory! Enemy tank destroyed!")
+            message_parts.append("🏆 Victory! Enemy tank destroyed!")
             return await self._end_game(match, player_id, 'combat', message=' '.join(message_parts))
 
         # Check max turns
@@ -927,26 +927,26 @@ class PvPGamesService:
                 game_state[f'{player_prefix}_position'] += movement
                 message_parts.append(f"⚡ Boost powerup! Moved {movement} units")
             elif new_powerup == 'shield':
-                message_parts.append(f"🛡️ Shield powerup collected!")
+                message_parts.append("🛡️ Shield powerup collected!")
             else:
                 # Sabotage opponent
                 game_state[f'{opponent_prefix}_speed'] = max(3, game_state[f'{opponent_prefix}_speed'] - 2)
-                message_parts.append(f"🔧 Sabotage! Opponent speed reduced")
+                message_parts.append("🔧 Sabotage! Opponent speed reduced")
 
         elif action == GameAction.BLOCK.value:
             # Block opponent (if close)
             distance = abs(game_state['player1_position'] - game_state['player2_position'])
             if distance <= 5:
                 game_state[f'{opponent_prefix}_speed'] = max(3, game_state[f'{opponent_prefix}_speed'] - 1)
-                message_parts.append(f"🚧 Blocked opponent! Their speed reduced")
+                message_parts.append("🚧 Blocked opponent! Their speed reduced")
             else:
-                message_parts.append(f"❌ Too far to block")
+                message_parts.append("❌ Too far to block")
         else:
             return GameResult(success=False, message=f"Invalid action: {action}")
 
         # Check win conditions
         if game_state[f'{player_prefix}_position'] >= game_state['track_length']:
-            message_parts.append(f"🏁 FINISH LINE! Victory!")
+            message_parts.append("🏁 FINISH LINE! Victory!")
             return await self._end_game(match, player_id, 'race_finish', message=' '.join(message_parts))
 
         # Check max turns

@@ -99,7 +99,7 @@ async def test_mem0_service():
     logger.info("\n--- Test 5: Getting community context ---")
     try:
         context = await service.get_community_context()
-        logger.info(f"Community context:")
+        logger.info("Community context:")
         logger.info(f"  Total memories: {context['total_memories']}")
         logger.info(f"  Recent memories: {len(context['recent_memories'])}")
         logger.info(

@@ -55,7 +55,7 @@ async def test_generation(service: AIProviderService):
     print("\n=== Testing Text Generation ===")
 
     if service.provider != AIProvider.OLLAMA:
-        print(f"⚠ Skipping generation test (only Ollama implemented)")
+        print("⚠ Skipping generation test (only Ollama implemented)")
         return
 
     try:
@@ -72,7 +72,7 @@ async def test_generation(service: AIProviderService):
             max_tokens=50
         )
 
-        print(f"✓ Generation successful!")
+        print("✓ Generation successful!")
         print(f"  Model: {response.model}")
         print(f"  Tokens: {response.tokens_used}")
         print(f"  Time: {response.processing_time_ms}ms")
@@ -89,7 +89,7 @@ async def test_concurrent_generation(service: AIProviderService):
     print("\n=== Testing Concurrent Generation ===")
 
     if service.provider != AIProvider.OLLAMA:
-        print(f"⚠ Skipping concurrent test (only Ollama implemented)")
+        print("⚠ Skipping concurrent test (only Ollama implemented)")
         return
 
     try:
@@ -130,7 +130,7 @@ async def test_embeddings(service: AIProviderService):
     print("\n=== Testing Embeddings ===")
 
     if service.provider != AIProvider.OLLAMA:
-        print(f"⚠ Skipping embeddings test (only Ollama implemented)")
+        print("⚠ Skipping embeddings test (only Ollama implemented)")
         return
 
     try:
@@ -140,7 +140,7 @@ async def test_embeddings(service: AIProviderService):
 
         embedding = await service.embed(text)
 
-        print(f"✓ Embedding generated!")
+        print("✓ Embedding generated!")
         print(f"  Dimensions: {len(embedding)}")
         print(f"  First 5 values: {embedding[:5]}")
 

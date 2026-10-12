@@ -85,6 +85,7 @@ def spiffe_id(env: str, service: str) -> str:
         raise ServiceJwtError(f"invalid SPIFFE id components: env={env!r} service={service!r}")
     return candidate
 
+
 #: Machine JWTs are capped at 1h per security.md JWT Claims ("Machine access
 #: tokens are short-lived (1h, same ceiling as JWT Claims above)").
 MAX_TOKEN_TTL_SECONDS = 3600

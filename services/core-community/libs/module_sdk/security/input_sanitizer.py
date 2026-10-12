@@ -295,7 +295,7 @@ class InputSanitizer:
                     f'pattern={pattern}'
                 )
                 raise ValueError(
-                    f'input contains potentially malicious content'
+                    'input contains potentially malicious content'
                 )
 
         # If HTML is not allowed, escape dangerous characters
