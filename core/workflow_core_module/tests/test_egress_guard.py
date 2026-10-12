@@ -44,15 +44,23 @@ def _fake_getaddrinfo(*answers: str) -> Any:
 
 def _context() -> ExecutionContext:
     return ExecutionContext(
-        execution_id="exec-1", workflow_id="wf-1", workflow_version="1.0",
-        session_id="sess-1", entity_id="community-1", user_id="user-1",
+        execution_id="exec-1",
+        workflow_id="wf-1",
+        workflow_version="1.0",
+        session_id="sess-1",
+        entity_id="community-1",
+        user_id="user-1",
     )
 
 
 def _webhook(url: str) -> ActionWebhookConfig:
     return ActionWebhookConfig(
-        node_id="w1", label="W", position={"x": 0, "y": 0}, url=url,
-        method=HttpMethod.GET, retry_count=0,
+        node_id="w1",
+        label="W",
+        position={"x": 0, "y": 0},
+        url=url,
+        method=HttpMethod.GET,
+        retry_count=0,
     )
 
 
@@ -159,7 +167,12 @@ async def test_guarded_resolver_blocks_private(monkeypatch: pytest.MonkeyPatch) 
 
 @pytest.mark.parametrize(
     "url",
-    ["http://169.254.169.254/latest/meta-data/", "http://10.0.0.5/", "http://127.0.0.1/", "http://[::1]/"],
+    [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.5/",
+        "http://127.0.0.1/",
+        "http://[::1]/",
+    ],
 )
 async def test_webhook_node_blocks_ssrf_targets_without_requesting(url: str) -> None:
     executor = NodeExecutor()
@@ -226,9 +239,7 @@ async def test_webhook_node_refuses_redirects(monkeypatch: pytest.MonkeyPatch) -
         return _Redirect()
 
     executor._webhook_session.request = _request
-    result = await executor.execute_action_webhook(
-        _webhook("https://example.com/"), _context(), {}
-    )
+    result = await executor.execute_action_webhook(_webhook("https://example.com/"), _context(), {})
     assert captured["allow_redirects"] is False
     assert result.error_type == "egress_blocked"
     assert "redirect" in result.error

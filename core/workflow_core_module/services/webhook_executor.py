@@ -1,5 +1,4 @@
-"""
-Webhook Executor Service
+"""Webhook Executor Service.
 
 Executes outbound webhook actions in workflows with support for:
 - Multiple HTTP methods (POST, GET, PUT, DELETE)
@@ -20,9 +19,7 @@ import logging
 import operator
 import re
 import time
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+from typing import Any
 
 import httpx
 from flask_core import describe_db_error
@@ -62,8 +59,7 @@ class HMACSignatureGenerator:
     """Generates HMAC signatures for webhook authentication."""
 
     def __init__(self, secret: str, algorithm: str = "sha256"):
-        """
-        Initialize HMAC signature generator.
+        """Initialize HMAC signature generator.
 
         Args:
             secret: Secret key for HMAC generation
@@ -76,8 +72,7 @@ class HMACSignatureGenerator:
             raise ValueError(f"Unsupported HMAC algorithm: {self.algorithm}")
 
     def generate(self, payload: str) -> str:
-        """
-        Generate HMAC signature for payload.
+        """Generate HMAC signature for payload.
 
         Args:
             payload: Data to sign
@@ -92,8 +87,7 @@ class HMACSignatureGenerator:
         return signature.hexdigest()
 
     def verify(self, payload: str, signature: str) -> bool:
-        """
-        Verify HMAC signature.
+        """Verify HMAC signature.
 
         Args:
             payload: Original data
@@ -132,7 +126,7 @@ class SafeExpressionEvaluator:
     this evaluator doesn't implement at all.
     """
 
-    _BINOPS: Dict[type, Any] = {
+    _BINOPS: dict[type, Any] = {
         ast.Add: operator.add,
         ast.Sub: operator.sub,
         ast.Mult: operator.mul,
@@ -141,12 +135,12 @@ class SafeExpressionEvaluator:
         ast.Mod: operator.mod,
         ast.Pow: operator.pow,
     }
-    _UNARYOPS: Dict[type, Any] = {
+    _UNARYOPS: dict[type, Any] = {
         ast.UAdd: operator.pos,
         ast.USub: operator.neg,
         ast.Not: operator.not_,
     }
-    _COMPARES: Dict[type, Any] = {
+    _COMPARES: dict[type, Any] = {
         ast.Eq: operator.eq,
         ast.NotEq: operator.ne,
         ast.Lt: operator.lt,
@@ -161,11 +155,12 @@ class SafeExpressionEvaluator:
     _MAX_REPEAT_LENGTH = 100_000
     _MAX_EXPR_LENGTH = 4096
 
-    def __init__(self, context: Dict[str, Any]):
+    def __init__(self, context: dict[str, Any]):
+        """Bind the variable context that bare names resolve against."""
         self._context = context
 
     def evaluate(self, expr: str) -> Any:
-        """Parse and evaluate `expr`; raises `UnsafeExpressionError` for any disallowed construct."""
+        """Parse and evaluate `expr`; raise `UnsafeExpressionError` on a disallowed construct."""
         if len(expr) > self._MAX_EXPR_LENGTH:
             raise UnsafeExpressionError("expression too long")
         try:
@@ -230,7 +225,7 @@ class SafeExpressionEvaluator:
         if isinstance(node, ast.Compare):
             left = self._eval(node.left)
             outcome = True
-            for op_node, comparator in zip(node.ops, node.comparators):
+            for op_node, comparator in zip(node.ops, node.comparators, strict=True):
                 op = self._COMPARES.get(type(op_node))
                 if op is None:
                     raise UnsafeExpressionError(
@@ -264,9 +259,8 @@ class ExpressionTemplater:
     BRACKET_PATTERN = re.compile(r"\$\(([^)]+)\)")
 
     @staticmethod
-    def substitute(template: str, context: Dict[str, Any]) -> str:
-        """
-        Substitute expressions in template using context variables.
+    def substitute(template: str, context: dict[str, Any]) -> str:
+        """Substitute expressions in template using context variables.
 
         Supports two formats:
         - ${variable_name} - Simple variable substitution
@@ -320,9 +314,8 @@ class ExpressionTemplater:
         return result
 
     @staticmethod
-    def substitute_json(data: Any, context: Dict[str, Any]) -> Any:
-        """
-        Recursively substitute expressions in JSON data structure.
+    def substitute_json(data: Any, context: dict[str, Any]) -> Any:
+        """Recursively substitute expressions in JSON data structure.
 
         Args:
             data: JSON-serializable data (dict, list, str, etc.)
@@ -345,9 +338,8 @@ class ResponseExtractor:
     """Extracts and parses webhook responses."""
 
     @staticmethod
-    def extract_json(response: httpx.Response) -> Dict[str, Any]:
-        """
-        Extract JSON from response.
+    def extract_json(response: httpx.Response) -> dict[str, Any]:
+        """Extract JSON from response.
 
         Args:
             response: httpx.Response object
@@ -361,14 +353,13 @@ class ResponseExtractor:
         try:
             return response.json()
         except json.JSONDecodeError as e:
-            raise WebhookExecutionError(f"Invalid JSON in webhook response: {e}")
+            raise WebhookExecutionError(f"Invalid JSON in webhook response: {e}") from e
 
     @staticmethod
     def extract_variables(
-        response: httpx.Response, extractors: Optional[Dict[str, str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Extract variables from webhook response using JSON pointers/paths.
+        response: httpx.Response, extractors: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        """Extract variables from webhook response using JSON pointers/paths.
 
         Supports formats like:
         - "status" - Simple key access
@@ -410,8 +401,7 @@ class ResponseExtractor:
 
     @staticmethod
     def _get_nested_value(data: Any, path: str) -> Any:
-        """
-        Get nested value from data using path notation.
+        """Get nested value from data using path notation.
 
         Args:
             data: Data to traverse
@@ -470,10 +460,9 @@ class RetryPolicy:
         initial_delay: float = 1.0,
         max_delay: float = 60.0,
         exponential_base: float = 2.0,
-        retryable_status_codes: Optional[List[int]] = None,
+        retryable_status_codes: list[int] | None = None,
     ):
-        """
-        Initialize retry policy.
+        """Initialize retry policy.
 
         Args:
             max_retries: Maximum number of retries
@@ -488,9 +477,8 @@ class RetryPolicy:
         self.exponential_base = exponential_base
         self.retryable_status_codes = retryable_status_codes or [408, 429, 500, 502, 503, 504]
 
-    def is_retryable(self, error: Exception, status_code: Optional[int] = None) -> bool:
-        """
-        Determine if request should be retried.
+    def is_retryable(self, error: Exception, status_code: int | None = None) -> bool:
+        """Determine if request should be retried.
 
         Args:
             error: Exception from request
@@ -512,8 +500,7 @@ class RetryPolicy:
         return False
 
     def get_delay(self, attempt: int) -> float:
-        """
-        Calculate delay for retry attempt using exponential backoff.
+        """Calculate delay for retry attempt using exponential backoff.
 
         Args:
             attempt: Attempt number (0-indexed)
@@ -531,11 +518,10 @@ class WebhookExecutor:
     def __init__(
         self,
         timeout: float = 30.0,
-        retry_policy: Optional[RetryPolicy] = None,
+        retry_policy: RetryPolicy | None = None,
         verify_ssl: bool = True,
     ):
-        """
-        Initialize webhook executor.
+        """Initialize webhook executor.
 
         Args:
             timeout: Request timeout in seconds
@@ -550,16 +536,15 @@ class WebhookExecutor:
         self,
         url: str,
         method: str = "POST",
-        body: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None,
-        context: Optional[Dict[str, Any]] = None,
-        hmac_secret: Optional[str] = None,
+        body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        context: dict[str, Any] | None = None,
+        hmac_secret: str | None = None,
         hmac_header: str = "X-Webhook-Signature",
         hmac_algorithm: str = "sha256",
-        extractors: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Execute webhook request with full feature support.
+        extractors: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Execute webhook request with full feature support.
 
         Args:
             url: Webhook URL to call
@@ -656,7 +641,8 @@ class WebhookExecutor:
                                 delay = self.retry_policy.get_delay(attempt)
                                 logger.warning(
                                     f"Webhook request failed with {response.status_code}, "
-                                    f"retrying in {delay}s (attempt {attempt + 1}/{self.retry_policy.max_retries + 1})"
+                                    f"retrying in {delay}s "
+                                    f"(attempt {attempt + 1}/{self.retry_policy.max_retries + 1})"
                                 )
                                 await asyncio.sleep(delay)
                                 continue
@@ -670,7 +656,7 @@ class WebhookExecutor:
                         response, extractors, start_time, request_body_str
                     )
 
-            except httpx.TimeoutException as e:
+            except httpx.TimeoutException:
                 last_error = WebhookTimeoutError(f"Request timeout after {self.timeout}s")
 
                 if attempt < self.retry_policy.max_retries:
@@ -742,10 +728,10 @@ class WebhookExecutor:
     def _build_response(
         self,
         response: httpx.Response,
-        extractors: Optional[Dict[str, str]],
+        extractors: dict[str, str] | None,
         start_time: float,
-        request_body_str: Optional[str],
-    ) -> Dict[str, Any]:
+        request_body_str: str | None,
+    ) -> dict[str, Any]:
         """Build successful response dictionary."""
         execution_time = time.time() - start_time
 
@@ -781,17 +767,16 @@ class WebhookActionNode:
         node_id: str,
         url: str,
         method: str = "POST",
-        body: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None,
-        hmac_secret: Optional[str] = None,
+        body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        hmac_secret: str | None = None,
         hmac_header: str = "X-Webhook-Signature",
         hmac_algorithm: str = "sha256",
-        extractors: Optional[Dict[str, str]] = None,
+        extractors: dict[str, str] | None = None,
         timeout: float = 30.0,
-        retry_config: Optional[Dict[str, Any]] = None,
+        retry_config: dict[str, Any] | None = None,
     ):
-        """
-        Initialize webhook action node.
+        """Initialize webhook action node.
 
         Args:
             node_id: Unique node identifier
@@ -826,9 +811,8 @@ class WebhookActionNode:
             exponential_base=retry_config.get("exponential_base", 2.0),
         )
 
-    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute webhook action.
+    async def execute(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Execute webhook action.
 
         Args:
             context: Workflow execution context

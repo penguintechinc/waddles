@@ -88,12 +88,9 @@ def is_blocked_address(addr: IPAddress) -> bool:
     return not addr.is_global
 
 
-def _parse_literal(host: str) -> IPAddress | None:
-    """Parse ``host`` as an IP literal (zone id stripped), else None."""
-    try:
-        return ipaddress.ip_address(host.split("%", 1)[0])
-    except ValueError:
-        return None
+def parse_ip(host: str) -> IPAddress:
+    """Parse ``host`` as an IP address (zone id stripped); raises ``ValueError`` otherwise."""
+    return ipaddress.ip_address(host.split("%", 1)[0])
 
 
 def assert_addresses_public(host: str, addresses: list[str]) -> None:
@@ -104,11 +101,12 @@ def assert_addresses_public(host: str, addresses: list[str]) -> None:
     if not addresses:
         raise EgressBlockedError(f"egress blocked: {host!r} resolved to no addresses")
     for raw in addresses:
-        parsed = _parse_literal(raw)
-        if parsed is None:
+        try:
+            parsed = parse_ip(raw)
+        except ValueError as exc:
             raise EgressBlockedError(
                 f"egress blocked: {host!r} resolved to unparseable address {raw!r}"
-            )
+            ) from exc
         if is_blocked_address(parsed):
             raise EgressBlockedError(
                 f"egress blocked: {host!r} resolves to non-public address {parsed}"
@@ -116,10 +114,12 @@ def assert_addresses_public(host: str, addresses: list[str]) -> None:
 
 
 async def resolve_host(host: str, port: int) -> list[str]:
-    """Resolve ``host`` to its address strings (IP literals pass through)."""
-    literal = _parse_literal(host)
-    if literal is not None:
-        return [str(literal)]
+    """Resolve ``host`` to its address strings.
+
+    IP literals (including non-canonical forms such as ``127.1`` or a decimal
+    integer) go through ``getaddrinfo`` too, which resolves them numerically
+    without DNS -- so the result is validated exactly as the OS would connect.
+    """
     loop = asyncio.get_running_loop()
     try:
         infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -140,9 +140,7 @@ async def validate_egress_url(url: str) -> None:
 
     scheme = (parts.scheme or "").lower()
     if scheme not in ALLOWED_SCHEMES:
-        raise EgressBlockedError(
-            f"egress blocked: scheme {scheme!r} not allowed (http/https only)"
-        )
+        raise EgressBlockedError(f"egress blocked: scheme {scheme!r} not allowed (http/https only)")
     if parts.username is not None or parts.password is not None:
         raise EgressBlockedError("egress blocked: credentials in URL are not allowed")
     if not host:
@@ -165,13 +163,9 @@ class GuardedResolver(AbstractResolver):
         """Resolve and validate ``host``; raise ``EgressBlockedError`` on non-public answers."""
         loop = asyncio.get_running_loop()
         try:
-            infos = await loop.getaddrinfo(
-                host, port, type=socket.SOCK_STREAM, family=family
-            )
+            infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM, family=family)
         except socket.gaierror as exc:
-            raise EgressBlockedError(
-                f"egress blocked: cannot resolve {host!r}: {exc}"
-            ) from exc
+            raise EgressBlockedError(f"egress blocked: cannot resolve {host!r}: {exc}") from exc
         addresses = list(dict.fromkeys(info[4][0] for info in infos))
         assert_addresses_public(host, addresses)
         return [
