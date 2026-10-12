@@ -1254,35 +1254,42 @@ pipeline:
         cpu: "4000m"
         memory: "4Gi"
 
-  # feature/e2e-helm-rust-dataplane -- Rust data-plane Deployments (core/svc_ingest,
-  # core/svc_process, core/svc_action, core/bundle_executor). ADDITIVE, never replaces
-  # pipeline.svcIngest/svcProcess/svcAction above -- gated behind this single top-level
-  # `enabled` flag, defaulted false so the chart's existing Python deploy is completely
-  # undisturbed until deliberately flipped for an e2e run. Resource names all carry a
-  # `-rust` suffix (templates/svc-ingest-rust.yaml et al) so both stacks can be rendered
-  # (and, if ever needed, scheduled) side by side with zero K8s object-name collision --
-  # deliberately NOT reusing the Python Deployments' bare names even though
-  # core/svc_action/Dockerfile.rust's own build comment tags the Rust image with the exact
-  # same `svc-action:alpha` repo:tag the Python image uses (cutover-in-place image
-  # convention, M6). Image repository/tag values below intentionally mirror that same
-  # tag via `waddlebot.legacyModuleImage` for svc-ingest/svc-process/svc-action -- an
-  # operator doing the e2e cutover builds+pushes the Rust image over the same tag, then
-  # sets pipeline.svcIngest/svcProcess/svcAction.enabled=false alongside this flag so
-  # exactly one binary (Rust) is actually behind that tag while both flags are live.
+  # Rust data-plane Deployments (core/svc_ingest, core/svc_process, core/svc_action,
+  # core/bundle_executor). ADDITIVE, never replaces pipeline.svcIngest/svcProcess/svcAction
+  # above. Gated behind this top-level `enabled` flag (default false) so the Python deploy is
+  # undisturbed until deliberately flipped. Resource names carry a `-rust` suffix
+  # (templates/svc-ingest-rust.yaml et al) so both stacks render side by side with no K8s
+  # object-name collision. Image repositories are distinct `<module>-rust` repos
+  # (waddlebot.legacyModuleImage), built by CI / scripts/alpha-deploy.sh.
   #
-  # KNOWN GAPS this Helm-only change cannot close (read-only reference: core/*/src/*.rs):
-  #   - core/svc_ingest is an M5-blocked skeleton -- no VALKEY_URL/DB/Discord+Twitch
-  #     receiver-credential fields exist in its CliConfig yet. The env wired into
-  #     templates/svc-ingest-rust.yaml is forward-compatible only (extra env vars clap
-  #     silently ignores); no further chart change needed once M5 lands.
-  #   - core/svc_process's host-API/executor integration is TODO(M4) -- HOST_API_PORT
-  #     doesn't exist in its CliConfig yet, so bundleExecutor.stageTarget below defaults
-  #     to svc-action-rust (M3, landed and real) rather than svc-process-rust.
-  #   - RESOLVED (fix/alpha-deploy-executor-and-failfast): core/bundle_executor/
-  #     Dockerfile.rust now exists and is built+pushed by scripts/alpha-deploy.sh.
-  #   - The executor<->stage mTLS material (global.hostApiTls) has no insecureDev escape
-  #     hatch (unlike global.grpcTls) -- real PEM material is an OVERRIDE REQUIRED
-  #     operator step (see global.hostApiTls's own comment) even in alpha.
+  # ACTUAL STATE (verified against core/*/src, 2026-10-12):
+  #   - svc_ingest is NOT a skeleton (~13k lines). Native Twitch IRC, Discord Gateway (OP_RESUME
+  #     + fleet-wide IDENTIFY budget), Twitch EventSub with HMAC verification, and Twitch +
+  #     Discord outbound drains are implemented. Valkey comes from
+  #     penguin_spine::SpineConfig::from_env() (VALKEY_URL); receiver tokens come from its
+  #     Config. No DB by design (spec S4.1: the stage owns no tables).
+  #   - svc_process host-API EXISTS: HOST_API_PORT (default 8301, core/svc_process/src/config.rs,
+  #     server in src/host_api.rs). bundleExecutor.stageTarget below defaults to svc-action-rust;
+  #     point it at svc-process-rust for the PROCESS_BUNDLE_* ping proof (templates/svc-process-rust.yaml).
+  #   - Executor<->stage mTLS (global.hostApiTls) self-provisions on alpha/local (generated under
+  #     the same Secret name) and fails closed on beta/gamma/production. No insecureDev escape
+  #     hatch is needed; beta/prod require real material (cert-manager or ExternalSecret).
+  #
+  # REMAINING REAL GAPS:
+  #   - No Slack / YouTube / Kick / Spectrum Rust receivers yet (TODO(M5) in svc_ingest's
+  #     lib.rs); the generic webhook/JWT intake and D31 usage metering are also TODO(M5).
+  #   - Source configuration is static single-source config (env/CLI), not per-community.
+  #   - The bundle executor cannot yet invoke connector exports.
+  #   - svc_ingest has no host-API listener.
+  #
+  # HIDDEN SECOND GATE -- read before enabling (src/license.rs:32 flag key, :115 check):
+  #   core/svc_ingest only starts its receivers and outbound drains when the PostHog flag
+  #   `waddles.core.rust-data-plane` is ON. Default OFF, fail-closed: a never-seen flag, an
+  #   unreachable license server, or a license client that cannot be built (invalid license
+  #   config) all evaluate OFF. With the flag OFF the pod still runs its HTTP/metrics servers
+  #   but logs a WARN and starts no receivers, so svc_action refuses Discord chat.delete and
+  #   dm.send. Setting pipeline.rustDataPlane.enabled=true alone yields an INERT svc-ingest-rust
+  #   pod -- the flag must also be ON in PostHog (or a domain bypass applies).
   rustDataPlane:
     enabled: false
 
@@ -1528,7 +1535,8 @@ pipeline:
       # Which stage's host-API this executor dials -- short Service-name suffix, prefixed
       # with the release fullname by the template (spec SS6.6/SS7.1 -- "svc-process:8301"
       # or "svc-action:8302"). "svc-action-rust" (M3, real) is the only server-side
-      # implementation that exists today -- see KNOWN GAPS above re: svc-process's M4 gap.
+      # implementation the e2e path uses today -- svc-process's host-API also exists (see the
+      # ACTUAL STATE block above the rustDataPlane key).
       stageTarget: "svc-action-rust"
       stagePort: 8302
       stageConnections: 4

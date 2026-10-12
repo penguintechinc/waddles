@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays ungated in every tier. A CI gate (`tests/test_erasure_registry_coverage.py`) scans the migration chain and fails when a
   user-keyed table/column has no rule, so a future table cannot silently regress erasure. See `docs/PRIVACY.md`.
 
+### Changed
+- Docs (no code or behavior change): corrected stale "M5-blocked skeleton" / "TODO(M4)" claims in `k8s/helm/waddlebot/values.yaml`
+  (`pipeline.rustDataPlane`) and the `templates/svc-{ingest,process,action}-rust.yaml` and `templates/bundle-executor.yaml` headers.
+  The Rust data plane is implemented: svc_ingest has native Twitch IRC, Discord Gateway, Twitch EventSub and outbound drains;
+  svc_process and svc_action serve the executor host-API. Remaining gaps (no Slack/YouTube/Kick/Spectrum receivers, static
+  single-source config, no svc_ingest host-API listener) are now listed in the same block. Documented the PostHog gate:
+  svc-ingest starts receivers only when `waddles.core.rust-data-plane` is ON (default OFF, fail-closed), so enabling the Helm
+  flag alone yields an inert pod. Tracking issue #840.
+
 ### Fixed
 - CI verification integrity -- gates that could not fail now can: `scripts/lib/checks.sh` counters no longer turn a crashed
   scanner into "0 findings" (`tool_capture`, non-numeric counter = FAIL); beta `rollout status` + smoke steps in `ci-cd.yml` and the
