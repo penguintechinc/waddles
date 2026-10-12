@@ -1087,7 +1087,17 @@ pipeline:
   svcPresentation:
     enabled: true
     port: 8207
-    replicas: 2
+    # MUST stay 1. The overlay fan-out is IN-PROCESS: each pod only knows the websocket/SSE
+    # clients connected to itself, so with >1 replica a pushed frame reaches only the clients on
+    # the pod that received it -- frames split across pods. The chart REFUSES to render
+    # replicas > 1 (waddlebot.presentationReplicaGuard) unless sharedFanout.enabled is true.
+    # No HPA/PDB either (not in waddlebot.scaleTargets).
+    replicas: 1
+    sharedFanout:
+      # Shared cross-pod fan-out backend (e.g. Valkey pub/sub) -- NOT BUILT YET (roadmap item).
+      # Flip to true only once svc_presentation ships it; until then this only exists so the
+      # replicas guard has an explicit, auditable override rather than a silent footgun.
+      enabled: false
     resources:
       requests:
         cpu: "250m"
@@ -1133,6 +1143,10 @@ pipeline:
   # pod, not a generic pipeline-stage skeleton.
   svcStreaming:
     enabled: true
+    # Stateful singleton (RTMP/SRT listeners + local stream dir): Deployment strategy is
+    # Recreate and replicas must stay 1. No HPA/PDB (not in waddlebot.scaleTargets).
+    # Longer drain than the chart default so in-flight streams/recordings can finalize.
+    terminationGracePeriodSeconds: 60
     port: 8208
     grpcPort: 50208
     metricsPort: 9090
@@ -1705,11 +1719,9 @@ modules:
       port: 8000
     replicas: 2
     resourcePreset: large
-    autoscaling:
-      enabled: true
-      minReplicas: 2
-      maxReplicas: 10
-      targetCPUUtilizationPercentage: 70
+    # Autoscaling for the router is configured centrally: autoscaling.services.router
+    # (see the top-level `autoscaling:` block). The old per-module `autoscaling:` key was never
+    # consumed by any template.
     env:
       MODULE_NAME: "router_module"
       MODULE_VERSION: "1.0.0"
@@ -2634,6 +2646,50 @@ serviceAccount:
   name: "waddlebot"
 
 # Pod Security Context
+# Graceful shutdown (templates/_resilience.tpl), applied to EVERY Deployment: a preStop sleep
+# lets the pod drop out of Service endpoints before SIGTERM, then the app has
+# terminationGracePeriodSeconds (minus the sleep) to drain before SIGKILL. 0 disables the
+# preStop hook. terminationGracePeriodSeconds must exceed preStopSleepSeconds (render fails).
+shutdown:
+  terminationGracePeriodSeconds: 30
+  preStopSleepSeconds: 5
+
+# startupProbe budget (failureThreshold x periodSeconds = 150s by default) for the slow-start
+# workloads: hub-api, the Rust data-plane stages, the Python pipeline stages, svc-streaming and
+# svc-presentation. Liveness/readiness only begin once it passes.
+startupProbe:
+  periodSeconds: 5
+  failureThreshold: 30
+
+# HorizontalPodAutoscalers -- templates/autoscaling.yaml, registry in templates/_autoscaling.tpl
+# (waddlebot.scaleTargets). Only horizontally-scalable stateless services are registered; the
+# singletons svc-streaming + svc-presentation (and stateful infra, collectors, svc-ingest*)
+# NEVER get an HPA. Off by default everywhere; production enables it per service. When a
+# service's HPA is on, its Deployment omits spec.replicas so `helm upgrade` does not reset the
+# autoscaler. Needs metrics-server and container resource requests. Keys under `services:`:
+# hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor
+# bundleExecutorAction reputation router. A service entry overrides `defaults` field-by-field.
+autoscaling:
+  defaults:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: ""   # unset = CPU only
+    behavior: {}                            # optional autoscaling/v2 behavior block
+  services: {}
+
+# PodDisruptionBudgets -- same registry (adds svcIngest/svcIngestRust: PDB only, no HPA).
+# Rendered only for a service that effectively runs >1 replica (HPA minReplicas, else
+# `replicas`), so single-replica alpha/beta/gamma get none (a minAvailable PDB on one replica
+# would block node drains). Never rendered for singletons. Use `maxUnavailable` (int or "25%")
+# instead of `minAvailable` to switch the budget style; per-service overrides under `services:`.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: ""
+  services: {}
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000

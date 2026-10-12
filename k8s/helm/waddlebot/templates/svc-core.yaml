@@ -16,7 +16,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-core
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcCore")) }}
   replicas: {{ .Values.pipeline.svcCore.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -27,6 +29,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-core
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -41,6 +44,7 @@ spec:
         # tag. Replace once svc-core has its own Dockerfile and CI build.
         image: "{{ .Values.pipeline.pythonBaseImage }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -68,6 +72,7 @@ spec:
           value: {{ .Values.pipeline.svcCore.port | quote }}
         - name: GRPC_PORT
           value: {{ .Values.pipeline.svcCore.grpcPort | quote }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health

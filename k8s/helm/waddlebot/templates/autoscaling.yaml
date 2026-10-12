@@ -1,0 +1,83 @@
+# HorizontalPodAutoscalers + PodDisruptionBudgets for the horizontally-scalable, stateless
+# services in `waddlebot.scaleTargets` (_autoscaling.tpl). Singletons (svc-streaming,
+# svc-presentation, stateful infra, collectors) are NOT in that registry and never get either.
+#
+# HPA  -- gated per service by `autoscaling.services.<key>.enabled` (default from
+#         `autoscaling.defaults.enabled`, off). When on, the Deployment omits `spec.replicas`
+#         so helm upgrades do not reset the autoscaler's scale.
+# PDB  -- gated by `podDisruptionBudget.enabled` (+ per-service override). Rendered ONLY when the
+#         service effectively runs >1 replica (HPA minReplicas, else `replicas`): a
+#         minAvailable PDB on a single replica would block every node drain forever.
+{{- range $t := (include "waddlebot.scaleTargets" . | fromJsonArray) }}
+{{- if $t.on }}
+{{- $fullname := include "waddlebot.fullname" $ }}
+{{- $hpa := include "waddlebot.hpaCfg" (dict "root" $ "key" $t.key) | fromJson }}
+{{- $hpaOn := and $t.hpa $hpa.enabled }}
+{{- if $hpaOn }}
+{{- if not (or $hpa.targetCPUUtilizationPercentage $hpa.targetMemoryUtilizationPercentage) }}
+{{- fail (printf "autoscaling for %s needs targetCPUUtilizationPercentage and/or targetMemoryUtilizationPercentage" $t.key) }}
+{{- end }}
+{{- if gt (int $hpa.minReplicas) (int $hpa.maxReplicas) }}
+{{- fail (printf "autoscaling for %s: minReplicas (%v) must be <= maxReplicas (%v)" $t.key $hpa.minReplicas $hpa.maxReplicas) }}
+{{- end }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $fullname }}-{{ $t.name }}
+  labels:
+    {{- include "waddlebot.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $t.component }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $fullname }}-{{ $t.name }}
+  minReplicas: {{ $hpa.minReplicas }}
+  maxReplicas: {{ $hpa.maxReplicas }}
+  metrics:
+  {{- if $hpa.targetCPUUtilizationPercentage }}
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ $hpa.targetCPUUtilizationPercentage }}
+  {{- end }}
+  {{- if $hpa.targetMemoryUtilizationPercentage }}
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: {{ $hpa.targetMemoryUtilizationPercentage }}
+  {{- end }}
+  {{- with $hpa.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- $pdb := include "waddlebot.pdbCfg" (dict "root" $ "key" $t.key) | fromJson }}
+{{- $effective := ternary (int $hpa.minReplicas) (int $t.replicas) $hpaOn }}
+{{- if and $pdb.enabled (gt $effective 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $fullname }}-{{ $t.name }}
+  labels:
+    {{- include "waddlebot.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $t.component }}
+spec:
+  {{- if $pdb.maxUnavailable }}
+  maxUnavailable: {{ $pdb.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ $pdb.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $t.component }}
+{{- end }}
+{{- end }}
+{{- end }}

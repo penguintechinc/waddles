@@ -22,6 +22,7 @@ spec:
         app.kubernetes.io/component: teams-collector
         tier: trigger
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       initContainers:
       # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own /ready.
@@ -30,6 +31,7 @@ spec:
         - name: teams-collector
           image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.modules.collectors.teams.image) "imageTag" .Values.modules.collectors.teams.imageTag) }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          {{- include "waddlebot.preStop" $ | nindent 10 }}
           ports:
             - name: http
               containerPort: 8008

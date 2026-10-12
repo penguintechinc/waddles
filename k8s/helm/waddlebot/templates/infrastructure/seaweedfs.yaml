@@ -154,6 +154,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: storage
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -164,6 +165,7 @@ spec:
       - name: seaweedfs
         image: {{ .Values.infrastructure.seaweedfs.image }}
         imagePullPolicy: IfNotPresent
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

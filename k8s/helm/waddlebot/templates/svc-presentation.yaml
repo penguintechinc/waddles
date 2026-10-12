@@ -32,6 +32,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-presentation
 spec:
+  # >1 replica is refused (render-time `fail`) unless sharedFanout is enabled -- see
+  # waddlebot.presentationReplicaGuard: the overlay fan-out is in-process, frames would split.
+  {{- include "waddlebot.presentationReplicaGuard" $ }}
   replicas: {{ .Values.pipeline.svcPresentation.replicas }}
   selector:
     matchLabels:
@@ -43,6 +46,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-presentation
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -55,6 +59,7 @@ spec:
       - name: svc-presentation
         image: "{{ .Values.presentation.image.repository }}:{{ .Values.presentation.image.tag | default .Values.global.imageTag | toString }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -102,6 +107,7 @@ spec:
         - name: PUBLIC_STREAMING_URL
           value: ""
         {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health

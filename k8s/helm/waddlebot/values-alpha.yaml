@@ -236,6 +236,8 @@ pipeline:
       limits: { cpu: "500m", memory: "512Mi" }
   svcPresentation:
     enabled: true
+    # Pinned to 1: overlay fan-out is in-process, >1 replica splits frames across pods (the chart
+    # refuses replicas > 1 without sharedFanout.enabled -- see values.yaml).
     replicas: 1
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
