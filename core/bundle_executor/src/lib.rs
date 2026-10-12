@@ -44,8 +44,9 @@ pub mod telemetry;
 pub mod tls;
 pub mod wire;
 
+use std::future::Future;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::{error, info, warn};
 
@@ -53,11 +54,88 @@ use crate::bucket::BucketComponentSource;
 use crate::config::CliConfig;
 use crate::error::ExecutorError;
 use crate::heartbeat::{Heartbeat, HeartbeatConfig, HeartbeatMetrics};
-use crate::invoke::{ComponentSource, Executor};
+use crate::invoke::{ComponentSource, DrainOutcome, Executor};
 
 /// `tracing`/OTel service name (spec SS12.7's `OTEL_SERVICE_NAME`
 /// fallback).
 pub const SERVICE_NAME: &str = "bundle-executor";
+
+/// SIGTERM/SIGINT listeners, installed eagerly (at startup, before the first
+/// dial) so a signal arriving at any point -- including mid-handshake -- is
+/// observed instead of killing the process via the default disposition.
+/// Install failure is fatal at startup (fail loud), never a silent "no
+/// graceful shutdown" fallback.
+struct ShutdownSignals {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    /// Registers the SIGTERM (Kubernetes rollout/eviction) and SIGINT
+    /// (local ^C) handlers.
+    fn install() -> Result<Self, ExecutorError> {
+        use tokio::signal::unix::{signal, SignalKind};
+        let io_err = |name: &str, e: std::io::Error| {
+            ExecutorError::Config(format!("failed to install {name} handler: {e}"))
+        };
+        Ok(Self {
+            term: signal(SignalKind::terminate()).map_err(|e| io_err("SIGTERM", e))?,
+            int: signal(SignalKind::interrupt()).map_err(|e| io_err("SIGINT", e))?,
+        })
+    }
+
+    /// Resolves with the name of the first signal received.
+    async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.term.recv() => "SIGTERM",
+            _ = self.int.recv() => "SIGINT",
+        }
+    }
+}
+
+/// Runs `serve` (the never-ending dial/reconnect loop) until `shutdown`
+/// resolves, then drains `executor` for up to `drain_deadline` and returns.
+/// `serve` keeps being polled DURING the drain on purpose: in-flight
+/// invokes make host calls whose replies are delivered by the connection's
+/// read loop, so dropping it first would deadlock exactly the work being
+/// drained. If `serve` ends on its own first, returns immediately.
+async fn serve_until_shutdown<S, Sv, Sd>(
+    serve: Sv,
+    shutdown: Sd,
+    executor: &Executor<S>,
+    drain_deadline: Duration,
+) -> DrainOutcome
+where
+    S: ComponentSource,
+    Sv: Future<Output = ()>,
+    Sd: Future<Output = &'static str>,
+{
+    tokio::pin!(serve);
+    let signal = tokio::select! {
+        _ = &mut serve => return DrainOutcome::Drained,
+        signal = shutdown => signal,
+    };
+    info!(
+        signal,
+        drain_deadline_s = drain_deadline.as_secs(),
+        "shutdown requested; refusing new work and draining in-flight invokes"
+    );
+    let outcome = tokio::select! {
+        _ = &mut serve => DrainOutcome::Drained,
+        outcome = executor.drain(drain_deadline) => outcome,
+    };
+    match outcome {
+        DrainOutcome::Drained => info!("drain complete; exiting"),
+        DrainOutcome::TimedOut {
+            in_flight_calls,
+            in_flight_compiles,
+        } => warn!(
+            in_flight_calls,
+            in_flight_compiles, "drain deadline reached with work still in flight; exiting anyway"
+        ),
+    }
+    outcome
+}
 
 /// A tiny, dependency-free xorshift64* PRNG for jittering `crate::run`'s
 /// host-api reconnect backoff -- regression: readiness gated on executor
@@ -161,6 +239,7 @@ pub async fn run() -> Result<(), ExecutorError> {
         warn!(error = %e, probe_file = ?cfg.executor_probe_file, "failed to record liveness probe start marker");
     }
 
+    let mut signals = ShutdownSignals::install()?;
     let source = BucketComponentSource::from_cli(&cfg)?;
     let executor = Arc::new(Executor::new(&cfg, source)?);
     let heartbeat_cfg = HeartbeatConfig::from_cli(&cfg);
@@ -172,43 +251,53 @@ pub async fn run() -> Result<(), ExecutorError> {
         "host-api session liveness configured"
     );
 
-    let mut backoff = std::time::Duration::from_secs(1);
-    let backoff_cap = std::time::Duration::from_secs(30);
-    let mut attempt: u32 = 0;
-    let mut disconnected_at: Option<Instant> = None;
-    let jitter = Jitter::from_entropy();
-    loop {
-        attempt += 1;
-        match connect_and_serve(
-            &cfg,
-            &executor,
-            attempt,
-            heartbeat_cfg,
-            Arc::clone(&heartbeat_metrics),
-            disconnected_at,
-        )
-        .await
-        {
-            Ok(()) => {
-                info!(attempt, "host-api connection closed cleanly, reconnecting");
-                backoff = std::time::Duration::from_secs(1);
+    let serve = async {
+        let mut backoff = std::time::Duration::from_secs(1);
+        let backoff_cap = std::time::Duration::from_secs(30);
+        let mut attempt: u32 = 0;
+        let mut disconnected_at: Option<Instant> = None;
+        let jitter = Jitter::from_entropy();
+        loop {
+            attempt += 1;
+            match connect_and_serve(
+                &cfg,
+                &executor,
+                attempt,
+                heartbeat_cfg,
+                Arc::clone(&heartbeat_metrics),
+                disconnected_at,
+            )
+            .await
+            {
+                Ok(()) => {
+                    info!(attempt, "host-api connection closed cleanly, reconnecting");
+                    backoff = std::time::Duration::from_secs(1);
+                }
+                Err(e) => {
+                    let sleep_for = jittered_backoff(&jitter, backoff);
+                    error!(
+                        error = %e,
+                        attempt,
+                        backoff_s = backoff.as_secs(),
+                        sleep_s = sleep_for.as_secs_f64(),
+                        "host-api connection failed, retrying"
+                    );
+                    tokio::time::sleep(sleep_for).await;
+                    backoff = (backoff * 2).min(backoff_cap);
+                }
             }
-            Err(e) => {
-                let sleep_for = jittered_backoff(&jitter, backoff);
-                error!(
-                    error = %e,
-                    attempt,
-                    backoff_s = backoff.as_secs(),
-                    sleep_s = sleep_for.as_secs_f64(),
-                    "host-api connection failed, retrying"
-                );
-                tokio::time::sleep(sleep_for).await;
-                backoff = (backoff * 2).min(backoff_cap);
-            }
+            disconnected_at = Some(Instant::now());
+            heartbeat_metrics.record_reconnect();
         }
-        disconnected_at = Some(Instant::now());
-        heartbeat_metrics.record_reconnect();
-    }
+    };
+    serve_until_shutdown(
+        serve,
+        signals.recv(),
+        &executor,
+        Duration::from_secs(cfg.executor_shutdown_drain_secs),
+    )
+    .await;
+    Ok(())
 }
 
 /// Dials the stage and runs one connection to completion (spec SS4.5).
@@ -382,6 +471,104 @@ mod tests {
     #[tokio::test]
     async fn run_healthcheck_succeeds() -> Result<(), ExecutorError> {
         run_healthcheck().await
+    }
+
+    /// SIGTERM is actually observed (not the default kill): sends a real
+    /// SIGTERM to this test process and expects `ShutdownSignals::recv` to
+    /// resolve -- the process surviving at all proves the handler replaced
+    /// the default disposition.
+    #[tokio::test]
+    async fn a_real_sigterm_resolves_the_shutdown_signal() {
+        let mut signals = ShutdownSignals::install().expect("install handlers");
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .expect("spawn kill");
+        assert!(status.success(), "kill -TERM failed: {status:?}");
+        let got = tokio::time::timeout(Duration::from_secs(5), signals.recv())
+            .await
+            .expect("SIGTERM must be delivered to the handler");
+        assert_eq!(got, "SIGTERM");
+    }
+
+    fn shutdown_test_executor() -> Executor<UnimplementedBucketSource> {
+        let mut cfg = CliConfig::for_healthcheck();
+        cfg.executor_max_concurrent_calls = 2;
+        Executor::new(&cfg, UnimplementedBucketSource).expect("executor")
+    }
+
+    /// SIGTERM triggers a graceful drain: after the signal, the loop waits
+    /// for the in-flight call to finish, and returns `Drained` (so `run`
+    /// returns `Ok` and the process exits 0) only once it has.
+    #[tokio::test]
+    async fn shutdown_signal_drains_in_flight_calls_before_returning() {
+        let executor = shutdown_test_executor();
+        let in_flight = executor.test_hold_call_slot();
+        let serve = std::future::pending::<()>();
+        let shutdown = async { "SIGTERM" };
+
+        let mut outcome = Box::pin(serve_until_shutdown(
+            serve,
+            shutdown,
+            &executor,
+            Duration::from_secs(10),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut outcome)
+                .await
+                .is_err(),
+            "must keep waiting while a call is still in flight"
+        );
+        drop(in_flight);
+        assert_eq!(outcome.await, DrainOutcome::Drained);
+    }
+
+    /// A stuck guest cannot block a rollout: past the drain deadline the
+    /// loop returns anyway, reporting what was abandoned.
+    #[tokio::test]
+    async fn shutdown_signal_gives_up_at_the_drain_deadline() {
+        let executor = shutdown_test_executor();
+        let _stuck = executor.test_hold_call_slot();
+        let outcome = serve_until_shutdown(
+            std::future::pending::<()>(),
+            async { "SIGTERM" },
+            &executor,
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            DrainOutcome::TimedOut {
+                in_flight_calls: 1,
+                in_flight_compiles: 0
+            }
+        );
+    }
+
+    /// The serve loop keeps running (so in-flight host-call replies still
+    /// get delivered) until the signal arrives.
+    #[tokio::test]
+    async fn serve_keeps_running_until_the_shutdown_signal() {
+        let executor = shutdown_test_executor();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown = async move {
+            let _ = rx.await;
+            "SIGTERM"
+        };
+        let mut fut = Box::pin(serve_until_shutdown(
+            std::future::pending::<()>(),
+            shutdown,
+            &executor,
+            Duration::from_secs(1),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut fut)
+                .await
+                .is_err(),
+            "must not exit before a signal"
+        );
+        tx.send(()).expect("signal");
+        assert_eq!(fut.await, DrainOutcome::Drained);
     }
 
     #[test]
