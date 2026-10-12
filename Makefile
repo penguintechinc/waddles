@@ -8,7 +8,8 @@
         check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
         test-seaweedfs-sse-kms test-helm-pending-recover \
         verify-audit-chain verify-audit-export test-supply-chain \
-        suppression-stats suppression-purge suppression-lift suppression-check
+        suppression-stats suppression-purge suppression-lift suppression-check \
+        test-data-plane-parity check-builtin-handler-inventory
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -86,6 +87,22 @@ check-bundle-hygiene:
 	@python3 scripts/ci/check-bundle-manifest-permissions.py
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
+
+# builtin_handlers -> Rust-path/bundle inventory gate (gh #840 PR4): FAILS if a live Python
+# ingest/process/action handler has no mapping in .ci/builtin-handler-map.yaml, a covered
+# mapping's evidence is stale, a pending handler was removed, or a stage entrypoint dangles.
+# `make check-builtin-handler-inventory STRICT=1` also fails on any pending (Python-removal mode).
+check-builtin-handler-inventory:
+	@python3 -m pytest scripts/ci/tests/test_check_builtin_handler_inventory.py -q -p no:cacheprovider
+	@python3 scripts/ci/check-builtin-handler-inventory.py $(if $(STRICT),--strict,)
+
+# Data-plane golden-vector parity harness (gh #840 PR4): Rust normalize.rs oracle vs committed
+# goldens (svc_ingest), legacy Python normalize path vs the same goldens (tests/data_plane_parity),
+# every corpus event through svc_process's closed-schema pii_tokenize classifier, then the
+# inventory gate. Real paths, no mocked capability boundaries. Needs the repo .venv/py deps
+# (scripts/ci/install-unit-test-deps.sh) + the pinned Rust toolchain; see tests/data_plane_parity/README.md.
+test-data-plane-parity:
+	@bash scripts/ci/data-plane-parity.sh
 
 test:
 	@$(MAKE) test-unit

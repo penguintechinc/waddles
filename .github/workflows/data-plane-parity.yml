@@ -1,0 +1,120 @@
+name: Data-Plane Parity
+
+# Golden-vector parity harness (gh #840 PR4): proves the Rust/bundle ingest path
+# matches today's Python before anything is removed. One shared corpus
+# (tests/data_plane_parity/corpus) is run through the real Rust normalize.rs
+# oracle (svc_ingest), the real legacy Python receivers + normalizers, and
+# svc_process's closed-schema pii_tokenize classifier. Entry point:
+# `make test-data-plane-parity` (scripts/ci/data-plane-parity.sh), which
+# asserts each step's non-zero denominator.
+#
+# Path-filtered to the code the harness exercises (a path-filtered workflow that
+# does not run reports nothing, so ci-gate.yml is unaffected on unrelated PRs).
+# The builtin-handler inventory gate runs separately, on every PR
+# (builtin-handler-inventory.yml).
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'tests/data_plane_parity/**'
+      - 'core/svc_ingest/**'
+      - 'core/svc_process/src/pii_tokenize.rs'
+      - 'core/svc_process/tests/parity_pii_tokenize.rs'
+      - 'core/svc_process/Cargo.*'
+      - 'libs/flask_core/**'
+      - 'libs/waddle_transports/**'
+      - 'scripts/ci/data-plane-parity.sh'
+      - '.github/workflows/data-plane-parity.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'tests/data_plane_parity/**'
+      - 'core/svc_ingest/**'
+      - 'core/svc_process/src/pii_tokenize.rs'
+      - 'core/svc_process/tests/parity_pii_tokenize.rs'
+      - 'core/svc_process/Cargo.*'
+      - 'libs/flask_core/**'
+      - 'libs/waddle_transports/**'
+      - 'scripts/ci/data-plane-parity.sh'
+      - '.github/workflows/data-plane-parity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  parity:
+    name: Golden-vector parity (Rust oracle vs Python, PII classifier)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      # Same install sequence + pins as scripts/ci/install-unit-test-deps.sh, trimmed to what the
+      # legacy svc-ingest receivers/normalizers need (hash-pinned svc-ingest + waddle_transports
+      # requirements, editable libs/flask_core).
+      - name: Install Python deps (svc-ingest receivers/normalizers)
+        run: |
+          set -euo pipefail
+          pip install --disable-pip-version-check --no-cache-dir --require-hashes -r core/svc_ingest/requirements.txt
+          pip install --disable-pip-version-check --no-cache-dir "penguin-dal==0.4.0"
+          pip install --disable-pip-version-check --no-cache-dir -e libs/flask_core
+          pip install --disable-pip-version-check --no-cache-dir --require-hashes -r libs/waddle_transports/requirements.txt
+          pip install --disable-pip-version-check --no-cache-dir -e libs/waddle_transports
+          pip install --disable-pip-version-check --no-cache-dir "pyyaml==6.0.3"
+
+      # hub_client's build.rs (tonic-prost-build, pulled in by svc_process) needs protoc.
+      # Bounded retry, fails loudly -- same shape as rust-crate-ci.yml's apt step.
+      - name: Install protoc (for hub_client / svc_process)
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          for i in 1 2 3; do
+            if timeout 180 sudo -E apt-get -y -o Dpkg::Use-Pty=0 update \
+               && timeout 300 sudo -E apt-get -y -o Dpkg::Use-Pty=0 install --no-install-recommends protobuf-compiler; then
+              break
+            fi
+            echo "apt attempt $i failed/timed out" >&2
+            if [ "$i" -eq 3 ]; then
+              echo "all 3 apt attempts failed/timed out -- failing loudly" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo registry + git + targets
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/svc_ingest/target
+            core/svc_process/target
+          key: cargo-data-plane-parity-1.97.1-${{ runner.os }}-${{ hashFiles('core/svc_ingest/Cargo.lock', 'core/svc_process/Cargo.lock') }}
+          restore-keys: |
+            cargo-data-plane-parity-1.97.1-${{ runner.os }}-
+
+      - name: Golden-vector parity harness
+        run: make test-data-plane-parity
+        env:
+          PYTHON_BIN: python3

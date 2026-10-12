@@ -1,0 +1,60 @@
+{
+  "context": {
+    "message_type": "notification"
+  },
+  "frame": {
+    "event": {
+      "broadcaster_user_id": "111",
+      "broadcaster_user_login": "somechannel",
+      "is_anonymous": true,
+      "total": 1,
+      "user_id": null,
+      "user_login": null
+    },
+    "subscription": {
+      "condition": {
+        "broadcaster_user_id": "111"
+      },
+      "id": "sub-1",
+      "type": "channel.subscription.gift",
+      "version": "1"
+    }
+  },
+  "golden": {
+    "platform": "twitch",
+    "event_type": "channel.subscription.gift",
+    "actor": "somechannel",
+    "payload": {
+      "broadcaster_id": "111",
+      "broadcaster_login": "somechannel",
+      "user_id": null,
+      "user_login": null,
+      "user_display_name": null,
+      "metadata": {
+        "tier": "1000",
+        "total": 1,
+        "is_anonymous": true
+      }
+    },
+    "source": {
+      "platform": "twitch",
+      "account_id": "111",
+      "channel_id": "111"
+    }
+  },
+  "golden_origin": "rust",
+  "id": "twitch/eventsub_subscription_gift_anonymous",
+  "outcome": "event",
+  "path": "twitch_eventsub",
+  "pii_classifier": "pass",
+  "platform": "twitch",
+  "python_divergences": [
+    {
+      "path": "actor",
+      "python": "111",
+      "reason": "Python eventsub ingest falls back actor -> user_login | user_id | broadcaster_id; Rust falls back user_login | broadcaster_login",
+      "tracking": "#840"
+    }
+  ],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_eventsub.py + test_builtin_twitch_eventsub_ingest.py"
+}

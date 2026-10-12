@@ -1,0 +1,233 @@
+# Rust-path / connector-bundle mapping for every live Python `builtin_handlers/*` module.
+# Enforced by scripts/ci/check-builtin-handler-inventory.py (`make check-builtin-handler-inventory`,
+# .github/workflows/builtin-handler-inventory.yml). See that script's docstring for the rules.
+#
+#   status: covered  -- a Rust path or bundle implements the handler. Every target is verified:
+#                       `path` must exist and `contains` (regex) must match the file, so a stale or
+#                       wrong mapping fails the gate. `parity`:
+#                         verified   -- golden-vector corpus (tests/data_plane_parity) proves the
+#                                       Python and Rust outputs match (or diff only by declared,
+#                                       tracked divergences); needs `corpus` globs.
+#                         unverified -- the replacement EXISTS but behaviour parity is not yet proven
+#                                       by the corpus (the next PRs' job).
+#   status: pending  -- acknowledged gap (`gap` + `tracking` required). Allowed while the Python
+#                       handler exists; FATAL if the handler file is removed while still pending.
+#                       `--strict` (the "remove Python" PR) fails on any pending entry.
+#
+# Deleting a Python handler: delete its entry here in the same PR (a stale entry fails the gate).
+
+handlers:
+  # ---------------------------------------------------------------- ingest
+  - handler: core/svc_ingest/builtin_handlers/twitch_ingest.py
+    status: covered
+    parity: verified
+    corpus: ["twitch/irc_*.json"]
+    targets:
+      - {kind: rust-path, path: core/svc_ingest/src/normalize.rs, contains: "pub fn normalize_twitch_irc"}
+  - handler: core/svc_ingest/builtin_handlers/discord_ingest.py
+    status: covered
+    parity: verified
+    corpus: ["discord/*.json"]
+    targets:
+      - {kind: rust-path, path: core/svc_ingest/src/normalize.rs, contains: "pub fn normalize_discord"}
+  - handler: core/svc_ingest/builtin_handlers/twitch_eventsub_ingest.py
+    status: covered
+    parity: verified
+    corpus: ["twitch/eventsub_*.json"]
+    targets:
+      - {kind: rust-path, path: core/svc_ingest/src/normalize.rs, contains: "pub fn normalize_twitch_eventsub"}
+  - handler: core/svc_ingest/builtin_handlers/discord_gateway_manifest.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: rust-path, path: core/svc_ingest/src/ingest/discord.rs, contains: "DiscordGatewayReceiver"}
+  - handler: core/svc_ingest/builtin_handlers/twitch_gateway_manifest.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: rust-path, path: core/svc_ingest/src/ingest/twitch.rs, contains: "normalize_twitch_irc"}
+      - {kind: rust-path, path: core/svc_ingest/src/ingest/twitch_eventsub.rs, contains: "KNOWN_EVENT_TYPES"}
+  - handler: core/svc_ingest/builtin_handlers/slack_ingest.py
+    status: pending
+    gap: "no Rust Slack Socket Mode receiver/normalizer or connector bundle (svc_ingest TODO(M5)); corpus slot tests/data_plane_parity/corpus/slack"
+    tracking: "#840"
+  - handler: core/svc_ingest/builtin_handlers/slack_gateway_manifest.py
+    status: pending
+    gap: "no Rust Slack receiver registration (see slack_ingest)"
+    tracking: "#840"
+  - handler: core/svc_ingest/builtin_handlers/kick_ingest.py
+    status: pending
+    gap: "no Rust Kick Pusher receiver/normalizer/webhook intake or connector bundle; corpus slot corpus/kick"
+    tracking: "#840"
+  - handler: core/svc_ingest/builtin_handlers/kick_gateway_manifest.py
+    status: pending
+    gap: "no Rust Kick receiver registration (see kick_ingest)"
+    tracking: "#840"
+  - handler: core/svc_ingest/builtin_handlers/youtube_live_ingest.py
+    status: pending
+    gap: "no Rust YouTube Live poll receiver/normalizer or connector bundle; corpus slot corpus/youtube"
+    tracking: "#840"
+  - handler: core/svc_ingest/builtin_handlers/spectrum_ingest.py
+    status: pending
+    gap: "no Rust Spectrum poll/org-sync receiver/normalizer or connector bundle (Bar Citizen v3.0 must-have); corpus slot corpus/spectrum"
+    tracking: "#840"
+  - handler: core/svc_ingest/builtin_handlers/echo_ingest.py
+    status: pending
+    gap: "demo `waddles.core.demo.echo` ingest handler; no Rust equivalent -- decide retire (delete + remove entry) vs port"
+    tracking: "#840"
+
+  # ---------------------------------------------------------------- process
+  - handler: core/svc_process/builtin_handlers/bot_process.py
+    status: pending
+    gap: "command+keyword router (_FEATURE_MODULES): superseded by per-feature bundles + `consumes` routing, but keyword matching/custom-command router parity unproven"
+    tracking: "#840"
+  - handler: core/svc_process/builtin_handlers/community_announcements_process.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/announce/hub-manifest.yaml, contains: '"!announce"'}
+  - handler: core/svc_process/builtin_handlers/community_chat_process.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/chat/hub-manifest.yaml, contains: '"!chat-history"'}
+  - handler: core/svc_process/builtin_handlers/community_context_process.py
+    status: pending
+    gap: "`!cc` community-context switch has no bundle"
+    tracking: "#840"
+  - handler: core/svc_process/builtin_handlers/community_forums_process.py
+    status: pending
+    gap: "`!forum` post/reply commands have no bundle"
+    tracking: "#840"
+  - handler: core/svc_process/builtin_handlers/community_loyalty_process.py
+    status: pending
+    gap: "bundles/python/loyalty covers `!points` only; `!shop`/`!redeem` missing"
+    tracking: "#840"
+  - handler: core/svc_process/builtin_handlers/community_polls_process.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/poll/hub-manifest.yaml, contains: '"!poll"'}
+  - handler: core/svc_process/builtin_handlers/community_reputation_process.py
+    status: pending
+    gap: "`!reputation`/`!rep` lookup has no bundle (bundles/python/rank is `!rank` only)"
+    tracking: "#840"
+  - handler: core/svc_process/builtin_handlers/echo_process.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/echo/hub-manifest.yaml, contains: '"!echo"'}
+  - handler: core/svc_process/builtin_handlers/inventory_process.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/inventory/hub-manifest.yaml, contains: '"!inventory"'}
+  - handler: core/svc_process/builtin_handlers/marketing_engagement_process.py
+    status: pending
+    gap: "engagement poll/form event pass-through has no bundle"
+    tracking: "#840"
+  - handler: core/svc_process/builtin_handlers/social_alias_process.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/alias/hub-manifest.yaml, contains: '"!alias"'}
+  - handler: core/svc_process/builtin_handlers/social_music_process.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/music/hub-manifest.yaml, contains: '"!songrequest"'}
+  - handler: core/svc_process/builtin_handlers/social_quote_process.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/quote/hub-manifest.yaml, contains: '"!quote"'}
+  - handler: core/svc_process/builtin_handlers/social_shoutout_process.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/shoutout/hub-manifest.yaml, contains: '"!so"'}
+  - handler: core/svc_process/builtin_handlers/social_welcome_process.py
+    status: pending
+    gap: "first-message detection + welcome message has no bundle"
+    tracking: "#840"
+
+  # ---------------------------------------------------------------- action
+  - handler: core/svc_action/builtin_handlers/twitch_send_action.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: rust-path, path: core/svc_action/src/senders.rs, contains: "Platform::Twitch => SenderStatus::Implemented"}
+  - handler: core/svc_action/builtin_handlers/discord_send_action.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: rust-path, path: core/svc_action/src/senders.rs, contains: "Platform::Discord => SenderStatus::Implemented"}
+  - handler: core/svc_action/builtin_handlers/slack_send_action.py
+    status: pending
+    gap: "svc_action Slack sender is SenderStatus::PendingSeam (senders.rs)"
+    tracking: "#840"
+  - handler: core/svc_action/builtin_handlers/kick_send_action.py
+    status: pending
+    gap: "svc_action Kick sender is SenderStatus::PendingSeam (senders.rs)"
+    tracking: "#840"
+  - handler: core/svc_action/builtin_handlers/youtube_send_action.py
+    status: pending
+    gap: "svc_action YouTube sender is SenderStatus::PendingSeam (senders.rs)"
+    tracking: "#840"
+  - handler: core/svc_action/builtin_handlers/community_announcements_action.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/announce/hub-manifest.yaml, contains: '"!announce"'}
+  - handler: core/svc_action/builtin_handlers/community_forums_action.py
+    status: pending
+    gap: "forum post/reply persistence + relay has no bundle"
+    tracking: "#840"
+  - handler: core/svc_action/builtin_handlers/community_loyalty_action.py
+    status: pending
+    gap: "bundles/python/loyalty covers `!points` only; `!shop`/`!redeem` missing"
+    tracking: "#840"
+  - handler: core/svc_action/builtin_handlers/community_polls_action.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/poll/hub-manifest.yaml, contains: '"!poll"'}
+  - handler: core/svc_action/builtin_handlers/integrations_waddleai_action.py
+    status: pending
+    gap: "WaddleAI completion routing has no bundle"
+    tracking: "#840"
+  - handler: core/svc_action/builtin_handlers/marketing_engagement_action.py
+    status: pending
+    gap: "engagement notification send has no bundle"
+    tracking: "#840"
+  - handler: core/svc_action/builtin_handlers/moderation_enforce_action.py
+    status: pending
+    gap: "moderation enforcement (timeout/warn) has only a svc_process stub constant (MODERATION_ENFORCE_APP_ID); no enforcing Rust path/bundle"
+    tracking: "#840"
+  - handler: core/svc_action/builtin_handlers/social_alias_action.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/alias/hub-manifest.yaml, contains: '"!alias"'}
+  - handler: core/svc_action/builtin_handlers/social_music_action.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/music/hub-manifest.yaml, contains: '"!songrequest"'}
+  - handler: core/svc_action/builtin_handlers/social_quote_action.py
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/quote/hub-manifest.yaml, contains: '"!quote"'}
+  - handler: core/svc_action/builtin_handlers/social_welcome_action.py
+    status: pending
+    gap: "welcome message send has no bundle"
+    tracking: "#840"
+  - handler: core/svc_action/builtin_handlers/streaming_stream_action.py
+    status: pending
+    gap: "live-stream listing query has no bundle"
+    tracking: "#840"
+  - handler: core/svc_action/builtin_handlers/twitch_shoutout_action.py
+    status: pending
+    gap: "Twitch shoutout API call + `!vso` video shoutout not evidenced in bundles/python/shoutout (`!so` only)"
+    tracking: "#840"

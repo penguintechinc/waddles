@@ -1,0 +1,59 @@
+name: Builtin Handler Inventory
+
+# Hard gate (gh #840 PR4): every live Python `core/svc_{ingest,process,action}/
+# builtin_handlers/*` module must have a Rust-path or connector/feature-bundle
+# mapping in .ci/builtin-handler-map.yaml, every mapping's evidence must still
+# hold against the real Rust source / bundle manifest, and a still-`pending`
+# handler can never be deleted. This is what stops a platform being silently
+# dropped when the Python services are removed (that PR also runs the script
+# with --strict). Pure source analysis (stdlib + PyYAML, ~15s).
+#
+# ci-gate.yml aggregates every check-run on the head SHA, so a failure here is
+# fatal to the merge queue with no ci-gate edit. No `paths:` filter on purpose:
+# a path-filtered workflow that does not run reports nothing, and this is cheap
+# enough to run on every PR (a new handler anywhere must be caught).
+
+on:
+  pull_request:
+    branches: [main, 'release/**']
+  merge_group:
+    types: [checks_requested]
+    branches: ['release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: builtin-handler-inventory-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  inventory:
+    name: Builtin handler inventory (Rust-path / bundle mapping)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      # Exact pins (critical-rules.md Dependency Pinning), same as bundle-hygiene.yml.
+      - name: Install PyYAML + pytest
+        run: pip install --disable-pip-version-check --no-cache-dir "pyyaml==6.0.3" "pytest==9.1.1"
+
+      # A gate that cannot fail is not a gate: planted violations must exit non-zero
+      # (unmapped handler, stale evidence, pending handler removed, dangling entrypoint,
+      # zero handlers) before the real tree is judged.
+      - name: Self-test the gate (planted violations must fail)
+        run: python3 -m pytest scripts/ci/tests/test_check_builtin_handler_inventory.py -v -p no:cacheprovider
+
+      # Prints handlers / covered / pending counts; zero handlers examined is a FAIL.
+      - name: Every live Python handler is mapped to a Rust path or bundle
+        run: python3 scripts/ci/check-builtin-handler-inventory.py

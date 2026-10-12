@@ -1,0 +1,37 @@
+{
+  "context": {},
+  "frame": {
+    "channel_id": "C123",
+    "display_name": null,
+    "event_type": "message",
+    "message_ts": "1700000001.000200",
+    "platform": "slack",
+    "platform_user_id": "U789",
+    "team_id": "T456",
+    "text": "  hello waddlebot  ",
+    "thread_ts": "1700000000.000100"
+  },
+  "golden": {
+    "actor": "U789",
+    "event_type": "message",
+    "payload": {
+      "channel_id": "C123",
+      "display_name": null,
+      "message_ts": "1700000001.000200",
+      "platform_user_id": "U789",
+      "team_id": "T456",
+      "text": "hello waddlebot",
+      "thread_ts": "1700000000.000100"
+    },
+    "platform": "slack"
+  },
+  "golden_origin": "python",
+  "id": "slack/message",
+  "outcome": "event",
+  "path": "slack_socket",
+  "pii_classifier": "reject:message_ts,platform_user_id,team_id,thread_ts",
+  "platform": "slack",
+  "python_divergences": [],
+  "rust_path": null,
+  "seed": "core/svc_ingest/tests/test_builtin_slack_ingest.py"
+}
