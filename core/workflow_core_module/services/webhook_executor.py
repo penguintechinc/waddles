@@ -157,11 +157,17 @@ class SafeExpressionEvaluator:
         ast.NotIn: lambda a, b: a not in b,
     }
 
+    _MAX_POW_EXPONENT = 1000
+    _MAX_REPEAT_LENGTH = 100_000
+    _MAX_EXPR_LENGTH = 4096
+
     def __init__(self, context: Dict[str, Any]):
         self._context = context
 
     def evaluate(self, expr: str) -> Any:
         """Parse and evaluate `expr`; raises `UnsafeExpressionError` for any disallowed construct."""
+        if len(expr) > self._MAX_EXPR_LENGTH:
+            raise UnsafeExpressionError("expression too long")
         try:
             tree = ast.parse(expr, mode="eval")
         except SyntaxError as exc:
@@ -187,7 +193,21 @@ class SafeExpressionEvaluator:
             op = self._BINOPS.get(type(node.op))
             if op is None:
                 raise UnsafeExpressionError(f"disallowed operator: {type(node.op).__name__}")
-            return op(self._eval(node.left), self._eval(node.right))
+            left, right = self._eval(node.left), self._eval(node.right)
+            # Resource-exhaustion guard: `9**9**9` / `'a'*10**9` would pin a
+            # worker. Fail loud rather than compute.
+            if isinstance(node.op, ast.Pow):
+                if isinstance(right, (int, float)) and abs(right) > self._MAX_POW_EXPONENT:
+                    raise UnsafeExpressionError("exponent too large")
+            elif isinstance(node.op, ast.Mult):
+                for seq, count in ((left, right), (right, left)):
+                    if (
+                        isinstance(seq, (str, list, tuple))
+                        and isinstance(count, int)
+                        and len(seq) * max(count, 0) > self._MAX_REPEAT_LENGTH
+                    ):
+                        raise UnsafeExpressionError("repeated sequence too large")
+            return op(left, right)
 
         if isinstance(node, ast.UnaryOp):
             op = self._UNARYOPS.get(type(node.op))

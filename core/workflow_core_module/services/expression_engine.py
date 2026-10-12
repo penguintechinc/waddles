@@ -8,9 +8,23 @@ This module provides safe evaluation of workflow expressions with:
 - String methods
 - Safe AST-based evaluation (no arbitrary code execution)
 - Comprehensive error handling
+
+Security: expressions are NEVER passed to ``eval``/``exec``/``compile``.
+``ExpressionParser.validate_ast`` rejects disallowed constructs up front and
+``ExpressionEvaluator`` interprets the validated AST node-by-node with an
+explicit allowlist: literals, arithmetic/boolean/comparison operators,
+variable names, dict-key attribute access, list/dict/tuple subscripts, calls
+to the public ``BuiltInFunction`` set, and a fixed set of string methods.
+Any name or attribute beginning with ``_`` (dunders such as ``__class__``)
+is refused, attribute access never uses ``getattr`` (so
+``().__class__.__bases__[0].__subclasses__()`` style sandbox escapes have no
+surface), and ``**``/``*`` results are size-capped against resource
+exhaustion. The previous ``eval(..., {"__builtins__": {}})`` sandbox was
+bypassable and has been removed.
 """
 
 import ast
+import operator
 import re
 import random as random_module
 import datetime
@@ -233,6 +247,22 @@ class StringMethods:
             raise ExpressionEvaluationError(f"Unknown string method: {method}")
 
 
+PUBLIC_FUNCTION_NAMES = frozenset(
+    name for name in dir(BuiltInFunction) if not name.startswith("_")
+)
+
+ALLOWED_STRING_METHODS = frozenset({
+    "upper", "lower", "capitalize", "title", "strip", "lstrip", "rstrip",
+    "replace", "split", "join", "startswith", "endswith", "find", "count",
+})
+
+ALLOWED_CONSTANT_TYPES = (str, int, float, bool, type(None))
+
+MAX_EXPRESSION_LENGTH = 4096
+MAX_POW_EXPONENT = 1000
+MAX_REPEAT_LENGTH = 100_000
+
+
 class ExpressionParser:
     """Parses workflow expressions"""
 
@@ -306,16 +336,30 @@ class ExpressionParser:
                         if node_type not in {ast.And, ast.Or, ast.Not}:
                             return False
 
+            # Never allow private/dunder names or attributes (``__class__``,
+            # ``__subclasses__``, ``_x`` ...) -- the sandbox-escape gadget surface.
+            if isinstance(child, ast.Name) and child.id.startswith("_"):
+                return False
+            if isinstance(child, ast.Attribute) and child.attr.startswith("_"):
+                return False
+            if isinstance(child, ast.Constant) and not isinstance(
+                child.value, ALLOWED_CONSTANT_TYPES
+            ):
+                return False
+
             # Prevent dangerous function calls
             if isinstance(child, ast.Call):
+                if child.keywords or any(isinstance(a, ast.Starred) for a in child.args):
+                    return False
                 if isinstance(child.func, ast.Name):
                     func_name = child.func.id
                     # Only allow whitelisted built-in functions
-                    if not hasattr(BuiltInFunction, func_name):
+                    if func_name not in PUBLIC_FUNCTION_NAMES:
                         return False
                 elif isinstance(child.func, ast.Attribute):
-                    # Allow method calls on objects
-                    pass
+                    # Only a fixed set of string methods may be called
+                    if child.func.attr not in ALLOWED_STRING_METHODS:
+                        return False
                 else:
                     return False
 
@@ -330,6 +374,11 @@ class ExpressionParser:
     def parse_expression(expression: str) -> ast.Expression:
         """Parse expression string into AST"""
         expression = expression.strip()
+
+        if len(expression) > MAX_EXPRESSION_LENGTH:
+            raise ExpressionSecurityError(
+                f"Expression exceeds maximum length of {MAX_EXPRESSION_LENGTH}"
+            )
 
         try:
             tree = ast.parse(expression, mode='eval')
@@ -436,9 +485,40 @@ class ExpressionEvaluator:
             return type(obj)(converted) if isinstance(obj, tuple) else converted
         return obj
 
+    _BINOPS = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.FloorDiv: operator.floordiv,
+        ast.Mod: operator.mod,
+        ast.Pow: operator.pow,
+    }
+    _UNARYOPS = {
+        ast.UAdd: operator.pos,
+        ast.USub: operator.neg,
+        ast.Not: operator.not_,
+    }
+    _COMPARES = {
+        ast.Eq: operator.eq,
+        ast.NotEq: operator.ne,
+        ast.Lt: operator.lt,
+        ast.LtE: operator.le,
+        ast.Gt: operator.gt,
+        ast.GtE: operator.ge,
+    }
+
     @staticmethod
     def evaluate_ast(tree: ast.Expression, context: ExpressionContext) -> Any:
-        """Evaluate AST with given context"""
+        """Evaluate a validated AST against the context via an allowlist walker.
+
+        Never calls ``eval``/``exec``/``compile``. Re-validates the tree so a
+        caller handing in an AST that skipped ``ExpressionParser`` is still
+        refused (fail loud with ``ExpressionSecurityError``).
+        """
+        if not isinstance(tree, ast.Expression) or not ExpressionParser.validate_ast(tree):
+            raise ExpressionSecurityError("Expression contains unsafe operations")
+
         namespace = context.get_evaluation_namespace()
 
         # Convert dictionaries to DictAccessor for attribute-style access
@@ -447,24 +527,163 @@ class ExpressionEvaluator:
             converted_namespace[key] = ExpressionEvaluator._convert_to_accessor(value)
 
         try:
-            result = eval(
-                compile(tree, '<expression>', 'eval'),
-                {"__builtins__": {}},
-                converted_namespace
-            )
-            return result
+            return ExpressionEvaluator._eval_node(tree.body, converted_namespace)
+        except ExpressionEngineException:
+            raise
         except KeyError as e:
-            raise ExpressionEvaluationError(f"Undefined variable: {e}")
+            raise ExpressionEvaluationError(f"Undefined variable: {e}") from e
         except AttributeError as e:
-            raise ExpressionEvaluationError(f"Attribute error: {e}")
+            raise ExpressionEvaluationError(f"Attribute error: {e}") from e
         except TypeError as e:
-            raise ExpressionEvaluationError(f"Type error: {e}")
+            raise ExpressionEvaluationError(f"Type error: {e}") from e
         except ZeroDivisionError:
-            raise ExpressionEvaluationError("Division by zero")
+            raise ExpressionEvaluationError("Division by zero") from None
         except ValueError as e:
-            raise ExpressionEvaluationError(f"Value error: {e}")
+            raise ExpressionEvaluationError(f"Value error: {e}") from e
         except Exception as e:
-            raise ExpressionEvaluationError(f"Evaluation error: {e}")
+            raise ExpressionEvaluationError(f"Evaluation error: {e}") from e
+
+    @staticmethod
+    def _check_sizes(op: ast.operator, left: Any, right: Any) -> None:
+        """Refuse ``**``/``*`` operands that would exhaust CPU or memory."""
+        if isinstance(op, ast.Pow):
+            if (
+                isinstance(right, (int, float))
+                and not isinstance(right, bool)
+                and abs(right) > MAX_POW_EXPONENT
+            ):
+                raise ExpressionEvaluationError(
+                    f"Exponent exceeds maximum of {MAX_POW_EXPONENT}"
+                )
+        elif isinstance(op, ast.Mult):
+            for seq, count in ((left, right), (right, left)):
+                if isinstance(seq, (str, list, tuple)) and isinstance(count, int):
+                    if len(seq) * max(count, 0) > MAX_REPEAT_LENGTH:
+                        raise ExpressionEvaluationError(
+                            f"Repeated sequence exceeds maximum length of {MAX_REPEAT_LENGTH}"
+                        )
+
+    @staticmethod
+    def _eval_node(node: ast.AST, ns: Dict[str, Any]) -> Any:
+        """Interpret one allowlisted AST node; any other node type is refused."""
+        ev = ExpressionEvaluator._eval_node
+
+        if isinstance(node, ast.Constant):
+            if not isinstance(node.value, ALLOWED_CONSTANT_TYPES):
+                raise ExpressionSecurityError("Disallowed constant type")
+            return node.value
+
+        if isinstance(node, ast.Name):
+            if node.id.startswith("_"):
+                raise ExpressionSecurityError(f"Disallowed name: {node.id}")
+            if node.id not in ns:
+                raise ExpressionEvaluationError(f"Undefined variable: '{node.id}'")
+            return ns[node.id]
+
+        if isinstance(node, ast.BinOp):
+            op = ExpressionEvaluator._BINOPS.get(type(node.op))
+            if op is None:
+                raise ExpressionSecurityError(
+                    f"Disallowed operator: {type(node.op).__name__}"
+                )
+            left, right = ev(node.left, ns), ev(node.right, ns)
+            ExpressionEvaluator._check_sizes(node.op, left, right)
+            return op(left, right)
+
+        if isinstance(node, ast.UnaryOp):
+            op = ExpressionEvaluator._UNARYOPS.get(type(node.op))
+            if op is None:
+                raise ExpressionSecurityError(
+                    f"Disallowed operator: {type(node.op).__name__}"
+                )
+            return op(ev(node.operand, ns))
+
+        if isinstance(node, ast.BoolOp):
+            if isinstance(node.op, ast.And):
+                result: Any = True
+                for value_node in node.values:
+                    result = ev(value_node, ns)
+                    if not result:
+                        return result
+                return result
+            if isinstance(node.op, ast.Or):
+                result = False
+                for value_node in node.values:
+                    result = ev(value_node, ns)
+                    if result:
+                        return result
+                return result
+            raise ExpressionSecurityError("Disallowed boolean operator")
+
+        if isinstance(node, ast.Compare):
+            left = ev(node.left, ns)
+            for cmp_op, comparator in zip(node.ops, node.comparators):
+                fn = ExpressionEvaluator._COMPARES.get(type(cmp_op))
+                if fn is None:
+                    raise ExpressionSecurityError(
+                        f"Disallowed comparison: {type(cmp_op).__name__}"
+                    )
+                right = ev(comparator, ns)
+                if not fn(left, right):
+                    return False
+                left = right
+            return True
+
+        if isinstance(node, ast.List):
+            return [ev(elt, ns) for elt in node.elts]
+
+        if isinstance(node, ast.Tuple):
+            return tuple(ev(elt, ns) for elt in node.elts)
+
+        if isinstance(node, ast.Dict):
+            if any(k is None for k in node.keys):
+                raise ExpressionSecurityError("Dict unpacking is not allowed")
+            return {ev(k, ns): ev(v, ns) for k, v in zip(node.keys, node.values)}
+
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("_"):
+                raise ExpressionSecurityError(f"Disallowed attribute: {node.attr}")
+            target = ev(node.value, ns)
+            # Dict-key lookup ONLY -- never getattr(), so no object-graph walking.
+            if isinstance(target, dict):
+                if node.attr in target:
+                    return target[node.attr]
+                raise AttributeError(f"object has no attribute '{node.attr}'")
+            raise ExpressionSecurityError(
+                f"Attribute access not allowed on {type(target).__name__}"
+            )
+
+        if isinstance(node, ast.Subscript):
+            target = ev(node.value, ns)
+            if not isinstance(target, (dict, list, tuple, str)):
+                raise ExpressionSecurityError(
+                    f"Subscript not allowed on {type(target).__name__}"
+                )
+            if isinstance(node.slice, ast.Slice):
+                raise ExpressionSecurityError("Slices are not allowed")
+            return target[ev(node.slice, ns)]
+
+        if isinstance(node, ast.Call):
+            if node.keywords or any(isinstance(a, ast.Starred) for a in node.args):
+                raise ExpressionSecurityError("Keyword/starred call arguments are not allowed")
+            args = [ev(a, ns) for a in node.args]
+            func = node.func
+            if isinstance(func, ast.Name):
+                if func.id not in PUBLIC_FUNCTION_NAMES:
+                    raise ExpressionSecurityError(f"Disallowed function: {func.id}")
+                return getattr(BuiltInFunction, func.id)(*args)
+            if isinstance(func, ast.Attribute):
+                if func.attr not in ALLOWED_STRING_METHODS:
+                    raise ExpressionSecurityError(f"Disallowed method: {func.attr}")
+                target = ev(func.value, ns)
+                if not isinstance(target, str):
+                    raise ExpressionSecurityError(
+                        f"Method calls only allowed on strings, not {type(target).__name__}"
+                    )
+                return StringMethods.apply_method(target, func.attr, *args)
+            raise ExpressionSecurityError("Disallowed call target")
+
+        raise ExpressionSecurityError(f"Disallowed expression node: {type(node).__name__}")
 
     @staticmethod
     def evaluate_expression(expression: str, context: ExpressionContext) -> Any:

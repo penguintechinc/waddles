@@ -170,6 +170,13 @@ class TestExecuteActionModule:
 
 
 class TestExecuteActionWebhook:
+    @pytest.fixture(autouse=True)
+    def _stub_egress_preflight(self) -> Any:
+        """These tests mock the HTTP layer with fake hosts ('https://x'); the
+        real SSRF guard is covered in tests/test_egress_guard.py."""
+        with patch("services.node_executor.validate_egress_url", new=AsyncMock()):
+            yield
+
     @pytest.mark.asyncio
     async def test_success_with_json_body_template(self) -> None:
         executor = NodeExecutor()
@@ -183,8 +190,8 @@ class TestExecuteActionWebhook:
         ctx.set_variable("path", "hook")
         ctx.set_variable("token", "abc")
         ctx.set_variable("val", "1")
-        await executor._ensure_http_session()
-        executor._http_session.request = MagicMock(
+        await executor._ensure_webhook_session()
+        executor._webhook_session.request = MagicMock(
             return_value=_FakeResponse(200, text_body='{"ok": true}')
         )
         result = await executor.execute_action_webhook(node, ctx, {})
@@ -198,8 +205,8 @@ class TestExecuteActionWebhook:
         node = ActionWebhookConfig(
             node_id="w1", label="W", position={"x": 0, "y": 0}, url="https://x",
         )
-        await executor._ensure_http_session()
-        executor._http_session.request = MagicMock(
+        await executor._ensure_webhook_session()
+        executor._webhook_session.request = MagicMock(
             return_value=_FakeResponse(200, text_body="not json")
         )
         result = await executor.execute_action_webhook(node, _context(), {})
@@ -213,14 +220,14 @@ class TestExecuteActionWebhook:
             node_id="w1", label="W", position={"x": 0, "y": 0}, url="https://x",
             body_template="not { json",
         )
-        await executor._ensure_http_session()
+        await executor._ensure_webhook_session()
         captured: dict[str, Any] = {}
 
         def _request(**kwargs: Any) -> _FakeResponse:
             captured.update(kwargs)
             return _FakeResponse(200, text_body="ok")
 
-        executor._http_session.request = _request
+        executor._webhook_session.request = _request
         await executor.execute_action_webhook(node, _context(), {})
         assert captured["data"] == "not { json"
         await executor.close()
@@ -231,8 +238,8 @@ class TestExecuteActionWebhook:
         node = ActionWebhookConfig(
             node_id="w1", label="W", position={"x": 0, "y": 0}, url="https://x", retry_count=1,
         )
-        await executor._ensure_http_session()
-        executor._http_session.request = MagicMock(return_value=_FakeResponse(500, text_body="err"))
+        await executor._ensure_webhook_session()
+        executor._webhook_session.request = MagicMock(return_value=_FakeResponse(500, text_body="err"))
         with patch("services.node_executor.asyncio.sleep", new=AsyncMock()):
             result = await executor.execute_action_webhook(node, _context(), {})
         assert result.success is False
@@ -245,7 +252,7 @@ class TestExecuteActionWebhook:
         node = ActionWebhookConfig(
             node_id="w1", label="W", position={"x": 0, "y": 0}, url="https://x", retry_count=0,
         )
-        await executor._ensure_http_session()
+        await executor._ensure_webhook_session()
 
         class _Raiser:
             def __call__(self, **k: Any) -> "_Raiser":
@@ -257,7 +264,7 @@ class TestExecuteActionWebhook:
             async def __aexit__(self, *exc: Any) -> None:
                 return None
 
-        executor._http_session.request = _Raiser()
+        executor._webhook_session.request = _Raiser()
         result = await executor.execute_action_webhook(node, _context(), {})
         assert "Timeout" in result.error
         await executor.close()

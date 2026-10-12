@@ -29,6 +29,11 @@ except ImportError:
     default_guarded_getiter = None
     guarded_iter_unpack_sequence = None
 
+from services.egress_guard import (
+    EgressBlockedError,
+    build_guarded_connector,
+    validate_egress_url,
+)
 from models.nodes import (
     NodeType,
     WorkflowNode,
@@ -123,6 +128,11 @@ class NodeExecutor:
         """
         self.router_url = router_url or Config.ROUTER_URL
         self._http_session: Optional[aiohttp.ClientSession] = None
+        # Separate session for author-controlled outbound URLs (ACTION_WEBHOOK):
+        # its connector only connects to validated public addresses. The
+        # internal-service session above must stay unguarded (router etc. live
+        # on private addresses).
+        self._webhook_session: Optional[aiohttp.ClientSession] = None
 
     async def __aenter__(self):
         """Async context manager entry"""
@@ -139,11 +149,22 @@ class NodeExecutor:
             timeout = aiohttp.ClientTimeout(total=60)
             self._http_session = aiohttp.ClientSession(timeout=timeout)
 
+    async def _ensure_webhook_session(self):
+        """Ensure the SSRF-guarded session (public-address-only connector) exists"""
+        if self._webhook_session is None or self._webhook_session.closed:
+            timeout = aiohttp.ClientTimeout(total=60)
+            self._webhook_session = aiohttp.ClientSession(
+                timeout=timeout, connector=build_guarded_connector()
+            )
+
     async def close(self):
-        """Close HTTP session"""
+        """Close HTTP sessions"""
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
             self._http_session = None
+        if self._webhook_session and not self._webhook_session.closed:
+            await self._webhook_session.close()
+            self._webhook_session = None
 
     async def execute_node(
         self,
@@ -602,10 +623,22 @@ class NodeExecutor:
         Makes HTTP request to external webhook.
         """
         try:
-            await self._ensure_http_session()
+            await self._ensure_webhook_session()
 
             # Replace variables in URL
             url = self._replace_variables(node.url, context)
+
+            # SSRF guard (fail loud): scheme/host/resolved-address checks BEFORE
+            # any request. Covers IP-literal hosts; hostnames are additionally
+            # re-validated + pinned at connect time by the guarded connector.
+            try:
+                await validate_egress_url(url)
+            except EgressBlockedError as e:
+                return NodeExecutionResult(
+                    success=False,
+                    error=str(e),
+                    error_type="egress_blocked"
+                )
 
             # Build headers
             headers = {
@@ -628,14 +661,27 @@ class NodeExecutor:
                 try:
                     timeout = aiohttp.ClientTimeout(total=node.timeout_seconds)
 
-                    async with self._http_session.request(
+                    # allow_redirects=False: a redirect hop to an IP-literal
+                    # host would bypass the connector-level pin, so redirects
+                    # are refused (below) rather than followed.
+                    async with self._webhook_session.request(
                         method=node.method.value,
                         url=url,
                         headers=headers,
                         json=body if isinstance(body, dict) else None,
                         data=body if isinstance(body, str) else None,
-                        timeout=timeout
+                        timeout=timeout,
+                        allow_redirects=False
                     ) as response:
+                        if 300 <= response.status < 400:
+                            return NodeExecutionResult(
+                                success=False,
+                                error=(
+                                    f"egress blocked: webhook responded with redirect "
+                                    f"(HTTP {response.status}); redirects are not followed"
+                                ),
+                                error_type="egress_blocked"
+                            )
                         response_text = await response.text()
 
                         if response.status < 400:
@@ -667,6 +713,14 @@ class NodeExecutor:
 
                 except asyncio.TimeoutError:
                     last_error = f"Timeout after {node.timeout_seconds}s"
+                except EgressBlockedError as e:
+                    # Connect-time guard (DNS-rebinding defence) blocked the
+                    # target: fail loud, never retry a blocked destination.
+                    return NodeExecutionResult(
+                        success=False,
+                        error=str(e),
+                        error_type="egress_blocked"
+                    )
                 except Exception as e:
                     last_error = str(e)
 
