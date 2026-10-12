@@ -1,6 +1,4 @@
-"""
-Node Executor Service
-====================
+"""Node Executor Service.
 
 Executes individual workflow nodes based on their type.
 Handles all node types: triggers, conditions, actions, data, loops, and flow.
@@ -9,9 +7,8 @@ Handles all node types: triggers, conditions, actions, data, loops, and flow.
 import asyncio
 import json
 import re
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Any
 
 import aiohttp
 
@@ -29,62 +26,66 @@ except ImportError:
     default_guarded_getiter = None
     guarded_iter_unpack_sequence = None
 
+from flask_core import describe_db_error, get_logger
+
+from config import Config
+from models.execution import (
+    ExecutionContext,
+    NodeExecutionState,
+    PortData,
+)
 from models.nodes import (
-    NodeType,
-    WorkflowNode,
-    OperatorType,
-    ConditionRule,
-    # Trigger nodes
-    TriggerCommandConfig,
-    TriggerEventConfig,
-    TriggerWebhookConfig,
-    TriggerScheduleConfig,
-    # Condition nodes
-    ConditionIfConfig,
-    ConditionSwitchConfig,
-    ConditionFilterConfig,
+    ActionBrowserSourceConfig,
+    ActionChatMessageConfig,
+    ActionDelayConfig,
     # Action nodes
     ActionModuleConfig,
     ActionWebhookConfig,
-    ActionChatMessageConfig,
-    ActionBrowserSourceConfig,
-    ActionDelayConfig,
+    ConditionFilterConfig,
+    # Condition nodes
+    ConditionIfConfig,
+    ConditionRule,
+    ConditionSwitchConfig,
     # Data nodes
     DataTransformConfig,
-    DataVariableSetConfig,
     DataVariableGetConfig,
-    # Loop nodes
-    LoopForeachConfig,
-    LoopWhileConfig,
-    LoopBreakConfig,
+    DataVariableSetConfig,
+    FlowEndConfig,
     # Flow nodes
     FlowMergeConfig,
     FlowParallelConfig,
-    FlowEndConfig,
+    LoopBreakConfig,
+    # Loop nodes
+    LoopForeachConfig,
+    LoopWhileConfig,
+    OperatorType,
+    # Trigger nodes
+    TriggerCommandConfig,
+    TriggerEventConfig,
+    TriggerScheduleConfig,
+    TriggerWebhookConfig,
+    WorkflowNode,
 )
-from models.execution import (
-    NodeExecutionState,
-    NodeExecutionStatus,
-    ExecutionContext,
-    PortData,
+from services.egress_guard import (
+    EgressBlockedError,
+    build_guarded_connector,
+    validate_egress_url,
 )
-from config import Config
-from flask_core import get_logger, describe_db_error
 
 logger = get_logger(__name__)
 
 
 class NodeExecutionError(Exception):
-    """Raised when node execution fails"""
+    """Raised when node execution fails."""
     def __init__(self, message: str, error_type: str = "execution"):
+        """Store the message plus a machine-readable ``error_type``."""
         super().__init__(message)
         self.error_type = error_type
 
 
 @dataclass(slots=True)
 class NodeExecutionResult:
-    """
-    Result of node execution.
+    """Result of node execution.
 
     Attributes:
         success: Whether execution succeeded
@@ -95,64 +96,78 @@ class NodeExecutionResult:
         logs: Execution logs
     """
     success: bool
-    output_port: Optional[str] = None
-    output_data: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    error_type: Optional[str] = None
-    logs: List[str] = None
+    output_port: str | None = None
+    output_data: dict[str, Any] | None = None
+    error: str | None = None
+    error_type: str | None = None
+    logs: list[str] = None
 
     def __post_init__(self):
+        """Normalise ``logs`` to an empty list when not provided."""
         if self.logs is None:
             self.logs = []
 
 
 class NodeExecutor:
-    """
-    Executes individual workflow nodes.
+    """Executes individual workflow nodes.
 
     Handles all node types with proper error handling, timeouts,
     and security sandboxing where appropriate.
     """
 
-    def __init__(self, router_url: Optional[str] = None):
-        """
-        Initialize node executor.
+    def __init__(self, router_url: str | None = None):
+        """Initialize node executor.
 
         Args:
             router_url: URL of router API for action module calls
         """
         self.router_url = router_url or Config.ROUTER_URL
-        self._http_session: Optional[aiohttp.ClientSession] = None
+        self._http_session: aiohttp.ClientSession | None = None
+        # Separate session for author-controlled outbound URLs (ACTION_WEBHOOK):
+        # its connector only connects to validated public addresses. The
+        # internal-service session above must stay unguarded (router etc. live
+        # on private addresses).
+        self._webhook_session: aiohttp.ClientSession | None = None
 
     async def __aenter__(self):
-        """Async context manager entry"""
+        """Async context manager entry."""
         await self._ensure_http_session()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit"""
+        """Async context manager exit."""
         await self.close()
 
     async def _ensure_http_session(self):
-        """Ensure HTTP session exists"""
+        """Ensure HTTP session exists."""
         if self._http_session is None or self._http_session.closed:
             timeout = aiohttp.ClientTimeout(total=60)
             self._http_session = aiohttp.ClientSession(timeout=timeout)
 
+    async def _ensure_webhook_session(self):
+        """Ensure the SSRF-guarded session (public-address-only connector) exists."""
+        if self._webhook_session is None or self._webhook_session.closed:
+            timeout = aiohttp.ClientTimeout(total=60)
+            self._webhook_session = aiohttp.ClientSession(
+                timeout=timeout, connector=build_guarded_connector()
+            )
+
     async def close(self):
-        """Close HTTP session"""
+        """Close HTTP sessions."""
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
             self._http_session = None
+        if self._webhook_session and not self._webhook_session.closed:
+            await self._webhook_session.close()
+            self._webhook_session = None
 
     async def execute_node(
         self,
         node: WorkflowNode,
         context: ExecutionContext,
-        input_data: Optional[Dict[str, Any]] = None
+        input_data: dict[str, Any] | None = None
     ) -> NodeExecutionState:
-        """
-        Execute a workflow node.
+        """Execute a workflow node.
 
         Args:
             node: Node configuration to execute
@@ -225,10 +240,9 @@ class NodeExecutor:
         self,
         node: WorkflowNode,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """Route execution to type-specific handler"""
-
+        """Route execution to type-specific handler."""
         # Trigger nodes - validation only, not executed
         if isinstance(node, (TriggerCommandConfig, TriggerEventConfig,
                            TriggerWebhookConfig, TriggerScheduleConfig)):
@@ -293,9 +307,10 @@ class NodeExecutor:
         self,
         node: WorkflowNode,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
+        """Pass a trigger node through.
+
         Trigger nodes are entry points - they don't execute during workflow.
         This just validates and passes through.
         """
@@ -314,10 +329,9 @@ class NodeExecutor:
         self,
         node: ConditionIfConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute IF condition node.
+        """Execute IF condition node.
 
         Evaluates condition rules and routes to true/false output port.
         """
@@ -344,10 +358,9 @@ class NodeExecutor:
         self,
         node: ConditionSwitchConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute SWITCH condition node.
+        """Execute SWITCH condition node.
 
         Matches variable value against cases and routes to matching port.
         """
@@ -392,10 +405,9 @@ class NodeExecutor:
         self,
         node: ConditionFilterConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute FILTER condition node.
+        """Execute FILTER condition node.
 
         Filters array items based on condition rules.
         """
@@ -449,11 +461,10 @@ class NodeExecutor:
 
     def _evaluate_condition_rules(
         self,
-        rules: List[ConditionRule],
+        rules: list[ConditionRule],
         context: ExecutionContext
     ) -> bool:
-        """
-        Evaluate condition rules (AND logic between rules).
+        """Evaluate condition rules (AND logic between rules).
 
         Args:
             rules: List of condition rules
@@ -474,7 +485,7 @@ class NodeExecutor:
         return True
 
     def _evaluate_operator(self, left: Any, operator: OperatorType, right: Any) -> bool:
-        """Evaluate single operator comparison"""
+        """Evaluate single operator comparison."""
         try:
             if operator == OperatorType.EQUALS:
                 return left == right
@@ -513,10 +524,9 @@ class NodeExecutor:
         self,
         node: ActionModuleConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute ACTION_MODULE node.
+        """Execute ACTION_MODULE node.
 
         Calls Waddles action module via router API.
         """
@@ -577,13 +587,29 @@ class NodeExecutor:
                         error_type="api_error"
                     )
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
+            logger.warning(
+                f"Module node {node.node_id} timed out after {node.timeout_seconds}s",
+                extra={
+                    "workflow_id": context.workflow_id,
+                    "execution_id": context.execution_id,
+                    "node_id": node.node_id,
+                }
+            )
             return NodeExecutionResult(
                 success=False,
                 error=f"Module execution timeout after {node.timeout_seconds}s",
                 error_type="timeout"
             )
         except Exception as e:
+            logger.error(
+                f"Module node {node.node_id} failed: {describe_db_error(e)}",
+                extra={
+                    "workflow_id": context.workflow_id,
+                    "execution_id": context.execution_id,
+                    "node_id": node.node_id,
+                }
+            )
             return NodeExecutionResult(
                 success=False,
                 error=f"Module execution error: {str(e)}",
@@ -594,18 +620,39 @@ class NodeExecutor:
         self,
         node: ActionWebhookConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute ACTION_WEBHOOK node.
+        """Execute ACTION_WEBHOOK node.
 
         Makes HTTP request to external webhook.
         """
         try:
-            await self._ensure_http_session()
+            await self._ensure_webhook_session()
 
             # Replace variables in URL
             url = self._replace_variables(node.url, context)
+
+            # SSRF guard (fail loud): scheme/host/resolved-address checks BEFORE
+            # any request. Covers IP-literal hosts; hostnames are additionally
+            # re-validated + pinned at connect time by the guarded connector.
+            try:
+                await validate_egress_url(url)
+            except EgressBlockedError as e:
+                # Audit signal: a workflow tried to reach a blocked destination.
+                logger.warning(
+                    f"Webhook node {node.node_id} blocked by egress guard "
+                    f"(pre-flight): {describe_db_error(e)}",
+                    extra={
+                        "workflow_id": context.workflow_id,
+                        "execution_id": context.execution_id,
+                        "node_id": node.node_id,
+                    }
+                )
+                return NodeExecutionResult(
+                    success=False,
+                    error=str(e),
+                    error_type="egress_blocked"
+                )
 
             # Build headers
             headers = {
@@ -628,14 +675,27 @@ class NodeExecutor:
                 try:
                     timeout = aiohttp.ClientTimeout(total=node.timeout_seconds)
 
-                    async with self._http_session.request(
+                    # allow_redirects=False: a redirect hop to an IP-literal
+                    # host would bypass the connector-level pin, so redirects
+                    # are refused (below) rather than followed.
+                    async with self._webhook_session.request(
                         method=node.method.value,
                         url=url,
                         headers=headers,
                         json=body if isinstance(body, dict) else None,
                         data=body if isinstance(body, str) else None,
-                        timeout=timeout
+                        timeout=timeout,
+                        allow_redirects=False
                     ) as response:
+                        if 300 <= response.status < 400:
+                            return NodeExecutionResult(
+                                success=False,
+                                error=(
+                                    f"egress blocked: webhook responded with redirect "
+                                    f"(HTTP {response.status}); redirects are not followed"
+                                ),
+                                error_type="egress_blocked"
+                            )
                         response_text = await response.text()
 
                         if response.status < 400:
@@ -665,8 +725,25 @@ class NodeExecutor:
                         else:
                             last_error = f"HTTP {response.status}: {response_text}"
 
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     last_error = f"Timeout after {node.timeout_seconds}s"
+                except EgressBlockedError as e:
+                    # Connect-time guard (DNS-rebinding defence) blocked the
+                    # target: fail loud, never retry a blocked destination.
+                    logger.warning(
+                        f"Webhook node {node.node_id} blocked by egress guard "
+                        f"(connect): {describe_db_error(e)}",
+                        extra={
+                            "workflow_id": context.workflow_id,
+                            "execution_id": context.execution_id,
+                            "node_id": node.node_id,
+                        }
+                    )
+                    return NodeExecutionResult(
+                        success=False,
+                        error=str(e),
+                        error_type="egress_blocked"
+                    )
                 except Exception as e:
                     last_error = str(e)
 
@@ -682,6 +759,15 @@ class NodeExecutor:
             )
 
         except Exception as e:
+            # SECURITY (PII in logs): log the exception TYPE only, never its text.
+            logger.error(
+                f"Webhook node {node.node_id} raised {type(e).__name__}",
+                extra={
+                    "workflow_id": context.workflow_id,
+                    "execution_id": context.execution_id,
+                    "node_id": node.node_id,
+                }
+            )
             return NodeExecutionResult(
                 success=False,
                 error=f"Webhook error: {str(e)}",
@@ -692,10 +778,9 @@ class NodeExecutor:
         self,
         node: ActionChatMessageConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute ACTION_CHAT_MESSAGE node.
+        """Execute ACTION_CHAT_MESSAGE node.
 
         Sends message to chat platform via router API.
         """
@@ -752,10 +837,9 @@ class NodeExecutor:
         self,
         node: ActionBrowserSourceConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute ACTION_BROWSER_SOURCE node.
+        """Execute ACTION_BROWSER_SOURCE node.
 
         Updates OBS browser source via browser_source_core_module API.
         """
@@ -811,10 +895,9 @@ class NodeExecutor:
         self,
         node: ActionDelayConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute ACTION_DELAY node.
+        """Execute ACTION_DELAY node.
 
         Pauses workflow execution for specified duration.
         """
@@ -864,10 +947,9 @@ class NodeExecutor:
         self,
         node: DataTransformConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute DATA_TRANSFORM node.
+        """Execute DATA_TRANSFORM node.
 
         Executes Python code in RestrictedPython sandbox with 5s timeout.
         """
@@ -887,13 +969,29 @@ class NodeExecutor:
                     context.set_variable(output_var, result)
                     logs.append(f"Transformed '{output_var}' = {result}")
 
-                except asyncio.TimeoutError:
+                except TimeoutError:
+                    logger.warning(
+                        f"Transform node {node.node_id} timed out after 5s",
+                        extra={
+                            "workflow_id": context.workflow_id,
+                            "execution_id": context.execution_id,
+                            "node_id": node.node_id,
+                        }
+                    )
                     return NodeExecutionResult(
                         success=False,
                         error=f"Transformation '{output_var}' timeout after 5s",
                         error_type="timeout"
                     )
                 except Exception as e:
+                    logger.error(
+                        f"Transform node {node.node_id} failed: {describe_db_error(e)}",
+                        extra={
+                            "workflow_id": context.workflow_id,
+                            "execution_id": context.execution_id,
+                            "node_id": node.node_id,
+                        }
+                    )
                     return NodeExecutionResult(
                         success=False,
                         error=f"Transformation '{output_var}' error: {str(e)}",
@@ -911,6 +1009,14 @@ class NodeExecutor:
             )
 
         except Exception as e:
+            logger.error(
+                f"Transform node {node.node_id} failed: {describe_db_error(e)}",
+                extra={
+                    "workflow_id": context.workflow_id,
+                    "execution_id": context.execution_id,
+                    "node_id": node.node_id,
+                }
+            )
             return NodeExecutionResult(
                 success=False,
                 error=f"Transform error: {str(e)}",
@@ -922,8 +1028,7 @@ class NodeExecutor:
         code: str,
         context: ExecutionContext
     ) -> Any:
-        """
-        Execute Python code in RestrictedPython sandbox.
+        """Execute Python code in RestrictedPython sandbox.
 
         No file access, no network access, only safe builtins.
         """
@@ -949,7 +1054,7 @@ class NodeExecutor:
                 mode='eval'
             )
         except SyntaxError as e:
-            raise ValueError(f"Compilation errors: {e}")
+            raise ValueError(f"Compilation errors: {e}") from e
 
         # Build safe globals
         restricted_globals = {
@@ -976,10 +1081,9 @@ class NodeExecutor:
         self,
         node: DataVariableSetConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute DATA_VARIABLE_SET node.
+        """Execute DATA_VARIABLE_SET node.
 
         Sets workflow variables.
         """
@@ -1012,10 +1116,9 @@ class NodeExecutor:
         self,
         node: DataVariableGetConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute DATA_VARIABLE_GET node.
+        """Execute DATA_VARIABLE_GET node.
 
         Gets variable from context.
         """
@@ -1048,10 +1151,9 @@ class NodeExecutor:
         self,
         node: LoopForeachConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute LOOP_FOREACH node.
+        """Execute LOOP_FOREACH node.
 
         Sets up loop iteration variables. Actual loop logic handled by engine.
         """
@@ -1101,10 +1203,9 @@ class NodeExecutor:
         self,
         node: LoopWhileConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute LOOP_WHILE node.
+        """Execute LOOP_WHILE node.
 
         Checks while condition. Actual loop logic handled by engine.
         """
@@ -1151,10 +1252,9 @@ class NodeExecutor:
         self,
         node: LoopBreakConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute LOOP_BREAK node.
+        """Execute LOOP_BREAK node.
 
         Breaks out of current loop.
         """
@@ -1194,10 +1294,9 @@ class NodeExecutor:
         self,
         node: FlowMergeConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute FLOW_MERGE node.
+        """Execute FLOW_MERGE node.
 
         Consolidates multiple paths. Logic handled by engine.
         """
@@ -1212,10 +1311,9 @@ class NodeExecutor:
         self,
         node: FlowParallelConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute FLOW_PARALLEL node.
+        """Execute FLOW_PARALLEL node.
 
         Initiates parallel execution. Logic handled by engine.
         """
@@ -1233,10 +1331,9 @@ class NodeExecutor:
         self,
         node: FlowEndConfig,
         context: ExecutionContext,
-        input_data: Dict[str, Any]
+        input_data: dict[str, Any]
     ) -> NodeExecutionResult:
-        """
-        Execute FLOW_END node.
+        """Execute FLOW_END node.
 
         Marks workflow completion.
         """
@@ -1252,8 +1349,7 @@ class NodeExecutor:
     # ========================================================================
 
     def _replace_variables(self, template: str, context: ExecutionContext) -> str:
-        """
-        Replace {{variable}} placeholders in template with values from context.
+        """Replace {{variable}} placeholders in template with values from context.
 
         Args:
             template: String with {{variable}} placeholders

@@ -725,3 +725,17 @@ Module and chat message actions:
 - `models/execution.py` - Execution state models
 - `services/workflow_engine.py` - Workflow orchestration
 - `docs/event-processing.md` - Event processing overview
+
+## Security: SSRF Egress Guard
+
+`ACTION_WEBHOOK` fetches an author-controllable URL and reflects the response,
+so it is routed through `services/egress_guard.py` using a dedicated
+`_webhook_session` (the internal `_http_session` is unguarded by design).
+
+- http/https only, no URL credentials, every resolved address must be public
+  (RFC1918/loopback/link-local incl. 169.254.169.254/unique-local/CGNAT/IPv6
+  equivalents blocked)
+- DNS-rebinding safe: pre-flight check + connect-time `GuardedResolver` pinning
+- Redirects are refused, not followed
+- Blocked => `NodeExecutionResult(error_type="egress_blocked")`, never retried
+- Tests: `tests/test_egress_guard.py`
