@@ -642,7 +642,7 @@ mod tests {
             "a.b".into(),
             format!("{ok_header}.b"),
             format!("{ok_header}.b.c.d"),
-            format!(".b.c"),
+            ".b.c".to_string(),
             "!!!.b.c".into(),
             format!("{}=.b.c", b64(r#"{"alg":"EdDSA"}"#)),
             format!("{}.b.c", b64("not json")),

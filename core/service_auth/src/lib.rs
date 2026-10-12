@@ -34,7 +34,7 @@ use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
 
 use crate::jwt_hardening::{
@@ -344,12 +344,144 @@ fn unsigned_claim(object: &Map<String, Value>, name: &str) -> Result<u64, &'stat
         .ok_or(REASON_INVALID_CLAIM)
 }
 
+/// Default TCP+TLS connect timeout for every outbound HTTP client.
+pub const DEFAULT_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Default total per-request timeout (connect through last body byte).
+pub const DEFAULT_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default time an unknown `kid` stays negatively cached before one more
+/// JWKS refetch is allowed.
+pub const DEFAULT_JWKS_NEGATIVE_TTL: Duration = Duration::from_secs(30);
+/// Hard cap on negative-cache entries so a flood of distinct bogus `kid`s
+/// cannot grow memory without bound.
+const NEGATIVE_CACHE_MAX_ENTRIES: usize = 1024;
+
+/// Env override: connect timeout in whole seconds.
+pub const ENV_HTTP_CONNECT_TIMEOUT_SECS: &str = "SERVICE_AUTH_HTTP_CONNECT_TIMEOUT_SECS";
+/// Env override: total request timeout in whole seconds.
+pub const ENV_HTTP_REQUEST_TIMEOUT_SECS: &str = "SERVICE_AUTH_HTTP_REQUEST_TIMEOUT_SECS";
+/// Env override: JWKS unknown-`kid` negative-cache TTL in whole seconds.
+pub const ENV_JWKS_NEGATIVE_TTL_SECS: &str = "SERVICE_AUTH_JWKS_NEGATIVE_TTL_SECS";
+
+/// Explicit connect + request timeouts applied to every outbound HTTP
+/// client in this crate, so a hung hub-api can never wedge a verifier or a
+/// token refresh indefinitely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpTimeouts {
+    /// Max time to establish the connection.
+    pub connect: Duration,
+    /// Max total time for one request/response exchange.
+    pub request: Duration,
+}
+
+impl Default for HttpTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: DEFAULT_HTTP_CONNECT_TIMEOUT,
+            request: DEFAULT_HTTP_REQUEST_TIMEOUT,
+        }
+    }
+}
+
+impl HttpTimeouts {
+    /// Defaults overridden by `SERVICE_AUTH_HTTP_CONNECT_TIMEOUT_SECS` /
+    /// `SERVICE_AUTH_HTTP_REQUEST_TIMEOUT_SECS`; invalid or zero values are
+    /// logged and ignored (never "no timeout").
+    pub fn from_env() -> Self {
+        Self {
+            connect: duration_from_env(ENV_HTTP_CONNECT_TIMEOUT_SECS, DEFAULT_HTTP_CONNECT_TIMEOUT),
+            request: duration_from_env(ENV_HTTP_REQUEST_TIMEOUT_SECS, DEFAULT_HTTP_REQUEST_TIMEOUT),
+        }
+    }
+
+    /// Build a `reqwest::Client` with both timeouts set.
+    fn build_client(self) -> Result<reqwest::Client, ServiceAuthError> {
+        Ok(reqwest::Client::builder()
+            .connect_timeout(self.connect)
+            .timeout(self.request)
+            .build()?)
+    }
+}
+
+/// Parse a positive whole-seconds value; `None`, zero or garbage -> `default`.
+fn parse_secs(raw: Option<&str>, default: Duration) -> Duration {
+    match raw.map(str::trim) {
+        None | Some("") => default,
+        Some(v) => match v.parse::<u64>() {
+            Ok(n) if n > 0 => Duration::from_secs(n),
+            _ => default,
+        },
+    }
+}
+
+fn duration_from_env(name: &str, default: Duration) -> Duration {
+    let raw = std::env::var(name).ok();
+    let parsed = parse_secs(raw.as_deref(), default);
+    if raw.is_some() && parsed == default {
+        debug!(
+            env = name,
+            "service_auth.env_override_ignored_using_default"
+        );
+    }
+    parsed
+}
+
+/// Build the client for `new()` constructors. Same failure mode (and
+/// invariant) as `reqwest::Client::new()`, which panics only if the TLS
+/// backend cannot initialise -- never silently fall back to a client
+/// without timeouts.
+fn client_or_die(timeouts: HttpTimeouts) -> reqwest::Client {
+    match timeouts.build_client() {
+        Ok(client) => client,
+        Err(err) => panic!("service_auth: cannot build HTTP client (TLS backend init): {err}"),
+    }
+}
+
+/// Tunables for [`JwksTrustBundle`]: HTTP timeouts + unknown-`kid` negative TTL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JwksConfig {
+    /// Timeouts for the JWKS fetch.
+    pub http: HttpTimeouts,
+    /// How long a `kid` absent from the JWKS (or whose refetch failed) is
+    /// rejected without touching the network.
+    pub negative_ttl: Duration,
+}
+
+impl Default for JwksConfig {
+    fn default() -> Self {
+        Self {
+            http: HttpTimeouts::default(),
+            negative_ttl: DEFAULT_JWKS_NEGATIVE_TTL,
+        }
+    }
+}
+
+impl JwksConfig {
+    /// Defaults overridden from the `SERVICE_AUTH_*` env vars.
+    pub fn from_env() -> Self {
+        Self {
+            http: HttpTimeouts::from_env(),
+            negative_ttl: duration_from_env(ENV_JWKS_NEGATIVE_TTL_SECS, DEFAULT_JWKS_NEGATIVE_TTL),
+        }
+    }
+}
+
 /// [`TrustBundle`] backed by hub-api's own JWKS endpoint, refreshed on a
 /// cache miss (new `kid` seen, e.g. mid-rotation).
+///
+/// Resilience: the fetch has connect + request timeouts; concurrent misses
+/// are coalesced (single-flight) into one refetch; and a `kid` the JWKS does
+/// not contain is negatively cached for a short TTL so a flood of bogus
+/// `kid`s cannot hammer the endpoint. An unknown `kid` is still rejected
+/// (fail closed) -- the caches only bound how often we re-ask.
 pub struct JwksTrustBundle {
     jwks_url: String,
     http: reqwest::Client,
     cache: RwLock<HashMap<String, DecodingKey>>,
+    /// Serialises refetches: whoever holds it is the one in-flight request.
+    refresh_gate: Mutex<()>,
+    /// `kid` -> instant until which it is known-unknown.
+    negative: std::sync::Mutex<HashMap<String, Instant>>,
+    negative_ttl: Duration,
 }
 
 #[derive(Deserialize)]
@@ -364,11 +496,29 @@ struct JwkEntry {
 }
 
 impl JwksTrustBundle {
+    /// Bundle with timeouts/TTL from the environment (or defaults).
     pub fn new(jwks_url: impl Into<String>) -> Self {
+        let config = JwksConfig::from_env();
+        Self::build(jwks_url.into(), config, client_or_die(config.http))
+    }
+
+    /// Bundle with explicit [`JwksConfig`]; errors if the HTTP client cannot be built.
+    pub fn with_config(
+        jwks_url: impl Into<String>,
+        config: JwksConfig,
+    ) -> Result<Self, ServiceAuthError> {
+        let client = config.http.build_client()?;
+        Ok(Self::build(jwks_url.into(), config, client))
+    }
+
+    fn build(jwks_url: String, config: JwksConfig, http: reqwest::Client) -> Self {
         Self {
-            jwks_url: jwks_url.into(),
-            http: reqwest::Client::new(),
+            jwks_url,
+            http,
             cache: RwLock::new(HashMap::new()),
+            refresh_gate: Mutex::new(()),
+            negative: std::sync::Mutex::new(HashMap::new()),
+            negative_ttl: config.negative_ttl,
         }
     }
 
@@ -393,6 +543,30 @@ impl JwksTrustBundle {
         debug!(count = cache.len(), "service_auth.jwks_refreshed");
         Ok(())
     }
+
+    /// True while `kid` is inside its negative-cache window.
+    fn is_negatively_cached(&self, kid: &str) -> bool {
+        let map = self.negative.lock().unwrap_or_else(|p| p.into_inner());
+        map.get(kid).is_some_and(|until| Instant::now() < *until)
+    }
+
+    /// Remember `kid` as unknown until `negative_ttl` elapses. Expired
+    /// entries are purged on insert and the map is hard-capped.
+    fn remember_unknown(&self, kid: &str) {
+        let now = Instant::now();
+        let mut map = self.negative.lock().unwrap_or_else(|p| p.into_inner());
+        map.retain(|_, until| now < *until);
+        if map.len() >= NEGATIVE_CACHE_MAX_ENTRIES {
+            let oldest = map
+                .iter()
+                .min_by_key(|(_, until)| **until)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                map.remove(&k);
+            }
+        }
+        map.insert(kid.to_owned(), now + self.negative_ttl);
+    }
 }
 
 #[async_trait::async_trait]
@@ -401,12 +575,31 @@ impl TrustBundle for JwksTrustBundle {
         if let Some(key) = self.cache.read().await.get(kid) {
             return Some(key.clone());
         }
+        if self.is_negatively_cached(kid) {
+            debug!("service_auth.jwks_negative_cache_hit");
+            return None;
+        }
+        // Single-flight: concurrent misses queue on the gate; only the first
+        // actually fetches, the rest re-check the caches it just filled.
+        let _flight = self.refresh_gate.lock().await;
+        if let Some(key) = self.cache.read().await.get(kid) {
+            return Some(key.clone());
+        }
+        if self.is_negatively_cached(kid) {
+            return None;
+        }
         // Cache miss -- refresh once (covers key rotation) before giving up.
         if let Err(err) = self.refresh().await {
             warn!(error = %err, "service_auth.jwks_refresh_failed");
+            // Fail closed, and back off so a down endpoint isn't re-hit per token.
+            self.remember_unknown(kid);
             return None;
         }
-        self.cache.read().await.get(kid).cloned()
+        let found = self.cache.read().await.get(kid).cloned();
+        if found.is_none() {
+            self.remember_unknown(kid);
+        }
+        found
     }
 }
 
@@ -435,16 +628,46 @@ struct TokenResponse {
 }
 
 impl MachineJwtClient {
+    /// Client with timeouts from the environment (or defaults).
     pub fn new(
         token_endpoint: impl Into<String>,
         sa_token_path: impl Into<String>,
         scope: impl Into<String>,
     ) -> Self {
+        Self::build(
+            token_endpoint.into(),
+            sa_token_path.into(),
+            scope.into(),
+            client_or_die(HttpTimeouts::from_env()),
+        )
+    }
+
+    /// Client with explicit [`HttpTimeouts`]; errors if the HTTP client cannot be built.
+    pub fn with_timeouts(
+        token_endpoint: impl Into<String>,
+        sa_token_path: impl Into<String>,
+        scope: impl Into<String>,
+        timeouts: HttpTimeouts,
+    ) -> Result<Self, ServiceAuthError> {
+        Ok(Self::build(
+            token_endpoint.into(),
+            sa_token_path.into(),
+            scope.into(),
+            timeouts.build_client()?,
+        ))
+    }
+
+    fn build(
+        token_endpoint: String,
+        sa_token_path: String,
+        scope: String,
+        http: reqwest::Client,
+    ) -> Self {
         Self {
-            token_endpoint: token_endpoint.into(),
-            sa_token_path: sa_token_path.into(),
-            scope: scope.into(),
-            http: reqwest::Client::new(),
+            token_endpoint,
+            sa_token_path,
+            scope,
+            http,
             cached: RwLock::new(None),
         }
     }
@@ -729,6 +952,15 @@ mod tests {
     /// Minimal HTTP server returning canned `(status, body)` responses in
     /// order (last one repeats); returns its base URL and a hit counter.
     async fn mock_server(responses: Vec<(u16, String)>) -> (String, Arc<AtomicUsize>) {
+        mock_server_delayed(responses, Duration::ZERO).await
+    }
+
+    /// As [`mock_server`] but waits `delay` before answering, so concurrent
+    /// callers genuinely overlap an in-flight request.
+    async fn mock_server_delayed(
+        responses: Vec<(u16, String)>,
+        delay: Duration,
+    ) -> (String, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let hits = Arc::new(AtomicUsize::new(0));
@@ -743,6 +975,7 @@ mod tests {
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 8192];
                     let _ = sock.read(&mut buf).await;
+                    tokio::time::sleep(delay).await;
                     let resp = format!(
                         "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -920,6 +1153,162 @@ mod tests {
         assert!(
             matches!(err, ServiceAuthError::InvalidToken(m) if m.contains("bad JWKS entry k1"))
         );
+    }
+
+    /// Accepts connections and never answers -- an unbounded wait unless the
+    /// client carries a request timeout.
+    async fn hung_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn fast_timeouts() -> HttpTimeouts {
+        HttpTimeouts {
+            connect: Duration::from_millis(200),
+            request: Duration::from_millis(300),
+        }
+    }
+
+    #[test]
+    fn default_timeouts_are_finite_and_env_parsing_never_yields_unbounded() {
+        let d = HttpTimeouts::default();
+        assert!(d.connect > Duration::ZERO && d.request >= d.connect);
+        let def = Duration::from_secs(7);
+        assert_eq!(parse_secs(None, def), def);
+        assert_eq!(parse_secs(Some(""), def), def);
+        assert_eq!(
+            parse_secs(Some("0"), def),
+            def,
+            "zero must not disable the timeout"
+        );
+        assert_eq!(parse_secs(Some("abc"), def), def);
+        assert_eq!(parse_secs(Some(" 5 "), def), Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn jwks_fetch_times_out_instead_of_hanging() {
+        let url = hung_server().await;
+        let cfg = JwksConfig {
+            http: fast_timeouts(),
+            negative_ttl: Duration::from_secs(30),
+        };
+        let bundle = JwksTrustBundle::with_config(url, cfg).expect("client");
+        let started = Instant::now();
+        let got = tokio::time::timeout(Duration::from_secs(5), bundle.public_key("k1"))
+            .await
+            .expect("must resolve via the client timeout, not hang");
+        assert!(got.is_none(), "fail closed on timeout");
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn machine_client_request_times_out_instead_of_hanging() {
+        let url = hung_server().await;
+        let sa = temp_sa_token("hung", "sa-token");
+        let client =
+            MachineJwtClient::with_timeouts(url, sa.clone(), "s", fast_timeouts()).expect("client");
+        let err = tokio::time::timeout(Duration::from_secs(5), client.get_token())
+            .await
+            .expect("must resolve via the client timeout, not hang")
+            .unwrap_err();
+        assert!(
+            matches!(&err, ServiceAuthError::Http(e) if e.is_timeout()),
+            "{err:?}"
+        );
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn concurrent_unknown_kid_lookups_trigger_exactly_one_fetch() {
+        // 150ms server delay guarantees all 16 callers overlap the first fetch.
+        let (url, hits) =
+            mock_server_delayed(vec![(200, jwks_body("k1"))], Duration::from_millis(150)).await;
+        let bundle = Arc::new(JwksTrustBundle::new(url));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let b = bundle.clone();
+            tasks.push(tokio::spawn(async move {
+                b.public_key("bogus").await.is_none()
+            }));
+        }
+        for t in tasks {
+            assert!(t.await.expect("join"), "unknown kid is still rejected");
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "single-flight: one refetch for N callers"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_lookups_of_a_new_valid_kid_share_one_fetch_and_all_succeed() {
+        let (url, hits) =
+            mock_server_delayed(vec![(200, jwks_body("k1"))], Duration::from_millis(150)).await;
+        let bundle = Arc::new(JwksTrustBundle::new(url));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let b = bundle.clone();
+            tasks.push(tokio::spawn(
+                async move { b.public_key("k1").await.is_some() },
+            ));
+        }
+        for t in tasks {
+            assert!(t.await.expect("join"));
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn bogus_kid_is_negatively_cached_then_refetched_after_ttl() {
+        let (url, hits) = mock_server(vec![(200, jwks_body("k1"))]).await;
+        let cfg = JwksConfig {
+            http: HttpTimeouts::default(),
+            negative_ttl: Duration::from_millis(300),
+        };
+        let bundle = JwksTrustBundle::with_config(url, cfg).expect("client");
+        assert!(bundle.public_key("bogus").await.is_none());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        for _ in 0..5 {
+            assert!(bundle.public_key("bogus").await.is_none());
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "within TTL: no refetch");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(bundle.public_key("bogus").await.is_none());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "after TTL: exactly one more refetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_cache_does_not_block_a_different_valid_kid() {
+        let (url, _hits) = mock_server(vec![(200, jwks_body("k1"))]).await;
+        let bundle = JwksTrustBundle::new(url);
+        assert!(bundle.public_key("bogus").await.is_none());
+        assert!(
+            bundle.public_key("k1").await.is_some(),
+            "rotation to a real kid still works"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_cache_is_bounded() {
+        let (url, _hits) = mock_server(vec![(200, jwks_body("k1"))]).await;
+        let bundle = JwksTrustBundle::new(url);
+        for i in 0..(NEGATIVE_CACHE_MAX_ENTRIES + 50) {
+            bundle.remember_unknown(&format!("kid-{i}"));
+        }
+        let len = bundle.negative.lock().expect("lock").len();
+        assert!(len <= NEGATIVE_CACHE_MAX_ENTRIES);
     }
 
     #[tokio::test]
