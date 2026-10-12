@@ -69,11 +69,13 @@ class Config:
     BROWSER_SOURCE_URL = os.getenv('BROWSER_SOURCE_URL', 'http://browser-source:8050')
 
     # WaddleAI configuration (for AI-powered translation and decisions)
-    # Note: Using Qwen2.5:1.5b for language detection (93%+ accuracy, multilingual)
+    # Note: Default is Google Gemma (gemma4:e2b), the free community model; plain-text
+    # LANG:CONFIDENCE output, no JSON/structured schema (use gemma4:e4b if that changes).
+    # PRC-origin models (e.g. Qwen) are prohibited by the supply-chain rule.
     # TinyLlama is NOT suitable for language detection (0% accuracy)
     WADDLEAI_BASE_URL = os.getenv('WADDLEAI_BASE_URL', 'http://ollama:11434')
     WADDLEAI_API_KEY = os.getenv('WADDLEAI_API_KEY', '')
-    WADDLEAI_MODEL = os.getenv('WADDLEAI_MODEL', 'qwen2.5:1.5b')
+    WADDLEAI_MODEL = os.getenv('WADDLEAI_MODEL', 'gemma4:e2b')
     WADDLEAI_TEMPERATURE = float(os.getenv('WADDLEAI_TEMPERATURE', '0.1'))  # Low temp for detection
     WADDLEAI_MAX_TOKENS = int(os.getenv('WADDLEAI_MAX_TOKENS', '500'))
     WADDLEAI_TIMEOUT = int(os.getenv('WADDLEAI_TIMEOUT', '30'))
