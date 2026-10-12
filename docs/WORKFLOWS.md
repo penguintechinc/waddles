@@ -1419,3 +1419,8 @@ share `scripts/lib/checks.sh`. Rules, enforced by
   finding fails, ceilings only move down, and a run under its ceiling prints a
   `RATCHET` line to lower it in the same PR.
 - Zero applicable checks, or a missing tool for files that exist, fails the suite.
+- Python unit suites (`hub_api`, `core/workflow_core_module`, `core/community_module`,
+  `libs/*`, `core/svc_*`) each carry a `.coveragerc` (`fail_under = 90`, tests omitted)
+  and `addopts = --cov ...` in `pytest.ini`, so `make test-unit` / CI fail below 90%
+  line coverage. Use `pytest --no-cov <file>` when iterating on a single test file.
+  Rust crates gate via `cargo llvm-cov --fail-under-lines 90` (`rust-crate-ci.yml`).

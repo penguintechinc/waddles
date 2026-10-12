@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Self-test for scripts/lib/checks.sh and scripts/lint.sh: proves the lint /
+# Self-test for scripts/lib/checks.sh, scripts/lint.sh and the pytest coverage
+# threshold (.coveragerc fail_under): proves the lint / coverage /
 # security gates can actually FAIL (critical-rules.md Verification Integrity).
 #
 # The defect this guards against: every counter used to be
@@ -108,6 +109,45 @@ if grep -q '1 file(s)' "$d/out" || grep -q 'PASS    flake8' "$d/out"; then
   ok "clean run prints a denominator (file count)"
 else
   bad "clean run prints a denominator (file count)"
+fi
+
+echo "== coverage gate (.coveragerc fail_under=90 + pytest addopts) =="
+# Uses the REAL .coveragerc the suites use (hub_api's), so a typo in fail_under
+# there is caught here. pytest + pytest-cov are required: a missing dependency
+# is a failure of this test, never a silent skip.
+PYTEST_PY="${PYTHON_BIN:-python3}"
+if ! "$PYTEST_PY" -c 'import pytest, pytest_cov' 2>/dev/null; then
+  bad "pytest + pytest-cov importable by $PYTEST_PY (pip install -r scripts/ci/tests/requirements-gate-test.txt)"
+else
+  cov_sandbox() {
+    # cov_sandbox <extra-test-lines>; prints the sandbox path. mod.py has two
+    # functions; the test always calls f() and calls g() only when asked.
+    local d
+    d=$(mktemp -d); sandboxes="$sandboxes $d"
+    mkdir -p "$d/tests"
+    printf 'def f():\n    return 1\n\n\ndef g():\n    return 2\n' > "$d/mod.py"
+    cp "$REPO_ROOT/hub_api/.coveragerc" "$d/.coveragerc"
+    printf '[pytest]\ntestpaths = tests\naddopts = --cov --cov-config=.coveragerc --cov-report=term:skip-covered\n' > "$d/pytest.ini"
+    printf 'import mod\n\n\ndef test_it():\n    assert mod.f() == 1\n%b' "$1" > "$d/tests/test_mod.py"
+    echo "$d"
+  }
+  run_cov() {
+    local rc=0
+    ( cd "$1" && "$PYTEST_PY" -m pytest -q -p no:cacheprovider ) > "$1/out" 2>&1 || rc=$?
+    echo "$rc"
+  }
+
+  d=$(cov_sandbox '')
+  rc=$(run_cov "$d")
+  expect nonzero "suite under 90% line coverage FAILS the pytest run" "$rc"
+  if grep -q 'Required test coverage of 90' "$d/out"; then
+    ok "failure is the coverage threshold, not an unrelated error"
+  else
+    bad "failure is the coverage threshold, not an unrelated error"
+  fi
+
+  d=$(cov_sandbox '    assert mod.g() == 2\n')
+  expect zero "suite at 100% line coverage PASSES" "$(run_cov "$d")"
 fi
 
 echo

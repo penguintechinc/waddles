@@ -28,7 +28,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
-      - name: Seeded-failure test for checks.sh / lint.sh
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install pytest + pytest-cov (digest-pinned, for the coverage-gate case)
+        run: python -m pip install --require-hashes -r scripts/ci/tests/requirements-gate-test.txt
+
+      - name: Seeded-failure test for checks.sh / lint.sh / coverage gate
+        env:
+          PYTHON_BIN: python
         run: bash scripts/ci/tests/test_checks_gate_integrity.sh
 
   no-stubs-gate:

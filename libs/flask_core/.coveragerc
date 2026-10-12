@@ -1,0 +1,22 @@
+# Coverage gate (critical-rules.md Coverage: 90%+ mandatory). `fail_under` makes
+# the pytest run -- and so `make test-unit` and CI -- FAIL below 90% line
+# coverage; there is no `|| true` between the number and the exit code.
+# Tests themselves are excluded so they cannot inflate the figure.
+# Iterating on one test file? `pytest --no-cov path/to/test.py` skips the gate.
+[run]
+source = .
+omit =
+    tests/*
+    */tests/*
+    test_*.py
+    */test_*.py
+    *_test.py
+    conftest.py
+    */conftest.py
+    .venv/*
+    venv/*
+    */site-packages/*
+
+[report]
+fail_under = 90
+skip_covered = true
