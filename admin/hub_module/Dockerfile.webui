@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -g 1001 nodejs && \
     useradd -u 1001 -g nodejs -s /bin/bash nodejs
 
-# Install the exact locked server dependency graph (express + http-proxy-middleware)
+# Install the exact locked server dependency graph (express only; the /api proxy is dependency-free)
 COPY admin/hub_module/webui-server/package*.json ./
 # Install the locked server dependencies, then remove the base image's bundled global npm.
 # The runtime entrypoint is `node server.js` -- npm/npx/corepack are never invoked after
@@ -47,7 +47,7 @@ RUN npm ci --omit=dev --ignore-scripts \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
 # Copy the proxy/static server and the built frontend assets
-COPY --chown=nodejs:nodejs admin/hub_module/webui-server/server.js ./server.js
+COPY --chown=nodejs:nodejs admin/hub_module/webui-server/server.js admin/hub_module/webui-server/proxy.js ./
 COPY --chown=nodejs:nodejs --from=frontend-build /build/admin/hub_module/frontend/dist ./dist
 
 ENV NODE_ENV=production
