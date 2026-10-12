@@ -35,7 +35,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::jwt_hardening::{
     inspect_header, report_outcome, JwtMetrics, JwtRejection, KidPolicy, ALG_LABEL_ABSENT,
@@ -544,17 +544,35 @@ impl JwksTrustBundle {
         Ok(())
     }
 
-    /// True while `kid` is inside its negative-cache window.
+    /// Lock the negative cache, failing loudly if a prior panic poisoned it.
+    /// Returns `None` (after an ERROR log) rather than silently recovering the
+    /// possibly-corrupt inner map; callers must fail closed on `None`.
+    fn lock_negative(&self) -> Option<std::sync::MutexGuard<'_, HashMap<String, Instant>>> {
+        match self.negative.lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                error!("service_auth negative cache mutex poisoned; failing closed");
+                None
+            }
+        }
+    }
+
+    /// True while `kid` is inside its negative-cache window. A poisoned cache
+    /// fails closed (reports the `kid` as denied) so no refetch is attempted.
     fn is_negatively_cached(&self, kid: &str) -> bool {
-        let map = self.negative.lock().unwrap_or_else(|p| p.into_inner());
-        map.get(kid).is_some_and(|until| Instant::now() < *until)
+        match self.lock_negative() {
+            Some(map) => map.get(kid).is_some_and(|until| Instant::now() < *until),
+            None => true,
+        }
     }
 
     /// Remember `kid` as unknown until `negative_ttl` elapses. Expired
     /// entries are purged on insert and the map is hard-capped.
     fn remember_unknown(&self, kid: &str) {
         let now = Instant::now();
-        let mut map = self.negative.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(mut map) = self.lock_negative() else {
+            return;
+        };
         map.retain(|_, until| now < *until);
         if map.len() >= NEGATIVE_CACHE_MAX_ENTRIES {
             let oldest = map
@@ -1297,6 +1315,27 @@ mod tests {
         assert!(
             bundle.public_key("k1").await.is_some(),
             "rotation to a real kid still works"
+        );
+    }
+
+    #[tokio::test]
+    async fn poisoned_negative_cache_fails_closed_without_refetch() {
+        let (url, hits) = mock_server(vec![(200, jwks_body("k1"))]).await;
+        let bundle = std::sync::Arc::new(JwksTrustBundle::new(url));
+        let b = bundle.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = b.negative.lock().expect("lock");
+            panic!("poison the negative cache");
+        })
+        .join();
+        assert!(bundle.negative.is_poisoned());
+        assert!(bundle.is_negatively_cached("anything"), "fails closed");
+        bundle.remember_unknown("x"); // must not panic or recover the map
+        assert!(bundle.public_key("bogus").await.is_none());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no refetch on poisoned cache"
         );
     }
 
