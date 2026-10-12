@@ -61,7 +61,9 @@ count_golangci() {
   for mod in $go_mods; do
     dir=$(dirname "$mod")
     out=$(cd "$dir" && tool_capture "0 1" golangci-lint run) || return 1
-    n=$(printf '%s\n' "$out" | count_matching '.')
+    # Count issue lines (file:line:col: ...), not every line: a clean run still
+    # prints a "0 issues." summary that a blanket line count reported as 1.
+    n=$(printf '%s\n' "$out" | count_matching '^[^ ]+:[0-9]+:')
     total=$((total + n))
   done
   echo "$total"

@@ -10,23 +10,18 @@
 #
 # Seeded 2026-08-26 on release/v3.0.X.
 #
-# 2026-10-12 re-measure (gate-integrity fix, scripts/lib/checks.sh no longer
-# treats a crashed scanner as "0 findings"):
-#   lowered    shellcheck 5700 -> 5206, zizmor 21 -> 6
-#   EXCEEDED   flake8 measures 2466 (ceiling 2000), hadolint 157 (120),
-#              doc-refs 24 (23) on release/v3.0.X itself. The ceilings were NOT
-#              raised -- these are real regressions/drift that `make lint` now
-#              reports honestly; paying them down (or a deliberate, reviewed
-#              re-baseline) is tracked as follow-up. Figures are tool-version
-#              sensitive (flake8 7.1.1/pycodestyle 2.12.1, hadolint, shellcheck
-#              as installed locally), so pin the CI tool versions when wiring
-#              `make lint` into CI.
-#   UNMEASURED golangci-lint 27 -- crashed locally (go.mod needs go >= 1.26),
-#              which the old counter silently reported as 0.
-flake8=2000
+# 2026-10-12 re-measure on a clean release/v3.0.X tree (after the flake8 / hadolint /
+# Go-gate debt PRs #828-#830), with scripts/lib/checks.sh no longer treating a
+# crashed scanner as "0 findings". Every ceiling is the real measured value:
+#   flake8 2000 -> 1600, shellcheck 5700 -> 5206, hadolint 120 -> 40,
+#   golangci-lint 27 -> 0 (the 27 was a line-count artifact), zizmor 21 -> 6,
+#   gitleaks 420 -> 415, doc-refs 23 -> 21, govulncheck 2 -> 0.
+# Counts are tool-version sensitive (flake8 7.1.1 / pycodestyle 2.12.1 locally),
+# so pin tool versions when wiring `make lint` into CI.
+flake8=1600
 shellcheck=5206
-hadolint=120
-golangci-lint=27
+hadolint=40
+golangci-lint=0
 zizmor=6
 
 # --- security ---
@@ -35,7 +30,7 @@ pip-audit=0
 npm-audit=0
 gosec=0
 # core/module_rtc only; disappears with the Rust rewrite at P3.
-govulncheck=2
+govulncheck=0
 # gitleaks scans git HISTORY, so this count cannot fall without rewriting it —
 # the RATCHET line will never fire for this check. Baselined so a NEW committed
 # secret fails the gate, which is the property that matters.
@@ -53,4 +48,4 @@ gitleaks=415
 
 # Documentation reference gate (scripts/check-doc-refs.sh). Dead repo paths
 # referenced in docs/**/*.md. Seeded 2026-08-29; lower as docs are corrected.
-doc-refs=23
+doc-refs=21

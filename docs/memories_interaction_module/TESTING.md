@@ -457,7 +457,7 @@ Tests run in GitHub Actions:
 
 ## Test Files
 
-Test files located in: `action/interactive/memories_interaction_module/tests/`
+Test files located in: `action/interactive/memories_interaction_module/` (see `test-api.sh`)
 
 Structure:
 ```
