@@ -10,6 +10,7 @@ Provides semantic memory storage and retrieval using mem0 with:
 """
 
 import logging
+import re
 from typing import Optional, Any
 from dataclasses import dataclass, field
 
@@ -19,6 +20,14 @@ from config import Config
 from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
+
+#: mem0 owner keys are PII-free by construction: `community_<id>` (community-wide, belongs to
+#: no individual) or `user_<uuid>` (a `hub_users.uuid`/bundle `user_uuid` token). Anything else
+#: -- a username, e-mail, numeric platform id -- is rejected on write, so the Qdrant store can
+#: never acquire raw-PII keys. hub-api's DSAR export/erasure
+#: (`hub_api/services/mem0_privacy.py`) finds a subject's memories by the `user_<uuid>` key.
+_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_OWNER_KEY_RE = re.compile(rf"^(community_\d+|user_{_UUID})$")
 
 
 @dataclass(slots=True)
@@ -57,6 +66,18 @@ class Mem0Service:
                 f"community {self.community_id}: {describe_db_error(e)}"
             )
             raise
+
+    @staticmethod
+    def user_key(user_uuid: str) -> str:
+        """Return the mem0 owner key for a user token (`user_<uuid>`).
+
+        Raises:
+            ValueError: `user_uuid` is not a UUID (never key memory by raw PII).
+        """
+        key = f"user_{str(user_uuid).strip().lower()}"
+        if not _OWNER_KEY_RE.match(key):
+            raise ValueError("mem0 user key must be built from a UUID token, never raw PII")
+        return key
 
     def _build_mem0_config(self) -> dict[str, Any]:
         """
@@ -140,7 +161,9 @@ class Mem0Service:
 
         return mem0_config
 
-    async def add_messages(self, messages: list[dict]) -> None:
+    async def add_messages(
+        self, messages: list[dict], user_uuid: str | None = None
+    ) -> None:
         """
         Add chat messages to memory.
 
@@ -149,9 +172,12 @@ class Mem0Service:
 
         Args:
             messages: List of message dictionaries with 'role' and 'content'
+            user_uuid: PII-free user token the messages belong to. Attributing messages to
+                their author is what lets a DSAR export/erase them; omitted -> they are stored
+                under the community-wide key and cannot be attributed to one person.
 
         Raises:
-            ValueError: If messages format is invalid
+            ValueError: If messages format is invalid or user_uuid is not a UUID
             RuntimeError: If mem0 is not initialized
         """
         if self._memory is None:
@@ -171,11 +197,11 @@ class Mem0Service:
                         "Messages must have 'role' and 'content' fields"
                     )
 
-            # Add messages to mem0
-            self._memory.add(
-                messages=messages,
-                user_id=f"community_{self.community_id}"
+            owner = (
+                self.user_key(user_uuid) if user_uuid else f"community_{self.community_id}"
             )
+            # Add messages to mem0
+            self._memory.add(messages=messages, user_id=owner)
 
             logger.info(
                 f"Added {len(messages)} messages to memory for "
@@ -200,7 +226,7 @@ class Mem0Service:
 
         Args:
             content: Memory content text
-            user_id: Optional user ID to associate with memory
+            user_id: Optional owner key (`user_key(uuid)`); never a username/e-mail
             metadata: Optional metadata dictionary
 
         Returns:
@@ -223,6 +249,11 @@ class Mem0Service:
             effective_user_id = (
                 user_id or f"community_{self.community_id}"
             )
+            if not _OWNER_KEY_RE.match(effective_user_id):
+                raise ValueError(
+                    "user_id must be 'user_<uuid>' (see Mem0Service.user_key) or a "
+                    "community key, never raw PII"
+                )
 
             # Add memory
             result = self._memory.add(
@@ -380,6 +411,30 @@ class Mem0Service:
                 f"community {self.community_id}: {describe_db_error(e)}"
             )
             return False
+
+    async def export_user_memories(self, user_uuid: str) -> list[dict[str, Any]]:
+        """Return every memory this community's store holds for `user_uuid` (DSAR access).
+
+        Empty list for a user with none. hub-api's DSAR flow reads Qdrant directly across all
+        communities; this is the in-service equivalent for a single community.
+        """
+        if self._memory is None:
+            raise RuntimeError(f"mem0 not initialized for community {self.community_id}")
+        memories = self._memory.get_all(user_id=self.user_key(user_uuid))
+        if isinstance(memories, dict):
+            memories = memories.get("results", [])
+        return list(memories or [])
+
+    async def delete_user_memories(self, user_uuid: str) -> None:
+        """Delete every memory this community's store holds for `user_uuid` (DSAR erasure).
+
+        Idempotent -- a user with no memories is a no-op. Errors propagate (never swallowed):
+        a failed erasure must not look successful.
+        """
+        if self._memory is None:
+            raise RuntimeError(f"mem0 not initialized for community {self.community_id}")
+        self._memory.delete_all(user_id=self.user_key(user_uuid))
+        logger.info(f"Deleted user memories for community {self.community_id}")
 
     async def get_community_context(self) -> dict[str, Any]:
         """
