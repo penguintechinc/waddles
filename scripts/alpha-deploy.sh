@@ -64,10 +64,14 @@
 # evicted once under DiskPressure).
 #
 # Usage:
-#   scripts/alpha-deploy.sh [--skip-build]
+#   scripts/alpha-deploy.sh [--skip-build] [--skip-deploy]
 #
 # --skip-build   Reuse whatever is already pushed under the current HEAD's
 #                sha8 tag (skips the build+push step).
+# --skip-deploy  Build+push+verify the registry preflight, then exit 0 before
+#                any helm step. Pre-warms images so a later
+#                `--skip-build` deploy is fast. Legal with --skip-build
+#                (just verifies the registry, then exits).
 #
 # fix/valkey-cert-rollout-and-migrate-wait -- if you pipe this script's
 # output (e.g. `scripts/alpha-deploy.sh | tee /tmp/alpha-deploy.log`), the
@@ -116,9 +120,11 @@ CACHE_BUILDER="${CACHE_BUILDER:-alpha-registry-cache}"
 readonly NAMESPACE RELEASE HELM_CHART REGISTRY CACHE_BUILDER
 
 SKIP_BUILD=false
+SKIP_DEPLOY=false
 for arg in "$@"; do
     case "$arg" in
         --skip-build) SKIP_BUILD=true ;;
+        --skip-deploy) SKIP_DEPLOY=true ;;
         *) echo "unknown arg: $arg" >&2; exit 1 ;;
     esac
 done
@@ -515,6 +521,14 @@ EOF
 }
 
 check_images_in_registry
+
+# --skip-deploy: images are built+pushed+verified present -- stop before any
+# helm step (lint/dry-run/upgrade). Legal together with --skip-build (just
+# verifies the registry, then exits).
+if [[ "${SKIP_DEPLOY}" == "true" ]]; then
+    info "--skip-deploy: images built+pushed+verified at ${SHA8}, skipping helm"
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Step 2: helm lint + dry-run + upgrade.
