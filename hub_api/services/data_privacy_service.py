@@ -50,6 +50,8 @@ from opentelemetry import trace
 from services import ban_suppression, mem0_privacy, session_service
 from services.audit_service import report_write_failure
 from services.bundle_telemetry import get_meter, get_tracer
+from services.erasure_executor import ErasureSubject, collect_object_urls, run_registry_erasure
+from services.erasure_external import EnvExternalErasure, ExternalErasure
 from services.errors import bad_request, not_found, unauthorized
 from services.suppression_keys import PlatformKekKeySource, SuppressionKeySource
 
@@ -70,10 +72,18 @@ ERASURE_RETAINED_TABLES: tuple[str, ...] = (
 )
 
 #: `deletion_scope` keys that are NOT hard-deleted row counts: the in-place `hub_users`
-#: anonymization, and the suppression rows WRITTEN for an erased user with an active ban.
+#: anonymization, and the suppression rows WRITTEN for an erased user with an active ban. Registry
+#: SCRUB counts (`<table>__scrubbed`, rows kept with their PII blanked) are non-deletes too --
+#: see `_is_delete_count_key()`.
 _NON_DELETE_COUNT_KEYS: frozenset[str] = frozenset(
     {"hub_users_anonymized", "suppression_records_written"}
 )
+_SCRUBBED_SUFFIX = "__scrubbed"
+
+
+def _is_delete_count_key(key: str) -> bool:
+    """Is `deletion_scope[key]` a count of hard-deleted rows (vs an anonymize/scrub/write count)?"""
+    return key not in _NON_DELETE_COUNT_KEYS and not key.endswith(_SCRUBBED_SUFFIX)
 
 
 def _iso(value: Any) -> str | None:
@@ -528,8 +538,8 @@ def _instruments() -> _ErasureInstruments:
 
 
 def _rows_deleted(counts: dict[str, int]) -> int:
-    """Total rows hard-deleted (the in-place anonymizations are not deletes)."""
-    return sum(v for k, v in counts.items() if k not in _NON_DELETE_COUNT_KEYS)
+    """Total rows hard-deleted (the in-place anonymizations and scrubs are not deletes)."""
+    return sum(v for k, v in counts.items() if _is_delete_count_key(k))
 
 
 def _record_erasure_metrics(result: str, started: float, counts: dict[str, int] | None) -> None:
@@ -683,6 +693,48 @@ def _delete_reputation_and_identity(
     return counts
 
 
+def _subject_of(scope: _ErasureScope, *, user_id: int) -> ErasureSubject:
+    """The registry's view of the subject, built from the pre-delete `_ErasureScope`."""
+    return ErasureSubject(
+        user_id=user_id,
+        identities=scope.identities,
+        member_ids=tuple(int(m.id) for m in scope.member_rows),
+        user_uuids=scope.user_uuids,
+    )
+
+
+def _erase_external_stores(
+    dal: Any, scope: _ErasureScope, *, user_id: int, external: ExternalErasure
+) -> dict[str, int]:
+    """Delete the subject's SeaweedFS objects and Valkey bundle KV keys.
+
+    Runs BEFORE any row is deleted (the object URLs live in rows erasure is about to remove) and
+    FAILS LOUD: an error aborts the whole erasure -- the transaction rolls back and a `failed`
+    ledger row is written -- so the user's retry re-runs everything instead of the ledger saying
+    "completed" over data left behind. Both stores are idempotent, so deleting here and then
+    failing a later database step is harmless. Nothing here is tier- or flag-gated: erasure is a
+    statutory right in every tier.
+    """
+    subject = _subject_of(scope, user_id=user_id)
+    return dict(
+        external.erase(object_urls=collect_object_urls(dal, subject), user_uuids=scope.user_uuids)
+    )
+
+
+def _erase_registry_tables(dal: Any, scope: _ErasureScope, *, user_id: int) -> dict[str, int]:
+    """Run the Art. 17 registry over every OTHER user-keyed table (~100); see its docstring."""
+    result = run_registry_erasure(dal, _subject_of(scope, user_id=user_id))
+    logger.info(
+        "dsar.erasure_registry_applied",
+        extra={
+            "tables_examined": result.tables_examined,
+            "tables_absent": len(result.tables_absent),
+            "rules_skipped": len(result.rules_skipped),
+        },
+    )
+    return result.counts
+
+
 def _sync_erase(
     dal: Any,
     *,
@@ -690,6 +742,7 @@ def _sync_erase(
     email: str | None,
     now: datetime,
     keys: SuppressionKeySource,
+    external_stores: ExternalErasure | None = None,
     external_counts: dict[str, int] | None = None,
 ) -> dict[str, int]:
     """Erase `user_id` in ONE transaction: suppression (if banned), every delete, anonymize, audit.
@@ -732,6 +785,12 @@ def _sync_erase(
             now=now,
             retention_days=ban_suppression.max_retention_days() if scope.restrictions else None,
         )
+        # Object storage + bundle KV first: the avatar/banner URLs are read from rows deleted below.
+        counts.update(
+            _erase_external_stores(
+                dal, scope, user_id=user_id, external=external_stores or EnvExternalErasure()
+            )
+        )
         counts["profiles"] = dal(dal.hub_user_profiles.hub_user_id == user_id).delete()
         counts["sessions"] = dal(dal.hub_sessions.user_id == user_id).delete()
         # Node's own WHERE (`user_identifier = (SELECT email FROM hub_users
@@ -754,6 +813,10 @@ def _sync_erase(
         # every erased user, banned or not.
         counts["community_members"] = _delete_memberships(dal, scope, now=now)
         counts.update(_delete_reputation_and_identity(dal, scope, user_id=user_id))
+        # Every OTHER user-keyed table (~100: activity, content, tokens, balances, SSO subjects,
+        # bookings, economy ledgers, ...) -- driven by the declarative registry so a table added
+        # later cannot be forgotten (`services/erasure_registry.py`, pinned by its coverage test).
+        counts.update(_erase_registry_tables(dal, scope, user_id=user_id))
         dal(dal.hub_users.id == user_id).update(
             email=f"deleted_{user_id}@deleted.waddlebot",
             username=f"deleted_{user_id}",
@@ -787,6 +850,7 @@ async def anonymize_user_data(
     user_id: int,
     email: str | None,
     suppression_keys: SuppressionKeySource | None = None,
+    external_stores: ExternalErasure | None = None,
 ) -> None:
     """Delete/anonymize every PII-bearing row for `user_id`, atomically, and record the outcome.
 
@@ -800,7 +864,9 @@ async def anonymize_user_data(
 
     `suppression_keys` is the seam for the ban-suppression master key (default:
     the platform tenant KEK from the environment, see `services/suppression_keys.py`);
-    it is only ever read when the subject has an active ban.
+    it is only ever read when the subject has an active ban. `external_stores` is the matching
+    seam for the non-Postgres stores this module erases itself (SeaweedFS objects, Valkey bundle KV;
+    default: this deployment's, from the environment -- see `services/erasure_external.py`).
 
     All-or-nothing (see `_sync_erase()`): on failure the data subject's
     rows are exactly as they were, a separate best-effort `"failed"` row is
@@ -837,6 +903,7 @@ async def anonymize_user_data(
                         email=email,
                         now=now,
                         keys=keys,
+                        external_stores=external_stores,
                         external_counts=external,
                     ),
                 )
