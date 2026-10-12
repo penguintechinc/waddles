@@ -122,6 +122,12 @@ cascade into immutable history.
 | privacy | `privacy.dsar_export`, `privacy.erasure_requested` | route map (GET + DELETE `/api/v1/user/me/data`) |
 | license | `license.subscription_changed`, `license.provider_event` (Stripe/PayPal webhooks, actor `external`) | route map |
 | admin | `admin.platform_config_changed`; `admin.action` for **every other scope-protected state-changing request** | route map + generic rule |
+| credential | `credential.byok_key_set/byok_key_deleted/stream_key_regenerated/pat_created/pat_revoked/password_changed/passkey_registered/passkey_removed/connection_changed/webhook_changed` (the key/token/password value is **never** recorded) | `INLINE_AUTHZ_ROUTES` |
+| user (identity) | `user.identity_linked/identity_unlinked/identity_primary_changed` | `INLINE_AUTHZ_ROUTES` |
+| role (delegated) | `role.event_admin_changed`, `role.join_request_decided` | `INLINE_AUTHZ_ROUTES` |
+| bundle (inline) | `bundle.permission_changed/activation_changed/version_published` | `INLINE_AUTHZ_ROUTES` |
+| license (inline) | `license.token_balance_changed`, `license.payout_profile_changed`, `license.vendor_module_changed` | `INLINE_AUTHZ_ROUTES` |
+| admin (inline) | `admin.community_profile_changed/ai_config_changed/music_config_changed/stream_config_changed/workflow_changed/calendar_event_changed/ticketing_changed`; `privacy.consent_changed` | `INLINE_AUTHZ_ROUTES` |
 | bundle | `app_installed_globally`, `permissions_approved_globally`, `tenant_availability_*`, ... | `bundle_audit.record` bridge (also kept in the legacy `audit_log`) |
 | audit | `audit.exported` | export endpoint (recorded **before** data is returned) |
 
@@ -130,6 +136,19 @@ Coverage is a table, not a memory exercise: any new scope-protected `POST/PUT/PA
 action; `tests/test_audit_http.py::TestAppFactoryWiring::test_every_semantic_route_names_a_real_route`
 fails if an entry no longer matches a live route. Service-to-service plumbing (`/api/v1/internal/*`,
 `/internal/*`, `/mcp/*`) is never classified.
+
+**Inline-authz routes (SOC2 CC7.2).** Routes that authorize inline (`tenant_middleware` + an
+in-handler community/role/ownership check, no `@require_scope`) publish no `AuthzDecision`, so the
+generic rule cannot see them. Each sensitive one (73 today: BYOK/stream keys, PATs, password and
+passkey changes, identity links, vendor payout profile, token credit/debit, bundle grants, community
+admin and event/ticketing admin) is listed in `INLINE_AUTHZ_ROUTES` (`services/audit_events.py`);
+the remainder is in `INLINE_AUTHZ_UNAUDITED` **with a reason** (login handshakes audited at the mint
+site, public inbound endpoints, low-sensitivity self-service). The event is built from the URL
+*rule*, method and status only -- never the path, query, headers or body -- so a secret in the
+request or response cannot reach the chain; unauthenticated attempts are not recorded; the tenant
+comes from `TenantContext` or, for routes without `tenant_middleware`, the verified JWT `tenant`
+claim. `tests/test_audit_inline_authz.py::TestInlineAuthzCoverage` fails the build if a new mutating
+route lacking `require_scope` is in neither map, so a sensitive route cannot ship unaudited.
 
 ### PII contract
 

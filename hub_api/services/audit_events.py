@@ -89,6 +89,7 @@ class AuditCategory(StrEnum):
     ADMIN = "admin"
     BUNDLE = "bundle"
     AUDIT = "audit"
+    CREDENTIAL = "credential"
 
 
 class AuditOutcome(StrEnum):
@@ -145,6 +146,41 @@ class AuditAction(StrEnum):
     ADMIN_PLATFORM_CONFIG_CHANGED = "admin.platform_config_changed"
     AUDIT_EXPORTED = "audit.exported"
     AUDIT_VERIFY_FAILED = "audit.verify_failed"
+    # --- credential / secret lifecycle (inline-authz routes; the secret value is never logged) ---
+    CREDENTIAL_BYOK_KEY_SET = "credential.byok_key_set"
+    CREDENTIAL_BYOK_KEY_DELETED = "credential.byok_key_deleted"
+    CREDENTIAL_STREAM_KEY_REGENERATED = "credential.stream_key_regenerated"
+    CREDENTIAL_PAT_CREATED = "credential.pat_created"
+    CREDENTIAL_PAT_REVOKED = "credential.pat_revoked"
+    CREDENTIAL_PASSWORD_CHANGED = "credential.password_changed"  # noqa: S105 - action name  # nosec B105
+    CREDENTIAL_PASSKEY_REGISTERED = "credential.passkey_registered"
+    CREDENTIAL_PASSKEY_REMOVED = "credential.passkey_removed"
+    CREDENTIAL_CONNECTION_CHANGED = "credential.connection_changed"
+    CREDENTIAL_WEBHOOK_CHANGED = "credential.webhook_changed"
+    # --- identity linking ---
+    USER_IDENTITY_LINKED = "user.identity_linked"
+    USER_IDENTITY_UNLINKED = "user.identity_unlinked"
+    USER_IDENTITY_PRIMARY_CHANGED = "user.identity_primary_changed"
+    # --- membership / delegated administration ---
+    ROLE_EVENT_ADMIN_CHANGED = "role.event_admin_changed"
+    ROLE_JOIN_REQUEST_DECIDED = "role.join_request_decided"
+    # --- bundles ---
+    BUNDLE_PERMISSION_CHANGED = "bundle.permission_changed"
+    BUNDLE_ACTIVATION_CHANGED = "bundle.activation_changed"
+    BUNDLE_VERSION_PUBLISHED = "bundle.version_published"
+    # --- money / vendor ---
+    LICENSE_TOKEN_BALANCE_CHANGED = "license.token_balance_changed"  # noqa: S105  # nosec B105
+    LICENSE_PAYOUT_PROFILE_CHANGED = "license.payout_profile_changed"
+    LICENSE_VENDOR_MODULE_CHANGED = "license.vendor_module_changed"
+    # --- community administration ---
+    ADMIN_COMMUNITY_PROFILE_CHANGED = "admin.community_profile_changed"
+    ADMIN_AI_CONFIG_CHANGED = "admin.ai_config_changed"
+    ADMIN_MUSIC_CONFIG_CHANGED = "admin.music_config_changed"
+    ADMIN_STREAM_CONFIG_CHANGED = "admin.stream_config_changed"
+    ADMIN_WORKFLOW_CHANGED = "admin.workflow_changed"
+    ADMIN_CALENDAR_EVENT_CHANGED = "admin.calendar_event_changed"
+    ADMIN_TICKETING_CHANGED = "admin.ticketing_changed"
+    PRIVACY_CONSENT_CHANGED = "privacy.consent_changed"
 
 
 class AuditValidationError(ValueError):
@@ -421,6 +457,321 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ),
 }
 
+
+def _ra(category: AuditCategory, action: AuditAction) -> RouteAudit:
+    """Shorthand for a :class:`RouteAudit` (keeps the route table below readable)."""
+    return RouteAudit(category, action)
+
+
+_P = "/api/v1"
+_ADM = "/api/v1/admin/<int:community_id>"
+_ADMS = "/api/v1/admin/<community_id>"
+_CAL = "/api/v1/admin/<community_id>/calendar/events/<event_id>"
+_WF = "/api/v1/admin/<community_id>/workflows"
+_APPS = "/api/v1/apps/community/<int:community_id>"
+
+#: Routes that authorize *inline* (a ``tenant_middleware`` + in-handler community/role check, or
+#: self-service ownership) instead of ``@require_scope``. ``require_scope`` publishes the
+#: :class:`~flask_core.authz.AuthzDecision` the generic admin-action rule keys on, so these
+#: mutations of sensitive state (credentials, keys, money, delegated authority, bundle grants)
+#: were invisible to the audit trail (SOC2 CC7.2). Listing them here makes each one a first-class
+#: event. As with :data:`SEMANTIC_ROUTES`, the event is derived from the URL *rule*, the method
+#: and the status only -- never the path, query or body -- so a key/token/password in the request
+#: or response can never reach the store. Unlike the semantic map an unauthenticated request is
+#: not recorded (pre-identity noise), and an authenticated refusal is already an authz event.
+#: ``tests/test_audit_http.py::TestInlineAuthzCoverage`` pins that every mutating route lacking
+#: ``require_scope`` is either here or in :data:`INLINE_AUTHZ_UNAUDITED`, and that every key
+#: names a live route.
+_INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]], ...]] = (
+    (
+        _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_BYOK_KEY_SET),
+        (("PUT", f"{_ADM}/ai/byok-keys"),),
+    ),
+    (
+        _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_BYOK_KEY_DELETED),
+        (("DELETE", f"{_ADM}/ai/byok-keys/<provider>"),),
+    ),
+    (
+        _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_STREAM_KEY_REGENERATED),
+        (("POST", f"{_ADM}/streams/key/regenerate"),),
+    ),
+    (
+        _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_PAT_CREATED),
+        (("POST", f"{_P}/user/tokens/pat"),),
+    ),
+    (
+        _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_PAT_REVOKED),
+        (("DELETE", f"{_P}/user/tokens/pat"),),
+    ),
+    (
+        _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_PASSWORD_CHANGED),
+        (("POST", f"{_P}/auth/password"),),
+    ),
+    (
+        _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_PASSKEY_REGISTERED),
+        (("POST", f"{_P}/user/passkey/register/finish"),),
+    ),
+    (
+        _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_PASSKEY_REMOVED),
+        (("DELETE", f"{_P}/user/passkey/credentials/<int:credential_id>"),),
+    ),
+    (
+        _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_CONNECTION_CHANGED),
+        (
+            ("POST", f"{_P}/<community_id>/github-sync/connections"),
+            ("DELETE", f"{_P}/<community_id>/github-sync/connections/<connection_id>"),
+            ("POST", f"{_ADM}/music/providers/<provider>/oauth"),
+            ("DELETE", f"{_ADM}/music/providers/<provider>"),
+            ("POST", f"{_ADM}/streams/destinations"),
+            ("DELETE", f"{_ADM}/streams/destinations/<int:destination_id>"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_WEBHOOK_CHANGED),
+        (
+            ("POST", f"{_WF}/<workflow_id>/webhooks"),
+            ("DELETE", f"{_WF}/<workflow_id>/webhooks/<webhook_id>"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.USER, AuditAction.USER_IDENTITY_LINKED),
+        (
+            ("POST", f"{_P}/auth/link-oauth"),
+            ("POST", f"{_P}/user/identities/link/<platform>"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.USER, AuditAction.USER_IDENTITY_UNLINKED),
+        (
+            ("DELETE", f"{_P}/auth/oauth/<platform>"),
+            ("DELETE", f"{_P}/user/identities/<platform>"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.USER, AuditAction.USER_IDENTITY_PRIMARY_CHANGED),
+        (("PUT", f"{_P}/user/identities/primary"),),
+    ),
+    (
+        _ra(AuditCategory.ROLE, AuditAction.ROLE_EVENT_ADMIN_CHANGED),
+        (
+            ("POST", f"{_CAL}/admins"),
+            ("PUT", f"{_CAL}/admins/<admin_id>"),
+            ("DELETE", f"{_CAL}/admins/<admin_id>"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.ROLE, AuditAction.ROLE_JOIN_REQUEST_DECIDED),
+        (
+            ("PUT", f"{_ADM}/join-requests/<int:request_id>/approve"),
+            ("PUT", f"{_ADM}/join-requests/<int:request_id>/reject"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.BUNDLE, AuditAction.BUNDLE_PERMISSION_CHANGED),
+        (
+            ("POST", f"{_APPS}/<app_id>/permissions/grant"),
+            ("DELETE", f"{_APPS}/<app_id>/permissions/<permission_id>"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.BUNDLE, AuditAction.BUNDLE_ACTIVATION_CHANGED),
+        (
+            ("POST", f"{_APPS}/activation"),
+            ("DELETE", f"{_APPS}/activation/<app_id>"),
+            ("POST", f"{_P}/marketplace/community/<int:community_id>/bundles"),
+            ("DELETE", f"{_P}/marketplace/community/<int:community_id>/bundles/<app_id>"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.BUNDLE, AuditAction.BUNDLE_VERSION_PUBLISHED),
+        (("POST", f"{_P}/apps/<app_id>/versions"),),
+    ),
+    (
+        _ra(AuditCategory.LICENSE, AuditAction.LICENSE_TOKEN_BALANCE_CHANGED),
+        (
+            ("POST", f"{_P}/marketplace/communities/<int:community_id>/tokens/credit"),
+            ("POST", f"{_P}/marketplace/communities/<int:community_id>/tokens/debit"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.LICENSE, AuditAction.LICENSE_PAYOUT_PROFILE_CHANGED),
+        (
+            ("POST", f"{_P}/marketplace/vendor/profile"),
+            ("PUT", f"{_P}/marketplace/vendor/profile"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.LICENSE, AuditAction.LICENSE_VENDOR_MODULE_CHANGED),
+        (
+            ("POST", f"{_P}/marketplace/vendor/request"),
+            ("POST", f"{_P}/marketplace/vendor/modules"),
+            ("PUT", f"{_P}/marketplace/vendor/modules/<int:module_id>"),
+            ("POST", f"{_P}/marketplace/vendor/modules/<int:module_id>/submit"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_COMMUNITY_PROFILE_CHANGED),
+        (
+            ("PUT", f"{_ADM}/profile"),
+            ("POST", f"{_ADM}/logo"),
+            ("DELETE", f"{_ADM}/logo"),
+            ("POST", f"{_ADM}/banner"),
+            ("DELETE", f"{_ADM}/banner"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_AI_CONFIG_CHANGED),
+        (("PUT", f"{_ADM}/ai/config"),),
+    ),
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_MUSIC_CONFIG_CHANGED),
+        (
+            ("PUT", f"{_ADM}/music/settings"),
+            ("POST", f"{_ADM}/music/radio-stations"),
+            ("DELETE", f"{_ADM}/music/radio-stations/<int:station_id>"),
+            ("PUT", f"{_ADM}/music-station/policy"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_STREAM_CONFIG_CHANGED),
+        (
+            ("POST", f"{_ADM}/streams"),
+            ("PUT", f"{_ADM}/streams/destinations/<int:destination_id>/force-cut"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_WORKFLOW_CHANGED),
+        (
+            ("POST", _WF),
+            ("PUT", f"{_WF}/<workflow_id>"),
+            ("DELETE", f"{_WF}/<workflow_id>"),
+            ("POST", f"{_WF}/<workflow_id>/publish"),
+            ("POST", f"{_WF}/<workflow_id>/execute"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_CALENDAR_EVENT_CHANGED),
+        (
+            ("POST", f"{_ADMS}/calendar/events"),
+            ("PUT", _CAL),
+            ("DELETE", _CAL),
+            ("POST", f"{_CAL}/approve"),
+            ("POST", f"{_CAL}/reject"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_TICKETING_CHANGED),
+        (
+            ("POST", f"{_CAL}/ticketing/enable"),
+            ("POST", f"{_CAL}/ticketing/disable"),
+            ("POST", f"{_CAL}/ticket-types"),
+            ("PUT", f"{_CAL}/ticket-types/<type_id>"),
+            ("DELETE", f"{_CAL}/ticket-types/<type_id>"),
+            ("POST", f"{_CAL}/tickets"),
+            ("POST", f"{_CAL}/tickets/<ticket_id>/cancel"),
+            ("POST", f"{_CAL}/tickets/<ticket_id>/transfer"),
+        ),
+    ),
+    (
+        _ra(AuditCategory.PRIVACY, AuditAction.PRIVACY_CONSENT_CHANGED),
+        (
+            ("DELETE", f"{_P}/cookie"),
+            ("PATCH", f"{_P}/cookie/preferences"),
+        ),
+    ),
+)
+
+INLINE_AUTHZ_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
+    key: meaning for meaning, keys in _INLINE_AUTHZ_GROUPS for key in keys
+}
+
+_R_SESSION: Final[str] = (
+    "login/session/registration handshake: session issue/revoke is audited at the mint/revoke "
+    "chokepoint (audit_http.record_session_*)"
+)
+_R_PUBLIC: Final[str] = (
+    "unauthenticated public/inbound endpoint: no actor, pre-identity noise an attacker could use "
+    "to bloat the chain"
+)
+_R_SELF: Final[str] = (
+    "low-sensitivity self-service data (own calendar/availability/profile/RSVP); no credential, "
+    "money or delegated authority changes"
+)
+_R_OPS: Final[str] = (
+    "high-volume operational action (queue/playlist/check-in/dry-run); not a security-relevant "
+    "state change"
+)
+_R_USAGE: Final[str] = (
+    "usage metering/ticketing/support traffic; no credential, money or authority change"
+)
+
+#: Mutating routes that authorize inline but are *deliberately* not audited, each with the reason.
+#: Anything not here and not in :data:`INLINE_AUTHZ_ROUTES` fails
+#: ``tests/test_audit_http.py::TestInlineAuthzCoverage`` -- a new sensitive route cannot ship
+#: silently unaudited; its author must classify it.
+INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
+    ("POST", "/api/v1/auth/admin"): _R_SESSION,
+    ("POST", "/api/v1/auth/login"): _R_SESSION,
+    ("POST", "/api/v1/auth/logout"): _R_SESSION,
+    ("POST", "/api/v1/auth/logout-all"): _R_SESSION,
+    ("POST", "/api/v1/auth/passkey/login/finish"): _R_SESSION,
+    ("POST", "/api/v1/auth/passkey/login/start"): _R_SESSION,
+    ("POST", "/api/v1/auth/refresh"): _R_SESSION,
+    ("POST", "/api/v1/auth/register"): _R_SESSION,
+    ("POST", "/api/v1/auth/resend-verification"): _R_SESSION,
+    ("POST", "/api/v1/auth/sso/<public_id>/acs"): _R_SESSION,
+    ("POST", "/api/v1/auth/temp-password"): _R_SESSION,
+    ("POST", "/api/v1/user/passkey/register/start"): _R_SESSION,
+    ("POST", "/api/v1/cookie"): _R_PUBLIC,
+    ("POST", "/api/v1/github-sync/webhook"): _R_PUBLIC,
+    ("POST", "/api/v1/marketplace/public/vendor/submit"): _R_PUBLIC,
+    ("POST", "/api/v1/calendar/book/<slug>"): _R_PUBLIC,
+    ("DELETE", "/api/v1/admin/<community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
+    ("POST", "/api/v1/admin/<community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
+    ("DELETE", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
+    ("DELETE", "/api/v1/calendar/booking-pages/<page_id>/members/<user_id>"): _R_SELF,
+    ("DELETE", "/api/v1/calendar/bookings/<uuid>"): _R_SELF,
+    ("DELETE", "/api/v1/calendar/oauth/calendars/<id>"): _R_SELF,
+    ("DELETE", "/api/v1/user/profile/avatar"): _R_SELF,
+    ("POST", "/api/v1/calendar/booking-pages"): _R_SELF,
+    ("POST", "/api/v1/calendar/booking-pages/<page_id>/members"): _R_SELF,
+    ("POST", "/api/v1/calendar/oauth/calendars/<id>/sync"): _R_SELF,
+    ("POST", "/api/v1/user/profile/avatar"): _R_SELF,
+    ("PUT", "/api/v1/calendar/availability/settings"): _R_SELF,
+    ("PUT", "/api/v1/calendar/availability/weekly"): _R_SELF,
+    ("PUT", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
+    ("PUT", "/api/v1/user/profile"): _R_SELF,
+    ("POST", "/api/v1/<int:community_id>/join-requests"): _R_SELF,
+    ("DELETE", "/api/v1/admin/<int:community_id>/music-station/queue/<int:queue_id>"): _R_OPS,
+    (
+        "DELETE",
+        "/api/v1/admin/<int:community_id>/music-station/queue/playlists/<playlist_id>",
+    ): _R_OPS,
+    ("POST", "/api/v1/<community_id>/github-sync/ticket/<ticket_id>/sync"): _R_OPS,
+    ("POST", "/api/v1/admin/<community_id>/calendar/events/<event_id>/check-in"): _R_OPS,
+    (
+        "POST",
+        "/api/v1/admin/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>/undo-check-in",
+    ): _R_OPS,
+    (
+        "POST",
+        "/api/v1/admin/<community_id>/workflows/<workflow_id>/executions/<execution_id>/cancel",
+    ): _R_OPS,
+    ("POST", "/api/v1/admin/<community_id>/workflows/<workflow_id>/test"): _R_OPS,
+    ("POST", "/api/v1/admin/<community_id>/workflows/validate"): _R_OPS,
+    ("POST", "/api/v1/admin/<int:community_id>/music-station/queue/advance"): _R_OPS,
+    ("POST", "/api/v1/admin/<int:community_id>/music-station/queue/playlists"): _R_OPS,
+    ("POST", "/api/v1/admin/<int:community_id>/music-station/queue/requests"): _R_OPS,
+    ("PUT", "/api/v1/admin/<int:community_id>/music-station/queue/reorder"): _R_OPS,
+    ("POST", "/api/v1/admin/calendar/verify-ticket"): _R_OPS,
+    (
+        "POST",
+        "/api/v1/admin/<int:community_id>/support/my-tickets/<int:ticket_id>/comments",
+    ): _R_USAGE,
+    ("POST", "/api/v1/admin/<int:community_id>/support/submit"): _R_USAGE,
+    ("POST", "/api/v1/community/<int:community_id>/ai/completions"): _R_USAGE,
+}
+
 #: Methods that change state; a scope-protected request using one is an auditable admin action.
 MUTATING_METHODS: Final[frozenset[str]] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -465,7 +816,8 @@ def classify_request(facts: RequestFacts) -> Classification | None:
     """Decide whether (and as what) a finished request is auditable; ``None`` = not audited.
 
     Order matters: an authenticated principal being refused is always an authz event;
-    then the explicit semantic map; then the generic rule that every state-changing
+    then the explicit semantic map and the inline-authz map (authenticated callers only); then the
+    generic rule that every state-changing
     request which passed a scope check is an admin action. Reads are never audited
     (their denial is), and unauthenticated 401s are not (they are pre-identity noise
     an attacker could use to bloat the chain).
@@ -483,6 +835,13 @@ def classify_request(facts: RequestFacts) -> Classification | None:
     if semantic is not None:
         outcome = AuditOutcome.SUCCESS if 200 <= facts.status_code < 400 else AuditOutcome.FAILURE
         return Classification(semantic.category, semantic.action, outcome)
+    inline = INLINE_AUTHZ_ROUTES.get((method, facts.rule))
+    if inline is not None:
+        if not facts.authenticated:
+            # No identity to attribute: an unauthenticated 401 is pre-identity noise.
+            return None
+        outcome = AuditOutcome.SUCCESS if 200 <= facts.status_code < 400 else AuditOutcome.FAILURE
+        return Classification(inline.category, inline.action, outcome)
     if method in MUTATING_METHODS and facts.scope_checked and not facts.denied:
         outcome = AuditOutcome.SUCCESS if 200 <= facts.status_code < 400 else AuditOutcome.FAILURE
         return Classification(AuditCategory.ADMIN, AuditAction.ADMIN_ACTION, outcome)
