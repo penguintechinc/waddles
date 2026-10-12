@@ -3,7 +3,6 @@ name: Container Builds
 on:
   push:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
-    tags: [ 'v*' ]
     paths:
       - 'processing/router_module/**'
       - 'trigger/receiver/**'
@@ -24,6 +23,8 @@ on:
   merge_group:
     types: [checks_requested]
     branches: ['release/**']
+  release:
+    types: [released, prereleased]
   workflow_dispatch:
 
 concurrency:
@@ -62,41 +63,49 @@ jobs:
 
       - name: Determine version and suffix
         id: version
-        env:
-          REF: ${{ github.ref }}
-          HEAD_REF: ${{ github.head_ref }}
         run: |
-          # Read version from .version file
-          if [ -f .version ]; then
-            VERSION=$(tr -d '[:space:]' < .version)
+          set -euo pipefail
+          # Five-tier tag scheme (devops.md CI/CD Tag Naming) -- tier -> tag -> trigger:
+          #   alpha : any non-release branch push / dispatch -> alpha-<epoch>
+          #   beta  : push to release/v*.X (or main)         -> beta-<epoch>
+          #   gamma : GitHub release flagged pre-release     -> gamma-<epoch>   (release: prereleased)
+          #   prod  : GitHub release published as release    -> v{Major}.{Minor}.{Patch} + latest (release: released)
+          # <epoch> = unix seconds, computed once here so every matrix job shares it.
+          # .version is NOT used for tags. `suffix` is kept (always empty) so
+          # downstream ${version}${suffix} references keep resolving.
+          EPOCH="$(date +%s)"
+          IS_RELEASE=false
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            ACTION="$(jq -r '.action' "$GITHUB_EVENT_PATH")"
+            case "$ACTION" in
+              released)
+                SEMVER_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
+                if ! [[ "$GITHUB_REF_NAME" =~ $SEMVER_RE ]]; then
+                  echo "::error::release tag '$GITHUB_REF_NAME' is not v{Major}.{Minor}.{Patch}" >&2
+                  exit 1
+                fi
+                TAG="$GITHUB_REF_NAME"
+                IS_RELEASE=true
+                ;;
+              prereleased)
+                TAG="gamma-${EPOCH}"
+                ;;
+              *)
+                echo "::error::unsupported release action '$ACTION'" >&2
+                exit 1
+                ;;
+            esac
+          elif [[ "$GITHUB_REF" == refs/heads/release/v* ]] || [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            TAG="beta-${EPOCH}"
           else
-            VERSION="0.0.0"
+            TAG="alpha-${EPOCH}"
           fi
-
-          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
-
-          # Determine suffix based on ref type
-          # Tagged push (v*) = release + latest
-          # Release branch (v*.x) or PR from one = beta
-          # Main branch push = gamma (pre-release)
-          # Everything else = alpha
-          if [[ "$REF" == refs/tags/v* ]]; then
-            echo "suffix=" >> "$GITHUB_OUTPUT"
-            echo "is_release=true" >> "$GITHUB_OUTPUT"
-            echo "Building RELEASE: v${VERSION} and latest"
-          elif [[ "$REF" == refs/heads/v* ]] || [[ "$HEAD_REF" == v* ]]; then
-            echo "suffix=-beta" >> "$GITHUB_OUTPUT"
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-            echo "Building BETA: v${VERSION}-beta"
-          elif [ "$REF" = "refs/heads/main" ]; then
-            echo "suffix=-gamma" >> "$GITHUB_OUTPUT"
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-            echo "Building GAMMA (pre-release): v${VERSION}-gamma"
-          else
-            echo "suffix=-alpha" >> "$GITHUB_OUTPUT"
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-            echo "Building ALPHA: v${VERSION}-alpha"
-          fi
+          {
+            echo "version=${TAG}"
+            echo "suffix="
+            echo "is_release=${IS_RELEASE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${TAG} (release=${IS_RELEASE})"
 
           # Derive the multi_arch flag from the single BUILD_PLATFORMS toggle
           # (env, top of file). A comma means more than one platform is
@@ -267,7 +276,7 @@ jobs:
           ACTION_PLATFORMS: ${{ steps.changes.outputs.action-platforms }}
           ACTION_SERVERLESS: ${{ steps.changes.outputs.action-serverless }}
           LIBS: ${{ steps.changes.outputs.libs }}
-          # workflow_dispatch must still force-build every module -- the
+          # workflow_dispatch and release (gamma/prod) must still force-build every module -- the
           # unconditional-emit filter below (gh#ci-mergegroup-optimization)
           # would otherwise drop every module on a manual run with no real
           # file changes, same as the step-level `|| github.event_name ==
@@ -305,7 +314,7 @@ jobs:
           ENTRIES="[]"
           for m in "${MODULES[@]}"; do
             IFS='|' read -r NAME CHANGED DOCKERFILE PORT <<< "$m"
-            if [ "$CHANGED" = "true" ] || [ "$LIBS" = "true" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$CHANGED" = "true" ] || [ "$LIBS" = "true" ] || [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$EVENT_NAME" = "release" ]; then
               CONDITION="true"
             else
               CONDITION="false"
@@ -376,7 +385,7 @@ jobs:
       needs.detect-changes.outputs.action-platforms == 'true' ||
       needs.detect-changes.outputs.action-serverless == 'true' ||
       needs.detect-changes.outputs.libs == 'true' ||
-      github.event_name == 'workflow_dispatch')
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'release'))
     strategy:
       fail-fast: false
       # Whole matrix object computed by detect-changes (see that job's
@@ -395,12 +404,12 @@ jobs:
       # unchanged modules don't pull tooling from Docker Hub only to skip the build.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
-        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        if: matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
 
       - name: Log in to Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
         if: >
-          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          (matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')) &&
           github.event_name != 'pull_request' &&
           github.event_name != 'merge_group'
         with:
@@ -424,7 +433,7 @@ jobs:
       # pushes -- push: false there regardless of this tag list.)
       - name: Compute image tags
         id: tags
-        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        if: matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}
           VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
@@ -447,7 +456,7 @@ jobs:
 
       - name: Build and push Docker image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
-        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        if: matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -463,13 +472,13 @@ jobs:
 
       # Gated (non-masked) Trivy scan against the image this job just loaded
       # locally -- PR/merge_group never reach merge-manifests (skipped, see
-      # that job's `if:`), so without this the push-path's informational-only
-      # security-scan job (continue-on-error: true) is the only scan these
+      # that job's `if:`), so without this the push-path's
+      # security-scan job (scanner/pull failures fail it; findings stay advisory) is the only scan these
       # events would otherwise get, and it doesn't run on PR either. This
       # step is what actually gates a PR on HIGH/CRITICAL findings.
       - name: Trivy vulnerability scan (gated, local image)
         if: >
-          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          (matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')) &&
           (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
           matrix.platform == 'linux/amd64'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
@@ -483,7 +492,7 @@ jobs:
 
       - name: Run container tests
         if: >
-          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          (matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')) &&
           matrix.port != 0 &&
           ((github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
           matrix.platform == 'linux/amd64')
@@ -523,7 +532,7 @@ jobs:
       needs.detect-changes.outputs.action-platforms == 'true' ||
       needs.detect-changes.outputs.action-serverless == 'true' ||
       needs.detect-changes.outputs.libs == 'true' ||
-      github.event_name == 'workflow_dispatch')
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'release'))
     strategy:
       fail-fast: false
       # Whole matrix object computed by detect-changes (see that job's
@@ -542,12 +551,12 @@ jobs:
       # unchanged modules don't pull tooling from Docker Hub only to skip the build.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
-        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        if: matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
 
       - name: Log in to Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
         if: >
-          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          (matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')) &&
           github.event_name != 'pull_request' &&
           github.event_name != 'merge_group'
         with:
@@ -571,7 +580,7 @@ jobs:
       # pushes -- push: false there regardless of this tag list.)
       - name: Compute image tags
         id: tags
-        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        if: matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}
           VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
@@ -594,7 +603,7 @@ jobs:
 
       - name: Build and push Docker image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
-        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        if: matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -610,13 +619,13 @@ jobs:
 
       # Gated (non-masked) Trivy scan against the image this job just loaded
       # locally -- PR/merge_group never reach merge-manifests (skipped, see
-      # that job's `if:`), so without this the push-path's informational-only
-      # security-scan job (continue-on-error: true) is the only scan these
+      # that job's `if:`), so without this the push-path's
+      # security-scan job (scanner/pull failures fail it; findings stay advisory) is the only scan these
       # events would otherwise get, and it doesn't run on PR either. This
       # step is what actually gates a PR on HIGH/CRITICAL findings.
       - name: Trivy vulnerability scan (gated, local image)
         if: >
-          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          (matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')) &&
           (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
           matrix.platform == 'linux/amd64'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
@@ -630,7 +639,7 @@ jobs:
 
       - name: Run container tests
         if: >
-          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          (matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')) &&
           matrix.port != 0 &&
           ((github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
           matrix.platform == 'linux/amd64')
@@ -675,7 +684,7 @@ jobs:
       needs.detect-changes.outputs.action-platforms == 'true' ||
       needs.detect-changes.outputs.action-serverless == 'true' ||
       needs.detect-changes.outputs.libs == 'true' ||
-      github.event_name == 'workflow_dispatch')
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'release'))
     strategy:
       fail-fast: false
       matrix:
@@ -724,7 +733,7 @@ jobs:
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
 
       - name: Create and push multi-arch manifest
-        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        if: matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
         env:
           VERSION: "${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}"
           IS_RELEASE: ${{ needs.determine-version.outputs.is_release }}
@@ -903,7 +912,10 @@ jobs:
 
   # ============================================================
   # Security scanning
-  # Security scan is informational only and does not block deployment
+  # Security scan is GATING: a Trivy/registry/SARIF-upload failure fails this
+  # job (no job-level continue-on-error). Trivy itself still reports findings
+  # without failing (action default exit-code 0); only a scanner that cannot
+  # run, or an image that cannot be pulled, turns the job red.
   # ============================================================
   security-scan:
     name: Security Scan
@@ -920,7 +932,6 @@ jobs:
     if: >
       always() &&
       (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -963,7 +974,7 @@ jobs:
     steps:
       - name: Log in to Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
-        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        if: matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -971,7 +982,7 @@ jobs:
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        if: matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
         with:
           version: v0.69.3
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.image }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
@@ -980,69 +991,9 @@ jobs:
 
       - name: Upload Trivy scan results
         uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225  # v4
-        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        if: matrix.condition == 'true' || (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
         with:
           sarif_file: 'trivy-${{ matrix.image }}.sarif'
-
-  # ============================================================
-  # Create GitHub Release (only on tagged push)
-  # ============================================================
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    needs: [determine-version, merge-manifests]
-    # always() so a skipped merge-manifests (BUILD_PLATFORMS amd64-only)
-    # doesn't implicitly block this job -- release tags still get created,
-    # pointing at the plain tags build-platform pushed directly.
-    if: >
-      always() &&
-      needs.determine-version.outputs.is_release == 'true' &&
-      (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
-    permissions:
-      contents: write  # creates the GitHub Release object for a tagged build
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
-        with:
-          persist-credentials: false
-
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION_IN: ${{ needs.determine-version.outputs.version }}
-          REPOSITORY: ${{ github.repository }}
-          COMMIT_SHA: ${{ github.sha }}
-        run: |
-          VERSION="$VERSION_IN"
-
-          # Check if release already exists
-          if gh release view "$VERSION" > /dev/null 2>&1; then
-            echo "Release $VERSION already exists, skipping"
-            exit 0
-          fi
-
-          # Create release notes
-          cat << EOF > release_notes.md
-          ## Release $VERSION
-
-          **Container Images Built:**
-          - All modules tagged with \`$VERSION\` and \`latest\`
-          - Available at \`ghcr.io/${REPOSITORY}\`
-
-          ### Changes
-
-          See commit history for detailed changes since last release.
-
-          ---
-          *This release was automatically generated by the CI/CD pipeline.*
-          EOF
-
-          gh release create "$VERSION" \
-            --title "$VERSION" \
-            --notes-file release_notes.md \
-            --target "$COMMIT_SHA"
-
-          echo "Created release $VERSION"
 
   # ============================================================
   # Notify on completion

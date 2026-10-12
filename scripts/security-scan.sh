@@ -91,10 +91,14 @@ go_count=$(count_lines "$go_mods")
 # core/module_rtc is the only Go left (822 lines) and is slated for a Rust
 # rewrite at P3. These checks skip themselves once the last go.mod is gone.
 count_gosec() {
-  local total=0 dir n
+  local total=0 dir n out
   for mod in $go_mods; do
     dir=$(dirname "$mod")
-    n=$( ( cd "$dir" && gosec -quiet ./... 2>&1 ) | grep -cE "^\\[/" || true )
+    # gosec exits 1 when it finds issues; anything else is a crash. stderr is
+    # no longer merged into the counted stream, so a crash cannot be counted
+    # as zero findings.
+    out=$(cd "$dir" && tool_capture "0 1" gosec -quiet ./...) || return 1
+    n=$(printf '%s\n' "$out" | count_matching '^\[/')
     total=$((total + n))
   done
   echo "$total"
@@ -102,10 +106,12 @@ count_gosec() {
 run_counted_check "gosec" gosec "$go_count" count_gosec
 
 count_govulncheck() {
-  local total=0 dir n
+  local total=0 dir n out
   for mod in $go_mods; do
     dir=$(dirname "$mod")
-    n=$( ( cd "$dir" && govulncheck ./... 2>&1 ) | grep -cE "^Vulnerability #" || true )
+    # govulncheck exits 3 when vulnerabilities are found; other codes = failure.
+    out=$(cd "$dir" && tool_capture "0 3" govulncheck ./...) || return 1
+    n=$(printf '%s\n' "$out" | count_matching '^Vulnerability #')
     total=$((total + n))
   done
   echo "$total"
@@ -116,9 +122,12 @@ run_counted_check "govulncheck" govulncheck "$go_count" count_govulncheck
 # tree including .worktrees/, which reports other branches' findings here.
 tracked=$(git ls-files | wc -l | tr -d ' ')
 count_gitleaks() {
-  gitleaks detect --source . --redact --no-banner --report-format json \
-    --report-path /dev/stdout 2>/dev/null \
-    | grep -c '"RuleID"' || true
+  local out
+  # gitleaks exits 1 when it finds leaks (default --exit-code); anything else
+  # is a crash.
+  out=$(tool_capture "0 1" gitleaks detect --source . --redact --no-banner \
+    --report-format json --report-path /dev/stdout) || return 1
+  printf '%s\n' "$out" | count_matching '"RuleID"'
 }
 run_counted_check "gitleaks" gitleaks "$tracked" count_gitleaks
 

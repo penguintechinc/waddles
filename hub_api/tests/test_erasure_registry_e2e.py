@@ -138,7 +138,7 @@ def _seed_decoys(db: Any) -> None:
 async def _erase(db: Any, user_id: int, external: FakeExternal | None = None) -> FakeExternal:
     ext = external or FakeExternal()
     await privacy.anonymize_user_data(
-        db, db.dal, user_id=user_id, email="subject@example.com", external=ext
+        db, db.dal, user_id=user_id, email="subject@example.com", external_stores=ext
     )
     return ext
 
@@ -391,7 +391,14 @@ class TestNoTierGate:
         import inspect
 
         params = set(inspect.signature(privacy.anonymize_user_data).parameters)
-        assert params == {"async_dal", "dal", "user_id", "email", "suppression_keys", "external"}
+        assert params == {
+            "async_dal",
+            "dal",
+            "user_id",
+            "email",
+            "suppression_keys",
+            "external_stores",
+        }
 
 
 class TestPiiFreeTelemetry:

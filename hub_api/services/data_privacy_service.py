@@ -47,7 +47,7 @@ import bcrypt
 from flask_core.db_errors import describe_db_error, log_db_error
 from opentelemetry import trace
 
-from services import ban_suppression, session_service
+from services import ban_suppression, mem0_privacy, session_service
 from services.audit_service import report_write_failure
 from services.bundle_telemetry import get_meter, get_tracer
 from services.erasure_executor import ErasureSubject, collect_object_urls, run_registry_erasure
@@ -343,6 +343,21 @@ async def _export_chat_messages(
     ]
 
 
+async def _export_mem0_memories(
+    async_dal: Any, dal: Any, user_id: int, community_ids: Collection[int] | None = None
+) -> list[dict[str, Any]]:
+    """The subject's mem0/Qdrant chat memories (GRC: Art. 15 reach into the vector store).
+
+    Resolves the subject's PII-free tokens, then reads Qdrant by owner key. A Qdrant outage
+    raises, so `collect_user_data` reports the source in `incomplete` rather than omitting it.
+    """
+    loop = asyncio.get_running_loop()
+    uuids = await loop.run_in_executor(
+        async_dal.executor, lambda: _read_subject_uuids(dal, user_id=user_id)
+    )
+    return await mem0_privacy.export_user_memories(uuids, community_ids=community_ids)
+
+
 async def _export_cookie_consent(async_dal: Any, dal: Any, user_id: int) -> list[dict[str, Any]]:
     rows = await async_dal.select_async(
         dal(dal.cookie_consent.user_id == user_id),
@@ -422,6 +437,7 @@ async def collect_user_data(
         ("message_activity", _export_message_activity(async_dal, dal, user_id, community_ids)),
         ("watch_activity", _export_watch_activity(async_dal, dal, user_id, community_ids)),
         ("chat_messages", _export_chat_messages(async_dal, dal, user_id, community_ids)),
+        ("mem0_memories", _export_mem0_memories(async_dal, dal, user_id, community_ids)),
         ("cookie_consent", _export_cookie_consent(async_dal, dal, user_id)),
         ("deletion_requests", _export_deletion_requests(async_dal, dal, user_id)),
     ]
@@ -556,6 +572,35 @@ class _ErasureScope:
     restrictions: tuple[ban_suppression.ActiveRestriction, ...]
 
 
+def _subject_uuids(
+    dal: Any, *, user_id: int, identities: Collection[Any], members: Collection[Any]
+) -> tuple[str, ...]:
+    """The PII-free tokens keyed to the subject: hub uuid, member `user_uuid`s, pseudonyms.
+
+    Bundle reputation AND the mem0/Qdrant chat-memory owner keys (`user_<uuid>`) hang off
+    these, so erasure and export share one definition of "this subject's tokens".
+    """
+    uuids: set[str] = set()
+    hub_row = dal(dal.hub_users.id == user_id).select(dal.hub_users.uuid).first()
+    if hub_row is not None and hub_row.uuid:
+        uuids.add(str(hub_row.uuid))
+    uuids.update(str(m.user_uuid) for m in members if m.user_uuid)
+    pseudonyms = dal.ephemeral_pseudonyms
+    for platform, platform_user_id in identities:
+        for row in dal(
+            (pseudonyms.platform == platform) & (pseudonyms.platform_user_id == platform_user_id)
+        ).select(pseudonyms.pseudonym):
+            uuids.add(str(row.pseudonym))
+    return tuple(sorted(uuids))
+
+
+def _read_subject_uuids(dal: Any, *, user_id: int) -> tuple[str, ...]:
+    """Read-only: resolve the subject's token set (runs in an executor job)."""
+    identities = ban_suppression.identities_of(dal, user_id)
+    members = ban_suppression.subject_member_rows(dal, hub_user_id=user_id, identities=identities)
+    return _subject_uuids(dal, user_id=user_id, identities=identities, members=members)
+
+
 def _collect_erasure_scope(dal: Any, *, user_id: int) -> _ErasureScope:
     """Read the subject's identities, memberships, bundle-reputation tokens and active bans.
 
@@ -568,21 +613,11 @@ def _collect_erasure_scope(dal: Any, *, user_id: int) -> _ErasureScope:
     restrictions = ban_suppression.collect_active_restrictions(
         dal, hub_user_id=user_id, identities=identities, members=members
     )
-    uuids: set[str] = set()
-    hub_row = dal(dal.hub_users.id == user_id).select(dal.hub_users.uuid).first()
-    if hub_row is not None and hub_row.uuid:
-        uuids.add(str(hub_row.uuid))
-    uuids.update(str(m.user_uuid) for m in members if m.user_uuid)
-    pseudonyms = dal.ephemeral_pseudonyms
-    for platform, platform_user_id in identities:
-        for row in dal(
-            (pseudonyms.platform == platform) & (pseudonyms.platform_user_id == platform_user_id)
-        ).select(pseudonyms.pseudonym):
-            uuids.add(str(row.pseudonym))
+    uuids = _subject_uuids(dal, user_id=user_id, identities=identities, members=members)
     return _ErasureScope(
         identities=tuple(identities),
         member_rows=tuple(members),
-        user_uuids=tuple(sorted(uuids)),
+        user_uuids=uuids,
         restrictions=tuple(restrictions),
     )
 
@@ -707,7 +742,8 @@ def _sync_erase(
     email: str | None,
     now: datetime,
     keys: SuppressionKeySource,
-    external: ExternalErasure | None = None,
+    external_stores: ExternalErasure | None = None,
+    external_counts: dict[str, int] | None = None,
 ) -> dict[str, int]:
     """Erase `user_id` in ONE transaction: suppression (if banned), every delete, anonymize, audit.
 
@@ -732,11 +768,15 @@ def _sync_erase(
       whole erasure (rolled back, `failed` ledger row) rather than erasing without
       suppressing; a benign user never touches the key.
 
+    `external_counts` are deletions already made in non-transactional stores BEFORE this
+    transaction (the mem0/Qdrant chat memory); they are merged into the ledger row so the
+    proof of erasure covers every store.
+
     Does NOT touch `ERASURE_RETAINED_TABLES` (consent / audit retention,
     Art. 5(2)). Returns the per-table row counts written to the audit row.
     """
     try:
-        counts: dict[str, int] = {}
+        counts: dict[str, int] = dict(external_counts or {})
         scope = _collect_erasure_scope(dal, user_id=user_id)
         counts["suppression_records_written"] = ban_suppression.record_suppressions(
             dal,
@@ -748,7 +788,7 @@ def _sync_erase(
         # Object storage + bundle KV first: the avatar/banner URLs are read from rows deleted below.
         counts.update(
             _erase_external_stores(
-                dal, scope, user_id=user_id, external=external or EnvExternalErasure()
+                dal, scope, user_id=user_id, external=external_stores or EnvExternalErasure()
             )
         )
         counts["profiles"] = dal(dal.hub_user_profiles.hub_user_id == user_id).delete()
@@ -810,7 +850,7 @@ async def anonymize_user_data(
     user_id: int,
     email: str | None,
     suppression_keys: SuppressionKeySource | None = None,
-    external: ExternalErasure | None = None,
+    external_stores: ExternalErasure | None = None,
 ) -> None:
     """Delete/anonymize every PII-bearing row for `user_id`, atomically, and record the outcome.
 
@@ -824,9 +864,9 @@ async def anonymize_user_data(
 
     `suppression_keys` is the seam for the ban-suppression master key (default:
     the platform tenant KEK from the environment, see `services/suppression_keys.py`);
-    it is only ever read when the subject has an active ban. `external` is the matching seam for
-    the non-Postgres stores (SeaweedFS objects, Valkey bundle KV; default: this deployment's, from
-    the environment -- see `services/erasure_external.py`).
+    it is only ever read when the subject has an active ban. `external_stores` is the matching
+    seam for the non-Postgres stores this module erases itself (SeaweedFS objects, Valkey bundle KV;
+    default: this deployment's, from the environment -- see `services/erasure_external.py`).
 
     All-or-nothing (see `_sync_erase()`): on failure the data subject's
     rows are exactly as they were, a separate best-effort `"failed"` row is
@@ -846,10 +886,25 @@ async def anonymize_user_data(
             "hub.dsar.erase", record_exception=False, set_status_on_exception=False
         ) as span:
             try:
+                # Qdrant is not part of the DB transaction, so purge it FIRST: it is idempotent
+                # and fails loud (Mem0PrivacyError aborts before anything else changes -> the
+                # request can simply be retried). Purging after the commit instead could strand
+                # the memories with no way to find them again (the identity rows are gone).
+                subject_uuids = await loop.run_in_executor(
+                    async_dal.executor, lambda: _read_subject_uuids(dal, user_id=user_id)
+                )
+                purge = await mem0_privacy.erase_user_memories(subject_uuids)
+                external = {"mem0_memories": purge.deleted} if purge.configured else {}
                 counts = await loop.run_in_executor(
                     async_dal.executor,
                     lambda: _sync_erase(
-                        dal, user_id=user_id, email=email, now=now, keys=keys, external=external
+                        dal,
+                        user_id=user_id,
+                        email=email,
+                        now=now,
+                        keys=keys,
+                        external_stores=external_stores,
+                        external_counts=external,
                     ),
                 )
             except Exception as exc:

@@ -359,8 +359,8 @@ When updating Slack Module documentation:
 
 ## Quick Links
 
-- **Source Code**: `trigger/receiver/slack_module/src/`
-- **Tests**: `trigger/receiver/slack_module/tests/`
+- **Source Code**: `trigger/receiver/slack_module/services/`
+- **Tests**: `trigger/receiver/slack_module/test-api.sh`
 - **Configuration**: `.env.example` in module directory
 - **Docker**: `trigger/receiver/slack_module/Dockerfile`
 - **CI/CD**: `.github/workflows/test-slack-module.yml`

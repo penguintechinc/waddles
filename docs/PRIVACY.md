@@ -82,6 +82,7 @@ The deletion runs as a single, **all-or-nothing** database transaction (`service
 | `activity_message_events` | Hard delete |
 | `activity_watch_sessions` | Hard delete |
 | `hub_chat_messages` | Hard delete (rows the user *sent*, every community) |
+| **mem0 / Qdrant chat memory** (`community_<id>` collections) | **Hard delete** — every vector/memory keyed to the account's `user_<uuid>` tokens, in every community; see *mem0 / Qdrant Chat Memory* below |
 | `community_members` | **Hard delete** — every membership row of the account, in every community, **including its reputation** (hub-linked rows and platform-keyed rows matching a linked identity) |
 | `hub_user_identities` | **Hard delete** — the Discord/Twitch/… account links (there is no "identity anchor" any more; see *Returning After Deletion*) |
 | `reputation_events`, `reputation_tenant` | **Hard delete** — the reputation score and its audit trail |
@@ -91,7 +92,7 @@ The deletion runs as a single, **all-or-nothing** database transaction (`service
 | `hub_users` | **Anonymized in-place** (see below) |
 | `data_deletion_requests` | Completion row inserted (see *Deletion Audit Trail*) |
 
-**Atomicity.** Every delete, the suppression record (when the account has an active ban), the `hub_users` anonymization and the `completed` ledger row are issued in one executor job and committed once. If any statement fails, everything is rolled back — the account is left exactly as it was, never half-erased — a separate `failed` ledger row records the attempt, and the original error is returned (a `500`; the request can simply be retried). Erasure never ends in a state where the data is gone but the proof of erasure is missing, or vice versa. A banned user's erasure also needs the platform key to compute the suppression code: if it is unavailable the whole erasure fails and rolls back (a `failed` ledger row, a `500`, retry once fixed) rather than erasing without suppressing — a user with no active ban never touches the key.
+**Atomicity.** The mem0/Qdrant purge is outside the database transaction, so it runs first, is idempotent and fails loudly (an unreachable Qdrant aborts the erasure before anything changes — a `failed` ledger row and a `500`; retry once Qdrant is back). Then every delete, the suppression record (when the account has an active ban), the `hub_users` anonymization and the `completed` ledger row are issued in one executor job and committed once. If any statement fails, everything is rolled back — the account is left exactly as it was, never half-erased — a separate `failed` ledger row records the attempt, and the original error is returned (a `500`; the request can simply be retried). Erasure never ends in a state where the data is gone but the proof of erasure is missing, or vice versa. A banned user's erasure also needs the platform key to compute the suppression code: if it is unavailable the whole erasure fails and rolls back (a `failed` ledger row, a `500`, retry once fixed) rather than erasing without suppressing — a user with no active ban never touches the key.
 
 **Export/erasure symmetry.** Everything the Art. 15 export discloses from the message/activity tables (`message_activity`, `watch_activity`, `chat_messages`) is removed by Art. 17 erasure. `hub_chat_messages` was previously exported but not erased (GRC finding #1, fixed).
 
@@ -150,6 +151,17 @@ Net: 94 of the 178 tables are erased (75 delete + 4 scrub-only + 15 core; 79 of 
 **Assumed hub ids.** Fifteen legacy-module integer columns (`ASSUMED_HUB_ID_COLUMNS` in the registry — e.g. `memories_reminders.user_id`, `platform_admins.user_id`, `support_tickets.reporter_user_id`) declare no foreign key but are matched as `hub_users.id`, because the module code only ever writes the hub id. If any ever held another value, a different user's row with the same integer would be erased; each is listed (and a test fails if a new un-FK'd hub-id match is added without being listed) so the assumption is reviewable.
 
 **Cascade side effects.** Deleting a user's forum post cascades to other users' replies on it (`hub_forum_replies.post_id ON DELETE CASCADE`); deleting a call room they created cascades its participants and annotations; deleting a PvP match removes it from the opponent's history. These follow the schema's existing cascade semantics for "the owner's content is gone".
+
+### mem0 / Qdrant Chat Memory (Art. 15 / 17)
+
+The AI researcher module stores semantic chat memory in Qdrant via mem0 — one collection per community (`community_<id>`), each point owned by a mem0 `user_id` key. It is a covered data store: the DSAR export and the erasure both reach it (`hub_api/services/mem0_privacy.py`, called from `collect_user_data` and `anonymize_user_data`, so self-service and the Enterprise admin console share it).
+
+- **Keying.** Owner keys are PII-free: `user_<uuid>` (the account's `hub_users.uuid`, member `user_uuid`s and pseudonym tokens) or the community-wide `community_<id>`. The AI researcher (`Mem0Service.add_memory`/`add_messages`) **rejects** any other key shape, so a username, e-mail or numeric platform id can never become a Qdrant key. Message text itself is free-text content the subject wrote and is covered by this export/erasure, not by tokenization.
+- **Export.** `mem0_memories` lists every memory for the subject's tokens: community, memory id, text, timestamps, caller metadata — never the embedding vector. The tenant-admin console only reads its own tenant's collections.
+- **Erasure.** Every point owned by the subject's tokens is deleted in every community, a full delete (no suppression retention: a chat store holds no ban evidence — the keyed suppression code lives in `suppression_records`). The count is recorded in the ledger as `deletion_scope.mem0_memories`.
+- **Not configured.** With no `QDRANT_URL` the store does not exist in that deployment and the source is skipped (logged at WARNING; no ledger key).
+- **Residual (documented).** Memories stored under the community-wide `community_<id>` key (e.g. aggregated community context, messages added without an author token) cannot be attributed to one person and are outside a per-subject export/erasure; they are removed with the community. Authors should be attributed (`user_uuid`) when writing messages — doing so is what makes them reachable.
+
 
 ### Anonymize In-Place: Why Not Hard Delete `hub_users`?
 
@@ -241,7 +253,7 @@ Every deletion attempt is recorded in `data_deletion_requests`. This table store
 | `requested_at` | Timestamp of request |
 | `completed_at` | Timestamp of completion |
 | `status` | `pending`, `completed`, or `failed` |
-| `deletion_scope` | JSONB: row counts deleted per table (no field values) — `chat_messages`, `community_members`, `hub_user_identities`, the reputation tables, `ephemeral_pseudonyms` — plus `suppression_records_written` (rows *written*, not deleted; `0` for a user with no active ban) |
+| `deletion_scope` | JSONB: row counts deleted per table (no field values) — `chat_messages`, `community_members`, `hub_user_identities`, the reputation tables, `ephemeral_pseudonyms`, `mem0_memories` — plus `suppression_records_written` (rows *written*, not deleted; `0` for a user with no active ban) |
 | `error_detail` | Failure category if status = `failed` — exception type / SQLSTATE only, never the driver message (which can echo row values) |
 
 Superadmins can view `{ requested_at, completed_at, status }` at `GET /api/v1/superadmin/users/:userId/deletion-request` for support inquiries. No PII is returned.
@@ -326,7 +338,7 @@ Internal service calls (hub → analytics-core, hub → ai-interaction) carry on
 
 `GET /api/v1/user/me/data` returns the authenticated user's own data as a JSON attachment (`waddles-data-{id}.json`). The subject is always the JWT's `sub` claim — there is no request parameter that can point it at another account. It is available in **every** tier.
 
-Sources: `account`, `profile`, `linked_identities`, `sessions`, `passkeys`, `message_activity`, `watch_activity`, `chat_messages`, `cookie_consent`, `deletion_requests`. Every source lists its columns explicitly (never `SELECT *`), so the export never contains a password hash, a session token, a passkey public key, or a verification/reset token. A source that fails is reported in the response's `incomplete` list rather than silently omitted — a partial export the subject can see beats a `500`.
+Sources: `account`, `profile`, `linked_identities`, `sessions`, `passkeys`, `message_activity`, `watch_activity`, `chat_messages`, `mem0_memories`, `cookie_consent`, `deletion_requests`. Every source lists its columns explicitly (never `SELECT *`), so the export never contains a password hash, a session token, a passkey public key, or a verification/reset token. A source that fails is reported in the response's `incomplete` list rather than silently omitted — a partial export the subject can see beats a `500`.
 
 ---
 
