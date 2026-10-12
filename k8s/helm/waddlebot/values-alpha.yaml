@@ -497,6 +497,10 @@ egressProxy:
     limits: { cpu: "150m", memory: "128Mi" }
 egressPolicy:
   enabled: true
+  # R5: dev clusters (MicroK8s/Calico today) exempt from the all-workload egress lockdown; the
+  # data-plane + egress-proxy CNPs above still render. Beta/gamma/prod keep the base default (true).
+  workloadEgress:
+    enabled: false
   clusterCidrs:
     podCidr: "10.1.0.0/16"      # MicroK8s default — confirm against cluster before deploy
     serviceCidr: "10.152.183.0/24"
@@ -746,3 +750,11 @@ posthog:
     resources:
       requests: { cpu: "100m", memory: "512Mi" }
       limits: { cpu: "500m", memory: "1Gi" }
+
+# R5 posture toggles -- alpha is exempt from the shipping-only controls (NodePort Services are reached
+# from the host/world; the cluster has no Tetragon). The same pod specs are still asserted PSA
+# restricted-compliant by tests/test_security_posture_r5_render.py.
+networkPolicy:
+  enabled: false
+tetragon:
+  enabled: false

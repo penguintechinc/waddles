@@ -37,11 +37,15 @@ spec:
         app.kubernetes.io/component: cache
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.infrastructure.redis.podSecurityContext | nindent 8 }}
       containers:
       - name: redis
         image: {{ .Values.infrastructure.redis.image }}
         imagePullPolicy: IfNotPresent
         {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          {{- toYaml .Values.infrastructure.redis.securityContext | nindent 10 }}
         command:
         - redis-server
         - --requirepass
@@ -181,4 +185,8 @@ spec:
   selector:
     app.kubernetes.io/name: redis
     app.kubernetes.io/instance: {{ .Release.Name }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- $redisPorts := list 6379 }}
+{{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}{{- $redisPorts = append $redisPorts $.Values.infrastructure.redis.tls.port }}{{- end }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "cache" "name" "redis" "selector" (dict "app.kubernetes.io/name" "redis" "app.kubernetes.io/instance" $.Release.Name) "ports" $redisPorts "egress" "internal" "tetragon" false) }}
 {{- end }}

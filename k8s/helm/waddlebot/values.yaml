@@ -246,6 +246,24 @@ infrastructure:
     database: "waddlebot"
     password: "REPLACE_ME"  # Only used for secrets, actual DB already running
     image: postgres:16-bookworm@sha256:a0fd72825431f4b7fd3f9d5def9f370b9c22012f1a9e37ece1a5749b95333fb7
+    # R5 posture: rootless. uid/gid 999 is the official image's own `postgres` user; fsGroup chowns
+    # the PVC so an existing volume (formerly initialised by root->gosu as the same uid) stays
+    # writable. Rootfs is read-only; the socket dir and /tmp are emptyDirs (templates/infrastructure/postgres.yaml).
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      fsGroup: 999
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      capabilities:
+        drop: ["ALL"]
     service:
       name: "infra-postgres"
       port: 5432
@@ -357,6 +375,22 @@ infrastructure:
   redis:
     enabled: true
     image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571  # Valkey (Redis-compatible fork); Debian bookworm, digest-pinned
+    # R5 posture: rootless (uid 999 = the image's `valkey` user); only /data (PVC/emptyDir) is written.
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      fsGroup: 999
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      capabilities:
+        drop: ["ALL"]
     port: 6379
     password: "REPLACE_ME"  # Only used for secrets, actual Redis already running
     # Module-specific Redis passwords (matches docker-compose.yml ACL setup)
@@ -559,6 +593,23 @@ infrastructure:
   ollama:
     enabled: true
     image: ollama/ollama:latest@sha256:bfc9c6d53cc6989aa5131a6fde6b162b2802d4d337657f3253b5f69579bddeee
+    # R5 posture: rootless. The model store moves from /root/.ollama to $HOME/.ollama
+    # (HOME=/home/ollama, same PVC, so already-pulled models are kept); /tmp is an emptyDir.
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      capabilities:
+        drop: ["ALL"]
     port: 11434
     defaultProvider: "ollama"
     defaultModel: "tinyllama"
@@ -575,6 +626,8 @@ infrastructure:
         memory: "2Gi"
     persistence:
       enabled: true
+      name: "ollama-data"   # templates/infrastructure/ollama.yaml PVC name (was unset: empty-name PVC, `helm lint` warning)
+      accessMode: ReadWriteOnce
       size: 30Gi
     gpu:
       enabled: false
@@ -584,6 +637,23 @@ infrastructure:
   qdrant:
     enabled: true
     image: qdrant/qdrant:latest@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
+    # R5 posture: rootless. The image defaults to root; qdrant only needs /qdrant/storage (PVC),
+    # /qdrant/snapshots and /tmp (emptyDirs, templates/infrastructure/qdrant.yaml).
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      capabilities:
+        drop: ["ALL"]
     port: 6333
     grpcPort: 6334
     service:
@@ -599,6 +669,8 @@ infrastructure:
         memory: "1Gi"
     persistence:
       enabled: true
+      name: "qdrant-data"   # templates/infrastructure/qdrant.yaml PVC name (was unset: empty-name PVC, `helm lint` warning)
+      accessMode: ReadWriteOnce
       size: 10Gi
 
   # Apache OpenWhisk (Serverless)
@@ -2707,6 +2779,53 @@ securityContext:
     drop:
       - ALL
 
+# Pod Security Admission (R5) -- labels stamped on the chart-managed Namespace
+# (templates/namespace.yaml). `restricted` is the shipping posture: every pod template in this chart
+# is asserted restricted-compliant by tests/test_security_posture_r5_render.py. Only applies when
+# `namespaceCreate: true`; operators who pre-create the namespace must apply the same labels.
+podSecurity:
+  enabled: true
+  enforce: restricted
+  audit: restricted
+  warn: restricted
+  version: latest
+
+# Tetragon runtime enforcement (R5) -- one TracingPolicyNamespaced per app workload
+# (templates/_networkpolicy.tpl `waddlebot.workloadPolicies`). ENFORCED, not observe-only: a
+# sys_execve of any binary outside the workload's own runtime is SIGKILLed (e.g. a shell/curl/nc/wget
+# dropped by a compromised dependency). Needs the Tetragon agent + TracingPolicyNamespaced CRD in the
+# cluster (cluster add-on, not part of this chart); alpha/local/ci set enabled:false.
+# `action: Post` is a temporary audit-only escape hatch for validating a new image's exec set —
+# never ship it.
+tetragon:
+  enabled: true
+  action: Sigkill
+  # Binaries allowed in EVERY covered pod: the preStop exec fallback (kube < 1.30) and the
+  # python wait-for-hub-api initContainer (waddlebot.waitForHubApiInitContainer) — Tetragon's
+  # podSelector spans every container in the pod, init containers included.
+  commonBinaries:
+    - /usr/local/bin/python3
+    - /bin/sleep
+    - /usr/bin/sleep
+  # Per-runtime base allowlists (execve arg0 as resolved by the runtime). A workload adds its own
+  # binaries via the `binaries` include arg; legacy `sh -c` CMDs opt in with `shell: true`.
+  runtimes:
+    python:
+      - /usr/local/bin/python
+      - /usr/local/bin/python3
+      - /usr/local/bin/python3.13
+      - /usr/local/bin/hypercorn
+    node:
+      - /usr/bin/dumb-init
+      - /usr/local/bin/node
+    rust: []
+    go: []
+  shellBinaries:
+    - /bin/sh
+    - /usr/bin/sh
+    - /bin/dash
+    - /usr/bin/dash
+
 # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- shared wait-for-hub-api
 # initContainer config (waddlebot.waitForHubApiInitContainer, _helpers.tpl), applied to
 # every non-hub-api, non-infrastructure Deployment/Job in this chart. Image pinned to the
@@ -2742,9 +2861,34 @@ httproute:
 # Network Policies — namespace-level ingress isolation
 # When enabled, denies all cross-namespace ingress and allows only
 # same-namespace traffic + ingress controller traffic.
+#
+# R5 posture (release-audit): every policy is a CiliumNetworkPolicy (house rule — never plain
+# NetworkPolicy). When enabled the chart renders (a) a namespace-wide default-deny-ingress CNP
+# and (b) one per-workload CNP (templates/_networkpolicy.tpl, included by each workload
+# template) that admits ingress ONLY on that workload's declared containerPort(s) from the same
+# namespace. Ports are never opened wholesale. `base` default is the shipping (beta/gamma/prod)
+# posture; alpha keeps it off because its NodePort Services are reached from the host/world.
 networkPolicy:
-  enabled: false
+  enabled: true
   ingressNamespace: ingress-nginx
+  # Components (app.kubernetes.io/component) that ALSO accept ingress-controller / Gateway-API
+  # traffic on their declared ports. Everything else is reachable from inside the namespace only.
+  externalIngressComponents:
+    - hub
+    - hub-api
+    - hub-webui
+    - hub-webui-v3
+    - router
+    - marketplace
+    - trigger-webhooks
+    - svc-presentation
+    - svc-streaming
+    - svc-rtc
+  # Per-component egress profile override, e.g. { seaweedfs: https } when an external KMS is in
+  # use. Profiles: internal (DNS + same namespace) | https (+ world TCP/443) | world (+ any
+  # world port) | managed (egress governed by another CNP — set automatically for
+  # egressPolicy.dataPlaneComponents).
+  egressProfileOverrides: {}
 
 # OTel collector — not yet deployed by this chart (tracked separately);
 # stub so egressPolicy can conditionally allow data-plane egress to it once
@@ -2765,6 +2909,26 @@ otel:
 # by a `fail` guard in templates/infrastructure/egress-proxy.yaml.
 egressPolicy:
   enabled: true
+  # R5 posture: default-deny egress for EVERY long-running workload (not just the data plane).
+  # Each workload gets DNS + same-namespace (destination ingress CNPs scope the ports) + only the
+  # outbound profile it needs (networkPolicy.egressProfileOverrides / the include in its
+  # template). RFC1918/CGNAT/link-local/loopback/cluster CIDRs are NEVER reachable via the
+  # world rules below (169.254.169.254 metadata included); only the egress-proxy's explicit
+  # customer private-ip grants reach private space. Alpha sets this false (dev clusters).
+  workloadEgress:
+    enabled: true
+  # Optional FQDN pin for the `https` profile (Cilium toFQDNs entries, e.g.
+  # `- matchName: license.penguintech.io` / `- matchPattern: "*.discord.com"`). Empty = TLS (443) to
+  # any PUBLIC address (private/link-local/metadata/cluster ranges still excluded).
+  httpsFqdns: []
+  # Private ranges excluded from every workload "world" allow (in addition to denyCidrs +
+  # clusterCidrs). Not reachable except through an explicit per-workload allowlist.
+  privateCidrs:
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+    - "100.64.0.0/10"    # CGNAT / some cloud-internal ranges
+    - "fc00::/7"         # ULA v6
   # Components (app.kubernetes.io/component label values) subject to the
   # egress default-deny. Extend as more Rust dataplane Deployments land.
   dataPlaneComponents:

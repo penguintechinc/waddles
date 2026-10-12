@@ -46,11 +46,15 @@ spec:
         app.kubernetes.io/component: vectordb
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.infrastructure.qdrant.podSecurityContext | nindent 8 }}
       containers:
       - name: qdrant
         image: {{ .Values.infrastructure.qdrant.image }}
         imagePullPolicy: IfNotPresent
         {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          {{- toYaml .Values.infrastructure.qdrant.securityContext | nindent 10 }}
         ports:
         - name: http
           containerPort: 6333
@@ -61,6 +65,11 @@ spec:
         volumeMounts:
         - name: qdrant-data
           mountPath: /qdrant/storage
+        # readOnlyRootFilesystem: snapshots + scratch are the only other writable paths.
+        - name: qdrant-snapshots
+          mountPath: /qdrant/snapshots
+        - name: tmp
+          mountPath: /tmp
         resources:
           requests:
             memory: {{ .Values.infrastructure.qdrant.resources.requests.memory }}
@@ -88,6 +97,10 @@ spec:
       - name: qdrant-data
         persistentVolumeClaim:
           claimName: {{ .Values.infrastructure.qdrant.persistence.name }}
+      - name: qdrant-snapshots
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -116,4 +129,6 @@ spec:
   selector:
     app.kubernetes.io/name: qdrant
     app.kubernetes.io/instance: {{ .Release.Name }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "vectordb" "name" "qdrant" "selector" (dict "app.kubernetes.io/name" "qdrant" "app.kubernetes.io/instance" $.Release.Name) "ports" (list 6333 6334) "egress" "internal" "tetragon" false) }}
 {{- end }}

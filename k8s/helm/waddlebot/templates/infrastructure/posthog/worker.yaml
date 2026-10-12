@@ -45,4 +45,6 @@ spec:
               command: ["pgrep", "-f", "docker-worker-celery"]
             initialDelaySeconds: 45
             periodSeconds: 30
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "feature-flags" "name" "posthog-worker" "selector" (dict "app.kubernetes.io/name" "posthog-worker") "ports" (list) "egress" "internal" "tetragon" false) }}
 {{- end }}

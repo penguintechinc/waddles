@@ -103,4 +103,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-rtc
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-rtc" "ports" (list $.Values.pipeline.svcRtc.port) "runtime" "go" "binaries" (list "/app/module_rtc") "egress" "world") }}
 {{- end }}

@@ -315,4 +315,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: hub-api
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "hub-api" "ports" (list $.Values.pipeline.hubApi.port $.Values.pipeline.hubApi.grpcPort) "runtime" "python" "egress" "https" "kubeApiServer" true "excludePorts" (list $.Values.pipeline.hubApi.grpcPort)) }}
 {{- end }}
