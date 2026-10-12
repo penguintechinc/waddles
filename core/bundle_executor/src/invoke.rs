@@ -43,22 +43,22 @@
 //! measured for a large component does not yet get amortized away.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use penguin_bundle_host::wire::{
     ErrorBody, ErrorCode, ExportKind, HelloBody, InvokeBody, LoadBody, LoadedBody, ResultBody,
     SandboxInfo, ShutdownBody, UnloadBody, UnloadedBody,
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tracing::{info, warn};
-use wasmtime::component::Component;
+use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::config::CliConfig;
-use crate::engine::{ticks_for_deadline, Stage};
+use crate::engine::{ticks_for_deadline, StagePre};
 use crate::error::ExecutorError;
 use crate::host::{ExecState, HostBridge};
 use crate::metrics::{self, ExecutorMetrics};
@@ -114,7 +114,17 @@ struct LoadedBundle {
     /// field, so a second scope loading the same digest under a different
     /// `app_id` string never causes a collision or a silent overwrite.
     app_id: String,
-    component: Component,
+    /// The component pre-linked against the executor's `Linker` once at
+    /// load time (`Linker::instantiate_pre`), so every invoke only pays for
+    /// instantiation, not import resolution/type-checking. A fresh `Store`
+    /// (and therefore fresh guest state) is still created per call -- the
+    /// digest is shared across tenants, so reusing a live instance would
+    /// leak guest state between them.
+    pre: StagePre<ExecState>,
+    /// `EXECUTOR_INSTANCES_PER_BUNDLE` permits: caps concurrent in-flight
+    /// instances of THIS digest so one hot bundle can't consume every
+    /// global call slot.
+    slots: Arc<Semaphore>,
     /// This bundle's effective per-instance linear-memory cap in MiB,
     /// resolved once from the FIRST `load` call for this digest (spec
     /// SS7.3, sandbox layer 8): `body.limits.memory_mb` when the stage
@@ -148,12 +158,33 @@ struct LoadedBundle {
     scopes: HashSet<Scope>,
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+impl<S: ComponentSource> Executor<S> {
+    /// Test seam: occupies one global call slot, standing in for an
+    /// in-flight invoke until the returned permit is dropped.
+    pub(crate) fn test_hold_call_slot(&self) -> OwnedSemaphorePermit {
+        Arc::clone(&self.call_limiter)
+            .try_acquire_owned()
+            .expect("a free global call slot")
+    }
+}
+
+#[cfg(test)]
+impl LoadedBundle {
+    /// Test seam: the shareable parts a hand-built second registry entry
+    /// needs (`component`, pre-linked form, slot semaphore).
+    fn test_parts(&self) -> (StagePre<ExecState>, Arc<Semaphore>) {
+        (self.pre.clone(), Arc::clone(&self.slots))
+    }
+}
+
 /// Runs loaded bundles against real wasmtime instantiation. One per
 /// executor process, shared (behind an `Arc`) across every connection's
 /// read loop.
 pub struct Executor<S: ComponentSource> {
     engine: Engine,
-    linker: wasmtime::component::Linker<ExecState>,
+    linker: Arc<Linker<ExecState>>,
     source: S,
     max_call_timeout_ms: u64,
     /// `EXECUTOR_MEMORY_LIMIT_MB`: the per-instance memory cap a `load`
@@ -173,7 +204,24 @@ pub struct Executor<S: ComponentSource> {
     /// never left to accumulate across the process's lifetime; a digest
     /// already resident in `bundles` never touches this map at all (the
     /// fast path in `on_load`).
-    compiling: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Component>>>>,
+    compiling: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Compiled>>>>,
+    /// `EXECUTOR_MAX_CONCURRENT_CALLS` permits: the process-wide ceiling on
+    /// in-flight invocations across every bundle and tenant. Guest
+    /// execution runs on the tokio blocking pool, so this also bounds how
+    /// many blocking threads guests can occupy.
+    call_limiter: Arc<Semaphore>,
+    /// `EXECUTOR_MAX_CONCURRENT_COMPILES` permits: bounds concurrent WASM
+    /// JIT compiles (each on a blocking-pool thread).
+    compile_limiter: Arc<Semaphore>,
+    max_concurrent_calls: u32,
+    max_concurrent_compiles: u32,
+    instances_per_bundle: usize,
+    /// `EXECUTOR_POOL_WAIT_MS`: how long an invoke queues for a slot before
+    /// failing `pool_exhausted`.
+    pool_wait: Duration,
+    /// Set by [`Executor::drain`] on SIGTERM: new `load`/`invoke` requests
+    /// are refused `SHUTTING_DOWN` while in-flight work finishes.
+    draining: AtomicBool,
     /// Count of `unload` calls naming a scope that was NOT in the digest's
     /// referencing set (a duplicate/retried/orphaned unload, see
     /// [`LoadedBundle::scopes`]'s doc) -- never an error, but never silent
@@ -205,10 +253,30 @@ pub struct Executor<S: ComponentSource> {
     metrics: Arc<ExecutorMetrics>,
 }
 
+/// What the single-flight compile produces: the pre-linked component
+/// (`StagePre` owns the compiled `Component`).
+#[derive(Clone)]
+struct Compiled {
+    pre: StagePre<ExecState>,
+}
+
+/// How [`Executor::drain`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainOutcome {
+    /// Every in-flight invoke and compile finished before the deadline.
+    Drained,
+    /// The deadline passed first; these were still running when the
+    /// executor gave up waiting.
+    TimedOut {
+        in_flight_calls: u32,
+        in_flight_compiles: u32,
+    },
+}
+
 impl<S: ComponentSource> Executor<S> {
     pub fn new(cfg: &CliConfig, source: S) -> Result<Self, ExecutorError> {
         let engine = crate::engine::build_engine(cfg)?;
-        let linker = crate::engine::build_linker(&engine)?;
+        let linker = Arc::new(crate::engine::build_linker(&engine)?);
         let ticker_engine = engine.clone();
         let epoch_ticker = tokio::spawn(async move {
             loop {
@@ -226,6 +294,15 @@ impl<S: ComponentSource> Executor<S> {
             max_memory_limit_mb: cfg.executor_max_memory_limit_mb,
             bundles: RwLock::new(HashMap::new()),
             compiling: tokio::sync::Mutex::new(HashMap::new()),
+            call_limiter: Arc::new(Semaphore::new(cfg.executor_max_concurrent_calls as usize)),
+            compile_limiter: Arc::new(Semaphore::new(
+                cfg.executor_max_concurrent_compiles as usize,
+            )),
+            max_concurrent_calls: cfg.executor_max_concurrent_calls,
+            max_concurrent_compiles: cfg.executor_max_concurrent_compiles,
+            instances_per_bundle: cfg.executor_instances_per_bundle as usize,
+            pool_wait: Duration::from_millis(cfg.executor_pool_wait_ms),
+            draining: AtomicBool::new(false),
             orphaned_unload_total: AtomicU64::new(0),
             epoch_ticker,
             signing_keys,
@@ -240,6 +317,83 @@ impl<S: ComponentSource> Executor<S> {
     pub(crate) fn with_metrics(mut self, metrics: Arc<ExecutorMetrics>) -> Self {
         self.metrics = metrics;
         self
+    }
+
+    /// Graceful-shutdown drain (SIGTERM): refuses new `load`/`invoke`
+    /// requests (`SHUTTING_DOWN`) and waits up to `deadline` for every
+    /// in-flight invoke and compile to release its permit. Returns
+    /// [`DrainOutcome::TimedOut`] (never an error) when the deadline wins so
+    /// the caller can still exit 0 -- a rollout must not hang on a stuck
+    /// guest. Idempotent.
+    pub async fn drain(&self, deadline: Duration) -> DrainOutcome {
+        self.draining.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        // Acquiring EVERY permit succeeds only once all in-flight holders
+        // have released theirs; held until return, which also blocks any
+        // straggler that slipped past the `draining` check.
+        let calls = tokio::time::timeout(
+            deadline,
+            Arc::clone(&self.call_limiter).acquire_many_owned(self.max_concurrent_calls),
+        )
+        .await;
+        let remaining = deadline.saturating_sub(started.elapsed());
+        let compiles = tokio::time::timeout(
+            remaining,
+            Arc::clone(&self.compile_limiter).acquire_many_owned(self.max_concurrent_compiles),
+        )
+        .await;
+        let drained = matches!((&calls, &compiles), (Ok(Ok(_)), Ok(Ok(_))));
+        // Release anything acquired before sampling, so the in-flight
+        // counts below reflect real holders only.
+        drop((calls, compiles));
+        if drained {
+            return DrainOutcome::Drained;
+        }
+        DrainOutcome::TimedOut {
+            in_flight_calls: self
+                .max_concurrent_calls
+                .saturating_sub(self.call_limiter.available_permits() as u32),
+            in_flight_compiles: self
+                .max_concurrent_compiles
+                .saturating_sub(self.compile_limiter.available_permits() as u32),
+        }
+    }
+
+    /// Waits for a free per-bundle slot and a free global call slot, up to
+    /// `EXECUTOR_POOL_WAIT_MS`. The per-bundle permit is taken first so a
+    /// saturated hot bundle's waiters never sit on global permits other
+    /// bundles need. Failure is `EXECUTOR_DEADLINE` with detail
+    /// `pool_exhausted` (the pinned wire crate has no dedicated code).
+    async fn acquire_call_slots(
+        &self,
+        bundle_slots: Arc<Semaphore>,
+        app_id: &str,
+    ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), ErrorBody> {
+        let acquire = async {
+            let bundle = bundle_slots.acquire_owned().await?;
+            let global = Arc::clone(&self.call_limiter).acquire_owned().await?;
+            Ok::<_, tokio::sync::AcquireError>((bundle, global))
+        };
+        match tokio::time::timeout(self.pool_wait, acquire).await {
+            Ok(Ok(permits)) => Ok(permits),
+            Ok(Err(_closed)) => Err(error_body(
+                ErrorCode::ShuttingDown,
+                "executor is shutting down",
+            )),
+            Err(_elapsed) => {
+                warn!(
+                    app_id,
+                    pool_wait_ms = self.pool_wait.as_millis() as u64,
+                    "no free instance slot within the pool wait; failing pool_exhausted"
+                );
+                let mut body = error_body(
+                    ErrorCode::ExecutorDeadline,
+                    "pool_exhausted: no free instance slot within EXECUTOR_POOL_WAIT_MS",
+                );
+                body.detail = Some("pool_exhausted".to_string());
+                Err(body)
+            }
+        }
     }
 
     /// The `hello` frame this executor opens every connection with (spec
@@ -364,6 +518,14 @@ impl<S: ComponentSource> Executor<S> {
         let app_id = body.app_id.clone();
         let digest = body.digest.clone();
         let scope: Scope = (body.tenant_id, body.community_id, app_id.clone());
+        if self.draining.load(Ordering::SeqCst) {
+            self.metrics
+                .record_load(metrics::error_code_label(ErrorCode::ShuttingDown));
+            return Err(error_body(
+                ErrorCode::ShuttingDown,
+                "executor is shutting down",
+            ));
+        }
 
         // Content-addressed fast path: a digest already resident (loaded by
         // an earlier scope, possibly under a different `app_id`) is never
@@ -449,7 +611,7 @@ impl<S: ComponentSource> Executor<S> {
                     .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
             )
         };
-        let compiled: Result<&Component, ExecutorError> = cell
+        let compiled: Result<&Compiled, ExecutorError> = cell
             .get_or_try_init(|| async {
                 let fetch_started = Instant::now();
                 let fetched = self
@@ -497,8 +659,27 @@ impl<S: ComponentSource> Executor<S> {
                 );
                 verified?;
 
+                // Bounded + off-reactor: the JIT compile is seconds of pure
+                // CPU, so it queues on `compile_limiter` and runs on a
+                // blocking-pool thread -- running it inline would stall the
+                // event loop (and every other tenant's frames) on this pod.
+                let compile_permit = Arc::clone(&self.compile_limiter)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| {
+                        ExecutorError::Wasmtime("executor is shutting down".to_string())
+                    })?;
                 let compile_started = Instant::now();
-                let compiled = Component::new(&self.engine, &bytes).map_err(ExecutorError::from);
+                let (engine, linker) = (self.engine.clone(), Arc::clone(&self.linker));
+                let compiled = tokio::task::spawn_blocking(move || {
+                    let _permit = compile_permit;
+                    let component = Component::new(&engine, &bytes)?;
+                    let pre = StagePre::new(linker.instantiate_pre(&component)?)?;
+                    Ok::<_, wasmtime::Error>(Compiled { pre })
+                })
+                .await
+                .map_err(|e| ExecutorError::Wasmtime(format!("compile task failed: {e}")))
+                .and_then(|r| r.map_err(ExecutorError::from));
                 self.metrics.record_load_phase(
                     &app_id,
                     "precompile",
@@ -508,7 +689,7 @@ impl<S: ComponentSource> Executor<S> {
                 compiled
             })
             .await;
-        let component = match compiled {
+        let Compiled { pre, .. } = match compiled {
             Ok(c) => c.clone(),
             Err(err) => {
                 // Never leave a failed attempt's slot behind -- a future
@@ -565,7 +746,8 @@ impl<S: ComponentSource> Executor<S> {
                 digest.clone(),
                 LoadedBundle {
                     app_id: app_id.clone(),
-                    component,
+                    pre,
+                    slots: Arc::new(Semaphore::new(self.instances_per_bundle)),
                     memory_limit_mb,
                     scopes,
                 },
@@ -734,81 +916,149 @@ impl<S: ComponentSource> Executor<S> {
         invoke_id: u64,
         connection: Arc<Connection>,
     ) -> Result<ResultBody, ErrorBody> {
+        if self.draining.load(Ordering::SeqCst) {
+            return Err(error_body(
+                ErrorCode::ShuttingDown,
+                "executor is shutting down",
+            ));
+        }
         // Fail-closed, digest-only lookup (spec §3): never falls back to
         // "whatever happens to be loaded under this app_id" -- an
         // unrecognized digest is always `UNKNOWN_BUNDLE`, even if some OTHER
         // digest is currently resident for this same `app_id` under a
         // different scope.
-        let (component, memory_limit_mb) = {
+        let (pre, slots, memory_limit_mb) = {
             let bundles = self.bundles.read().await;
             let loaded = bundles
                 .get(&body.digest)
                 .ok_or_else(|| error_body(ErrorCode::UnknownBundle, body.digest.clone()))?;
-            (loaded.component.clone(), loaded.memory_limit_mb)
+            (
+                loaded.pre.clone(),
+                Arc::clone(&loaded.slots),
+                loaded.memory_limit_mb,
+            )
         };
 
+        let (bundle_permit, global_permit) = self.acquire_call_slots(slots, &body.app_id).await?;
+
         let deadline_ms = body.deadline_ms.min(self.max_call_timeout_ms).max(1);
-        let bridge = HostBridge::new(connection);
-        let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
-            .with_memory_limit_mb(memory_limit_mb);
-        let mut store = new_bounded_store(&self.engine, exec_state, deadline_ms);
+        let job = GuestJob {
+            engine: self.engine.clone(),
+            pre,
+            metrics: Arc::clone(&self.metrics),
+            body,
+            invoke_id,
+            connection,
+            memory_limit_mb,
+            deadline_ms,
+        };
+        // Guest execution is synchronous CPU between host-call awaits (the
+        // epoch deadline traps rather than yields), so it runs on a
+        // blocking-pool thread driving the future via `Handle::block_on`:
+        // a hot/hostile guest then ties up one bounded blocking thread
+        // instead of stalling the async reactor for every tenant. The
+        // permits move into the task so they are held until the guest has
+        // genuinely finished, even if the caller's future is dropped.
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let _slots = (bundle_permit, global_permit);
+            handle.block_on(run_guest(job))
+        })
+        .await
+        .map_err(|e| {
+            error_body(
+                ErrorCode::WasmTrap,
+                format!("guest execution task failed: {e}"),
+            )
+        })?
+    }
+}
 
-        let start = std::time::Instant::now();
-        let stage = Stage::instantiate_async(&mut store, &component, &self.linker)
-            .await
-            .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
-        self.metrics
-            .record_instantiate(&body.app_id, start.elapsed());
-        let guest_started = Instant::now();
+/// Everything one guest invocation needs, owned so it can move onto a
+/// blocking-pool thread.
+struct GuestJob {
+    engine: Engine,
+    pre: StagePre<ExecState>,
+    metrics: Arc<ExecutorMetrics>,
+    body: InvokeBody,
+    invoke_id: u64,
+    connection: Arc<Connection>,
+    memory_limit_mb: u32,
+    deadline_ms: u64,
+}
 
-        let result = match body.export {
-            ExportKind::Transform => {
-                let event = serde_json::from_value(body.payload)
-                    .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
-                let outcome = stage
-                    .waddle_bundle_process_stage()
-                    .call_transform(&mut store, &event)
-                    .await;
-                self.metrics
-                    .record_guest(&body.app_id, "transform", guest_started.elapsed());
-                match outcome {
-                    Ok(Ok(reply)) => serde_json::to_value(reply),
-                    Ok(Err(unsupported)) => serde_json::to_value(unsupported)
-                        .map(|v| serde_json::json!({"unsupported_stage": v})),
-                    Err(trap) => {
-                        let memory_cap_hit = store.data().memory_cap_hit();
-                        return Err(trap_to_error_body(trap, memory_cap_hit));
-                    }
-                }
-            }
-            ExportKind::Dispatch => {
-                let envelope: EnvelopeAndConfig = serde_json::from_value(body.payload)
-                    .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
-                let outcome = stage
-                    .waddle_bundle_action_stage()
-                    .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
-                    .await;
-                self.metrics
-                    .record_guest(&body.app_id, "dispatch", guest_started.elapsed());
-                match outcome {
-                    Ok(Ok(reply)) => serde_json::to_value(reply),
-                    Ok(Err(transport_error)) => serde_json::to_value(transport_error)
-                        .map(|v| serde_json::json!({"transport_error": v})),
-                    Err(trap) => {
-                        let memory_cap_hit = store.data().memory_cap_hit();
-                        return Err(trap_to_error_body(trap, memory_cap_hit));
-                    }
+/// Instantiates (from the pre-linked component, in a fresh bounded `Store`)
+/// and runs one guest export, recording the instantiate and guest-execution
+/// histograms. Behavior is unchanged from the former inline `invoke_inner`.
+async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
+    let GuestJob {
+        engine,
+        pre,
+        metrics,
+        body,
+        invoke_id,
+        connection,
+        memory_limit_mb,
+        deadline_ms,
+    } = job;
+    let bridge = HostBridge::new(connection);
+    let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
+        .with_memory_limit_mb(memory_limit_mb);
+    let mut store = new_bounded_store(&engine, exec_state, deadline_ms);
+
+    let start = std::time::Instant::now();
+    let stage = pre
+        .instantiate_async(&mut store)
+        .await
+        .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
+    metrics.record_instantiate(&body.app_id, start.elapsed());
+    let guest_started = Instant::now();
+
+    let result = match body.export {
+        ExportKind::Transform => {
+            let event = serde_json::from_value(body.payload)
+                .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
+            let outcome = stage
+                .waddle_bundle_process_stage()
+                .call_transform(&mut store, &event)
+                .await;
+            metrics.record_guest(&body.app_id, "transform", guest_started.elapsed());
+            match outcome {
+                Ok(Ok(reply)) => serde_json::to_value(reply),
+                Ok(Err(unsupported)) => serde_json::to_value(unsupported)
+                    .map(|v| serde_json::json!({"unsupported_stage": v})),
+                Err(trap) => {
+                    let memory_cap_hit = store.data().memory_cap_hit();
+                    return Err(trap_to_error_body(trap, memory_cap_hit));
                 }
             }
         }
-        .map_err(|e| error_body(ErrorCode::LoadFailed, format!("result encode failed: {e}")))?;
-
-        Ok(ResultBody {
-            payload: result,
-            duration_ms: start.elapsed().as_millis() as u64,
-            fuel_used: 0,
-        })
+        ExportKind::Dispatch => {
+            let envelope: EnvelopeAndConfig = serde_json::from_value(body.payload)
+                .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
+            let outcome = stage
+                .waddle_bundle_action_stage()
+                .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
+                .await;
+            metrics.record_guest(&body.app_id, "dispatch", guest_started.elapsed());
+            match outcome {
+                Ok(Ok(reply)) => serde_json::to_value(reply),
+                Ok(Err(transport_error)) => serde_json::to_value(transport_error)
+                    .map(|v| serde_json::json!({"transport_error": v})),
+                Err(trap) => {
+                    let memory_cap_hit = store.data().memory_cap_hit();
+                    return Err(trap_to_error_body(trap, memory_cap_hit));
+                }
+            }
+        }
     }
+    .map_err(|e| error_body(ErrorCode::LoadFailed, format!("result encode failed: {e}")))?;
+
+    Ok(ResultBody {
+        payload: result,
+        duration_ms: start.elapsed().as_millis() as u64,
+        fuel_used: 0,
+    })
 }
 
 /// Delegating impl so an `Arc<Executor<S>>` -- the shape shared across
@@ -1300,15 +1550,15 @@ mod tests {
                 .values()
                 .next()
                 .expect("first scope's bundle is registered")
-                .component
-                .clone();
+                .test_parts();
             let mut scopes = HashSet::with_capacity(1);
             scopes.insert((2, 0, "waddles.test.app".to_string()));
             bundles.insert(
                 other_digest.clone(),
                 LoadedBundle {
                     app_id: "waddles.test.app".to_string(),
-                    component: first,
+                    pre: first.0,
+                    slots: first.1,
                     memory_limit_mb: 64,
                     scopes,
                 },
@@ -1963,6 +2213,193 @@ mod tests {
     fn trap_to_error_body_classifies_on_the_flag_even_with_a_generic_message() {
         let result = trap_to_error_body(wasmtime::Error::msg("something failed"), true);
         assert!(matches!(result.code, ErrorCode::MemoryLimit));
+    }
+
+    fn limited_config(calls: u32, per_bundle: u32, pool_wait_ms: u64) -> CliConfig {
+        let mut cfg = test_config();
+        cfg.executor_max_concurrent_calls = calls;
+        cfg.executor_instances_per_bundle = per_bundle;
+        cfg.executor_pool_wait_ms = pool_wait_ms;
+        cfg
+    }
+
+    /// Takes every global call permit but `leave`, simulating in-flight
+    /// invocations without needing a slow guest.
+    fn hold_global_calls(executor: &Executor<FixtureSource>, n: u32) -> Vec<OwnedSemaphorePermit> {
+        (0..n)
+            .map(|_| {
+                Arc::clone(&executor.call_limiter)
+                    .try_acquire_owned()
+                    .expect("global call permit available")
+            })
+            .collect()
+    }
+
+    /// The global concurrency cap is enforced: with `max_concurrent_calls`
+    /// slots all busy, the N+1th invoke queues for `EXECUTOR_POOL_WAIT_MS`
+    /// and then fails `pool_exhausted`; once a slot frees it runs.
+    #[tokio::test]
+    async fn global_call_cap_queues_then_rejects_the_n_plus_1th_invoke() -> Result<(), ExecutorError>
+    {
+        let executor = Executor::new(&limited_config(2, 4, 150), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load");
+        let held = hold_global_calls(&executor, 2);
+
+        let started = Instant::now();
+        let err = invoke_noop(&executor, "waddles.test.app", &fixture_digest())
+            .await
+            .expect_err("N+1th invoke must not run while all slots are busy");
+        assert_eq!(err.code, ErrorCode::ExecutorDeadline);
+        assert_eq!(err.detail.as_deref(), Some("pool_exhausted"));
+        assert!(
+            started.elapsed() >= Duration::from_millis(140),
+            "must queue for the pool wait before failing, took {:?}",
+            started.elapsed()
+        );
+
+        // Freeing a slot lets the next invoke through.
+        drop(held);
+        invoke_noop(&executor, "waddles.test.app", &fixture_digest())
+            .await
+            .expect("invoke runs once a slot is free");
+        Ok(())
+    }
+
+    /// A waiting invoke is QUEUED, not rejected, when a slot frees within
+    /// the pool wait.
+    #[tokio::test]
+    async fn invoke_queues_for_a_slot_that_frees_within_the_pool_wait() -> Result<(), ExecutorError>
+    {
+        let executor = Arc::new(Executor::new(&limited_config(1, 4, 5_000), FixtureSource)?);
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load");
+        let held = hold_global_calls(&executor, 1);
+        let waiter = {
+            let executor = Arc::clone(&executor);
+            tokio::spawn(async move {
+                invoke_noop(&*executor, "waddles.test.app", &fixture_digest()).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished(), "the N+1th invoke must block");
+        drop(held);
+        waiter
+            .await
+            .expect("join")
+            .expect("queued invoke runs after the slot frees");
+        Ok(())
+    }
+
+    /// `EXECUTOR_INSTANCES_PER_BUNDLE` caps one digest independently of the
+    /// global ceiling: a saturated bundle fails `pool_exhausted` even though
+    /// global slots are free.
+    #[tokio::test]
+    async fn per_bundle_instance_cap_is_enforced_independently() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&limited_config(32, 1, 100), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load");
+        let slots = {
+            let bundles = executor.bundles.read().await;
+            Arc::clone(&bundles.get(&fixture_digest()).expect("resident").slots)
+        };
+        let _held = slots.try_acquire_owned().expect("the one bundle slot");
+        let err = invoke_noop(&executor, "waddles.test.app", &fixture_digest())
+            .await
+            .expect_err("bundle at its instance cap must reject");
+        assert_eq!(err.detail.as_deref(), Some("pool_exhausted"));
+        assert!(executor.call_limiter.available_permits() == 32);
+        Ok(())
+    }
+
+    /// Drain refuses new work with `SHUTTING_DOWN`, waits for in-flight
+    /// work, and reports `Drained` only after it finishes.
+    #[tokio::test]
+    async fn drain_waits_for_in_flight_work_and_refuses_new_invokes() -> Result<(), ExecutorError> {
+        let executor = Arc::new(Executor::new(&limited_config(2, 4, 100), FixtureSource)?);
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load");
+        let held = hold_global_calls(&executor, 1);
+
+        let drain = {
+            let executor = Arc::clone(&executor);
+            tokio::spawn(async move { executor.drain(Duration::from_secs(10)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !drain.is_finished(),
+            "drain must wait for the in-flight call"
+        );
+
+        let err = invoke_noop(&*executor, "waddles.test.app", &fixture_digest())
+            .await
+            .expect_err("new invokes are refused while draining");
+        assert_eq!(err.code, ErrorCode::ShuttingDown);
+        let err = executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect_err("new loads are refused while draining");
+        assert_eq!(err.code, ErrorCode::ShuttingDown);
+
+        drop(held);
+        assert_eq!(drain.await.expect("join"), DrainOutcome::Drained);
+        Ok(())
+    }
+
+    /// A stuck call cannot hold the process hostage: drain gives up at its
+    /// deadline and says how much was still running.
+    #[tokio::test]
+    async fn drain_times_out_and_reports_what_was_still_in_flight() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&limited_config(4, 4, 100), FixtureSource)?;
+        let _held = hold_global_calls(&executor, 1);
+        let outcome = executor.drain(Duration::from_millis(100)).await;
+        assert_eq!(
+            outcome,
+            DrainOutcome::TimedOut {
+                in_flight_calls: 1,
+                in_flight_compiles: 0
+            }
+        );
+        Ok(())
+    }
+
+    /// JIT compilation runs off the async reactor: on a SINGLE-threaded
+    /// runtime, a concurrent task keeps getting scheduled while a cold
+    /// `load` compiles. Inline `Component::new` would starve it for the
+    /// whole compile (0 ticks).
+    #[tokio::test(flavor = "current_thread")]
+    async fn cold_load_compile_does_not_starve_the_async_runtime() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        let ticks = Arc::new(AtomicU64::new(0));
+        let ticker = {
+            let ticks = Arc::clone(&ticks);
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    ticks.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        };
+        tokio::select! {
+            loaded = executor.on_load(fixture_load_body("waddles.test.app")) => {
+                loaded.expect("load");
+            }
+            _ = ticker => unreachable!("the ticker never completes"),
+        }
+        let observed = ticks.load(Ordering::SeqCst);
+        assert!(
+            observed >= 3,
+            "runtime was starved during the compile: only {observed} ticks"
+        );
+        Ok(())
     }
 
     #[tokio::test]
