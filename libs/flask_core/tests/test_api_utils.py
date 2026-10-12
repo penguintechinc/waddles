@@ -14,6 +14,7 @@ from quart import Quart, request
 
 from flask_core import api_utils as au
 from flask_core import auth
+from flask_core.rate_limiter import RateLimiter
 from flask_core.api_utils import (
     async_endpoint,
     auth_required,
@@ -26,7 +27,7 @@ from flask_core.api_utils import (
     success_response,
 )
 
-SECRET = "api-utils-test-secret-key-0123456789"
+SECRET = "test-secret-key-not-for-production-use-only"
 
 
 @pytest.fixture(autouse=True)
@@ -347,14 +348,11 @@ class TestAuthRequired:
         assert resp.status_code == 401
 
 
-class _Limiter:
-    def __init__(self, limit_after: int):
-        self.calls: list[dict] = []
-        self.limit_after = limit_after
-
-    async def check_rate_limit(self, key, limit, window_seconds):
-        self.calls.append({"key": key, "limit": limit, "window": window_seconds})
-        return len(self.calls) <= self.limit_after
+def _real_limiter() -> RateLimiter:
+    """The production RateLimiter in its in-memory mode (no Redis server in unit tests)."""
+    rl = RateLimiter(redis_url=None)
+    rl._fallback_enabled = True
+    return rl
 
 
 class TestRateLimitDecorator:
@@ -362,9 +360,9 @@ class TestRateLimitDecorator:
         resp = await make_app().test_client().get("/limited")
         assert resp.status_code == 200
 
-    async def test_allows_then_blocks_with_429(self):
+    async def test_allows_then_blocks_with_429_using_real_rate_limiter(self):
         app = make_app()
-        limiter = _Limiter(limit_after=2)
+        limiter = _real_limiter()
         app.config["rate_limiter"] = limiter
         client = app.test_client()
         assert (await client.get("/limited")).status_code == 200
@@ -372,12 +370,13 @@ class TestRateLimitDecorator:
         blocked = await client.get("/limited")
         body = await blocked.get_json()
         assert blocked.status_code == 429 and body["error"]["code"] == "RATE_LIMIT_EXCEEDED"
-        assert all(c["limit"] == 2 and c["window"] == 60 for c in limiter.calls)
-        assert limiter.calls[0]["key"].endswith(":limited")
+        (key,) = limiter._fallback_cache
+        assert key.startswith("rate_limit:rate_limit:") and key.endswith(":limited")
+        assert len(limiter._fallback_cache[key]) == 2
 
     async def test_key_uses_authenticated_user_when_present(self):
         app = Quart("rl")
-        limiter = _Limiter(limit_after=10)
+        limiter = _real_limiter()
         app.config["rate_limiter"] = limiter
 
         @app.route("/r")
@@ -390,7 +389,7 @@ class TestRateLimitDecorator:
             request.current_user = {"user_id": "user-42"}
 
         await app.test_client().get("/r")
-        assert limiter.calls[0]["key"] == "rate_limit:user-42:r"
+        assert list(limiter._fallback_cache) == ["rate_limit:rate_limit:user-42:r"]
 
 
 class TestCorsHeaders:

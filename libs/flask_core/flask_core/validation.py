@@ -43,6 +43,11 @@ try:
     HAS_SHARED_MODELS = True
 except ImportError:
     HAS_SHARED_MODELS = False
+    # Names listed in __all__ must exist even without penguin-libs, or
+    # `from flask_core.validation import *` raises AttributeError. None (not a
+    # stand-in class) so a caller that needs them fails loudly; gate on
+    # HAS_SHARED_MODELS.
+    WaddleBaseModel = WaddleRequestModel = Platform = None
 
 logger = logging.getLogger(__name__)
 

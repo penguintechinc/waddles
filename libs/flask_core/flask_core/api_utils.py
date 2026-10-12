@@ -492,10 +492,13 @@ def rate_limit(requests_per_minute: int = 60):
             rate_key = f"rate_limit:{user_id}:{f.__name__}"
 
             # Check rate limit
+            # Positional on purpose: RateLimiter.check_rate_limit(identifier, limit, window)
+            # takes no `key=`/`window_seconds=` keywords, so the old keyword call raised
+            # TypeError against the real RateLimiter (-> 500 on every limited route).
             is_allowed = await rate_limiter.check_rate_limit(
-                key=rate_key,
-                limit=requests_per_minute,
-                window_seconds=60
+                rate_key,
+                requests_per_minute,
+                60
             )
 
             if not is_allowed:
