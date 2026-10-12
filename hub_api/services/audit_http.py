@@ -28,11 +28,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from flask_core.auth import verify_jwt_token
 from flask_core.authz import AuthzDecision, get_authz_decision
+from flask_core.secrets import require_secret_key
 from flask_core.tenancy import TenantContext, get_tenant_context
 from quart import Quart, Response, current_app, has_app_context, jsonify, request
 
 from services.audit_events import (
+    INLINE_AUTHZ_ROUTES,
     SEMANTIC_ROUTES,
     ActorKind,
     AuditAction,
@@ -81,6 +84,33 @@ def _subject_user_id(decision: AuthzDecision | None) -> int | None:
     return get_optional_current_user_id(request)
 
 
+async def _resolve_tenant(
+    service: AuditService, ctx: TenantContext | None
+) -> tuple[int | None, str | None]:
+    """The ``(tenant_id, tenant_slug)`` this request's event belongs to.
+
+    ``tenant_middleware`` routes publish a :class:`TenantContext`. Inline-authz routes that
+    do not run it (calendar admin, ...) fall back to the *verified* JWT ``tenant`` claim -- never
+    a path/body value -- resolved through the audit service so an unknown tenant lands on the
+    platform chain instead of failing the write.
+    """
+    if ctx is not None:
+        return ctx.tenant_id, ctx.tenant_slug
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None, None
+    try:
+        payload = verify_jwt_token(auth_header[7:], require_secret_key())
+    except Exception:  # noqa: BLE001 - an unreadable token just means "no tenant to attribute"
+        logger.debug("audit hook: token tenant claim unreadable; recording on the platform chain")
+        return None, None
+    slug = payload.get("tenant") if payload else None
+    if not isinstance(slug, str) or not slug:
+        return None, None
+    known = await service.find_tenant(tenant_id=None, tenant_slug=slug)
+    return (known[0], known[1]) if known is not None else (None, None)
+
+
 def _facts(response: Response, decision: AuthzDecision | None, user_id: int | None) -> RequestFacts:
     """Collect the request/response facts the classifier needs (no user-supplied text)."""
     rule = request.url_rule.rule if request.url_rule is not None else None
@@ -100,7 +130,7 @@ def _build_event(
     action: str,
     outcome: AuditOutcome,
     user_id: int | None,
-    ctx: TenantContext | None,
+    tenant: tuple[int | None, str | None],
     decision: AuthzDecision | None,
     response: Response,
 ) -> AuditEvent:
@@ -120,8 +150,8 @@ def _build_event(
         outcome=outcome,
         actor_kind=ActorKind.USER if user_id is not None else ActorKind.EXTERNAL,
         actor_user_id=user_id,
-        tenant_id=ctx.tenant_id if ctx is not None else None,
-        tenant_slug=ctx.tenant_slug if ctx is not None else None,
+        tenant_id=tenant[0],
+        tenant_slug=tenant[1],
         target_type="http_route",
         target_id=None,
         details=details,
@@ -141,6 +171,7 @@ async def _audit_response(response: Response) -> Response:
         decision is None
         and response.status_code != 403
         and (request.method.upper(), rule) not in SEMANTIC_ROUTES
+        and (request.method.upper(), rule) not in INLINE_AUTHZ_ROUTES
     ):
         return response
     user_id = _subject_user_id(decision)
@@ -159,7 +190,7 @@ async def _audit_response(response: Response) -> Response:
             action=classification.action,
             outcome=classification.outcome,
             user_id=user_id,
-            ctx=get_tenant_context(request),
+            tenant=await _resolve_tenant(service, get_tenant_context(request)),
             decision=decision,
             response=response,
         )
