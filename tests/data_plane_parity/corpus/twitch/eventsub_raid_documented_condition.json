@@ -1,0 +1,58 @@
+{
+  "context": {
+    "message_type": "notification"
+  },
+  "frame": {
+    "event": {
+      "from_broadcaster_user_id": "222",
+      "from_broadcaster_user_login": "raider",
+      "from_broadcaster_user_name": "Raider",
+      "to_broadcaster_user_id": "111",
+      "to_broadcaster_user_login": "somechannel",
+      "viewers": 42
+    },
+    "subscription": {
+      "condition": {
+        "to_broadcaster_user_id": "111"
+      },
+      "id": "sub-1",
+      "type": "channel.raid",
+      "version": "1"
+    }
+  },
+  "golden": {
+    "platform": "twitch",
+    "event_type": "channel.raid",
+    "actor": "raider",
+    "payload": {
+      "broadcaster_id": "",
+      "broadcaster_login": null,
+      "user_id": "222",
+      "user_login": "raider",
+      "user_display_name": "Raider",
+      "metadata": {
+        "viewers": 42
+      }
+    },
+    "source": {
+      "platform": "twitch",
+      "account_id": "",
+      "channel_id": ""
+    }
+  },
+  "golden_origin": "rust",
+  "id": "twitch/eventsub_raid_documented_condition",
+  "outcome": "event",
+  "path": "twitch_eventsub",
+  "pii_classifier": "pass",
+  "platform": "twitch",
+  "python_divergences": [
+    {
+      "path": "<outcome>",
+      "python": "raises ValueError",
+      "reason": "Twitch's documented channel.raid subscription condition is to_/from_broadcaster_user_id (no broadcaster_user_id): both paths resolve broadcaster_id to \"\"; Python normalize() rejects it (runner drops the raid), Rust emits it with an empty broadcaster_id / source.account_id",
+      "tracking": "#840"
+    }
+  ],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_eventsub.py + test_builtin_twitch_eventsub_ingest.py"
+}

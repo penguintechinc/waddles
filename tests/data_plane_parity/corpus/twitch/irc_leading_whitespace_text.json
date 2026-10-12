@@ -1,0 +1,46 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "frame": "@user-id=9;display-name=Padded :padded!padded@padded.tmi.twitch.tv PRIVMSG #somechannel :   leading spaces kept?",
+  "golden": {
+    "platform": "twitch",
+    "event_type": "message",
+    "actor": "padded",
+    "payload": {
+      "text": "   leading spaces kept?",
+      "channel_name": "somechannel",
+      "author": "padded",
+      "author_id": "9",
+      "user_id": "9",
+      "display_name": "Padded",
+      "message_id": null,
+      "room_id": null,
+      "badges": [],
+      "is_mod": false,
+      "is_subscriber": false,
+      "is_vip": false,
+      "is_broadcaster": false
+    },
+    "source": {
+      "platform": "twitch",
+      "account_id": "somechannel",
+      "channel_id": "somechannel"
+    }
+  },
+  "golden_origin": "rust",
+  "id": "twitch/irc_leading_whitespace_text",
+  "outcome": "event",
+  "path": "twitch_irc",
+  "pii_classifier": "pass",
+  "platform": "twitch",
+  "python_divergences": [
+    {
+      "path": "payload.text",
+      "python": "leading spaces kept?",
+      "reason": "Python twitch_ingest.normalize() .strip()s the text; Rust normalize_twitch_irc passes it through verbatim",
+      "tracking": "#840"
+    }
+  ],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_receivers_twitch_irc.py"
+}
