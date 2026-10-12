@@ -87,10 +87,15 @@ jobs:
         env:
           K8S_NAMESPACE: ${{ secrets.K8S_NAMESPACE }}
         run: |
+          set -euo pipefail
           NAMESPACE="${K8S_NAMESPACE:-waddlebot}"
 
+          # No `|| true`: a deployment that never becomes ready must fail the
+          # job (Verification Integrity) -- the pod/deployment listings below
+          # still run only on a ready rollout; the always() summary step
+          # prints the same state for a failed one.
           echo "Waiting for all deployments to be ready..."
-          kubectl rollout status deployment -n "$NAMESPACE" --timeout=10m || true
+          kubectl rollout status deployment -n "$NAMESPACE" --timeout=10m
 
           echo ""
           echo "Current pod status:"
@@ -100,23 +105,25 @@ jobs:
           echo "Deployment status:"
           kubectl get deployments -n "$NAMESPACE"
 
+      # Gating: no continue-on-error and no `|| echo` -- a failing health curl
+      # must fail the deploy job, not print a message and report success.
       - name: Run smoke tests
-        continue-on-error: true
         env:
           K8S_NAMESPACE: ${{ secrets.K8S_NAMESPACE }}
         run: |
+          set -euo pipefail
           NAMESPACE="${K8S_NAMESPACE:-waddlebot}"
 
           echo "Testing router health endpoint..."
           kubectl run curl-test --image=curlimages/curl:latest --rm -i --restart=Never \
             --namespace="$NAMESPACE" \
-            -- curl -f http://router:8000/health || echo "Router health check failed"
+            -- curl -f http://router:8000/health
 
           echo ""
           echo "Testing hub health endpoint..."
           kubectl run curl-test-hub --image=curlimages/curl:latest --rm -i --restart=Never \
             --namespace="$NAMESPACE" \
-            -- curl -f http://hub:8060/api/health || echo "Hub health check failed"
+            -- curl -f http://hub:8060/api/health
 
       - name: Deployment summary
         if: always()

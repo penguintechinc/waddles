@@ -19,26 +19,36 @@ echo "=== Linting ==="
 
 py_files=$(discover -name "*.py")
 py_count=$(count_lines "$py_files")
+# Every counter below goes through tool_capture: only the exit codes that mean
+# "ran to completion" are accepted, so a scanner that crashes fails the gate
+# instead of printing nothing and counting as zero findings.
 count_flake8() {
-  flake8 . --max-line-length=120 \
-    --exclude=.git,__pycache__,venv,.venv,node_modules,.worktrees,.claude/worktrees,vendor \
-    2>/dev/null | grep -c . || true
+  local out
+  # --exit-zero: flake8 exits 1 on findings AND on a crash, which are
+  # indistinguishable; with it, any non-zero exit is a genuine crash.
+  out=$(tool_capture "0" flake8 . --exit-zero --max-line-length=120 \
+    --exclude=.git,__pycache__,venv,.venv,node_modules,.worktrees,.claude/worktrees,vendor) || return 1
+  printf '%s\n' "$out" | count_matching '.'
 }
 run_counted_check "flake8" flake8 "$py_count" count_flake8
 
 sh_files=$(discover -name "*.sh")
 sh_count=$(count_lines "$sh_files")
 count_shellcheck() {
+  local out
   # shellcheck disable=SC2086
-  shellcheck -f gcc $sh_files 2>/dev/null | grep -c . || true
+  out=$(tool_capture "0 1" shellcheck -f gcc $sh_files) || return 1
+  printf '%s\n' "$out" | count_matching '.'
 }
 run_counted_check "shellcheck" shellcheck "$sh_count" count_shellcheck
 
 docker_files=$(discover -name "Dockerfile*")
 docker_count=$(count_lines "$docker_files")
 count_hadolint() {
+  local out
   # shellcheck disable=SC2086
-  hadolint -f tty $docker_files 2>/dev/null | grep -c . || true
+  out=$(tool_capture "0 1" hadolint -f tty $docker_files) || return 1
+  printf '%s\n' "$out" | count_matching '.'
 }
 run_counted_check "hadolint" hadolint "$docker_count" count_hadolint
 
@@ -47,10 +57,11 @@ run_counted_check "hadolint" hadolint "$docker_count" count_hadolint
 go_mods=$(discover -name "go.mod")
 go_count=$(count_lines "$go_mods")
 count_golangci() {
-  local total=0 dir n
+  local total=0 dir n out
   for mod in $go_mods; do
     dir=$(dirname "$mod")
-    n=$( ( cd "$dir" && golangci-lint run 2>/dev/null ) | grep -c . || true )
+    out=$(cd "$dir" && tool_capture "0 1" golangci-lint run) || return 1
+    n=$(printf '%s\n' "$out" | count_matching '.')
     total=$((total + n))
   done
   echo "$total"
@@ -61,8 +72,11 @@ run_counted_check "golangci-lint" golangci-lint "$go_count" count_golangci
 # advisory, and gating on it now would bury the findings that matter.
 wf_count=$(count_lines "$(discover -path "./.github/workflows/*" -name "*.yml")")
 count_zizmor() {
-  zizmor .github/workflows/ --min-severity high 2>/dev/null \
-    | grep -cE "^(error|warning)\[" || true
+  local out
+  # zizmor encodes the highest severity found in its exit code (10-14); 0 is
+  # clean. Anything else (1 = runtime error, 2 = usage) is a crash.
+  out=$(tool_capture "0 10 11 12 13 14" zizmor .github/workflows/ --min-severity high) || return 1
+  printf '%s\n' "$out" | count_matching '^(error|warning)\['
 }
 run_counted_check "zizmor" zizmor "$wf_count" count_zizmor
 
@@ -73,7 +87,7 @@ run_counted_check "zizmor" zizmor "$wf_count" count_zizmor
 doc_md_files=$(discover -path "./docs/*" -name "*.md")
 doc_md_count=$(count_lines "$doc_md_files")
 count_doc_refs() {
-  scripts/check-doc-refs.sh --count 2>/dev/null || echo 999999
+  scripts/check-doc-refs.sh --count || echo 999999
 }
 run_counted_check "doc-refs" bash "$doc_md_count" count_doc_refs
 

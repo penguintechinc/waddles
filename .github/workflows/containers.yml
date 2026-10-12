@@ -463,8 +463,8 @@ jobs:
 
       # Gated (non-masked) Trivy scan against the image this job just loaded
       # locally -- PR/merge_group never reach merge-manifests (skipped, see
-      # that job's `if:`), so without this the push-path's informational-only
-      # security-scan job (continue-on-error: true) is the only scan these
+      # that job's `if:`), so without this the push-path's
+      # security-scan job (scanner/pull failures fail it; findings stay advisory) is the only scan these
       # events would otherwise get, and it doesn't run on PR either. This
       # step is what actually gates a PR on HIGH/CRITICAL findings.
       - name: Trivy vulnerability scan (gated, local image)
@@ -610,8 +610,8 @@ jobs:
 
       # Gated (non-masked) Trivy scan against the image this job just loaded
       # locally -- PR/merge_group never reach merge-manifests (skipped, see
-      # that job's `if:`), so without this the push-path's informational-only
-      # security-scan job (continue-on-error: true) is the only scan these
+      # that job's `if:`), so without this the push-path's
+      # security-scan job (scanner/pull failures fail it; findings stay advisory) is the only scan these
       # events would otherwise get, and it doesn't run on PR either. This
       # step is what actually gates a PR on HIGH/CRITICAL findings.
       - name: Trivy vulnerability scan (gated, local image)
@@ -903,7 +903,10 @@ jobs:
 
   # ============================================================
   # Security scanning
-  # Security scan is informational only and does not block deployment
+  # Security scan is GATING: a Trivy/registry/SARIF-upload failure fails this
+  # job (no job-level continue-on-error). Trivy itself still reports findings
+  # without failing (action default exit-code 0); only a scanner that cannot
+  # run, or an image that cannot be pulled, turns the job red.
   # ============================================================
   security-scan:
     name: Security Scan
@@ -920,7 +923,6 @@ jobs:
     if: >
       always() &&
       (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:

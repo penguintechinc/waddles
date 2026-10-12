@@ -17,6 +17,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Proves the lint/security gate plumbing (scripts/lib/checks.sh, scripts/lint.sh)
+  # can FAIL: seeds a crashing scanner, a non-numeric counter and a new finding
+  # and asserts each turns the gate red (critical-rules.md Verification
+  # Integrity). Needs no real scanners -- fake ones are put on PATH.
+  gate-integrity:
+    name: Gate integrity (lint/security gates can fail)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Seeded-failure test for checks.sh / lint.sh
+        run: bash scripts/ci/tests/test_checks_gate_integrity.sh
+
   no-stubs-gate:
     name: No stubs / no silent fallbacks (check-no-stubs)
     runs-on: ubuntu-latest
