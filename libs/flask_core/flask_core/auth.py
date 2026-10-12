@@ -621,7 +621,10 @@ async def verify_api_key_async(api_key: str, dal) -> Optional[Dict[str, Any]]:
     hashed_key = hash_api_key(api_key)
 
     # Query API keys table
-    query = (dal.api_keys.key_hash == hashed_key) & (dal.api_keys.is_active is True)
+    # `== True`, NOT `is True`: `is` is an identity test on the Field object and is
+    # always False, which compiled the query to `... AND 0` so no API key could ever
+    # verify against a real DAL (the column comparison must build a SQL expression).
+    query = (dal.api_keys.key_hash == hashed_key) & (dal.api_keys.is_active == True)  # noqa: E712
     rows = await dal.select_async(query)
 
     if not rows:
