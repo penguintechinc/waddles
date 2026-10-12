@@ -47,6 +47,7 @@ def _matching_placeholder_label(value: str) -> str | None:
             return label
     return None
 
+
 # Workload env vars are checked ONLY when their NAME looks credential-shaped --
 # unlike a Secret's data/stringData (inherently sensitive by definition), a
 # plain Deployment env var can legitimately contain the substring "example"

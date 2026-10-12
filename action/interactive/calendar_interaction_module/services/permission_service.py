@@ -533,7 +533,7 @@ class PermissionService:
                     params.append(permissions[key])
 
             if not update_fields:
-                logger.warning(f"[AUTHZ] No valid permission fields to update")
+                logger.warning("[AUTHZ] No valid permission fields to update")
                 return None
 
             # Add community_id

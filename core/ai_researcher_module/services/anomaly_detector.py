@@ -90,7 +90,7 @@ class AnomalyDetector:
 
         try:
             logger.info(
-                f"Detecting anomalies",
+                "Detecting anomalies",
                 extra={
                     'community_id': community_id,
                     'check_types': check_types
@@ -115,7 +115,7 @@ class AnomalyDetector:
             processing_time = int((time.time() - start_time) * 1000)
 
             logger.info(
-                f"Anomaly detection completed",
+                "Anomaly detection completed",
                 extra={
                     'community_id': community_id,
                     'anomalies_found': len(anomalies),

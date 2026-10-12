@@ -40,22 +40,29 @@ except ImportError:
     class DummyMetric:
         def labels(self, *args, **kwargs):
             return self
+
         def inc(self, *args, **kwargs):
             pass
+
         def dec(self, *args, **kwargs):
             pass
+
         def set(self, *args, **kwargs):
             pass
+
         def observe(self, *args, **kwargs):
             pass
+
         def info(self, *args, **kwargs):
             pass
+
         def time(self):
             return DummyTimer()
 
     class DummyTimer:
         def __enter__(self):
             return self
+
         def __exit__(self, *args):
             pass
 

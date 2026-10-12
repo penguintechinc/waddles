@@ -22,8 +22,6 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-
-
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x63ommon.proto\x12\x10waddlebot.common\"\x1a\n\tAuthToken\x12\r\n\x05token\x18\x01 \x01(\t\"\x8d\x01\n\x05\x45rror\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x35\n\x07\x64\x65tails\x18\x03 \x03(\x0b\x32$.waddlebot.common.Error.DetailsEntry\x1a.\n\x0c\x44\x65tailsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\x07\n\x05\x45mpty\"[\n\x0fSuccessResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12&\n\x05\x65rror\x18\x03 \x01(\x0b\x32\x17.waddlebot.common.Errorb\x06proto3')
 
 _globals = globals()
@@ -33,14 +31,14 @@ if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_ERROR_DETAILSENTRY']._loaded_options = None
   _globals['_ERROR_DETAILSENTRY']._serialized_options = b'8\001'
-  _globals['_AUTHTOKEN']._serialized_start=34
-  _globals['_AUTHTOKEN']._serialized_end=60
-  _globals['_ERROR']._serialized_start=63
-  _globals['_ERROR']._serialized_end=204
-  _globals['_ERROR_DETAILSENTRY']._serialized_start=158
-  _globals['_ERROR_DETAILSENTRY']._serialized_end=204
-  _globals['_EMPTY']._serialized_start=206
-  _globals['_EMPTY']._serialized_end=213
-  _globals['_SUCCESSRESPONSE']._serialized_start=215
-  _globals['_SUCCESSRESPONSE']._serialized_end=306
+  _globals['_AUTHTOKEN']._serialized_start = 34
+  _globals['_AUTHTOKEN']._serialized_end = 60
+  _globals['_ERROR']._serialized_start = 63
+  _globals['_ERROR']._serialized_end = 204
+  _globals['_ERROR_DETAILSENTRY']._serialized_start = 158
+  _globals['_ERROR_DETAILSENTRY']._serialized_end = 204
+  _globals['_EMPTY']._serialized_start = 206
+  _globals['_EMPTY']._serialized_end = 213
+  _globals['_SUCCESSRESPONSE']._serialized_start = 215
+  _globals['_SUCCESSRESPONSE']._serialized_end = 306
 # @@protoc_insertion_point(module_scope)

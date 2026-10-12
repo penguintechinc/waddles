@@ -44,7 +44,6 @@ if str(_LIBS_DIR) not in sys.path:
 # --- end libs/ path
 
 
-
 @pytest.fixture(autouse=True)
 def _isolated_token_revocation():
     """Give every test its own empty, process-local revocation store.

@@ -904,7 +904,7 @@ async def update_researcher_config(community_id: int):
             return error_response("No fields to update", 400)
 
         # Add updated_at
-        updates.append(f"updated_at = NOW()")
+        updates.append("updated_at = NOW()")
 
         # Check if config exists
         check_query = "SELECT id FROM ai_researcher_config WHERE community_id = $1"

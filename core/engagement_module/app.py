@@ -74,6 +74,7 @@ for key in dir(config):
     if key.isupper() and not key.startswith('_'):
         app.config[key] = getattr(config, key)
 
+
 # Logging
 def setup_logging():
     log_format = "[%(asctime)s] %(levelname)s %(name)s:%(funcName)s:%(lineno)d %(message)s"
@@ -83,6 +84,7 @@ def setup_logging():
     root_logger = logging.getLogger()
     root_logger.setLevel(getattr(logging, config.LOG_LEVEL.upper()))
     root_logger.addHandler(console_handler)
+
 
 setup_logging()
 logger = logging.getLogger(__name__)
