@@ -20,7 +20,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: hub-webui-v3
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "hubWebui")) }}
   replicas: {{ .Values.pipeline.hubWebui.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -31,6 +33,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: hub-webui-v3
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -47,6 +50,7 @@ spec:
         # is the alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-webui" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:

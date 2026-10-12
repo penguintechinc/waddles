@@ -35,6 +35,23 @@ pipeline:
     #     2026-09-prod-key1: "<base64 32-byte Ed25519 public key>"
     bundleSigningPublicKeys: {}
 
+# Resilience (templates/autoscaling.yaml). Production runs multi-replica: HPA on the stateless
+# services (CPU 70%), PodDisruptionBudgets rendered automatically for every service whose
+# effective replicas > 1. svc-streaming / svc-presentation stay single-replica singletons and
+# are never autoscaled. HPA minReplicas is the production floor (3+ per the prod resource tier).
+autoscaling:
+  defaults:
+    minReplicas: 3
+    maxReplicas: 10
+  services:
+    hubApi: { enabled: true }
+    hubWebui: { enabled: true }
+    svcActionRust: { enabled: true }
+    svcProcessRust: { enabled: true }
+    bundleExecutor: { enabled: true }
+    bundleExecutorAction: { enabled: true }
+    reputation: { enabled: true }
+
 # Egress lockdown — MANDATORY (fail guard blocks a render with this off).
 # PenguinTech prod resource tier (500m/1000m cpu, 512Mi/1Gi mem, replicas 3+) for the proxy.
 egressProxy:

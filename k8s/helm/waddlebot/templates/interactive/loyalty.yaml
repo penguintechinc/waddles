@@ -19,6 +19,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: interactive-loyalty
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -30,6 +31,7 @@ spec:
       - name: interactive-loyalty
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "interactive-loyalty" "imageTag" .Values.modules.interactiveLoyalty.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:

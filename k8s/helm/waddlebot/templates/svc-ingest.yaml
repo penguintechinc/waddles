@@ -33,7 +33,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-ingest
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcIngest")) }}
   replicas: {{ .Values.pipeline.svcIngest.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -44,6 +46,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-ingest
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -59,6 +62,7 @@ spec:
         # scripts/deploy-alpha.sh.
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-ingest" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -155,6 +159,7 @@ spec:
         - name: MODULE_LOAD_MARKETING
           value: "true"
         {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health

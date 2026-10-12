@@ -19,6 +19,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: core-community
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -30,6 +31,7 @@ spec:
       - name: core-community
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "core-community" "imageTag" .Values.modules.coreCommunity.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
