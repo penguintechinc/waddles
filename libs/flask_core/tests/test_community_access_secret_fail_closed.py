@@ -15,8 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from quart import Blueprint, Quart
-
 from flask_core import community_access
 from flask_core.auth import create_jwt_token
 from flask_core.community_access import (
@@ -25,6 +23,7 @@ from flask_core.community_access import (
     install_community_scoped_auth,
 )
 from flask_core.secrets import InsecureSecretError
+from quart import Blueprint, Quart
 
 PLACEHOLDER = "change-me-in-production"
 REAL_SECRET = "a-real-randomly-generated-secret-value-0123456789"
