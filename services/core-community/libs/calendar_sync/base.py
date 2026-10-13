@@ -26,6 +26,21 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def describe_error(exc: BaseException) -> str:
+    """Describe `exc` for logs without its message: exception type (+ HTTP status).
+
+    SECURITY (PII in logs): provider and DB exception messages embed request
+    URLs (calendar IDs are usually the owner's e-mail), event titles/attendees
+    from malformed payloads, and bound SQL values. Only the exception class and
+    -- when the error carries an HTTP response -- its numeric status are safe.
+    """
+    parts = [f"type={type(exc).__name__}"]
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int) and not isinstance(status, bool):
+        parts.append(f"status={status}")
+    return " ".join(parts)
+
+
 class CalendarProviderBase(ABC):
     """Abstract base class for all calendar provider integrations.
 
@@ -232,7 +247,7 @@ class CalendarProviderBase(ABC):
         )
 
     def _log_error(self, operation: str, error: Exception) -> None:
-        """Emit a structured error log."""
+        """Emit a structured error log (exception type/status only, never its message)."""
         self.logger.error(
-            f"[{self.PROVIDER.upper()}] {operation} failed: {error}"
+            "[%s] %s failed: %s", self.PROVIDER.upper(), operation, describe_error(error)
         )

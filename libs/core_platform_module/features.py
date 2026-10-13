@@ -2,14 +2,21 @@
 Core/Platform Module -- Feature contracts + default App bindings
 ====================================================================
 
-Declares the 14 Core/platform capability Features spanning the six
+Declares the 18 Core/platform capability Features spanning the six
 namespaces added to :data:`flask_core.app_manifest.KNOWN_MODULES` alongside
 the 4 product Modules (see that module's docstring): ``analytics``,
 ``video_proxy``, ``auth``, ``compliance``, ``integrations``, ``tenancy``.
 Tiers below are copied VERBATIM from the merged license catalog -- they are
-load-bearing (``entitlement.py``'s tier_requirements/PostHog gate keys off
-``min_tier`` per contract) and must not drift from the catalog on a future
-edit here.
+load-bearing and must not drift from the catalog on a future edit here.
+``min_tier`` is ENFORCED at runtime: ``EntitlementClient.required_tier`` takes
+the stricter of the live registry contract and the static
+``flask_core.tier_catalog.FEATURE_MIN_TIERS`` snapshot, and a feature is granted
+only when its PostHog flag is on AND the tenant's effective tier is >= that
+``min_tier`` -- a flag alone never unlocks a Professional/Enterprise feature.
+The snapshot exists because hub-api installs ``flask_core`` without these
+``*_module`` packages, so a tier changed here MUST also be changed in
+``tier_catalog``; ``flask_core/tests/test_tier_enforcement.py::
+TestCatalogMatchesContracts`` fails on any drift.
 
 | Feature id                            | Tier         | Flag                                          |
 |-----------------------------------------|--------------|------------------------------------------------|
@@ -24,9 +31,13 @@ edit here.
 | ``auth.sso_google``                     | professional | ``waddles.auth.sso_google``                     |
 | ``auth.sso_saml``                       | enterprise   | ``waddles.auth.sso_saml``                       |
 | ``compliance.audit_logs``               | enterprise   | ``waddles.compliance.audit_logs``               |
+| ``compliance.audit_export``             | enterprise   | ``waddles.compliance.audit_export``             |
 | ``compliance.external_kms``             | enterprise   | ``waddles.compliance.external_kms``             |
 | ``integrations.waddleai``               | enterprise   | ``waddles.integrations.waddleai``               |
+| ``integrations.provider_connections``   | professional | ``waddles.integrations.provider_connections``   |
 | ``tenancy.multi_tenant``                | enterprise   | ``waddles.tenancy.multi_tenant``                |
+| ``compliance.bulk_dsar``                | enterprise   | ``waddles.compliance.bulk_dsar``                |
+| ``tenancy.whitelabel``                  | professional | ``waddles.tenancy.whitelabel``                  |
 
 Each Feature gets exactly one shipped default App (``provider="builtin"``,
 ``is_default=True``), mirroring :mod:`bot_module.features`'s shape. Most of
@@ -158,12 +169,27 @@ _FEATURE_DEFS: Tuple[Dict[str, Any], ...] = (
         "flag": "waddles.auth.sso_saml",
     },
     {
+        # Scope is `:admin`, not `:read`: `create_session_token` hands EVERY session the
+        # `*:read` wildcard, and `require_scope` honours `*:<action>` wildcards, so a
+        # `compliance.audit:read` requirement would be satisfied by any logged-in user.
+        # `*:admin` is held only by platform super-admins, and the tenant-owner bundle
+        # lists `compliance.audit:admin` explicitly (flask_core.auth.SCOPE_BUNDLES).
         "id": "compliance.audit_logs",
         "version": 1,
         "module": "compliance",
-        "requires_scopes": frozenset({"compliance.audit:read"}),
+        "requires_scopes": frozenset({"compliance.audit:admin"}),
         "min_tier": "enterprise",
         "flag": "waddles.compliance.audit_logs",
+    },
+    {
+        # Exporting the tamper-evident log is a separately licensed capability on top of
+        # recording/reading it (GRC #3: "export capability also Enterprise").
+        "id": "compliance.audit_export",
+        "version": 1,
+        "module": "compliance",
+        "requires_scopes": frozenset({"compliance.audit:admin"}),
+        "min_tier": "enterprise",
+        "flag": "waddles.compliance.audit_export",
     },
     {
         "id": "compliance.external_kms",
@@ -182,12 +208,41 @@ _FEATURE_DEFS: Tuple[Dict[str, Any], ...] = (
         "flag": "waddles.integrations.waddleai",
     },
     {
+        # Standard provider/connection framework (Twitch bot + channel first). Scope is `:admin`,
+        # not `:read`: every session carries the `*:read` wildcard, so a read scope would be
+        # satisfied by any logged-in user. The tenant-owner bundle lists it explicitly
+        # (flask_core.auth.SCOPE_BUNDLES); hub-api additionally requires the caller to administer
+        # the specific community (services.community_authz.authorize_community).
+        "id": "integrations.provider_connections",
+        "version": 1,
+        "module": "integrations",
+        "requires_scopes": frozenset({"connections:admin"}),
+        "min_tier": "professional",
+        "flag": "waddles.integrations.provider_connections",
+    },
+    {
         "id": "tenancy.multi_tenant",
         "version": 1,
         "module": "tenancy",
         "requires_scopes": frozenset({"tenancy.tenant:admin"}),
         "min_tier": "enterprise",
         "flag": "waddles.tenancy.multi_tenant",
+    },
+    {
+        "id": "compliance.bulk_dsar",
+        "version": 1,
+        "module": "compliance",
+        "requires_scopes": frozenset({"compliance.dsar:admin"}),
+        "min_tier": "enterprise",
+        "flag": "waddles.compliance.bulk_dsar",
+    },
+    {
+        "id": "tenancy.whitelabel",
+        "version": 1,
+        "module": "tenancy",
+        "requires_scopes": frozenset({"tenancy.whitelabel:admin"}),
+        "min_tier": "professional",
+        "flag": "waddles.tenancy.whitelabel",
     },
 )
 
@@ -316,7 +371,18 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
         "module": "compliance",
         "provider": "builtin",
         "surfaces": ("process",),
-        "permissions": ("compliance.audit:read",),
+        "permissions": ("compliance.audit:admin",),
+        "is_default": True,
+    },
+    {
+        "app_id": "waddles.compliance.audit_export.default",
+        "name": "Audit Log Export (default)",
+        "version": "1.0.0",
+        "feature": "waddles.compliance.audit_export",
+        "module": "compliance",
+        "provider": "builtin",
+        "surfaces": ("process",),
+        "permissions": ("compliance.audit:admin",),
         "is_default": True,
     },
     {
@@ -342,6 +408,17 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
         "is_default": True,
     },
     {
+        "app_id": "waddles.integrations.provider_connections.default",
+        "name": "Provider Connections (default)",
+        "version": "1.0.0",
+        "feature": "waddles.integrations.provider_connections",
+        "module": "integrations",
+        "provider": "builtin",
+        "surfaces": ("action",),
+        "permissions": ("connections:admin",),
+        "is_default": True,
+    },
+    {
         "app_id": "waddles.tenancy.multi_tenant.default",
         "name": "Multi-Tenant Management (default)",
         "version": "1.0.0",
@@ -352,16 +429,38 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
         "permissions": ("tenancy.tenant:admin",),
         "is_default": True,
     },
+    {
+        "app_id": "waddles.compliance.bulk_dsar.default",
+        "name": "Admin/Bulk DSAR Console (default)",
+        "version": "1.0.0",
+        "feature": "waddles.compliance.bulk_dsar",
+        "module": "compliance",
+        "provider": "builtin",
+        "surfaces": ("process",),
+        "permissions": ("compliance.dsar:admin",),
+        "is_default": True,
+    },
+    {
+        "app_id": "waddles.tenancy.whitelabel.default",
+        "name": "Tenant Whitelabel Branding (default)",
+        "version": "1.0.0",
+        "feature": "waddles.tenancy.whitelabel",
+        "module": "tenancy",
+        "provider": "builtin",
+        "surfaces": ("process",),
+        "permissions": ("tenancy.whitelabel:admin",),
+        "is_default": True,
+    },
 )
 
 
 def build_contracts() -> Tuple[FeatureContract, ...]:
-    """Parse and validate the 14 Core/platform Feature contracts, without registering them."""
+    """Parse and validate the 18 Core/platform Feature contracts, without registering them."""
     return tuple(parse_feature_contract(raw) for raw in _FEATURE_DEFS)
 
 
 def build_default_apps() -> Tuple[AppManifest, ...]:
-    """Parse and validate the 14 Core/platform default App manifests, without registering them."""
+    """Parse and validate the 18 Core/platform default App manifests, without registering them."""
     return tuple(parse_manifest(raw) for raw in _DEFAULT_APP_DEFS)
 
 
@@ -371,7 +470,7 @@ def register_all(
     app_registry: Optional[AppRegistry] = None,
 ) -> Tuple[Tuple[FeatureContract, ...], Tuple[AppManifest, ...]]:
     """
-    Parse, validate and register all 14 Core/platform Features and their
+    Parse, validate and register all 18 Core/platform Features and their
     shipped default Apps.
 
     Defaults to the process-wide singletons

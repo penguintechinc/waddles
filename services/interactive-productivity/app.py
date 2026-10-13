@@ -480,7 +480,7 @@ def init_translate_services():
                 return jsonify({"error": str(e)}), 500
 
         app.register_blueprint(translate_bp)
-        trans_logger.info(f"Translate module initialized")
+        trans_logger.info("Translate module initialized")
 
     except Exception as e:
         logger.error(f"Failed to initialize translate module: {e}", exc_info=True)
@@ -528,9 +528,9 @@ async def start_grpc_server():
             TranslateInteractionServicer(translation_service, dal),
             server,
         )
-        bind_secure_port(server, f"0.0.0.0:50033")
+        bind_secure_port(server, "0.0.0.0:50033")
         await server.start()
-        logger.info(f"gRPC server (TLS) listening on port 50033")
+        logger.info("gRPC server (TLS) listening on port 50033")
         await server.wait_for_termination()
     except Exception as e:
         logger.warning(f"gRPC server startup failed (translate optional): {e}")
@@ -542,7 +542,7 @@ async def start_grpc_server():
 
 async def main():
     hconfig = HypercornConfig()
-    hconfig.bind = [f"0.0.0.0:8030"]
+    hconfig.bind = ["0.0.0.0:8030"]
 
     grpc_task = asyncio.create_task(start_grpc_server())
     rest_task = asyncio.create_task(serve(app, hconfig))

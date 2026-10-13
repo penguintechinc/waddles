@@ -938,6 +938,35 @@ async def seed_one(
     return results
 
 
+#: `communities.name` of the tenant-wide sentinel row (id `TENANT_WIDE_COMMUNITY_SENTINEL`).
+_SENTINEL_COMMUNITY_NAME = "__tenant_wide__"
+
+
+async def _ensure_sentinel_community(install_dal: AsyncDB, *, tenant_id: int) -> None:
+    """Ensure the tenant-wide sentinel `communities` row (id 0) exists -- idempotent.
+
+    `community_permission_grants.community_id` is `REFERENCES communities(id)` (migration
+    0041) but tenant-wide grants use the `TENANT_WIDE_COMMUNITY_SENTINEL` (0) scope, and
+    `communities.id` is a SERIAL starting at 1 -- so without this row every tenant-wide
+    grant insert raised an FK IntegrityError (36/40 core bundles failed to grant on a
+    fresh DB, #480 kind-e2e). The row is owned by the `global` tenant when it exists
+    (so deleting an ordinary tenant never cascades away every tenant's grants), else by
+    the granting tenant; inactive + non-public so it never surfaces in community listings.
+    Inserting an explicit id leaves the SERIAL sequence untouched.
+    """
+    await raw_sql_write(
+        install_dal,
+        "INSERT INTO communities (id, tenant_id, name, is_active, is_public) "
+        "VALUES (:id, COALESCE((SELECT id FROM tenants WHERE slug = 'global'), :tenant_id), "
+        ":name, FALSE, FALSE) ON CONFLICT (id) DO NOTHING",
+        {
+            "id": TENANT_WIDE_COMMUNITY_SENTINEL,
+            "tenant_id": tenant_id,
+            "name": _SENTINEL_COMMUNITY_NAME,
+        },
+    )
+
+
 async def _grant_core_bundle_permissions(
     install_dal: AsyncDB,
     *,
@@ -974,6 +1003,8 @@ async def _grant_core_bundle_permissions(
     if not required:
         return
     try:
+        if community_id == TENANT_WIDE_COMMUNITY_SENTINEL:
+            await _ensure_sentinel_community(install_dal, tenant_id=tenant_id)
         await grant_community_permissions(
             install_dal,
             tenant_id=tenant_id,
@@ -996,6 +1027,14 @@ async def _grant_core_bundle_permissions(
                 "community_id": community_id,
                 "required_permission_ids": sorted(required),
             },
+        )
+    except Exception as exc:  # noqa: BLE001 -- one bundle's grant failure must not abort the run
+        logger.exception(
+            "core bundle permission auto-grant hit an unexpected error (%s: %s) -- continuing "
+            "with the remaining bundles; grants for this scope will deny until resolved",
+            type(exc).__name__,
+            exc,
+            extra={"app_id": app_id, "tenant_id": tenant_id, "community_id": community_id},
         )
 
 

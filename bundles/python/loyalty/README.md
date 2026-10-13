@@ -9,12 +9,10 @@ written fresh for this bundle. See `bundle.yaml`'s `author`/`notice` fields for 
 contrast `bundles/csharp/superpenguin-roll`, which *is* a line-for-line port and carries the full
 verbatim MIT notice because it reuses original code.
 
-**DB-backed (depends on #623, not yet merged).** This bundle is built on top of
-`feature/db-capability-production` (merged into this branch directly, since #623 itself hasn't
-landed on `release/v3.0.X` yet) for the structured `db` capability (`insert`/`get`/`query`/
-`update`/`delete`). **This bundle cannot merge into `release/v3.0.X` until #623 lands there
-first** -- it is expected to rebase cleanly on top once #623 merges (confirmed: this branch's own
-merge of `feature/db-capability-production` was conflict-free). Until then this PR stays draft.
+**DB-backed.** Built on the structured `db` capability (`insert`/`get`/`query`/`update`/`delete`,
+#623) plus `kv`; merged into `release/v3.0.X` via #630 and registered in
+`bundles/core-bundles.yaml`. A shared cross-bundle economy (loyalty/slots/duel/gamble/heist sharing
+one balance) is a separate, open design item (#714).
 
 ## Commands
 
@@ -24,10 +22,83 @@ merge of `feature/db-capability-production` was conflict-free). Until then this 
 | `!points <user>` | documented grammar extension (see `src/app.py`) | That user's balance. `0` if they have never received points. |
 | `!points top` | `top` sub-module | Leaderboard: top 10 balances, highest first. |
 | `!points add <amount> <user>` | `add` verb | Broadcaster/moderator only. Adds `<amount>` points to `<user>`. |
-| `!points sub <amount> <user>` | `sub` verb | Broadcaster/moderator only. Removes `<amount>` points from `<user>`, clamped at `0` (never negative). |
+| `!points sub <amount> <user>` | `sub` verb | Broadcaster/moderator only. Removes `<amount>` points from `<user>`, clamped at `0` (never negative); the reply reports the amount actually removed. |
 
 Any other grammar-legal verb (`enable`/`disable`/`remove`/`reset`) or a malformed `!points ...`
-replies with usage text -- never silently dropped.
+replies with usage text -- never silently dropped. `<amount>` must be a positive integer
+(`0`, negatives, decimals, words, `+5`, `1_000`, non-ASCII digits and anything over `1000000000` are usage errors).
+
+## Examples
+
+```text
+> !points add 50 alice                 (mod)
+Added 50 points to alice. New balance: 50.
+> !points alice
+alice has 50 points.
+> !points sub 80 alice                 (mod)
+Removed 80 points from alice. New balance: 0.
+> !points top
+Top points: 1. player-3f7a9c21: 50, 2. player-91bd0e44: 10
+> !points add 5 alice                  (regular viewer)
+only moderators/broadcasters can adjust points
+```
+
+## Permissions (V2, `bundle.yaml` / `hub-manifest.yaml`)
+
+| id | Why |
+|---|---|
+| `storage.kv` | `loyalty.rowid.<pseudonym> -> row_id` lookup index -- the `db` interface has no column-equality query, so this is the O(1) path to a user's balance row. |
+| `flags.read` | Reads the `waddles.command-loyalty` feature flag that gates the command. |
+
+The `db` capability itself is granted by the manifest's `data.tables: [loyalty_balances]` (not by a
+`permissions` entry). No egress (`egress: []`).
+
+## Moderator gate (fail-closed)
+
+`add`/`sub` require `is_mod` **or** `is_broadcaster` on the normalized event
+(`_caller_role_signal()`), decided in `dispatch` **before any `kv`/`db` access**: neither field
+present (Discord today) => denied; present but falsy => denied; either true => allowed. Denial
+logs `loyalty.adjust_denied` (command + role-signal state only). `!points`, `!points <user>` and
+`!points top` never need a role.
+
+## Platforms
+
+Twitch and Discord `chat.message` events starting with `!points` (`stages.process.consumes`).
+Discord events carry no mod badge today, so `add`/`sub` are denied there until its normalizer
+supplies the fields.
+
+## Failure behavior (fail-loud, never silent)
+
+| Condition | Behavior |
+|---|---|
+| Any `kv`/`db` call fails (`kv_get`, `kv_set`, `db_get`, `db_insert`, `db_query`, `db_update`) | ERROR `loyalty.backend_error` (`op` + the error class **name**), chat reply "points are temporarily unavailable, try again shortly.", then `RuntimeError`. Exactly one relay. |
+| Optimistic-concurrency conflicts | Retried up to 5 times with a fresh `db.get`; exhausted => loud `db_update_retry` failure. |
+| `kv` index points at a row `db.get` can no longer find | Loud `index_stale` failure -- never silently re-created (that would orphan/duplicate the row). |
+| Non-UTF-8 index value, or non-numeric `balance` column | Raises (never invents or renders a balance). |
+| Missing `channel_id`, missing community (no tenant-wide fallback), unknown command, malformed forwarded payload | `ValueError`; missing community also logs ERROR `loyalty.missing_community`. |
+| `relay.push` fails | Propagates; no success line is logged. |
+
+## Integrity guarantees (1.0.3)
+
+| Risk | Guard |
+|---|---|
+| Two simultaneous first-time `add`s for one user created two rows and one grant's points vanished (leaderboard showed the user twice) | Row creation is gated by an atomic claim (`loyalty.claim.<pseudonym>`, `kv.increment` -- only the first caller sees `1`; 30 s TTL so a crashed creator cannot wedge a user). The loser re-checks the index and otherwise replies "points for that user are being set up right now, try again in a few seconds." -- never a duplicate row, never a silent drop. |
+| Row inserted but its index write failed -> unreachable orphan row holding points | The orphan is deleted and the claim released before the error is raised; a failed cleanup is logged at ERROR (`loyalty.orphan_cleanup_failed`). |
+| Negative balances | `sub` clamps at `0`; the first-ever `sub` against a user with no row writes nothing ("alice has 0 points; nothing to remove.") instead of creating a junk zero row. A stored negative / over-cap balance is treated as corruption and fails loud (`balance_invalid`) instead of being rendered or "repaired". |
+| Unbounded / overflowing amounts | One `add`/`sub` is `1..1000000000` (ASCII digits only -- `+5`, `1_000` and non-ASCII digits are usage errors); balances saturate at `10^15` (exact in JSON, far inside int8). The reply says what was actually applied: `Removed 5 of 999 points from alice (balance can't go below 0). New balance: 0.` |
+| A mod-granted balance invisible to its owner (`Alice` vs `alice` hashed differently) | The caller's own `!points` identity is normalized exactly like a typed `<user>` (strip `@`, lower-case). |
+| Non-moderator passing the mod gate with a string badge (`"false"` is truthy) | Badges are read with an identity check; only a real boolean `True` opens the gate. |
+
+Double-apply is not possible on the update path: every retry re-reads the row and recomputes from
+the fresh balance (`expected_version` gated).
+
+## Logging / PII
+
+Every log message has a strict field allowlist (command, platform, op/error class) -- **never**
+the raw message, target, typed amount text, or `event.actor` (regression: gh-674; the suite drives
+every command and outcome with a sentinel string as actor and target, and asserts its absence plus
+the exact per-message field set). Keys and the `actor_hash` column are SHA-256 pseudonyms, never
+raw names.
 
 ## Data model (`db` + `kv`)
 
@@ -91,9 +162,9 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
       waddle_sdk._component_entry -o /tmp/loyalty.wasm"
 ```
 
-Confirmed building a valid wasm component (`21MB`, `wasm32` component binary) from this branch.
-**Not yet wired into `bundles/Dockerfile.core-bundles`** -- same genericization-PR dependency
-`fish`'s own README documents; this bundle's CI wasm build is blocked on that PR landing.
+In CI/release the wasm is built generically: `bundles/Dockerfile.core-bundles` runs
+`bundles/build_python_bundles.py`, which builds every `language: python` entry in
+`bundles/core-bundles.yaml` -- no per-bundle Dockerfile edit.
 
 ## Test
 
@@ -107,11 +178,9 @@ mypy --strict src
 ruff check .
 ```
 
-Current result: 81 tests, `src/app.py` at 100% statement+branch coverage, `ruff check .` and
-`mypy --strict src` both clean.
+Current result: 194 tests, `src/app.py` at 100% statement+branch coverage.
 
 ## Activation
 
-**Not yet added to `bundles/core-bundles.yaml`** -- batched registration, per this PR's own
-description (also gated on #623 landing first). `bundles/Dockerfile.core-bundles` is likewise
-untouched here.
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.loyalty`, activation target
+`global`); dark until `waddles.command-loyalty` is turned on.

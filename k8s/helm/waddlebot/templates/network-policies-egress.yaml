@@ -163,13 +163,10 @@ spec:
     # happens in the proxy's signed-allowlist re-check, not here — this CNP
     # only guarantees the proxy can NEVER reach loopback/link-local/metadata/
     # this cluster's own CIDRs, no matter what a request claims.
+    # (R5: v4/v6 carve-outs split into separate cidr entries -- Cilium requires every `except`
+    # to be a subnet of its cidr; `::1/128`/`fe80::/10` under `0.0.0.0/0` was invalid.)
     - toCIDRSet:
-        - cidr: "0.0.0.0/0"
-          except:
-            {{- toYaml .Values.egressPolicy.denyCidrs | nindent 12 }}
-            - {{ .Values.egressPolicy.clusterCidrs.podCidr | quote }}
-            - {{ .Values.egressPolicy.clusterCidrs.serviceCidr | quote }}
-            - {{ .Values.egressPolicy.clusterCidrs.nodeCidr | quote }}
+        {{- include "waddlebot.splitCidrSet" (concat .Values.egressPolicy.denyCidrs (list .Values.egressPolicy.clusterCidrs.podCidr .Values.egressPolicy.clusterCidrs.serviceCidr .Values.egressPolicy.clusterCidrs.nodeCidr)) | nindent 8 }}
       toPorts:
         - ports:
             {{- range .Values.egressProxy.allowedPorts }}

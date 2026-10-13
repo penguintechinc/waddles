@@ -56,8 +56,6 @@ COPY --from=builder --chown=appuser:appuser /app .
 # (pip-26.0.1.dist-info) that the COPY above doesn't remove (COPY merges,
 # it doesn't delete stale destination files) -- drop it so only the
 # builder's patched pip metadata (26.2.1) remains.
-RUN find /usr/local/lib/python3.13/site-packages -maxdepth 1 -name 'pip-*.dist-info' ! -name 'pip-26.2.1.dist-info' -exec rm -rf {} +
-
 # Switch to non-root user
 # Remove base image's own bundled pip + ensurepip wheel: pip vendors an
 # outdated msgpack (GHSA-6v7p-g79w-8964) and pkg_resources/setuptools
@@ -65,7 +63,8 @@ RUN find /usr/local/lib/python3.13/site-packages -maxdepth 1 -name 'pip-*.dist-i
 # hasn't picked up yet. Neither pip nor its vendor tree is imported by
 # any service at runtime (installs happen at build time via uv/pip
 # above), so removing them is a real fix, not a suppression.
-RUN rm -rf /usr/local/lib/python3.13/site-packages/pip \
+RUN find /usr/local/lib/python3.13/site-packages -maxdepth 1 -name 'pip-*.dist-info' ! -name 'pip-26.2.1.dist-info' -exec rm -rf {} + && \
+    rm -rf /usr/local/lib/python3.13/site-packages/pip \
     /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
     /usr/local/lib/python3.13/ensurepip
 

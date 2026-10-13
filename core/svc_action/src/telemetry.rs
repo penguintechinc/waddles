@@ -160,6 +160,17 @@ pub struct HostApiMetrics {
     pub connected_executors: prometheus::IntGauge,
     pub heartbeat_timeouts_total: prometheus::IntCounter,
     pub dead_lettered_no_executor_total: prometheus::IntCounter,
+    /// Producer found the bounded writer channel full and had to await
+    /// capacity (backpressure engaged).
+    pub writer_backpressure_total: prometheus::IntCounter,
+    /// Frames shed because the writer channel stayed full past the send
+    /// timeout (or a non-blocking send found it full).
+    pub writer_shed_total: prometheus::IntCounter,
+    /// `host-call`s shed (error reply) because the per-connection
+    /// concurrent-handler cap was reached.
+    pub host_calls_shed_total: prometheus::IntCounter,
+    /// Inbound host-API connections refused at the connection cap.
+    pub connections_rejected_total: prometheus::IntCounter,
 }
 
 /// Registers [`HostApiMetrics`]. Must be called exactly once per `registry`
@@ -193,10 +204,38 @@ pub fn register_host_api_metrics(registry: &prometheus::Registry) -> HostApiMetr
         .register(Box::new(dead_lettered_no_executor_total.clone()))
         .expect("register dispatch_dead_lettered_no_executor_total");
 
+    let counter = |name: &str, help: &str| -> prometheus::IntCounter {
+        let c = prometheus::IntCounter::new(name, help).expect("valid metric definition");
+        registry
+            .register(Box::new(c.clone()))
+            .expect("register host-api bound counter");
+        c
+    };
+    let writer_backpressure_total = counter(
+        "host_api_writer_backpressure_total",
+        "Times a producer found the bounded host-API writer channel full and awaited capacity",
+    );
+    let writer_shed_total = counter(
+        "host_api_writer_shed_total",
+        "Host-API frames shed because the bounded writer channel stayed full past the send timeout",
+    );
+    let host_calls_shed_total = counter(
+        "host_api_host_calls_shed_total",
+        "Host-calls shed (overloaded error reply) at the per-connection concurrent-handler cap",
+    );
+    let connections_rejected_total = counter(
+        "host_api_connections_rejected_total",
+        "Inbound host-API connections refused at the connection cap",
+    );
+
     HostApiMetrics {
         connected_executors,
         heartbeat_timeouts_total,
         dead_lettered_no_executor_total,
+        writer_backpressure_total,
+        writer_shed_total,
+        host_calls_shed_total,
+        connections_rejected_total,
     }
 }
 

@@ -8,10 +8,10 @@ short key (`!announce set <key> <message>`); anyone can later recall it with
 moderator/broadcaster can delete one with `!announce remove <key>`.
 
 **Not to be confused with** the pre-existing, DB-backed
-`core/svc_process/bundles/community_announcements_process.py` /
-`core/svc_action/bundles/community_announcements_action.py` script bundles,
+`core/svc_process/builtin_handlers/community_announcements_process.py` /
+`core/svc_action/builtin_handlers/community_announcements_action.py` built-in stage handlers,
 which already parse `!announce publish <announcement_id>` against the
-legacy `flask_core`/`svc_process`/`svc_action` script-bundle runner (not
+legacy `flask_core`/`svc_process`/`svc_action` stage-runner (not
 this repo's newer WASI-component `waddle_sdk` bundle SDK) to broadcast a
 web-UI-authored `announcements` DB row. Both consume the same `!announce`
 command-text prefix; this bundle only recognizes `set`/`remove`/`list`/a
@@ -165,7 +165,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 def _resolve_command(rest: str) -> tuple[str, str | None]:
@@ -239,9 +239,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     # Forward the normalized badge signal, if present -- see `fish`/`music`'s own
     # identical forwarding comment for why absence must reach `dispatch` as absence, not `False`.
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
 
     return PlatformEvent(
         platform=event.platform,

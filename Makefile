@@ -1,11 +1,15 @@
-.PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
-        seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
+        seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs generate-bundle-signing-key
+        check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        test-seaweedfs-sse-kms test-helm-pending-recover \
+        verify-audit-chain verify-audit-export test-supply-chain \
+        suppression-stats suppression-purge suppression-lift suppression-check \
+        test-data-plane-parity check-builtin-handler-inventory
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -26,6 +30,10 @@ docker-push:
 
 lint:
 	@bash scripts/lint.sh
+
+openapi-hubapi:
+	@python3 scripts/export-hubapi-openapi.py
+	@spectral lint openapi/v1.yaml --fail-severity=error
 
 check-docs:
 	@bash scripts/check-doc-refs.sh
@@ -54,6 +62,11 @@ check-wait-for-hub-api:
 check-alpha-deploy-no-wait:
 	@python3 scripts/check_alpha_deploy_no_wait.py
 
+# alpha-deploy.sh self-heals a release stuck in pending-* (interrupted upgrade);
+# stub-driven test of that recovery logic, no cluster touched.
+test-helm-pending-recover:
+	@bash scripts/test-helm-pending-recover.sh
+
 # No-stubs / no-silent-fallbacks gate (gh-regression: a `flags capability not
 # wired -- TODO(M4+)` stub returned a silent default and shipped as "done",
 # causing a multi-hour alpha outage). Scans non-test core/hub_api/sdk/bundles/
@@ -63,12 +76,51 @@ check-alpha-deploy-no-wait:
 check-no-stubs:
 	@bash scripts/ci/check-no-stubs.sh
 
+# Bundle hygiene gates (.github/workflows/bundle-hygiene.yml): raw user input in
+# bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, broad
+# silent `except` swallows, and role badges (`is_mod`, ...) read through Python
+# truthiness (`bool("false")` is True -> mod-gate bypass) in bundles AND the
+# legacy svc-ingest tree. Each prints the count it examined and exits non-zero on
+# a hit (or on zero examined). Needs PyYAML for the manifest check.
+check-bundle-hygiene:
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check log-pii
+	@python3 scripts/ci/check-bundle-manifest-permissions.py
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
+
+# builtin_handlers -> Rust-path/bundle inventory gate (gh #840 PR4): FAILS if a live Python
+# ingest/process/action handler has no mapping in .ci/builtin-handler-map.yaml, a covered
+# mapping's evidence is stale, a pending handler was removed, or a stage entrypoint dangles.
+# `make check-builtin-handler-inventory STRICT=1` also fails on any pending (Python-removal mode).
+check-builtin-handler-inventory:
+	@python3 -m pytest scripts/ci/tests/test_check_builtin_handler_inventory.py -q -p no:cacheprovider
+	@python3 scripts/ci/check-builtin-handler-inventory.py $(if $(STRICT),--strict,)
+
+# Data-plane golden-vector parity harness (gh #840 PR4): Rust normalize.rs oracle vs committed
+# goldens (svc_ingest), legacy Python normalize path vs the same goldens (tests/data_plane_parity),
+# every corpus event through svc_process's closed-schema pii_tokenize classifier, then the
+# inventory gate. Real paths, no mocked capability boundaries. Needs the repo .venv/py deps
+# (scripts/ci/install-unit-test-deps.sh) + the pinned Rust toolchain; see tests/data_plane_parity/README.md.
+test-data-plane-parity:
+	@bash scripts/ci/data-plane-parity.sh
+
 test:
 	@$(MAKE) test-unit
 
 test-unit:
 	@echo "Running unit tests..."
 	@bash tests/k8s/alpha/05-unit-tests.sh
+
+# Env-gated REAL-endpoint Ollama tests (hub-api router, AI Researcher, AI Interaction) --
+# LAN-only lab endpoint, never run in CI. The lab GPU is shared with the live WaddleAI, so the
+# three suites run strictly one after another (and each serializes its own requests). Needs each
+# module's test deps installed -- see docs/testing/ollama-realpath.md.
+#   make test-ollama-realpath WADDLE_TEST_OLLAMA_URL=http://192.168.2.105:11434/
+test-ollama-realpath:
+	@test -n "$(WADDLE_TEST_OLLAMA_URL)" || { echo "WADDLE_TEST_OLLAMA_URL is required (e.g. http://192.168.2.105:11434/)" >&2; exit 1; }
+	cd hub_api && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_routing_ollama_realpath.py -v -rs
+	cd core/ai_researcher_module && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_researcher_ollama_realpath.py -v -rs
+	cd action/interactive/ai_interaction_module && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_interaction_ollama_realpath.py -v -rs
 
 test-integration:
 	@echo "Running integration tests..."
@@ -86,6 +138,18 @@ test-functional:
 test-security:
 	@bash scripts/security-scan.sh
 
+# Seeded-failure proof that the lint/security gates can fail (crashed scanner,
+# non-numeric counter, new finding above baseline) -- Verification Integrity.
+test-gate-integrity:
+	@bash scripts/ci/tests/test_checks_gate_integrity.sh
+
+# Supply-chain signing self-test (scripts/ci/supply-chain.sh) against a throwaway local
+# registry + ephemeral keys, plus the Kyverno admission render tests. Needs cosign, syft,
+# jq, docker, helm and pytest on PATH; a missing tool fails loudly, it never skips.
+test-supply-chain:
+	@bash scripts/ci/test-supply-chain.sh
+	@python3 -m pytest -q k8s/helm/waddlebot/tests/test_supply_chain_verify_images_render.py
+
 smoke-test:
 	@echo "Running smoke tests..."
 	@test -f tests/alpha-smoke-test.sh || { echo "tests/alpha-smoke-test.sh not found" >&2; exit 1; }
@@ -94,7 +158,19 @@ smoke-test:
 seed-mock-data:
 	@echo "Seeding mock data..."
 	@test -f scripts/seed-admin.sh || { echo "scripts/seed-admin.sh not found" >&2; exit 1; }
-	@bash scripts/seed-admin.sh
+	@bash scripts/seed-admin.sh $(SEED_ARGS)
+	@$(MAKE) --no-print-directory seed-ui-mock-data
+
+# UI content seed (communities, members, leaderboard, overlays, chat, bundles)
+# so marketing screenshots are not empty-state. SEED_ARGS e.g. --docker.
+seed-ui-mock-data:
+	@bash scripts/seed-ui-mock-data.sh $(filter --docker,$(SEED_ARGS))
+
+# Marketing screenshots -> docs/screenshots/ (pinned Playwright, see
+# tests/screenshots). Needs a running hub-webui at BASE_URL and seeded data;
+# SCREENSHOT_EMAIL/SCREENSHOT_PASSWORD from env (never committed).
+screenshots:
+	@bash scripts/screenshots.sh
 
 clean:
 	docker-compose down -v
@@ -170,6 +246,48 @@ build-superpenguin-roll-bundle:
 test-csharp-bundle-compile:
 	@cd core/bundle_compiler && cargo test --locked builds_csping_via_docker -- --ignored --nocapture
 
+# Tamper-evident audit log (GRC audit finding #3, docs/compliance/audit-logging.md).
+# verify-audit-chain: recompute every audit chain straight from the database (DATABASE_URL / DB_*
+# env, run from hub_api so `cli.*` resolves). Exits 1 on tampering, 2 if zero records were
+# examined (a check over nothing is not a pass; add ALLOW_EMPTY=1 for deployments with no
+# Enterprise tenant), 3 if it could not run. Pin heads with EXPECT="tenant:1=42:<hash>".
+verify-audit-chain:
+	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \
+		$(foreach e,$(EXPECT),--expect $(e))
+
+# Ban-evasion suppression list (docs/compliance/suppression-LIA.md, hub_api/cli/suppression.py).
+# Run from hub_api so `cli.*` resolves; DATABASE_URL / DB_* env, TENANT_KEK_HEX for `lift`.
+#   suppression-stats: live/expired rows per tenant, type and key version (when can
+#                      TENANT_KEK_HEX_PREVIOUS be dropped after a KEK rotation?).
+#   suppression-purge: delete every expired row now (hub-api also does this hourly).
+#   suppression-lift:  delete one identity's row in one tenant (restriction lifted / objection
+#                      upheld). The platform id goes in via the PLATFORM_USER_ID environment
+#                      variable and stdin -- never argv, so it stays out of shell history/ps.
+#   make suppression-lift TENANT_ID=3 PLATFORM=discord PLATFORM_USER_ID=<id>
+#   suppression-check: read-only -- is there a live row for this identity in this tenant?
+#                      (the answer to an Art. 15 access request / an Art. 21 objection).
+#   make suppression-check TENANT_ID=3 PLATFORM=discord PLATFORM_USER_ID=<id>
+suppression-stats:
+	@cd hub_api && python3 -m cli.suppression stats
+
+suppression-purge:
+	@cd hub_api && python3 -m cli.suppression purge
+
+suppression-check:
+	@test -n "$(TENANT_ID)" -a -n "$(PLATFORM)" -a -n "$$PLATFORM_USER_ID" || { echo "usage: PLATFORM_USER_ID=<id> make suppression-check TENANT_ID=<n> PLATFORM=<name>" >&2; exit 2; }
+	@cd hub_api && printf '%s\n' "$$PLATFORM_USER_ID" | python3 -m cli.suppression check --tenant-id "$(TENANT_ID)" --platform "$(PLATFORM)" --platform-user-id-stdin
+
+suppression-lift:
+	@test -n "$(TENANT_ID)" -a -n "$(PLATFORM)" -a -n "$$PLATFORM_USER_ID" || { echo "usage: PLATFORM_USER_ID=<id> make suppression-lift TENANT_ID=<n> PLATFORM=<name>" >&2; exit 2; }
+	@cd hub_api && printf '%s\n' "$$PLATFORM_USER_ID" | python3 -m cli.suppression lift --tenant-id "$(TENANT_ID)" --platform "$(PLATFORM)" --platform-user-id-stdin
+
+# verify-audit-export: verify downloaded export file(s) offline -- no server, DB or network.
+#   make verify-audit-export EXPORT="page1.json page2.json" [ANCHOR=<hash>] [HEAD_SEQ=42] [HEAD_HASH=<hash>]
+verify-audit-export:
+	@test -n "$(EXPORT)" || { echo "usage: make verify-audit-export EXPORT=\"page1.json [page2.json ...]\"" >&2; exit 2; }
+	@python3 scripts/verify_audit_export.py $(EXPORT) $(if $(ANCHOR),--anchor-hash $(ANCHOR)) \
+		$(if $(HEAD_SEQ),--expect-head-seq $(HEAD_SEQ)) $(if $(HEAD_HASH),--expect-head-hash $(HEAD_HASH))
+
 # Proves bundles/Dockerfile.core-bundles's two example-bundle artifacts (ping.wasm from the
 # rust-bundle-builder stage, pyping.wasm from the python-bundle-builder stage) are both
 # byte-reproducible -- two independent --no-cache builds of the full image must produce
@@ -203,6 +321,13 @@ generate-service-jwt-key:
 generate-seaweedfs-sse-key:
 	@test -n "$(KUBE_CONTEXT)" || { echo "ERROR: KUBE_CONTEXT is required, e.g. make generate-seaweedfs-sse-key KUBE_CONTEXT=dal2-beta" >&2; exit 1; }
 	@bash scripts/generate-seaweedfs-sse-key.sh --context "$(KUBE_CONTEXT)" $(if $(NAMESPACE),--namespace "$(NAMESPACE)",)
+
+# Enterprise external KMS: the chart's rendered SeaweedFS KMS mapping against the REAL pinned `weed`
+# image (docker + helm required; the image must already be pulled -- this target never pulls
+# implicitly). A missing prerequisite FAILS the target, it is never a skip. See
+# hub_api/tests/envelope/test_seaweedfs_sse_kms_e2e.py and docs/guides/external-kms-byok.md.
+test-seaweedfs-sse-kms:
+	@cd hub_api && WADDLES_E2E_SEAWEEDFS=1 python3 -m pytest tests/envelope/test_seaweedfs_sse_kms_e2e.py -v -p no:cacheprovider
 
 # Builds+pushes images at HEAD's SHA (Rust svc-ingest/svc-process/svc-action into their
 # own "*-rust" repositories), then `helm upgrade --install` with only the image tag set --

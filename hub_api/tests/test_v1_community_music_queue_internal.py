@@ -2,7 +2,7 @@
 
 Standalone Quart app registering `music_internal_bp` against the
 `music_station_db` fixture (`tests/conftest.py`) -- the chat-command path
-(`core/svc_action/bundles/social_music_action.py`, `!sr`/`!songrequest`)
+(`core/svc_action/builtin_handlers/social_music_action.py`, `!sr`/`!songrequest`)
 has no user JWT, so it calls this route with `X-Service-Key` auth instead
 of the admin-scoped `music_queue_bp` route
 (`tests/test_v1_community_music_queue_blueprint.py` covers that one, and

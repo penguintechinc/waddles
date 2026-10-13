@@ -31,15 +31,17 @@ cooldown, so a typo doesn't cost a real play.
 All state goes through `waddle_sdk.community_kv`, keyed by `community_id` -- never global or
 tenant-wide. The caller's key uses a SHA-256 hash of `event.actor` as the pseudonym (same
 rationale as `fish`/`duel`'s own `_pseudonym()`). See `src/app.py`'s module docstring for the full
-identity/pseudonymization trade-off.
+identity/pseudonymization trade-off. Keys are `.`-separated, never `:` -- the real `kv` host rejects
+`:` (gh-631); the table previously (incorrectly) showed colons, and `waddle_sdk.kv.validate_key`
+fails any colon key at runtime and in this suite.
 
 | Key | Scope | TTL | Purpose |
 |---|---|---|---|
-| `rps:lastplay:<pseudonym>` | per-(community, caller) | `cooldown` seconds | Cooldown gate -- presence + elapsed time decide allow/deny. |
-| `rps:wins:<pseudonym>` | per-(community, caller) | none | Running total wins (`kv.increment`). |
-| `rps:losses:<pseudonym>` | per-(community, caller) | none | Running total losses (`kv.increment`). |
-| `rps:ties:<pseudonym>` | per-(community, caller) | none | Running total ties (`kv.increment`). |
-| `rps:config:cooldown` | per-community | none | Admin-configured play cooldown in seconds. |
+| `rps.lastplay.<pseudonym>` | per-(community, caller) | `cooldown` seconds | Cooldown gate -- presence + elapsed time decide allow/deny. |
+| `rps.wins.<pseudonym>` | per-(community, caller) | none | Running total wins (`kv.increment`). |
+| `rps.losses.<pseudonym>` | per-(community, caller) | none | Running total losses (`kv.increment`). |
+| `rps.ties.<pseudonym>` | per-(community, caller) | none | Running total ties (`kv.increment`). |
+| `rps.config.cooldown` | per-community | none | Admin-configured play cooldown in seconds. |
 
 ## Deferred to v2 (not stubbed)
 
@@ -50,6 +52,54 @@ a leaderboard needs a real `db` capability with an `order_by`/pagination surface
 `fish`/`duel` document for their own leaderboards. No `!rps leaderboard` command is declared.
 
 Also out of scope for this kv-only v1: best-of-N matches, wagers/stakes, and a ranking ladder.
+
+## Examples
+
+```text
+viewer> !rps rock
+bot>    🪨 viewer threw rock, I threw scissors -- viewer wins!
+viewer> !rps p
+bot>    🕒 slow down, viewer! try again in 9s.
+viewer> !rps list
+bot>    Record: 1W - 0L - 0T.
+viewer> !rps lizard
+bot>    Usage: !rps <rock|paper|scissors> (r/p/s) | !rps list | !rps set cooldown <seconds>
+mod>    !rps set cooldown 0
+bot>    rps cooldown set to 0s
+```
+
+## Permissions (V2 structured)
+
+| Id | Why |
+|---|---|
+| `storage.kv` | Persists per-community rock-paper-scissors tallies, cooldown timestamps and config. |
+| `flags.read` | Gates the command behind its `waddles.command-rps` feature flag. |
+
+No `db` (`data.tables: []`), no egress. Mod gate: `set cooldown` requires a real `is_mod` or
+`is_broadcaster` `True`; **absent** badge fields (e.g. the Discord normalizer today) are **denied**
+(fail closed) with zero `kv` access. Playing and `list` are open to any caller.
+
+## Platforms
+
+`consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!rps"]`; replies go
+back to the event's own origin platform + channel. A `community` context is required (no
+tenant-wide fallback): without one `dispatch` logs `rps.missing_community` and raises
+`ValueError`.
+
+## Failure semantics (fail loud)
+
+| Condition | Behavior |
+|---|---|
+| `kv` backend error | ERROR `rps.kv_error` (`op` + exception type only), chat reply "rock-paper-scissors is temporarily unavailable, try again shortly.", `RuntimeError("rps kv <op> failed: <Type>")`. |
+| Corrupt cooldown config / cooldown timestamp / a W-L-T counter | ERROR `rps.*_corrupt` (community only) and treated as the default / no cooldown / `0` -- logged loudly, never silent. |
+| Missing `channel_id` / unknown command | `ValueError`. |
+
+## Logging / PII
+
+Logs carry only `command`, `detail` (`invalid_choice`/`cooldown`/`win`/`lose`/`tie`), `op`,
+`community`, `role_signal`, `platform` and exception type names -- never the typed move, typed
+arguments, grammar text or `event.actor`. Regression:
+`tests/test_backfill.py::test_no_log_line_in_any_flow_contains_typed_text_or_the_raw_actor`.
 
 ## Feature flag
 
@@ -65,7 +115,7 @@ the real grammar classification.
 | `hub-manifest.yaml` | hub-api install-pipeline manifest (separate schema consumer, see its own header comment) |
 | `src/app.py` | `transform`/`dispatch` -- the full game |
 | `src/_entry_wiring.py` | Static `bundle_compiler`-shaped entry wiring (see `pyping`'s own) |
-| `tests/` | Host-native pytest suite (fake `wit_world`, no wasmtime) |
+| `tests/` | Host-native pytest suite (fake `wit_world`, no wasmtime) -- `test_app.py` (grammar/game) + `test_backfill.py` (mod-gate matrix, cooldown TTL/bounds, PII, gh-631); 100% line + branch |
 
 ## Build
 
@@ -99,6 +149,4 @@ ruff check .
 
 ## Activation
 
-**Not yet registered in `bundles/core-bundles.yaml`.** This bundle is built standalone, awaiting
-batched catalog registration alongside other in-flight command bundles -- intentionally out of
-scope for this PR (see PR description).
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.rps`).

@@ -1,0 +1,29 @@
+{
+  "context": {
+    "guild_owner_id": "900",
+    "guild_roles": [],
+    "member_role_ids": [],
+    "self_user_id": "999"
+  },
+  "frame": {
+    "author": {
+      "bot": false,
+      "id": "999",
+      "username": "WaddleBot"
+    },
+    "channel_id": "222",
+    "content": "hello chat",
+    "guild_id": "111",
+    "id": "333",
+    "type": 0
+  },
+  "golden": null,
+  "golden_origin": "rust",
+  "id": "discord/self_message_dropped",
+  "outcome": "dropped",
+  "path": "discord_gateway",
+  "pii_classifier": "pass",
+  "platform": "discord",
+  "python_divergences": [],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_builtin_discord_ingest.py"
+}

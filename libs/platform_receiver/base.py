@@ -163,15 +163,16 @@ class PlatformReceiverBase(ABC):
                     json=event,
                     timeout=30.0,
                 )
+                # SECURITY: never log the username (PII) -- message type + status only
                 self.logger.debug(
-                    f"Dispatched {event.get('message_type')} for {event.get('username')} → {resp.status_code}"
+                    "Dispatched %s → %s", event.get("message_type"), resp.status_code
                 )
                 if resp.status_code == 200:
                     return resp.json()
                 return {"success": False, "error": f"Router HTTP {resp.status_code}"}
         except Exception as exc:
-            self.logger.error(f"Router dispatch failed: {exc}")
-            return {"success": False, "error": str(exc)}
+            self.logger.error("Router dispatch failed: %s", type(exc).__name__)
+            return {"success": False, "error": f"Router dispatch failed: {type(exc).__name__}"}
 
     # ──────────────────────────────────────────────────────────────────────
     # Permission helpers (override per-platform as needed)

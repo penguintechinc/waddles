@@ -35,6 +35,7 @@ def _setup_module_imports(module_name: str) -> None:
             del sys.modules[key]
     sys.path.insert(0, os.path.join(_base_dir, module_name))
 
+
 from flask_core import (async_endpoint, create_health_blueprint,  # noqa: E402
                         init_database, setup_aaa_logging,
                         success_response)
@@ -483,5 +484,5 @@ if __name__ == '__main__':
     import hypercorn.asyncio
     from hypercorn.config import Config as HyperConfig
     config = HyperConfig()
-    config.bind = [f"0.0.0.0:8100"]
+    config.bind = ["0.0.0.0:8100"]
     asyncio.run(hypercorn.asyncio.serve(app, config))

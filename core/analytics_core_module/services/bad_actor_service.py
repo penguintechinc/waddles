@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from decimal import Decimal
 import json
+from .log_safety import log_failure
 
 
 class BadActorService:
@@ -58,11 +59,12 @@ class BadActorService:
             summary = self._summarize_alerts(unique_alerts)
 
             self.logger.audit(
-                "Bad actor detection completed",
-                community_id=community_id,
                 action="detect_bad_actors",
-                alerts_count=len(unique_alerts),
-                result="SUCCESS"
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Bad actor detection completed",
+                alerts_count=len(unique_alerts)
             )
 
             return {
@@ -73,7 +75,7 @@ class BadActorService:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to detect bad actors: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to detect bad actors", e, community_id=community_id)
             raise
 
     async def _detect_spam_bursts(self, community_id: int) -> List[Dict[str, Any]]:
@@ -123,7 +125,7 @@ class BadActorService:
             return alerts
 
         except Exception as e:
-            self.logger.error(f"Failed to detect spam bursts: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to detect spam bursts", e, community_id=community_id)
             return []
 
     async def _detect_duplicates(self, community_id: int) -> List[Dict[str, Any]]:
@@ -175,7 +177,7 @@ class BadActorService:
             return alerts
 
         except Exception as e:
-            self.logger.error(f"Failed to detect duplicates: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to detect duplicates", e, community_id=community_id)
             return []
 
     async def _detect_coordinated_activity(self, community_id: int) -> List[Dict[str, Any]]:
@@ -239,7 +241,7 @@ class BadActorService:
             return alerts
 
         except Exception as e:
-            self.logger.error(f"Failed to detect coordinated activity: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to detect coordinated activity", e, community_id=community_id)
             return []
 
     async def _deduplicate_and_store_alerts(
@@ -304,7 +306,7 @@ class BadActorService:
             return unique_alerts
 
         except Exception as e:
-            self.logger.error(f"Failed to store alerts: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to store alerts", e, community_id=community_id)
             return []
 
     def _classify_severity_burst(self, message_count: int) -> str:
@@ -346,5 +348,5 @@ class BadActorService:
                 return {'is_premium': result[0][0]}
             return {'is_premium': False}
         except Exception as e:
-            self.logger.error(f"Failed to get config: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to get config", e, community_id=community_id)
             return {'is_premium': False}

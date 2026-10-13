@@ -3,7 +3,7 @@ name = "bundle-host-http"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Shared bundle `http` host-capability egress guard (SSRF-hardened allowlist/DNS-pinning/redirect-recheck/rate-limit pipeline, connector spec SS8.2) extracted from core/svc_action so core/svc_process's process-stage bundles can enforce the identical policy for their own http capability, with zero behavior change to svc_action. A same-repo path dependency, not a penguin-libs crate: this pipeline is specific to this repo's own bundle-host wire shapes (`penguin_bundle_host::wire::HostResultError`), not a general-purpose library."
 
@@ -25,7 +25,7 @@ prometheus = "=0.14.0"
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 base64 = "=0.22.1"
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69f25b007e397bcf22c20bee368495f61f0a1b8a", package = "penguin-bundle-host", version = "=0.2.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b063b7ba49f8544f95dba0d23dcbe0e109b7b16c", package = "penguin-bundle-host", version = "=0.2.0" }
 # Same-repo path dependency (not a penguin-libs crate) -- the shared signed
 # egress-allowlist assertion wire format (PR #468), also depended on by
 # core/egress_proxy's verifier so the two crates can never drift apart.
@@ -43,6 +43,22 @@ axum = "=0.8.9"
 # wired here -- and the verify primitive core/egress_proxy's own verifier
 # wraps). Same pin as egress-assertion's own Cargo.toml.
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+# Test-only: `tests/executor_wire_e2e.rs` drives the REAL bundle-executor
+# (wasmtime, a real compiled guest, the real host-API frame codec) against
+# THIS crate's real `EgressGuard`, so the executor <-> guard `http.send` JSON
+# wire can never drift again undetected (it silently dropped every request
+# body and failed to decode every response with headers before that test).
+# A dev-dependency only: never linked into a release binary, and not walked
+# by `scripts/ci/check-dockerfile-rust-path-deps.py` (which scans
+# `[dependencies]`/`[build-dependencies]`) -- no Dockerfile needs a COPY for
+# it. bundle-executor itself may not depend on this crate (its `reqwest` is
+# banned from that binary, `core/bundle_executor/tests/dependency_policy.rs`),
+# which is why the cross-crate test lives here.
+bundle-executor = { path = "../bundle_executor", version = "=0.1.0" }
+# Test-only, same pins as bundle-executor: `CliConfig::try_parse_from` (the
+# `Parser` trait) and the fixture component's `sha256:` digest.
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+sha2 = "=0.10.9"
 
 [profile.release]
 opt-level = 3

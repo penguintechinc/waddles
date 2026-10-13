@@ -14,7 +14,7 @@ path this module owns).
 Mounted at `POST /eventsub/twitch/webhook` (`app.py`) -- unlike the IRC
 gateway receiver (`receivers/twitch_irc.py`), EventSub genuinely IS a
 webhook Twitch calls into this service (`communication_model=
-"webhook_push"`, `bundles/twitch_gateway_manifest.py`'s own
+"webhook_push"`, `builtin_handlers/twitch_gateway_manifest.py`'s own
 `TWITCH_EVENTSUB_MANIFEST`), so this module fans a normalized event out
 via the same `fanout.fan_out_event` machinery the IRC receiver uses,
 rather than anything IRC/socket-shaped.
@@ -39,15 +39,15 @@ EVENTSUB_TIMESTAMP = "Twitch-Eventsub-Message-Timestamp"
 EVENTSUB_MESSAGE_ID = "Twitch-Eventsub-Message-Id"
 
 #: The `consumes` tag the EventSub ingest bundle declares
-#: (`bundles/twitch_gateway_manifest.py`'s `TWITCH_EVENTSUB_MANIFEST`).
+#: (`builtin_handlers/twitch_gateway_manifest.py`'s `TWITCH_EVENTSUB_MANIFEST`).
 CONSUMES_TAG = "twitch.eventsub"
 
 #: EventSub subscription types this connector's MVP normalizes -- matches
-#: `bundles/twitch_eventsub_ingest.py`'s own `KNOWN_EVENT_TYPES`.
+#: `builtin_handlers/twitch_eventsub_ingest.py`'s own `KNOWN_EVENT_TYPES`.
 #:
 #: gh #287 S10 (live ON/OFF detection): `stream.online`/`stream.offline`
 #: added -- this is the webhook-side companion edit
-#: `bundles/twitch_eventsub_ingest.py`'s own module docstring flagged as
+#: `builtin_handlers/twitch_eventsub_ingest.py`'s own module docstring flagged as
 #: the "known gap" blocking a real Twitch webhook delivery for either type
 #: from ever reaching `normalize()` (this handler's `handle_webhook`
 #: drops any `event_type` not in this set BEFORE `build_raw_event` runs).
@@ -94,10 +94,10 @@ def verify_signature(*, secret: str, headers: dict[str, str], body: bytes) -> bo
 def build_raw_event(
     event_type: str, event: dict[str, Any], subscription: dict[str, Any]
 ) -> dict[str, Any]:
-    """Build the raw event dict fanned out to `bundles.twitch_eventsub_ingest:normalize`.
+    """Build the raw event dict fanned out to `builtin_handlers.twitch_eventsub_ingest:normalize`.
 
     Field set ported from the legacy module's own `_build_event_data`,
-    trimmed to what `bundles/twitch_eventsub_ingest.py`'s `normalize()`
+    trimmed to what `builtin_handlers/twitch_eventsub_ingest.py`'s `normalize()`
     actually reads -- per-event-type metadata (tier/bits/viewers/etc.)
     is folded into `metadata`, matching that module's own shape.
     """
@@ -122,14 +122,14 @@ def build_raw_event(
         # broadcaster_user_login, broadcaster_user_name, type, started_at}.
         # `type` ("live"/"playlist"/"watch_party"/"premiere"/"rerun") and
         # `started_at` ride in `metadata` exactly like `channel.raid`'s
-        # `viewers` above -- `bundles/twitch_eventsub_ingest.py::normalize`
+        # `viewers` above -- `builtin_handlers/twitch_eventsub_ingest.py::normalize`
         # passes `metadata` straight through onto `PlatformEvent.payload`.
         metadata = {"type": event.get("type", "live"), "started_at": event.get("started_at", "")}
     elif event_type == "stream.offline":
         # Real Twitch payload carries no extra fields beyond
         # broadcaster_user_id/_login/_name -- metadata is deliberately
         # empty, matching `test_normalizes_a_stream_offline_event`'s own
-        # assertion in `bundles/twitch_eventsub_ingest.py`'s test suite.
+        # assertion in `builtin_handlers/twitch_eventsub_ingest.py`'s test suite.
         metadata = {}
 
     return {

@@ -1,0 +1,21 @@
+[project]
+name = "waddle-bundle-weather"
+version = "1.0.0"
+description = "!weather <location> -> current conditions from WeatherAPI.com (API key via secret-ref only)"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3", "mypy==1.14.1", "ruff==0.11.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+
+# `waddle-sdk` ships no `py.typed` marker (pre-existing SDK packaging gap, out of scope here).
+[[tool.mypy.overrides]]
+module = "waddle_sdk.*"
+ignore_missing_imports = true

@@ -60,6 +60,10 @@ _ALLOWED_STAGES = frozenset({"process", "action", "presentation"})
 _MAX_TIMEOUT_MS = 10000
 _MAX_MEMORY_MB = 256
 _MAX_EGRESS_RPS = 10
+#: First-party ingest/chat platforms a bundle may name in `supported_platforms`
+#: (a `custom:<name>` entry is additionally validated against the tenant's
+#: registered custom platforms, same as `consumes[].platform`).
+KNOWN_SUPPORTED_PLATFORMS = frozenset({"discord", "twitch", "slack", "youtube", "kick"})
 
 
 class ManifestV2Error(ValueError):
@@ -156,6 +160,47 @@ class BundleManifestV2:
     # fixtures, `bundle_approval_service._reparse_trusted`) keeps working
     # unchanged; `parse_bundle_manifest_v2` always passes it explicitly.
     permission_declarations: tuple[PermissionDeclaration, ...] = ()
+    # Issue #685 -- platforms this bundle may run on. `None` (field absent)
+    # means ALL platforms (back-compat for every pre-existing bundle). Rides
+    # in the stored `manifest_json` blob; no DB column.
+    supported_platforms: tuple[str, ...] | None = None
+
+    def supports_platform(self, platform: str) -> bool:
+        """Return True when this bundle may run on `platform` (absent field = every platform)."""
+        return self.supported_platforms is None or platform in self.supported_platforms
+
+
+def _parse_supported_platforms(
+    raw_value: Any, *, known_custom_platforms: frozenset[str]
+) -> tuple[str, ...] | None:
+    """Validate the optional `supported_platforms` list; `None` when absent (all platforms)."""
+    if raw_value is None:
+        return None
+    _require(
+        isinstance(raw_value, list) and bool(raw_value),
+        "invalid_supported_platforms",
+        "supported_platforms must be a non-empty list when present",
+    )
+    seen: list[str] = []
+    for entry in raw_value:
+        _require(
+            isinstance(entry, str), "invalid_supported_platforms", f"{entry!r} is not a string"
+        )
+        if entry.startswith("custom:"):
+            _require(
+                entry.removeprefix("custom:") in known_custom_platforms,
+                "invalid_supported_platforms",
+                f"{entry!r} is not registered for this tenant",
+            )
+        else:
+            _require(
+                entry in KNOWN_SUPPORTED_PLATFORMS,
+                "invalid_supported_platforms",
+                f"{entry!r} is not one of {sorted(KNOWN_SUPPORTED_PLATFORMS)}",
+            )
+        if entry not in seen:
+            seen.append(entry)
+    return tuple(seen)
 
 
 def _require(condition: bool, reason: str, detail: str) -> None:
@@ -211,6 +256,12 @@ def _parse_consumes(
 _MAX_JUSTIFICATION_LEN = 280
 _MAX_OVERLAY_DURATION_S = 30
 _MAX_REPUTATION_DELTA = 5
+#: Mirrors the Rust catalog's `economy.wager`/`economy.transfer`
+#: `per_call_abs_max` (`core/bundle_capability_gate/src/permission.rs`); the
+#: gate re-clamps a declared bound to it, this is the approval-time check.
+_MAX_ECONOMY_AMOUNT = 1_000
+#: Declared per-call bound param name per money-moving economy permission.
+_ECONOMY_BOUND_PARAM = {"economy.wager": "max_bet", "economy.transfer": "max_amount"}
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_.]*$")
 
 
@@ -225,7 +276,10 @@ def parse_permission_declarations(
     vice versa (Sec2.3's mutual-requirement rule); `overlay.media` requires
     a non-empty `allowed_hosts` and a `max_duration_seconds` within the
     catalog ceiling; `reputation.*.write` bounds `delta_min`/`delta_max`
-    within `|delta| <= 5` and validates every `reason_codes` entry.
+    within `|delta| <= 5` and validates every `reason_codes` entry;
+    `economy.wager`/`economy.transfer` (issue #714) each require their own
+    declared per-call bound (`params.max_bet` / `params.max_amount`) as an
+    integer in `1..=1000`, and reject the other permission's bound param.
     `interaction.pii.receive` (raw PII in form/modal/interaction inputs,
     DEFAULT NO/`dangerous`) takes no special `params` -- like any other
     dangerous, non-parameterized catalog entry it only needs the
@@ -314,6 +368,25 @@ def parse_permission_declarations(
             _require(bool(reason_codes), "missing_reason_codes", f"{permission_id!r}")
             for code in reason_codes:
                 _require(bool(_REASON_CODE_RE.match(code)), "invalid_reason_code", f"{code!r}")
+
+        if permission_id in _ECONOMY_BOUND_PARAM:
+            bound_param = _ECONOMY_BOUND_PARAM[permission_id]
+            declared = params.get(bound_param)
+            _require(
+                isinstance(declared, int)
+                and not isinstance(declared, bool)
+                and 1 <= declared <= _MAX_ECONOMY_AMOUNT,
+                "invalid_economy_bound",
+                f"{permission_id!r} requires params.{bound_param} as an integer in "
+                f"1..={_MAX_ECONOMY_AMOUNT}, got {declared!r}",
+            )
+        for other_id, other_param in _ECONOMY_BOUND_PARAM.items():
+            if permission_id != other_id and other_param in params:
+                _require(
+                    False,
+                    "invalid_economy_bound",
+                    f"params.{other_param} is only valid for {other_id}",
+                )
 
         declarations.append(
             PermissionDeclaration(
@@ -480,6 +553,17 @@ def parse_bundle_manifest_v2(
             "an action stage must not declare consumes",
         )
 
+    supported_platforms = _parse_supported_platforms(
+        raw.get("supported_platforms"), known_custom_platforms=known_custom_platforms
+    )
+    if supported_platforms is not None:
+        for rule in consumes:
+            _require(
+                rule.platform in supported_platforms,
+                "consumes_platform_unsupported",
+                f"consumes platform {rule.platform!r} is not in supported_platforms",
+            )
+
     egress_rules: list[EgressRule] = []
     for entry in raw.get("egress") or []:
         host = entry.get("host", "")
@@ -547,4 +631,5 @@ def parse_bundle_manifest_v2(
         homepage_url=homepage_url,
         notice=notice,
         category=category,
+        supported_platforms=supported_platforms,
     )

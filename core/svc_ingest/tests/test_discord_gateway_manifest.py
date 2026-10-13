@@ -1,10 +1,13 @@
-"""Tests for `bundles.discord_gateway_manifest` -- the seeded Discord gateway ingest bundle."""
+"""Tests for `builtin_handlers.discord_gateway_manifest` -- Discord gateway ingest handler."""
 
 from __future__ import annotations
 
 from flask_core.app_registry import AppRegistry
 
-from bundles.discord_gateway_manifest import DISCORD_GATEWAY_MANIFEST, register_default_bundles
+from builtin_handlers.discord_gateway_manifest import (
+    DISCORD_GATEWAY_MANIFEST,
+    register_default_bundles,
+)
 
 
 class TestRegisterDefaultBundles:
@@ -29,7 +32,7 @@ class TestRegisterDefaultBundles:
         ingest_spec = manifest.stage_specs["ingest"]
         assert ingest_spec.communication_model is None
         assert ingest_spec.consumes == ("discord.message",)
-        assert ingest_spec.entrypoint == "bundles.discord_ingest:normalize"
+        assert ingest_spec.entrypoint == "builtin_handlers.discord_ingest:normalize"
 
     def test_registered_manifest_is_retrievable_from_the_registry(self) -> None:
         registry = AppRegistry()
@@ -46,6 +49,6 @@ class TestRegisterDefaultBundles:
         """
         stages = DISCORD_GATEWAY_MANIFEST["stages"]
         assert DISCORD_GATEWAY_MANIFEST["app_id"] == "waddles.bot.discord.default"
-        assert stages["ingest"]["entrypoint"] == "bundles.discord_ingest:normalize"
+        assert stages["ingest"]["entrypoint"] == "builtin_handlers.discord_ingest:normalize"
         assert stages["ingest"]["consumes"] == ["discord.message"]
         assert "communication_model" not in stages["ingest"]

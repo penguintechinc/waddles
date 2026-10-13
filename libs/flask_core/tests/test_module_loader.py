@@ -38,9 +38,9 @@ EXPECTED_COUNTS = {
     "social": 9,
     "marketing": 3,
     "customer": 5,
-    "core_platform": 14,
+    "core_platform": 18,
 }
-TOTAL_ALL_ENABLED = 35
+TOTAL_ALL_ENABLED = 39
 assert sum(EXPECTED_COUNTS.values()) == TOTAL_ALL_ENABLED  # keep constants honest
 
 

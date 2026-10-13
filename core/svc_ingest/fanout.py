@@ -60,7 +60,7 @@ class _NullInstallationLookup:
     """`InstallationLookup` with no rows.
 
     Every `resolve_apps` call falls straight to the Feature's shipped
-    default (see `bundles/discord_gateway_manifest.py`'s own docstring
+    default (see `builtin_handlers/discord_gateway_manifest.py`'s own docstring
     for why this is today's deliberate MVP scope, not the long-term
     design).
     """

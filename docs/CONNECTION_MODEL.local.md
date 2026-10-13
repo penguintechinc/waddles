@@ -158,3 +158,35 @@ JWT/machine-token on every call, regardless of transport).
 3. Admin UI (Unit G) reuse+approval UX; role-sync worker (Unit F) resolves creds by community
    via `resolve_community_connection()` instead of its current tenant-wide `credential_
    resolver.resolve()` call for Discord's bot token.
+
+---
+
+## Step 1, hub-api half (DONE, `feature/provider-connection-framework`, migration `0058_provider_connections`)
+
+Full guide: [`PROVIDER_CONNECTIONS.md`](PROVIDER_CONNECTIONS.md). What shipped, and where it
+deliberately differs from the sketch above:
+
+- **`AdapterSpec` is declarative data; behaviour lives in a `ProviderAdapter` protocol.** The sketch
+  put callables (`authorize_url_builder`, `code_exchange`, ...) inside the spec. Splitting them keeps
+  the spec immutable/serialisable (the install descriptor is derived from it, so a UI/CLI needs no
+  per-provider code) and lets `adapter.py` / `errors.py` / `vault.py` stay Waddles-agnostic for the
+  later `penguin-aaa` extraction. Registry: `services/provider_connections/registry.py`.
+- **API shape.** Shipped: community-scoped CRUD at `/api/v1/communities/{id}/provider-connections`,
+  install descriptors at `/api/v1/connection-providers`, and the two data-plane routes
+  `GET /api/v1/internal/provider-connections` (what to run, no tokens) and
+  `POST /api/v1/internal/communities/{id}/provider-connections/{conn}/resolve` (fresh access token).
+  The redirect-style `authorize` / `callback` / `bind` routes are **not** built here: they belong with
+  the Discord `bot_invite_link` migration (Step 2), which is where a second install kind forces the
+  shape. `installKind` is `credentials` until then.
+- **Internal auth is the machine JWT** (`connections:resolve`, operator-plane `system` tenant), not the
+  `X-Service-Key` the older `connections_internal_bp` uses -- `security.md` requires a JWT on every
+  inter-service call.
+- **Storage reuses layer 2/3** (no new table): `platform_connections` holds the link + the only copy
+  of the token (AES-256-GCM ciphertext); `community_connection_access` carries the per-community
+  `enabled` switch. A tenant's `resource_id` is the Twitch **channel** user id (the token belongs to
+  the **bot**, so the two are independent -- one bot token can serve many channels).
+- **Not folded in yet (Step 2):** the per-community OAuth page (`community_connections.py`, tokens in
+  `platform_integrations`), `tenant_twitch_install.py` / `discord_install_service.py`, the role-sync
+  worker's use of `resolve_community_connection()`, and the Discord adapter.
+- **Paired follow-ups outside hub-api:** `svc-ingest` (Rust) polls the internal list and resolves per
+  connection instead of reading static env; the webui connection UI; the CLI connection commands.

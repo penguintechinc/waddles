@@ -19,6 +19,7 @@ import pytest
 import wit_fake_db
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.kv import validate_key
 
 from app import (
     _KNOWN_COMMANDS,
@@ -1012,3 +1013,472 @@ def test_caller_role_signal_true_from_mod() -> None:
 
 def test_caller_role_signal_false_when_both_false() -> None:
     assert _caller_role_signal({"is_mod": False, "is_broadcaster": False}) is False
+
+
+# -- PII-free logs -- regression: gh-674 (bundle-logs-must-be-pii-free) ----------
+
+#: Lower-case on purpose: chat-typed targets/items are lower-cased before hashing, so a
+#: lower-case sentinel round-trips (actor == target) through every code path below.
+_SENTINEL = "sentinelpii9f3a"
+
+#: Strict per-message allowlist: a log line may carry ONLY these fields. A new field (e.g. a
+#: raw `item=`/`target=`/`actor=`) fails here instead of silently shipping user input to telemetry.
+_ALLOWED_LOG_FIELDS: dict[str, frozenset[str]] = {
+    "inventory.transform matched": frozenset({"command"}),
+    "inventory.dispatch relayed": frozenset({"platform", "command"}),
+    "inventory.dispatch adjusted": frozenset({"command"}),
+    "inventory.dispatch gave": frozenset({"command"}),
+    "inventory.grant_denied": frozenset({"command", "role_signal"}),
+    "inventory.give_denied": frozenset({"reason"}),
+    "inventory.backend_error": frozenset({"op", "error"}),
+    "inventory.cleanup_skipped": frozenset({"row_id", "reason"}),
+    "inventory.decrement_skipped": frozenset({"row_id", "reason"}),
+    "inventory.missing_community": frozenset({"command"}),
+}
+
+
+def _assert_logs_pii_free(host: _FakeHost, *, minimum_lines: int) -> set[str]:
+    """Every captured log line is allow-listed field-by-field and free of the sentinel.
+
+    Asserts a non-empty denominator first -- a check that examined zero log lines proves nothing.
+    Returns the distinct messages seen so callers can prove each branch was exercised.
+    """
+    assert len(host.log_calls) >= minimum_lines
+    for _lvl, message, fields_json in host.log_calls:
+        assert _SENTINEL not in message
+        assert _SENTINEL not in fields_json
+        assert message in _ALLOWED_LOG_FIELDS, f"unexpected log message {message!r}"
+        assert set(json.loads(fields_json)) <= _ALLOWED_LOG_FIELDS[message]
+    return {message for _lvl, message, _f in host.log_calls}
+
+
+def _conflicting_delete(row_id: str, expected_version: int) -> None:
+    raise wit_fake_db.WitDbError(wit_fake_db.Error_Conflict("version mismatch"))
+
+
+def test_transform_logs_never_carry_user_input(fake_host: _FakeHost) -> None:
+    # regression: gh-674
+    for text in (
+        f"!inv {_SENTINEL}",
+        f"!inv give {_SENTINEL} {_SENTINEL}",
+        f"!inv add {_SENTINEL} {_SENTINEL}",
+        f"!inv remove {_SENTINEL} {_SENTINEL}",
+        f"!inventory {_SENTINEL} extra words",
+        f"!inv set {_SENTINEL}",
+        "!inv",
+        "!INVENTORY",
+    ):
+        assert _run(transform(_sample_event(text, is_mod=True, actor=_SENTINEL))) is not None
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=8)
+    assert seen == {"inventory.transform matched"}
+
+
+def test_dispatch_logs_never_carry_user_input_on_any_command(fake_host: _FakeHost) -> None:
+    # regression: gh-674 -- sentinel as actor, item AND target, across every outcome.
+    def go(
+        command: str,
+        *,
+        item: str | None = None,
+        target: str | None = None,
+        role: bool | None = None,
+    ) -> None:
+        envelope = _sample_envelope(
+            "twitch", command, actor=_SENTINEL, item=item, target=target, is_mod=role
+        )
+        _run(dispatch(envelope, {}, http_client=None))
+
+    go("add", item=_SENTINEL, target=_SENTINEL, role=True)
+    go("add", item=_SENTINEL, target=_SENTINEL, role=True)
+    go("list_self")
+    go("list_other", target=_SENTINEL)
+    go("give", item=_SENTINEL, target="other")
+    go("give", item=_SENTINEL, target=_SENTINEL)  # self -> give_denied
+    go("give", item="nothing", target="other")  # insufficient -> give_denied
+    go("remove", item=_SENTINEL, target=_SENTINEL, role=True)  # to zero -> cleanup
+    go("remove", item=_SENTINEL, target=_SENTINEL, role=True)  # nothing left
+    go("add", item=_SENTINEL, target=_SENTINEL, role=False)  # denied
+    go("remove", item=_SENTINEL, target=_SENTINEL)  # denied, no role signal at all
+    go("usage")
+    # cleanup_skipped (conflict on the zero-row delete), then decrement_skipped (stale zero row)
+    go("add", item="x2", target=_SENTINEL, role=True)
+    sys.modules["wit_world"].imports.db.delete = _conflicting_delete
+    go("remove", item="x2", target=_SENTINEL, role=True)
+    go("remove", item="x2", target=_SENTINEL, role=True)
+
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=15)
+    assert seen == {
+        "inventory.dispatch relayed",
+        "inventory.dispatch adjusted",
+        "inventory.dispatch gave",
+        "inventory.grant_denied",
+        "inventory.give_denied",
+        "inventory.cleanup_skipped",
+        "inventory.decrement_skipped",
+    }
+    assert all(_SENTINEL not in call[1] for call in fake_host.kv_calls)
+    assert all(
+        _SENTINEL not in str(row.get("actor_hash", "")) for row in fake_host.db.rows.values()
+    )
+
+
+def test_failure_paths_never_log_user_input(fake_host: _FakeHost) -> None:
+    # regression: gh-674 -- a backend failure whose own exception text echoes user-ish data, a
+    # corrupt directory containing user-ish bytes, and the missing-community guard.
+    fake_host.db.raise_on["insert"] = wit_fake_db.WitDbError(
+        wit_fake_db.Error_Backend(f"detail {_SENTINEL}")
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        _run(
+            dispatch(
+                _sample_envelope(
+                    "twitch", "add", actor=_SENTINEL, item=_SENTINEL, target=_SENTINEL, is_mod=True
+                ),
+                {},
+                http_client=None,
+            )
+        )
+    assert _SENTINEL not in str(excinfo.value)
+
+    fake_host.kv_store[_scoped(_dir_key(_pseudonym(_SENTINEL)))] = ("{" + _SENTINEL).encode()
+    with pytest.raises(RuntimeError):
+        _run(
+            dispatch(_sample_envelope("twitch", "list_self", actor=_SENTINEL), {}, http_client=None)
+        )
+    with pytest.raises(ValueError):
+        _run(
+            dispatch(
+                _sample_envelope("twitch", "list_self", actor=_SENTINEL, community=None),
+                {},
+                http_client=None,
+            )
+        )
+
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=3)
+    assert seen == {"inventory.backend_error", "inventory.missing_community"}
+    errors = [json.loads(f) for _lvl, m, f in fake_host.log_calls if m == "inventory.backend_error"]
+    # `waddle_sdk.db` re-raises the WIT error as its own `DbError`; only that class name is logged.
+    assert errors[0] == {"op": "db_insert", "error": "DbError"}
+    assert errors[1]["op"] == "dir_decode"
+
+
+# -- mod gate: add/remove fail closed, before any kv/db access ----------------------
+
+_NO_GRANT_ROLE = [
+    pytest.param({}, id="no-signal-at-all"),
+    pytest.param({"is_mod": False}, id="mod-false"),
+    pytest.param({"is_broadcaster": False}, id="broadcaster-false"),
+    pytest.param({"is_mod": False, "is_broadcaster": False}, id="both-false"),
+]
+
+
+@pytest.mark.parametrize("verb", ["add", "remove"])
+@pytest.mark.parametrize("role", _NO_GRANT_ROLE)
+def test_grants_are_denied_without_any_kv_or_db_access(
+    verb: str, role: dict[str, bool], fake_host: _FakeHost
+) -> None:
+    result = _run(
+        dispatch(
+            _sample_envelope("twitch", verb, item="fish", target="alice", **role),
+            {},
+            http_client=None,
+        )
+    )
+    assert result.detail == f"{verb}:denied"
+    assert _reply_text(fake_host) == "only moderators/broadcasters can adjust inventories"
+    assert fake_host.kv_calls == []
+    assert fake_host.db.calls == []
+
+
+@pytest.mark.parametrize("verb", ["add", "remove"])
+@pytest.mark.parametrize(
+    "role",
+    [{"is_mod": True}, {"is_broadcaster": True}, {"is_mod": True, "is_broadcaster": True}],
+)
+def test_either_badge_alone_opens_the_gate(
+    verb: str, role: dict[str, bool], fake_host: _FakeHost
+) -> None:
+    result = _run(
+        dispatch(
+            _sample_envelope("twitch", verb, item="fish", target="alice", **role),
+            {},
+            http_client=None,
+        )
+    )
+    assert result.detail == verb
+
+
+def test_present_but_null_badge_fields_are_denied(fake_host: _FakeHost) -> None:
+    envelope = _sample_envelope("twitch", "add", item="fish", target="alice")
+    envelope.event.payload["is_mod"] = None
+    envelope.event.payload["is_broadcaster"] = None
+    result = _run(dispatch(envelope, {}, http_client=None))
+    assert result.detail == "add:denied"
+    assert fake_host.db.calls == []
+
+
+def test_read_commands_never_need_a_role(fake_host: _FakeHost) -> None:
+    for command, target in (("list_self", None), ("list_other", "alice")):
+        result = _run(
+            dispatch(
+                _sample_envelope("discord", command, target=target, is_mod=False),
+                {},
+                http_client=None,
+            )
+        )
+        assert result.detail == command
+
+
+# -- corrupt store: fail loud on every command, never silently reset -----------------------
+
+_CORRUPT_DIRECTORIES = [
+    pytest.param(b"\xff\xfe", id="not-utf8"),
+    pytest.param(b"{", id="truncated-json"),
+    pytest.param(b"[1, 2]", id="json-array"),
+    pytest.param(b'"text"', id="json-string"),
+    pytest.param(b"null", id="json-null"),
+    pytest.param(b"42", id="json-number"),
+]
+
+
+@pytest.mark.parametrize("payload", _CORRUPT_DIRECTORIES)
+@pytest.mark.parametrize(
+    ("command", "role"),
+    [
+        ("list_self", None),
+        ("list_other", None),
+        ("add", True),
+        ("remove", True),
+        ("give", None),
+    ],
+)
+def test_every_corrupt_directory_shape_fails_loud_and_is_never_overwritten(
+    payload: bytes, command: str, role: bool | None, fake_host: _FakeHost
+) -> None:
+    giver_key = _scoped(_dir_key(_pseudonym("viewer-1")))
+    target_key = _scoped(_dir_key(_pseudonym("alice")))
+    fake_host.kv_store[giver_key] = payload
+    fake_host.kv_store[target_key] = payload
+    envelope = _sample_envelope(
+        "twitch",
+        command,
+        item=None if command.startswith("list") else "fish",
+        target="alice",
+        is_mod=role,
+    )
+
+    with pytest.raises(RuntimeError, match="inventory dir_decode failed"):
+        _run(dispatch(envelope, {}, http_client=None))
+
+    assert "temporarily unavailable" in _reply_text(fake_host)
+    assert len(fake_host.relay_calls) == 1
+    errors = [
+        (lvl, json.loads(f)["op"])
+        for lvl, m, f in fake_host.log_calls
+        if m == "inventory.backend_error"
+    ]
+    assert errors == [(0, "dir_decode")]
+    assert fake_host.kv_store[giver_key] == payload
+    assert fake_host.kv_store[target_key] == payload
+    assert fake_host.db.calls == []
+
+
+def test_directory_with_non_string_row_ids_points_nowhere_and_fails_loud(
+    fake_host: _FakeHost,
+) -> None:
+    fake_host.kv_store[_scoped(_dir_key(_pseudonym("viewer-1")))] = json.dumps({"fish": 5}).encode()
+    with pytest.raises(RuntimeError, match="inventory directory_stale failed"):
+        _run(dispatch(_sample_envelope("twitch", "list_self"), {}, http_client=None))
+    assert "temporarily unavailable" in _reply_text(fake_host)
+
+
+@pytest.mark.parametrize("bad_quantity", ["abc", None], ids=["text", "null"])
+@pytest.mark.parametrize("command", ["list_self", "add"])
+def test_corrupt_quantity_column_raises_instead_of_rendering_garbage(
+    command: str, bad_quantity: object, fake_host: _FakeHost
+) -> None:
+    _run(_grant("add", "fish", "viewer-1"))
+    (row,) = fake_host.db.rows.values()
+    row["quantity"] = bad_quantity
+    relay_before = len(fake_host.relay_calls)
+    with pytest.raises((ValueError, TypeError, RuntimeError)):
+        _run(
+            dispatch(
+                _sample_envelope("twitch", command, item="fish", target="viewer-1", is_mod=True),
+                {},
+                http_client=None,
+            )
+        )
+    assert not any(
+        "fish x" in json.loads(m)["text"] for _p, m in fake_host.relay_calls[relay_before:]
+    )
+
+
+# -- no silent fallback ---------------------------------------------------------------------
+
+
+def test_give_recipient_side_failure_fails_loud_with_no_success_reply(
+    fake_host: _FakeHost,
+) -> None:
+    _run(_grant("add", "fish", "viewer-1"))
+    fake_host.db.raise_on["insert"] = wit_fake_db.WitDbError(wit_fake_db.Error_Backend("down"))
+    relay_before = len(fake_host.relay_calls)
+
+    with pytest.raises(RuntimeError, match="inventory db_insert failed"):
+        _run(
+            dispatch(
+                _sample_envelope("twitch", "give", item="fish", target="alice"),
+                {},
+                http_client=None,
+            )
+        )
+
+    replies = [json.loads(m)["text"] for _p, m in fake_host.relay_calls[relay_before:]]
+    assert len(replies) == 1
+    assert "temporarily unavailable" in replies[0]
+    assert "gave 1" not in replies[0]
+
+
+def test_relay_failure_propagates_and_is_not_logged_as_relayed(fake_host: _FakeHost) -> None:
+    def _boom(provider: str, msg: str) -> None:
+        raise RuntimeError("relay down")
+
+    sys.modules["wit_world"].imports.relay = types.SimpleNamespace(push=_boom)
+    with pytest.raises(RuntimeError, match="relay down"):
+        _run(dispatch(_sample_envelope("twitch", "list_self"), {}, http_client=None))
+    assert not any(m == "inventory.dispatch relayed" for _lvl, m, _f in fake_host.log_calls)
+
+
+def test_missing_community_logs_error_and_touches_no_state(fake_host: _FakeHost) -> None:
+    with pytest.raises(ValueError, match="community"):
+        _run(
+            dispatch(
+                _sample_envelope(
+                    "twitch", "add", item="fish", target="alice", is_mod=True, community=None
+                ),
+                {},
+                http_client=None,
+            )
+        )
+    assert fake_host.kv_calls == []
+    assert fake_host.db.calls == []
+    assert fake_host.relay_calls == []
+    errors = [
+        (lvl, json.loads(f))
+        for lvl, m, f in fake_host.log_calls
+        if m == "inventory.missing_community"
+    ]
+    assert errors == [(0, {"command": "add"})]
+
+
+# -- CRUD edges ---------------------------------------------------------------------------------
+
+
+def test_item_and_target_normalization_collapse_onto_one_row(fake_host: _FakeHost) -> None:
+    _run(_grant("add", "Fish", "@Alice"))
+    _run(_grant("add", "fish", "alice"))
+    assert len(fake_host.db.rows) == 1
+    (row,) = fake_host.db.rows.values()
+    assert (row["item"], row["quantity"]) == ("fish", 2)
+
+
+def test_list_shows_exactly_the_max_without_a_remainder_note(fake_host: _FakeHost) -> None:
+    for i in range(25):
+        _run(_grant("add", f"item{i:02d}", "viewer-1"))
+    _run(dispatch(_sample_envelope("twitch", "list_self"), {}, http_client=None))
+    text = _reply_text(fake_host)
+    assert text.count(" x1") == 25
+    assert "more)" not in text
+
+    _run(_grant("add", "item25", "viewer-1"))
+    _run(dispatch(_sample_envelope("twitch", "list_self"), {}, http_client=None))
+    assert _reply_text(fake_host).endswith("(and 1 more)")
+
+
+def test_communities_never_share_inventory_state(fake_host: _FakeHost) -> None:
+    _run(
+        dispatch(
+            _sample_envelope(
+                "twitch", "add", item="fish", target="alice", is_mod=True, community="comm-1"
+            ),
+            {},
+            http_client=None,
+        )
+    )
+    _run(
+        dispatch(
+            _sample_envelope("twitch", "list_other", target="alice", community="comm-2"),
+            {},
+            http_client=None,
+        )
+    )
+    assert _reply_text(fake_host) == "alice has no items."
+
+
+def test_give_leaves_a_stale_zero_row_listing_clean(fake_host: _FakeHost) -> None:
+    """After giving away the last unit the giver's listing no longer mentions the item."""
+    _run(_grant("add", "fish", "viewer-1"))
+    _run(
+        dispatch(
+            _sample_envelope("twitch", "give", item="fish", target="alice"), {}, http_client=None
+        )
+    )
+    _run(dispatch(_sample_envelope("twitch", "list_self"), {}, http_client=None))
+    assert _reply_text(fake_host) == "viewer-1 has no items."
+
+
+# -- transform(): payload shape + flag gate ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "keys"),
+    [
+        ("!inv", {"command", "channel_id"}),
+        ("!inv alice", {"command", "channel_id", "target"}),
+        ("!inv give sword alice", {"command", "channel_id", "item", "target"}),
+        ("!inventory add sword alice", {"command", "channel_id", "item", "target"}),
+        ("!INV Remove sword alice", {"command", "channel_id", "item", "target"}),
+        ("!inv alice bob", {"command", "channel_id"}),
+        ("!inv set sword", {"command", "channel_id"}),
+    ],
+)
+def test_transform_forwards_only_the_fields_dispatch_needs(
+    text: str, keys: set[str], fake_host: _FakeHost
+) -> None:
+    result = _run(transform(_sample_event(text)))
+    assert result is not None
+    assert set(result.payload) == keys
+
+
+def test_flag_is_checked_by_key_and_defaults_off(fake_host: _FakeHost) -> None:
+    seen: list[tuple[str, bool]] = []
+
+    def _enabled(key: str, default_value: bool) -> bool:
+        seen.append((key, default_value))
+        return False
+
+    sys.modules["wit_world"].imports.flags = types.SimpleNamespace(enabled=_enabled)
+    assert _run(transform(_sample_event("!inv"))) is None
+    assert seen == [("waddles.command-inventory", False)]
+    assert fake_host.kv_calls == [] and fake_host.db.calls == []
+
+
+# -- kv key charset -- regression: gh-631 ---------------------------------------------------------
+
+
+def test_every_kv_key_the_bundle_touches_satisfies_the_host_charset(fake_host: _FakeHost) -> None:
+    # regression: gh-631 -- the host rejects any guest key outside ASCII alnum + `_`/`-`/`.`
+    # (notably `:`). This suite's own kv fake is permissive, so check the keys directly.
+    _run(_grant("add", "fish", "alice"))
+    _run(dispatch(_sample_envelope("twitch", "list_other", target="alice"), {}, http_client=None))
+    _run(_grant("add", "fish", "viewer-1"))
+    _run(
+        dispatch(
+            _sample_envelope("twitch", "give", item="fish", target="alice"), {}, http_client=None
+        )
+    )
+    keys = [call[1] for call in fake_host.kv_calls]
+    assert keys
+    for key in keys:
+        validate_key(key)
+        assert ":" not in key
+    validate_key(_dir_key(_pseudonym("alice")))

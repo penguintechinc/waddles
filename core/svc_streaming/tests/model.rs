@@ -61,11 +61,13 @@ fn all_output_specs() -> Vec<OutputSpec> {
             url_secret_ref: SecretRef::Env {
                 var: "RELAY_URL".into(),
             },
+            profile: None,
         },
         OutputSpec::SrtPush {
             url_secret_ref: SecretRef::File {
                 path: "/secrets/srt-url".into(),
             },
+            profile: None,
         },
         OutputSpec::Hls {
             variant: HlsVariant::Ll,

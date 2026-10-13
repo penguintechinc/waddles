@@ -9,11 +9,20 @@
 # that is a conversation, not an edit.
 #
 # Seeded 2026-08-26 on release/v3.0.X.
-flake8=2000
-shellcheck=5700
-hadolint=120
-golangci-lint=27
-zizmor=21
+#
+# 2026-10-12 re-measure on a clean release/v3.0.X tree (after the flake8 / hadolint /
+# Go-gate debt PRs #828-#830), with scripts/lib/checks.sh no longer treating a
+# crashed scanner as "0 findings". Every ceiling is the real measured value:
+#   flake8 2000 -> 1600, shellcheck 5700 -> 5206, hadolint 120 -> 40,
+#   golangci-lint 27 -> 0 (the 27 was a line-count artifact), zizmor 21 -> 6,
+#   gitleaks 420 -> 415, doc-refs 23 -> 21, govulncheck 2 -> 0.
+# Counts are tool-version sensitive (flake8 7.1.1 / pycodestyle 2.12.1 locally),
+# so pin tool versions when wiring `make lint` into CI.
+flake8=1600
+shellcheck=5206
+hadolint=40
+golangci-lint=0
+zizmor=6
 
 # --- security ---
 bandit=0
@@ -21,12 +30,13 @@ pip-audit=0
 npm-audit=0
 gosec=0
 # core/module_rtc only; disappears with the Rust rewrite at P3.
-govulncheck=2
+govulncheck=0
 # gitleaks scans git HISTORY, so this count cannot fall without rewriting it —
 # the RATCHET line will never fire for this check. Baselined so a NEW committed
 # secret fails the gate, which is the property that matters.
 #
-# The 420 are pre-existing and were triaged, not waved through:
+# The 415 (was 420; 3 findings above that on 2026-10-12 were test fixtures, allowlisted
+# in .gitleaks.toml, then ratcheted) are pre-existing and were triaged, not waved through:
 #   208  curl-auth-header   docs/*.md — `curl -H "Authorization: Bearer …"` examples
 #   196  generic-api-key    same, plus k8s/manifests/secrets.yaml
 #    77  of those in k8s/manifests/secrets.yaml, a dev-defaults file whose values
@@ -34,8 +44,8 @@ govulncheck=2
 #        tree in fa7bad03. Still in history; a separate cleanup decision.
 # Per devops.md the pre-commit hook should use `gitleaks protect --staged`,
 # which checks what you are about to commit rather than all of history.
-gitleaks=420
+gitleaks=415
 
 # Documentation reference gate (scripts/check-doc-refs.sh). Dead repo paths
 # referenced in docs/**/*.md. Seeded 2026-08-29; lower as docs are corrected.
-doc-refs=23
+doc-refs=21

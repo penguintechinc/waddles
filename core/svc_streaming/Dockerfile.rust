@@ -5,10 +5,32 @@
 # build -- this becomes `Dockerfile` once that build is retired (see
 # README.md Container section and issue #287).
 #
+# Three published image variants, one Dockerfile -- select with `--target`:
+#
+#   --target  tag suffix  adds on top of runtime-base             hardware encode (h264/hevc)
+#   cpu       -cpu        nothing                                 none (libx264/libx265)
+#   amd       -amd        libva2 + libva-drm2 + mesa-va-drivers   h264_vaapi, hevc_vaapi (/dev/dri)
+#   nvidia    -nvidia     NVIDIA_DRIVER_CAPABILITIES=...,video    h264_nvenc, hevc_nvenc (NVIDIA runtime)
+#
+# AV1 is CPU-only on every variant: Debian bookworm's ffmpeg 5.1.9 has no
+# av1_nvenc / av1_vaapi. Full AV1-GPU and enhanced-RTMP need an ffmpeg 6.1
+# build -- out of scope here, tracked in core/svc_streaming/README.md.
+#
+# NVIDIA driver libraries (libnvidia-encode, libcuda) are deliberately NOT
+# baked into the nvidia target: they must match the host kernel module, and
+# nvidia-container-toolkit injects the host-matched copies when the pod runs
+# with the NVIDIA runtime and `video` in NVIDIA_DRIVER_CAPABILITIES.
+#
 # Build (context = this directory, not the repo root -- no shared libs to
 # pull in for a Rust crate):
-#   docker build -f Dockerfile.rust -t localhost:32000/waddlebot/svc-streaming:alpha-<epoch> .
+#   docker build -f Dockerfile.rust --target cpu    -t <repo>/svc-streaming:<tag>-cpu    .
+#   docker build -f Dockerfile.rust --target amd    -t <repo>/svc-streaming:<tag>-amd    .
+#   docker build -f Dockerfile.rust --target nvidia -t <repo>/svc-streaming:<tag>-nvidia .
+# Docker builds the LAST stage when --target is omitted, so `cpu` stays last.
 
+# ---------------------------------------------------------------------------
+# builder -- shared by all variants; the binary is identical across variants.
+# ---------------------------------------------------------------------------
 FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
 
 # cmake + a C/C++ compiler are required to build aws-lc-sys -- the
@@ -28,12 +50,17 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
-FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
+# ---------------------------------------------------------------------------
+# runtime-base -- CPU software encoders only. Every variant inherits this.
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime-base
 
 # Debian bookworm's `ffmpeg` package carries libx264/libx265/libsvtav1/libaom
-# encoders out of the box -- the media engine `pipeline::ffmpeg` (S3) shells
-# out to, once implemented. `ca-certificates` for rustls (webpki/native
-# roots) on outbound TLS (reqwest, sea-orm's runtime-tokio-rustls, OTLP).
+# encoders out of the box -- the media engine `pipeline::ffmpeg` shells out
+# to. It also compiles in the h264/hevc nvenc and vaapi *wrappers*; the GPU
+# variants below add the missing user-space *drivers* those wrappers need.
+# `ca-certificates` for rustls (webpki/native roots) on outbound TLS
+# (reqwest, sea-orm's runtime-tokio-rustls, OTLP).
 # Full apt-get upgrade (not just libpcre2-8-0) clears every fixable
 # HIGH/CRITICAL OS-package CVE the pinned debian:bookworm-slim digest
 # still ships (perl/perl-base, libcap, libgnutls, libpcre2-8-0, ...).
@@ -67,3 +94,43 @@ HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
 EXPOSE 8208 9090 1935 9000/udp
 
 ENTRYPOINT ["/app/svc-streaming"]
+
+# ---------------------------------------------------------------------------
+# amd -- VA-API user-space driver for AMD (radeonsi) GPUs. Needs /dev/dri
+# (renderD*) at runtime plus the render group in supplementalGroups; with no
+# device the trial encode fails and the service stays on libx264.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS amd
+
+USER root
+# Versions pinned to the bookworm mirror (same practice as ffmpeg above).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        libva2=2.17.0-1 libva-drm2=2.17.0-1 mesa-va-drivers=22.3.6-1+deb12u2 \
+    && rm -rf /var/lib/apt/lists/*
+# Mesa's shader cache writes under $HOME; the pod runs with a read-only root
+# filesystem and a no-home user, so disable it rather than emit write errors.
+ENV MESA_SHADER_CACHE_DISABLE=true
+USER appuser
+
+LABEL io.waddles.svc-streaming.variant="amd"
+
+# ---------------------------------------------------------------------------
+# nvidia -- NVENC via the NVIDIA container runtime. No driver libs are copied
+# in; the runtime injects host-matched libcuda + libnvidia-encode when the
+# `compute` and `video` capabilities are requested below.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS nvidia
+
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+
+LABEL io.waddles.svc-streaming.variant="nvidia"
+
+# ---------------------------------------------------------------------------
+# cpu -- software encoders only; the general-purpose image and the default
+# target (keep this stage LAST). Identical to runtime-base plus a label.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS cpu
+
+LABEL io.waddles.svc-streaming.variant="cpu"

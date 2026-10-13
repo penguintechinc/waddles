@@ -60,18 +60,144 @@ use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 use bundle_capability_gate::{
-    AppScopedResource, CapabilityGate, Denied, HostInvokeScopeBuilder, PermissionId, ResourceRef,
-    TenantTier,
+    AppScopedResource, CapabilityGate, Denied, EconomyTarget, HostInvokeScopeBuilder,
+    PermissionFamily, PermissionId, Quota, ReputationTarget, ResourceRef, ScopeKind, TenantTier,
 };
 use bundle_host_db::{
     CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
     SchemaCache,
 };
+use bundle_host_economy::{EconomyCaps, EconomyError, EconomyScope, EconomyStore, IdempotencyKey};
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
+use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
+use crate::identity::{
+    self, IdentityError, IdentityScope, IdentityWiring, InvocationIdentity, MAX_MENTION_TOKEN_LEN,
+};
 use crate::license::FeatureGate;
+use crate::stage_metrics::{self, StageMetrics};
+
+/// The durable rolling-24h absolute-delta caps the store enforces for
+/// `reputation.community.write` -- the catalog's own `per_user_daily_abs_max`
+/// (per community, user) and `per_scope_daily_abs_max` (per app across the
+/// community), so the in-memory gate quota and the durable store caps can
+/// never disagree about the ceilings.
+fn reputation_caps() -> ReputationCaps {
+    match PermissionFamily::ReputationCommunityWrite
+        .catalog_entry()
+        .default_quota
+    {
+        Quota::ReputationDelta {
+            per_user_daily_abs_max,
+            per_scope_daily_abs_max,
+            ..
+        } => ReputationCaps {
+            per_user_daily_abs_max,
+            per_scope_daily_abs_max,
+        },
+        // The catalog entry is statically ReputationDelta-shaped (unit-tested
+        // in the gate crate); any other shape denies every write by capping
+        // both at zero rather than guessing a number.
+        _ => ReputationCaps {
+            per_user_daily_abs_max: 0,
+            per_scope_daily_abs_max: 0,
+        },
+    }
+}
+
+/// Maps a store [`ReputationError`] onto the `{code, message}` wire error the
+/// executor decodes back into the WIT `reputation.error` variant
+/// (`bundle_executor::host::stage_next_imports`).
+fn reputation_error_to_host(err: ReputationError) -> HostResultError {
+    if let ReputationError::Backend(detail) = &err {
+        // Detail may carry DB internals; log it, never hand it to a guest.
+        tracing::error!(error = %detail, "reputation store backend error");
+        return denied("backend", "reputation store backend error");
+    }
+    denied(err.wire_code(), err.to_string())
+}
+
+/// The durable rolling-24h aggregate caps the store enforces for a
+/// money-moving economy permission -- the catalog's own
+/// `per_user_daily_abs_max` / `per_scope_daily_abs_max`, so the gate's
+/// in-memory quota and the store's durable caps can never disagree about the
+/// ceilings. (For a wager the store applies them to the stake AND, in its own
+/// window, to the payout it mints.) Any non-`EconomyAmount` shape (a wiring bug, unit-tested away in
+/// the gate crate) caps both at zero, refusing every call rather than guessing.
+fn economy_caps(family: PermissionFamily) -> EconomyCaps {
+    match family.catalog_entry().default_quota {
+        Quota::EconomyAmount {
+            per_user_daily_abs_max,
+            per_scope_daily_abs_max,
+            ..
+        } => EconomyCaps {
+            per_user_daily_max: per_user_daily_abs_max,
+            per_scope_daily_max: per_scope_daily_abs_max,
+        },
+        _ => EconomyCaps {
+            per_user_daily_max: 0,
+            per_scope_daily_max: 0,
+        },
+    }
+}
+
+/// Maps a store [`EconomyError`] onto the `{code, message}` wire error the
+/// executor decodes back into the WIT `economy.error` variant
+/// (`bundle_executor::host::stage_next_economy`). `insufficient_funds` /
+/// `over_cap` carry their number as the bare-decimal message.
+fn economy_error_to_host(err: EconomyError) -> HostResultError {
+    if let EconomyError::Backend(detail) = &err {
+        // Detail may carry DB internals; log it, never hand it to a guest.
+        tracing::error!(error = %detail, "economy store backend error");
+        return denied("backend", "economy store backend error");
+    }
+    denied(err.wire_code(), err.wire_message())
+}
+
+/// Maps an [`IdentityError`] onto the `{code, message}` wire error the
+/// executor decodes back into the WIT `identity.error` variant
+/// (`bundle_executor::host::stage_next_identity`). Messages are the fixed,
+/// PII-free constants of [`IdentityError`]; a backend failure's detail is
+/// logged (by `crate::identity`) and never handed to a guest.
+fn identity_error_to_host(err: IdentityError) -> HostResultError {
+    if let IdentityError::Backend(_) = &err {
+        return denied("backend", "identity store backend error");
+    }
+    denied(err.wire_code(), err.to_string())
+}
+
+/// Reads a required positive-or-zero integer argument as an `i64` -- the
+/// WIT `u64` amounts arrive as JSON numbers; anything non-integer, negative or
+/// above `i64::MAX` (the `BIGINT` balance ceiling) is `invalid_args`.
+fn economy_amount_arg(
+    args: &serde_json::Value,
+    key: &str,
+    min: i64,
+) -> Result<i64, HostResultError> {
+    args.get(key)
+        .and_then(|v| v.as_u64())
+        .and_then(|v| i64::try_from(v).ok())
+        .filter(|v| *v >= min)
+        .ok_or_else(|| {
+            denied(
+                "invalid_args",
+                format!("{key} must be an integer >= {min} and <= {}", i64::MAX),
+            )
+        })
+}
+
+/// Reads a required UUID-string argument.
+fn economy_user_arg(args: &serde_json::Value, key: &str) -> Result<uuid::Uuid, HostResultError> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| denied("invalid_args", format!("{key} must be a UUID string")))
+        .and_then(|s| {
+            uuid::Uuid::parse_str(s)
+                .map_err(|_| denied("invalid_args", format!("{key} must be a UUID string")))
+        })
+}
 
 /// Maps a gate [`Denied`] onto the `{code, message}` shape every `host-call`
 /// error reply carries (spec SS5.4's stable `reason` vocabulary).
@@ -97,7 +223,7 @@ pub trait CapabilityHandler: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, HostResultError>> + Send + 'a>>;
 }
 
-fn denied(code: &str, message: impl Into<String>) -> HostResultError {
+pub(crate) fn denied(code: &str, message: impl Into<String>) -> HostResultError {
     HostResultError {
         code: code.to_string(),
         message: message.into(),
@@ -208,6 +334,32 @@ pub struct DbWiring {
     pub flag: Arc<dyn FeatureGate>,
 }
 
+/// Live wiring for the `reputation` bundle host capability (issue #726):
+/// the durable store plus the opt-in flag. Built once at startup
+/// (`crate::lib::try_build_reputation_wiring`) and cloned (cheap, `Arc`) into
+/// every per-invoke [`StageCapabilities`], like [`DbWiring`]. `None` on the
+/// handler means every `reputation.*` call denies `not_implemented`.
+#[derive(Clone)]
+pub struct ReputationWiring {
+    pub store: Arc<dyn ReputationStore>,
+    /// `crate::license::BUNDLE_REPUTATION_CAPABILITY_FLAG` gate -- OFF denies
+    /// every call `feature_disabled` before the store is touched.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
+/// Live wiring for the `economy` bundle host capability (issue #714): the
+/// durable store plus the opt-in flag. Built once at startup
+/// (`crate::lib::try_build_economy_wiring`) and cloned (cheap, `Arc`) into
+/// every per-invoke [`StageCapabilities`], like [`ReputationWiring`]. `None`
+/// on the handler means every `economy.*` call denies `not_implemented`.
+#[derive(Clone)]
+pub struct EconomyWiring {
+    pub store: Arc<dyn EconomyStore>,
+    /// `crate::license::BUNDLE_ECONOMY_CAPABILITY_FLAG` gate -- OFF denies
+    /// every call `feature_disabled` before the store is touched.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
 /// The real capability implementation this stage wires today, scoped to
 /// exactly one invocation's `(tenant, community, app_id)` -- see the
 /// module doc for why this is constructed per-invoke, never per-connection.
@@ -260,6 +412,28 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// unimplemented-seam capability's fail-closed default in
     /// [`Self::handle`]).
     db: Option<DbWiring>,
+    /// `None` until [`Self::with_reputation`] -- every `reputation.*` call
+    /// denies `not_implemented` in that state (never panics, never a silent
+    /// default balance).
+    reputation: Option<ReputationWiring>,
+    /// `None` until [`Self::with_economy`] -- every `economy.*` call denies
+    /// `not_implemented` in that state (never panics, never a silent default
+    /// balance).
+    economy: Option<EconomyWiring>,
+    /// `None` until [`Self::with_identity`] -- every `identity.*` call denies
+    /// `not_implemented` in that state (never panics, never a default or
+    /// guessed identity).
+    identity: Option<IdentityWiring>,
+    /// The HOST-derived identity facts of THIS invocation (who triggered it,
+    /// which mentions its message carried) -- built by `crate::spine` from the
+    /// event it delivered, never from guest input. Paired with [`Self::identity`]
+    /// by [`Self::with_identity`].
+    invocation_identity: Option<Arc<InvocationIdentity>>,
+    /// The OTel instruments every `host-call` served by this value is timed
+    /// into (`waddles_host_call_latency_seconds`). Always the process-wide
+    /// set in production; tests swap it via `with_stage_metrics` so they can
+    /// read back exactly what this call emitted.
+    stage_metrics: Arc<StageMetrics>,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -297,7 +471,21 @@ impl<K: KvBackend> StageCapabilities<K> {
             egress,
             gate,
             db: None,
+            reputation: None,
+            economy: None,
+            identity: None,
+            invocation_identity: None,
+            stage_metrics: stage_metrics::stage_metrics(),
         }
+    }
+
+    /// Test seam: routes this value's host-call timings into `metrics`
+    /// instead of the process-wide set, so an assertion sees only the calls
+    /// made through this instance.
+    #[cfg(test)]
+    pub(crate) fn with_stage_metrics(mut self, metrics: Arc<StageMetrics>) -> Self {
+        self.stage_metrics = metrics;
+        self
     }
 
     /// Builds the gate's host-only [`bundle_capability_gate::InvokeScope`]
@@ -349,6 +537,604 @@ impl<K: KvBackend> StageCapabilities<K> {
     pub fn with_db(mut self, db: DbWiring) -> Self {
         self.db = Some(db);
         self
+    }
+
+    /// Attaches the `reputation` capability's live wiring -- called once per
+    /// invoke with a clone of the process-wide [`ReputationWiring`].
+    pub fn with_reputation(mut self, reputation: ReputationWiring) -> Self {
+        self.reputation = Some(reputation);
+        self
+    }
+
+    /// Attaches the `economy` capability's live wiring -- called once per
+    /// invoke with a clone of the process-wide [`EconomyWiring`].
+    pub fn with_economy(mut self, economy: EconomyWiring) -> Self {
+        self.economy = Some(economy);
+        self
+    }
+
+    /// Attaches the `identity` capability's live wiring plus THIS invocation's
+    /// host-derived identity facts -- called once per invoke with a clone of the
+    /// process-wide [`IdentityWiring`] and an [`InvocationIdentity`] built from
+    /// the event being delivered. The two are inseparable by construction: the
+    /// wiring says HOW to resolve, the invocation says WHO.
+    pub fn with_identity(
+        mut self,
+        identity: IdentityWiring,
+        invocation: Arc<InvocationIdentity>,
+    ) -> Self {
+        self.identity = Some(identity);
+        self.invocation_identity = Some(invocation);
+        self
+    }
+
+    /// `identity.resolve_actor` / `identity.resolve_mention`
+    /// (`wit/waddle-bundle/stage.wit` `interface identity`), carried as
+    /// `capability = db`, `op = "identity.*"` (`penguin-bundle-host`'s closed
+    /// `CapabilityKind` has no identity member; see the WIT doc).
+    ///
+    /// Same fail-loud order as [`Self::handle_economy`]: (1) argument parsing --
+    /// `resolve_mention` needs a bounded, clean `token` string, `resolve_actor`
+    /// takes none (and nothing in `args` can name whose identity to resolve:
+    /// the actor is host-derived); (2) the activation must be community-scoped
+    /// with a resolved numeric tenant AND community; (3) **the gate authorizes
+    /// FIRST** (`identity.resolve`: grant, rate limit, instance policy) so an
+    /// ungranted call reports `not_granted`, never `not_implemented`/
+    /// `feature_disabled`; (4) wiring/flag state; (5) the resolution itself
+    /// ([`identity::resolve_actor`] / [`identity::resolve_mention`]). Scope
+    /// (tenant/community) is always `self`'s host-derived scope, never an
+    /// argument. The success value is `{"user": "<uuid>"}` and nothing else.
+    async fn handle_identity(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        enum Op<'a> {
+            Actor,
+            Mention(&'a str),
+        }
+        let op = match call.op.as_str() {
+            "identity.resolve_actor" => Op::Actor,
+            "identity.resolve_mention" => {
+                let token = call
+                    .args
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .filter(|t| !t.is_empty() && t.len() <= MAX_MENTION_TOKEN_LEN)
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            format!("token must be a string of 1..={MAX_MENTION_TOKEN_LEN} bytes"),
+                        )
+                    })?;
+                Op::Mention(token)
+            }
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("identity op {other:?} not supported"),
+                ))
+            }
+        };
+
+        if self.tenant_id == 0 || self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "identity is community-scoped; this activation has no resolved tenant/community",
+            ));
+        }
+
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
+
+        let Some(wiring) = &self.identity else {
+            return Err(denied(
+                "not_implemented",
+                "identity capability is not provisioned in this deployment \
+                 (no DB reader account configured for the stage)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "identity capability is disabled (waddles.bundle-identity-capability is OFF)",
+            ));
+        }
+        let Some(invocation) = &self.invocation_identity else {
+            return Err(denied(
+                "not_implemented",
+                "this invocation carries no triggering-event identity to resolve",
+            ));
+        };
+
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        let user = match op {
+            Op::Actor => identity::resolve_actor(wiring, invocation, scope).await,
+            Op::Mention(token) => identity::resolve_mention(wiring, invocation, scope, token).await,
+        }
+        .map_err(identity_error_to_host)?;
+        Ok(serde_json::json!({ "user": user.to_string() }))
+    }
+
+    /// `economy.balance` / `economy.wager` / `economy.transfer` /
+    /// `economy.max_bet` / `economy.leaderboard` (`wit/waddle-bundle/stage.wit`
+    /// `interface economy`), carried as `capability = db`, `op = "economy.*"`
+    /// (`penguin-bundle-host`'s closed `CapabilityKind` has no economy member
+    /// yet; see the WIT doc).
+    ///
+    /// Same fail-loud order as [`Self::handle_reputation`]: (1) argument
+    /// parsing -- users must be UUIDs, amounts positive in-range integers (a
+    /// transfer to oneself is malformed); (2) the community must be a real one;
+    /// (3) **the gate authorizes FIRST** with an `EconomyScoped` resource, so
+    /// grant, declared `max_bet`/`max_amount`, the economy's own amount quotas
+    /// (a wager's stake AND its payout -- the mint), instance policy and the
+    /// membership pre-filter (every named user) all run before anything else
+    /// can leak state; (4) wiring/flag state; (5) **actor binding** (money
+    /// movers only): the account whose funds move -- a wager's `user`, a
+    /// transfer's `from` -- MUST be the invocation's authenticated actor
+    /// ([`Self::bind_actor`]: derived host-side from the event, never from an
+    /// argument), else `actor_mismatch`; a bundle can spend only the funds of
+    /// whoever triggered it; (6) an **idempotency key** derived from the event
+    /// id and the mutation's ordinal, so a retried or replayed call credits
+    /// once -- the ordinal ([`InvocationIdentity::reserve_mutation`]) is claimed
+    /// right after argument parsing, before the gate, so it is the call's
+    /// position and no refusal can shift the calls after it; (7) the store, which
+    /// re-verifies membership and enforces the per-call cap -- computed HERE
+    /// from the grant's declared bound clamped to the catalog ceiling, never
+    /// from guest input -- and the durable per-user/per-scope rolling-24h caps
+    /// ([`economy_caps`]) inside its own atomic write. Scope (tenant/community/
+    /// app) is always `self`'s host-derived scope, never an argument.
+    async fn handle_economy(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        // Each op carries exactly the users it names, so an op can never run
+        // against a missing/defaulted user: the parse below either yields every
+        // user an op needs or refuses the call.
+        #[derive(Clone, Copy)]
+        enum Op {
+            Balance(uuid::Uuid),
+            MaxBet(uuid::Uuid),
+            Wager {
+                user: uuid::Uuid,
+                stake: i64,
+                payout: i64,
+            },
+            Transfer {
+                from: uuid::Uuid,
+                to: uuid::Uuid,
+                amount: i64,
+            },
+            Leaderboard(u32),
+        }
+
+        /// A money mover's claimed idempotency slot: the mutation kind, the
+        /// account whose funds it would move, and the `(event_id, ordinal)`
+        /// position it holds among the invocation's mutations (`None` when the
+        /// invocation has no replay-stable event id).
+        struct MutationClaim {
+            kind: &'static str,
+            payer: uuid::Uuid,
+            slot: Option<(String, u32)>,
+        }
+
+        let args = &call.args;
+        let op = match call.op.as_str() {
+            "economy.balance" => Op::Balance(economy_user_arg(args, "user")?),
+            "economy.max_bet" => Op::MaxBet(economy_user_arg(args, "user")?),
+            "economy.wager" => {
+                let user = economy_user_arg(args, "user")?;
+                let stake = economy_amount_arg(args, "stake", 1)?;
+                let payout = economy_amount_arg(args, "payout", 0)?;
+                Op::Wager {
+                    user,
+                    stake,
+                    payout,
+                }
+            }
+            "economy.transfer" => {
+                let from = economy_user_arg(args, "from")?;
+                let to = economy_user_arg(args, "to")?;
+                if from == to {
+                    return Err(denied("invalid_args", "cannot transfer to oneself"));
+                }
+                let amount = economy_amount_arg(args, "amount", 1)?;
+                Op::Transfer { from, to, amount }
+            }
+            "economy.leaderboard" => {
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| (1..=bundle_host_economy::MAX_LEADERBOARD_LIMIT).contains(v))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            format!(
+                                "limit must be 1..={}",
+                                bundle_host_economy::MAX_LEADERBOARD_LIMIT
+                            ),
+                        )
+                    })?;
+                Op::Leaderboard(limit)
+            }
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("economy op {other:?} not supported"),
+                ))
+            }
+        };
+
+        if self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "economy is community-scoped; this activation has no community",
+            ));
+        }
+
+        // A well-formed money mover claims its ordinal NOW, before the gate (or
+        // anything else) can refuse it: the ordinal is the call's POSITION among
+        // the invocation's wager/transfer attempts, so a gate denial that is not
+        // reproduced on a redelivery (an in-memory quota that reset with the
+        // process, a grant or membership that changed) cannot shift the ordinals
+        // of the calls after it -- which would hand a later call another call's
+        // key and let it apply twice. `None` when the invocation has no event id;
+        // that is refused (after the gate) below. The claim also carries the
+        // account whose funds the call would move (a wager's player, a
+        // transfer's sender) -- the one [`Self::bind_actor`] must tie to the
+        // invocation's actor.
+        let claim: Option<MutationClaim> = match op {
+            Op::Wager { user, .. } => Some(("wager", user)),
+            Op::Transfer { from, .. } => Some(("transfer", from)),
+            Op::Balance(_) | Op::MaxBet(_) | Op::Leaderboard(_) => None,
+        }
+        .map(|(kind, payer)| {
+            let slot = self
+                .invocation_identity
+                .as_deref()
+                .and_then(|inv| inv.reserve_mutation(kind))
+                .map(|(event_id, ordinal)| (event_id.to_string(), ordinal));
+            MutationClaim { kind, payer, slot }
+        });
+
+        // `max_bet` describes the WAGER capability's own limit, so it is
+        // authorized under `economy.wager` (carrying no amount: it is rate
+        // limited, not metered); balance/leaderboard are `economy.read`.
+        let (permission, amount, payout, target_user, counterparty) = match op {
+            Op::Balance(user) => (PermissionId::EconomyRead, None, None, Some(user), None),
+            Op::Leaderboard(_) => (PermissionId::EconomyRead, None, None, None, None),
+            Op::MaxBet(user) => (PermissionId::EconomyWager, None, None, Some(user), None),
+            Op::Wager {
+                user,
+                stake,
+                payout,
+            } => (
+                PermissionId::EconomyWager,
+                Some(stake),
+                Some(payout),
+                Some(user),
+                None,
+            ),
+            Op::Transfer { from, to, amount } => (
+                PermissionId::EconomyTransfer,
+                Some(amount),
+                None,
+                Some(from),
+                Some(to),
+            ),
+        };
+        let family = permission.family();
+        let authorized = self
+            .gate
+            .authorize(
+                &self.gate_scope(),
+                permission,
+                ResourceRef::EconomyScoped(EconomyTarget {
+                    target_user,
+                    counterparty,
+                    amount,
+                    payout,
+                }),
+            )
+            .map_err(denied_from_gate)?;
+
+        let Some(wiring) = &self.economy else {
+            return Err(denied(
+                "not_implemented",
+                "economy capability is not provisioned in this deployment \
+                 (BUNDLE_ECONOMY_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "economy capability is disabled (waddles.bundle-economy-capability is OFF)",
+            ));
+        }
+
+        let scope = EconomyScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        };
+
+        // Actor binding + idempotency key for the money movers. Neither is
+        // optional: with no resolvable actor, or no event to anchor a key to,
+        // the mutation is refused loudly rather than run unbound/unkeyed.
+        let mut reservation: Option<(&InvocationIdentity, &'static str, u32)> = None;
+        let mut idempotency: Option<IdempotencyKey> = None;
+        if let Some(MutationClaim {
+            kind,
+            payer,
+            slot: claimed,
+        }) = claim
+        {
+            self.bind_actor(kind, payer).await?;
+            let (Some(invocation), Some((event_id, ordinal))) =
+                (self.invocation_identity.as_deref(), claimed)
+            else {
+                return Err(denied(
+                    "not_implemented",
+                    "this invocation carries no replay-stable event id; economy mutations cannot be made idempotent",
+                ));
+            };
+            idempotency = Some(
+                IdempotencyKey::for_event(&event_id, kind, ordinal)
+                    .map_err(economy_error_to_host)?,
+            );
+            reservation = Some((invocation, kind, ordinal));
+        }
+
+        let result = match op {
+            Op::Balance(user) => wiring
+                .store
+                .balance(&scope, user)
+                .await
+                .map(|balance| serde_json::json!({ "balance": balance })),
+            Op::MaxBet(user) => {
+                // The cap is the grant's declared `max_bet` clamped to the
+                // catalog ceiling: the exact number the gate enforces on a
+                // wager's stake.
+                let cap = family
+                    .economy_amount_bound(&authorized.params)
+                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                wiring
+                    .store
+                    .max_bet(&scope, user, cap)
+                    .await
+                    .map(|max_bet| serde_json::json!({ "max_bet": max_bet }))
+            }
+            Op::Wager {
+                user,
+                stake,
+                payout,
+            } => {
+                let cap = family
+                    .economy_amount_bound(&authorized.params)
+                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                let key = idempotency
+                    .as_ref()
+                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
+                wiring
+                    .store
+                    .wager(&scope, user, stake, payout, cap, economy_caps(family), key)
+                    .await
+                    .map(|balance| serde_json::json!({ "balance": balance }))
+            }
+            Op::Transfer { from, to, amount } => {
+                let cap = family
+                    .economy_amount_bound(&authorized.params)
+                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                let key = idempotency
+                    .as_ref()
+                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
+                wiring
+                    .store
+                    .transfer(&scope, from, to, amount, cap, economy_caps(family), key)
+                    .await
+                    .map(|()| serde_json::json!({}))
+            }
+            Op::Leaderboard(limit) => wiring.store.leaderboard(&scope, limit).await.map(|rows| {
+                serde_json::json!({
+                    "entries": rows
+                        .into_iter()
+                        .map(|r| serde_json::json!({
+                            "user": r.user.to_string(),
+                            "balance": r.balance,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            }),
+        };
+        // A backend failure is INDETERMINATE (it may have committed before the
+        // connection died): give the ordinal back so the guest's retry of the
+        // same call presents the SAME key and is applied at most once. Every
+        // definitive outcome (applied or refused) keeps its ordinal.
+        if let (Some((invocation, kind, ordinal)), Err(EconomyError::Backend(_))) =
+            (reservation, &result)
+        {
+            invocation.release_mutation(kind, ordinal);
+        }
+        result.map_err(economy_error_to_host)
+    }
+
+    /// Binds an economy money mover to the invocation's authenticated actor:
+    /// resolves the TRIGGERING actor host-side ([`identity::resolve_actor`]
+    /// over the event the stage delivered -- no argument can name whose
+    /// identity it is) and requires `named`, the account whose funds the call
+    /// would move (a wager's player, a transfer's sender), to be that actor.
+    ///
+    /// Without this a bundle could pass any member's UUID as the payer and move
+    /// THEIR funds (theft). It deliberately does not consult the `identity`
+    /// capability's flag or the bundle's `identity.resolve` grant: this is a
+    /// platform guarantee about whose money a bundle may move, not a
+    /// bundle-facing feature. Fail-closed at every step: no identity wiring or
+    /// invocation facts (`not_implemented`), an unresolvable actor (the
+    /// identity wire code -- `not_linked`, `not_a_member`, ...), a different
+    /// account (`actor_mismatch`). Logs carry UUIDs only.
+    async fn bind_actor(&self, op: &'static str, named: uuid::Uuid) -> Result<(), HostResultError> {
+        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
+            identity::record_actor_binding(op, "unwired");
+            return Err(denied(
+                "not_implemented",
+                "economy mutations are bound to the invocation's actor, but this deployment has \
+                 no identity wiring (no DB reader account configured for the stage)",
+            ));
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        let actor = match identity::resolve_actor(wiring, invocation, scope).await {
+            Ok(actor) => actor,
+            Err(e) => {
+                identity::record_actor_binding(op, e.wire_code());
+                return Err(identity_error_to_host(e));
+            }
+        };
+        if actor != named {
+            identity::record_actor_binding(op, "mismatch");
+            tracing::warn!(
+                op,
+                tenant_id = self.tenant_id,
+                community_id = self.community_id,
+                app_id = %self.app_id,
+                actor = %actor,
+                named = %named,
+                "economy mutation refused: the named account is not the invocation's actor"
+            );
+            return Err(denied(
+                "actor_mismatch",
+                "an economy mutation may only move the funds of the account that triggered this invocation",
+            ));
+        }
+        identity::record_actor_binding(op, "bound");
+        Ok(())
+    }
+
+    /// `reputation.get` / `reputation.adjust` (`wit/waddle-bundle/stage.wit`
+    /// `interface reputation`), carried as `capability = db`,
+    /// `op = "reputation.*"` (`penguin-bundle-host`'s closed `CapabilityKind`
+    /// has no reputation member yet; see the WIT doc).
+    ///
+    /// Order is load-bearing and fail-loud at every step: (1) argument
+    /// parsing -- `user` must be a UUID, `delta` a non-zero in-range i32 (a
+    /// zero delta consumes no quota yet would append a ledger row per call),
+    /// `reason` a machine code; (2) the community must be a real one (a tenant-wide
+    /// `community_id == 0` activation has no community to score in); (3)
+    /// **the gate authorizes FIRST** with a `ReputationScoped` resource, so
+    /// grant, declared delta bounds, per-call/per-user/per-scope quotas,
+    /// instance policy and the membership pre-filter all run before anything
+    /// else can leak state (an ungranted call reports `not_granted`, never
+    /// `not_implemented`/`feature_disabled`); (4) wiring/flag state; (5) the
+    /// store, which re-verifies membership and the durable per-user and
+    /// per-scope daily caps inside its own transaction. Scope (tenant/community/app) is always
+    /// `self`'s host-derived scope, never an argument.
+    async fn handle_reputation(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let is_adjust = match call.op.as_str() {
+            "reputation.get" => false,
+            "reputation.adjust" => true,
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("reputation op {other:?} not supported"),
+                ))
+            }
+        };
+
+        let user = call
+            .args
+            .get("user")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| denied("invalid_args", "user must be a UUID string"))
+            .and_then(|s| {
+                uuid::Uuid::parse_str(s)
+                    .map_err(|_| denied("invalid_args", "user must be a UUID string"))
+            })?;
+        let (delta, reason) = if is_adjust {
+            let delta = call
+                .args
+                .get("delta")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or_else(|| denied("invalid_args", "delta must be an i32"))?;
+            bundle_host_reputation::validate_delta(delta).map_err(reputation_error_to_host)?;
+            let reason = call
+                .args
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| denied("invalid_args", "reason must be a string"))?;
+            bundle_host_reputation::validate_reason(reason).map_err(reputation_error_to_host)?;
+            (Some(delta), Some(reason))
+        } else {
+            (None, None)
+        };
+
+        if self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "reputation is community-scoped; this activation has no community",
+            ));
+        }
+
+        let permission = if is_adjust {
+            PermissionId::ReputationCommunityWrite
+        } else {
+            PermissionId::ReputationRead
+        };
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                permission,
+                ResourceRef::ReputationScoped(ReputationTarget {
+                    target_user: user,
+                    scope_kind: ScopeKind::Community,
+                    delta,
+                }),
+            )
+            .map_err(denied_from_gate)?;
+
+        let Some(wiring) = &self.reputation else {
+            return Err(denied(
+                "not_implemented",
+                "reputation capability is not provisioned in this deployment \
+                 (BUNDLE_REPUTATION_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "reputation capability is disabled (waddles.bundle-reputation-capability is OFF)",
+            ));
+        }
+
+        let scope = ReputationScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        };
+        let balance = match (delta, reason) {
+            (Some(delta), Some(reason)) => {
+                wiring
+                    .store
+                    .adjust(&scope, user, delta, reason, reputation_caps())
+                    .await
+            }
+            _ => wiring.store.get(&scope, user).await,
+        }
+        .map_err(reputation_error_to_host)?;
+        Ok(serde_json::json!({ "balance": balance }))
     }
 
     /// `http.send` (`wit/waddle-bundle/stage.wit` `interface http`) --
@@ -921,71 +1707,109 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
         call: HostCallBody,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, HostResultError>> + Send + 'a>> {
         Box::pin(async move {
-            match call.capability {
-                CapabilityKind::Clock => self.handle_clock(&call.op),
-                CapabilityKind::Context => self.handle_context(),
-                CapabilityKind::Log => self.handle_log(&call.args),
-                CapabilityKind::Kv => self.handle_kv(&call).await,
-                // Gate call FIRST (spec SS5, PR #433): the classified
-                // `NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp`
-                // permission must be authorized before the request ever
-                // reaches the shared `EgressGuard` (module doc) -- a
-                // granted call still passes through the guard's own
-                // allowlist/DNS-pinning/redirect-recheck/SSRF checks
-                // (`self.handle_http`), which are enforced regardless of
-                // grant status.
-                CapabilityKind::Http => {
-                    let host = extract_http_host(&call.args).ok_or_else(|| {
-                        denied("invalid_args", "http.send requires a 'url' string")
-                    })?;
-                    self.gate
-                        .authorize(
-                            &self.gate_scope(),
-                            classify_net_http_permission(&host),
-                            ResourceRef::AppScoped(AppScopedResource::None),
-                        )
-                        .map_err(denied_from_gate)?;
-                    self.handle_http(&call.args).await
-                }
-                // `db` is wired to `bundle_host_db::DbHost` (PR #498) --
-                // `handle_db` itself gate-checks FIRST (spec SS5) before
-                // consulting its own feature-flag/wiring state.
-                CapabilityKind::Db => self.handle_db(&call).await,
-                // `enabled` is wired to a real `penguin_licensing::
-                // LicenseClient` (`crate::license::resolve_flag`) -- see
-                // that module's doc for the fallback semantics (live ->
-                // cached -> caller default, never an error). `tier` is
-                // not wired in this landing. `handle_flags` itself
-                // gate-checks FIRST (spec SS5).
-                CapabilityKind::Flags => self.handle_flags(&call).await,
-                // Spec §6.5: "Capability: granted only to action-stage
-                // bundles" -- never granted to a process-stage bundle at
-                // all. The gate is still consulted first for uniform audit
-                // (module doc), but this arm never trusts a `Granted`
-                // outcome alone: even if a grant somehow existed (a
-                // misconfiguration this stage's own manifest/linker should
-                // never produce), the hard denial below still fires --
-                // belt-and-suspenders against ever running relay
-                // process-side.
-                CapabilityKind::Relay => {
-                    let provider = call
-                        .args
-                        .get("provider")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let _ = self.gate.authorize(
+            let (capability, op) = stage_metrics::host_call_labels(call.capability, &call.op);
+            let started = std::time::Instant::now();
+            let outcome = self.dispatch(call).await;
+            let result =
+                stage_metrics::host_call_result(outcome.as_ref().err().map(|e| e.code.as_str()));
+            self.stage_metrics
+                .record_host_call(capability, op, result, started.elapsed());
+            outcome
+        })
+    }
+}
+
+impl<K: KvBackend> StageCapabilities<K> {
+    /// Routes one `host-call` to its capability arm. Split out of
+    /// [`CapabilityHandler::handle`] so that wrapper can time the whole call
+    /// (early `?` returns included) and label its outcome without every arm
+    /// touching telemetry; routing and behavior are unchanged.
+    async fn dispatch(&self, call: HostCallBody) -> Result<serde_json::Value, HostResultError> {
+        match call.capability {
+            CapabilityKind::Clock => self.handle_clock(&call.op),
+            CapabilityKind::Context => self.handle_context(),
+            CapabilityKind::Log => self.handle_log(&call.args),
+            CapabilityKind::Kv => self.handle_kv(&call).await,
+            // Gate call FIRST (spec SS5, PR #433): the classified
+            // `NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp`
+            // permission must be authorized before the request ever
+            // reaches the shared `EgressGuard` (module doc) -- a
+            // granted call still passes through the guard's own
+            // allowlist/DNS-pinning/redirect-recheck/SSRF checks
+            // (`self.handle_http`), which are enforced regardless of
+            // grant status.
+            CapabilityKind::Http => {
+                let host = extract_http_host(&call.args)
+                    .ok_or_else(|| denied("invalid_args", "http.send requires a 'url' string"))?;
+                self.gate
+                    .authorize(
                         &self.gate_scope(),
-                        PermissionId::ChatSend(provider),
+                        classify_net_http_permission(&host),
                         ResourceRef::AppScoped(AppScopedResource::None),
-                    );
-                    Err(denied(
+                    )
+                    .map_err(denied_from_gate)?;
+                self.handle_http(&call.args).await
+            }
+            // `db` is wired to `bundle_host_db::DbHost` (PR #498) --
+            // `handle_db` itself gate-checks FIRST (spec SS5) before
+            // consulting its own feature-flag/wiring state.
+            //
+            // `reputation.*` ops (issue #726) ride the same wire kind
+            // (`CapabilityKind` is closed in penguin-bundle-host) and are
+            // dispatched on the op prefix BEFORE the `storage.tables`
+            // path: they carry their own gate permission
+            // (`reputation.read`/`reputation.community.write`), never
+            // `storage.tables`.
+            CapabilityKind::Db if call.op.starts_with("reputation.") => {
+                self.handle_reputation(&call).await
+            }
+            // `economy.*` ops (issue #714) likewise: own gate permissions
+            // (`economy.read`/`economy.wager`/`economy.transfer`), own
+            // handler, never the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("economy.") => {
+                self.handle_economy(&call).await
+            }
+            // `identity.*` ops likewise: own gate permission
+            // (`identity.resolve`), own handler, never the
+            // `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("identity.") => {
+                self.handle_identity(&call).await
+            }
+            CapabilityKind::Db => self.handle_db(&call).await,
+            // `enabled` is wired to a real `penguin_licensing::
+            // LicenseClient` (`crate::license::resolve_flag`) -- see
+            // that module's doc for the fallback semantics (live ->
+            // cached -> caller default, never an error). `tier` is
+            // not wired in this landing. `handle_flags` itself
+            // gate-checks FIRST (spec SS5).
+            CapabilityKind::Flags => self.handle_flags(&call).await,
+            // Spec §6.5: "Capability: granted only to action-stage
+            // bundles" -- never granted to a process-stage bundle at
+            // all. The gate is still consulted first for uniform audit
+            // (module doc), but this arm never trusts a `Granted`
+            // outcome alone: even if a grant somehow existed (a
+            // misconfiguration this stage's own manifest/linker should
+            // never produce), the hard denial below still fires --
+            // belt-and-suspenders against ever running relay
+            // process-side.
+            CapabilityKind::Relay => {
+                let provider = call
+                    .args
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let _ = self.gate.authorize(
+                    &self.gate_scope(),
+                    PermissionId::ChatSend(provider),
+                    ResourceRef::AppScoped(AppScopedResource::None),
+                );
+                Err(denied(
                         "not_granted",
                         "relay is an action-stage-only capability, never granted to a process-stage bundle",
                     ))
-                }
             }
-        })
+        }
     }
 }
 
@@ -1793,6 +2617,109 @@ mod tests {
         assert_eq!(err.code, "unknown_op");
     }
 
+    /// Builds an isolated OTel harness plus a `StageMetrics` on it, so a
+    /// test reads back exactly the host calls made through the capability
+    /// set it injects the metrics into.
+    fn isolated_metrics() -> (
+        crate::stage_metrics::test_support::Harness,
+        Arc<StageMetrics>,
+    ) {
+        let harness = crate::stage_metrics::test_support::Harness::new();
+        let metrics = Arc::new(StageMetrics::new(&harness.meter()));
+        (harness, metrics)
+    }
+
+    #[tokio::test]
+    async fn host_calls_are_timed_per_capability_op_and_result() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps().with_stage_metrics(metrics);
+
+        c.handle(call(
+            CapabilityKind::Clock,
+            "now-rfc3339",
+            serde_json::json!({}),
+        ))
+        .await
+        .expect("clock succeeds");
+        c.handle(call(
+            CapabilityKind::Clock,
+            "now-rfc3339",
+            serde_json::json!({}),
+        ))
+        .await
+        .expect("clock succeeds");
+        c.handle(call(CapabilityKind::Context, "get", serde_json::json!({})))
+            .await
+            .expect("context succeeds");
+        // An unknown clock op is an operational error, not a policy denial.
+        c.handle(call(CapabilityKind::Clock, "bogus", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        // `relay` is hard-denied on the process stage -> a policy denial.
+        c.handle(call(CapabilityKind::Relay, "send", serde_json::json!({})))
+            .await
+            .unwrap_err();
+
+        let name = "waddles_host_call_latency_seconds";
+        let count = |capability: &str, op: &str, result: &str| {
+            h.count(
+                name,
+                &[
+                    ("stage", "process"),
+                    ("capability", capability),
+                    ("op", op),
+                    ("result", result),
+                ],
+            )
+        };
+        assert_eq!(count("clock", "now-rfc3339", "ok"), 2.0);
+        assert_eq!(count("context", "get", "ok"), 1.0);
+        assert_eq!(count("clock", "other", "error"), 1.0);
+        assert_eq!(count("relay", "send", "denied"), 1.0);
+        let timed = h.last(name, &[("capability", "clock"), ("op", "now-rfc3339")]);
+        assert!(timed.expect("series exported").sum >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_gate_denial_is_labeled_denied_not_error() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps_denied().with_stage_metrics(metrics);
+        c.handle(call(
+            CapabilityKind::Clock,
+            "now-rfc3339",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(
+            h.count(
+                "waddles_host_call_latency_seconds",
+                &[("capability", "clock"), ("result", "denied")]
+            ),
+            1.0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hostile_op_string_never_becomes_a_label_value() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps().with_stage_metrics(metrics);
+        for i in 0..20 {
+            let hostile = format!("evil-op-{i}; drop table users");
+            c.handle(call(CapabilityKind::Kv, &hostile, serde_json::json!({})))
+                .await
+                .unwrap_err();
+        }
+        let points: Vec<_> = h
+            .points()
+            .into_iter()
+            .filter(|p| p.name == "waddles_host_call_latency")
+            .collect();
+        assert_eq!(points.len(), 1, "20 hostile ops must fold into one series");
+        assert_eq!(points[0].attrs.get("op").map(String::as_str), Some("other"));
+        assert_eq!(points[0].value, 20.0);
+    }
+
     #[tokio::test]
     async fn context_reports_scope_without_secrets() {
         let result = caps()
@@ -2452,3 +3379,15 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "capabilities_reputation_tests.rs"]
+mod reputation_tests;
+
+#[cfg(test)]
+#[path = "capabilities_economy_tests.rs"]
+mod economy_tests;
+
+#[cfg(test)]
+#[path = "capabilities_identity_tests.rs"]
+mod identity_tests;

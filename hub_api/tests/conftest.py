@@ -105,6 +105,16 @@ from services.schema import (
     bind_token_billing_tables,
 )
 
+# Env-gated real-Ollama fixtures (skip unless WADDLE_TEST_OLLAMA_URL is set) -- shared support
+# in <repo>/tests/support; see docs/testing/ollama-realpath.md. Additive re-export only.
+from tests.ollama_support import (  # noqa: E402,F401
+    json_model,
+    ollama_url,
+    safety_model,
+    single_flight,
+    text_model,
+)
+
 #: Matches flask_core.tenancy/authz's own os.getenv("SECRET_KEY", ...) fallback.
 SECRET_KEY = "change-me-in-production"
 
@@ -157,6 +167,22 @@ def bundle_signing_sidecar_upload_mock(monkeypatch: Any) -> Any:
     mock = AsyncMock(return_value="bundles/mock/1/mock.json")
     monkeypatch.setattr(storage_service, "write_bundle_sidecar", mock)
     return mock
+
+
+@pytest.fixture(autouse=True)
+def isolated_token_revocation() -> Any:
+    """Every test gets its own empty process-local JWT revocation store.
+
+    `flask_core.auth.verify_jwt_token` consults a process-wide `TokenRevocation`; a user-wide
+    cutoff written by one test (same `sub`, same second) would otherwise reject the tokens of the
+    next. Yields the live instance so a test can assert on / drive revocations directly.
+    """
+    from flask_core import token_revocation as tr
+
+    instance = tr.TokenRevocation(tr.MemoryBackend())
+    previous = tr.configure_token_revocation(instance)
+    yield instance
+    tr.configure_token_revocation(previous)
 
 
 @pytest.fixture
@@ -1601,6 +1627,8 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("id", Integer, primary_key=True, autoincrement=True),
         Column("tenant_id", Integer, nullable=False),
         Column("name", String(255)),
+        Column("is_active", Boolean),
+        Column("is_public", Boolean),
     )
     # app_source_bindings (migration 0025) -- AUTO-BIND record of which
     # ingest_sources an approved app consumes (services/app_source_

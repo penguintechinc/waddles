@@ -263,6 +263,24 @@ Logs include:
 - Authentication failures
 - Request failures
 
+### Log and error-message safety
+
+Spotify error bodies and `str(httpx.HTTPStatusError)` echo request data (search text, auth
+code, refresh token, device ids), so neither is ever logged or placed in a raised error.
+Failures are described by `providers/_log_safety.py:describe_error` -- exception **type**,
+HTTP **status** and Spotify's machine-readable **reason** enum (accepted only when it is a
+plain identifier, e.g. `invalid_grant`, `PREMIUM_REQUIRED`):
+
+```
+Spotify API error: HTTPStatusError status=403 reason=PREMIUM_REQUIRED
+```
+
+Raised `SpotifyAPIError` / `SpotifyAuthError` carry the same text and are raised
+`from None` so a caller's `exc_info` cannot re-print the chained httpx URL. Importing the
+provider also pins the `httpx` logger to WARNING (its INFO request line contains the full
+URL) and installs a query-stripping filter as a backstop. Regression tests:
+`providers/test_spotify_provider_log_redaction.py`.
+
 ## Future Enhancements
 
 Potential additions:

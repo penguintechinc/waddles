@@ -50,7 +50,7 @@ this fix addresses.
 The EventSub webhook (`POST /eventsub/twitch/webhook`, `eventsub.py`) is a
 genuine inbound HTTP push (not a persistent socket) -- registered as a
 plain Quart route, wired to the same `fanout.fan_out_event` machinery the
-IRC receivers use. `POST /webhook/kick` (`bundles.kick_ingest.
+IRC receivers use. `POST /webhook/kick` (`builtin_handlers.kick_ingest.
 handle_kick_webhook`, gh #287 S10) is the identical shape for Kick's own
 signed mod/sub/stream-lifecycle webhook -- a SEPARATE delivery mechanism
 from `receivers/kick_pusher.py`'s Pusher chat socket, always mounted
@@ -83,7 +83,7 @@ import asyncio
 import logging
 import sys
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 import httpx
@@ -95,12 +95,23 @@ from flask_core.logging_config import StructuredFormatter
 from flask_core.stage_runner import BundlePoller
 from quart import Blueprint, Quart, request
 
-from bundles.discord_gateway_manifest import register_default_bundles as register_discord_bundles
-from bundles.kick_gateway_manifest import register_default_bundles as register_kick_bundles
-from bundles.kick_ingest import handle_kick_webhook
-from bundles.slack_gateway_manifest import register_default_bundles as register_slack_bundles
-from bundles.twitch_gateway_manifest import register_default_bundles as register_twitch_bundles
-from bundles.youtube_live_ingest import register_default_bundles as register_youtube_bundles
+from builtin_handlers.discord_gateway_manifest import (
+    register_default_bundles as register_discord_bundles,
+)
+from builtin_handlers.kick_gateway_manifest import register_default_bundles as register_kick_bundles
+from builtin_handlers.kick_ingest import handle_kick_webhook
+from builtin_handlers.slack_gateway_manifest import (
+    register_default_bundles as register_slack_bundles,
+)
+from builtin_handlers.spectrum_ingest import (
+    register_default_bundles as register_spectrum_bundles,
+)
+from builtin_handlers.twitch_gateway_manifest import (
+    register_default_bundles as register_twitch_bundles,
+)
+from builtin_handlers.youtube_live_ingest import (
+    register_default_bundles as register_youtube_bundles,
+)
 from config import Config
 from eventsub import TwitchEventSubHandler
 from fanout import fan_out_event
@@ -111,6 +122,12 @@ from receivers.kick_pusher import CONSUMES_TAG as KICK_CONSUMES_TAG
 from receivers.kick_pusher import KickPusherReceiver
 from receivers.slack_socket import CONSUMES_TAG as SLACK_CONSUMES_TAG
 from receivers.slack_socket import SlackSocketReceiver
+from receivers.spectrum_org import KIND_EVENTS, KIND_ROSTER, RedisSnapshotStore
+from receivers.spectrum_poll import CONSUMES_TAG as SPECTRUM_CONSUMES_TAG
+from receivers.spectrum_poll import FLAG_KEY as SPECTRUM_FLAG_KEY
+from receivers.spectrum_poll import KIND_FORUM, KIND_LOBBY, SpectrumPollReceiver
+from receivers.spectrum_poll import ORG_CONSUMES_TAG as SPECTRUM_ORG_CONSUMES_TAG
+from receivers.spectrum_poll import ORG_SYNC_FLAG_KEY as SPECTRUM_ORG_SYNC_FLAG_KEY
 from receivers.twitch_irc import CONSUMES_TAG as TWITCH_CONSUMES_TAG
 from receivers.twitch_irc import TwitchIrcReceiver
 from receivers.youtube_live_poll import CONSUMES_TAG as YOUTUBE_CONSUMES_TAG
@@ -468,6 +485,158 @@ def _register_kick_receivers(
     )
 
 
+async def _spectrum_flag_enabled() -> bool:
+    """Evaluate `waddles.spectrum-integration` -- PostHog when connected, else the ENV baseline.
+
+    `flask_core.feature_flags.feature_enabled` degrades to `default` (here the
+    `FLAG_WADDLES_SPECTRUM_INTEGRATION` baseline, default OFF) whenever the flag
+    backend is absent/unreachable, so alpha needs no PostHog.
+    """
+    from flask_core.feature_flags import feature_enabled
+
+    return bool(
+        await feature_enabled(
+            SPECTRUM_FLAG_KEY,
+            tenant=Config.RUNNER_TENANT_SLUG,
+            default=Config.spectrum_flag_baseline(),
+        )
+    )
+
+
+async def _spectrum_org_flag_enabled() -> bool:
+    """Org sync runs only when BOTH `waddles.spectrum-integration` and `...-org-sync` are on.
+
+    The master flag stays the one quick kill-switch for everything Spectrum; the
+    second flag lets an operator run message ingest without roster/event tracking
+    (roster join/leave is the more privacy-sensitive half). ENV baseline for the
+    second flag: `FLAG_WADDLES_SPECTRUM_ORG_SYNC`, default OFF.
+    """
+    from flask_core.feature_flags import feature_enabled
+
+    if not await _spectrum_flag_enabled():
+        return False
+    return bool(
+        await feature_enabled(
+            SPECTRUM_ORG_SYNC_FLAG_KEY,
+            tenant=Config.RUNNER_TENANT_SLUG,
+            default=Config.spectrum_org_flag_baseline(),
+        )
+    )
+
+
+def _register_spectrum_receivers(
+    supervisor: ReceiverSupervisor,
+    *,
+    redis_client: Any,
+    registry: AppRegistry,
+) -> None:
+    """Build + lease-guard + supervise one Spectrum poller per configured source.
+
+    Sources: each forum channel / lobby (message ingest), plus a `roster` and an
+    `events` poller per Spectrum community in `SPECTRUM_ORG_COMMUNITIES` (org
+    sync, snapshot-diffed against a Valkey-backed `RedisSnapshotStore`).
+    One-way (Spectrum -> Waddles) only. Skipped with a loud WARN when sources are
+    configured but the RSI session token is missing (never a silent no-op); skipped
+    quietly (INFO) when nothing is configured. Flag evaluation happens inside each
+    poller so PostHog can flip it at runtime without a restart.
+    """
+    sources = (
+        [(KIND_FORUM, c) for c in Config.SPECTRUM_FORUM_CHANNELS]
+        + [(KIND_LOBBY, c) for c in Config.SPECTRUM_LOBBIES]
+        + [
+            (kind, c)
+            for c in Config.SPECTRUM_ORG_COMMUNITIES
+            for kind in (KIND_ROSTER, KIND_EVENTS)
+        ]
+    )
+    if not sources:
+        logger.system(
+            "svc-ingest starting with no Spectrum receivers -- "
+            "SPECTRUM_FORUM_CHANNELS/SPECTRUM_LOBBIES/SPECTRUM_ORG_COMMUNITIES not configured",
+            action="startup",
+            result="SKIPPED",
+        )
+        return
+    if not Config.spectrum_token_configured():
+        logger.warning(
+            "svc-ingest Spectrum sources configured but the RSI session token env var "
+            f"{Config.SPECTRUM_RSI_TOKEN_REF} is unset -- Spectrum ingest NOT started",
+            action="startup",
+            result="SKIPPED",
+        )
+        return
+
+    replica_id = uuid.uuid4().hex
+    leased_receivers = []
+    snapshot_store = RedisSnapshotStore(
+        redis_client,
+        prefix=f"waddles:t:{Config.RUNNER_TENANT_SLUG}:spectrum:snapshot",
+        ttl_s=Config.SPECTRUM_SNAPSHOT_TTL_S,
+    )
+
+    def _make_on_item(consumes_tag: str) -> Callable[[Mapping[str, Any]], Awaitable[None]]:
+        """Build the `on_item` callback that fans items out under `consumes_tag`."""
+
+        async def _on_spectrum_item(item: Mapping[str, Any]) -> None:
+            """Fan one raw Spectrum item out to every consuming bundle (tenant-wide)."""
+            await fan_out_event(
+                item,
+                consumes_tag=consumes_tag,
+                tenant=Config.RUNNER_TENANT_SLUG,
+                community=None,
+                redis_client=redis_client,
+                registry=registry,
+            )
+
+        return _on_spectrum_item
+
+    for kind, source_id in sources:
+        org = kind in (KIND_ROSTER, KIND_EVENTS)
+        spectrum_receiver = SpectrumPollReceiver(
+            flag_check=_spectrum_org_flag_enabled if org else _spectrum_flag_enabled,
+            snapshot_store=snapshot_store if org else None,
+        )
+        leased = LeasedReceiver(
+            transport=spectrum_receiver,
+            config={  # nosec B105 -- env var name, not a token value
+                "kind": kind,
+                "source_id": source_id,
+                "token_ref": Config.SPECTRUM_RSI_TOKEN_REF,
+                "api_base": Config.SPECTRUM_API_BASE or None,
+                "poll_interval_s": (
+                    Config.SPECTRUM_ORG_POLL_INTERVAL_S if org else Config.SPECTRUM_POLL_INTERVAL_S
+                ),
+                "max_consecutive_errors": Config.SPECTRUM_MAX_CONSECUTIVE_ERRORS,
+                "emit_backlog": (
+                    Config.SPECTRUM_ORG_EMIT_BACKLOG if org else Config.SPECTRUM_EMIT_BACKLOG
+                ),
+                "roster_max_departure_ratio": Config.SPECTRUM_ROSTER_MAX_DEPARTURE_RATIO,
+            },
+            on_item=_make_on_item(SPECTRUM_ORG_CONSUMES_TAG if org else SPECTRUM_CONSUMES_TAG),
+            redis_client=redis_client,
+            provider="spectrum",
+            community=f"{kind}-{source_id}",
+            owner_id=replica_id,
+            ttl_s=Config.SOCKET_LEASE_TTL_S,
+            renew_interval_s=Config.SOCKET_LEASE_RENEW_INTERVAL_S,
+            claim_timeout_s=Config.SOCKET_LEASE_CLAIM_TIMEOUT_S,
+            run_without_lease_on_unavailable=Config.SOCKET_LEASE_RUN_WITHOUT_ON_UNAVAILABLE,
+        )
+        leased_receivers.append(leased)
+        supervisor.register(
+            f"spectrum_poll:{kind}-{source_id}", leased.run, transport=spectrum_receiver
+        )
+
+    app.config["spectrum_leased_receivers"] = leased_receivers
+    logger.system(
+        "svc-ingest registered Spectrum poll receivers",
+        action="startup",
+        replica_id=replica_id,
+        sources=len(sources),
+        org_communities=len(Config.SPECTRUM_ORG_COMMUNITIES),
+    )
+
+
 def _register_twitch_receivers(
     supervisor: ReceiverSupervisor,
     *,
@@ -638,6 +807,7 @@ async def startup() -> None:
     register_discord_bundles(registry)
     register_slack_bundles(registry)
     register_youtube_bundles(registry)
+    register_spectrum_bundles(registry)
     register_kick_bundles(registry)
     register_twitch_bundles(registry)
     app.config["registry"] = registry
@@ -664,6 +834,7 @@ async def startup() -> None:
         _register_slack_receiver(supervisor, redis_client=redis_client, registry=registry)
         _register_youtube_live_receiver(supervisor, redis_client=redis_client, registry=registry)
         _register_kick_receivers(supervisor, redis_client=redis_client, registry=registry)
+        _register_spectrum_receivers(supervisor, redis_client=redis_client, registry=registry)
         _register_twitch_receivers(supervisor, redis_client=redis_client, registry=registry)
         _register_twitch_eventsub(redis_client=redis_client, registry=registry)
         await supervisor.start()
@@ -745,7 +916,7 @@ async def kick_webhook():  # type: ignore[no-untyped-def]
 
     Always mounted (unlike `eventsub_bp`'s Twitch route, whose underlying
     handler is only conditionally built in `startup()`) --
-    `bundles.kick_ingest.handle_kick_webhook` itself returns 503 when
+    `builtin_handlers.kick_ingest.handle_kick_webhook` itself returns 503 when
     `Config.KICK_WEBHOOK_SECRET` is unset, the same graceful
     "not configured yet" posture without needing a second app.config
     presence check here. `redis_client`/`registry` are unconditionally set

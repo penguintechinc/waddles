@@ -27,6 +27,24 @@ Any other grammar-legal verb (`add`/`sub`/`enable`/`disable`/`remove`/`reset`), 
 call combined with another verb (e.g. `!flip heads list`), or a malformed `!flip ...` replies
 with usage text -- never silently dropped.
 
+```text
+!flip                    -> 🪙 viewer-1 flips a coin -- tumbling end over end... HEADS! (flip #1)
+!flip tails              -> 🪙 viewer-1 calls tails... HEADS! Not this time. (flip #2)
+!flip list               -> Flips: 2. Correct calls: 0.
+!coinflip set cooldown 0 (mod) -> coinflip cooldown set to 0s
+!flip set cooldown 5  (viewer) -> only moderators/broadcasters can configure !flip
+```
+
+Platforms: Twitch + Discord (`chat.message`). The mod/broadcaster gate **fails closed** -- with
+no `is_mod`/`is_broadcaster` on the event (Discord today) `set cooldown` is denied.
+
+## Permissions (V2)
+
+| id | why |
+|---|---|
+| `flags.read` | gates the command behind `waddles.command-coinflip` |
+| `storage.kv` | persists per-community coin-flip tallies and state |
+
 ## State (kv, community-scoped only)
 
 All state goes through `waddle_sdk.community_kv`, keyed by `community_id` -- never global or
@@ -36,10 +54,12 @@ username/actor id -- see `src/app.py::_pseudonym()`), ahead of the PII-tokenizat
 
 | Key | Scope | TTL | Purpose |
 |---|---|---|---|
-| `coinflip:lastflip:<pseudonym>` | per-(community, caller) | `cooldown` seconds (`0` = never expires) | Cooldown gate -- presence + elapsed time decide allow/deny. |
-| `coinflip:flips:<pseudonym>` | per-(community, caller) | none | Running total flips, bare + called (`kv.increment`). |
-| `coinflip:wins:<pseudonym>` | per-(community, caller) | none | Running total correct calls (`kv.increment`, called flips only). |
-| `coinflip:config:cooldown` | per-community | none | Admin-configured flip cooldown in seconds. |
+| `coinflip.lastflip.<pseudonym>` | per-(community, caller) | `cooldown` seconds (`0` = never expires) | Cooldown gate -- presence + elapsed time decide allow/deny. |
+| `coinflip.flips.<pseudonym>` | per-(community, caller) | none | Running total flips, bare + called (`kv.increment`). |
+| `coinflip.wins.<pseudonym>` | per-(community, caller) | none | Running total correct calls (`kv.increment`, called flips only). |
+| `coinflip.config.cooldown` | per-community | none | Admin-configured flip cooldown in seconds. |
+
+Colon-free keys (gh-631) -- the `kv` host rejects `:`; `.` only.
 
 ## Deferred to v2 (not stubbed)
 
@@ -80,21 +100,24 @@ docker run --rm --user "$(id -u):$(id -g)" \
       waddle_sdk._component_entry -o /tmp/coinflip.wasm"
 ```
 
+## Behavior notes
+
+- **Fail loud.** A `kv` backend error logs `coinflip.kv_error` at ERROR (error class only),
+  replies "temporarily unavailable", then raises. Corrupt counters/cooldown state self-heal
+  (read as 0 / default) but always log ERROR (`coinflip.*_corrupt`).
+- **PII-free logs.** Logs never include the actor, its pseudonym, or typed text (gh-674: the
+  invalid-cooldown log once echoed the raw typed value).
+
 ## Test
 
 ```bash
 cd bundles/python/coinflip
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e ../../../sdk/waddle-sdk
-pip install pytest==8.3.3 mypy==1.14.1 ruff==0.14.1
-pytest --cov=src --cov-report=term-missing
-mypy --strict src
-ruff check .
+python3 -m pytest --cov=app --cov-branch --cov-report=term-missing
 ```
+
+`tests/conftest.py` wires `src/` and `sdk/waddle-sdk/src` onto `sys.path`; no WASM build or SDK
+install needed.
 
 ## Activation
 
-**Not yet registered** in `bundles/core-bundles.yaml` or wired into
-`bundles/Dockerfile.core-bundles` -- deliberately held back for a batched catalog registration
-pass covering multiple new bundles at once (see this bundle's PR description). The bundle is
-otherwise complete and buildable; the catalog entry/Dockerfile stage is the only remaining step.
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.coinflip`).

@@ -65,7 +65,57 @@ order_by API lands** -- no `!slots leaderboard` command is declared, and nothing
 stand-in stub for it.
 
 Also out of scope: any wallet/points-economy integration (betting an actual balance, redeeming
-payouts) -- the no-real-money-ties rule above, not partially stubbed.
+payouts) -- the no-real-money-ties rule above, not partially stubbed. A shared economy/points
+capability across the gambling bundles is tracked separately (gh-714); until it lands this bundle
+has no balance.
+
+## Examples
+
+```text
+viewer> !slots
+bot>    🎰 viewer spins... 🍒 🍒 🍒 -- triple cherries! You win 5 points! (spin #1)
+viewer> !slots
+bot>    🎰 slow down, viewer! try again in 29s.
+viewer> !slots list
+bot>    Spins: 1. Wins: 1. Best payout: 5 points (Cherry).
+mod>    !slots set cooldown 60
+bot>    slots cooldown set to 60s
+```
+
+## Permissions (V2 structured)
+
+| Id | Why |
+|---|---|
+| `storage.kv` | Persists per-community slot-machine tallies, cooldown timestamps and config. |
+| `flags.read` | Gates the command behind its `waddles.command-slots` feature flag. |
+
+No `db` (`data.tables: []`), no egress. Mod gate: `set cooldown` requires a real `is_mod` or
+`is_broadcaster` `True`; **absent** badge fields (e.g. the Discord normalizer today) are **denied**
+(fail closed) with zero `kv` access. Spinning and `list` are open to any caller.
+
+## Platforms
+
+`consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!slots"]`; replies go
+back to the event's own origin platform + channel. A `community` context is required (no
+tenant-wide fallback): without one `dispatch` logs `slots.missing_community` and raises
+`ValueError`.
+
+## Failure semantics (fail loud)
+
+| Condition | Behavior |
+|---|---|
+| `kv` backend error | ERROR `slots.kv_error` (`op` + exception type only), chat reply, `RuntimeError("slots kv <op> failed: <Type>")`. |
+| Corrupt cooldown config / cooldown timestamp / a counter / the best-payout JSON | ERROR `slots.*_corrupt` (community only) and treated as the default / no cooldown / `0` / "none yet" -- logged loudly, never silent; the next better win rewrites the best-payout record. |
+| Missing `channel_id` / unknown command | `ValueError`. |
+
+The best-payout record only moves on a **strictly better** spin (equal/lower payouts never rewrite
+it).
+
+## Logging / PII
+
+Logs carry only `command`, `op`, `community`, `role_signal`, `platform` and exception type names --
+never typed arguments, grammar text or `event.actor`. Regression:
+`tests/test_backfill.py::test_no_log_line_in_any_flow_contains_typed_text_or_the_raw_actor`.
 
 ## Feature flag
 
@@ -98,18 +148,16 @@ docker run --rm --user "$(id -u):$(id -g)" \
 
 ```bash
 cd bundles/python/slots
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e ../../../sdk/waddle-sdk
-pip install pytest==8.3.3 mypy==1.14.1 ruff==0.14.1
-pytest --cov=src --cov-report=term-missing
-mypy --strict src
-ruff check .
+python3.13 -m venv .venv && . .venv/bin/activate
+pip install pytest==8.3.3 pytest-cov==5.0.0
+pytest --cov=src --cov-branch --cov-report=term-missing   # 100% line + branch
 ```
+
+`tests/conftest.py` puts `src/` and `sdk/waddle-sdk/src` on `sys.path`, so no package install is
+needed. `test_app.py` covers grammar/game logic; `test_backfill.py` adds the mod-gate matrix, reel
+table + payout invariants, cooldown bounds/TTL, corrupt-state healing, PII-free-log regression,
+flag fail-closed and `_entry_wiring`.
 
 ## Activation
 
-**Not yet registered** in `bundles/core-bundles.yaml` or wired into
-`bundles/Dockerfile.core-bundles` -- deliberately held back for a batched catalog
-registration pass covering multiple new bundles at once (see this bundle's PR description).
-The bundle is otherwise complete and buildable; the catalog entry/Dockerfile stage is the only
-remaining step.
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.slots`).

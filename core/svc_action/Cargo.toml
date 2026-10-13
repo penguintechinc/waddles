@@ -3,7 +3,7 @@ name = "svc-action"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Waddles ACTION stage-runner -- terminal pipeline stage: dispatch outcomes to platform senders, retry-with-backoff, audit to action_dispatch_log."
 
@@ -88,7 +88,7 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 # `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # (PR penguintechinc/penguin-libs#93, same commit `core/bundle_executor`
 # pins).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69f25b007e397bcf22c20bee368495f61f0a1b8a", package = "penguin-bundle-host", version = "=0.2.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b063b7ba49f8544f95dba0d23dcbe0e109b7b16c", package = "penguin-bundle-host", version = "=0.2.0" }
 # Spec SS13.5's two flags this crate gates on (`waddles.core.rust-data-plane`,
 # `waddles.core.bundle-egress`) -- see `src/flags.rs`. Pinned to the tip of
 # `release/rust-licensing/v0.1.x`.
@@ -116,7 +116,15 @@ rustls-pki-types = "=1.15.1"
 # operation is envelope-typed (`SpineClient::append` requires a
 # `StageEnvelope`), so this is a second, direct `redis` connection, same
 # crate/feature pins `penguin-spine` itself uses internally.
-redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
+# `script` for the atomic fixed-window counter behind the `dm.send` throttle
+# (`capabilities::INCR_WINDOW_SCRIPT`) -- already compiled in via
+# `bundle-host-kv`'s own redis dependency; declared here too so this crate
+# never relies on cargo feature unification for it.
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "script"] }
+# Unguessable id for each queued Discord op's confirmation handshake
+# (`capabilities::handle_discord_queued_op`'s `op_id`). Already in this
+# crate's lockfile transitively at the same exact version.
+uuid = { version = "=1.26.1", features = ["v4"] }
 # The DB-driven active-bundle loader's shared, read-only Postgres query +
 # diff logic (`src/bundle_loader.rs`) -- a same-repo `path` dependency, NOT
 # a `penguin-libs` git dependency: this schema
@@ -169,7 +177,24 @@ egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
 # `egress_detokenizer::HubClientResolver`.
 hub_client = { path = "../hub_client", version = "=0.1.0" }
 
+# `src/stage_metrics.rs`: OTel instruments built from the global meter
+# provider `penguin-logging` installs (never a provider of its own). Same
+# exact pin `penguin-logging` and the `bundle-host-*` crates use, already
+# resolved in this Cargo.lock.
+opentelemetry = "=0.32.0"
+# `src/metrics_facade.rs`: `bundle-capability-gate` records its audit
+# counters (`waddles_bundle_capability_{denied,authorized}_total`) through
+# the `metrics` facade and installs no recorder itself; this service
+# installs an OTel-backed one so they are no longer silently dropped. Same
+# exact pin the gate crate uses, already resolved in this Cargo.lock.
+metrics = "=0.24.6"
+
 [dev-dependencies]
+# `InMemoryMetricExporter` (the SDK's `testing` feature) so tests read back
+# the metric data points a collector would actually receive -- proving the
+# instruments EMIT, not merely exist. Same exact version `penguin-logging`
+# pins, so no second copy enters the graph.
+opentelemetry_sdk = { version = "=0.32.1", features = ["testing"] }
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
 # `tokio::time::{pause,advance}` for retry-backoff tests. Never linked into
 # the release binary.

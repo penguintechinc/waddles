@@ -38,7 +38,7 @@ needs the env var *names* to build the static env-fallback path, never
 the client id/secret values themselves -- `CommunityTokens` carries no
 client id/secret fields). `refresh_token_env` matches each connector's
 own existing static-credential env var where one already exists:
-`YOUTUBE_REFRESH_TOKEN` (`core/svc_action/bundles/youtube_send_action.py`),
+`YOUTUBE_REFRESH_TOKEN` (`core/svc_action/builtin_handlers/youtube_send_action.py`),
 `KICK_ACCESS_TOKEN` (`kick_send_action.py`'s `access_token_ref` default),
 `DISCORD_BOT_TOKEN`/`SLACK_BOT_TOKEN` (the one static bot credential
 those platforms already use in place of a per-user OAuth refresh token).

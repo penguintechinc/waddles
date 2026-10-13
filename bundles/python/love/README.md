@@ -49,6 +49,36 @@ digest). See `src/app.py::_compute_match()`.
 **No cooldown.** Unlike `duel`/`fish`, there is no per-caller rate-limit: the result is a pure
 function of its inputs, so repeating the same call costs nothing extra and there's nothing to spam.
 
+## Examples
+
+```text
+> !love bob
+💘 alice + bob = 72% -- sparks are flying!
+> !love alice                      (alice typing her own name)
+💘 alice + alice = 100% -- self-love is important!
+> !ship bob carol
+💘 bob + carol = 41% -- a solid maybe -- could go either way!
+> !love list
+You've shipped 2 times; best match: 100%!
+> !love !!!
+I don't know who '!!!' is -- try !love @username.
+```
+
+## Permissions (V2, `bundle.yaml` / `hub-manifest.yaml`)
+
+| id | Why |
+|---|---|
+| `storage.kv` | Persists the caller's own per-community ship counter and best-match high score. |
+| `flags.read` | Reads the `waddles.command-love` feature flag that gates the command. |
+
+No `db`, no egress (`egress: []`, `data.tables: []`). No role/mod gate -- every command is open to
+any chatter, so there is no moderator path to fail closed.
+
+## Platforms
+
+Twitch and Discord `chat.message` events starting with `!love` or `!ship`
+(`stages.process.consumes`); replies relay to the originating platform/channel.
+
 ## State (kv, community-scoped only)
 
 All state goes through `waddle_sdk.community_kv`, keyed by `community_id` -- never global or
@@ -67,6 +97,23 @@ fix after it reached production).
 
 `!ship <a> <b>` writes **no** state at all -- there is no single caller identity to attribute a
 record to (neither named user need be the caller). Deliberate scope boundary, not a missing feature.
+
+## Failure behavior (fail-loud, never silent)
+
+| Condition | Behavior |
+|---|---|
+| `kv` get/set/increment raises | ERROR `love.kv_error` (`op` + WIT error **case name**), chat reply "shipping is temporarily unavailable, try again shortly.", then `RuntimeError`. Exactly one relay -- never a result line; a failed increment writes no best score, a failed best-write leaves the previous best intact. |
+| Corrupt ship counter / best score (non-integer bytes) | ERROR `love.ships_corrupt` / `love.best_corrupt` (community id only); reads as `0`, so the next real pairing overwrites it (self-healing). |
+| Missing `channel_id`, missing community (no tenant-wide fallback), unknown command, missing forwarded target(s) | `ValueError` from `dispatch`; the missing-community case also logs ERROR `love.missing_community`. |
+| `relay.push` fails | Propagates; no success line is logged. |
+
+## Logging / PII
+
+Every log message has a strict field allowlist (command, platform, outcome `detail`, op/error
+case, community id) -- **never** the raw message, `event.actor`, or any typed target (regression:
+gh-674; the suite drives every command and outcome with a sentinel string as both actor and
+target and asserts its absence plus the exact per-message field set). Per-user kv keys are SHA-256
+pseudonyms, never raw names.
 
 ## Deferred to v2 (not stubbed)
 
@@ -128,6 +175,5 @@ ruff check .
 
 ## Activation
 
-**Not yet registered in `bundles/core-bundles.yaml`.** This bundle is built standalone, awaiting
-batched catalog registration alongside other in-flight command bundles -- intentionally out of
-scope for this PR (see PR description).
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.love`, activation target
+`global`); the commands stay dark until `waddles.command-love` is turned on.

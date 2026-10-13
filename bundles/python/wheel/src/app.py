@@ -87,6 +87,10 @@ OPTIONS_KEY = "wheel.options"
 MAX_OPTION_LEN = 200
 MAX_OPTIONS = 100
 
+#: The only sub-command tokens that may appear verbatim in a log line (static, code-owned
+#: names; the empty string is bare `!wheel`, logged as `spin`). Anything else is user input.
+_LOGGED_TOKENS = frozenset({"", "spin", "add", "remove", "list", "reset"})
+
 _USAGE = (
     "Usage: !wheel [spin] | !wheel add <option> | !wheel remove <option> | "
     "!wheel list | !wheel reset"
@@ -106,7 +110,18 @@ class _KvFailure(Exception):
     thin wrapper that does not classify or catch the generated WIT `Err`
     itself, so this bundle reclassifies it at its own call sites -- fail
     loud, never silent (`critical-rules.md` Fail-Loud Code Paths).
+
+    Carries only a static `op` name and the failure's *class name* (`cause`): this is what the
+    ERROR log line reports. Neither the stored option text, the key's contents, nor the host's
+    free-form error message is ever included -- a corrupt blob is made of user-typed options, so
+    echoing a parse/decode message could leak them (PII-free logs, gh-674).
     """
+
+    def __init__(self, op: str, cause: str) -> None:
+        """Record the failing operation name and the cause's class name."""
+        super().__init__(f"{op} failed: {cause}")
+        self.op = op
+        self.cause = cause
 
 
 async def _kv_get(community_id: str, key: str) -> bytes | None:
@@ -114,9 +129,7 @@ async def _kv_get(community_id: str, key: str) -> bytes | None:
     try:
         result = await community_kv.get(community_id, key)
     except Exception as exc:  # noqa: BLE001 - classified like waddle_sdk.db/count (see module docstring)
-        raise _KvFailure(
-            f"kv.get({key!r}) failed: {getattr(exc, 'value', exc)}"
-        ) from exc
+        raise _KvFailure("kv_get", type(getattr(exc, "value", exc)).__name__) from exc
     # `waddle_sdk.community_kv` ships no `py.typed` marker, so mypy sees `Any` here -- cast
     # back to the real contract (`waddle_sdk/community_kv.py`'s own `get()` signature).
     return cast("bytes | None", result)
@@ -126,10 +139,8 @@ async def _kv_set(community_id: str, key: str, value: bytes) -> None:
     """`community_kv.set` (no TTL -- wheel options persist indefinitely), reclassifying `Err`."""
     try:
         await community_kv.set(community_id, key, value, ttl_seconds=0)
-    except Exception as exc:  # noqa: BLE001
-        raise _KvFailure(
-            f"kv.set({key!r}) failed: {getattr(exc, 'value', exc)}"
-        ) from exc
+    except Exception as exc:  # noqa: BLE001 - classified like waddle_sdk.db/count
+        raise _KvFailure("kv_set", type(getattr(exc, "value", exc)).__name__) from exc
 
 
 async def _load_options(community_id: str) -> list[str]:
@@ -146,9 +157,9 @@ async def _load_options(community_id: str) -> list[str]:
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise _KvFailure(f"corrupt wheel options: {exc}") from exc
+        raise _KvFailure("options_decode", type(exc).__name__) from exc
     if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
-        raise _KvFailure("corrupt wheel options: expected a JSON array of strings")
+        raise _KvFailure("options_shape", "NotAStringList")
     return data
 
 
@@ -168,7 +179,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("wheel.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 async def _handle_add(community_id: str, arg: str, event: PlatformEvent) -> str:
@@ -290,10 +301,13 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         try:
             reply = await _route(ctx.community, token, arg, event)
         except _KvFailure as exc:
-            log.error("wheel.kv_failure", error=str(exc))
+            log.error("wheel.kv_failure", op=exc.op, error=exc.cause)
             reply = _KV_ERROR_MSG
 
-    log.info("wheel.transform matched", command=token or "spin")
+    # PII-free: `token` is user-typed (e.g. `!wheel @someone`), so log a static name only --
+    # an unrecognized token is reported as the fixed string "unknown", never echoed.
+    logged_command = (token or "spin") if token in _LOGGED_TOKENS else "unknown"
+    log.info("wheel.transform matched", command=logged_command)
     return PlatformEvent(
         platform=event.platform,
         event_type=event.event_type,

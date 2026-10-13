@@ -11,7 +11,7 @@ action-only upserts with the exact `stages` JSON the task spec calls for;
 own test suite was authored to catch: a bare `... || '...'::jsonb` casts
 only the LAST literal unless the whole concatenation is wrapped in
 `(...)::jsonb`); (c) both action entrypoints resolve to a real,
-already-shipped module file under `core/svc_action/bundles/` (the
+already-shipped module file under `core/svc_action/builtin_handlers/` (the
 "coded but not routable" guard `0014`'s own test establishes); (d) both
 `app_tenant_availability` rows are upserted with `config_defaults.
 bot_token_ref` set directly; (e) both upgrade()/downgrade() are
@@ -33,7 +33,7 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0017_loyalty_shoutout_apps.py"
 )
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_ACTION_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_action" / "bundles"
+_ACTION_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_action" / "builtin_handlers"
 
 LOYALTY_APP_ID = "waddles.community.loyalty.default"
 SHOUTOUT_APP_ID = "waddles.bot.shoutout.default"

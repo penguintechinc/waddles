@@ -45,7 +45,12 @@ pub struct CliConfig {
     #[arg(long, env = "EXECUTOR_MAX_MEMORY_LIMIT_MB", default_value_t = 256)]
     pub executor_max_memory_limit_mb: u32,
 
-    /// Pre-instantiated stores kept warm per loaded bundle (spec SS7.2).
+    /// Max concurrent in-flight instances (invocations) PER loaded bundle
+    /// digest (spec SS7.2) -- enforced by a per-bundle semaphore in
+    /// `crate::invoke::Executor`. Each call still gets a FRESH `Store` (no
+    /// guest state is shared across invokes, so a digest shared by several
+    /// tenants can never leak data between them); what is reused is the
+    /// pre-linked `InstancePre`, so per-call work is instantiation only.
     #[arg(long, env = "EXECUTOR_INSTANCES_PER_BUNDLE", default_value_t = 4)]
     pub executor_instances_per_bundle: u32,
 
@@ -79,12 +84,15 @@ pub struct CliConfig {
     pub executor_fuel_limit_dispatch: u64,
 
     /// Global ceiling on in-flight calls across all loaded bundles (spec
-    /// SS7.2).
+    /// SS7.2) -- enforced by a process-wide semaphore; also the size of the
+    /// slice of the tokio blocking pool guest execution may occupy.
     #[arg(long, env = "EXECUTOR_MAX_CONCURRENT_CALLS", default_value_t = 32)]
     pub executor_max_concurrent_calls: u32,
 
-    /// How long a call waits for a free pooled instance before failing
-    /// `pool_exhausted` (spec SS7.2).
+    /// How long a call waits for a free per-bundle instance slot AND a
+    /// global call slot before failing `pool_exhausted` (spec SS7.2),
+    /// reported as an `EXECUTOR_DEADLINE` error with detail
+    /// `pool_exhausted`.
     #[arg(long, env = "EXECUTOR_POOL_WAIT_MS", default_value_t = 500)]
     pub executor_pool_wait_ms: u64,
 
@@ -251,6 +259,22 @@ pub struct CliConfig {
     /// a failure) when `--max-age` is not passed explicitly.
     #[arg(long, env = "EXECUTOR_GRACE_SECONDS", default_value_t = 60)]
     pub executor_grace_secs: u64,
+
+    /// Ceiling on concurrent WASM JIT compiles (`Component::new`). Each
+    /// compile runs on a tokio blocking-pool thread (never the async
+    /// reactor) and holds one of these permits for its duration, so a burst
+    /// of cold digests from many tenants queues instead of saturating every
+    /// core. Compiles are CPU-heavy (~3-4s for a large component, spec
+    /// SS7.2), hence the small default.
+    #[arg(long, env = "EXECUTOR_MAX_CONCURRENT_COMPILES", default_value_t = 2)]
+    pub executor_max_concurrent_compiles: u32,
+
+    /// On SIGTERM/SIGINT: how long to wait for in-flight invokes/compiles to
+    /// drain before exiting 0 anyway. Keep below the pod's
+    /// `terminationGracePeriodSeconds` (Kubernetes default 30s) so a rollout
+    /// never falls through to SIGKILL.
+    #[arg(long, env = "EXECUTOR_SHUTDOWN_DRAIN_SECONDS", default_value_t = 25)]
+    pub executor_shutdown_drain_secs: u64,
 }
 
 impl CliConfig {
@@ -293,6 +317,8 @@ impl CliConfig {
             executor_self_ping_enabled: false,
             executor_probe_file: PathBuf::from("/tmp/executor-live"),
             executor_grace_secs: 60,
+            executor_max_concurrent_compiles: 2,
+            executor_shutdown_drain_secs: 25,
         }
     }
 
@@ -328,6 +354,18 @@ impl CliConfig {
             return Err(ExecutorError::Config(
                 "EXECUTOR_FUEL_LIMIT_DISPATCH must be > 0".to_string(),
             ));
+        }
+        if self.executor_instances_per_bundle == 0
+            || self.executor_max_concurrent_calls == 0
+            || self.executor_max_concurrent_compiles == 0
+        {
+            return Err(ExecutorError::Config(format!(
+                "EXECUTOR_INSTANCES_PER_BUNDLE ({}), EXECUTOR_MAX_CONCURRENT_CALLS ({}) and \
+                 EXECUTOR_MAX_CONCURRENT_COMPILES ({}) must all be >= 1",
+                self.executor_instances_per_bundle,
+                self.executor_max_concurrent_calls,
+                self.executor_max_concurrent_compiles
+            )));
         }
         if self.executor_wasm_collector != "drc" {
             // spec SS7.2: the collector is part of the artifact's
@@ -475,6 +513,32 @@ mod tests {
         args.extend_from_slice(&["--executor-memory-limit-mb", "512"]);
         let cfg = CliConfig::try_parse_from(args)?;
         assert!(matches!(cfg.validate(), Err(ExecutorError::Config(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn zero_concurrency_knobs_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        for flag in [
+            "--executor-instances-per-bundle",
+            "--executor-max-concurrent-calls",
+            "--executor-max-concurrent-compiles",
+        ] {
+            let mut a = base_args();
+            a.extend([flag, "0"]);
+            let cfg = CliConfig::try_parse_from(a)?;
+            assert!(
+                matches!(cfg.validate(), Err(ExecutorError::Config(_))),
+                "{flag}=0 must be rejected"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrency_and_drain_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = CliConfig::try_parse_from(base_args())?;
+        assert_eq!(cfg.executor_max_concurrent_compiles, 2);
+        assert_eq!(cfg.executor_shutdown_drain_secs, 25);
         Ok(())
     }
 

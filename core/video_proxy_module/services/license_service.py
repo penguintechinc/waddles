@@ -47,18 +47,18 @@ async def is_premium(community_id: str, request_domain: str) -> bool:
     if any(d in domain_lower for d in PREMIUM_BYPASS_DOMAINS):
         logger.info(f"Premium granted for bypass domain: {request_domain}")
         return True
-    
+
     # Development mode: all premium
     if not RELEASE_MODE:
-        logger.info(f"Premium granted (development mode)")
+        logger.info("Premium granted (development mode)")
         return True
-    
+
     # Check license server
     license_key = os.getenv("LICENSE_KEY")
     if not license_key:
         logger.warning("No license key configured")
         return False
-    
+
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
@@ -69,18 +69,18 @@ async def is_premium(community_id: str, request_domain: str) -> bool:
                     "product": "waddlebot-video-proxy",
                 },
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
                 is_valid = data.get("valid", False)
                 tier = data.get("tier", "free")
-                
+
                 logger.info(f"License validation: valid={is_valid}, tier={tier}")
                 return is_valid and tier.lower() == "premium"
             else:
                 logger.error(f"License server error: {response.status_code}")
                 return False
-                
+
     except httpx.TimeoutException:
         logger.error("License server timeout")
         return False
@@ -122,13 +122,13 @@ async def can_add_destination(community_id: str, current_count: int, request_dom
     """
     limits = await get_limits(community_id, request_domain)
     max_destinations = limits["max_destinations"]
-    
+
     can_add = current_count < max_destinations
-    
+
     logger.info(
         f"Destination limit check: {current_count}/{max_destinations} - can_add={can_add}"
     )
-    
+
     return can_add
 
 
@@ -148,11 +148,11 @@ async def can_add_2k_destination(
     """
     limits = await get_limits(community_id, request_domain)
     max_2k = limits["max_2k_destinations"]
-    
+
     can_add = current_2k_count < max_2k
-    
+
     logger.info(
         f"2K destination limit check: {current_2k_count}/{max_2k} - can_add={can_add}"
     )
-    
+
     return can_add

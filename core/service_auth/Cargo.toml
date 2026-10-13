@@ -3,7 +3,7 @@ name = "service_auth"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Client + verifier for hub-api-issued per-service EdDSA machine JWTs (feature/eddsa-machine-jwt). Bootstraps with the pod's projected Kubernetes ServiceAccount token, caches and refreshes the resulting machine JWT, and verifies inbound machine JWTs against a JWKS-shaped trust bundle. SPIFFE/Skauswatch-ready: TrustBundle is a trait so a future JWT-SVID bundle source drops in without touching callers -- see docs comment in src/lib.rs."
 
@@ -41,6 +41,33 @@ jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
 async-trait = "=0.1.89"
+# JWT Phase-0 hardening (`src/jwt_hardening.rs`): the JOSE header is decoded
+# by hand (base64url + JSON) BEFORE `jsonwebtoken` sees the token, so a
+# hostile `alg`/`jku`/`jwk`/`x5u`/`x5c`/`crit`/`kid` is named precisely and
+# never reaches signature work or a trust-bundle lookup. `base64` is already
+# in the lockfile transitively via `jsonwebtoken` (same exact version) --
+# promoting it to a direct dependency adds no new package.
+base64 = "=0.22.1"
+# OpenTelemetry *API* only, metrics feature only (no SDK, no exporter, no
+# trace/logs): the verification counter + latency histogram are recorded
+# against whatever global meter provider the host service installed at
+# startup (`opentelemetry::global::set_meter_provider`); with none
+# installed the instruments are no-ops and verification is unaffected.
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["metrics"] }
+# Only for `test_support` (the in-memory metric capture) -- off by default and
+# never part of a service binary.
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics"], optional = true }
+
+[features]
+default = []
+# Exposes `service_auth::test_support::Capture` to dependents' tests.
+test-support = ["dep:opentelemetry_sdk"]
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+# Test-only: the capturing exporter proves the counter/histogram carry the
+# exact `waddles_jwt_verifications_total{verifier,alg,outcome}` label set the
+# Python verifiers emit. Never linked into a service binary.
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics"] }
+# Test-only: captures rendered log lines to assert no token material is logged.
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }

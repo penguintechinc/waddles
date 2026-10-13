@@ -43,23 +43,25 @@
 //! measured for a large component does not yet get amortized away.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use penguin_bundle_host::wire::{
     ErrorBody, ErrorCode, ExportKind, HelloBody, InvokeBody, LoadBody, LoadedBody, ResultBody,
     SandboxInfo, ShutdownBody, UnloadBody, UnloadedBody,
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tracing::{info, warn};
-use wasmtime::component::Component;
+use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::config::CliConfig;
-use crate::engine::{ticks_for_deadline, Stage};
+use crate::engine::{ticks_for_deadline, StagePre};
 use crate::error::ExecutorError;
 use crate::host::{ExecState, HostBridge};
+use crate::metrics::{self, ExecutorMetrics};
 use crate::signing::PlatformPublicKeys;
 use crate::wire::{Connection, RequestHandler};
 
@@ -112,7 +114,17 @@ struct LoadedBundle {
     /// field, so a second scope loading the same digest under a different
     /// `app_id` string never causes a collision or a silent overwrite.
     app_id: String,
-    component: Component,
+    /// The component pre-linked against the executor's `Linker` once at
+    /// load time (`Linker::instantiate_pre`), so every invoke only pays for
+    /// instantiation, not import resolution/type-checking. A fresh `Store`
+    /// (and therefore fresh guest state) is still created per call -- the
+    /// digest is shared across tenants, so reusing a live instance would
+    /// leak guest state between them.
+    pre: StagePre<ExecState>,
+    /// `EXECUTOR_INSTANCES_PER_BUNDLE` permits: caps concurrent in-flight
+    /// instances of THIS digest so one hot bundle can't consume every
+    /// global call slot.
+    slots: Arc<Semaphore>,
     /// This bundle's effective per-instance linear-memory cap in MiB,
     /// resolved once from the FIRST `load` call for this digest (spec
     /// SS7.3, sandbox layer 8): `body.limits.memory_mb` when the stage
@@ -146,12 +158,33 @@ struct LoadedBundle {
     scopes: HashSet<Scope>,
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+impl<S: ComponentSource> Executor<S> {
+    /// Test seam: occupies one global call slot, standing in for an
+    /// in-flight invoke until the returned permit is dropped.
+    pub(crate) fn test_hold_call_slot(&self) -> OwnedSemaphorePermit {
+        Arc::clone(&self.call_limiter)
+            .try_acquire_owned()
+            .expect("a free global call slot")
+    }
+}
+
+#[cfg(test)]
+impl LoadedBundle {
+    /// Test seam: the shareable parts a hand-built second registry entry
+    /// needs (`component`, pre-linked form, slot semaphore).
+    fn test_parts(&self) -> (StagePre<ExecState>, Arc<Semaphore>) {
+        (self.pre.clone(), Arc::clone(&self.slots))
+    }
+}
+
 /// Runs loaded bundles against real wasmtime instantiation. One per
 /// executor process, shared (behind an `Arc`) across every connection's
 /// read loop.
 pub struct Executor<S: ComponentSource> {
     engine: Engine,
-    linker: wasmtime::component::Linker<ExecState>,
+    linker: Arc<Linker<ExecState>>,
     source: S,
     max_call_timeout_ms: u64,
     /// `EXECUTOR_MEMORY_LIMIT_MB`: the per-instance memory cap a `load`
@@ -175,7 +208,24 @@ pub struct Executor<S: ComponentSource> {
     /// never left to accumulate across the process's lifetime; a digest
     /// already resident in `bundles` never touches this map at all (the
     /// fast path in `on_load`).
-    compiling: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Component>>>>,
+    compiling: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Compiled>>>>,
+    /// `EXECUTOR_MAX_CONCURRENT_CALLS` permits: the process-wide ceiling on
+    /// in-flight invocations across every bundle and tenant. Guest
+    /// execution runs on the tokio blocking pool, so this also bounds how
+    /// many blocking threads guests can occupy.
+    call_limiter: Arc<Semaphore>,
+    /// `EXECUTOR_MAX_CONCURRENT_COMPILES` permits: bounds concurrent WASM
+    /// JIT compiles (each on a blocking-pool thread).
+    compile_limiter: Arc<Semaphore>,
+    max_concurrent_calls: u32,
+    max_concurrent_compiles: u32,
+    instances_per_bundle: usize,
+    /// `EXECUTOR_POOL_WAIT_MS`: how long an invoke queues for a slot before
+    /// failing `pool_exhausted`.
+    pool_wait: Duration,
+    /// Set by [`Executor::drain`] on SIGTERM: new `load`/`invoke` requests
+    /// are refused `SHUTTING_DOWN` while in-flight work finishes.
+    draining: AtomicBool,
     /// Count of `unload` calls naming a scope that was NOT in the digest's
     /// referencing set (a duplicate/retried/orphaned unload, see
     /// [`LoadedBundle::scopes`]'s doc) -- never an error, but never silent
@@ -217,12 +267,37 @@ pub struct Executor<S: ComponentSource> {
     /// `Config` error from this constructor, same as any other malformed
     /// config field.
     signing_keys: PlatformPublicKeys,
+    /// The OTel instruments every load/unload/invoke is recorded into
+    /// (`crate::metrics`). Always the process-wide set in production; tests
+    /// swap it via `with_metrics` so they can read back exactly what this
+    /// executor emitted.
+    metrics: Arc<ExecutorMetrics>,
+}
+
+/// What the single-flight compile produces: the pre-linked component
+/// (`StagePre` owns the compiled `Component`).
+#[derive(Clone)]
+struct Compiled {
+    pre: StagePre<ExecState>,
+}
+
+/// How [`Executor::drain`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainOutcome {
+    /// Every in-flight invoke and compile finished before the deadline.
+    Drained,
+    /// The deadline passed first; these were still running when the
+    /// executor gave up waiting.
+    TimedOut {
+        in_flight_calls: u32,
+        in_flight_compiles: u32,
+    },
 }
 
 impl<S: ComponentSource> Executor<S> {
     pub fn new(cfg: &CliConfig, source: S) -> Result<Self, ExecutorError> {
         let engine = crate::engine::build_engine(cfg)?;
-        let linker = crate::engine::build_linker(&engine)?;
+        let linker = Arc::new(crate::engine::build_linker(&engine)?);
         let ticker_engine = engine.clone();
         let epoch_ticker = tokio::spawn(async move {
             loop {
@@ -242,10 +317,106 @@ impl<S: ComponentSource> Executor<S> {
             fuel_limit_dispatch: cfg.executor_fuel_limit_dispatch,
             bundles: RwLock::new(HashMap::new()),
             compiling: tokio::sync::Mutex::new(HashMap::new()),
+            call_limiter: Arc::new(Semaphore::new(cfg.executor_max_concurrent_calls as usize)),
+            compile_limiter: Arc::new(Semaphore::new(
+                cfg.executor_max_concurrent_compiles as usize,
+            )),
+            max_concurrent_calls: cfg.executor_max_concurrent_calls,
+            max_concurrent_compiles: cfg.executor_max_concurrent_compiles,
+            instances_per_bundle: cfg.executor_instances_per_bundle as usize,
+            pool_wait: Duration::from_millis(cfg.executor_pool_wait_ms),
+            draining: AtomicBool::new(false),
             orphaned_unload_total: AtomicU64::new(0),
             epoch_ticker,
             signing_keys,
+            metrics: metrics::executor_metrics(),
         })
+    }
+
+    /// Test seam: routes this executor's load/unload/invoke metrics into
+    /// `metrics` instead of the process-wide set, so an assertion sees only
+    /// what this instance emitted.
+    #[cfg(test)]
+    pub(crate) fn with_metrics(mut self, metrics: Arc<ExecutorMetrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// Graceful-shutdown drain (SIGTERM): refuses new `load`/`invoke`
+    /// requests (`SHUTTING_DOWN`) and waits up to `deadline` for every
+    /// in-flight invoke and compile to release its permit. Returns
+    /// [`DrainOutcome::TimedOut`] (never an error) when the deadline wins so
+    /// the caller can still exit 0 -- a rollout must not hang on a stuck
+    /// guest. Idempotent.
+    pub async fn drain(&self, deadline: Duration) -> DrainOutcome {
+        self.draining.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        // Acquiring EVERY permit succeeds only once all in-flight holders
+        // have released theirs; held until return, which also blocks any
+        // straggler that slipped past the `draining` check.
+        let calls = tokio::time::timeout(
+            deadline,
+            Arc::clone(&self.call_limiter).acquire_many_owned(self.max_concurrent_calls),
+        )
+        .await;
+        let remaining = deadline.saturating_sub(started.elapsed());
+        let compiles = tokio::time::timeout(
+            remaining,
+            Arc::clone(&self.compile_limiter).acquire_many_owned(self.max_concurrent_compiles),
+        )
+        .await;
+        let drained = matches!((&calls, &compiles), (Ok(Ok(_)), Ok(Ok(_))));
+        // Release anything acquired before sampling, so the in-flight
+        // counts below reflect real holders only.
+        drop((calls, compiles));
+        if drained {
+            return DrainOutcome::Drained;
+        }
+        DrainOutcome::TimedOut {
+            in_flight_calls: self
+                .max_concurrent_calls
+                .saturating_sub(self.call_limiter.available_permits() as u32),
+            in_flight_compiles: self
+                .max_concurrent_compiles
+                .saturating_sub(self.compile_limiter.available_permits() as u32),
+        }
+    }
+
+    /// Waits for a free per-bundle slot and a free global call slot, up to
+    /// `EXECUTOR_POOL_WAIT_MS`. The per-bundle permit is taken first so a
+    /// saturated hot bundle's waiters never sit on global permits other
+    /// bundles need. Failure is `EXECUTOR_DEADLINE` with detail
+    /// `pool_exhausted` (the pinned wire crate has no dedicated code).
+    async fn acquire_call_slots(
+        &self,
+        bundle_slots: Arc<Semaphore>,
+        app_id: &str,
+    ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), ErrorBody> {
+        let acquire = async {
+            let bundle = bundle_slots.acquire_owned().await?;
+            let global = Arc::clone(&self.call_limiter).acquire_owned().await?;
+            Ok::<_, tokio::sync::AcquireError>((bundle, global))
+        };
+        match tokio::time::timeout(self.pool_wait, acquire).await {
+            Ok(Ok(permits)) => Ok(permits),
+            Ok(Err(_closed)) => Err(error_body(
+                ErrorCode::ShuttingDown,
+                "executor is shutting down",
+            )),
+            Err(_elapsed) => {
+                warn!(
+                    app_id,
+                    pool_wait_ms = self.pool_wait.as_millis() as u64,
+                    "no free instance slot within the pool wait; failing pool_exhausted"
+                );
+                let mut body = error_body(
+                    ErrorCode::ExecutorDeadline,
+                    "pool_exhausted: no free instance slot within EXECUTOR_POOL_WAIT_MS",
+                );
+                body.detail = Some("pool_exhausted".to_string());
+                Err(body)
+            }
+        }
     }
 
     /// The `hello` frame this executor opens every connection with (spec
@@ -313,6 +484,14 @@ fn resolve_memory_limit_mb(requested_mb: u32, default_mb: u32, max_mb: u32) -> u
     .max(1)
 }
 
+/// The stable `export` label for an invoke's [`ExportKind`].
+fn export_label(kind: &ExportKind) -> &'static str {
+    match kind {
+        ExportKind::Transform => "transform",
+        ExportKind::Dispatch => "dispatch",
+    }
+}
+
 fn error_body(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
     ErrorBody {
         code,
@@ -352,12 +531,24 @@ fn new_bounded_store(engine: &Engine, exec_state: ExecState, deadline_ms: u64) -
     store
 }
 
-impl<S: ComponentSource> RequestHandler for Executor<S> {
-    async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
+impl<S: ComponentSource> Executor<S> {
+    /// The body of `on_load`, recording the per-outcome counter and the
+    /// per-phase (fetch / verify / precompile) histograms as it goes. The
+    /// `on_load` wrapper adds the end-to-end `total` phase. Behavior is
+    /// unchanged from before the metrics existed.
+    async fn load_inner(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
         let start = std::time::Instant::now();
         let app_id = body.app_id.clone();
         let digest = body.digest.clone();
         let scope: Scope = (body.tenant_id, body.community_id, app_id.clone());
+        if self.draining.load(Ordering::SeqCst) {
+            self.metrics
+                .record_load(metrics::error_code_label(ErrorCode::ShuttingDown));
+            return Err(error_body(
+                ErrorCode::ShuttingDown,
+                "executor is shutting down",
+            ));
+        }
 
         // Content-addressed fast path: a digest already resident (loaded by
         // an earlier scope, possibly under a different `app_id`) is never
@@ -413,6 +604,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     referencing_scopes = existing.scopes.len(),
                     "bundle already resident, scope registered"
                 );
+                self.metrics.record_load("already_resident");
                 return Ok(LoadedBody {
                     app_id,
                     digest,
@@ -442,13 +634,22 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
             )
         };
-        let compiled: Result<&Component, ExecutorError> = cell
+        let compiled: Result<&Compiled, ExecutorError> = cell
             .get_or_try_init(|| async {
-                let (bytes, sidecar_bytes) = self
+                let fetch_started = Instant::now();
+                let fetched = self
                     .source
                     .fetch(&body.component_key, &body.sidecar_key)
-                    .await?;
-                verify_digest(&bytes, &body.digest)?;
+                    .await;
+                self.metrics.record_load_phase(
+                    &app_id,
+                    "fetch",
+                    if fetched.is_ok() { "ok" } else { "error" },
+                    fetch_started.elapsed(),
+                );
+                let (bytes, sidecar_bytes) = fetched?;
+                let verify_started = Instant::now();
+                let verified = verify_digest(&bytes, &body.digest);
 
                 // Artifact integrity (spec SS5.6/Gemini review condition 9):
                 // refuse to instantiate a component whose signed sidecar
@@ -461,20 +662,57 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                 // own doc. Lives inside the single-flight closure so a
                 // concurrent `load` for the same digest never bypasses
                 // verification via the shared `OnceCell`.
-                if !self.signing_keys.is_empty() {
+                let verified = verified.and_then(|()| {
+                    if self.signing_keys.is_empty() {
+                        return Ok(());
+                    }
                     crate::signing::verify_artifact_signature(
                         &sidecar_bytes,
                         &self.signing_keys,
                         &body.app_id,
                         &body.version,
                         &body.digest,
-                    )?;
-                }
+                    )
+                });
+                self.metrics.record_load_phase(
+                    &app_id,
+                    "verify",
+                    if verified.is_ok() { "ok" } else { "error" },
+                    verify_started.elapsed(),
+                );
+                verified?;
 
-                Component::new(&self.engine, &bytes).map_err(ExecutorError::from)
+                // Bounded + off-reactor: the JIT compile is seconds of pure
+                // CPU, so it queues on `compile_limiter` and runs on a
+                // blocking-pool thread -- running it inline would stall the
+                // event loop (and every other tenant's frames) on this pod.
+                let compile_permit = Arc::clone(&self.compile_limiter)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| {
+                        ExecutorError::Wasmtime("executor is shutting down".to_string())
+                    })?;
+                let compile_started = Instant::now();
+                let (engine, linker) = (self.engine.clone(), Arc::clone(&self.linker));
+                let compiled = tokio::task::spawn_blocking(move || {
+                    let _permit = compile_permit;
+                    let component = Component::new(&engine, &bytes)?;
+                    let pre = StagePre::new(linker.instantiate_pre(&component)?)?;
+                    Ok::<_, wasmtime::Error>(Compiled { pre })
+                })
+                .await
+                .map_err(|e| ExecutorError::Wasmtime(format!("compile task failed: {e}")))
+                .and_then(|r| r.map_err(ExecutorError::from));
+                self.metrics.record_load_phase(
+                    &app_id,
+                    "precompile",
+                    if compiled.is_ok() { "ok" } else { "error" },
+                    compile_started.elapsed(),
+                );
+                compiled
             })
             .await;
-        let component = match compiled {
+        let Compiled { pre, .. } = match compiled {
             Ok(c) => c.clone(),
             Err(err) => {
                 // Never leave a failed attempt's slot behind -- a future
@@ -486,6 +724,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     ExecutorError::DigestMismatch { .. } => ErrorCode::DigestMismatch,
                     _ => ErrorCode::LoadFailed,
                 };
+                self.metrics.record_load(metrics::error_code_label(code));
                 return Err(error_body(code, err.to_string()));
             }
         };
@@ -530,7 +769,8 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                 digest.clone(),
                 LoadedBundle {
                     app_id: app_id.clone(),
-                    component,
+                    pre,
+                    slots: Arc::new(Semaphore::new(self.instances_per_bundle)),
                     memory_limit_mb,
                     scopes,
                 },
@@ -544,7 +784,9 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                 "bundle loaded"
             );
         }
+        self.metrics.set_bundles_loaded(bundles.len());
         drop(bundles);
+        self.metrics.record_load("ok");
 
         Ok(LoadedBody {
             app_id,
@@ -557,6 +799,18 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
             exports: vec!["transform".to_string(), "dispatch".to_string()],
         })
     }
+}
+
+impl<S: ComponentSource> RequestHandler for Executor<S> {
+    async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
+        let started = Instant::now();
+        let app_id = body.app_id.clone();
+        let outcome = self.load_inner(body).await;
+        let result = if outcome.is_ok() { "ok" } else { "error" };
+        self.metrics
+            .record_load_phase(&app_id, "total", result, started.elapsed());
+        outcome
+    }
 
     async fn on_unload(&self, body: UnloadBody) -> Result<UnloadedBody, ErrorBody> {
         let scope: Scope = (body.tenant_id, body.community_id, body.app_id.clone());
@@ -566,6 +820,8 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                 if loaded.scopes.remove(&scope) {
                     if loaded.scopes.is_empty() {
                         bundles.remove(&body.digest);
+                        self.metrics.record_unload("evicted");
+                        self.metrics.set_bundles_loaded(bundles.len());
                         info!(
                             app_id = body.app_id,
                             digest = body.digest,
@@ -574,6 +830,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                             "bundle unloaded (last referencing scope)"
                         );
                     } else {
+                        self.metrics.record_unload("still_referenced");
                         info!(
                             app_id = body.app_id,
                             digest = body.digest,
@@ -592,6 +849,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     // `LoadedBundle::scopes`'s doc for the exact failure
                     // mode this prevents).
                     self.orphaned_unload_total.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.record_unload("orphaned");
                     warn!(
                         app_id = body.app_id,
                         digest = body.digest,
@@ -607,10 +865,13 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     digest: body.digest,
                 })
             }
-            None => Err(error_body(
-                ErrorCode::UnknownBundle,
-                format!("digest {} is not loaded", body.digest),
-            )),
+            None => {
+                self.metrics.record_unload("unknown_bundle");
+                Err(error_body(
+                    ErrorCode::UnknownBundle,
+                    format!("digest {} is not loaded", body.digest),
+                ))
+            }
         }
     }
 
@@ -620,115 +881,21 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         invoke_id: u64,
         connection: Arc<Connection>,
     ) -> Result<ResultBody, ErrorBody> {
-        // Fail-closed, digest-only lookup (spec §3): never falls back to
-        // "whatever happens to be loaded under this app_id" -- an
-        // unrecognized digest is always `UNKNOWN_BUNDLE`, even if some OTHER
-        // digest is currently resident for this same `app_id` under a
-        // different scope.
-        let (component, memory_limit_mb) = {
-            let bundles = self.bundles.read().await;
-            let loaded = bundles
-                .get(&body.digest)
-                .ok_or_else(|| error_body(ErrorCode::UnknownBundle, body.digest.clone()))?;
-            (loaded.component.clone(), loaded.memory_limit_mb)
+        let app_id = body.app_id.clone();
+        let export = export_label(&body.export);
+        let _active = self.metrics.invocation_started();
+        let started = Instant::now();
+        let outcome = self.invoke_inner(body, invoke_id, connection).await;
+        let (result, trip) = match &outcome {
+            Ok(_) => ("ok", None),
+            Err(e) => (
+                metrics::error_code_label(e.code),
+                metrics::sandbox_limit(e.code),
+            ),
         };
-
-        let deadline_ms = body.deadline_ms.min(self.max_call_timeout_ms).max(1);
-        let bridge = HostBridge::new(connection);
-        let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
-            .with_memory_limit_mb(memory_limit_mb);
-        let mut store = new_bounded_store(&self.engine, exec_state, deadline_ms);
-        // Connector spec SS0 condition 4: fuel per invocation, budgeted by
-        // world (`transform` vs `dispatch`, see `CliConfig`'s doc), alongside
-        // the epoch deadline armed by `new_bounded_store` above -- never a
-        // replacement for it. The engine was built with `consume_fuel(true)`
-        // (`crate::engine::build_engine`) so a `Store` starts at zero fuel
-        // and traps immediately unless armed here on every call.
-        let fuel_budget = match body.export {
-            ExportKind::Transform => self.fuel_limit_transform,
-            ExportKind::Dispatch => self.fuel_limit_dispatch,
-        };
-        store.set_fuel(fuel_budget).map_err(|e| {
-            error_body(
-                ErrorCode::WasmTrap,
-                format!("failed to arm fuel budget: {e}"),
-            )
-        })?;
-
-        let start = std::time::Instant::now();
-        let stage = match Stage::instantiate_async(&mut store, &component, &self.linker).await {
-            Ok(stage) => stage,
-            Err(err) => {
-                // Instantiation itself can trap (a heavy/looping start
-                // function burning the fuel budget, hitting the epoch
-                // deadline, or growing memory past the cap) exactly like an
-                // export call can -- classify identically via
-                // `trap_to_error_body` rather than always bucketing an
-                // instantiate failure as `LOAD_FAILED`, which would hide a
-                // genuine guest fault from `svc_process::spine`'s DLQ-kind
-                // mapping and its per-source circuit breaker (both key off
-                // the typed `ErrorCode`, connector spec SS0 condition 5).
-                let memory_cap_hit = store.data().memory_cap_hit();
-                if memory_cap_hit || err.downcast_ref::<wasmtime::Trap>().is_some() {
-                    return Err(trap_to_error_body(err, memory_cap_hit));
-                }
-                return Err(error_body(ErrorCode::LoadFailed, err.to_string()));
-            }
-        };
-
-        let result = match body.export {
-            ExportKind::Transform => {
-                let event = serde_json::from_value(body.payload)
-                    .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
-                let outcome = stage
-                    .waddle_bundle_process_stage()
-                    .call_transform(&mut store, &event)
-                    .await;
-                match outcome {
-                    Ok(Ok(reply)) => serde_json::to_value(reply),
-                    Ok(Err(unsupported)) => serde_json::to_value(unsupported)
-                        .map(|v| serde_json::json!({"unsupported_stage": v})),
-                    Err(trap) => {
-                        let memory_cap_hit = store.data().memory_cap_hit();
-                        return Err(trap_to_error_body(trap, memory_cap_hit));
-                    }
-                }
-            }
-            ExportKind::Dispatch => {
-                let envelope: EnvelopeAndConfig = serde_json::from_value(body.payload)
-                    .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
-                let outcome = stage
-                    .waddle_bundle_action_stage()
-                    .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
-                    .await;
-                match outcome {
-                    Ok(Ok(reply)) => serde_json::to_value(reply),
-                    Ok(Err(transport_error)) => serde_json::to_value(transport_error)
-                        .map(|v| serde_json::json!({"transport_error": v})),
-                    Err(trap) => {
-                        let memory_cap_hit = store.data().memory_cap_hit();
-                        return Err(trap_to_error_body(trap, memory_cap_hit));
-                    }
-                }
-            }
-        }
-        .map_err(|e| error_body(ErrorCode::LoadFailed, format!("result encode failed: {e}")))?;
-
-        // Fuel is monotonically consumed, never replenished mid-call, so the
-        // budget minus what remains is exactly what this invocation spent
-        // (spec SS0 condition 4's overhead-measurement requirement).
-        // `get_fuel` only errs when fuel accounting is disabled, which never
-        // happens here (`crate::engine::build_engine` always enables it) --
-        // fall back to the full budget (fuel_used=0) rather than panicking on
-        // an invariant this store can't actually violate.
-        let fuel_remaining = store.get_fuel().unwrap_or(fuel_budget);
-        let fuel_used = fuel_budget.saturating_sub(fuel_remaining);
-
-        Ok(ResultBody {
-            payload: result,
-            duration_ms: start.elapsed().as_millis() as u64,
-            fuel_used,
-        })
+        self.metrics
+            .record_invoke(&app_id, export, result, trip, started.elapsed());
+        outcome
     }
 
     async fn on_shutdown(&self, body: ShutdownBody) {
@@ -748,6 +915,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
             bundles.clear();
             evicted
         };
+        self.metrics.set_bundles_loaded(0);
         self.compiling.lock().await.clear();
         if evicted > 0 {
             info!(
@@ -757,6 +925,209 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
             );
         }
     }
+}
+
+impl<S: ComponentSource> Executor<S> {
+    /// The body of `on_invoke`, recording the instantiate and guest-execution
+    /// histograms as it goes. The `on_invoke` wrapper adds the in-flight
+    /// gauge, the end-to-end histogram and the sandbox-trip counter around
+    /// every exit path. Behavior is unchanged from before the metrics
+    /// existed.
+    async fn invoke_inner(
+        &self,
+        body: InvokeBody,
+        invoke_id: u64,
+        connection: Arc<Connection>,
+    ) -> Result<ResultBody, ErrorBody> {
+        if self.draining.load(Ordering::SeqCst) {
+            return Err(error_body(
+                ErrorCode::ShuttingDown,
+                "executor is shutting down",
+            ));
+        }
+        // Fail-closed, digest-only lookup (spec §3): never falls back to
+        // "whatever happens to be loaded under this app_id" -- an
+        // unrecognized digest is always `UNKNOWN_BUNDLE`, even if some OTHER
+        // digest is currently resident for this same `app_id` under a
+        // different scope.
+        let (pre, slots, memory_limit_mb) = {
+            let bundles = self.bundles.read().await;
+            let loaded = bundles
+                .get(&body.digest)
+                .ok_or_else(|| error_body(ErrorCode::UnknownBundle, body.digest.clone()))?;
+            (
+                loaded.pre.clone(),
+                Arc::clone(&loaded.slots),
+                loaded.memory_limit_mb,
+            )
+        };
+
+        let (bundle_permit, global_permit) = self.acquire_call_slots(slots, &body.app_id).await?;
+
+        let deadline_ms = body.deadline_ms.min(self.max_call_timeout_ms).max(1);
+        // Connector spec SS0 condition 4: fuel per invocation, budgeted by
+        // world (`transform` vs `dispatch`, see `CliConfig`'s doc), armed in
+        // `run_guest` on the fresh `Store` before instantiation, alongside
+        // (never replacing) the epoch deadline. Resolved here, before `body`
+        // moves into the job, so the budget is fixed before the call starts.
+        let fuel_budget = match body.export {
+            ExportKind::Transform => self.fuel_limit_transform,
+            ExportKind::Dispatch => self.fuel_limit_dispatch,
+        };
+        let job = GuestJob {
+            engine: self.engine.clone(),
+            pre,
+            metrics: Arc::clone(&self.metrics),
+            body,
+            invoke_id,
+            connection,
+            memory_limit_mb,
+            deadline_ms,
+            fuel_budget,
+        };
+        // Guest execution is synchronous CPU between host-call awaits (the
+        // epoch deadline traps rather than yields), so it runs on a
+        // blocking-pool thread driving the future via `Handle::block_on`:
+        // a hot/hostile guest then ties up one bounded blocking thread
+        // instead of stalling the async reactor for every tenant. The
+        // permits move into the task so they are held until the guest has
+        // genuinely finished, even if the caller's future is dropped.
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let _slots = (bundle_permit, global_permit);
+            handle.block_on(run_guest(job))
+        })
+        .await
+        .map_err(|e| {
+            error_body(
+                ErrorCode::WasmTrap,
+                format!("guest execution task failed: {e}"),
+            )
+        })?
+    }
+}
+
+/// Everything one guest invocation needs, owned so it can move onto a
+/// blocking-pool thread.
+struct GuestJob {
+    engine: Engine,
+    pre: StagePre<ExecState>,
+    metrics: Arc<ExecutorMetrics>,
+    body: InvokeBody,
+    invoke_id: u64,
+    connection: Arc<Connection>,
+    memory_limit_mb: u32,
+    deadline_ms: u64,
+    fuel_budget: u64,
+}
+
+/// Instantiates (from the pre-linked component, in a fresh bounded `Store`)
+/// and runs one guest export, recording the instantiate and guest-execution
+/// histograms. Behavior is unchanged from the former inline `invoke_inner`.
+async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
+    let GuestJob {
+        engine,
+        pre,
+        metrics,
+        body,
+        invoke_id,
+        connection,
+        memory_limit_mb,
+        deadline_ms,
+        fuel_budget,
+    } = job;
+    let bridge = HostBridge::new(connection);
+    let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
+        .with_memory_limit_mb(memory_limit_mb);
+    let mut store = new_bounded_store(&engine, exec_state, deadline_ms);
+    // The engine was built with `consume_fuel(true)`
+    // (`crate::engine::build_engine`) so a `Store` starts at zero fuel and
+    // traps immediately unless armed here on every call -- armed BEFORE
+    // instantiation so a heavy start function is metered too.
+    store.set_fuel(fuel_budget).map_err(|e| {
+        error_body(
+            ErrorCode::WasmTrap,
+            format!("failed to arm fuel budget: {e}"),
+        )
+    })?;
+
+    let start = std::time::Instant::now();
+    let stage = match pre.instantiate_async(&mut store).await {
+        Ok(stage) => stage,
+        Err(err) => {
+            // Instantiation itself can trap (a heavy/looping start function
+            // burning the fuel budget, hitting the epoch deadline, or growing
+            // memory past the cap) exactly like an export call can --
+            // classify identically via `trap_to_error_body` rather than
+            // always bucketing an instantiate failure as `LOAD_FAILED`, which
+            // would hide a genuine guest fault from `svc_process::spine`'s
+            // DLQ-kind mapping and its per-source circuit breaker (both key
+            // off the typed `ErrorCode`, connector spec SS0 condition 5).
+            let memory_cap_hit = store.data().memory_cap_hit();
+            if memory_cap_hit || err.downcast_ref::<wasmtime::Trap>().is_some() {
+                return Err(trap_to_error_body(err, memory_cap_hit));
+            }
+            return Err(error_body(ErrorCode::LoadFailed, err.to_string()));
+        }
+    };
+    metrics.record_instantiate(&body.app_id, start.elapsed());
+    let guest_started = Instant::now();
+
+    let result = match body.export {
+        ExportKind::Transform => {
+            let event = serde_json::from_value(body.payload)
+                .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
+            let outcome = stage
+                .waddle_bundle_process_stage()
+                .call_transform(&mut store, &event)
+                .await;
+            metrics.record_guest(&body.app_id, "transform", guest_started.elapsed());
+            match outcome {
+                Ok(Ok(reply)) => serde_json::to_value(reply),
+                Ok(Err(unsupported)) => serde_json::to_value(unsupported)
+                    .map(|v| serde_json::json!({"unsupported_stage": v})),
+                Err(trap) => {
+                    let memory_cap_hit = store.data().memory_cap_hit();
+                    return Err(trap_to_error_body(trap, memory_cap_hit));
+                }
+            }
+        }
+        ExportKind::Dispatch => {
+            let envelope: EnvelopeAndConfig = serde_json::from_value(body.payload)
+                .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
+            let outcome = stage
+                .waddle_bundle_action_stage()
+                .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
+                .await;
+            metrics.record_guest(&body.app_id, "dispatch", guest_started.elapsed());
+            match outcome {
+                Ok(Ok(reply)) => serde_json::to_value(reply),
+                Ok(Err(transport_error)) => serde_json::to_value(transport_error)
+                    .map(|v| serde_json::json!({"transport_error": v})),
+                Err(trap) => {
+                    let memory_cap_hit = store.data().memory_cap_hit();
+                    return Err(trap_to_error_body(trap, memory_cap_hit));
+                }
+            }
+        }
+    }
+    .map_err(|e| error_body(ErrorCode::LoadFailed, format!("result encode failed: {e}")))?;
+
+    // Fuel is monotonically consumed, never replenished mid-call, so the
+    // budget minus what remains is exactly what this invocation spent
+    // (spec SS0 condition 4's overhead-measurement requirement). `get_fuel`
+    // only errs when fuel accounting is disabled, which never happens here
+    // (`crate::engine::build_engine` always enables it) -- fall back to the
+    // full budget (fuel_used=0) rather than panicking on an invariant this
+    // store can't actually violate.
+    let fuel_remaining = store.get_fuel().unwrap_or(fuel_budget);
+    let fuel_used = fuel_budget.saturating_sub(fuel_remaining);
+
+    Ok(ResultBody {
+        payload: result,
+        duration_ms: start.elapsed().as_millis() as u64,
+        fuel_used,
+    })
 }
 
 /// Delegating impl so an `Arc<Executor<S>>` -- the shape shared across
@@ -1262,15 +1633,15 @@ mod tests {
                 .values()
                 .next()
                 .expect("first scope's bundle is registered")
-                .component
-                .clone();
+                .test_parts();
             let mut scopes = HashSet::with_capacity(1);
             scopes.insert((2, 0, "waddles.test.app".to_string()));
             bundles.insert(
                 other_digest.clone(),
                 LoadedBundle {
                     app_id: "waddles.test.app".to_string(),
-                    component: first,
+                    pre: first.0,
+                    slots: first.1,
                     memory_limit_mb: 64,
                     scopes,
                 },
@@ -2176,6 +2547,193 @@ mod tests {
         Ok(())
     }
 
+    fn limited_config(calls: u32, per_bundle: u32, pool_wait_ms: u64) -> CliConfig {
+        let mut cfg = test_config();
+        cfg.executor_max_concurrent_calls = calls;
+        cfg.executor_instances_per_bundle = per_bundle;
+        cfg.executor_pool_wait_ms = pool_wait_ms;
+        cfg
+    }
+
+    /// Takes every global call permit but `leave`, simulating in-flight
+    /// invocations without needing a slow guest.
+    fn hold_global_calls(executor: &Executor<FixtureSource>, n: u32) -> Vec<OwnedSemaphorePermit> {
+        (0..n)
+            .map(|_| {
+                Arc::clone(&executor.call_limiter)
+                    .try_acquire_owned()
+                    .expect("global call permit available")
+            })
+            .collect()
+    }
+
+    /// The global concurrency cap is enforced: with `max_concurrent_calls`
+    /// slots all busy, the N+1th invoke queues for `EXECUTOR_POOL_WAIT_MS`
+    /// and then fails `pool_exhausted`; once a slot frees it runs.
+    #[tokio::test]
+    async fn global_call_cap_queues_then_rejects_the_n_plus_1th_invoke() -> Result<(), ExecutorError>
+    {
+        let executor = Executor::new(&limited_config(2, 4, 150), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load");
+        let held = hold_global_calls(&executor, 2);
+
+        let started = Instant::now();
+        let err = invoke_noop(&executor, "waddles.test.app", &fixture_digest())
+            .await
+            .expect_err("N+1th invoke must not run while all slots are busy");
+        assert_eq!(err.code, ErrorCode::ExecutorDeadline);
+        assert_eq!(err.detail.as_deref(), Some("pool_exhausted"));
+        assert!(
+            started.elapsed() >= Duration::from_millis(140),
+            "must queue for the pool wait before failing, took {:?}",
+            started.elapsed()
+        );
+
+        // Freeing a slot lets the next invoke through.
+        drop(held);
+        invoke_noop(&executor, "waddles.test.app", &fixture_digest())
+            .await
+            .expect("invoke runs once a slot is free");
+        Ok(())
+    }
+
+    /// A waiting invoke is QUEUED, not rejected, when a slot frees within
+    /// the pool wait.
+    #[tokio::test]
+    async fn invoke_queues_for_a_slot_that_frees_within_the_pool_wait() -> Result<(), ExecutorError>
+    {
+        let executor = Arc::new(Executor::new(&limited_config(1, 4, 5_000), FixtureSource)?);
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load");
+        let held = hold_global_calls(&executor, 1);
+        let waiter = {
+            let executor = Arc::clone(&executor);
+            tokio::spawn(async move {
+                invoke_noop(&*executor, "waddles.test.app", &fixture_digest()).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished(), "the N+1th invoke must block");
+        drop(held);
+        waiter
+            .await
+            .expect("join")
+            .expect("queued invoke runs after the slot frees");
+        Ok(())
+    }
+
+    /// `EXECUTOR_INSTANCES_PER_BUNDLE` caps one digest independently of the
+    /// global ceiling: a saturated bundle fails `pool_exhausted` even though
+    /// global slots are free.
+    #[tokio::test]
+    async fn per_bundle_instance_cap_is_enforced_independently() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&limited_config(32, 1, 100), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load");
+        let slots = {
+            let bundles = executor.bundles.read().await;
+            Arc::clone(&bundles.get(&fixture_digest()).expect("resident").slots)
+        };
+        let _held = slots.try_acquire_owned().expect("the one bundle slot");
+        let err = invoke_noop(&executor, "waddles.test.app", &fixture_digest())
+            .await
+            .expect_err("bundle at its instance cap must reject");
+        assert_eq!(err.detail.as_deref(), Some("pool_exhausted"));
+        assert!(executor.call_limiter.available_permits() == 32);
+        Ok(())
+    }
+
+    /// Drain refuses new work with `SHUTTING_DOWN`, waits for in-flight
+    /// work, and reports `Drained` only after it finishes.
+    #[tokio::test]
+    async fn drain_waits_for_in_flight_work_and_refuses_new_invokes() -> Result<(), ExecutorError> {
+        let executor = Arc::new(Executor::new(&limited_config(2, 4, 100), FixtureSource)?);
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load");
+        let held = hold_global_calls(&executor, 1);
+
+        let drain = {
+            let executor = Arc::clone(&executor);
+            tokio::spawn(async move { executor.drain(Duration::from_secs(10)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !drain.is_finished(),
+            "drain must wait for the in-flight call"
+        );
+
+        let err = invoke_noop(&*executor, "waddles.test.app", &fixture_digest())
+            .await
+            .expect_err("new invokes are refused while draining");
+        assert_eq!(err.code, ErrorCode::ShuttingDown);
+        let err = executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect_err("new loads are refused while draining");
+        assert_eq!(err.code, ErrorCode::ShuttingDown);
+
+        drop(held);
+        assert_eq!(drain.await.expect("join"), DrainOutcome::Drained);
+        Ok(())
+    }
+
+    /// A stuck call cannot hold the process hostage: drain gives up at its
+    /// deadline and says how much was still running.
+    #[tokio::test]
+    async fn drain_times_out_and_reports_what_was_still_in_flight() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&limited_config(4, 4, 100), FixtureSource)?;
+        let _held = hold_global_calls(&executor, 1);
+        let outcome = executor.drain(Duration::from_millis(100)).await;
+        assert_eq!(
+            outcome,
+            DrainOutcome::TimedOut {
+                in_flight_calls: 1,
+                in_flight_compiles: 0
+            }
+        );
+        Ok(())
+    }
+
+    /// JIT compilation runs off the async reactor: on a SINGLE-threaded
+    /// runtime, a concurrent task keeps getting scheduled while a cold
+    /// `load` compiles. Inline `Component::new` would starve it for the
+    /// whole compile (0 ticks).
+    #[tokio::test(flavor = "current_thread")]
+    async fn cold_load_compile_does_not_starve_the_async_runtime() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        let ticks = Arc::new(AtomicU64::new(0));
+        let ticker = {
+            let ticks = Arc::clone(&ticks);
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    ticks.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        };
+        tokio::select! {
+            loaded = executor.on_load(fixture_load_body("waddles.test.app")) => {
+                loaded.expect("load");
+            }
+            _ = ticker => unreachable!("the ticker never completes"),
+        }
+        let observed = ticks.load(Ordering::SeqCst);
+        assert!(
+            observed >= 3,
+            "runtime was starved during the compile: only {observed} ticks"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn on_shutdown_logs_and_returns() -> Result<(), ExecutorError> {
         crate::init_test_tracing();
@@ -2498,5 +3056,489 @@ mod tests {
             elapsed.as_secs_f64() * 1000.0 / f64::from(N)
         );
         Ok(())
+    }
+
+    /// Metric-emission tests: each drives a REAL `on_load`/`on_unload`/
+    /// `on_invoke` against the committed hostile fixture component and reads
+    /// the data points back out of an in-memory OTel exporter -- proving the
+    /// instruments emit under real wasmtime execution, not that they merely
+    /// exist. Every test owns an isolated provider (`Executor::with_metrics`),
+    /// so assertions are exact.
+    mod metrics_emission {
+        use super::*;
+        use crate::metrics::test_support::Harness;
+
+        fn executor_with<S: ComponentSource>(source: S) -> (Harness, Executor<S>) {
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let executor = Executor::new(&test_config(), source)
+                .expect("executor builds")
+                .with_metrics(metrics);
+            (harness, executor)
+        }
+
+        async fn invoke_event(
+            executor: &Executor<impl ComponentSource>,
+            app_id: &str,
+            export: ExportKind,
+            payload: serde_json::Value,
+            deadline_ms: u64,
+        ) -> Result<ResultBody, ErrorBody> {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let connection = crate::wire::Connection::new(tx);
+            executor
+                .on_invoke(
+                    InvokeBody {
+                        app_id: app_id.to_string(),
+                        digest: fixture_digest(),
+                        export,
+                        payload,
+                        deadline_ms,
+                        trace: None,
+                    },
+                    1,
+                    connection,
+                )
+                .await
+        }
+
+        fn event(kind: &str) -> serde_json::Value {
+            serde_json::json!({
+                "platform": "test",
+                "event_type": kind,
+                "actor": null,
+                "payload_json": "{}",
+                "occurred_at": "2026-09-22T00:00:00.000Z",
+            })
+        }
+
+        #[tokio::test]
+        async fn a_cold_load_records_every_phase_and_the_resident_gauge() {
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.load"))
+                .await
+                .expect("load succeeds");
+
+            for phase in ["fetch", "verify", "precompile", "total"] {
+                assert_eq!(
+                    h.count(
+                        "waddles_executor_load_seconds",
+                        &[
+                            ("app_id", "waddles.mx.load"),
+                            ("phase", phase),
+                            ("result", "ok")
+                        ]
+                    ),
+                    1.0,
+                    "phase {phase} must be recorded exactly once"
+                );
+            }
+            // The compile is the expensive phase: real wasmtime work, so its
+            // recorded time is genuinely non-zero.
+            let compile = h
+                .last("waddles_executor_load_seconds", &[("phase", "precompile")])
+                .expect("precompile exported");
+            assert!(compile.sum > 0.0, "compile time was {}", compile.sum);
+            assert_eq!(
+                h.count("waddles_executor_loads_total", &[("result", "ok")]),
+                1.0
+            );
+            assert_eq!(
+                h.last("waddles_executor_bundles_loaded", &[])
+                    .expect("gauge exported")
+                    .value,
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_second_scope_on_a_resident_digest_is_counted_without_redoing_the_phases() {
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body_scoped("waddles.mx.shared", 1, 0))
+                .await
+                .expect("first load");
+            executor
+                .on_load(fixture_load_body_scoped("waddles.mx.shared", 2, 0))
+                .await
+                .expect("second scope, same digest");
+
+            assert_eq!(
+                h.count(
+                    "waddles_executor_loads_total",
+                    &[("result", "already_resident")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count("waddles_executor_loads_total", &[("result", "ok")]),
+                1.0
+            );
+            // One real compile; the fast path adds only a `total` sample.
+            assert_eq!(
+                h.count("waddles_executor_load_seconds", &[("phase", "precompile")]),
+                1.0
+            );
+            assert_eq!(
+                h.count("waddles_executor_load_seconds", &[("phase", "total")]),
+                2.0
+            );
+            assert_eq!(
+                h.last("waddles_executor_bundles_loaded", &[])
+                    .expect("gauge exported")
+                    .value,
+                1.0,
+                "two scopes share one resident digest"
+            );
+        }
+
+        #[tokio::test]
+        async fn unloads_are_classified_and_the_gauge_follows_eviction() {
+            let (h, executor) = executor_with(FixtureSource);
+            let digest = fixture_digest();
+            executor
+                .on_load(fixture_load_body_scoped("waddles.mx.unload", 1, 0))
+                .await
+                .expect("load a");
+            executor
+                .on_load(fixture_load_body_scoped("waddles.mx.unload", 2, 0))
+                .await
+                .expect("load b");
+
+            // A scope that never referenced the digest: orphaned, no effect.
+            executor
+                .on_unload(fixture_unload_body("waddles.mx.unload", 9, 9, &digest))
+                .await
+                .expect("orphaned unload is a no-op, not an error");
+            executor
+                .on_unload(fixture_unload_body("waddles.mx.unload", 1, 0, &digest))
+                .await
+                .expect("unload a");
+            executor
+                .on_unload(fixture_unload_body("waddles.mx.unload", 2, 0, &digest))
+                .await
+                .expect("unload b (last)");
+            // Now fully evicted: another unload names an unknown digest.
+            executor
+                .on_unload(fixture_unload_body("waddles.mx.unload", 2, 0, &digest))
+                .await
+                .expect_err("unknown digest fails closed");
+
+            for (result, want) in [
+                ("orphaned", 1.0),
+                ("still_referenced", 1.0),
+                ("evicted", 1.0),
+                ("unknown_bundle", 1.0),
+            ] {
+                assert_eq!(
+                    h.count("waddles_executor_unloads_total", &[("result", result)]),
+                    want,
+                    "{result}"
+                );
+            }
+            assert_eq!(h.count("waddles_executor_orphaned_unloads_total", &[]), 1.0);
+            assert_eq!(
+                executor.orphaned_unload_total.load(Ordering::Relaxed),
+                1,
+                "the pre-existing atomic must keep counting alongside the OTel counter"
+            );
+            assert_eq!(
+                h.last("waddles_executor_bundles_loaded", &[])
+                    .expect("gauge exported")
+                    .value,
+                0.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_digest_mismatch_records_a_failed_verify_and_no_compile() {
+            let (h, executor) = executor_with(FixtureSource);
+            let mut body = fixture_load_body("waddles.mx.mismatch");
+            body.digest = format!("sha256:{}", "0".repeat(64));
+            executor
+                .on_load(body)
+                .await
+                .expect_err("a digest mismatch fails the load");
+
+            let count = |phase: &str, result: &str| {
+                h.count(
+                    "waddles_executor_load_seconds",
+                    &[("phase", phase), ("result", result)],
+                )
+            };
+            assert_eq!(count("fetch", "ok"), 1.0);
+            assert_eq!(count("verify", "error"), 1.0);
+            assert_eq!(
+                count("precompile", "ok") + count("precompile", "error"),
+                0.0
+            );
+            assert_eq!(count("total", "error"), 1.0);
+            assert_eq!(
+                h.count(
+                    "waddles_executor_loads_total",
+                    &[("result", "digest_mismatch")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_failed_fetch_records_a_failed_fetch_phase_and_load_failed() {
+            let (h, executor) = executor_with(UnimplementedBucketSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.fetchfail"))
+                .await
+                .expect_err("the unimplemented bucket source fails closed");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_load_seconds",
+                    &[("phase", "fetch"), ("result", "error")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count("waddles_executor_load_seconds", &[("phase", "verify")]),
+                0.0,
+                "nothing was fetched, so nothing was verified"
+            );
+            assert_eq!(
+                h.count("waddles_executor_loads_total", &[("result", "load_failed")]),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_successful_invoke_records_instantiate_guest_and_total_and_clears_the_gauge() {
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.invoke"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.invoke",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("noop invoke succeeds");
+
+            assert_eq!(
+                h.count(
+                    "waddles_executor_invoke_seconds",
+                    &[
+                        ("app_id", "waddles.mx.invoke"),
+                        ("export", "transform"),
+                        ("result", "ok")
+                    ]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_executor_instantiate_seconds",
+                    &[("app_id", "waddles.mx.invoke")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_executor_guest_seconds",
+                    &[("app_id", "waddles.mx.invoke"), ("export", "transform")]
+                ),
+                1.0
+            );
+            let total = h
+                .last("waddles_executor_invoke_seconds", &[("result", "ok")])
+                .expect("invoke exported");
+            let guest = h
+                .last("waddles_executor_guest_seconds", &[])
+                .expect("guest exported");
+            assert!(total.sum >= guest.sum, "end-to-end >= guest-only");
+            assert_eq!(
+                h.last("waddles_executor_invocations_active", &[])
+                    .expect("gauge exported")
+                    .value,
+                0.0,
+                "the in-flight gauge must return to zero"
+            );
+            assert_eq!(h.count("waddles_executor_sandbox_trip_total", &[]), 0.0);
+        }
+
+        #[tokio::test]
+        async fn an_unknown_digest_is_an_unknown_bundle_result_not_a_trip() {
+            let (h, executor) = executor_with(FixtureSource);
+            // Nothing loaded: the digest lookup fails closed before any guest runs.
+            invoke_event(
+                &executor,
+                "waddles.mx.unknown",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect_err("unknown bundle");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_invoke_seconds",
+                    &[
+                        ("app_id", "waddles.mx.unknown"),
+                        ("result", "unknown_bundle")
+                    ]
+                ),
+                1.0
+            );
+            assert_eq!(h.count("waddles_executor_sandbox_trip_total", &[]), 0.0);
+            assert_eq!(h.count("waddles_executor_instantiate_seconds", &[]), 0.0);
+            assert_eq!(
+                h.last("waddles_executor_invocations_active", &[])
+                    .expect("gauge exported")
+                    .value,
+                0.0
+            );
+        }
+
+        /// Multi-threaded on purpose (same as the pre-existing deadline test):
+        /// the epoch ticker is a runtime task, and a current-thread runtime
+        /// would starve it while the guest's tight loop owns the only thread.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_runaway_guest_records_a_timeout_trip() {
+            crate::init_test_tracing();
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.busy"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.busy",
+                ExportKind::Transform,
+                event("busy-loop"),
+                200,
+            )
+            .await
+            .expect_err("the epoch deadline must interrupt the loop");
+
+            assert_eq!(
+                h.count(
+                    "waddles_executor_sandbox_trip_total",
+                    &[("app_id", "waddles.mx.busy"), ("limit", "timeout")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_executor_invoke_seconds",
+                    &[
+                        ("app_id", "waddles.mx.busy"),
+                        ("result", "executor_deadline")
+                    ]
+                ),
+                1.0
+            );
+            // The guest ran (and was cut off), so its time was still recorded.
+            let guest = h
+                .last(
+                    "waddles_executor_guest_seconds",
+                    &[("app_id", "waddles.mx.busy")],
+                )
+                .expect("guest time recorded even when trapped");
+            // The epoch deadline is enforced at `EPOCH_TICK` (50 ms) granularity
+            // from an arbitrary phase within a tick, so a 200 ms deadline lets
+            // the guest run roughly 150-200 ms; assert a floor with margin
+            // that still proves real execution time was recorded.
+            assert!(
+                guest.sum >= 0.1,
+                "guest ran for a deadline of ~200ms, recorded {}",
+                guest.sum
+            );
+        }
+
+        #[tokio::test]
+        async fn a_memory_hog_records_a_memory_trip() {
+            crate::init_test_tracing();
+            let (h, executor) = executor_with(FixtureSource);
+            let mut body = fixture_load_body("waddles.mx.hog");
+            body.limits = penguin_bundle_host::wire::LoadLimits {
+                timeout_ms: 10_000,
+                memory_mb: 8,
+            };
+            executor.on_load(body).await.expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.hog",
+                ExportKind::Transform,
+                event("memory-hog"),
+                10_000,
+            )
+            .await
+            .expect_err("the memory cap must trap the hog");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_sandbox_trip_total",
+                    &[("app_id", "waddles.mx.hog"), ("limit", "memory")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_malformed_dispatch_payload_is_labeled_by_export_and_code() {
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.dispatch"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "waddles.mx.dispatch",
+                ExportKind::Dispatch,
+                serde_json::json!({"not": "an envelope"}),
+                1000,
+            )
+            .await
+            .expect_err("malformed dispatch payload");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_invoke_seconds",
+                    &[
+                        ("app_id", "waddles.mx.dispatch"),
+                        ("export", "dispatch"),
+                        ("result", "malformed_frame")
+                    ]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_disconnect_wipes_the_registry_and_zeroes_the_gauge() {
+            let (h, executor) = executor_with(FixtureSource);
+            executor
+                .on_load(fixture_load_body("waddles.mx.disconnect"))
+                .await
+                .expect("load");
+            assert_eq!(
+                h.last("waddles_executor_bundles_loaded", &[])
+                    .expect("gauge exported")
+                    .value,
+                1.0
+            );
+            executor.on_disconnect().await;
+            assert_eq!(
+                h.last("waddles_executor_bundles_loaded", &[])
+                    .expect("gauge exported")
+                    .value,
+                0.0
+            );
+        }
+
+        #[test]
+        fn export_labels_are_stable() {
+            assert_eq!(export_label(&ExportKind::Transform), "transform");
+            assert_eq!(export_label(&ExportKind::Dispatch), "dispatch");
+        }
     }
 }

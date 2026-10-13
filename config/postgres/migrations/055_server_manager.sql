@@ -23,12 +23,16 @@ ALTER TABLE server_status_configs
     ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 
 -- 2. Widen chk_status_api_type constraint to include rcon, mumble_ice, ts_serverquery
+-- The column created by 042_interactive_new_modules.sql is `status_api_type` (this file
+-- used to reference a non-existent `api_type`, so it could never apply). The widened set
+-- keeps the original 042 values (steam, riot, custom_url) so existing rows stay valid.
 ALTER TABLE server_status_configs
     DROP CONSTRAINT IF EXISTS chk_status_api_type;
 
 ALTER TABLE server_status_configs
     ADD CONSTRAINT chk_status_api_type CHECK (
-        api_type IN (
+        status_api_type IN (
+            'steam', 'riot', 'custom_url',
             'http_json', 'battlemetrics', 'steam_query',
             'rcon', 'mumble_ice', 'ts_serverquery'
         )

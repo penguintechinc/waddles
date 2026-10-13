@@ -85,4 +85,6 @@ spec:
         resources:
           requests:
             storage: {{ .Values.posthog.kafka.storage }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "event-pipeline" "name" "posthog-kafka" "selector" (dict "app.kubernetes.io/name" "posthog-kafka") "ports" (list 9092) "egress" "internal" "tetragon" false) }}
 {{- end }}

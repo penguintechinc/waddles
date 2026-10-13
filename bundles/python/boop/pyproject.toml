@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-boop"
+version = "1.0.0"
+description = "`!boop [target]` -> a wholesome flavor-text reply that boops people on the nose, relayed back to the caller's own origin platform. Relay only, no kv/db state. Modeled on bundles/python/slap."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

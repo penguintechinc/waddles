@@ -56,12 +56,12 @@ functional.
 
 Permission gate platform gap: `set`/`remove`/`timer` require the caller to
 be a broadcaster or moderator, read via `event.payload["is_mod"]`/
-`["is_broadcaster"]` -- booleans `core/svc_ingest/bundles/twitch_ingest.py`
+`["is_broadcaster"]` -- booleans `core/svc_ingest/builtin_handlers/twitch_ingest.py`
 and `kick_ingest.py` already normalize onto every chat `PlatformEvent`
 (no `data.tables` permission is declared here, so the
-`community_members`-role-lookup convention `core/svc_process/bundles/
+`community_members`-role-lookup convention `core/svc_process/builtin_handlers/
 social_alias_process.py` uses is not available to this kv-only bundle).
-`core/svc_ingest/bundles/discord_ingest.py` does not yet normalize an
+`core/svc_ingest/builtin_handlers/discord_ingest.py` does not yet normalize an
 equivalent role signal onto its payload -- `_is_privileged()` fails CLOSED
 (denies) whenever both keys are absent, so Discord callers cannot manage
 commands yet rather than being granted by a missing-key default. Tracked as
@@ -135,7 +135,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     Fails closed -- see module docstring.
     """
     payload = event.payload
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 def _normalize_name(token: str) -> str | None:

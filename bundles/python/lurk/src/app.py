@@ -196,9 +196,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     # absence, not as an implicit `False`, so these keys are only set when
     # actually present on the inbound event.
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
 
     return PlatformEvent(
         platform=event.platform,
@@ -329,7 +329,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 async def _fail_kv(exc: Exception, *, provider: str, channel_id: str, op: str) -> NoReturn:

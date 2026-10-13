@@ -32,6 +32,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-presentation
 spec:
+  # >1 replica is refused (render-time `fail`) unless sharedFanout is enabled -- see
+  # waddlebot.presentationReplicaGuard: the overlay fan-out is in-process, frames would split.
+  {{- include "waddlebot.presentationReplicaGuard" $ }}
   replicas: {{ .Values.pipeline.svcPresentation.replicas }}
   selector:
     matchLabels:
@@ -43,6 +46,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-presentation
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -55,6 +59,7 @@ spec:
       - name: svc-presentation
         image: "{{ .Values.presentation.image.repository }}:{{ .Values.presentation.image.tag | default .Values.global.imageTag | toString }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -67,6 +72,10 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_presentation;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_presentation") | nindent 8 }}
         - name: MODULE_NAME
           value: "svc-presentation"
         - name: PIPELINE_STAGE
@@ -81,8 +90,24 @@ spec:
         # externally-reachable svc-streaming base URL rewritten into HLS playback URLs for
         # the browser's own HLS.js fetches. Empty by default (live_stream.py degrades to
         # "offline" rather than guessing a hostname); see values.yaml/values-alpha.yaml.
+        {{- if .Values.presentation.publicStreamingUrl }}
         - name: PUBLIC_STREAMING_URL
-          value: {{ .Values.presentation.publicStreamingUrl | default "" | quote }}
+          value: {{ .Values.presentation.publicStreamingUrl | quote }}
+        {{- else if .Values.presentation.publicStreamingUrlFromNodeIP }}
+        {{- if not .Values.pipeline.svcStreaming.nodePort.enabled }}
+        {{- fail "presentation.publicStreamingUrlFromNodeIP requires pipeline.svcStreaming.nodePort.enabled=true (the URL is <node hostIP>:<svcStreaming nodePort.httpPort>); set an explicit presentation.publicStreamingUrl otherwise" }}
+        {{- end }}
+        - name: NODE_HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: PUBLIC_STREAMING_URL
+          value: {{ printf "http://$(NODE_HOST_IP):%v" .Values.pipeline.svcStreaming.nodePort.httpPort | quote }}
+        {{- else }}
+        - name: PUBLIC_STREAMING_URL
+          value: ""
+        {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -128,4 +153,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-presentation
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-presentation" "ports" (list $.Values.pipeline.svcPresentation.port) "runtime" "python" "shell" true) }}
 {{- end }}

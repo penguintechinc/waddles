@@ -184,3 +184,49 @@ async def test_list_availability_returns_rows_for_tenant(install_dal: Any) -> No
     )
     rows = await list_availability(install_dal, tenant_id=1)
     assert any(r.app_id == "waddles.socials.music.default" for r in rows)
+
+
+async def test_unset_available_finishes_the_cascade_then_raises_when_the_audit_write_fails(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-loud must not leave the platform half-changed.
+
+    A failed audit write (GRC #3: no longer swallowed) still lets the community deactivation
+    cascade run to completion, and only then raises `AuditWriteError`.
+    """
+    from services import bundle_audit
+    from services.audit_service import AuditWriteError
+    from services.bundle_approval_service import activate_for_community
+
+    await _seed_installed(install_dal)
+    await set_available(
+        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+    )
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    await activate_for_community(
+        install_dal,
+        tenant_id=1,
+        community_id=community_id,
+        app_id="waddles.socials.music.default",
+        activated_by=1,
+    )
+
+    async def audit_store_down(_dal: Any, **_kw: Any) -> None:
+        raise AuditWriteError("audit store down")
+
+    monkeypatch.setattr(bundle_audit, "record", audit_store_down)
+    with pytest.raises(AuditWriteError):
+        await unset_available(
+            install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        )
+    still_active = await install_dal(
+        install_dal.app_active_versions.app_id == "waddles.socials.music.default"
+    ).select()
+    assert not still_active  # the cascade ran despite the audit failure
+    availability = (
+        await install_dal(
+            (install_dal.bundle_tenant_availability.tenant_id == 1)
+            & (install_dal.bundle_tenant_availability.app_id == "waddles.socials.music.default")
+        ).select()
+    ).first()
+    assert availability.available is False

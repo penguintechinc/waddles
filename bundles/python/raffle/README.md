@@ -61,3 +61,67 @@ module docstring for the full rationale and the documented (not built) extension
 - **Multiple concurrent raffles, prize tiers, weighted/multiple entries, raffle history.** Out
   of scope for this single open/closed-flag-plus-entrant-list v1.
 - **Cross-community anything.** Every key here is scoped by `community_id` only.
+
+## Example
+
+```text
+mod>    !raffle open
+bot>    🎟️ the raffle is open! use !raffle or !enter to join.
+alice>  !enter
+bot>    🎉 alice entered the raffle! (1 entered)
+alice>  !enter
+bot>    alice, you're already entered!              (friendly, never a silent no-op)
+viewer> !raffle draw
+bot>    only moderators/broadcasters can do that
+mod>    !raffle draw
+bot>    🎉 the winner is entrant 3f2a9c1e! DM a mod to claim your prize.
+```
+
+(Entrant cap: 5000 -- the 5001st entry gets `the raffle is full (5000 max entrants)`.)
+
+## Failure semantics (fail loud)
+
+| Condition | Behavior |
+|---|---|
+| `kv` backend error | ERROR `raffle.kv_error` (`op` + exception type only), chat reply "unavailable", `RuntimeError("raffle kv <op> failed: <Type>")`. |
+| Corrupt entrants blob (non-UTF-8 / non-JSON / not an array of strings) | ERROR `raffle.state_corrupt`, chat reply "corrupted", `RuntimeError` -- the blob is **never** overwritten or reset. |
+| Unexpected `raffle.state` value | Treated as **closed** (fail-closed default). |
+| No `community` on the envelope | ERROR `raffle.missing_community` + `ValueError` (no tenant-wide fallback). |
+| Missing `channel_id` / unknown command | `ValueError`. |
+
+## Permissions (V2 structured)
+
+| Id | Why |
+|---|---|
+| `storage.kv` | Persists per-community raffle entrants and state. |
+| `flags.read` | Gates the command behind its `waddles.command-raffle` feature flag. |
+
+No `db` (`data.tables: []`), no egress. Mod gate: `open`/`close`/`draw` require a real `is_mod` or
+`is_broadcaster` `True`; **absent** badge fields (e.g. the Discord normalizer today) are **denied**
+(fail closed) with zero `kv` access. `enter`/`list` are open to anyone.
+
+## Feature flag
+
+`waddles.command-raffle`, **default OFF** (requested with `default=False`, so a flag outage or a
+missing `wit_world` keeps both `!raffle` and `!enter` off). Checked after the cheap command-head
+match and before grammar resolution; while off nothing is parsed, stored or logged.
+
+## Platforms
+
+`consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!raffle", "!enter"]`;
+replies go back to the event's own origin platform + channel.
+
+## Logging / PII
+
+Logs carry only `command`, `op`, `community`, `role_signal` and exception type names -- never typed
+grammar text or `event.actor`; entrants are stored only as SHA-256 pseudonyms. Regression:
+`tests/test_backfill.py::test_no_log_line_in_any_flow_contains_typed_text_or_the_raw_actor`.
+
+## Test
+
+```bash
+cd bundles/python/raffle
+python3.13 -m venv .venv && . .venv/bin/activate
+pip install pytest==8.3.3 pytest-cov==5.0.0
+pytest --cov=src --cov-branch --cov-report=term-missing   # 100% line + branch
+```

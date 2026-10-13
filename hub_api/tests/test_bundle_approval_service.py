@@ -424,3 +424,39 @@ def test_derive_capabilities_always_includes_the_unconditional_set() -> None:
     assert {"context", "flags", "log", "clock"} <= caps
     assert "http" in caps  # `_MANIFEST` declares `egress`
     assert "db" in caps  # `_MANIFEST` declares `data.tables`
+
+
+async def test_uninstall_globally_finishes_the_cascade_then_raises_when_the_audit_write_fails(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed audit write is loud (raised) but must not skip the tenant-hiding cascade."""
+    from services import bundle_audit
+    from services.audit_service import AuditWriteError
+
+    await _seed_published(install_dal)
+    await install_version_globally(
+        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+    )
+    await set_available(
+        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+    )
+
+    async def audit_store_down(_dal: Any, **_kw: Any) -> None:
+        raise AuditWriteError("audit store down")
+
+    monkeypatch.setattr(bundle_audit, "record", audit_store_down)
+    with pytest.raises(AuditWriteError):
+        await uninstall_globally(install_dal, app_id="waddles.socials.music.default", revoked_by=1)
+    availability = (
+        await install_dal(
+            (install_dal.bundle_tenant_availability.tenant_id == 1)
+            & (install_dal.bundle_tenant_availability.app_id == "waddles.socials.music.default")
+        ).select()
+    ).first()
+    assert availability.available is False  # cascade completed before the error surfaced
+    revoked = (
+        await install_dal(
+            install_dal.app_global_installs.app_id == "waddles.socials.music.default"
+        ).select()
+    ).first()
+    assert revoked.revoked_at is not None

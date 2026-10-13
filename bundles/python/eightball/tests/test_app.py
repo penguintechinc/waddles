@@ -133,3 +133,71 @@ def test_transform_and_dispatch_never_log_the_raw_actor(fake_host) -> None:
         assert "viewer-1" not in message
         assert "viewer-1" not in fields_json
         assert "actor" not in json.loads(fields_json)
+
+
+# regression: gh-674 -- bundles must never log raw user input (the question text) or raw identity.
+def test_logs_never_contain_actor_or_question_text(fake_host) -> None:
+    for text in ("!8ball", "!8ball will PIIQUESTION_secret happen?", "!8BALL   PIIQUESTION_secret"):
+        event = _sample_event(text)
+        event.actor = "PIIACTOR_alice"
+        out = _run(transform(event))
+        assert out is not None
+        envelope = _sample_envelope("twitch", out.payload["text"])
+        envelope.event.actor = "PIIACTOR_alice"
+        _run(dispatch(envelope, {}, http_client=None))
+
+    assert len(fake_host.log_calls) >= 6, "too few log calls -- PII check would be vacuous"
+    for _level, message, fields_json in fake_host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        assert "piiactor_alice" not in blob
+        assert "piiquestion_secret" not in blob
+
+
+def test_flag_is_queried_default_off_so_it_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bundle must ask the host for `waddles.command-8ball` with `default_value=False`."""
+    asked: list[tuple[str, bool]] = []
+
+    def _enabled(key: str, default_value: bool) -> bool:
+        asked.append((key, default_value))
+        return default_value
+
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
+        flags=types.SimpleNamespace(enabled=_enabled)
+    )
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+
+    assert _run(transform(_sample_event("!8ball"))) is None
+    assert asked == [("waddles.command-8ball", False)]
+
+
+def test_unmatched_text_never_consults_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cheap-skip ordering: a non-command message must not pay a flag host round trip."""
+    asked: list[str] = []
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
+        flags=types.SimpleNamespace(enabled=lambda key, default_value: asked.append(key) or True)
+    )
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+
+    assert _run(transform(_sample_event("hello there"))) is None
+    assert asked == []
+
+
+@pytest.mark.parametrize("answer", ANSWERS)
+def test_every_canned_answer_is_reachable_and_emoji_prefixed(
+    answer: str, monkeypatch: pytest.MonkeyPatch, fake_host
+) -> None:
+    import app
+
+    monkeypatch.setattr(app.random, "choice", lambda _seq: answer)
+    result = _run(transform(_sample_event("!8ball ready?")))
+    assert result is not None
+    assert result.payload["text"] == f"\U0001f3b1 {answer}"
+
+
+def test_dispatch_rejects_empty_channel_id_string(fake_host) -> None:
+    envelope = _sample_envelope("twitch", "x", channel_id="")
+    with pytest.raises(ValueError, match="channel_id"):
+        _run(dispatch(envelope, {}, http_client=None))
+    assert fake_host.relay_calls == []

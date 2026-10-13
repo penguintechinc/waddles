@@ -485,10 +485,19 @@ egressProxy:
     limits: { cpu: "150m", memory: "128Mi" }
 egressPolicy:
   enabled: true
+  # R5: dev clusters (MicroK8s/Calico today) exempt from the all-workload egress lockdown; the
+  # data-plane + egress-proxy CNPs above still render. Beta/gamma/prod keep the base default (true).
+  workloadEgress:
+    enabled: false
   clusterCidrs:
     podCidr: "10.1.0.0/16"      # MicroK8s default — confirm against cluster before deploy
     serviceCidr: "10.152.183.0/24"
     nodeCidr: "10.0.0.0/8"
+
+# R5: local deliberately relaxes runAsNonRoot below, which PSA `restricted` rejects -- so a local
+# namespace enforces `baseline` (still no privileged/host*/added caps) and only warns/audits restricted.
+podSecurity:
+  enforce: baseline
 
 # Pod Security Context - Relaxed for local
 podSecurityContext:
@@ -622,3 +631,7 @@ modules:
 spire:
   enabled: false
   environment: "alpha"
+
+# R5: no Tetragon agent on local clusters (networkPolicy.enabled is already false above).
+tetragon:
+  enabled: false

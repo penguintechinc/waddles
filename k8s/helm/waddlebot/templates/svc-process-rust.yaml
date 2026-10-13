@@ -23,7 +23,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-process-rust
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcProcessRust")) }}
   replicas: {{ .Values.pipeline.rustDataPlane.svcProcess.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -49,6 +51,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-process-rust
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       # Dedicated identity (feature/eddsa-machine-jwt, security review HIGH
       # finding) -- distinguishes this deployment's pods from every other
       # workload in the namespace for `flask_core.service_jwt`'s TokenReview
@@ -67,12 +70,14 @@ spec:
       containers:
       - name: svc-process-rust
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process-rust") "imageTag" .Values.global.imageTag) }}"
-        # Hardcoded Always (not .Values.global.imagePullPolicy) -- this Rust data-plane image
-        # iterates rapidly against the mutable `alpha` tag on the in-cluster registry and the
-        # node's containerd IfNotPresent cache was proven to serve a stale binary after a
-        # same-tag push (alpha deploy retro). Always guarantees the running pod matches the
-        # registry's current digest for this actively-iterating tag.
-        imagePullPolicy: Always
+        # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Deploys carry
+        # a unique per-deploy global.imageTag, so a stale same-tag node cache can no longer
+        # occur -- the old hardcoded Always was unnecessary and fatal for locally-loaded
+        # images (kind e2e, alpha local builds: Always forces a registry pull the node cannot
+        # satisfy, so the pod never becomes Ready). Set global.imagePullPolicy=Always per-env
+        # only when deploying a mutable tag.
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_process/
         # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
         # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
@@ -108,6 +113,10 @@ spec:
             name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
             optional: true
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_process;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.port | quote }}
         - name: METRICS_PORT
@@ -171,11 +180,6 @@ spec:
         - name: PII_TOKENIZATION_ENABLED
           value: "false"
         {{- end }}
-        - name: DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: DB_PASSWORD
         - name: SERVICE_API_KEY
           valueFrom:
             secretKeyRef:
@@ -313,6 +317,7 @@ spec:
           value: {{ $value | quote }}
         {{- end }}
         {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -383,4 +388,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-process-rust
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-process-rust" "ports" (list $.Values.pipeline.rustDataPlane.svcProcess.port $.Values.pipeline.rustDataPlane.svcProcess.metricsPort $.Values.pipeline.rustDataPlane.svcProcess.hostApiPort) "runtime" "rust" "binaries" (list "/app/svc-process")) }}
 {{- end }}

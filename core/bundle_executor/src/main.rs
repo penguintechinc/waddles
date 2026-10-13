@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Thin binary entrypoint -- all real logic lives in `src/lib.rs` so
 //! `tests/` integration tests can exercise it directly (same pattern as
 //! `core/svc_process`).

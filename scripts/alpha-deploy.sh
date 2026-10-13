@@ -64,10 +64,14 @@
 # evicted once under DiskPressure).
 #
 # Usage:
-#   scripts/alpha-deploy.sh [--skip-build]
+#   scripts/alpha-deploy.sh [--skip-build] [--skip-deploy]
 #
 # --skip-build   Reuse whatever is already pushed under the current HEAD's
 #                sha8 tag (skips the build+push step).
+# --skip-deploy  Build+push+verify the registry preflight, then exit 0 before
+#                any helm step. Pre-warms images so a later
+#                `--skip-build` deploy is fast. Legal with --skip-build
+#                (just verifies the registry, then exits).
 #
 # fix/valkey-cert-rollout-and-migrate-wait -- if you pipe this script's
 # output (e.g. `scripts/alpha-deploy.sh | tee /tmp/alpha-deploy.log`), the
@@ -116,15 +120,20 @@ CACHE_BUILDER="${CACHE_BUILDER:-alpha-registry-cache}"
 readonly NAMESPACE RELEASE HELM_CHART REGISTRY CACHE_BUILDER
 
 SKIP_BUILD=false
+SKIP_DEPLOY=false
 for arg in "$@"; do
     case "$arg" in
         --skip-build) SKIP_BUILD=true ;;
+        --skip-deploy) SKIP_DEPLOY=true ;;
         *) echo "unknown arg: $arg" >&2; exit 1 ;;
     esac
 done
 
 info() { echo "[INFO] $*"; }
 err()  { echo "[ERROR] $*" >&2; }
+
+# shellcheck source=scripts/lib/helm-pending-recover.sh
+source "${SCRIPT_DIR}/lib/helm-pending-recover.sh"
 
 # ---------------------------------------------------------------------------
 # KUBE_CONTEXT allowlist -- alpha-deploy.sh may only ever target local-alpha
@@ -301,8 +310,19 @@ service_image_repo() {
 # stale-mutable-`:alpha`-tag bug this fix addresses.
 service_image_tag() {
     case "$1" in
-        reputation-module|svc-streaming) echo "alpha" ;;
+        reputation-module) echo "alpha" ;;
+        # svc-streaming publishes per-variant tags (<tag>-<variant>, streaming.gpuVariant in
+        # values.yaml); alpha builds the cpu variant only. GPU variants: core/svc_streaming/README.md.
+        svc-streaming) echo "alpha-cpu" ;;
         *) echo "${SHA8}" ;;
+    esac
+}
+
+# Docker build target per service (Dockerfile.rust multi-stage). Empty = default (last stage).
+service_build_target_args() {
+    case "$1" in
+        svc-streaming) echo "--target cpu" ;;
+        *) echo "" ;;
     esac
 }
 
@@ -315,7 +335,7 @@ service_image_tag() {
 # so a local alpha build failed with "proto: not found"/a missing COPY source.
 service_build_context_args() {
     case "$1" in
-        svc-process|svc-action) echo "--build-context proto=proto" ;;
+        svc-process|svc-action|svc-presentation) echo "--build-context proto=proto" ;;
         *) echo "" ;;
     esac
 }
@@ -375,11 +395,12 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
         dockerfile="$(service_dockerfile "${svc}")"
         context="$(service_context "${svc}")"
         extra_build_context_args="$(service_build_context_args "${svc}")"
+        extra_build_target_args="$(service_build_target_args "${svc}")"
         cache_ref="${REGISTRY}/buildcache/${repo}"
         info "Building ${img} (${dockerfile}), cache ${cache_ref}"
-        # shellcheck disable=SC2086 # extra_build_context_args is either empty or a
-        # fixed, space-free "--build-context proto=proto" literal -- intentional
-        # word-splitting, never user/env-controlled content.
+        # shellcheck disable=SC2086 # extra_build_context_args / extra_build_target_args are
+        # either empty or fixed, space-free literals ("--build-context proto=proto",
+        # "--target cpu") -- intentional word-splitting, never user/env-controlled content.
         docker buildx build --builder "${CACHE_BUILDER}" --pull=false \
             --cache-from "type=registry,ref=${cache_ref}" \
             --cache-to "type=registry,ref=${cache_ref},mode=max,image-manifest=true,oci-mediatypes=true" \
@@ -388,6 +409,7 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
             -t "${img}" \
             --label "org.opencontainers.image.revision=${SHA}" \
             ${extra_build_context_args} \
+            ${extra_build_target_args} \
             "${context}"
 
         info "Pushing ${img}"
@@ -500,6 +522,14 @@ EOF
 
 check_images_in_registry
 
+# --skip-deploy: images are built+pushed+verified present -- stop before any
+# helm step (lint/dry-run/upgrade). Legal together with --skip-build (just
+# verifies the registry, then exits).
+if [[ "${SKIP_DEPLOY}" == "true" ]]; then
+    info "--skip-deploy: images built+pushed+verified at ${SHA8}, skipping helm"
+    exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # Step 2: helm lint + dry-run + upgrade.
 #
@@ -545,7 +575,21 @@ HELM_ARGS=(
     --values "${HELM_CHART}/values-alpha.yaml"
     --set-string "global.imageTag=${SHA8}"
     --timeout 60m
+    # helm v4 Server-Side Apply: take over fields owned by another field
+    # manager (a seaweedfs SSA ownership conflict wedged revs 56/57).
+    --force-conflicts
 )
+
+# Self-heal a release wedged in pending-upgrade/-install/-rollback by an
+# interrupted upgrade (Helm refuses every further upgrade until cleared). Acts
+# ONLY on pending-* states, only against the allowlist-validated KUBE_CONTEXT;
+# fails loud (exit 1) if the release is still pending afterwards. Contract:
+# scripts/lib/helm-pending-recover.sh, test: scripts/test-helm-pending-recover.sh
+info "Preflight: checking for a stuck pending helm release"
+helm_recover_pending_release "${RELEASE}" "${NAMESPACE}" "${KUBE_CONTEXT}" || {
+    err "stuck helm release ${RELEASE} could not be recovered -- aborting before upgrade"
+    exit 1
+}
 
 info "helm upgrade --dry-run validation"
 helm "${HELM_ARGS[@]}" --dry-run=server >/dev/null

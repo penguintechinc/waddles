@@ -10,13 +10,14 @@ log = botLogger("waddlebot-dbc")
 log.fileLogger("waddlebot-dbc.log")
 
 # const
-DEFAULT_CFG_FILENAME="config.yml"
+DEFAULT_CFG_FILENAME = "config.yml"
+
 
 # ---------------------
 # This is the class which will handle all database interactions
 # ---------------------
 class botDb:
-    def __init__(self, config: dict = None, dbc: dbinfo = None ):
+    def __init__(self, config: dict = None, dbc: dbinfo = None):
         # our input
         self.dbc = dbc
         # These must initialize in order to be useful
@@ -55,7 +56,7 @@ class botDb:
         except ValueError as err:
             log.error(f"JSON decoding failed: {err}")
             return None
-    
+
     # ---------------------
     # Function which calls out to a DB via API to update DB records
     # ---------------------

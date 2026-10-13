@@ -173,7 +173,7 @@ class AvailabilityService:
                     param_idx += 1
 
                 # Add updated_at
-                set_clauses.append(f"updated_at = NOW()")
+                set_clauses.append("updated_at = NOW()")
 
                 # Add WHERE clause parameter
                 values.append(user_id)

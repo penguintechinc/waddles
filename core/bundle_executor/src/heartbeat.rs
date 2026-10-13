@@ -197,14 +197,11 @@ impl HeartbeatConfig {
     }
 }
 
-/// Reconnect/stale-session counters. No Prometheus/OTel registry exists in
-/// this crate (deliberately -- see `Cargo.toml`'s doc comment on why
-/// `penguin-logging`/`opentelemetry-otlp` are excluded here, same
-/// dependency-minimalism argument that keeps `reqwest` out), so these are
-/// plain atomics logged by `crate::run`/this module, same convention as
-/// the pre-existing `Executor::orphaned_unload_total`. A future metrics
-/// registry can read these directly rather than this module needing to
-/// change.
+/// Reconnect/stale-session counters. Plain atomics (readable by tests and the
+/// logs `crate::run`/this module emit) that ALSO feed the OTel counters in
+/// `crate::metrics` -- the registry this crate used to lack (see
+/// `Cargo.toml`'s doc comment on why `penguin-logging` is still excluded but
+/// `opentelemetry-otlp` is taken gRPC-only, which keeps `reqwest` out).
 #[derive(Debug, Default)]
 pub struct HeartbeatMetrics {
     pub reconnects_total: AtomicU64,
@@ -212,13 +209,19 @@ pub struct HeartbeatMetrics {
 }
 
 impl HeartbeatMetrics {
+    /// Counts one trip round the dial loop -- the atomic below AND the OTel
+    /// counter `waddles_executor_reconnects_total`.
     pub fn record_reconnect(&self) {
         self.reconnects_total.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::executor_metrics().record_reconnect();
     }
 
+    /// Counts one session dropped as stale -- the atomic below AND the OTel
+    /// counter `waddles_executor_heartbeat_timeouts_total`.
     pub fn record_heartbeat_timeout(&self) {
         self.heartbeat_timeouts_total
             .fetch_add(1, Ordering::Relaxed);
+        crate::metrics::executor_metrics().record_heartbeat_timeout();
     }
 }
 
@@ -365,5 +368,31 @@ pub async fn run_monitor(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::test_support::shared;
+
+    /// `HeartbeatMetrics` keeps its atomics (tests and logs read them) AND
+    /// feeds the OTel counters. The OTel series are label-less and shared
+    /// with every other test in this process, so assert on the delta.
+    #[test]
+    fn heartbeat_counters_feed_both_the_atomics_and_otel() {
+        let metrics = HeartbeatMetrics::default();
+        let before = |name: &str| shared().count(name, &[]);
+        let reconnects = before("waddles_executor_reconnects_total");
+        let timeouts = before("waddles_executor_heartbeat_timeouts_total");
+
+        metrics.record_reconnect();
+        metrics.record_reconnect();
+        metrics.record_heartbeat_timeout();
+
+        assert_eq!(metrics.reconnects_total.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.heartbeat_timeouts_total.load(Ordering::Relaxed), 1);
+        assert!(shared().count("waddles_executor_reconnects_total", &[]) >= reconnects + 2.0);
+        assert!(shared().count("waddles_executor_heartbeat_timeouts_total", &[]) >= timeouts + 1.0);
     }
 }

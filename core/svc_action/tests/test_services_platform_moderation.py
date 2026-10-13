@@ -3,7 +3,7 @@
 Only the community-aware resolver helper is tested directly here --
 `twitch_timeout`/`discord_timeout`/`discord_warn`/`twitch_warn`'s own real
 HTTP/relay call logic is already covered end-to-end via
-`test_bundles_moderation_enforce_action.py`, which is also where this
+`test_builtin_moderation_enforce_action.py`, which is also where this
 helper's integration into `_enforce_twitch`'s moderator-token resolution
 order (community-first, env-fallback) is exercised.
 """

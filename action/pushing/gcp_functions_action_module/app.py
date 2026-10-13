@@ -29,6 +29,7 @@ from services.grpc_handler import GCPFunctionsActionServicer, GrpcServer
 app = Quart(__name__)
 app.config.from_object(Config)
 
+
 # Setup logging
 def setup_logging():
     """Setup comprehensive AAA logging."""
@@ -73,6 +74,7 @@ def setup_logging():
         except Exception as e:
             print(f"Failed to setup syslog: {e}")
 
+
 setup_logging()
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,7 @@ gcp_service = GCPFunctionsService()
 grpc_servicer = GCPFunctionsActionServicer(gcp_service)
 grpc_server = GrpcServer(grpc_servicer, Config.GRPC_PORT)
 
+
 # Authentication decorator
 def require_auth(f):
     """Decorator for JWT authentication."""
@@ -124,6 +127,7 @@ def require_auth(f):
     return decorated_function
 
 # REST API Endpoints
+
 
 @app.route("/health", methods=["GET"])
 async def health():
@@ -150,6 +154,7 @@ async def health():
             "error": str(e)
         }), 503
 
+
 @app.route("/api/v1/auth/token", methods=["POST"])
 async def generate_token():
     """Generate JWT token for API access."""
@@ -171,6 +176,7 @@ async def generate_token():
         "token": token,
         "expires_in": Config.JWT_EXPIRATION_SECONDS
     })
+
 
 @app.route("/api/v1/functions/invoke", methods=["POST"])
 @require_auth
@@ -227,6 +233,7 @@ async def invoke_function():
             "error": str(e)
         }), 500
 
+
 @app.route("/api/v1/functions/invoke-http", methods=["POST"])
 @require_auth
 async def invoke_http_function():
@@ -262,6 +269,7 @@ async def invoke_http_function():
             "success": False,
             "error": str(e)
         }), 500
+
 
 @app.route("/api/v1/functions/batch", methods=["POST"])
 @require_auth
@@ -336,6 +344,7 @@ async def batch_invoke_functions():
             "error": str(e)
         }), 500
 
+
 @app.route("/api/v1/functions/list", methods=["GET"])
 @require_auth
 async def list_functions():
@@ -359,6 +368,7 @@ async def list_functions():
     except Exception as e:
         logger.error(f"List functions failed: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/v1/functions/<function_name>/details", methods=["GET"])
 @require_auth
@@ -387,6 +397,7 @@ async def get_function_details(function_name: str):
     except Exception as e:
         logger.error(f"Get function details failed: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/v1/stats", methods=["GET"])
 @require_auth
@@ -424,6 +435,7 @@ async def get_stats():
 
 # Application Lifecycle
 
+
 @app.before_serving
 async def startup():
     """Application startup."""
@@ -444,6 +456,7 @@ async def startup():
         f"REST: {Config.REST_PORT}, gRPC: {Config.GRPC_PORT}"
     )
 
+
 @app.after_serving
 async def shutdown():
     """Application shutdown."""
@@ -459,6 +472,7 @@ async def shutdown():
     db.close()
 
     logger.info("GCP Functions Action Module stopped")
+
 
 if __name__ == "__main__":
     # Run with Hypercorn in production

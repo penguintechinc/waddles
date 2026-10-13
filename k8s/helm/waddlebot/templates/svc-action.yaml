@@ -16,7 +16,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-action
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcAction")) }}
   replicas: {{ .Values.pipeline.svcAction.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -27,6 +29,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-action
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       # Dedicated identity (feature/eddsa-machine-jwt, security review HIGH
       # finding) -- distinguishes this deployment's pods from every other
       # workload in the namespace for `flask_core.service_jwt`'s TokenReview
@@ -46,6 +49,7 @@ spec:
         # scripts/deploy-alpha.sh.
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-action" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -58,6 +62,10 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_action;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_action") | nindent 8 }}
         - name: MODULE_NAME
           value: "svc-action"
         - name: PIPELINE_STAGE
@@ -91,11 +99,6 @@ spec:
         # svc-action writes action_dispatch_log rows directly (core/svc_action/runner.py)
         # and sends outbound Discord messages via CANON-LIB (waddle_transports) using this
         # bot token -- same Secret keys hub-api/svc-ingest already read.
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: DATABASE_URL
         # fix/helm-platform-credentials -- sourced from the operator-managed
         # platform-credentials Secret, never the chart-rendered `-secrets`
         # Secret; optional so a community with no Discord bot configured
@@ -122,6 +125,7 @@ spec:
         - name: MODULE_LOAD_MARKETING
           value: "true"
         {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -170,4 +174,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-action
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-action" "ports" (list $.Values.pipeline.svcAction.port) "runtime" "python" "shell" true) }}
 {{- end }}

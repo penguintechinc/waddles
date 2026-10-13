@@ -62,11 +62,16 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 spec:
   replicas: 1
+  # Recreate, never RollingUpdate: one single-writer Postgres on one ReadWriteOnce PVC. A
+  # RollingUpdate surge starts the replacement pod while the old one still has PGDATA open --
+  # two postmasters on one data directory (each is PID 1 in its own container, so
+  # postmaster.pid never detects the other), then the old pod is killed mid-write and the
+  # survivor PANICs "could not locate a valid checkpoint record" (kind upgrade-path, run
+  # 38098458861). Any pod-template change (this chart's H-1/H-3 move of POSTGRES_PASSWORD to
+  # the <release>-db-admin Secret is one) rolls Postgres on `helm upgrade`, so this is a
+  # live-upgrade data-integrity requirement. Same strategy redis/seaweedfs/qdrant/ollama use.
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: postgres
@@ -78,10 +83,16 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: database
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.infrastructure.postgresql.podSecurityContext | nindent 8 }}
       containers:
       - name: postgres
         image: {{ .Values.infrastructure.postgresql.image }}
         imagePullPolicy: IfNotPresent
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          {{- toYaml .Values.infrastructure.postgresql.securityContext | nindent 10 }}
         args: ["-c", "max_connections=300"]
         ports:
         - name: postgres
@@ -93,10 +104,13 @@ spec:
             configMapKeyRef:
               name: waddlebot-config
               key: POSTGRES_USER
+        # H-1/H-3 -- the database OWNER credential is read from its own Secret
+        # (<release>-db-admin / infrastructure.postgresql.admin.existingSecret), never
+        # from waddlebot-secrets, which every other workload envFrom's.
         - name: POSTGRES_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: waddlebot-secrets
+              name: {{ include "waddlebot.db.adminSecretName" . }}
               key: POSTGRES_PASSWORD
         - name: POSTGRES_DB
           valueFrom:
@@ -116,6 +130,11 @@ spec:
         - name: init-script
           mountPath: /docker-entrypoint-initdb.d
           readOnly: true
+        # readOnlyRootFilesystem: the unix-socket dir and /tmp must be writable.
+        - name: pg-run
+          mountPath: /var/run/postgresql
+        - name: tmp
+          mountPath: /tmp
         resources:
           requests:
             memory: {{ .Values.infrastructure.postgresql.resources.requests.memory }}
@@ -150,6 +169,10 @@ spec:
       - name: init-script
         configMap:
           name: postgres-init-script
+      - name: pg-run
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -171,4 +194,6 @@ spec:
   selector:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/instance: {{ .Release.Name }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "database" "name" "postgres" "selector" (dict "app.kubernetes.io/name" "postgres" "app.kubernetes.io/instance" $.Release.Name) "ports" (list 5432) "egress" "internal" "tetragon" false) }}
 {{- end }}

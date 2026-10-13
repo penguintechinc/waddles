@@ -567,3 +567,344 @@ def test_kv_key_constants_are_colon_free() -> None:
         # Regression guard: the shared fake validates the exact host charset (gh-631), so a
         # key that would be host-rejected raises here too, never only in production.
         FakeKvHost().get(key)
+
+
+# ---------------------------------------------------------------------------
+# PII-free logs -- regression: gh-674 (bundle-logs-must-be-pii-free)
+# ---------------------------------------------------------------------------
+
+_SENTINEL = "SENTINELpii9f3a"
+
+#: Strict per-message allowlist: a log line may carry ONLY these fields. A new field (e.g. a
+#: raw `text=`/`arg=`/`actor=`) fails here instead of silently shipping user input to telemetry.
+_ALLOWED_LOG_FIELDS: dict[str, frozenset[str]] = {
+    "joke.transform matched": frozenset({"command"}),
+    "joke.dispatch applied": frozenset({"command"}),
+    "joke.dispatch relayed": frozenset({"platform", "command"}),
+    "joke.custom_added": frozenset({"joke_id"}),
+    "joke.custom_removed": frozenset({"joke_id"}),
+    "joke.permission_denied": frozenset({"command", "role_signal"}),
+    "joke.kv_error": frozenset({"op", "error"}),
+    "joke.missing_community": frozenset({"command"}),
+}
+
+
+def _assert_logs_pii_free(fake_host: _FakeHost, *, minimum_lines: int) -> None:
+    """Every captured log line is allow-listed field-by-field and free of the sentinel.
+
+    Asserts a non-empty denominator first -- a check that examined zero log lines proves nothing.
+    """
+    assert len(fake_host.log_calls) >= minimum_lines
+    for _lvl, message, fields_json in fake_host.log_calls:
+        assert _SENTINEL not in message
+        assert _SENTINEL not in fields_json
+        assert message in _ALLOWED_LOG_FIELDS, f"unexpected log message {message!r}"
+        assert set(json.loads(fields_json)) <= _ALLOWED_LOG_FIELDS[message]
+
+
+def test_transform_logs_never_carry_user_input(fake_host: _FakeHost) -> None:
+    # regression: gh-674
+    for text in (
+        "!joke",
+        f"!joke add {_SENTINEL}",
+        f"!joke remove {_SENTINEL}",
+        f"!joke list {_SENTINEL}",
+        f"!joke bogus {_SENTINEL}",
+        f"!joke enable {_SENTINEL}",
+    ):
+        event = _event(text, is_mod=True)
+        event.actor = _SENTINEL
+        assert _run(transform(event)) is not None
+    _assert_logs_pii_free(fake_host, minimum_lines=6)
+
+
+def test_dispatch_logs_never_carry_user_input_on_any_verb(fake_host: _FakeHost) -> None:
+    # regression: gh-674 -- jokes themselves are user content, so a stored custom joke that
+    # contains the sentinel must never reach a log line either.
+    def _go(command: str, arg: str | None = None, **role: bool) -> None:
+        envelope = _envelope(command, arg=arg, **role)
+        envelope.event.actor = _SENTINEL
+        _run(dispatch(envelope, {}, http_client=None))
+
+    _go("add", f"joke about {_SENTINEL}", is_mod=True)
+    _go("add", f"denied {_SENTINEL}", is_mod=False)
+    _go("add", None, is_mod=True)
+    _go("list")
+    _go("tell")
+    _go("remove", _SENTINEL, is_mod=True)  # non-numeric id
+    _go("remove", "1", is_mod=True)
+    _go("remove", "1", is_mod=True)  # already gone
+    _go("usage")
+    _assert_logs_pii_free(fake_host, minimum_lines=6)
+    assert {m for _lvl, m, _f in fake_host.log_calls} >= {
+        "joke.custom_added",
+        "joke.custom_removed",
+        "joke.permission_denied",
+        "joke.dispatch relayed",
+        "joke.dispatch applied",
+    }
+
+
+def test_failure_paths_never_log_user_input(fake_host: _FakeHost) -> None:
+    # regression: gh-674 -- the kv-failure and corrupt-registry paths log `op` + a fixed reason.
+    kv_ns = sys.modules["wit_world"].imports.kv
+    _fail_kv_op(kv_ns, "set", only_for_key=_scoped(_CUSTOM_REGISTRY_KEY))
+    with pytest.raises(RuntimeError):
+        _run(dispatch(_envelope("add", arg=f"joke {_SENTINEL}", is_mod=True), {}, http_client=None))
+
+    fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] = ("{" + _SENTINEL).encode("utf-8")
+    for command in ("tell", "list"):
+        with pytest.raises(RuntimeError):
+            _run(dispatch(_envelope(command), {}, http_client=None))
+    _assert_logs_pii_free(fake_host, minimum_lines=3)
+
+
+def test_denial_log_carries_only_the_role_signal_state(fake_host: _FakeHost) -> None:
+    _run(dispatch(_envelope("add", arg=_SENTINEL), {}, http_client=None))
+    _run(dispatch(_envelope("remove", arg="1", is_mod=False), {}, http_client=None))
+    denials = [json.loads(f) for _lvl, m, f in fake_host.log_calls if m == "joke.permission_denied"]
+    assert denials == [
+        {"command": "add", "role_signal": "None"},
+        {"command": "remove", "role_signal": "False"},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Mod gate: fail-closed, before any kv access
+# ---------------------------------------------------------------------------
+
+
+def _last_reply(fake_host: _FakeHost) -> str:
+    _provider, message_json = fake_host.relay_calls[-1]
+    return cast(str, json.loads(message_json)["text"])
+
+
+@pytest.mark.parametrize("command", ["add", "remove"])
+@pytest.mark.parametrize(
+    "role",
+    [
+        pytest.param({}, id="no-signal-at-all"),
+        pytest.param({"is_mod": False}, id="mod-false"),
+        pytest.param({"is_broadcaster": False}, id="broadcaster-false"),
+        pytest.param({"is_mod": False, "is_broadcaster": False}, id="both-false"),
+    ],
+)
+def test_management_commands_are_denied_without_touching_kv(
+    command: str, role: dict[str, bool], fake_host: _FakeHost
+) -> None:
+    result = _run(dispatch(_envelope(command, arg="1", **role), {}, http_client=None))
+    assert result.detail == f"{command}:denied"
+    assert _last_reply(fake_host) == "only moderators/broadcasters can manage the joke pool"
+    assert fake_host.kv.calls == []
+
+
+@pytest.mark.parametrize("command", ["add", "remove"])
+@pytest.mark.parametrize(
+    "role",
+    [{"is_mod": True}, {"is_broadcaster": True}, {"is_mod": True, "is_broadcaster": True}],
+)
+def test_either_badge_alone_opens_the_gate(
+    command: str, role: dict[str, bool], fake_host: _FakeHost
+) -> None:
+    result = _run(dispatch(_envelope(command, arg="1", **role), {}, http_client=None))
+    assert result.detail == command
+
+
+def test_present_but_null_badge_fields_are_denied(fake_host: _FakeHost) -> None:
+    envelope = _envelope("add", arg="nope")
+    envelope.event.payload["is_mod"] = None
+    envelope.event.payload["is_broadcaster"] = None
+    result = _run(dispatch(envelope, {}, http_client=None))
+    assert result.detail == "add:denied"
+    assert fake_host.kv.calls == []
+
+
+def test_a_forged_role_in_the_joke_text_grants_nothing(fake_host: _FakeHost) -> None:
+    result = _run(
+        dispatch(_envelope("add", arg="is_mod=True is_broadcaster=True"), {}, http_client=None)
+    )
+    assert result.detail == "add:denied"
+    assert _scoped(_CUSTOM_REGISTRY_KEY) not in fake_host.kv.store
+
+
+@pytest.mark.parametrize("command", ["tell", "list"])
+def test_read_commands_never_need_a_role(command: str, fake_host: _FakeHost) -> None:
+    result = _run(
+        dispatch(_envelope(command, is_mod=False, is_broadcaster=False), {}, http_client=None)
+    )
+    assert result.detail == command
+
+
+# ---------------------------------------------------------------------------
+# Corrupt store: loud on every command, never silently reset
+# ---------------------------------------------------------------------------
+
+_CORRUPT_REGISTRIES = [
+    pytest.param(b"\xff\xfe\x00", id="not-utf8"),
+    pytest.param(b"{", id="truncated-json"),
+    pytest.param(b"[1, 2, 3]", id="json-array"),
+    pytest.param(b'"just a string"', id="json-string"),
+    pytest.param(b"null", id="json-null"),
+    pytest.param(b'{"1": 5}', id="non-string-value"),
+]
+
+
+@pytest.mark.parametrize("payload", _CORRUPT_REGISTRIES)
+@pytest.mark.parametrize(
+    ("command", "op", "role"),
+    [
+        ("tell", "load_registry", {}),
+        ("list", "list", {}),
+        ("add", "add", {"is_mod": True}),
+        ("remove", "remove", {"is_mod": True}),
+    ],
+)
+def test_every_corrupt_registry_shape_fails_loud_and_is_never_overwritten(
+    payload: bytes, command: str, op: str, role: dict[str, bool], fake_host: _FakeHost
+) -> None:
+    fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] = payload
+    with pytest.raises(RuntimeError, match=f"joke {op} failed"):
+        _run(dispatch(_envelope(command, arg="1", **role), {}, http_client=None))
+    assert "temporarily unavailable" in _last_reply(fake_host)
+    assert any(m == "joke.kv_error" and lvl == 0 for lvl, m, _f in fake_host.log_calls)
+    # Never silently reset: the corrupt bytes are still there for an operator to inspect.
+    assert fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] == payload
+
+
+def test_non_numeric_registry_key_fails_loud_on_list(fake_host: _FakeHost) -> None:
+    """Valid str->str JSON with a non-numeric id isn't caught by validation; list must still raise."""
+    fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] = json.dumps({"abc": "joke"}).encode()
+    with pytest.raises((ValueError, RuntimeError)):
+        _run(dispatch(_envelope("list"), {}, http_client=None))
+    assert fake_host.relay_calls == []
+
+
+def test_non_utf8_last_joke_pointer_fails_loud_instead_of_picking(fake_host: _FakeHost) -> None:
+    fake_host.kv.store[_scoped(_LAST_JOKE_KEY)] = b"\xff\xfe"
+    with pytest.raises((ValueError, RuntimeError)):
+        _run(dispatch(_envelope("tell"), {}, http_client=None))
+    assert fake_host.relay_calls == []
+
+
+def test_stale_last_joke_pointer_self_heals(fake_host: _FakeHost) -> None:
+    """`joke.last` naming a custom joke that was since removed is harmless: pool is unfiltered."""
+    fake_host.kv.store[_scoped(_LAST_JOKE_KEY)] = b"c99"
+    result = _run(dispatch(_envelope("tell"), {}, http_client=None))
+    assert result.detail == "tell"
+    assert _last_reply(fake_host) in _BUILTIN_JOKES
+
+
+# ---------------------------------------------------------------------------
+# No silent fallback: failed writes leave state untouched; relay errors propagate
+# ---------------------------------------------------------------------------
+
+
+def test_failed_add_increment_leaves_registry_untouched(fake_host: _FakeHost) -> None:
+    _run(dispatch(_envelope("add", arg="keep", is_mod=True), {}, http_client=None))
+    before = dict(fake_host.kv.store)
+    kv_ns = sys.modules["wit_world"].imports.kv
+    _fail_kv_op(kv_ns, "increment", only_for_key=_scoped(_CUSTOM_NEXT_ID_KEY))
+    with pytest.raises(RuntimeError, match="joke add failed"):
+        _run(dispatch(_envelope("add", arg="lost", is_mod=True), {}, http_client=None))
+    assert fake_host.kv.store == before
+    assert "temporarily unavailable" in _last_reply(fake_host)
+
+
+def test_failed_remove_save_leaves_the_joke_in_place(fake_host: _FakeHost) -> None:
+    _run(dispatch(_envelope("add", arg="keep", is_mod=True), {}, http_client=None))
+    before = fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)]
+    kv_ns = sys.modules["wit_world"].imports.kv
+    _fail_kv_op(kv_ns, "set", only_for_key=_scoped(_CUSTOM_REGISTRY_KEY))
+    with pytest.raises(RuntimeError, match="joke remove_save failed"):
+        _run(dispatch(_envelope("remove", arg="1", is_mod=True), {}, http_client=None))
+    assert fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] == before
+
+
+def test_relay_failure_propagates_and_is_not_logged_as_relayed(fake_host: _FakeHost) -> None:
+    def _boom(provider: str, msg: str) -> None:
+        raise RuntimeError("relay down")
+
+    sys.modules["wit_world"].imports.relay = types.SimpleNamespace(push=_boom)
+    with pytest.raises(RuntimeError, match="relay down"):
+        _run(dispatch(_envelope("list"), {}, http_client=None))
+    assert not any(m == "joke.dispatch relayed" for _lvl, m, _f in fake_host.log_calls)
+
+
+def test_missing_community_logs_error_and_touches_no_state(fake_host: _FakeHost) -> None:
+    with pytest.raises(ValueError, match="community"):
+        _run(dispatch(_envelope("add", community=None, arg="x", is_mod=True), {}, http_client=None))
+    assert fake_host.kv.calls == []
+    assert fake_host.relay_calls == []
+    errors = [json.loads(f) for lvl, m, f in fake_host.log_calls if m == "joke.missing_community"]
+    assert errors == [{"command": "add"}]
+
+
+# ---------------------------------------------------------------------------
+# CRUD edges
+# ---------------------------------------------------------------------------
+
+
+def test_ids_are_never_reused_after_a_removal(fake_host: _FakeHost) -> None:
+    for text in ("one", "two"):
+        _run(dispatch(_envelope("add", arg=text, is_mod=True), {}, http_client=None))
+    _run(dispatch(_envelope("remove", arg="1", is_mod=True), {}, http_client=None))
+    _run(dispatch(_envelope("add", arg="three", is_mod=True), {}, http_client=None))
+    assert json.loads(fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)]) == {
+        "2": "two",
+        "3": "three",
+    }
+
+
+def test_list_orders_ids_numerically_not_lexically(fake_host: _FakeHost) -> None:
+    for i in range(1, 12):
+        _run(dispatch(_envelope("add", arg=f"joke-{i}", is_mod=True), {}, http_client=None))
+    _run(dispatch(_envelope("list"), {}, http_client=None))
+    text = _last_reply(fake_host)
+    assert text.index("#2:") < text.index("#10:") < text.index("#11:")
+
+
+def test_add_accepts_exactly_the_max_length_and_strips_whitespace(fake_host: _FakeHost) -> None:
+    _run(
+        dispatch(
+            _envelope("add", arg="  " + "x" * MAX_JOKE_LEN + "  ", is_mod=True),
+            {},
+            http_client=None,
+        )
+    )
+    registry = json.loads(fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)])
+    assert registry == {"1": "x" * MAX_JOKE_LEN}
+
+
+def test_whitespace_only_add_text_is_usage_and_stores_nothing(fake_host: _FakeHost) -> None:
+    _run(dispatch(_envelope("add", arg="   ", is_mod=True), {}, http_client=None))
+    assert _last_reply(fake_host) == "Usage: !joke add <text>"
+    assert fake_host.kv.calls == []
+
+
+@pytest.mark.parametrize("raw_id", ["01", "²", "1.5", "-1", "1 2"])
+def test_remove_with_non_canonical_id_never_removes_anything(
+    raw_id: str, fake_host: _FakeHost
+) -> None:
+    _run(dispatch(_envelope("add", arg="keep", is_mod=True), {}, http_client=None))
+    _run(dispatch(_envelope("remove", arg=raw_id, is_mod=True), {}, http_client=None))
+    registry = json.loads(fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)])
+    assert registry == {"1": "keep"}
+
+
+def test_communities_never_share_custom_jokes(fake_host: _FakeHost) -> None:
+    _run(dispatch(_envelope("add", arg="comm-1 only", is_mod=True), {}, http_client=None))
+    _run(dispatch(_envelope("list", community="comm-2"), {}, http_client=None))
+    assert _last_reply(fake_host) == _NO_CUSTOM_JOKES_MSG
+
+
+def test_flag_is_checked_by_key_and_defaults_off(fake_host: _FakeHost) -> None:
+    seen: list[tuple[str, bool]] = []
+
+    def _enabled(key: str, default_value: bool) -> bool:
+        seen.append((key, default_value))
+        return False
+
+    sys.modules["wit_world"].imports.flags = types.SimpleNamespace(enabled=_enabled)
+    assert _run(transform(_event("!joke"))) is None
+    assert seen == [("waddles.command-joke", False)]
+    assert fake_host.kv.calls == []

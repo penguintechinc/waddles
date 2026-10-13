@@ -33,7 +33,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-ingest
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcIngest")) }}
   replicas: {{ .Values.pipeline.svcIngest.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -44,6 +46,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-ingest
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -59,6 +62,7 @@ spec:
         # scripts/deploy-alpha.sh.
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-ingest" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -71,6 +75,10 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_ingest;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_ingest") | nindent 8 }}
         - name: MODULE_NAME
           value: "svc-ingest"
         - name: PIPELINE_STAGE
@@ -119,6 +127,14 @@ spec:
               name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: TWITCH_OAUTH_TOKEN
               optional: true
+        # RSI Spectrum session token (gh #101) -- operator-managed platform-credentials
+        # Secret, never chart-rendered; optional so an unconfigured platform doesn't block.
+        - name: SPECTRUM_RSI_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
+              key: SPECTRUM_RSI_TOKEN
+              optional: true
         - name: TWITCH_NICK
           value: {{ .Values.oauth.twitch.nick | default "" | quote }}
         - name: TWITCH_CHANNELS
@@ -143,6 +159,7 @@ spec:
         - name: MODULE_LOAD_MARKETING
           value: "true"
         {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -189,4 +206,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-ingest
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-ingest" "ports" (list $.Values.pipeline.svcIngest.port) "runtime" "python") }}
 {{- end }}

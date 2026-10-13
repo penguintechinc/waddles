@@ -55,6 +55,7 @@ class DefaultConfig(dict):
                 return defaults[key]
             raise
 
+
 # Initialize Flask/Quart app with pre-populated config dict
 class PreConfiguredQuart(Quart):
     """Quart with pre-configured defaults to avoid __init__ KeyError."""
@@ -64,6 +65,7 @@ class PreConfiguredQuart(Quart):
     def __init__(self, *args, **kwargs):
         """Initialize with custom config class."""
         super().__init__(*args, **kwargs)
+
 
 app = PreConfiguredQuart(__name__)
 app.config["SECRET_KEY"] = Config.MODULE_SECRET_KEY

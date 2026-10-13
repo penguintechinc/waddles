@@ -79,8 +79,10 @@ pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
 pub mod http;
+pub mod metrics_facade;
 pub mod retry;
 pub mod senders;
+pub mod stage_metrics;
 pub mod telemetry;
 pub mod usage;
 pub mod wiring;
@@ -236,6 +238,15 @@ where
     F2: std::future::Future<Output = ()> + Send + 'static,
 {
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
+    // Build the stage's OTel instruments NOW, strictly after `telemetry::init`
+    // installed the global meter provider: an instrument created earlier
+    // would bind to the no-op default provider and silently record nothing.
+    // Every later `stage_metrics::stage_metrics()` call returns this same set.
+    let _ = stage_metrics::stage_metrics();
+    // Route `bundle-capability-gate`'s `metrics`-facade audit counters
+    // (grants and denials) into the same OTel pipeline; without a recorder
+    // the facade drops them.
+    metrics_facade::install();
 
     tracing::info!(
         http_port = config.cli.http_port,
@@ -1264,7 +1275,7 @@ fn try_start_changelog_consumer(
                                 retry_policy: dispatch_retry_policy,
                                 db: dispatch_db,
                                 usage,
-                                metrics: Arc::new(penguin_spine::NoopMetrics),
+                                metrics: stage_metrics::stage_metrics(),
                                 rust_data_plane,
                                 active_digests: Arc::clone(&active_digests),
                                 loaded_sessions: Arc::clone(&loaded_sessions),
@@ -1433,7 +1444,7 @@ fn try_start_dispatch(
             platform: "internal".to_string(),
             source_id: app_id.clone(),
         };
-        let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
+        let metrics: Arc<dyn penguin_spine::SpineMetrics> = stage_metrics::stage_metrics();
 
         try_start_usage_flush(
             config.cli.metering_flush_interval_s,

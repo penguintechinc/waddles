@@ -48,6 +48,11 @@ tables:
   - tenant_platform_apps
   - platform_connections
   - community_connection_access
+  - keystore.tenant_encryption_keys
+  - tenant_kms_configs
+  - sso_connections
+  - sso_identities
+  - suppression_records
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -740,4 +745,141 @@ grants:
     privileges: []
   - role: migration_runner
     table: community_connection_access
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # Per-tenant envelope encryption key store + Enterprise BYOK config (migration
+  # 0054_tenant_external_kms; design 2026-09-28-tenant-envelope-encryption Sec4/Sec6).
+  # hub_api is the sole reader/writer. Every data-plane role gets an explicit
+  # empty row: a compromised svc_* credential must not read even a *wrapped* DEK.
+  # keystore.tenant_encryption_keys: SELECT/INSERT/UPDATE only -- keys are retired,
+  # never hard-deleted by application code.
+  - role: hub_api
+    table: keystore.tenant_encryption_keys
+    privileges: [SELECT, INSERT, UPDATE]
+  - role: waddles_publisher
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_ingest
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_process
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_action
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_streaming
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: webui
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: migration_runner
+    table: keystore.tenant_encryption_keys
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: tenant_kms_configs
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: tenant_kms_configs
+    privileges: []
+  - role: svc_ingest
+    table: tenant_kms_configs
+    privileges: []
+  - role: svc_process
+    table: tenant_kms_configs
+    privileges: []
+  - role: svc_action
+    table: tenant_kms_configs
+    privileges: []
+  - role: svc_streaming
+    table: tenant_kms_configs
+    privileges: []
+  - role: webui
+    table: tenant_kms_configs
+    privileges: []
+  - role: migration_runner
+    table: tenant_kms_configs
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0049_sso_connections: hub-api-owned control-plane tables for enterprise SSO.
+  # sso_identities.subject may be an email (SAML NameID) -- PII, hub_api only;
+  # every other role gets an explicit empty row (spec D28).
+  - role: hub_api
+    table: sso_connections
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: sso_connections
+    privileges: []
+  - role: svc_ingest
+    table: sso_connections
+    privileges: []
+  - role: svc_process
+    table: sso_connections
+    privileges: []
+  - role: svc_action
+    table: sso_connections
+    privileges: []
+  - role: svc_streaming
+    table: sso_connections
+    privileges: []
+  - role: webui
+    table: sso_connections
+    privileges: []
+  - role: migration_runner
+    table: sso_connections
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: sso_identities
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: sso_identities
+    privileges: []
+  - role: svc_ingest
+    table: sso_identities
+    privileges: []
+  - role: svc_process
+    table: sso_identities
+    privileges: []
+  - role: svc_action
+    table: sso_identities
+    privileges: []
+  - role: svc_streaming
+    table: sso_identities
+    privileges: []
+  - role: webui
+    table: sso_identities
+    privileges: []
+  - role: migration_runner
+    table: sso_identities
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0059_suppression_records: ban-evasion suppression (per-tenant keyed one-way codes).
+  # The HMAC key never leaves hub-api, so no other role can compute or test a code --
+  # explicit empty rows keep the live-grants equality check honest (no unexamined gap).
+  - role: hub_api
+    table: suppression_records
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: suppression_records
+    privileges: []
+  - role: svc_ingest
+    table: suppression_records
+    privileges: []
+  - role: svc_process
+    table: suppression_records
+    privileges: []
+  - role: svc_action
+    table: suppression_records
+    privileges: []
+  - role: svc_streaming
+    table: suppression_records
+    privileges: []
+  - role: webui
+    table: suppression_records
+    privileges: []
+  - role: migration_runner
+    table: suppression_records
     privileges: [SELECT, INSERT, UPDATE, DELETE]

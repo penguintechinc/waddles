@@ -10,6 +10,8 @@ every group needs.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from services.errors import ApiError
 
 
@@ -57,3 +59,29 @@ def provider_error(message: str) -> ApiError:
 def invalid_byok_key(message: str = "BYOK API key failed validation") -> ApiError:
     """400 -- a rotate/set call's key was rejected by the provider's own API."""
     return ApiError(message, 400, "AI_BYOK_KEY_INVALID")
+
+
+#: ``ApiError.code`` for a refused model-requested tool call. Routers key off this to make sure a
+#: tool-call denial is never downgraded to a silent tier fallback.
+TOOL_CALL_DENIED_CODE = "AI_TOOL_CALL_DENIED"
+
+
+@dataclass(slots=True)
+class ToolCallDeniedError(ApiError):
+    """403 -- a model-requested tool call failed server-side re-authorisation (fail-closed).
+
+    ``reason`` is the stable ``flask_core.ai_tool_authz`` denial code (e.g. ``scope_denied``,
+    ``reserved_argument``); it never carries the model's tool name or any argument value.
+    """
+
+    reason: str = "denied"
+
+
+def ai_tool_call_denied(reason: str) -> ToolCallDeniedError:
+    """403 -- the model asked for an action the invoking user's tenant/scopes do not permit."""
+    return ToolCallDeniedError(
+        "The AI response requested an action that is not permitted",
+        403,
+        TOOL_CALL_DENIED_CODE,
+        reason,
+    )

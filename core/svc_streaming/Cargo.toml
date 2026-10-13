@@ -3,7 +3,7 @@ name = "svc-streaming"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Waddles A/V data-plane service -- RTMP/SRT/WHIP ingest, ffmpeg transcode, HLS/WHEP/relay/record/Discord-voice egress."
 
@@ -42,6 +42,12 @@ utoipa-swagger-ui = { version = "=9.0.2", features = ["axum"] }
 # `aws_lc_rs` avoids that dependency entirely (requires cmake + a C/C++
 # compiler in the Docker builder stage -- see `Dockerfile.rust`).
 jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
+# JWT Phase-0 hardening (`src/http/auth/hardening.rs`): the JOSE header is
+# decoded by hand (base64url + JSON) BEFORE `jsonwebtoken` sees the token so
+# `alg: none` / `jku` / `crit` / a hostile `kid` are named precisely. Already
+# in the lockfile transitively via `jsonwebtoken` (same exact version) --
+# promoting it to a direct dependency adds no new package.
+base64 = "=0.22.1"
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
 chrono = { version = "=0.4.45", features = ["serde"] }
 thiserror = "=2.0.20"
@@ -93,6 +99,16 @@ async-trait = "=0.1.92"
 ffmpeg-sidecar = "=2.5.2"
 hls_m3u8 = "=0.7.0"
 object_store = { version = "=0.14.1", features = ["aws"] }
+
+# Direct process-group signalling (`killpg`) and non-reaping exit detection
+# (`waitid(WNOWAIT)`) for `pipeline::process_group` -- the supervisor used to
+# shell out to a `kill` binary the `debian:bookworm-slim` runtime image does not
+# ship, so teardown signals were silently never delivered. `nix` is NOT new
+# supply-chain surface: 0.31.3 (MIT) is already resolved at this exact version
+# and checksum in Cargo.lock via the WebRTC stack; only this crate's edge to it
+# is new. `signal` pulls in `process` (waitid/getpgrp); default features off.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

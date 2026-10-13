@@ -13,7 +13,10 @@ data:
   DB_HOST: {{ .Values.infrastructure.postgresql.service.name | quote }}
   DB_PORT: {{ .Values.infrastructure.postgresql.service.port | quote }}
   DB_NAME: {{ .Values.infrastructure.postgresql.database | quote }}
-  DB_USER: {{ .Values.infrastructure.postgresql.username | quote }}
+  # H-1/H-3 -- NO DB_USER / DATABASE_USER here. The database owner (superuser) name used
+  # to be handed to every pod through this shared ConfigMap; each workload now sets its OWN
+  # role via waddlebot.dbEnv (_helpers.tpl). POSTGRES_USER below is read only by the
+  # Postgres Deployment (initdb) and is the owner, not an application identity.
   DB_TYPE: "postgres"
   POSTGRES_USER: {{ .Values.infrastructure.postgresql.username | quote }}
   POSTGRES_DB: {{ .Values.infrastructure.postgresql.database | quote }}
@@ -21,7 +24,6 @@ data:
   DATABASE_HOST: {{ .Values.infrastructure.postgresql.service.name | quote }}
   DATABASE_PORT: {{ .Values.infrastructure.postgresql.service.port | quote }}
   DATABASE_NAME: {{ .Values.infrastructure.postgresql.database | quote }}
-  DATABASE_USER: {{ .Values.infrastructure.postgresql.username | quote }}
 
   # Redis Configuration
   REDIS_HOST: {{ .Values.infrastructure.redis.service.name | quote }}
@@ -116,6 +118,17 @@ data:
   KICK_PUSHER_KEY: {{ .Values.config.kickPusherKey | default "" | quote }}
   KICK_PUSHER_CLUSTER: {{ .Values.config.kickPusherCluster | default "" | quote }}
   YOUTUBE_LIVE_CHANNELS: {{ .Values.config.youtubeLiveChannels | default "" | quote }}
+  # RSI Spectrum one-way ingest (gh #101). Flag baseline defaults OFF; PostHog overrides when connected.
+  SPECTRUM_FORUM_CHANNELS: {{ .Values.config.spectrumForumChannels | default "" | quote }}
+  SPECTRUM_LOBBIES: {{ .Values.config.spectrumLobbies | default "" | quote }}
+  FLAG_WADDLES_SPECTRUM_INTEGRATION: {{ .Values.config.spectrumIntegrationEnabled | default false | quote }}
+  # Spectrum org sync (roster join/leave/role changes + event create/update/RSVP). Needs BOTH
+  # flags ON; baseline defaults OFF, PostHog overrides when connected.
+  SPECTRUM_ORG_COMMUNITIES: {{ .Values.config.spectrumOrgCommunities | default "" | quote }}
+  FLAG_WADDLES_SPECTRUM_ORG_SYNC: {{ .Values.config.spectrumOrgSyncEnabled | default false | quote }}
+  SPECTRUM_ORG_POLL_INTERVAL_S: {{ .Values.config.spectrumOrgPollIntervalS | default 300 | quote }}
+  SPECTRUM_ROSTER_MAX_DEPARTURE_RATIO: {{ .Values.config.spectrumRosterMaxDepartureRatio | default 0.5 | quote }}
+  SPECTRUM_ORG_EMIT_BACKLOG: {{ .Values.config.spectrumOrgEmitBacklog | default false | quote }}
 
   # Service Discovery URLs
   HUB_API_URL: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:8204"

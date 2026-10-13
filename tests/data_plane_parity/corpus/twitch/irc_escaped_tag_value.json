@@ -1,0 +1,39 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "frame": "@display-name=Some\\sUser\\:x\\\\y;user-id=42 :someuser!someuser@someuser.tmi.twitch.tv PRIVMSG #somechannel :escapes",
+  "golden": {
+    "platform": "twitch",
+    "event_type": "message",
+    "actor": "someuser",
+    "payload": {
+      "text": "escapes",
+      "channel_name": "somechannel",
+      "author": "someuser",
+      "author_id": "42",
+      "user_id": "42",
+      "display_name": "Some User;x\\y",
+      "message_id": null,
+      "room_id": null,
+      "badges": [],
+      "is_mod": false,
+      "is_subscriber": false,
+      "is_vip": false,
+      "is_broadcaster": false
+    },
+    "source": {
+      "platform": "twitch",
+      "account_id": "somechannel",
+      "channel_id": "somechannel"
+    }
+  },
+  "golden_origin": "rust",
+  "id": "twitch/irc_escaped_tag_value",
+  "outcome": "event",
+  "path": "twitch_irc",
+  "pii_classifier": "pass",
+  "platform": "twitch",
+  "python_divergences": [],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_receivers_twitch_irc.py"
+}

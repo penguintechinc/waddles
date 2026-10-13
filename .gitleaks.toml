@@ -10,7 +10,11 @@ useDefault = true
 # See trigger/receiver/kick_module_flask/services/chat_client.py:26-27
 # for the original commit where this was established as public, not secret.
 description = "Kick's public Pusher app key allowlist"
-regexes = ["eb1d5f283081a78b932c"]
+regexes = [
+  "eb1d5f283081a78b932c",
+  # Fake token fixture in core/svc_process/src/pii_tokenize.rs tests.
+  "tok-123456789012345678",
+]
 paths = [
   "core/svc_ingest/receivers/kick_pusher\\.py",
   "core/svc_ingest/tests/test_receivers_kick_pusher\\.py",
@@ -19,4 +23,13 @@ paths = [
   # (core/bundle_compiler/tests/scan_test.rs::secret_in_source_blocks) --
   # never a real credential.
   "core/bundle_compiler/tests/fixtures/bundles/scan-secret/app\\.py",
+  # Test fixtures only (fake keys / PUBLIC Discord application client IDs),
+  # triaged 2026-10-12 when the gitleaks counter stopped being masked and
+  # reported 3 findings above the history baseline. Each is a test file; none
+  # holds a real credential.
+  "hub_api/tests/provider_connections/test_adapter_contract\\.py",
+  "hub_api/tests/test_v1_discord_bot_install_blueprint\\.py",
+  "hub_api/tests/test_discord_bot_install_service\\.py",
+  "libs/flask_core/tests/test_ai_guard\\.py",
+  "core/credential_manager_module/services/test_log_redaction\\.py",
 ]

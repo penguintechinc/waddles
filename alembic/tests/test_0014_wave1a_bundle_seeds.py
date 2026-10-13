@@ -19,8 +19,8 @@ Additional coverage specific to 0014:
     round-trip, not by this test alone, but locked in here so a future edit
     can't silently reintroduce it without a real DB);
   - every seeded app_id's `process`/`action` entrypoint resolves to a
-    real, already-shipped module file under `core/svc_process/bundles/` /
-    `core/svc_action/bundles/` -- the "coded but not routable" guard this
+    real, already-shipped module file under `core/svc_process/builtin_handlers/` /
+    `core/svc_action/builtin_handlers/` -- the "coded but not routable" guard this
     migration exists to close (gh-298);
   - no app_id is seeded twice;
   - `upgrade()`/`downgrade()` are each idempotent when the underlying SQL
@@ -41,8 +41,8 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0014_wave1a_bundle_seeds.py"
 )
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_PROCESS_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_process" / "bundles"
-_ACTION_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_action" / "bundles"
+_PROCESS_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_process" / "builtin_handlers"
+_ACTION_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_action" / "builtin_handlers"
 
 # app_id -> (process module name or None, action module name or None).
 # Mirrors the `bundles.<module>:<function>` entrypoint convention; the

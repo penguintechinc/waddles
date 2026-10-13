@@ -4,8 +4,8 @@ Tenant Isolation Tests
 
 Centerpiece: `TestCrossTenantIsolation` proves a token scoped to tenant A
 never reaches tenant B's rows, via `tenant_scoped`. Also covers the
-mandatory `tenant` JWT claim and its bounded migration-window fallback --
-see security.md Tenant Isolation and Task 0.4 of
+mandatory `tenant` JWT claim (no migration-window fallback -- removed in
+H-2 Phase 0) -- see security.md Tenant Isolation and Task 0.4 of
 docs/plans/2026-08-26-v3-scbm-apps.md.
 """
 
@@ -16,13 +16,15 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import jwt
+import psycopg2.errors
 import pytest
 from pydal import DAL, Field
 
 from flask_core.auth import (
+    DEFAULT_JWT_AUDIENCE,
+    DEFAULT_JWT_ISSUER,
     DEFAULT_TENANT_SLUG,
     SCOPE_BUNDLES,
-    TENANT_CLAIM_MIGRATION_CUTOFF,
     create_jwt_token,
     setup_default_roles,
     verify_jwt_token,
@@ -35,6 +37,12 @@ from flask_core.tenancy import (
 )
 
 SECRET = "test-secret-key-not-for-production-use-only"
+
+
+class _PoisonedConnectionError(psycopg2.errors.InFailedSqlTransaction):
+    """A genuine psycopg2 `InFailedSqlTransaction` (SQLSTATE 25P02), pgcode fixed for the test."""
+
+    pgcode = "25P02"  # type: ignore[assignment]  # psycopg2 sets this from a live result
 
 
 @pytest.fixture
@@ -156,45 +164,58 @@ class TestTenantClaim:
         assert payload is not None
         assert payload["tenant"] == "tenant-a"
 
-    def test_verify_rejects_missing_tenant_claim_post_cutoff(self):
-        """A token issued after the migration cutoff with no tenant claim is
-        rejected outright -- the fallback is bounded, not permanent."""
-        now = datetime.now(timezone.utc)
-        assert now < TENANT_CLAIM_MIGRATION_CUTOFF, "test assumes 'now' precedes the cutoff constant"
-        post_cutoff_iat = TENANT_CLAIM_MIGRATION_CUTOFF + timedelta(days=1)
+    @pytest.mark.parametrize(
+        "issued_at",
+        [
+            # regression (H-2 Phase 0): every iat -- including ones that sat inside the retired
+            # "pre-2026-11-26 migration window" -- is rejected when `tenant` is missing.
+            pytest.param(datetime.now(timezone.utc), id="now-inside-old-window"),
+            pytest.param(datetime(2026, 1, 1, tzinfo=timezone.utc), id="long-before-old-cutoff"),
+            pytest.param(datetime(2027, 1, 1, tzinfo=timezone.utc), id="after-old-cutoff"),
+        ],
+    )
+    def test_verify_rejects_missing_tenant_claim_at_any_iat(self, issued_at):
+        """No default-tenant fallback exists: a token without `tenant` is None, always."""
         payload = {
             "sub": "u1",
             "username": "alice",
             "email": "alice@example.com",
             "roles": [],
-            "iat": post_cutoff_iat,
-            "exp": post_cutoff_iat + timedelta(hours=1),
+            "scope": "",
+            "iss": DEFAULT_JWT_ISSUER,
+            "aud": DEFAULT_JWT_AUDIENCE,
+            "iat": issued_at,
+            # exp is wall-clock-relative so the token is never merely "expired";
+            # rejection here is solely the missing-tenant-claim path.
+            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
             "type": "access",
         }
         token = jwt.encode(payload, SECRET, algorithm="HS256")
-        # exp is compared against real wall-clock utcnow(); a post-cutoff iat
-        # is necessarily in the future too, so the token is not yet expired --
-        # rejection here is solely the missing-tenant-claim path.
         assert verify_jwt_token(token, SECRET) is None
 
-    def test_verify_applies_default_tenant_fallback_pre_cutoff(self):
-        """A legacy token (no tenant claim, issued before the cutoff) is
-        defaulted to DEFAULT_TENANT_SLUG rather than rejected."""
-        legacy_iat = datetime.now(timezone.utc)
-        assert legacy_iat < TENANT_CLAIM_MIGRATION_CUTOFF
+    def test_verify_never_defaults_an_empty_tenant_to_global(self):
+        """`tenant: ""` is not "global" -- it is rejected, not defaulted."""
+        now = datetime.now(timezone.utc)
         payload = {
             "sub": "u1",
-            "username": "alice",
-            "email": "alice@example.com",
             "roles": [],
-            "iat": legacy_iat,
-            "exp": legacy_iat + timedelta(hours=1),
-            "type": "access",
+            "scope": "",
+            "tenant": "",
+            "iss": DEFAULT_JWT_ISSUER,
+            "aud": DEFAULT_JWT_AUDIENCE,
+            "iat": now,
+            "exp": now + timedelta(hours=1),
         }
         token = jwt.encode(payload, SECRET, algorithm="HS256")
-        result = verify_jwt_token(token, SECRET)
-        assert result is not None
-        assert result["tenant"] == DEFAULT_TENANT_SLUG
+        assert verify_jwt_token(token, SECRET) is None
+
+    def test_migration_cutoff_fallback_is_removed(self):
+        """The 2026-11-26 default-tenant migration window must stay deleted (MED-5)."""
+        import flask_core
+        import flask_core.auth
+
+        assert not hasattr(flask_core.auth, "TENANT_CLAIM_MIGRATION_CUTOFF")
+        assert not hasattr(flask_core, "TENANT_CLAIM_MIGRATION_CUTOFF")
 
 
 class TestScopeBundles:
@@ -278,8 +299,8 @@ class TestResolveTenantContextDbResilience:
                 call_count["n"] += 1
                 if call_count["n"] == 1:
                     query_set.select = MagicMock(
-                        side_effect=RuntimeError(
-                            "InFailedSqlTransaction: current transaction is aborted, "
+                        side_effect=_PoisonedConnectionError(
+                            "current transaction is aborted, "
                             "commands ignored until end of transaction block"
                         )
                     )
@@ -290,15 +311,24 @@ class TestResolveTenantContextDbResilience:
             payload = {"tenant": "tenant-a"}
 
             with caplog.at_level(logging.ERROR):
-                with pytest.raises(RuntimeError, match="InFailedSqlTransaction"):
+                with pytest.raises(_PoisonedConnectionError):
                     await resolve_tenant_context(payload, db)
 
             rollback_spy.assert_called_once()
             error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+            # The real trigger must stay identifiable (operation + type + SQLSTATE
+            # + category), not just the downstream cascade -- but never via the raw
+            # driver message, which can embed bound values (PII/tokens).
             assert any(
-                "resolve_tenant_context" in r.message and "InFailedSqlTransaction" in r.message
+                "resolve_tenant_context" in r.message
+                and "_PoisonedConnectionError" in r.message
+                and "sqlstate=25P02" in r.message
+                and "category=in_failed_sql_transaction" in r.message
                 for r in error_records
             ), "the real trigger exception must be logged, not just the downstream cascade"
+            assert not any(
+                "current transaction is aborted" in r.message for r in error_records
+            ), "raw driver message leaked into the log (bound-value leak risk)"
 
             # Next call on the SAME dal/connection succeeds -- the connection
             # self-healed instead of staying poisoned (the "recurs every

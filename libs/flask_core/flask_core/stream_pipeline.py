@@ -739,7 +739,9 @@ class StreamPipeline:
     def _make_dlq_name(self, stream: str) -> str:
         """Create dead letter queue name for a stream"""
         # Extract just the stream name without prefix
-        stream_name = stream.replace(f"{self.stream_prefix}:", "")
+        # removeprefix, not replace(): replace() also stripped every later occurrence of
+        # the prefix inside the stream name itself ("s:events:process" -> "eventprocess").
+        stream_name = stream.removeprefix(f"{self.stream_prefix}:")
         return f"{self.dlq_prefix}:{stream_name}"
 
     async def publish_event(

@@ -12,9 +12,10 @@ sys.path.insert(0, '/workspaces/WaddleBot/router_module')
 
 from models import db
 
+
 def setup_commands():
     """Add reputation and community commands to the router"""
-    
+
     # Commands to add
     commands = [
         # Community commands (local container)
@@ -35,7 +36,7 @@ def setup_commands():
             'module_id': 'community',
             'version': '1.0.0'
         },
-        
+
         # Reputation commands (local container)
         {
             'command': 'reputation',
@@ -54,7 +55,7 @@ def setup_commands():
             'module_id': 'reputation',
             'version': '1.0.0'
         },
-        
+
         # Score command (alias for reputation)
         {
             'command': 'score',
@@ -73,7 +74,7 @@ def setup_commands():
             'module_id': 'reputation',
             'version': '1.0.0'
         },
-        
+
         # Leaderboard command
         {
             'command': 'leaderboard',
@@ -93,7 +94,7 @@ def setup_commands():
             'version': '1.0.0'
         }
     ]
-    
+
     try:
         for cmd in commands:
             # Check if command already exists
@@ -102,11 +103,11 @@ def setup_commands():
                 (db.commands.prefix == cmd['prefix']) &
                 (db.commands.is_active == True)
             ).select().first()
-            
+
             if existing_cmd:
                 print(f"Command '{cmd['prefix']}{cmd['command']}' already exists, skipping...")
                 continue
-            
+
             # Insert new command
             cmd_id = db.commands.insert(
                 command=cmd['command'],
@@ -127,20 +128,21 @@ def setup_commands():
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
             )
-            
+
             print(f"Added command '{cmd['prefix']}{cmd['command']}' with ID {cmd_id}")
-        
+
         db.commit()
         print("✅ All commands added successfully!")
-        
+
     except Exception as e:
         print(f"❌ Error adding commands: {str(e)}")
         db.rollback()
         raise
 
+
 def setup_entities():
     """Add default entities for testing"""
-    
+
     # Default entities to add
     entities = [
         {
@@ -171,7 +173,7 @@ def setup_entities():
             'config': {'test': True}
         }
     ]
-    
+
     try:
         for entity in entities:
             # Check if entity already exists
@@ -179,11 +181,11 @@ def setup_entities():
                 (db.entities.entity_id == entity['entity_id']) &
                 (db.entities.is_active == True)
             ).select().first()
-            
+
             if existing_entity:
                 print(f"Entity '{entity['entity_id']}' already exists, skipping...")
                 continue
-            
+
             # Insert new entity
             entity_id = db.entities.insert(
                 entity_id=entity['entity_id'],
@@ -196,24 +198,25 @@ def setup_entities():
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
             )
-            
+
             print(f"Added entity '{entity['entity_id']}' with ID {entity_id}")
-        
+
         db.commit()
         print("✅ All entities added successfully!")
-        
+
     except Exception as e:
         print(f"❌ Error adding entities: {str(e)}")
         db.rollback()
         raise
 
+
 if __name__ == "__main__":
     print("Setting up Waddles commands and entities...")
-    
+
     # Setup commands
     setup_commands()
-    
+
     # Setup entities
     setup_entities()
-    
+
     print("🎉 Setup complete!")

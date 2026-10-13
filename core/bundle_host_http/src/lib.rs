@@ -30,6 +30,14 @@
 //! tracked as `svc_ingest`'s own follow-up; the guard-side pipeline itself
 //! is complete and covered by this crate's own hermetic tests.
 //!
+//! **Query-parameter secret refs (landed).** A `secret_refs` slot named
+//! `?<param>` (e.g. `?key` for WeatherAPI-style `?key=` auth) is resolved
+//! host-side exactly like a header ref and appended to the URL's query, so
+//! the value never enters the component -- injected only on the first hop to
+//! a granted `net.http.fqdn` host, dropped on every redirect, and scrubbed
+//! from logs, `Debug` output, transport errors and responses. Full contract:
+//! `egress`'s module doc ("Secret refs: header slots and `?query` slots").
+//!
 //! **Upstream egress proxy (not part of this landing).** A
 //! network-level egress gateway is planned separately. [`egress::
 //! EgressLimits::proxy_url`] is the config seam reserved for it: `None`

@@ -7,9 +7,17 @@
 //! path in `crate::capabilities::StageCapabilities::handle_relay` (the
 //! platform explicitly called out as the relay-based one, and the simplest
 //! to land completely: no SSRF-guarded `http` capability, no per-platform
-//! credential injection). Discord routes through the REST `http`
-//! capability (`crate::egress::EgressGuard`); Slack/YouTube/Kick remain a
-//! documented `TODO(M3+)` seam -- rather than reimplement connector logic
+//! credential injection).
+//!
+//! **Discord is a bot-token built-in, never a bundle-held credential and
+//! never the bundle `http` capability / `crate::egress::EgressGuard`.**
+//! Three ops, two paths: `chat.send` is an inline bot-REST `POST` from
+//! `StageCapabilities::handle_discord_relay`; `chat.delete` and `dm.send`
+//! are queued to svc-ingest's bot-token REST sender
+//! (`svc_ingest::outbound::run_discord`) -- accepted only while that drain
+//! advertises readiness, and reported successful only once it confirms the
+//! op (`StageCapabilities::handle_discord_queued_op`). Slack/YouTube/Kick
+//! remain a documented `TODO(M3+)` seam -- rather than reimplement connector logic
 //! here, this module leaves an explicit seam per remaining platform naming
 //! the `penguin-connectors` crate that owns it, per the M3 task's own
 //! instruction ("USE penguin-connectors' senders where they exist ... do
@@ -60,7 +68,8 @@ impl Platform {
 /// `TODO(M3+)` seam awaiting a `penguin-connectors` REST sender.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SenderStatus {
-    /// Fully wired end to end (Twitch, via the `relay` host capability).
+    /// Fully wired end to end through the `relay` host capability (Twitch
+    /// via the IRC drain; Discord via bot-token REST -- see the module doc).
     Implemented,
     /// `TODO(M3+): {platform} sender -- pending penguin-connectors
     /// {platform}` -- names exactly which upstream crate/module will back
@@ -75,10 +84,10 @@ pub enum SenderStatus {
 pub fn sender_status(platform: Platform) -> SenderStatus {
     match platform {
         Platform::Twitch => SenderStatus::Implemented,
-        Platform::Discord => SenderStatus::PendingSeam {
-            reason: "TODO(M3+): discord sender -- pending the http host capability \
-                     (crate::capabilities) and penguin-connector-discord's REST sender",
-        },
+        // Bot-token REST (module doc): chat.send inline; chat.delete/dm.send
+        // queued to svc-ingest's Discord REST sender behind the drain-ready
+        // + confirmation handshake (relay capability).
+        Platform::Discord => SenderStatus::Implemented,
         Platform::Slack => SenderStatus::PendingSeam {
             reason: "TODO(M3+): slack sender -- pending the http host capability \
                      (crate::capabilities) and penguin-connectors' Slack scaffold",
@@ -188,14 +197,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn twitch_is_implemented_every_other_platform_is_a_seam() {
+    fn twitch_and_discord_are_implemented_every_other_platform_is_a_seam() {
         assert_eq!(sender_status(Platform::Twitch), SenderStatus::Implemented);
-        for platform in [
-            Platform::Discord,
-            Platform::Slack,
-            Platform::Youtube,
-            Platform::Kick,
-        ] {
+        assert_eq!(sender_status(Platform::Discord), SenderStatus::Implemented);
+        for platform in [Platform::Slack, Platform::Youtube, Platform::Kick] {
             assert!(matches!(
                 sender_status(platform),
                 SenderStatus::PendingSeam { .. }

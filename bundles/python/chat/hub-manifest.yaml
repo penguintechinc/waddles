@@ -2,7 +2,7 @@
 # waddles.core.example.chat -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 #
-# 1.0.0: initial port of core/svc_process/bundles/community_chat_process.py's two read-only
+# 1.0.0: initial port of core/svc_process/builtin_handlers/community_chat_process.py's two read-only
 # commands (chat-history, channels) -- see this bundle's src/app.py module docstring
 # (feature/bundle-chat). BUILD-ONLY / INERT -- see that docstring's own note.
 # 2026-10-08: re-ported onto the structured waddle_sdk.db facade -- no data/storage capability

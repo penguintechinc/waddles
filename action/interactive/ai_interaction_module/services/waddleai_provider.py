@@ -12,8 +12,11 @@ import logging
 from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
 
+from flask_core.ai_guard import redact_pii, sanitize_model_output
+from flask_core.ai_tool_authz import ToolCallDenied, reject_unsolicited_tool_calls
+
 from config import Config
-from .prompt_safety import UNTRUSTED_DATA_NOTICE, wrap_untrusted
+from .prompt_safety import UNTRUSTED_DATA_NOTICE, safe_label, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +119,11 @@ class WaddleAIProvider:
             messages = self._build_messages(
                 message_content, message_type, user_id, platform, context
             )
+            # WaddleAI forwards to third-party providers (OpenAI, Claude, ...):
+            # every turn is redacted BEFORE the request is built, always.
+            messages = [
+                {**m, "content": redact_pii(m["content"])} for m in messages
+            ]
 
             # Build request payload
             payload = {
@@ -136,6 +144,11 @@ class WaddleAIProvider:
 
                 if response.status_code == 200:
                     data = response.json()
+                    # No tools are ever offered on this surface: any tool call in
+                    # the answer is refused loudly (propagates to AIService).
+                    reject_unsolicited_tool_calls(
+                        data, provider="openai", surface="chat_reply"
+                    )
                     content = data['choices'][0]['message']['content']
 
                     # Log WaddleAI metrics
@@ -152,7 +165,17 @@ class WaddleAIProvider:
                     )
 
                     # Clean and return response
-                    return self._clean_response(content)
+                    cleaned = self._clean_response(content)
+                    if not cleaned:
+                        # Never hand the caller a blank "success": say why, so
+                        # AIService's canned fallback is a logged decision.
+                        logger.error(
+                            f"WaddleAI returned an empty completion "
+                            f"(model={actual_model}, finish_reason="
+                            f"{data['choices'][0].get('finish_reason')!r})"
+                        )
+                        return None
+                    return cleaned
 
                 elif response.status_code == 429:
                     logger.warning("WaddleAI quota exceeded")
@@ -171,6 +194,8 @@ class WaddleAIProvider:
                     )
                     return None
 
+        except ToolCallDenied:
+            raise
         except httpx.TimeoutException:
             logger.error(  # noqa: E501
                 f"WaddleAI request timed out after {self.timeout}s"
@@ -293,7 +318,7 @@ class WaddleAIProvider:
         base_prompt = Config.SYSTEM_PROMPT
 
         # Add platform context
-        platform_context = f"\nYou are responding on {platform}."
+        platform_context = f"\nYou are responding on {safe_label(platform)}."
 
         # Add message type specific instructions
         match message_type:
@@ -319,7 +344,7 @@ class WaddleAIProvider:
             case _:
                 type_context = (  # noqa: E501
                     f" Respond enthusiastically to this "
-                    f"{message_type} event."
+                    f"{safe_label(message_type)} event."
                 )
 
         length_instruction = (
@@ -378,7 +403,8 @@ class WaddleAIProvider:
                 )
             case _:
                 return (  # noqa: E501
-                    f"User {safe_user_id} triggered a {message_type} event! "
+                    f"User {safe_user_id} triggered a "
+                    f"{safe_label(message_type)} event! "
                     f"Respond appropriately."
                 )
 
@@ -395,8 +421,10 @@ class WaddleAIProvider:
         if not response:
             return ""
 
-        # Strip whitespace
-        cleaned = response.strip()
+        # Neutralise exfiltration channels in the reply itself (remote-image
+        # beacons, active HTML, @everyone/@here and role pings, invisible
+        # smuggling characters) before it is posted to a chat platform.
+        cleaned = sanitize_model_output(response).strip()
 
         # Remove markdown formatting
         cleaned = cleaned.replace('**', '').replace('*', '')

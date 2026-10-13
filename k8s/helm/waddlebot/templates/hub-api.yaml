@@ -13,7 +13,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: hub-api
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "hubApi")) }}
   replicas: {{ .Values.pipeline.hubApi.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -32,6 +34,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: hub-api
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -47,13 +50,14 @@ spec:
         # pipeline.pythonBaseImage skeleton placeholder. Bare module name "hub-api" is the
         # alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
-        # Hardcoded Always (not .Values.global.imagePullPolicy, which alpha pins to
-        # IfNotPresent) -- same node-image-cache rationale as templates/svc-process-rust.yaml/
-        # svc-action-rust.yaml/bundle-executor.yaml: proven stale here too (this Deployment
-        # kept serving a pre-fix image with a `ModuleNotFoundError: penguin_dal` crash for
-        # hours after a same-tag push carried the fix). hub-api iterates against the same
-        # mutable `alpha` tag those Rust services do, so it needs the same guarantee.
-        imagePullPolicy: Always
+        # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Every deploy
+        # now carries a unique per-deploy global.imageTag (alpha SHA8, beta beta-<epoch>), so
+        # the old hardcoded Always (a workaround for a stale same-tag `alpha` push) is
+        # unnecessary -- and fatal for locally-loaded images (kind e2e, alpha local builds),
+        # where Always forces a registry pull the node cannot satisfy and the pod never
+        # becomes Ready. Set global.imagePullPolicy=Always per-env only for a mutable tag.
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -100,7 +104,15 @@ spec:
         - secretRef:
             name: {{ .Values.serviceJwt.signingSecretName }}
             optional: true
+        # Enterprise external KMS / BYOK (templates/_kms.tpl): the -kms ConfigMap, the baseline
+        # tenant KEK and any referenced provider-credential Secrets. Renders nothing unless
+        # kms.enabled -- the platform-managed baseline needs none of it.
+        {{- with (include "waddlebot.kms.hubApiEnvFrom" .) }}{{ . | nindent 8 }}{{- end }}
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
         # `flask_core.service_jwt.load_issuer_from_env` also reads
         # SERVICE_JWT_PUBLIC_KEY_<kid> for every still-valid-for-verification
         # rotation key -- these are public keys, safe to render directly
@@ -190,6 +202,19 @@ spec:
               name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
               key: BUNDLE_SIGNING_KEY_ID
               optional: true
+        # #684 / PR #718 -- OTS AES-256-GCM key (64 hex), auto-provisioned by
+        # auto-provisioned-secrets.yaml; hub-api fails at startup if blank, so not optional.
+        - name: ONE_TIME_SECRET_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.autoProvisionedKeys.oneTimeSecret.secretName }}
+              key: {{ .Values.autoProvisionedKeys.oneTimeSecret.secretKey }}
+        # Enterprise SSO (hub_api/services/sso_*.py) -- encryption key (optional: SSO is
+        # entitlement-gated), tuning, SSRF allowlist, shared Google client. See templates/_sso.tpl.
+        {{- include "waddlebot.sso.hubApiEnv" . | nindent 8 }}
+        # Ban-evasion suppression (hub_api/services/ban_suppression.py): K_master (the platform
+        # tenant KEK) -- hub-api only -- and the optional retention ceiling. See templates/_suppression.tpl.
+        {{- include "waddlebot.suppression.hubApiEnv" . | nindent 8 }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- hub-api itself
         # calls hub_api/services/valkey_admin_client.py::build_client() (via
@@ -226,6 +251,7 @@ spec:
         - name: MODULE_LOAD_MARKETING
           value: "true"
         {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -289,4 +315,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: hub-api
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "hub-api" "ports" (list $.Values.pipeline.hubApi.port $.Values.pipeline.hubApi.grpcPort) "runtime" "python" "egress" "https" "kubeApiServer" true "excludePorts" (list $.Values.pipeline.hubApi.grpcPort)) }}
 {{- end }}
