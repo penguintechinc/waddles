@@ -597,8 +597,18 @@ use tracing::{Event, Level, Metadata, Subscriber};
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<(Level, String)>>>);
 
+/// Per-thread capture routes consulted by the process-global [`Capture`]
+/// subscriber.
+static ROUTES: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<std::thread::ThreadId, Captured>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Process-global subscriber routing each event to the capture registered for
+/// the emitting thread (if any). It is installed ONCE as the global default:
+/// a scoped `set_default` loses to `tracing`'s process-wide callsite-interest
+/// cache whenever another test thread (no subscriber) reaches a callsite
+/// first, which made the WARN capture see zero events under `cargo llvm-cov`.
 struct Capture {
-    out: Captured,
     next_span: AtomicU64,
 }
 
@@ -620,25 +630,46 @@ impl Subscriber for Capture {
     fn record(&self, _: &Id, _: &Record<'_>) {}
     fn record_follows_from(&self, _: &Id, _: &Id) {}
     fn event(&self, event: &Event<'_>) {
-        let mut c = Collect(String::new());
-        event.record(&mut c);
-        self.out
-            .0
+        let target = ROUTES
             .lock()
             .unwrap()
-            .push((*event.metadata().level(), c.0));
+            .get(&std::thread::current().id())
+            .cloned();
+        if let Some(out) = target {
+            let mut c = Collect(String::new());
+            event.record(&mut c);
+            out.0.lock().unwrap().push((*event.metadata().level(), c.0));
+        }
     }
     fn enter(&self, _: &Id) {}
     fn exit(&self, _: &Id) {}
 }
 
-fn capture_logs() -> (Captured, tracing::subscriber::DefaultGuard) {
-    let captured = Captured::default();
-    let guard = tracing::subscriber::set_default(Capture {
-        out: captured.clone(),
-        next_span: AtomicU64::new(0),
+/// Unregisters the calling thread's capture when the test ends.
+struct CaptureGuard(std::thread::ThreadId);
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        ROUTES.lock().unwrap().remove(&self.0);
+    }
+}
+
+/// Captures every event this test's thread emits. `#[tokio::test]` runs a
+/// current-thread runtime, so thread identity == test identity.
+fn capture_logs() -> (Captured, CaptureGuard) {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        // Another global default would leave the capture silently empty, so
+        // fail loudly instead.
+        tracing::subscriber::set_global_default(Capture {
+            next_span: AtomicU64::new(0),
+        })
+        .expect("no other global tracing subscriber in this test binary");
     });
-    (captured, guard)
+    let id = std::thread::current().id();
+    let captured = Captured::default();
+    ROUTES.lock().unwrap().insert(id, captured.clone());
+    (captured, CaptureGuard(id))
 }
 
 fn limits_small() -> EventLimits {
