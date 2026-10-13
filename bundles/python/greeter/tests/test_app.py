@@ -577,3 +577,29 @@ def test_defensive_toggle_usage_error_becomes_the_reply(
 
     monkeypatch.setattr(SubModuleGate, "apply_toggle", _boom)
     assert "no sub-module" in _text(_run(_mod_event("!greeter enable greet")))
+    assert [c for c in host.log_calls if "greeter.usage_error" in c[1]]
+
+
+@pytest.mark.parametrize("text", ["!greeter bogus-secret-token", "!greeter enable nope-secret"])
+def test_usage_error_is_logged_at_debug_pii_free(host: types.SimpleNamespace, text: str) -> None:
+    """The usage catch is explicit: one DEBUG line, never the raw message text or the actor."""
+    _run(_event(text, actor="alice-raw-handle", extra={"is_mod": True}))
+    usage_logs = [c for c in host.log_calls if "greeter.usage_error" in c[1]]
+    assert len(usage_logs) == 1
+    assert usage_logs[0][0] == 3  # DEBUG
+    blob = json.dumps(usage_logs)
+    assert "secret" not in blob
+    assert "alice-raw-handle" not in blob
+
+
+@pytest.mark.parametrize(
+    "badges",
+    [{"is_mod": "true", "is_broadcaster": "true"}, {"is_mod": "false", "is_broadcaster": "false"}],
+)
+def test_string_badges_are_never_laundered_into_mod(
+    host: types.SimpleNamespace, badges: dict[str, Any]
+) -> None:
+    """A string badge (even "true") must not let a viewer toggle a responder."""
+    reply = _text(_run(_event("!greeter enable greet", actor="viewer", extra=badges)))
+    assert "only moderators" in reply
+    assert not [c for c in host.kv.calls if c[0] == "set"]

@@ -254,6 +254,8 @@ async def _handle_command(event: PlatformEvent, text: str, community: str) -> st
     try:
         parsed = parse_command(text, SPEC)
     except CommandUsageError as exc:
+        # Expected UX, not a failure: `str(exc)` IS the usage reply. Logged PII-free (no text).
+        log.debug("greeter.usage_error", op="parse", community=community)
         return str(exc)
 
     if parsed.option in ("enable", "disable"):
@@ -263,6 +265,7 @@ async def _handle_command(event: PlatformEvent, text: str, community: str) -> st
         try:
             enabled = await _apply_toggle(community, parsed)
         except CommandUsageError as exc:  # defensive: parse_command already guarantees a target
+            log.debug("greeter.usage_error", op=parsed.option, community=community)
             return str(exc)
         log.info(
             "greeter.toggled",
