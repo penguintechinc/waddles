@@ -135,6 +135,31 @@ pub fn sandbox_limit(code: ErrorCode) -> Option<&'static str> {
     }
 }
 
+/// Detail-aware `result` label for a failed `invoke`: like
+/// [`error_code_label`], but the two `ExecutorDeadline` sub-cases the wire
+/// code cannot express get their own bounded label -- `fuel_exhausted` (a
+/// runaway guest hit its instruction budget) and `pool_exhausted`
+/// (back-pressure: no free instance slot, NOT a guest fault) -- so neither
+/// is indistinguishable from a wall-clock `executor_deadline` timeout.
+pub fn error_label(code: ErrorCode, detail: Option<&str>) -> &'static str {
+    match (code, detail) {
+        (ErrorCode::ExecutorDeadline, Some("fuel_exhausted")) => "fuel_exhausted",
+        (ErrorCode::ExecutorDeadline, Some("pool_exhausted")) => "pool_exhausted",
+        _ => error_code_label(code),
+    }
+}
+
+/// Detail-aware `limit` label for `waddles_executor_sandbox_trip_total`:
+/// `fuel_exhausted` is its own `fuel` limit, and `pool_exhausted`
+/// back-pressure is not a sandbox trip at all (`None`).
+pub fn trip_limit(code: ErrorCode, detail: Option<&str>) -> Option<&'static str> {
+    match (code, detail) {
+        (ErrorCode::ExecutorDeadline, Some("fuel_exhausted")) => Some("fuel"),
+        (ErrorCode::ExecutorDeadline, Some("pool_exhausted")) => None,
+        _ => sandbox_limit(code),
+    }
+}
+
 /// Classifies one host-call outcome into the bounded `result` label: `ok`,
 /// `denied` (a stage-side policy refusal), `error` (any other stage-side
 /// failure), `connection_lost` (no stage to answer) or `malformed` (the
@@ -980,6 +1005,23 @@ mod tests {
                 "{name} -> {instrument}"
             );
         }
+    }
+
+    #[test]
+    fn fuel_and_pool_exhaustion_get_distinct_labels_and_back_pressure_is_no_trip() {
+        let d = ErrorCode::ExecutorDeadline;
+        assert_eq!(error_label(d, None), "executor_deadline");
+        assert_eq!(error_label(d, Some("fuel_exhausted")), "fuel_exhausted");
+        assert_eq!(error_label(d, Some("pool_exhausted")), "pool_exhausted");
+        assert_eq!(error_label(ErrorCode::WasmTrap, Some("x")), "wasm_trap");
+        assert_eq!(trip_limit(d, None), Some("timeout"));
+        assert_eq!(trip_limit(d, Some("fuel_exhausted")), Some("fuel"));
+        assert_eq!(
+            trip_limit(d, Some("pool_exhausted")),
+            None,
+            "pool back-pressure is not a sandbox trip"
+        );
+        assert_eq!(trip_limit(ErrorCode::MemoryLimit, None), Some("memory"));
     }
 
     #[test]

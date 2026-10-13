@@ -52,12 +52,21 @@ fn fixture_digest() -> String {
 
 fn test_config() -> CliConfig {
     use clap::Parser;
-    CliConfig::try_parse_from([
+    let mut cfg = CliConfig::try_parse_from([
         "bundle-executor",
         "--stage-host-api-addr",
         "svc-process:8301",
     ])
-    .expect("static test args always parse")
+    .expect("static test args always parse");
+    // This test proves the EPOCH-deadline path (`executor_deadline`). Fuel
+    // exhaustion now has its own `fuel_exhausted` label, and a tight busy
+    // loop can burn the default 500M-fuel budget before the 300ms deadline on
+    // a fast box -- so fuel is made effectively unbounded here to keep the
+    // trap deterministic (fuel's own labeling is covered by the
+    // `invoke::tests::metrics_emission` unit tests).
+    cfg.executor_fuel_limit_transform = u64::MAX;
+    cfg.executor_fuel_limit_dispatch = u64::MAX;
+    cfg
 }
 
 /// One flattened exported data point.

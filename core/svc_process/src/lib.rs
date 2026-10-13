@@ -392,6 +392,12 @@ where
     // `set_flags_metric` before any bundle invoke can reach
     // `StageCapabilities::handle_flags`.
     license::set_flags_metric(telemetry::register_flags_metrics(&prom_registry));
+    // Connector spec SS0 condition 5: registered here, same "before
+    // `prom_registry` moves into `AppState::new`" constraint as the metrics
+    // above, then threaded into whichever of `try_start_process_loop`/
+    // `try_start_changelog_consumer` actually starts.
+    let circuit_breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics> =
+        Arc::new(telemetry::register_circuit_breaker_metrics(&prom_registry));
 
     let connections = try_start_host_api(&config.cli, host_api_metrics);
 
@@ -510,6 +516,7 @@ where
                 Arc::clone(&consumer_loop_ready),
                 hub_minter.clone(),
                 app_version_snapshot.clone(),
+                Arc::clone(&circuit_breaker_metrics),
             );
         }
         PathDecision::NoDbConfig => {
@@ -526,6 +533,7 @@ where
                 drain_loop_metrics,
                 consumer_loop_ready,
                 hub_minter.clone(),
+                Arc::clone(&circuit_breaker_metrics),
             );
         }
         PathDecision::KillSwitchOn => {
@@ -542,6 +550,7 @@ where
                 drain_loop_metrics,
                 consumer_loop_ready,
                 hub_minter,
+                circuit_breaker_metrics,
             );
         }
     }
@@ -1005,6 +1014,7 @@ fn build_process_egress_guard(
 ///   downstream decision -- this hardcoding only affects which stream
 ///   `PROCESS_INGEST_PLATFORM`/`_SOURCE_ID` resolves to), identical scope
 ///   to `core/svc_action::try_start_dispatch`'s own documented gap.
+#[allow(clippy::too_many_arguments)]
 fn try_start_process_loop(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
@@ -1013,6 +1023,7 @@ fn try_start_process_loop(
     drain_loop_metrics: telemetry::DrainLoopMetrics,
     consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
     hub_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>>,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) {
     if config.cli.process_app_id.is_empty() {
         tracing::info!(
@@ -1264,6 +1275,11 @@ fn try_start_process_loop(
         // it. regression: drain loop exited on NOGROUP (alpha 2026-10-02)
         const BACKOFF_MAX: Duration = Duration::from_secs(30);
         let mut attempt: u32 = 0;
+        // Built ONCE for this loop's lifetime, never per reconnect attempt
+        // -- a reconnect is a transport-level event, unrelated to this
+        // source's own guest-fault history, so a breaker trip must survive
+        // across it (connector spec SS0 condition 5).
+        let breaker = Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics));
         loop {
             attempt += 1;
             drain_loop_metrics
@@ -1362,6 +1378,7 @@ fn try_start_process_loop(
                 community_id: 0,
                 gate: Arc::clone(&gate),
                 app_version_snapshot: app_version_snapshot.clone(),
+                breaker: Arc::clone(&breaker),
             };
 
             let (inner_tx, inner_rx) = tokio::sync::oneshot::channel();
@@ -1586,6 +1603,7 @@ fn try_start_changelog_consumer(
     consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
     hub_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -1807,6 +1825,7 @@ fn try_start_changelog_consumer(
                 // resolves this once, before either drain-loop path starts
                 // (fail-loud if tokenization is enabled and the connect failed).
                 hub_minter.clone(),
+                Arc::clone(&breaker_metrics),
                 Arc::clone(&membership),
             )
             .await
@@ -1919,6 +1938,7 @@ async fn build_source_supervisor_deps(
     active_digests: Arc<active_digests::ActiveDigests>,
     pii_gate: Arc<dyn license::FeatureGate>,
     pii_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>>,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
     membership: Arc<bundle_capability_gate::SnapshotMembership>,
 ) -> Option<source_supervisor::SupervisorDeps> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
@@ -1976,6 +1996,10 @@ async fn build_source_supervisor_deps(
         // synchronous/no-I/O" placement as `kv_conn` above -- see
         // `try_start_changelog_consumer`'s own spawned block.
         db_wiring: None,
+        // ONE instance shared across every binding this supervisor spawns
+        // (`SupervisorDeps::breaker`'s doc) -- built here (no I/O, so no
+        // reason to defer it like `kv_conn`/`db_wiring` above).
+        breaker: Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics)),
         reputation_wiring: None,
         economy_wiring: None,
         identity_wiring: None,
@@ -2210,6 +2234,7 @@ mod tests {
             Arc::new(active_digests::ActiveDigests::new()),
             Arc::new(license::test_support::FixedGate(true)),
             None,
+            Arc::new(()),
             Arc::new(bundle_capability_gate::SnapshotMembership::new()),
         )
         .await
@@ -2248,6 +2273,7 @@ mod tests {
             Arc::new(active_digests::ActiveDigests::new()),
             Arc::new(license::test_support::FixedGate(true)),
             None,
+            Arc::new(()),
             Arc::new(bundle_capability_gate::SnapshotMembership::new()),
         )
         .await;
@@ -2524,6 +2550,7 @@ mod tests {
             test_consumer_loop_ready(),
             None,
             bundle_active_set::ActiveVersionSnapshot::new(),
+            Arc::new(()),
         );
     }
 
@@ -2607,6 +2634,7 @@ mod tests {
             test_drain_loop_metrics(),
             test_consumer_loop_ready(),
             None,
+            Arc::new(()),
         );
     }
 
@@ -2627,6 +2655,7 @@ mod tests {
             test_drain_loop_metrics(),
             test_consumer_loop_ready(),
             None,
+            Arc::new(()),
         );
     }
 
@@ -2647,6 +2676,7 @@ mod tests {
             test_drain_loop_metrics(),
             test_consumer_loop_ready(),
             None,
+            Arc::new(()),
         );
     }
 
@@ -2677,6 +2707,7 @@ mod tests {
             test_drain_loop_metrics(),
             test_consumer_loop_ready(),
             None,
+            Arc::new(()),
         );
     }
 
@@ -2714,6 +2745,7 @@ mod tests {
                 test_drain_loop_metrics(),
                 test_consumer_loop_ready(),
                 None,
+                Arc::new(()),
             );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
@@ -2758,6 +2790,7 @@ mod tests {
                 test_drain_loop_metrics(),
                 test_consumer_loop_ready(),
                 None,
+                Arc::new(()),
             );
             unsafe {
                 std::env::remove_var("VALKEY_URL");

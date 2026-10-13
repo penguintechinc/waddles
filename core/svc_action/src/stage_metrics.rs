@@ -233,6 +233,19 @@ pub fn sandbox_limit(code: ErrorCode) -> Option<&'static str> {
     }
 }
 
+/// Detail-aware refinement of [`sandbox_limit`] for an executor error body:
+/// `fuel_exhausted` (a `Trap::OutOfFuel`, wire code `ExecutorDeadline`) gets
+/// its own `fuel` limit label so a runaway guest is distinguishable from a
+/// wall-clock timeout, and `pool_exhausted` (executor back-pressure, also
+/// wire code `ExecutorDeadline`) is NOT a sandbox trip at all.
+pub fn sandbox_limit_for(code: ErrorCode, detail: Option<&str>) -> Option<&'static str> {
+    match (code, detail) {
+        (ErrorCode::ExecutorDeadline, Some("fuel_exhausted")) => Some("fuel"),
+        (ErrorCode::ExecutorDeadline, Some("pool_exhausted")) => None,
+        _ => sandbox_limit(code),
+    }
+}
+
 /// The OTel instruments for this stage. Cheap to share (`Arc`); every record
 /// method is non-blocking and infallible, so telemetry can never fail a
 /// request.
@@ -1147,6 +1160,27 @@ mod tests {
         for code in ["backend", "invalid_args", "timeout", "not_implemented", ""] {
             assert_eq!(host_call_result(Some(code)), "error", "{code}");
         }
+    }
+
+    #[test]
+    fn sandbox_limit_for_separates_fuel_and_back_pressure_from_timeouts() {
+        assert_eq!(
+            sandbox_limit_for(ErrorCode::ExecutorDeadline, Some("fuel_exhausted")),
+            Some("fuel")
+        );
+        assert_eq!(
+            sandbox_limit_for(ErrorCode::ExecutorDeadline, Some("pool_exhausted")),
+            None,
+            "back-pressure is not a sandbox trip"
+        );
+        assert_eq!(
+            sandbox_limit_for(ErrorCode::ExecutorDeadline, None),
+            Some("timeout")
+        );
+        assert_eq!(
+            sandbox_limit_for(ErrorCode::WasmTrap, Some("anything")),
+            Some("trap")
+        );
     }
 
     #[test]
