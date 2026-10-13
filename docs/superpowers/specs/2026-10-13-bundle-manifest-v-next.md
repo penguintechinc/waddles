@@ -1,6 +1,6 @@
 # Bundle Manifest v-next — Network Policy, Requires, Transport Capability, Kind — Design
 
-**Status:** Design — decisions LOCKED by the product owner 2026-10-13 (do not re-litigate; the only open item is the IPv6 cap confirmation, §9).
+**Status:** Design — decisions LOCKED by the product owner 2026-10-13 (do not re-litigate; no open items remain, §9).
 **Date:** 2026-10-13
 **Scope:** the security/dependency foundation that precedes the #840 platform connectors. Touches `libs/flask_core` (`AppManifest`), `hub_api` (`BundleManifestV2`, `bundle_approval_service`, seeder, consent summary), `core/bundle_host_http` (egress engine), `core/svc_action` + `core/svc_process` (egress catalogs), `core/svc_ingest` (ingress), `core/bundle_executor` + `wit/` (transport capability), the external `penguin-libs` `rust-bundle-host` crate (Rust `Manifest`, `CapabilityKind`) plus the penguin-libs **connection library** (company-wide network filter, §4.6), and all 79 `bundles/**` manifests.
 **Ground truth:** anchors read at `origin/release/v3.0.X` @ `80bb66b7`; the branch has since advanced to `fcaffbbc`, which includes the merged connector host plumbing (B0, PR #844) — `core/svc_ingest/src/connector/` (`Transport` trait, registry, driver, sink) now exists on the release branch. Line numbers in §10 are from `80bb66b7` and may have drifted.
@@ -28,11 +28,11 @@ Today a bundle manifest declares *what it does* (stages, consumes, permissions) 
 |---|---|---|
 | 1 | `network` is the hard, fail-closed ceiling enforced by the host (no/empty `network` = no network); `net.http` is a consent + methods layer on top, exact-host only; legacy flat `egress:` DEPRECATED, superseded by `network.egress` | §4.3 |
 | 2 | `schema_version` bumps 2 → 3 (new `kind`/`network`/`requires`) | §2 |
-| 3 | CIDR max block `/24`, universal, no core/non-core exception; IPv6 analogue `/120` (confirm) | §2.1 |
+| 3 | CIDR max block `/24`, universal, no core/non-core exception; IPv6 `/120` max block (confirmed) | §2.1 |
 | 4 | Service bundles seed per-tenant rows on activation (tenant-wide activation = a row per tenant, never one global row) | §5.2 |
 | 5 | Wildcards live ONLY in `network.{ingress,egress}`; `net.http.fqdn` stays exact-host | §2.1, §4.3 |
 | a | Network filter extracted to the penguin-libs connection library for ALL apps company-wide; lands in F1 | §4.6, §8.1 |
-| b | Final wildcard grammar (leftmost-label, PSL-validated, intra-label globs allowed) | §2.1 |
+| b | Final wildcard grammar (leftmost-label, PSL-validated, partial-label globs allowed) | §2.1 |
 
 ---
 
@@ -58,7 +58,7 @@ network:                     # NEW. REQUIRED on EVERY bundle (app + service). Ha
   egress:                    # destinations the bundle may dial / call
     - discord.com            #   exact FQDN
     - "*.discord.com"        #   leftmost-label wildcard (NOT the apex)
-    - "cdn-*.discord.com"    #   intra-label glob, leftmost label only
+    - "cdn-*.discord.com"    #   partial-label glob, leftmost label only
     - gateway.discord.gg
     - 162.159.128.0/24       #   IP CIDR — public OR private; max block /24 (§2.1)
   ingress:                   # sources the host will accept inbound traffic FROM for this bundle
@@ -87,19 +87,27 @@ network:
 
 ### 2.1 `network` entry grammar (locked)
 
-**Wildcard grammar (final, locked):** `*` matches **1+ characters**, **never crosses a `.` label boundary**, and is allowed **only in the leftmost label**. Intra-label globs (`cdn-*`, `*-cdn`) are allowed. PSL-validated: the wildcard's suffix must be a registrable domain below a public suffix (eTLD+1 or deeper).
+**Wildcard grammar (final, locked):** the wildcard may appear only in the **leftmost label**, and its suffix must be a PSL-validated registrable domain (eTLD+1 or deeper). Two leftmost-label shapes with deliberately different reach:
+
+| Shape | Example | Reach |
+|---|---|---|
+| Bare `*` label | `*.discord.com` | 1+ subdomain labels — **ANY depth**: `gateway.discord.com` and `a.b.discord.com`; never the apex `discord.com` (list it separately); never `notdiscord.com` / `discord.com.evil.com` |
+| Partial-label glob | `cdn-*.discord.com`, `*-cdn.discord.com` | **EXACTLY ONE label**: `cdn-1.discord.com` yes, `cdn-1.x.discord.com` no |
+
+No multi-star anywhere (`*.*.x.com`, `a*b*.x.com`). Resolving the apparent tension: `*` inside a *partial* label never spans a `.`; a *bare* `*` label is the explicit subdomain wildcard and is the one form that spans multiple labels.
 
 | Entry | Verdict | Why |
 |---|---|---|
 | `discord.com` | VALID | exact FQDN |
-| `*.discord.com` | VALID | leftmost-label wildcard under eTLD+1 |
-| `cdn-*.discord.com` | VALID | intra-label glob, leftmost label |
-| `*-cdn.discord.com` | VALID | intra-label glob, leftmost label |
+| `*.discord.com` | VALID | bare leftmost `*` under eTLD+1 — matches subdomains at ANY depth |
+| `cdn-*.discord.com` | VALID | partial-label glob, leftmost label — matches EXACTLY ONE label |
+| `*-cdn.discord.com` | VALID | partial-label glob, leftmost label — matches EXACTLY ONE label |
 | `discord` | INVALID | bare token — substring/non-FQDN, not a registrable domain |
 | `*.com` | INVALID | wildcard at a TLD / public suffix |
 | `*.co.uk` | INVALID | wildcard at a public suffix |
 | `*.github.io` | INVALID | wildcard at a public suffix (private-section PSL entry) |
 | `a.*.discord.com` | INVALID | wildcard in a non-leftmost label |
+| `*.*.discord.com` | INVALID | multi-star |
 
 Match semantics:
 
@@ -111,13 +119,14 @@ Match semantics:
 | IP CIDR (public or private) | `1.2.3.0/24`, `fd00::/120` | any address in the block | anything outside |
 
 Rules:
-- **Label-boundary match, never substring.** Host is split on `.`; the entry's labels right of the leftmost label must equal the host's trailing labels. `*` itself never spans a `.`. Two leftmost-label shapes: a bare `*` label (`*.X`) is the subdomain wildcard — matches any host with strictly more labels than X ending in X, at any depth, never the apex; an intra-label glob (`cdn-*.X`, `*-cdn.X`) matches exactly one label directly under X.
+- **Label-boundary match, never substring.** Host is split on `.`; the entry's labels right of the leftmost label must equal the host's trailing labels. A `*` inside a partial label never spans a `.`; only the bare `*` label spans multiple labels. Two leftmost-label shapes: a bare `*` label (`*.X`) is the subdomain wildcard — matches any host with strictly more labels than X ending in X, at any depth, never the apex; an partial-label glob (`cdn-*.X`, `*-cdn.X`) matches exactly one label directly under X.
 - **No wildcard at apex/TLD/public suffix.** The wildcard's suffix must be eTLD+1 or deeper per the Public Suffix List. Rejected: `*.com`, `*.co.uk`, `*.github.io`. Valid: `*.discord.com`, `*.foo.github.io`.
-- **Wildcard only in the leftmost label** — none in any other label (`a.*.discord.com`), no bare `*`, no bare single-label token (`discord`).
+- **Wildcard only in the leftmost label** — none in any other label (`a.*.discord.com`), no multi-star, no lone `*` entry, no bare single-label token (`discord`).
+- **F1 alignment:** penguin-libs F1 (draft PR #136) already implements all of §2.1 as confirmed — `psl` crate for PSL validation, `MIN_IPV4_PREFIX=24` / `MIN_IPV6_PREFIX=120`, bare-`*` = any depth, partial-label glob = exactly one label. Spec and F1 are aligned.
 - **Wildcards live ONLY in `network.{ingress,egress}`.** `net.http.fqdn` permission targets stay exact-host (§4.3).
 - Lowercase-normalized; ASCII/punycode hosts only (IDN must be supplied as punycode); no scheme, port, path, or userinfo in an entry (port policy stays with the existing allowed-ports list, §4.3).
-- **PSL validation uses a pinned, offline copy** — never a runtime fetch. Rust: `publicsuffix` crate; Python: `tldextract` (offline snapshot mode) or `publicsuffix2` — Western/non-PRC per `general.md` Supply Chain. PSL snapshot version is pinned and bumped deliberately (a bump can invalidate a previously-valid wildcard; re-validation of stored manifests at bump time is part of the bump procedure).
-- **CIDR max block size = `/24`, ALWAYS and UNIVERSAL — no core/non-core exception (locked).** Any IPv4 CIDR entry with prefix < 24 (`/0`–`/23`: `/16`, `/8`, …) is **REJECTED** by manifest validation; `/24`–`/32` accepted. IPv6 analogue: cap at `/120` (256 hosts) — **confirm** (§9 OPEN-1). Rationale: one manifest entry grants at most a 256-address block; forbids broad provider-range allowlisting and forces least-privilege destination lists. Enforced identically in BOTH validators (hub-api Python + penguin-libs Rust) and in the portable matcher (§4.6) — a wider CIDR can never reach the runtime catalog. Error reason `network_cidr_too_wide`. Supersedes the earlier private-only `/16`·`/64` floor for `network` entries (the catalog's `net.http.private-ip` bound is unchanged but is always ⊆ a `network` entry, hence ⊆ `/24`).
+- **PSL validation uses a pinned, offline copy** — never a runtime fetch. Rust: `psl` crate (F1 uses it); Python: `tldextract` (offline snapshot mode) or `publicsuffix2` — Western/non-PRC per `general.md` Supply Chain. PSL snapshot version is pinned and bumped deliberately (a bump can invalidate a previously-valid wildcard; re-validation of stored manifests at bump time is part of the bump procedure).
+- **CIDR max block size — ALWAYS and UNIVERSAL, no core/non-core exception (locked, confirmed).** IPv4 CIDR entries accept `/24`–`/32` (reject broader: `/0`–`/23`, e.g. `/16`, `/8`); IPv6 CIDR entries accept `/120`–`/128` (reject broader: `/0`–`/119`). `/120` is the v6 analogue of `/24` — one entry grants at most 256 addresses. Rationale: forbids broad provider-range allowlisting and forces least-privilege destination lists. Enforced identically in BOTH validators (hub-api Python + penguin-libs Rust) and in the portable matcher (§4.6) — a wider CIDR can never reach the runtime catalog. Error reason `network_cidr_too_wide`. Supersedes the earlier private-only `/16`·`/64` floor for `network` entries (the catalog's `net.http.private-ip` bound is unchanged but is always ⊆ a `network` entry, hence within the cap).
 - **CIDR:** both public and private are legal. Always-denied ranges (loopback, link-local, cloud metadata, cluster CIDRs) stay denied at runtime regardless of any `network` entry (§4.3). A CIDR that *overlaps* an always-denied range is a validation error where statically knowable (loopback/link-local/metadata); cluster-CIDR overlap is checked at install against the deployment's configured denylist.
 - **Missing block = ERROR; empty list = "no network".** Same for `ingress` and `egress` independently — both keys required inside the block.
 
@@ -195,12 +204,12 @@ Runtime catalog row for an `app_id` = `network.egress` entries classified into t
 | # | Point | Change |
 |---|---|---|
 | E1 | hub-api manifest gate (`parse_bundle_manifest_v2`) | Require `schema_version: 3` + `network.{ingress,egress}`; grammar §2.1; PSL check; CIDR bounds (`/24` max, `/120` v6 — reject wider); `permission_outside_network`; error reasons `missing_network`, `invalid_network_entry`, `network_wildcard_public_suffix`, `network_cidr_too_wide`, `network_cidr_denied_range`. |
-| E2 | flask_core `parse_manifest` + penguin-libs `Manifest` | Same grammar + PSL + CIDR cap (Python `tldextract`/`publicsuffix2`; Rust `publicsuffix` — Rust side is the penguin-libs connection library, §4.6). Shared conformance fixtures (valid/invalid corpus) consumed by BOTH test suites so the parsers cannot drift (existing `tests/fixtures/manifests/equivalence/` pattern in penguin-libs is the precedent). |
+| E2 | flask_core `parse_manifest` + penguin-libs `Manifest` | Same grammar + PSL + CIDR cap (Python `tldextract`/`publicsuffix2`; Rust `psl` — Rust side is the penguin-libs connection library, §4.6). Shared conformance fixtures (valid/invalid corpus) consumed by BOTH test suites so the parsers cannot drift (existing `tests/fixtures/manifests/equivalence/` pattern in penguin-libs is the precedent). |
 | E3 | Consent summary (`build_permission_summary`, `classify_diff` ~335) | Add `network` to the summary and to `classify_diff`'s `_flatten` set — a widened network block is `widened` ⇒ re-consent; included in `permission_hash`. Wildcard and CIDR entries are visually flagged in the consent UI. |
 | E4 | Stored manifest round trip (`_reparse_trusted`) | Re-hydrate `kind`, `network`, `requires`. |
 | E5 | Active-set loader (`core/bundle_active_set` `ActiveBundleRow`/query) | Carry `network` (parsed from the version's stored manifest_json, or a dedicated column — implementation choice in F2) alongside `declared_capabilities`. |
 | E6 | **Wire the dead catalogs** | `svc_action` `BundleCatalog` (`lib.rs:265`) and `svc_process` `HttpEgressCatalog` (`lib.rs:1089`) populated by each service's `bundle_loader` on `load`, removed on `unload`, driven by the active-set diff — same lifecycle as existing `CapabilitySnapshot`. Test must prove a seeded bundle's declared host is **allowed** and an undeclared one **denied** end-to-end (the guard has never run against a real row in prod). |
-| E7 | Egress matcher | `EgressGuard` consumes the portable penguin-libs matcher (§4.6) instead of growing its own: leftmost-label wildcard + intra-label glob, public CIDR (`PublicIp` arm in `ip_matches_grant` currently exact-only; `/24` cap enforced). Negative tests: `notdiscord.com`, `discord.com.evil.com`, apex-vs-wildcard, `a.b.discord.com`, `a.*.discord.com`, `*.co.uk`, `/16` and `/23` CIDRs rejected, v4-mapped-v6 against a v4 CIDR. |
+| E7 | Egress matcher | `EgressGuard` consumes the portable penguin-libs matcher (§4.6) instead of growing its own: leftmost-label wildcard + partial-label glob, public CIDR (`PublicIp` arm in `ip_matches_grant` currently exact-only; `/24` cap enforced). Negative tests: `notdiscord.com`, `discord.com.evil.com`, apex-vs-wildcard, `a.b.discord.com`, `a.*.discord.com`, `*.co.uk`, `/16` and `/23` CIDRs rejected, v4-mapped-v6 against a v4 CIDR. |
 | E8 | `validate_dial` | Add the missing `limits.allowed_ports` check (parity with `send` ~993); regression test: declared host + undeclared port ⇒ `port_not_allowed`. Gains its first real caller via §6. |
 | E9 | Ingress gate (`svc_ingest/src/http/*` webhook handlers) | Before bundle resolution/body parse: resolve the receiving bundle's `network.ingress`; source IP (from the trusted-proxy-aware peer address — XFF only from configured trusted proxies, never blindly) must match an ingress CIDR, or reverse-verified domain entries (domain entries resolved on a bounded TTL and matched by address; never trust a client-supplied `Host`/`Origin` as a source identity). Empty `ingress` ⇒ the bundle receives no inbound. Denial counter `…ingress_denied_total{app_id,reason}`. Existing HMAC/replay checks remain (defence in depth, not replaced). |
 | E10 | Seeder / installer | Reject at seed/upload any manifest missing the block; seeder must fail the batch loud (never skip-and-continue) on a malformed network block. |
@@ -230,7 +239,7 @@ The network filter is **not Waddles-specific**. It is extracted to the penguin-l
 
 | Moves to penguin-libs (portable core) | Stays in Waddles (bundle-specific wiring) |
 |---|---|
-| FQDN / leftmost-label-wildcard / intra-label-glob / IP-CIDR matcher (the §2.1 grammar, incl. the `/24` v4 · `/120` v6 cap) | Manifest → per-`app_id` catalog row population (E5/E6) |
+| FQDN / leftmost-label-wildcard / partial-label-glob / IP-CIDR matcher (the §2.1 grammar, incl. the `/24` v4 · `/120` v6 cap) | Manifest → per-`app_id` catalog row population (E5/E6) |
 | Public-Suffix-List apex validation (pinned offline snapshot) | Cluster-CIDR denylist + instance egress policy configuration |
 | DNS resolve-then-pin / SSRF address-classification guard | Capability-gate integration (`net.http.*` ⊆ `network`, `transport` kind gate) |
 | `network: {ingress, egress}` policy types (+ serde, validation errors) | Consent summary / `classify_diff` / `permission_hash` |
@@ -362,7 +371,7 @@ F1 penguin-libs ──► F2 waddles enforcement ──► F3 manifest migration
 
 ### 8.1 F1 — penguin-libs (root, external)
 **Connection library (company-wide, §4.6):** extract the portable network filter — FQDN / leftmost-label-wildcard / IP-CIDR matcher (with the `/24` v4 · `/120` v6 cap), PSL apex validation, DNS resolve-then-pin / SSRF guard, and the `network: {ingress, egress}` policy types — from `EgressGuard` into the penguin-libs connection library for all apps. Waddles keeps only bundle-specific wiring.
-`rust-bundle-host`: structs for `kind`, `network {ingress,egress}`, `requires` (`schema_version: 3`); `CapabilityKind::Transport`; PSL validation (pinned offline `publicsuffix`); full SemVer comparison helper; shared conformance fixtures (incl. the §2.1 valid/invalid grammar table and CIDR-cap cases); CHANGELOG/version bump; release; then waddles bumps the `rev` in `bundle_executor`, `bundle_host_http`, `bundle_compiler` (reconcile the divergent `bundle_compiler` pin). **No waddles behaviour changes in F1** beyond the rev bump compiling cleanly (fields exist and validate in the Rust parser, which is the one parser that only the executor/compiler paths use — its enforcement hookup is F2). Per §3 the Rust parser's fields are enforced in the same release train as F2 — F1 and F2's Rust-consumer change must not be separated by a release that exposes parse-without-enforce in production.
+`rust-bundle-host`: structs for `kind`, `network {ingress,egress}`, `requires` (`schema_version: 3`); `CapabilityKind::Transport`; PSL validation (pinned offline `psl` crate); full SemVer comparison helper; shared conformance fixtures (incl. the §2.1 valid/invalid grammar table and CIDR-cap cases); CHANGELOG/version bump; release; then waddles bumps the `rev` in `bundle_executor`, `bundle_host_http`, `bundle_compiler` (reconcile the divergent `bundle_compiler` pin). **No waddles behaviour changes in F1** beyond the rev bump compiling cleanly (fields exist and validate in the Rust parser, which is the one parser that only the executor/compiler paths use — its enforcement hookup is F2). Per §3 the Rust parser's fields are enforced in the same release train as F2 — F1 and F2's Rust-consumer change must not be separated by a release that exposes parse-without-enforce in production.
 
 ### 8.2 F2 — waddles parsers + enforcement (needs F1)
 Split into disjoint, parallelizable slices (own worktrees, disjoint files):
@@ -398,13 +407,9 @@ Discord/Twitch/Slack/Kick/YouTube service bundles (connector spec §5/§6 order)
 
 ## 9. Open risks & questions
 
-**Resolved (locked 2026-10-13):** former OPEN-1 (egress surfaces → §4.3), OPEN-2 (`schema_version` 2 → 3 → §2), OPEN-3 (CIDR cap `/24` universal → §2.1), OPEN-4 (service bundles seed per-tenant rows → §5.2), OPEN-5 (wildcards only in `network`; `net.http.fqdn` exact-host → §2.1/§4.3). Note: the locked wildcard decision supersedes connector spec §3.1's "no wildcards" for `network` entries only.
+**Resolved (locked 2026-10-13):** former OPEN-1 (egress surfaces → §4.3), OPEN-2 (`schema_version` 2 → 3 → §2), OPEN-3 (CIDR cap `/24` universal → §2.1), OPEN-4 (service bundles seed per-tenant rows → §5.2), OPEN-5 (wildcards only in `network`; `net.http.fqdn` exact-host → §2.1/§4.3), OPEN-6 (IPv6 max block `/120`, confirmed → §2.1). Note: the locked wildcard decision supersedes connector spec §3.1's "no wildcards" for `network` entries only.
 
-**Open (needs owner confirmation):**
-
-| ID | Question | Proposed default |
-|---|---|---|
-| OPEN-1 | IPv6 CIDR cap — is `/120` (256 hosts, the v6 analogue of `/24`) the right ceiling? | `/120`, rejected wider (`/0`–`/119`), applied universally like the v4 cap; **confirm**. |
+**Open:** none.
 
 **Risks:**
 
