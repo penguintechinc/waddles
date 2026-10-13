@@ -5,15 +5,15 @@
 # templates/svc-ingest-rust.yaml's header for the full `-rust` resource-naming-vs-shared-
 # image-tag rationale (identical here) -- not repeated per file.
 #
-# This is the ONE stage whose host-API mTLS server (core/svc_action/src/host_api.rs) is
-# real today -- pipeline.rustDataPlane.bundleExecutor.stageTarget defaults to
-# svc-action-rust for exactly this reason (svc-process's own host-API is TODO(M4), see
-# templates/svc-process-rust.yaml). The HOST_API_SERVER_CERT_FILE/KEY_FILE/CLIENT_CA_FILE
-# env + volume below only render when waddlebot.hostApiTlsMaterialAvailable is true (real
-# PEM material supplied via global.hostApiTls, see its values.yaml comment) -- otherwise
-# host_api.rs's own build_server_config fails closed with a clear "must both be set" error
-# INSIDE its own spawned task (try_start_host_api's graceful-degradation contract), never
-# crashing this pod's HTTP/metrics servers.
+# Serves the executor<->stage host-API mTLS server (core/svc_action/src/host_api.rs). svc-process
+# has its own (core/svc_process/src/host_api.rs, see templates/svc-process-rust.yaml).
+# pipeline.rustDataPlane.bundleExecutor.stageTarget defaults to svc-action-rust; svc-process-rust
+# is the alternative target. The HOST_API_SERVER_CERT_FILE/KEY_FILE/CLIENT_CA_FILE env + volume
+# below render only when waddlebot.hostApiTlsMaterialAvailable is true. global.hostApiTls
+# self-provisions on alpha/local and must be supplied on beta/gamma/production (see its
+# values.yaml comment). Without material host_api.rs's build_server_config fails closed with a
+# "must both be set" error INSIDE its own spawned task (try_start_host_api's graceful-degradation
+# contract), never crashing this pod's HTTP/metrics servers.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcAction.enabled }}
 ---
 apiVersion: apps/v1

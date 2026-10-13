@@ -55,8 +55,8 @@ pipeline:
       replicas: 1
     svcActionRust:
       replicas: 1
-    # No Dockerfile exists for bundle-executor yet (values.yaml's own KNOWN GAPS
-    # comment) and it isn't in the workflow's kind-load image list -- disabling
+    # bundle-executor is not in helm-chart-e2e.yml's kind-load image list (its
+    # core/bundle_executor/Dockerfile.rust does exist) -- disabling
     # both here isn't a scope-cut, it's the only image reference that can't be
     # satisfied at all right now.
     bundleExecutor:

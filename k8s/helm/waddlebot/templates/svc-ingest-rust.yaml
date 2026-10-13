@@ -1,5 +1,6 @@
-# feature/e2e-helm-rust-dataplane -- Rust svc-ingest (core/svc_ingest, M5-blocked skeleton
-# today) Deployment, ADDITIVE to templates/svc-ingest.yaml's Python Deployment -- never
+# feature/e2e-helm-rust-dataplane -- Rust svc-ingest (core/svc_ingest, full receiver stack
+# implemented; INERT unless the PostHog flag waddles.core.rust-data-plane is ON -- see
+# pipeline.rustDataPlane in values.yaml) Deployment, ADDITIVE to templates/svc-ingest.yaml's Python Deployment -- never
 # replaces it. Gated on the top-level pipeline.rustDataPlane.enabled flag (default false)
 # plus this stage's own .enabled sub-flag, so flipping the parent flag alone doesn't force
 # every stage on.
@@ -15,12 +16,14 @@
 # core/svc_ingest/Dockerfile.rust's own build-tag comment predates this split and should be
 # updated to build+push "svc-ingest-rust" going forward.
 #
-# KNOWN GAP: core/svc_ingest/src/config.rs has no VALKEY_URL/DB/Discord+Twitch receiver-
-# credential fields yet (TODO(M5)) -- the env below is wired ahead of that landing so no
-# further chart change is needed once M5 lands; until then these are harmless extra env
-# vars clap silently ignores. No DB -- this stage owns no tables (config.rs's own doc
-# comment), so unlike svc-process-rust/svc-action-rust there is no db-migrate initContainer
-# here.
+# CURRENT STATE: core/svc_ingest is implemented -- native Twitch IRC, Discord Gateway,
+# Twitch EventSub (HMAC-verified), and Twitch/Discord outbound drains. Valkey is read from
+# VALKEY_URL via penguin_spine::SpineConfig::from_env(); receiver tokens come from its Config.
+# The stage is inert until the PostHog flag waddles.core.rust-data-plane is ON (default OFF,
+# fail-closed). Remaining gaps: no Slack/YouTube/Kick/Spectrum receivers (TODO(M5)), static
+# single-source config, no host-API listener. No DB -- this stage owns no tables (config.rs's
+# own doc comment), so unlike svc-process-rust/svc-action-rust there is no db-migrate
+# initContainer here.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcIngest.enabled }}
 ---
 apiVersion: apps/v1
@@ -108,9 +111,8 @@ spec:
         - name: ENVELOPE_BINDING_ACTIVE_KID
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid | quote }}
         {{- end }}
-        # Forward-compatible only until core/svc_ingest's M5 connector/intake work lands
-        # (see file header KNOWN GAP) -- same Secret keys the Python svc-ingest Deployment
-        # already reads (templates/svc-ingest.yaml).
+        # Valkey and receiver credentials consumed by core/svc_ingest (see file header) --
+        # same Secret keys the Python svc-ingest Deployment already reads (templates/svc-ingest.yaml).
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # fix/valkey-tls-alpha -- see templates/svc-process-rust.yaml's comment on this same
         # override block for the full rationale (identical here). Stays a secretKeyRef

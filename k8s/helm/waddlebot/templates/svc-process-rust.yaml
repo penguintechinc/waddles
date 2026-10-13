@@ -4,12 +4,12 @@
 # .enabled sub-flag. See templates/svc-ingest-rust.yaml's header for the full `-rust`
 # resource-naming-vs-shared-image-tag rationale (identical here) -- not repeated per file.
 #
-# fix/svc-process-host-api-wiring-alpha -- core/svc_process/src/config.rs now HAS
+# fix/svc-process-host-api-wiring-alpha -- core/svc_process/src/config.rs HAS
 # HOST_API_PORT/HOST_API_SERVER_CERT_FILE/HOST_API_SERVER_KEY_FILE/HOST_API_CLIENT_CA_FILE
-# fields (the M4 host-API server landed; the prior "KNOWN GAP" comment here was stale) --
-# wired the same way templates/svc-action-rust.yaml's own server-role host-API env/volume
-# already is. bundleExecutor.stageTarget must point at svc-process-rust (not its
-# svc-action-rust default) for the ping-bundle e2e proof, since PROCESS_BUNDLE_* above is
+# fields and src/host_api.rs (~2.1k lines) implements the host-API server, wired the same way
+# templates/svc-action-rust.yaml's server-role host-API env/volume is --
+# bundleExecutor.stageTarget must point at svc-process-rust (not its svc-action-rust
+# default) for the ping-bundle e2e proof, since PROCESS_BUNDLE_* above is
 # what drives the `load`/`invoke` calls this connection carries. CACHE_HOST/CACHE_PORT are
 # wired explicitly below (not envFrom'd) because the shared ConfigMap only exposes
 # REDIS_HOST/REDIS_PORT, a different name than this crate's CliConfig reads.
