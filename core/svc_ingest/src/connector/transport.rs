@@ -24,6 +24,63 @@ pub enum TransportError {
     /// Reading the next frame failed (reset, protocol error, timeout).
     #[error("read failed: {0}")]
     Read(String),
+    /// A TERMINAL failure that reconnecting cannot fix -- e.g. the upstream
+    /// answered 401/403 and the credential is dead. The driver PARKS the
+    /// source on this (stops, never backoff-retries) so a revoked token is
+    /// not hammered forever; the transport records `needs_reauth` (or
+    /// equivalent) itself when it returns it. May come from
+    /// [`Transport::connect`], [`Transport::send_handshake`] or
+    /// [`Transport::next_frame`].
+    #[error("fatal: {0}")]
+    Fatal(String),
+}
+
+impl TransportError {
+    /// Stable, low-cardinality class label for logs/metrics (never the
+    /// reason text).
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Connect(_) => "connect",
+            Self::Handshake(_) => "handshake",
+            Self::Read(_) => "read",
+            Self::Fatal(_) => "fatal",
+        }
+    }
+
+    /// True for the terminal class that parks the source instead of retrying.
+    #[must_use]
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, Self::Fatal(_))
+    }
+}
+
+/// Why a yielded frame did not end up fully published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameDropReason {
+    /// Over the platform's size ceiling; dropped before any guest ran.
+    Oversize,
+    /// The connector reported a bad frame (`frame-error`).
+    GuestError,
+    /// The sandbox contained a connector fault (trap/fuel/deadline/memory) or
+    /// the connector could not be invoked; the connection is being torn down.
+    ConnectorFault,
+    /// The guest succeeded but at least one returned event was dropped
+    /// (invalid, oversize, platform-spoofed, over a cap, or the spine write
+    /// failed).
+    PublishIncomplete,
+}
+
+/// What the driver did with a frame the transport yielded, reported back via
+/// [`Transport::on_frame_outcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameOutcome {
+    /// The connector accepted the frame and every event it returned was
+    /// published (an empty event list counts: nothing was lost).
+    Published,
+    /// The frame (or part of its events) was dropped; a stateful transport
+    /// must NOT treat its data as delivered.
+    Dropped(FrameDropReason),
 }
 
 /// A host-owned connection to one platform source.
@@ -54,4 +111,14 @@ pub trait Transport: Send {
 
     /// Closes the connection; best effort, called on every teardown path.
     async fn close(&mut self, reason: &str);
+
+    /// Told, after every frame this transport yielded from
+    /// [`Self::next_frame`], whether it was processed AND published. A
+    /// STATEFUL transport (a poll/snapshot cursor) uses it to avoid advancing
+    /// past a frame a guest error, sandbox trip or publish failure dropped --
+    /// it can hold its cursor and re-yield instead. Called exactly once per
+    /// yielded frame, in order, before the next `next_frame`. The default is a
+    /// no-op, correct for stateless transports (socket/IRC/webhook) where a
+    /// dropped frame is simply lost.
+    async fn on_frame_outcome(&mut self, _outcome: FrameOutcome) {}
 }

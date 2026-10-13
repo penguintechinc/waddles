@@ -72,10 +72,9 @@ handlers:
     gap: "no Rust Spectrum poll/org-sync receiver/normalizer or connector bundle (Bar Citizen v3.0 must-have); corpus slot corpus/spectrum"
     tracking: "#840"
   - handler: core/svc_ingest/builtin_handlers/echo_ingest.py
-    status: covered
-    parity: unverified
-    targets:
-      - {kind: rust-path, path: core/bundle_executor/tests/fixtures/echo-connector-src/src/lib.rs, contains: "fn on_frame"}
+    status: pending
+    gap: "the Rust Echo connector exists ONLY as a test fixture (core/bundle_executor/tests/fixtures/echo-connector-src, driven by core/connector_e2e); it has no production build/deploy path, so no deployed Rust equivalent of the demo echo ingest handler exists. A fixture is not production code -- the gate must not pass on it. Becomes covered only when a production Echo connector bundle (or the demo app's retirement) lands."
+    tracking: "#840"
 
   # ---------------------------------------------------------------- process
   - handler: core/svc_process/builtin_handlers/bot_process.py

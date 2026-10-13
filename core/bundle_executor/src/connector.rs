@@ -490,7 +490,12 @@ impl Inner {
         store: &Store<ExecState>,
         instantiating: bool,
     ) -> ConnectorCallError {
-        let chain = format!("{err:#}");
+        // The wasmtime error chain is deliberately NOT carried: a host-import
+        // error or a guest `panic!` message in it can echo guest-supplied text
+        // (a URL, a token), and this string crosses the invoke seam to a host
+        // that logs. Only the trap class (a static wasmtime description)
+        // survives -- see `scrubbed_diagnostic`.
+        let chain = scrubbed_diagnostic(&err);
         if store.data().memory_cap_hit() {
             return ConnectorCallError::MemoryLimit(chain);
         }
@@ -504,10 +509,44 @@ impl Inner {
     }
 }
 
+/// A PII-free, bounded description of a wasmtime failure: the typed trap's
+/// static description when there is one, otherwise a fixed class string. The
+/// full `{err:#}` chain is never returned because it can include text the
+/// guest (or a host-import error echoing guest input) chose.
+fn scrubbed_diagnostic(err: &wasmtime::Error) -> String {
+    match err.downcast_ref::<wasmtime::Trap>() {
+        Some(trap) => format!("wasm trap: {trap}"),
+        None => {
+            "non-trap failure (error chain withheld: it may carry guest-supplied text)".to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// regression: a host-import error / guest message echoing a secret must
+    /// not survive into the diagnostic handed to the host.
+    #[test]
+    fn a_non_trap_error_chain_carrying_guest_text_is_withheld() {
+        let err = wasmtime::Error::msg("fetch https://evil.example/?token=SECRET-123 failed")
+            .context("host import failed");
+        let diag = scrubbed_diagnostic(&err);
+        assert!(
+            !diag.contains("SECRET-123") && !diag.contains("evil.example"),
+            "{diag}"
+        );
+        assert!(diag.contains("withheld"));
+    }
+
+    #[test]
+    fn a_typed_trap_keeps_only_its_static_description() {
+        let err = wasmtime::Error::from(wasmtime::Trap::UnreachableCodeReached);
+        let diag = scrubbed_diagnostic(&err);
+        assert!(diag.starts_with("wasm trap: "), "{diag}");
+    }
 
     #[test]
     fn every_error_has_a_distinct_low_cardinality_kind() {

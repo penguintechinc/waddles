@@ -24,12 +24,17 @@ pub struct ConnectorMetrics {
     /// `svc_ingest_connector_on_frame_duration_seconds{platform}` -- the
     /// `on-frame` invocation latency (histogram, spec S4's budget).
     pub on_frame_duration_seconds: HistogramVec,
-    /// `svc_ingest_connector_connection_up{platform}` -- live connections
-    /// currently past connect+handshake.
+    /// `svc_ingest_connector_connection_up{platform}` -- the COUNT of live
+    /// connections currently past connect+handshake: `inc()` on establish and
+    /// `dec()` on end, never `set()`, so N connections for one platform report
+    /// N (one disconnect no longer zeroes the others).
     pub connection_up: IntGaugeVec,
     /// `svc_ingest_connector_connects_total{platform,outcome}` -- connect
     /// attempts, outcome `ok`/`failed`.
     pub connects_total: IntCounterVec,
+    /// `svc_ingest_connector_parked_total{platform}` -- sources parked on a
+    /// terminal `TransportError::Fatal` (needs re-auth) instead of retried.
+    pub parked_total: IntCounterVec,
 }
 
 /// Registers the connector metrics against `registry`. Call exactly once per
@@ -82,6 +87,14 @@ pub fn register_connector_metrics(
         ),
         &["platform", "outcome"],
     )?;
+    let parked_total = IntCounterVec::new(
+        Opts::new(
+            "svc_ingest_connector_parked_total",
+            "Sources parked on a terminal transport failure, by platform",
+        ),
+        &["platform"],
+    )?;
+    registry.register(Box::new(parked_total.clone()))?;
     registry.register(Box::new(frames_total.clone()))?;
     registry.register(Box::new(events_total.clone()))?;
     registry.register(Box::new(trap_total.clone()))?;
@@ -95,6 +108,7 @@ pub fn register_connector_metrics(
         on_frame_duration_seconds,
         connection_up,
         connects_total,
+        parked_total,
     })
 }
 
@@ -133,14 +147,15 @@ mod tests {
         m.on_frame_duration_seconds
             .with_label_values(&["echo"])
             .observe(0.001);
-        m.connection_up.with_label_values(&["echo"]).set(1);
+        m.connection_up.with_label_values(&["echo"]).inc();
         m.connects_total.with_label_values(&["echo", "ok"]).inc();
+        m.parked_total.with_label_values(&["echo"]).inc();
         assert!(register_connector_metrics(&registry).is_err());
         let families = registry.gather();
         assert_eq!(
             families.len(),
-            6,
-            "all six connector series must be exported"
+            7,
+            "all seven connector series must be exported"
         );
     }
 }

@@ -35,15 +35,21 @@
 pub mod driver;
 pub mod invoker;
 pub mod metrics;
+pub(crate) mod ratelimit;
 pub mod registry;
 pub mod sink;
 pub mod transport;
 pub mod types;
 
-pub use driver::{ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError};
+pub use driver::{ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError, RunEnd};
 pub use invoker::{ConnectorInvokeError, ConnectorInvoker, UnwiredInvoker};
 pub use metrics::{register_connector_metrics, ConnectorMetrics};
-pub use registry::{ConnectorRegistry, PinnedConnector, RegistryError, MAX_EVENTS_PER_FRAME};
-pub use sink::{to_platform_event, EventSink, SinkError, SpineEventSink};
-pub use transport::{Transport, TransportError};
+pub use registry::{
+    ConnectorRegistry, EventLimits, PinnedConnector, RegistryError, MAX_EVENTS_PER_FRAME,
+};
+pub use sink::{
+    check_event_limits, is_valid_event_type, to_platform_event, EventSink, SinkError,
+    SpineEventSink,
+};
+pub use transport::{FrameDropReason, FrameOutcome, Transport, TransportError};
 pub use types::{ConnectionCtx, ConnectorEvent, ConnectorFrameError, Handshake, RawFrame};

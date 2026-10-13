@@ -31,18 +31,32 @@ B0 is host plumbing only -- it implements **no** platform connector.
 | `ConnectorInvoker` | `core/svc_ingest/src/connector/invoker.rs` | Seam to the executor. Production default `UnwiredInvoker` fails every call loudly |
 | `EventSink` / `SpineEventSink` | `core/svc_ingest/src/connector/sink.rs` | Validates events via `penguin_spine::PlatformEvent` and publishes through the one `publish_event` site |
 | `ExecutorInvoker` | `core/connector_e2e/src/lib.rs` | `ConnectorInvoker` over the in-process `ConnectorHost` -- the real-path harness |
-| Echo connector | `core/bundle_executor/tests/fixtures/echo-connector-src` | Faithful port of `builtin_handlers/echo_ingest.py::normalize`; the B0 smoke |
+| Echo connector | `core/bundle_executor/tests/fixtures/echo-connector-src` | **Test fixture only** (no production build/deploy path): a faithful port of `builtin_handlers/echo_ingest.py::normalize`; the B0 smoke. Because it is not production code, `.ci/builtin-handler-map.yaml` keeps `echo_ingest` **pending** -- the parity gate must not go green on a fixture |
 | Fault connector | `core/bundle_executor/tests/fixtures/faulty-connector-src` | Trap / spin / memory hog / event flood on demand |
 
 ## Failure classes (spec S2.6)
 
 | `on-frame` outcome | Host reaction |
 |---|---|
-| `ok(events)` | cap at `max_events_per_frame` (64), drop events whose platform differs from the pinned one, publish the rest |
+| `ok(events)` | cap at `max_events_per_frame` (64), drop events whose platform differs from the pinned one, enforce the size caps below, publish the rest |
 | connector `frame-error` | that frame is dropped and counted; the connection stays up |
 | trap / fuel / deadline / memory cap / pool exhausted / invoker unavailable | connection torn down, `svc_ingest_connector_trap_total{platform,kind}`, reconnect under backoff; the connector keeps serving other connections |
+| transport `TransportError::Fatal` (e.g. 401, dead credential) | source **parked**: no reconnect, `ConnectorDriver::run` returns `RunEnd::Parked`, `svc_ingest_connector_parked_total{platform}`; the transport records `needs_reauth` itself |
 
 Frames larger than the pinned `max_frame_bytes` are dropped **before** any guest runs.
+
+**Backoff reset** (`driver::should_reset_backoff`): only after a connection was sustained for `STABILITY_WINDOW` (60s)
+and did not end in a connector fault -- never merely because a frame or two succeeded before a trap (a poison frame
+at position >= 2 used to reset it every cycle and hammer the upstream).
+
+**Host size caps** (`registry::EventLimits`, per pinned connector, typed `SinkError::Oversize`/`Invalid`, counted as
+`events_total{outcome=oversize|invalid}`, never silently truncated): `payload_json` 64 KiB, `actor` 256 B,
+`event_type` 128 B, summed `payload_json` per frame 1 MiB; `event_type` must be a dotted lowercase namespace
+(`message`, `channel.raid`).
+
+**`Transport::on_frame_outcome`** -- after every yielded frame the driver reports `FrameOutcome::Published` or
+`Dropped(Oversize | GuestError | ConnectorFault | PublishIncomplete)`, so a stateful poll transport can hold its
+snapshot cursor instead of advancing past a frame that was dropped. Default is a no-op (stateless transports).
 
 ## Isolation (spec S2.3 / S2.6 / S3.5)
 
@@ -62,9 +76,13 @@ Frames larger than the pinned `max_frame_bytes` are dropped **before** any guest
 Executor (OTel): `waddles_executor_connector_calls_total`, `waddles_executor_connector_call_seconds`
 (labels `app_id, export, outcome`) -- see `docs/observability/data-plane-metrics.md`.
 svc_ingest (Prometheus): `svc_ingest_connector_{frames,events,trap,connects}_total`,
-`..._on_frame_duration_seconds`, `..._connection_up`. Spec S2.6 names `source_id` as a trap-metric label; it is
-deliberately omitted (unbounded cardinality). Nothing frame-derived (bytes, actor, payload, guest message) is
-logged or used as a label; guest-supplied error text is never logged. `tracing` span `connector.on_frame` wraps each call.
+`..._on_frame_duration_seconds`, `..._connection_up` (an inc/dec **count** of live connections per platform, correct
+with N connections), `..._parked_total`. Spec S2.6 names `source_id` as a trap-metric label; it is deliberately
+omitted (unbounded cardinality). Nothing frame-derived (bytes, actor, payload, guest message) is logged or used as a
+label: logs carry error **classes** only (`SandboxTrip.message`/`Unavailable` payloads are never logged, the
+executor withholds the wasmtime error chain, `SinkError::Invalid` is a `&'static str`). Flood-prone WARNs (oversize,
+spoofed platform, rejected/failed events, truncation) are sampled -- 5 per 30s per category per connection with a
+`suppressed_before` count -- while every occurrence is still counted. `tracing` span `connector.on_frame` wraps each call.
 
 ## Not in B0 (explicit, typed, not silent)
 

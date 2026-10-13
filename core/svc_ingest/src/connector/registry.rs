@@ -15,6 +15,42 @@ use std::collections::HashMap;
 /// counts a metric.
 pub const MAX_EVENTS_PER_FRAME: usize = 64;
 
+/// Default ceiling on one event's `payload_json`, bytes.
+pub const MAX_EVENT_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Default ceiling on one event's `actor`, bytes.
+pub const MAX_EVENT_ACTOR_BYTES: usize = 256;
+/// Default ceiling on one event's `event_type`, bytes.
+pub const MAX_EVENT_TYPE_BYTES: usize = 128;
+/// Default ceiling on the summed `payload_json` bytes of ONE `on-frame`'s
+/// events -- bounds the worst case far below `64 events x payload cap`.
+pub const MAX_FRAME_EVENTS_BYTES: usize = 1024 * 1024;
+
+/// Host-enforced size ceilings on what a connector returns (spec S3.5). A
+/// violation is a typed [`super::SinkError`] (counted, loud), never a silent
+/// truncation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventLimits {
+    /// Max bytes of one event's `payload_json`.
+    pub max_payload_bytes: usize,
+    /// Max bytes of one event's `actor`.
+    pub max_actor_bytes: usize,
+    /// Max bytes of one event's `event_type`.
+    pub max_event_type_bytes: usize,
+    /// Max summed `payload_json` bytes across one frame's events.
+    pub max_frame_events_bytes: usize,
+}
+
+impl Default for EventLimits {
+    fn default() -> Self {
+        Self {
+            max_payload_bytes: MAX_EVENT_PAYLOAD_BYTES,
+            max_actor_bytes: MAX_EVENT_ACTOR_BYTES,
+            max_event_type_bytes: MAX_EVENT_TYPE_BYTES,
+            max_frame_events_bytes: MAX_FRAME_EVENTS_BYTES,
+        }
+    }
+}
+
 /// One pinned connector: which executor-held component serves a platform, and
 /// the host-enforced per-frame ceiling for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,10 +66,13 @@ pub struct PinnedConnector {
     pub max_frame_bytes: usize,
     /// Events accepted per `on-frame`; defaults to [`MAX_EVENTS_PER_FRAME`].
     pub max_events_per_frame: usize,
+    /// Per-event and per-frame size ceilings; defaults to [`EventLimits::default`].
+    pub event_limits: EventLimits,
 }
 
 impl PinnedConnector {
-    /// Builds a pinned entry with the default events-per-frame cap.
+    /// Builds a pinned entry with the default events-per-frame cap and
+    /// [`EventLimits`].
     #[must_use]
     pub fn new(
         platform: impl Into<String>,
@@ -47,6 +86,7 @@ impl PinnedConnector {
             digest: digest.into(),
             max_frame_bytes,
             max_events_per_frame: MAX_EVENTS_PER_FRAME,
+            event_limits: EventLimits::default(),
         }
     }
 }
@@ -93,6 +133,14 @@ impl ConnectorRegistry {
             return Err(RegistryError::Invalid(
                 "max_frame_bytes and max_events_per_frame must be > 0",
             ));
+        }
+        let l = &connector.event_limits;
+        if l.max_payload_bytes == 0
+            || l.max_actor_bytes == 0
+            || l.max_event_type_bytes == 0
+            || l.max_frame_events_bytes == 0
+        {
+            return Err(RegistryError::Invalid("every event limit must be > 0"));
         }
         if self.pinned.contains_key(&connector.platform) {
             return Err(RegistryError::AlreadyPinned(connector.platform));
@@ -178,6 +226,9 @@ mod tests {
         assert!(matches!(r.register(bad), Err(RegistryError::Invalid(_))));
         let mut bad = pinned("echo");
         bad.max_events_per_frame = 0;
+        assert!(matches!(r.register(bad), Err(RegistryError::Invalid(_))));
+        let mut bad = pinned("echo");
+        bad.event_limits.max_payload_bytes = 0;
         assert!(matches!(r.register(bad), Err(RegistryError::Invalid(_))));
         assert!(r.is_empty(), "no invalid entry may have been inserted");
     }

@@ -79,7 +79,7 @@ fn map_call_error(e: ConnectorCallError) -> ConnectorInvokeError {
         ConnectorCallError::FuelExhausted(message)
         | ConnectorCallError::DeadlineExceeded(message)
         | ConnectorCallError::MemoryLimit(message)
-        | ConnectorCallError::Trap(message) => ConnectorInvokeError::SandboxTrip { kind, message },
+        | ConnectorCallError::Trap(message) => ConnectorInvokeError::sandbox_trip(kind, message),
         other => ConnectorInvokeError::Unavailable(other.to_string()),
     }
 }

@@ -16,8 +16,9 @@ use std::time::Duration;
 use svc_ingest::connector::{
     register_connector_metrics, ConnectionCtx, ConnectionEnd, ConnectorDriver, ConnectorEvent,
     ConnectorFrameError, ConnectorInvokeError, ConnectorInvoker, ConnectorMetrics,
-    ConnectorRegistry, DriverError, EventSink, Handshake, PinnedConnector, RawFrame, RegistryError,
-    SinkError, Transport, TransportError, UnwiredInvoker,
+    ConnectorRegistry, DriverError, EventLimits, EventSink, FrameDropReason, FrameOutcome,
+    Handshake, PinnedConnector, RawFrame, RegistryError, RunEnd, SinkError, Transport,
+    TransportError, UnwiredInvoker,
 };
 use tokio::sync::oneshot;
 
@@ -50,6 +51,8 @@ struct ScriptedTransport {
     reads: VecDeque<Vec<Result<Option<Vec<u8>>, TransportError>>>,
     current: VecDeque<Result<Option<Vec<u8>>, TransportError>>,
     handshake_fails: bool,
+    handshake_fatal: bool,
+    outcomes: Arc<Mutex<Vec<FrameOutcome>>>,
     then_hang: bool,
     handshakes: Arc<Mutex<Vec<Handshake>>>,
     closes: Arc<Mutex<Vec<String>>>,
@@ -66,6 +69,8 @@ impl ScriptedTransport {
             reads: connections.into(),
             current: VecDeque::new(),
             handshake_fails: false,
+            handshake_fatal: false,
+            outcomes: Arc::default(),
             then_hang: false,
             handshakes: Arc::default(),
             closes: Arc::default(),
@@ -91,7 +96,9 @@ impl Transport for ScriptedTransport {
 
     async fn send_handshake(&mut self, handshake: Handshake) -> Result<(), TransportError> {
         self.handshakes.lock().unwrap().push(handshake);
-        if self.handshake_fails {
+        if self.handshake_fatal {
+            Err(TransportError::Fatal("401".to_string()))
+        } else if self.handshake_fails {
             Err(TransportError::Handshake("refused".to_string()))
         } else {
             Ok(())
@@ -108,6 +115,10 @@ impl Transport for ScriptedTransport {
 
     async fn close(&mut self, reason: &str) {
         self.closes.lock().unwrap().push(reason.to_string());
+    }
+
+    async fn on_frame_outcome(&mut self, outcome: FrameOutcome) {
+        self.outcomes.lock().unwrap().push(outcome);
     }
 }
 
@@ -188,7 +199,7 @@ impl EventSink for RecordingSink {
             let mut fail = self.fail_n.lock().unwrap();
             if *fail > 0 {
                 *fail -= 1;
-                return Err(SinkError::Invalid("injected".to_string()));
+                return Err(SinkError::Invalid("injected"));
             }
         }
         self.published.lock().unwrap().push((ctx.clone(), event));
@@ -203,26 +214,35 @@ struct Rig<I: ConnectorInvoker> {
     metrics: ConnectorMetrics,
 }
 
-fn registry(max_frame_bytes: usize) -> Arc<ConnectorRegistry> {
+fn registry(max_frame_bytes: usize, limits: EventLimits) -> Arc<ConnectorRegistry> {
     let mut r = ConnectorRegistry::new();
-    r.register(PinnedConnector::new(
+    let mut pinned = PinnedConnector::new(
         PLATFORM,
         "waddles.core.example.echo",
         "sha256:aa",
         max_frame_bytes,
-    ))
-    .unwrap();
+    );
+    pinned.event_limits = limits;
+    r.register(pinned).unwrap();
     Arc::new(r)
 }
 
 fn rig<I: ConnectorInvoker>(invoker: I, max_frame_bytes: usize) -> Rig<I> {
+    rig_with_limits(invoker, max_frame_bytes, EventLimits::default())
+}
+
+fn rig_with_limits<I: ConnectorInvoker>(
+    invoker: I,
+    max_frame_bytes: usize,
+    limits: EventLimits,
+) -> Rig<I> {
     let registry_metrics = prometheus::Registry::new();
     let metrics = register_connector_metrics(&registry_metrics).unwrap();
     let invoker = Arc::new(invoker);
     let sink = Arc::new(RecordingSink::default());
     Rig {
         driver: ConnectorDriver::new(
-            registry(max_frame_bytes),
+            registry(max_frame_bytes, limits),
             Arc::clone(&invoker),
             Arc::clone(&sink),
             metrics.clone(),
@@ -558,5 +578,501 @@ async fn a_context_for_a_different_platform_is_a_fatal_typed_error() {
     assert!(
         matches!(err, DriverError::ContextPlatformMismatch { .. }),
         "{err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Hardening regressions (PR #844 review): PII-free logs, per-platform
+// connection_up, host size caps, WARN sampling, `TransportError::Fatal`
+// parking and the `on_frame_outcome` hook.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::{Event, Level, Metadata, Subscriber};
+
+/// Every `tracing` event this thread emits, as `(level, "field=value ...")`.
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<(Level, String)>>>);
+
+struct Capture {
+    out: Captured,
+    next_span: AtomicU64,
+}
+
+struct Collect(String);
+
+impl Visit for Collect {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.0.push_str(&format!("{}={:?} ", field.name(), value));
+    }
+}
+
+impl Subscriber for Capture {
+    fn enabled(&self, _: &Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &Attributes<'_>) -> Id {
+        Id::from_u64(self.next_span.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+    fn record(&self, _: &Id, _: &Record<'_>) {}
+    fn record_follows_from(&self, _: &Id, _: &Id) {}
+    fn event(&self, event: &Event<'_>) {
+        let mut c = Collect(String::new());
+        event.record(&mut c);
+        self.out
+            .0
+            .lock()
+            .unwrap()
+            .push((*event.metadata().level(), c.0));
+    }
+    fn enter(&self, _: &Id) {}
+    fn exit(&self, _: &Id) {}
+}
+
+fn capture_logs() -> (Captured, tracing::subscriber::DefaultGuard) {
+    let captured = Captured::default();
+    let guard = tracing::subscriber::set_default(Capture {
+        out: captured.clone(),
+        next_span: AtomicU64::new(0),
+    });
+    (captured, guard)
+}
+
+fn limits_small() -> EventLimits {
+    EventLimits {
+        max_payload_bytes: 32,
+        max_actor_bytes: 8,
+        max_event_type_bytes: 16,
+        max_frame_events_bytes: 1024,
+    }
+}
+
+fn sized_event(payload_len: usize) -> ConnectorEvent {
+    let mut e = event(1);
+    e.payload_json = format!(r#"{{"t":"{}"}}"#, "x".repeat(payload_len));
+    e
+}
+
+/// regression: `SandboxTrip.message` (a wasmtime chain), `Unavailable`
+/// payloads and guest `actor`/`event_type`/payload text must never reach a log
+/// record at ANY level (a host-import error can echo a URL/token).
+#[tokio::test]
+async fn logs_never_carry_guest_supplied_text_or_error_payloads() {
+    const SECRET: &str = "SECRET-TOKEN-hunter2";
+    let (captured, _guard) = capture_logs();
+
+    let hostile_events = vec![
+        {
+            let mut e = event(1);
+            e.actor = Some(format!("actor-{SECRET}-{}", "a".repeat(64)));
+            e
+        },
+        {
+            let mut e = event(2);
+            e.event_type = format!("Bad Type {SECRET}");
+            e
+        },
+        {
+            let mut e = event(3);
+            e.payload_json = format!(r#"{{"t":"{SECRET}-{}"}}"#, "p".repeat(64));
+            e
+        },
+        {
+            let mut e = event(4);
+            e.platform = format!("evil-{SECRET}");
+            e
+        },
+        event(5),
+    ];
+    let invoker = ScriptedInvoker::with_frames(vec![
+        Err(ConnectorInvokeError::sandbox_trip(
+            "trap",
+            format!("host import failed: fetch https://x/?token={SECRET}"),
+        )),
+        Err(ConnectorInvokeError::Unavailable(format!(
+            "pool said {SECRET}"
+        ))),
+        Err(ConnectorInvokeError::Guest(ConnectorFrameError::Backend(
+            SECRET.to_string(),
+        ))),
+        Ok(hostile_events),
+    ]);
+    let r = rig_with_limits(invoker, 4096, limits_small());
+    *r.sink.fail_n.lock().unwrap() = 1;
+    let mut t = ScriptedTransport::new(vec![
+        frames(&[b"a"]),
+        frames(&[b"b"]),
+        frames(&[b"c", b"d"]),
+    ]);
+    let (_keep, mut rx) = never_shutdown();
+    for _ in 0..3 {
+        r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
+    }
+
+    // on-connect failing with a trip that carries the secret.
+    let invoker = ScriptedInvoker::default();
+    *invoker.on_connect_error.lock().unwrap() = Some(ConnectorInvokeError::sandbox_trip(
+        "trap",
+        format!("on-connect chain {SECRET}"),
+    ));
+    let r2 = rig(invoker, 4096);
+    let mut t2 = ScriptedTransport::new(vec![frames(&[b"x"])]);
+    r2.driver.serve_connection(&mut t2, &mut rx).await.unwrap();
+
+    let logs = captured.0.lock().unwrap();
+    assert!(
+        logs.len() >= 8,
+        "denominator: expected the driver to have logged, got {} records",
+        logs.len()
+    );
+    assert!(
+        logs.iter()
+            .any(|(l, m)| *l == Level::WARN && m.contains("kind=")),
+        "a class-only WARN must exist"
+    );
+    for (level, line) in logs.iter() {
+        assert!(
+            !line.contains(SECRET) && !line.contains("evil-") && !line.contains("Bad Type"),
+            "guest text leaked into a {level} log: {line}"
+        );
+    }
+}
+
+/// regression: `connection_up` was `set(1)`/`set(0)` per platform, so one of
+/// two connections ending reported 0 while the other was still up.
+#[tokio::test]
+async fn connection_up_counts_live_connections_per_platform() {
+    let r = rig(ScriptedInvoker::default(), 4096);
+    let up = r.metrics.connection_up.with_label_values(&[PLATFORM]);
+    let driver = Arc::new(r.driver);
+
+    let spawn_conn = |n: u32| {
+        let mut t = ScriptedTransport::new(vec![vec![]]);
+        t.connects = VecDeque::from(vec![Ok(ctx(n))]);
+        t.then_hang = true;
+        let (tx, mut rx) = oneshot::channel();
+        let d = Arc::clone(&driver);
+        let task = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await.unwrap() });
+        (tx, task)
+    };
+    let (tx_a, task_a) = spawn_conn(1);
+    let (tx_b, task_b) = spawn_conn(2);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while up.get() != 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never reached 2 up, at {}",
+            up.get()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tx_a.send(()).unwrap();
+    task_a.await.unwrap();
+    assert_eq!(up.get(), 1, "one disconnect must leave the other counted");
+    tx_b.send(()).unwrap();
+    task_b.await.unwrap();
+    assert_eq!(up.get(), 0);
+}
+
+#[tokio::test]
+async fn host_size_caps_and_event_type_shape_are_enforced_loudly_per_event() {
+    let invoker = ScriptedInvoker::with_frames(vec![Ok(vec![
+        event(1),        // valid
+        sized_event(64), // payload over 32
+        {
+            let mut e = event(2);
+            e.actor = Some("far-too-long-actor".to_string());
+            e
+        },
+        {
+            let mut e = event(3);
+            e.event_type = "Bad Type".to_string(); // shape
+            e
+        },
+        {
+            let mut e = event(4);
+            e.event_type = "a.very.long.event.type".to_string(); // over 16
+            e
+        },
+    ])]);
+    let r = rig_with_limits(invoker, 4096, limits_small());
+    let mut t = ScriptedTransport::new(vec![frames(&[b"f"])]);
+    let (_keep, mut rx) = never_shutdown();
+    r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
+
+    assert_eq!(r.sink.published.lock().unwrap().len(), 1);
+    assert_eq!(count(&r.metrics, "events", PLATFORM, "published"), 1);
+    assert_eq!(count(&r.metrics, "events", PLATFORM, "oversize"), 3);
+    assert_eq!(count(&r.metrics, "events", PLATFORM, "invalid"), 1);
+    assert_eq!(
+        *t.outcomes.lock().unwrap(),
+        vec![FrameOutcome::Dropped(FrameDropReason::PublishIncomplete)]
+    );
+}
+
+#[tokio::test]
+async fn the_per_frame_event_bytes_aggregate_is_capped() {
+    let limits = EventLimits {
+        max_payload_bytes: 100,
+        max_actor_bytes: 64,
+        max_event_type_bytes: 64,
+        max_frame_events_bytes: 150,
+    };
+    // Each payload is ~80 bytes: the first fits, the 2nd and 3rd push the
+    // frame past 150.
+    let invoker = ScriptedInvoker::with_frames(vec![Ok(vec![
+        sized_event(70),
+        sized_event(70),
+        sized_event(70),
+    ])]);
+    let r = rig_with_limits(invoker, 4096, limits);
+    let mut t = ScriptedTransport::new(vec![frames(&[b"f"])]);
+    let (_keep, mut rx) = never_shutdown();
+    r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
+
+    assert_eq!(count(&r.metrics, "events", PLATFORM, "published"), 1);
+    assert_eq!(count(&r.metrics, "events", PLATFORM, "oversize"), 2);
+}
+
+/// regression: per-frame / per-event WARNs were unbounded. A hostile stream
+/// must be fully COUNTED but only SAMPLED in the log.
+#[tokio::test]
+async fn a_flood_of_oversize_frames_and_failed_publishes_is_counted_but_log_sampled() {
+    let (captured, _guard) = capture_logs();
+
+    // 200 oversize frames.
+    let r = rig(ScriptedInvoker::default(), 8);
+    let flood: Vec<_> = (0..200).map(|_| Ok(Some(vec![b'z'; 32]))).collect();
+    let mut t = ScriptedTransport::new(vec![flood]);
+    let (_keep, mut rx) = never_shutdown();
+    r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
+    assert_eq!(count(&r.metrics, "frames", PLATFORM, "oversize"), 200);
+
+    // 10 frames x 64 events, every publish failing.
+    let results = (0..10)
+        .map(|_| Ok((0..64).map(event).collect::<Vec<_>>()))
+        .collect();
+    let r = rig(ScriptedInvoker::with_frames(results), 4096);
+    *r.sink.fail_n.lock().unwrap() = 640;
+    let mut t = ScriptedTransport::new(vec![frames(&[b"f".as_slice(); 10])]);
+    r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
+    assert_eq!(count(&r.metrics, "events", PLATFORM, "invalid"), 640);
+
+    let logs = captured.0.lock().unwrap();
+    let oversize_warns = logs
+        .iter()
+        .filter(|(l, m)| *l == Level::WARN && m.contains("exceeds the platform ceiling"))
+        .count();
+    let publish_warns = logs
+        .iter()
+        .filter(|(l, m)| *l == Level::WARN && m.contains("not published"))
+        .count();
+    assert!(
+        (1..=5).contains(&oversize_warns),
+        "200 oversize frames must log 1..=5 WARNs, logged {oversize_warns}"
+    );
+    assert!(
+        (1..=5).contains(&publish_warns),
+        "640 failed publishes must log 1..=5 WARNs, logged {publish_warns}"
+    );
+}
+
+/// regression: a terminal `Fatal` (401/auth-dead) must PARK the source, not
+/// backoff-retry it forever.
+#[tokio::test]
+async fn a_fatal_connect_error_parks_the_source_and_is_never_retried() {
+    let r = rig(ScriptedInvoker::default(), 4096);
+    let mut t = ScriptedTransport::new(vec![]);
+    t.connects = VecDeque::from(vec![
+        Err(TransportError::Fatal("401 unauthorized".to_string())),
+        Ok(ctx(1)), // must never be reached
+    ]);
+    let (_tx, rx) = oneshot::channel();
+    let end = tokio::time::timeout(Duration::from_secs(5), r.driver.run(t, rx))
+        .await
+        .expect("a parked source must return, not loop")
+        .unwrap();
+    assert_eq!(end, RunEnd::Parked);
+    assert_eq!(count(&r.metrics, "connects", PLATFORM, "fatal"), 1);
+    assert_eq!(count(&r.metrics, "connects", PLATFORM, "ok"), 0);
+    assert_eq!(
+        r.metrics.parked_total.with_label_values(&[PLATFORM]).get(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_fatal_error_mid_stream_or_in_the_handshake_parks_without_reconnecting() {
+    // Mid-stream: one good frame, then Fatal on read.
+    let r = rig(ScriptedInvoker::default(), 4096);
+    let mut t = ScriptedTransport::new(vec![vec![
+        Ok(Some(b"f".to_vec())),
+        Err(TransportError::Fatal("token revoked".to_string())),
+    ]]);
+    let (_keep, mut rx) = never_shutdown();
+    let report = r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
+    assert_eq!(report.end, ConnectionEnd::Parked);
+    assert!(report.established);
+    assert_eq!(report.frames_ok, 1);
+    assert_eq!(*t.closes.lock().unwrap(), vec!["parked"]);
+    assert_eq!(
+        *r.invoker.disconnect_reasons.lock().unwrap(),
+        vec!["parked"]
+    );
+
+    // Same via `run`: returns Parked and never attempts a second connect
+    // (a retry would hit the exhausted script and count a "failed" connect).
+    let r = rig(ScriptedInvoker::default(), 4096);
+    let t = ScriptedTransport::new(vec![vec![Err(TransportError::Fatal("x".to_string()))]]);
+    let (_tx, rx2) = oneshot::channel();
+    assert_eq!(r.driver.run(t, rx2).await.unwrap(), RunEnd::Parked);
+    assert_eq!(count(&r.metrics, "connects", PLATFORM, "failed"), 0);
+    assert_eq!(count(&r.metrics, "connects", PLATFORM, "ok"), 1);
+
+    // Handshake send: Fatal parks.
+    let r = rig(ScriptedInvoker::default(), 4096);
+    let mut t = ScriptedTransport::new(vec![frames(&[b"f"])]);
+    t.handshake_fatal = true;
+    let report = r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
+    assert_eq!(report.end, ConnectionEnd::Parked);
+    assert!(!report.established);
+    assert_eq!(*r.invoker.frame_calls.lock().unwrap(), 0);
+    assert_eq!(
+        r.metrics.parked_total.with_label_values(&[PLATFORM]).get(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_non_fatal_connect_error_is_retried_not_parked() {
+    let r = rig(ScriptedInvoker::with_frames(vec![Ok(vec![event(1)])]), 4096);
+    let mut t = ScriptedTransport::new(vec![frames(&[b"ok"])]);
+    t.connects = VecDeque::from(vec![
+        Err(TransportError::Connect("reset".to_string())),
+        Ok(ctx(1)),
+    ]);
+    t.then_hang = true;
+    let (tx, rx) = oneshot::channel();
+    let sink = Arc::clone(&r.sink);
+    let metrics = r.metrics.clone();
+    let task = tokio::spawn(async move { r.driver.run(t, rx).await });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while sink.published.lock().unwrap().len() != 1 {
+        assert!(tokio::time::Instant::now() < deadline, "never retried");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tx.send(()).unwrap();
+    assert_eq!(task.await.unwrap().unwrap(), RunEnd::Shutdown);
+    assert_eq!(metrics.parked_total.with_label_values(&[PLATFORM]).get(), 0);
+}
+
+#[tokio::test]
+async fn every_yielded_frame_is_reported_back_to_the_transport_with_its_outcome() {
+    let invoker = ScriptedInvoker::with_frames(vec![
+        Ok(vec![]), // f1: nothing lost
+        Err(ConnectorInvokeError::Guest(ConnectorFrameError::Malformed(
+            "x".into(),
+        ))), // f2
+        Ok(vec![event(1)]), // f4: sink fails
+        Ok(vec![event(2)]), // f5: published
+        Err(ConnectorInvokeError::sandbox_trip("trap", "t")), // f6
+    ]);
+    let r = rig(invoker, 8);
+    *r.sink.fail_n.lock().unwrap() = 1;
+    // f3 is oversize (never reaches the guest).
+    let mut t = ScriptedTransport::new(vec![frames(&[
+        b"f1",
+        b"f2",
+        b"way-too-large-frame",
+        b"f4",
+        b"f5",
+        b"f6",
+    ])]);
+    let (_keep, mut rx) = never_shutdown();
+    r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
+
+    assert_eq!(
+        *t.outcomes.lock().unwrap(),
+        vec![
+            FrameOutcome::Published,
+            FrameOutcome::Dropped(FrameDropReason::GuestError),
+            FrameOutcome::Dropped(FrameDropReason::Oversize),
+            FrameOutcome::Dropped(FrameDropReason::PublishIncomplete),
+            FrameOutcome::Published,
+            FrameOutcome::Dropped(FrameDropReason::ConnectorFault),
+        ],
+        "exactly one outcome per yielded frame, in order"
+    );
+}
+
+/// A stateful poll transport: yields snapshot pages in order and only
+/// COMMITS its cursor over a page once the driver says it was published. The
+/// first dropped page freezes the cursor so it can be re-yielded.
+struct CursorTransport {
+    pages: Vec<Vec<u8>>,
+    yielded: usize,
+    committed: Arc<Mutex<usize>>,
+    blocked: bool,
+}
+
+impl Transport for CursorTransport {
+    fn platform(&self) -> &str {
+        PLATFORM
+    }
+    async fn connect(&mut self) -> Result<ConnectionCtx, TransportError> {
+        Ok(ctx(0))
+    }
+    async fn send_handshake(&mut self, _h: Handshake) -> Result<(), TransportError> {
+        Ok(())
+    }
+    async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+        let page = self.pages.get(self.yielded).cloned();
+        self.yielded += 1;
+        Ok(page)
+    }
+    async fn close(&mut self, _reason: &str) {}
+    async fn on_frame_outcome(&mut self, outcome: FrameOutcome) {
+        if outcome == FrameOutcome::Published && !self.blocked {
+            *self.committed.lock().unwrap() += 1;
+        } else {
+            self.blocked = true;
+        }
+    }
+}
+
+/// regression: without the hook a poll transport's cursor advanced past a
+/// page a guest error / publish failure had dropped, losing it for good.
+#[tokio::test]
+async fn on_frame_outcome_stops_a_poll_cursor_advancing_past_a_dropped_page() {
+    let r = rig(
+        ScriptedInvoker::with_frames(vec![
+            Ok(vec![event(1)]),
+            Err(ConnectorInvokeError::Guest(ConnectorFrameError::Backend(
+                "x".into(),
+            ))),
+            Ok(vec![event(3)]),
+        ]),
+        4096,
+    );
+    let committed = Arc::new(Mutex::new(0usize));
+    let mut t = CursorTransport {
+        pages: vec![b"p1".to_vec(), b"p2".to_vec(), b"p3".to_vec()],
+        yielded: 0,
+        committed: Arc::clone(&committed),
+        blocked: false,
+    };
+    let (_keep, mut rx) = never_shutdown();
+    let report = r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
+
+    assert_eq!(report.frames_ok, 2, "p1 and p3 were processed");
+    assert_eq!(r.sink.published.lock().unwrap().len(), 2);
+    assert_eq!(
+        *committed.lock().unwrap(),
+        1,
+        "the cursor must stop at the dropped p2, not advance to 3"
     );
 }

@@ -27,7 +27,10 @@ pub enum ConnectorInvokeError {
         /// Stable low-cardinality kind (`trap`/`fuel_exhausted`/`deadline`/
         /// `memory_limit`).
         kind: &'static str,
-        /// Diagnostic detail; may be logged, never contains frame data.
+        /// Bounded diagnostic for a debugger/test to read off the error value.
+        /// NEVER logged by the host: the wasmtime error chain it can derive
+        /// from may echo guest-supplied text (a URL, a token). Build it with
+        /// [`ConnectorInvokeError::sandbox_trip`] so it is truncated.
         message: String,
     },
     /// The invocation could not be attempted or completed for a non-guest
@@ -37,7 +40,26 @@ pub enum ConnectorInvokeError {
     Unavailable(String),
 }
 
+/// Hard bound on a [`ConnectorInvokeError::SandboxTrip`] diagnostic, bytes.
+pub const MAX_TRIP_DIAGNOSTIC_BYTES: usize = 160;
+
 impl ConnectorInvokeError {
+    /// Builds a [`Self::SandboxTrip`], truncating `message` to
+    /// [`MAX_TRIP_DIAGNOSTIC_BYTES`] on a char boundary so a hostile guest
+    /// cannot park an unbounded string in the error.
+    #[must_use]
+    pub fn sandbox_trip(kind: &'static str, message: impl Into<String>) -> Self {
+        let mut message = message.into();
+        if message.len() > MAX_TRIP_DIAGNOSTIC_BYTES {
+            let mut end = MAX_TRIP_DIAGNOSTIC_BYTES;
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            message.truncate(end);
+        }
+        Self::SandboxTrip { kind, message }
+    }
+
     /// Stable, low-cardinality label for metrics.
     #[must_use]
     pub fn kind(&self) -> &'static str {
@@ -178,6 +200,21 @@ mod tests {
             assert!(err.tears_down_connection());
             assert_eq!(err.kind(), "unavailable");
         }
+    }
+
+    #[test]
+    fn a_sandbox_trip_diagnostic_is_truncated_on_a_char_boundary() {
+        let long = "é".repeat(500);
+        match ConnectorInvokeError::sandbox_trip("trap", long) {
+            ConnectorInvokeError::SandboxTrip { message, .. } => {
+                assert!(message.len() <= MAX_TRIP_DIAGNOSTIC_BYTES);
+                assert!(!message.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        // Display never carries the diagnostic.
+        let e = ConnectorInvokeError::sandbox_trip("trap", "SECRET");
+        assert!(!e.to_string().contains("SECRET"));
     }
 
     #[test]
