@@ -262,6 +262,15 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.socials
+    version: "1.0.0"
+    language: python
+    source_dir: python/socials
+    manifest_path: socials.manifest.yaml
+    artifact_path: socials.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
   - app_id: waddles.core.example.wheel
     version: "1.0.3"
     language: python
