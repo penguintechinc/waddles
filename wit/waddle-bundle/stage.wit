@@ -571,6 +571,77 @@ interface identity {
   resolve-mention: func(token: string) -> result<string, error>;
 }
 
+/// Host-mediated text generation against the platform's SELF-HOSTED model
+/// (never a vendor SDK or third-party endpoint inside or reachable from the
+/// bundle). Additive, `stage-next`-only: `world stage` (1.0.0) never imports
+/// this. Spec `docs/superpowers/specs/2026-09-28-bundle-permissions-and-
+/// capability-gate.md` SS9.
+///
+/// Capability: `ai.generate` (`bundle_capability_gate::permission::
+/// PermissionFamily::AiGenerate`) -- a DANGEROUS permission (consent-ack
+/// required), rate limited to 10 calls per 60 s, gated host-side like every
+/// other import; a bundle that never declared it gets `denied("not_granted")`.
+///
+/// **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in any environment until issue #858 is resolved.**
+/// AI is gated by the default-OFF flag `waddles.bundle-ai-capability` plus the `ai.generate` 'dangerous' consent-ack. Enterprise-tier enforcement is NOT YET implemented in code (tracked in issue #858); do not rely on it.
+///
+/// **The host owns the prompt, the bundle owns only the words.** The bundle
+/// supplies ONE free-text `prompt`; the host (a) refuses an over-bound prompt
+/// (`too-many-tokens`, 2000 prompt / 512 completion tokens), (b) REJECTS -- never
+/// redacts -- a prompt carrying PII or a secret-shaped string
+/// (`denied("contains_pii")`: tokenize/strip it first; a `{user:<uuid>}`
+/// placeholder is fine, a raw email/phone/card/token is not), (c) frames it as
+/// UNTRUSTED data inside a fixed host-authored system preamble, so the guest can
+/// neither replace the instructions nor name the model/endpoint/tenant, and (d)
+/// sanitizes and length-caps the completion before it is returned.
+///
+/// **The completion is untrusted text.** It is the model's output, never a
+/// command, permission decision or identity claim; a bundle must treat it as it
+/// would any other user-supplied string.
+///
+/// Wire note: like `reputation`/`economy`/`identity`, the call is carried as
+/// `capability = db`, `op = "ai.generate"`; the stage dispatches on the op
+/// prefix BEFORE the `db` (`storage.tables`) path, and the gate -- not the wire
+/// kind -- is what authorizes it.
+interface ai {
+  variant error {
+    /// The gate denied the call (not granted, rate limited, instance policy,
+    /// ...) or the host refused the prompt's content; carries the stable
+    /// denial code (`contains_pii` for a PII/secret-bearing prompt).
+    denied(string),
+    /// The prompt exceeds the 2000-token bound, or `max-tokens` exceeds the
+    /// 512-token completion bound; carries the bound that was exceeded.
+    too-many-tokens(u32),
+    /// The model produced no usable output (empty after sanitization), or the
+    /// host refused to pass it on (for example it tried to emit a tool call).
+    content-filtered,
+    /// Malformed argument (empty/oversized prompt, a non-finite or
+    /// out-of-range `temperature`, ...).
+    invalid(string),
+    /// The capability is not wired/enabled on this host (flag OFF, no model
+    /// backend provisioned) or the model backend is unreachable/timed out --
+    /// fail-loud, never a canned answer.
+    unavailable(string),
+    backend(string),
+  }
+
+  /// Per-call generation options. Every field is a REQUEST the host clamps to
+  /// its own bounds, never a grant of authority.
+  record options {
+    /// Completion length bound in tokens (1..=512); absent uses the host
+    /// default. Above 512 is `too-many-tokens(512)`.
+    max-tokens: option<u32>,
+    /// Sampling temperature (0.0..=2.0); absent uses the host default.
+    temperature: option<f32>,
+    /// `true` selects the STRUCTURED-output model and asks it for JSON; the
+    /// result is still untrusted text the bundle must parse defensively.
+    json: bool,
+  }
+
+  /// Generates a completion for `prompt`.
+  generate: func(prompt: string, opts: options) -> result<string, error>;
+}
+
 /// PostHog flag + license entitlement, two-gate, cached, fail-open to the
 /// supplied default. Capability: always granted.
 ///
@@ -685,6 +756,7 @@ world stage-next {
   import reputation;
   import economy;
   import identity;
+  import ai;
 
   export process-stage;
   export action-stage;

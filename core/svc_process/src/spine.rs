@@ -835,6 +835,13 @@ pub struct ProcessDeps<S: SpineOps> {
     /// reader account is configured (every `identity.*` call then denies
     /// `not_implemented`).
     pub identity_wiring: Option<crate::identity::IdentityWiring>,
+    /// The `ai` host capability's production wiring
+    /// (`crate::lib::build_ai_wiring`), cloned into every per-invoke
+    /// `StageCapabilities` and paired there with that invocation's executor
+    /// deadline (`now + call_timeout_ms`). `None` when the model endpoint is not
+    /// a valid self-hosted URL or no license client exists (every `ai.generate`
+    /// call then denies `not_implemented`).
+    pub ai_wiring: Option<crate::ai::AiWiring>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -1205,6 +1212,15 @@ async fn handle_delivered_inner<S: SpineOps>(
         };
         let caps = match &deps.economy_wiring {
             Some(eco) => caps.with_economy(eco.clone()),
+            None => caps,
+        };
+        // `ai`: every model call is clamped to what remains of THIS invoke's
+        // executor deadline, so the deadline is fixed here, at construction.
+        let caps = match &deps.ai_wiring {
+            Some(ai) => caps.with_ai(
+                ai.clone(),
+                std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
+            ),
             None => caps,
         };
         // `identity`: the invocation's host-derived identity facts come from
@@ -2274,6 +2290,7 @@ mod tests {
             reputation_wiring: None,
             economy_wiring: None,
             identity_wiring: None,
+            ai_wiring: None,
         };
         (deps, metrics)
     }

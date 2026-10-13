@@ -330,6 +330,30 @@ pub struct CliConfig {
         default_value_t = 30
     )]
     pub bundle_economy_membership_refresh_s: u64,
+    /// The self-hosted model endpoint behind the bundle `ai` host capability
+    /// (`ai.generate`, `crate::ai::OllamaBackend`). Same variable and default the
+    /// Python services use (`processing/router_module/config.py`). Refused at
+    /// startup unless it names a cluster-local / private host -- never a public
+    /// endpoint (`crate::ai::validate_base_url`).
+    #[arg(long, env = "WADDLEAI_BASE_URL", default_value = "http://ollama:11434")]
+    pub ai_base_url: String,
+    /// Model for free-text `ai.generate` calls (the free community Gemma tier).
+    #[arg(long, env = "WADDLEAI_MODEL", default_value = "gemma4:e2b")]
+    pub ai_model: String,
+    /// Model for structured (`json: true`) `ai.generate` calls -- the larger
+    /// Gemma, the one that reliably emits JSON.
+    #[arg(long, env = "BUNDLE_AI_JSON_MODEL", default_value = "gemma4:e4b")]
+    pub ai_json_model: String,
+    /// Ceiling, in milliseconds, on one `ai.generate` model call. Always further
+    /// clamped to the invocation's remaining `EXECUTOR_CALL_TIMEOUT_MS` budget,
+    /// so raise that for slower models. Clamped to `[100, 10000]` by
+    /// [`CliConfig::ai_call_timeout`].
+    #[arg(long, env = "BUNDLE_AI_TIMEOUT_MS", default_value_t = 8000)]
+    pub ai_timeout_ms: u64,
+    /// Process-wide cap on concurrent `ai.generate` model calls (clamped to
+    /// `[1, 64]` by [`CliConfig::ai_max_concurrency`]).
+    #[arg(long, env = "BUNDLE_AI_MAX_CONCURRENCY", default_value_t = 4)]
+    pub ai_max_concurrency: usize,
     /// Poll interval, in whole seconds, for the change-log consumer's
     /// incremental tick (`bundle_active_set::read_safe_seq`/`read_changes`)
     /// -- the full active-set re-read only runs for scopes the change-log
@@ -565,6 +589,19 @@ impl CliConfig {
         std::time::Duration::from_secs(self.bundle_economy_membership_refresh_s.max(5))
     }
 
+    /// [`Self::ai_max_concurrency`] clamped to `[1, 64]` so `0` can never make
+    /// every call wait forever for a permit that does not exist.
+    pub fn ai_max_concurrency(&self) -> usize {
+        self.ai_max_concurrency.clamp(1, 64)
+    }
+
+    /// [`Self::ai_timeout_ms`] clamped to `[100ms, 10s]` (the executor's own
+    /// maximum per-call budget), so a misconfigured `0` or huge value can neither
+    /// disable the timeout nor outlive any invocation.
+    pub fn ai_call_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.ai_timeout_ms.clamp(100, 10_000))
+    }
+
     /// [`Self::bundle_config_full_reconcile_minutes`] clamped to a 1-minute
     /// floor -- a misconfigured `0`/negative value must never hot-loop the
     /// full active-set re-read against the reader database.
@@ -773,6 +810,42 @@ mod tests {
         assert_eq!(cli.poll_interval_s, 5.0);
         assert_eq!(cli.process_app_id, "");
         cli.validate().expect("defaults must be valid");
+    }
+
+    /// The `ai.generate` knobs default to the self-hosted Gemma tier and clamp
+    /// hostile values: a zero/huge timeout can neither disable the deadline nor
+    /// outlive the executor's own ceiling, and zero concurrency can never strand
+    /// every call waiting for a permit that does not exist.
+    #[test]
+    fn ai_knobs_default_to_the_self_hosted_tier_and_clamp() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.ai_base_url, "http://ollama:11434");
+        assert_eq!(cli.ai_model, "gemma4:e2b");
+        assert_eq!(cli.ai_json_model, "gemma4:e4b");
+        assert_eq!(
+            cli.ai_call_timeout(),
+            std::time::Duration::from_millis(8_000)
+        );
+        assert_eq!(cli.ai_max_concurrency(), 4);
+
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--ai-timeout-ms",
+            "0",
+            "--ai-max-concurrency",
+            "0",
+        ]);
+        assert_eq!(cli.ai_call_timeout(), std::time::Duration::from_millis(100));
+        assert_eq!(cli.ai_max_concurrency(), 1);
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--ai-timeout-ms",
+            "9999999",
+            "--ai-max-concurrency",
+            "100000",
+        ]);
+        assert_eq!(cli.ai_call_timeout(), std::time::Duration::from_secs(10));
+        assert_eq!(cli.ai_max_concurrency(), 64);
     }
 
     /// The host-API bounds default to the documented values and each zero

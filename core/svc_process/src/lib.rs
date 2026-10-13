@@ -38,6 +38,7 @@
 //! router and config loader directly instead of spawning a subprocess.
 
 pub mod active_digests;
+pub mod ai;
 pub mod builtins;
 pub mod bundle_loader;
 pub mod capabilities;
@@ -149,6 +150,54 @@ fn build_identity_wiring(
         flag: Arc::new(license::BundleIdentityCapabilityGate::new(Arc::clone(
             license_client,
         ))),
+    }
+}
+
+/// Builds the `ai` bundle host capability's production wiring
+/// (`spine::ProcessDeps::ai_wiring`): the self-hosted Ollama backend named by
+/// `WADDLEAI_BASE_URL` plus the `BUNDLE_AI_CAPABILITY_FLAG` gate (default OFF).
+/// No connection is opened at startup -- the HTTP client is lazy. A base URL that
+/// is not a valid self-hosted endpoint (`ai::validate_base_url`) is a LOUD
+/// startup error log and leaves the capability unwired (every `ai.generate` call
+/// then denies `not_implemented`), never a silent fallback to another endpoint.
+fn build_ai_wiring(
+    cli: &config::CliConfig,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+) -> Option<ai::AiWiring> {
+    let call_timeout = cli.ai_call_timeout();
+    let backend = ai::build_backend(&ai::OllamaConfig {
+        base_url: cli.ai_base_url.clone(),
+        model: cli.ai_model.clone(),
+        json_model: cli.ai_json_model.clone(),
+        // Transport timeout a beat above the per-call deadline clamp so the
+        // handler's own timeout is the one that fires and is reported.
+        request_timeout: call_timeout + std::time::Duration::from_secs(1),
+    });
+    match backend {
+        Ok(backend) => {
+            tracing::info!(
+                model = %cli.ai_model,
+                json_model = %cli.ai_json_model,
+                timeout_ms = call_timeout.as_millis() as u64,
+                "ai capability: self-hosted model backend configured (flag-gated, default OFF)"
+            );
+            Some(ai::AiWiring::new(
+                backend,
+                Arc::new(license::BundleAiCapabilityGate::new(Arc::clone(
+                    license_client,
+                ))),
+                call_timeout,
+                cli.ai_max_concurrency(),
+            ))
+        }
+        Err(reason) => {
+            tracing::error!(
+                reason = %reason,
+                "ai capability: WADDLEAI_BASE_URL is not a valid self-hosted endpoint -- \
+                 capability unavailable (every ai.generate host-call will report not_implemented)"
+            );
+            None
+        }
     }
 }
 
@@ -1369,6 +1418,10 @@ fn try_start_process_loop(
                 // with `invalid_args`; it is wired only on the multi-tenant
                 // path, which holds the resolved scope and the DB reader.
                 identity_wiring: None,
+                // `ai` is wired only on the multi-tenant path: this legacy
+                // path runs at the `(0, 0)` fail-closed scope, where the gate
+                // denies every non-platform permission (`ai.generate` included).
+                ai_wiring: None,
                 // Env-only legacy mode has no `BUNDLE_SCOPE_TENANT_ID`/DB
                 // reader to resolve a real tenant from -- `(0, 0)` fails
                 // closed (denies every non-platform permission) rather than
@@ -1887,6 +1940,12 @@ fn try_start_changelog_consumer(
                         )),
                         None => None,
                     };
+                    // `ai` host capability: no database -- an HTTP client to the
+                    // self-hosted model plus the opt-in flag, so the same
+                    // license-client dependency as the capabilities above.
+                    deps.ai_wiring = bundle_db_license_client
+                        .as_ref()
+                        .and_then(|client| build_ai_wiring(&config.cli, client));
                     Some(Arc::new(source_supervisor::SpineConsumerSupervisor {
                         deps: Arc::new(deps),
                     })
@@ -2003,6 +2062,7 @@ async fn build_source_supervisor_deps(
         reputation_wiring: None,
         economy_wiring: None,
         identity_wiring: None,
+        ai_wiring: None,
     })
 }
 
@@ -3008,6 +3068,32 @@ mod tests {
         assert!(
             !wiring.flag.enabled().await,
             "the identity capability flag must default OFF"
+        );
+    }
+
+    /// The `ai` wiring builds for a self-hosted endpoint with the flag gate
+    /// fail-closed (a never-seen opt-in flag is OFF), the configured timeout
+    /// and concurrency applied -- and is LOUDLY absent (never silently pointed
+    /// elsewhere) when `WADDLEAI_BASE_URL` names a public host.
+    #[tokio::test]
+    async fn build_ai_wiring_is_fail_closed_and_refuses_a_public_endpoint() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let wiring = build_ai_wiring(&cli, &test_license_client())
+            .expect("the default in-cluster endpoint is valid");
+        assert!(
+            !wiring.flag.enabled().await,
+            "the ai capability flag must default OFF"
+        );
+        assert_eq!(wiring.max_call_timeout, cli.ai_call_timeout());
+        assert_eq!(wiring.concurrency.available_permits(), 4);
+        assert_eq!(wiring.backend.model_for(false), "gemma4:e2b");
+        assert_eq!(wiring.backend.model_for(true), "gemma4:e4b");
+
+        let public =
+            CliConfig::parse_from(["svc-process", "--ai-base-url", "https://api.openai.com"]);
+        assert!(
+            build_ai_wiring(&public, &test_license_client()).is_none(),
+            "a public model endpoint must leave the capability unwired"
         );
     }
 

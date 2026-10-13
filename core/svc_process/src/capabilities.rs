@@ -73,6 +73,7 @@ use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
+use crate::ai::{self, AiWiring, BackendError, GenerateRequest, PromptRefusal};
 use crate::identity::{
     self, IdentityError, IdentityScope, IdentityWiring, InvocationIdentity, MAX_MENTION_TOKEN_LEN,
 };
@@ -424,6 +425,13 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `not_implemented` in that state (never panics, never a default or
     /// guessed identity).
     identity: Option<IdentityWiring>,
+    /// `None` until [`Self::with_ai`] -- every `ai.generate` call denies
+    /// `not_implemented` in that state (never panics, never a canned answer).
+    ai: Option<AiWiring>,
+    /// The instant this invocation's executor deadline expires, set with
+    /// [`Self::with_ai`]. Every model call is clamped to what remains of it, so a
+    /// slow model can never hold the stage past the invocation's own deadline.
+    ai_deadline: Option<std::time::Instant>,
     /// The HOST-derived identity facts of THIS invocation (who triggered it,
     /// which mentions its message carried) -- built by `crate::spine` from the
     /// event it delivered, never from guest input. Paired with [`Self::identity`]
@@ -474,6 +482,8 @@ impl<K: KvBackend> StageCapabilities<K> {
             reputation: None,
             economy: None,
             identity: None,
+            ai: None,
+            ai_deadline: None,
             invocation_identity: None,
             stage_metrics: stage_metrics::stage_metrics(),
         }
@@ -565,6 +575,16 @@ impl<K: KvBackend> StageCapabilities<K> {
     ) -> Self {
         self.identity = Some(identity);
         self.invocation_identity = Some(invocation);
+        self
+    }
+
+    /// Attaches the `ai` capability's live wiring -- called once per invoke with a
+    /// clone of the process-wide [`AiWiring`] and the instant this invocation's
+    /// executor deadline expires (`now + ProcessDeps::call_timeout_ms`), which
+    /// bounds every model call [`Self::handle_ai`] makes.
+    pub fn with_ai(mut self, ai: AiWiring, invoke_deadline: std::time::Instant) -> Self {
+        self.ai = Some(ai);
+        self.ai_deadline = Some(invoke_deadline);
         self
     }
 
@@ -661,6 +681,251 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
         .map_err(identity_error_to_host)?;
         Ok(serde_json::json!({ "user": user.to_string() }))
+    }
+
+    /// `ai.generate` (`wit/waddle-bundle/stage.wit` `interface ai`), carried as
+    /// `capability = db`, `op = "ai.generate"` (`penguin-bundle-host`'s closed
+    /// `CapabilityKind` has no ai member; see the WIT doc).
+    ///
+    /// Fail-loud order: (1) argument SHAPE only (`prompt` string, optional
+    /// `max_tokens`/`temperature`, `json` bool; unknown keys refused so a guest can
+    /// never name a model, system prompt or endpoint); (2) **the gate authorizes
+    /// FIRST** (`ai.generate`: grant, 10 calls / 60 s, instance policy) so an
+    /// ungranted or rate-limited call reports that, never a content verdict and
+    /// never reaches a model; (3) wiring and flag state; (4) the bounds and
+    /// content guards ([`ai::prepare`]: token bound, PII rejection, untrusted
+    /// framing); (5) the model call, wrapped in a timeout clamped to the
+    /// invocation's remaining deadline; (6) the completion is sanitized and
+    /// length-capped. The success value is `{"text": "<completion>"}`. Neither the
+    /// prompt nor the completion is ever logged or used as a metric label.
+    ///
+    /// **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in
+    /// any environment until issue #858 is resolved.** Gating today is the
+    /// default-OFF flag plus the `ai.generate` 'dangerous' consent-ack;
+    /// Enterprise-tier enforcement is NOT YET implemented in code (issue #858).
+    async fn handle_ai(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
+        /// The only four fields a bundle may influence.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            prompt: String,
+            #[serde(default)]
+            max_tokens: Option<u64>,
+            #[serde(default)]
+            temperature: Option<f64>,
+            #[serde(default)]
+            json: bool,
+        }
+
+        if call.op != "ai.generate" {
+            return Err(denied(
+                "unknown_op",
+                format!("ai op {:?} not supported", call.op),
+            ));
+        }
+        let args: Args = serde_json::from_value(call.args.clone()).map_err(|_| {
+            ai::record_call("unknown", ai::outcome::INVALID, 0.0);
+            denied(
+                "invalid_args",
+                "ai.generate args malformed (expected prompt: string, max_tokens: u32|null, \
+                 temperature: number|null, json: bool)",
+            )
+        })?;
+
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::AiGenerate,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
+
+        let Some(wiring) = &self.ai else {
+            return Err(denied(
+                "not_implemented",
+                "ai capability is not provisioned in this deployment",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "ai capability is disabled (waddles.bundle-ai-capability is OFF)",
+            ));
+        }
+        let model = wiring.backend.model_for(args.json).to_string();
+        let started = std::time::Instant::now();
+        let refuse = |outcome: &'static str, err: HostResultError| {
+            ai::record_call(&model, outcome, started.elapsed().as_secs_f64());
+            err
+        };
+
+        let max_tokens = match args.max_tokens {
+            None => ai::DEFAULT_COMPLETION_TOKENS,
+            Some(0) => {
+                return Err(refuse(
+                    ai::outcome::INVALID,
+                    denied("invalid_args", "max_tokens must be >= 1"),
+                ))
+            }
+            Some(n) if n > u64::from(ai::MAX_COMPLETION_TOKENS) => {
+                return Err(refuse(
+                    ai::outcome::TOO_MANY_TOKENS,
+                    denied("too_many_tokens", ai::MAX_COMPLETION_TOKENS.to_string()),
+                ))
+            }
+            // In range by the arm above, so the conversion cannot fail.
+            Some(n) => u32::try_from(n).unwrap_or(ai::MAX_COMPLETION_TOKENS),
+        };
+        let temperature = match args.temperature {
+            None => ai::DEFAULT_TEMPERATURE,
+            Some(t) if t.is_finite() && (0.0..=ai::MAX_TEMPERATURE).contains(&t) => t,
+            Some(_) => {
+                return Err(refuse(
+                    ai::outcome::INVALID,
+                    denied(
+                        "invalid_args",
+                        format!(
+                            "temperature must be a number in 0.0..={}",
+                            ai::MAX_TEMPERATURE
+                        ),
+                    ),
+                ))
+            }
+        };
+
+        let prepared = ai::prepare(&args.prompt, args.json).map_err(|refusal| match refusal {
+            PromptRefusal::Empty => refuse(
+                ai::outcome::INVALID,
+                denied("invalid_args", "prompt must not be empty"),
+            ),
+            PromptRefusal::TooManyTokens(bound) => refuse(
+                ai::outcome::TOO_MANY_TOKENS,
+                denied("too_many_tokens", bound.to_string()),
+            ),
+            // The reserved `ai.generate` PII hook (`Denied::ContainsPii`): the
+            // stable `contains_pii` code, plus the closed category name -- never
+            // any of the matched text.
+            PromptRefusal::ContainsPii(category) => refuse(
+                ai::outcome::PII_REJECTED,
+                denied(
+                    Denied::ContainsPii.reason_str(),
+                    format!(
+                        "prompt contains {category}; tokenize or remove personal data before \
+                         calling ai.generate"
+                    ),
+                ),
+            ),
+            PromptRefusal::GuardUnavailable => refuse(
+                ai::outcome::BACKEND_ERROR,
+                denied("backend", "ai prompt guard unavailable"),
+            ),
+        })?;
+
+        // The model call may not outlive the invocation: clamp to the time left
+        // on its deadline (less a margin to sanitize and answer) and to the
+        // configured ceiling. Too little left is refused, not attempted.
+        let remaining = self
+            .ai_deadline
+            .map(|d| d.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or(wiring.max_call_timeout);
+        let budget = remaining
+            .saturating_sub(ai::DEADLINE_MARGIN)
+            .min(wiring.max_call_timeout);
+        if budget < ai::MIN_CALL_BUDGET {
+            return Err(refuse(
+                ai::outcome::DEADLINE,
+                denied(
+                    "unavailable",
+                    "too little of the invocation deadline remains for ai.generate",
+                ),
+            ));
+        }
+
+        let request = GenerateRequest {
+            messages: prepared.messages,
+            json: args.json,
+            max_tokens,
+            temperature,
+        };
+        // The permit wait and the model call share ONE deadline-clamped timeout:
+        // a saturated model host fails loud at the deadline, never queues past it.
+        let guarded = async {
+            let _permit = wiring.concurrency.acquire().await;
+            wiring.backend.generate(&request).await
+        };
+        let completion = match tokio::time::timeout(budget, guarded).await {
+            Err(_elapsed) => {
+                tracing::warn!(
+                    model = %model,
+                    budget_ms = budget.as_millis() as u64,
+                    "ai.generate model call exceeded its deadline-clamped timeout"
+                );
+                return Err(refuse(
+                    ai::outcome::TIMEOUT,
+                    denied("unavailable", "ai model call timed out"),
+                ));
+            }
+            Ok(Err(BackendError::ToolCall)) => {
+                tracing::error!(
+                    model = %model,
+                    "ai.generate: the model emitted a tool call on a surface that offers \
+                     none; refused"
+                );
+                return Err(refuse(
+                    ai::outcome::CONTENT_FILTERED,
+                    denied("content_filtered", "the model produced no usable text"),
+                ));
+            }
+            Ok(Err(BackendError::Unavailable(message))) => {
+                tracing::warn!(model = %model, error = %message, "ai.generate backend unavailable");
+                return Err(refuse(
+                    ai::outcome::UNAVAILABLE,
+                    denied("unavailable", message),
+                ));
+            }
+            Ok(Err(BackendError::Backend(message))) => {
+                tracing::error!(model = %model, error = %message, "ai.generate backend error");
+                return Err(refuse(
+                    ai::outcome::BACKEND_ERROR,
+                    denied("backend", message),
+                ));
+            }
+            Ok(Ok(completion)) => completion,
+        };
+
+        let text = ai::sanitize_completion(&completion.text).map_err(|_| {
+            refuse(
+                ai::outcome::BACKEND_ERROR,
+                denied("backend", "ai completion guard unavailable"),
+            )
+        })?;
+        if text.is_empty() {
+            return Err(refuse(
+                ai::outcome::CONTENT_FILTERED,
+                denied("content_filtered", "the model produced no usable text"),
+            ));
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        ai::record_call(&model, ai::outcome::OK, seconds);
+        let prompt_tokens = completion
+            .prompt_tokens
+            .unwrap_or(u64::from(prepared.prompt_tokens_estimate));
+        // Metrics only: when the model reports no count, the conservative
+        // estimate stands in (never a billing or authority input).
+        let completion_tokens = match completion.completion_tokens {
+            Some(reported) => reported,
+            None => u64::from(ai::estimate_tokens(&text)),
+        };
+        ai::record_tokens(&model, prompt_tokens, completion_tokens);
+        tracing::debug!(
+            model = %model,
+            latency_ms = (seconds * 1000.0) as u64,
+            prompt_tokens,
+            completion_tokens,
+            json = args.json,
+            "ai.generate served"
+        );
+        Ok(serde_json::json!({ "text": text }))
     }
 
     /// `economy.balance` / `economy.wager` / `economy.transfer` /
@@ -1775,6 +2040,9 @@ impl<K: KvBackend> StageCapabilities<K> {
             CapabilityKind::Db if call.op.starts_with("identity.") => {
                 self.handle_identity(&call).await
             }
+            // `ai.*` ops likewise: own gate permission (`ai.generate`), own
+            // handler, never the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("ai.") => self.handle_ai(&call).await,
             CapabilityKind::Db => self.handle_db(&call).await,
             // `enabled` is wired to a real `penguin_licensing::
             // LicenseClient` (`crate::license::resolve_flag`) -- see
@@ -3391,3 +3659,7 @@ mod economy_tests;
 #[cfg(test)]
 #[path = "capabilities_identity_tests.rs"]
 mod identity_tests;
+
+#[cfg(test)]
+#[path = "capabilities_ai_tests.rs"]
+mod ai_tests;

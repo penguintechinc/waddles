@@ -175,6 +175,34 @@ rm -f src/bindings.rs   # generated, not committed
 Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against
 `wit-bindgen-rt 0.44.0` (same toolchain as `reputation_fixture.wasm`).
 
+## `ai_fixture.wasm`
+
+A real, compiled `waddle:bundle` **`world stage-next`** component
+(`ai-fixture-src/`), used by `tests/stage_next_ai.rs` to prove a bundle can CALL
+the `ai` host import (`ai.generate`) through the executor's production `Linker`
+and that the call reaches the stage as `capability = db`, `op = "ai.generate"`
+with exactly the four guest-controlled args (`prompt`, `max_tokens`,
+`temperature`, `json`). `process-stage.transform` handles event type
+`ai-generate` (payload `prompt` / optional `max_tokens` / `temperature_x100` /
+`json`) and echoes the outcome (`ok:<text>` or a stable error tag) into
+`payload-json`. The fixture's `wit/stage.wit` is a verbatim copy of the
+normative `wit/waddle-bundle/stage.wit`; refresh it whenever that file changes.
+The Python counterpart is built fresh on every run by
+`tests/stage_next_python_ai_e2e.rs` from `ai-py-bundle/`.
+
+### Regenerating
+
+```bash
+cd ai-fixture-src
+cp ../../../../../wit/waddle-bundle/stage.wit wit/stage.wit
+cargo component build --release
+cp "${CARGO_TARGET_DIR:-target}/wasm32-wasip1/release/ai_fixture.wasm" ../ai_fixture.wasm
+rm -f src/bindings.rs   # generated, not committed
+```
+
+Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against
+`wit-bindgen-rt 0.44.0` (same toolchain as `economy_fixture.wasm`).
+
 ## `echo_connector.wasm` and `faulty_connector.wasm`
 
 Real, compiled `waddle:connector@1.0.0` components for the connector host capability (issue #840 B0; design note

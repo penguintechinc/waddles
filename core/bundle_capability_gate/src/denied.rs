@@ -57,8 +57,13 @@ pub enum Denied {
     /// before a `ResourceRef` is ever built); kept for the capability-
     /// specific per-platform check spec SS10.2 describes.
     UnsupportedPlatform,
-    /// Reserved for `ai.generate`'s host-side PII rejection (spec SS9) --
-    /// capability-specific, not triggered by this crate.
+    /// `ai.generate`'s host-side PII rejection (spec SS9): the prompt carries an
+    /// email / phone / SSN / card / secret-shaped token / raw platform mention /
+    /// raw handle / IP address and is REFUSED, never redacted. Capability-specific
+    /// post-authorize validation, so NOT triggered by this crate's `authorize()`:
+    /// `core/svc_process::ai::prepare` detects it and
+    /// `core/svc_process::capabilities::handle_ai` reports it through this shared
+    /// vocabulary (`contains_pii`) for consistent audit logging and metrics.
     ContainsPii,
     /// The permission's TYPE (family) is instance-denied platform-wide (spec:
     /// instance policy, above the 3 consent tiers) -- checked even when an
