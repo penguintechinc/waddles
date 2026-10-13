@@ -72,12 +72,14 @@ penguin-libs grows one.
 
 ## `ai` (`ai.generate`): guarded self-hosted text generation
 
+> **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in any environment until issue #858 is resolved.** AI is gated by the default-OFF flag `waddles.bundle-ai-capability` plus the `ai.generate` 'dangerous' consent-ack. Enterprise-tier enforcement is NOT YET implemented in code (tracked in issue #858); do not rely on it.
+
 | Item | Value |
 |---|---|
 | Status | **PENDING adversarial security review** -- `world stage-next` only; `svc_process` (process-stage) only, the action stage has no handler |
 | WIT | `interface ai`: `generate(prompt: string, opts: options{max-tokens: option<u32>, temperature: option<f32>, json: bool}) -> result<string, error>`; error `variant { denied(string), too-many-tokens(u32), content-filtered, invalid(string), unavailable(string), backend(string) }` |
 | Python SDK | `waddle_sdk.ai.generate(prompt, *, max_tokens=None, temperature=None, json=False)` (async); raises `DeniedError(code)`, `TooManyTokensError(bound)`, `ContentFilteredError`, `InvalidAiArgError`, `UnavailableError`, `BackendError`. Test double: `waddle_sdk.testing.install_fake_ai_host` |
-| Permission | `ai.generate` -- Dangerous, 10 calls / 60 s (`Quota::CallsPerWindow`), Enterprise-gated at marketplace time (hub-api refuses to grant it below Enterprise; the stage additionally requires flag `waddles.bundle-ai-capability`, default OFF) |
+| Permission | `ai.generate` -- Dangerous, 10 calls / 60 s (`Quota::CallsPerWindow`), consent-ack required; the stage requires flag `waddles.bundle-ai-capability` (default OFF). **Enterprise-tier enforcement is NOT YET implemented in code (issue #858); do not rely on it** |
 | Wire | like reputation/economy/identity: `capability = db`, op `ai.generate`; args are exactly `{prompt, max_tokens, temperature, json}` (any other key is `invalid_args`); result `{"text": "<completion>"}`; refusal codes `not_granted`/`rate_limited`/`quota_exceeded`/`instance_denied` (gate), `contains_pii`, `too_many_tokens` (bare decimal bound), `content_filtered`, `invalid_args`, `feature_disabled`/`not_implemented`/`unavailable`, `backend` |
 | Integration target | **Raw in-cluster Ollama (`/api/chat`), guards implemented Rust-side in `core/svc_process/src/ai.rs`.** No service-authenticated guard-applying WaddleAI endpoint exists to route through (hub-api `/ai/completions` needs an interactive user JWT and can route BYOK traffic to third parties). Config: `WADDLEAI_BASE_URL` (default `http://ollama:11434`), `WADDLEAI_MODEL` (`gemma4:e2b`), `BUNDLE_AI_JSON_MODEL` (`gemma4:e4b`, selected by `json: true`), `BUNDLE_AI_TIMEOUT_MS` (8000, clamped to 100..=10000) |
 
@@ -93,7 +95,7 @@ penguin-libs grows one.
 | **Self-hosted only** | `ai::validate_base_url` refuses anything but http(s) to a single-label / `*.svc` / `*.cluster.local` / `localhost` host or a private/loopback/ULA IP literal; a bad URL leaves the capability `not_implemented` (loud startup error), never a fallback | `ai.rs::base_url_validation_enforces_self_hosted_only` |
 | **PII-free telemetry** | Only the operator-configured model name, a closed outcome vocabulary and token counts are labels; prompt/completion text is never logged. OTel: `waddles_bundle_ai_generate_total`, `waddles_bundle_ai_generate_duration_seconds`, `waddles_bundle_ai_tokens_total`; host-call timing as `capability="ai"` | `tests/ai_generate_e2e.rs` (scrape read-back, counts asserted) |
 
-Not enforced stage-side: the Enterprise tier itself (`gate_scope` carries a fixed `TenantTier::Free`; the gate does not read it) -- hub-api's marketplace refusal to grant `ai.generate` below Enterprise plus the default-OFF flag are the controls.
+Not enforced anywhere: the Enterprise tier. `gate_scope` carries a fixed `TenantTier::Free` and the gate does not read it, and hub-api does NOT refuse to grant `ai.generate` below Enterprise. AI is gated by the default-OFF flag `waddles.bundle-ai-capability` plus the `ai.generate` 'dangerous' consent-ack. Enterprise-tier enforcement is NOT YET implemented in code (tracked in issue #858); do not rely on it.
 
 ## `economy` (#714): the shared community currency
 

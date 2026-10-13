@@ -2,8 +2,9 @@
 
 ``stage-next``-only: ``wit/waddle-bundle/stage.wit``'s ``interface ai`` exists
 only in ``world stage-next`` (a bundle must be built against that world and hold
-the DANGEROUS, Enterprise-gated ``ai.generate`` permission; the host rate limits
-it to 10 calls per 60 s). A bundle supplies ONE free-text ``prompt`` and three
+the DANGEROUS ``ai.generate`` permission; the host rate limits it to 10 calls
+per 60 s). **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in any environment until issue #858 is resolved.** Enterprise-tier enforcement is NOT YET implemented
+(issue #858); do not rely on it. A bundle supplies ONE free-text ``prompt`` and three
 options; the model, endpoint, system prompt, tenant and community are all
 host-controlled and cannot be named, widened or overridden from here.
 

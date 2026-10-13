@@ -578,10 +578,12 @@ interface identity {
 /// capability-gate.md` SS9.
 ///
 /// Capability: `ai.generate` (`bundle_capability_gate::permission::
-/// PermissionFamily::AiGenerate`) -- a DANGEROUS, Enterprise-gated permission
-/// (the marketplace refuses to offer it below Enterprise), rate limited to 10
-/// calls per 60 s, gated host-side like every other import; a bundle that never
-/// declared it gets `denied("not_granted")`.
+/// PermissionFamily::AiGenerate`) -- a DANGEROUS permission (consent-ack
+/// required), rate limited to 10 calls per 60 s, gated host-side like every
+/// other import; a bundle that never declared it gets `denied("not_granted")`.
+///
+/// **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in any environment until issue #858 is resolved.**
+/// AI is gated by the default-OFF flag `waddles.bundle-ai-capability` plus the `ai.generate` 'dangerous' consent-ack. Enterprise-tier enforcement is NOT YET implemented in code (tracked in issue #858); do not rely on it.
 ///
 /// **The host owns the prompt, the bundle owns only the words.** The bundle
 /// supplies ONE free-text `prompt`; the host (a) refuses an over-bound prompt

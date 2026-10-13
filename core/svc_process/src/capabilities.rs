@@ -698,6 +698,11 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// invocation's remaining deadline; (6) the completion is sanitized and
     /// length-capped. The success value is `{"text": "<completion>"}`. Neither the
     /// prompt nor the completion is ever logged or used as a metric label.
+    ///
+    /// **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in
+    /// any environment until issue #858 is resolved.** Gating today is the
+    /// default-OFF flag plus the `ai.generate` 'dangerous' consent-ack;
+    /// Enterprise-tier enforcement is NOT YET implemented in code (issue #858).
     async fn handle_ai(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
         /// The only four fields a bundle may influence.
         #[derive(serde::Deserialize)]

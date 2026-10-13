@@ -361,9 +361,14 @@ impl FeatureGate for BundleIdentityCapabilityGate {
 /// Gates the bundle `ai` host capability (`crate::capabilities::
 /// StageCapabilities::handle_ai`) -- a plain opt-in flag, same shape as
 /// [`BUNDLE_IDENTITY_CAPABILITY_FLAG`]: unseen/OFF/license-server-unreachable
-/// means every `ai.generate` call is denied `feature_disabled`. Defense in depth
-/// on top of the Enterprise-gated `ai.generate` grant, which hub-api refuses to
-/// issue below the Enterprise tier (spec SS9).
+/// means every `ai.generate` call is denied `feature_disabled`.
+///
+/// **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in any environment until issue #858 is resolved.**
+///
+/// Accurate gating today: the default-OFF flag plus the `ai.generate`
+/// 'dangerous' consent-ack. Enterprise-tier enforcement is NOT YET implemented in
+/// code (`gate_scope` hardcodes the Free tier and hub-api does not refuse the
+/// grant below Enterprise) -- tracked in issue #858; do not rely on it.
 pub const BUNDLE_AI_CAPABILITY_FLAG: &str = "waddles.bundle-ai-capability";
 
 /// Production [`FeatureGate`] for [`BUNDLE_AI_CAPABILITY_FLAG`] -- plain read of
