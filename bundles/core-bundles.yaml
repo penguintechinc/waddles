@@ -818,6 +818,15 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.memories
+    version: "1.0.0"
+    language: python
+    source_dir: python/memories
+    manifest_path: memories.manifest.yaml
+    artifact_path: memories.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
   - app_id: waddles.core.example.dailycounter
     version: "1.0.1"
     language: python

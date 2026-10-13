@@ -1,0 +1,57 @@
+schema_version: 2
+app_id: waddles.core.example.memories
+name: Memories Bundle (Python)
+# 1.0.0: initial kv-only v1 -- !remember <text> / !memories [@user] / !forget <id|all>.
+# Per-user, self-managed, public read, 20-item cap. See src/app.py's module docstring.
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/memories
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!remember", "!memories", "!forget"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!remember", "!memories", "!forget"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- state lives in `kv` only (one JSON-blob key per user).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists each user's remembered facts as one hashed per-user JSON blob"
+  - id: flags.read
+    justification: "gates the commands behind their waddles.command-memories feature flag"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null
