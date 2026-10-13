@@ -56,6 +56,7 @@ COPY bundle_host_reputation ./bundle_host_reputation
 COPY bundle_host_economy ./bundle_host_economy
 COPY bundle_host_http ./bundle_host_http
 COPY bundle_capability_gate ./bundle_capability_gate
+COPY circuit_breaker ./circuit_breaker
 COPY egress_assertion ./egress_assertion
 COPY hub_client ./hub_client
 COPY service_auth ./service_auth

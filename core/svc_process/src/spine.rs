@@ -146,7 +146,16 @@ pub enum InvokeError {
     #[error("host-api error: {0}")]
     HostApi(#[from] HostApiError),
     #[error("executor reported error {code:?}: {message}")]
-    ExecutorError { code: ErrorCode, message: String },
+    ExecutorError {
+        code: ErrorCode,
+        message: String,
+        /// The executor's wire `detail` discriminator (`ErrorBody::detail`),
+        /// e.g. `pool_exhausted` (back-pressure, NOT a guest fault) or
+        /// `fuel_exhausted` (a guest fault, distinct from a wall-clock
+        /// deadline). Carried through so consumers never have to guess from
+        /// the coarse `code` alone.
+        detail: Option<String>,
+    },
     #[error("transform payload encode/decode failed: {0}")]
     MalformedPayload(String),
 }
@@ -231,6 +240,7 @@ async fn load_round_trip(
         Message::Error(e) => Err(InvokeError::ExecutorError {
             code: e.code,
             message: e.message,
+            detail: e.detail,
         }),
         _ => Err(InvokeError::MalformedPayload(
             "expected loaded or error frame".to_string(),
@@ -267,6 +277,7 @@ pub async fn ensure_unloaded(
         Message::Error(e) => Err(InvokeError::ExecutorError {
             code: e.code,
             message: e.message,
+            detail: e.detail,
         }),
         _ => Err(InvokeError::MalformedPayload(
             "expected unloaded or error frame".to_string(),
@@ -357,6 +368,36 @@ fn error_code_to_dlq_kind(code: ErrorCode) -> DlqErrorKind {
     }
 }
 
+/// The executor `detail` discriminator for pool back-pressure
+/// (`bundle_executor::invoke::acquire_call_slots` hitting the global/per-
+/// bundle permit cap). Wire code is `ExecutorDeadline` (the pinned wire
+/// crate has no dedicated code) but it says nothing about the guest.
+const DETAIL_POOL_EXHAUSTED: &str = "pool_exhausted";
+
+/// Whether an executor error counts as a GUEST fault against the circuit
+/// breaker: a trap, a deadline/fuel exhaustion, or a memory-cap hit -- but
+/// NOT `pool_exhausted` back-pressure, which is the executor shedding load
+/// and must never open the breaker for innocent sources.
+fn is_guest_fault(kind: DlqErrorKind, detail: Option<&str>) -> bool {
+    if detail == Some(DETAIL_POOL_EXHAUSTED) {
+        return false;
+    }
+    matches!(
+        kind,
+        DlqErrorKind::BundleTrap | DlqErrorKind::CallTimeout | DlqErrorKind::MemoryLimit
+    )
+}
+
+/// The circuit-breaker key for one delivered entry: `{app_id}|{stream}`.
+/// Bindings are `(tenant, community, app_id, platform, source_id)` and
+/// several apps consume the same source stream, so keying on the stream
+/// alone would let one app's faults disable every other app's consumer on
+/// that stream. Matches `svc_action::dispatch::breaker_key`'s app-prefixed
+/// scheme.
+fn breaker_key(app_id: &str, stream: &str) -> String {
+    format!("{app_id}|{stream}")
+}
+
 /// Records the executor-call histogram for one `invoke` reply and, when the
 /// executor reported a sandbox trip, the trip counter. `result` is `ok` for a
 /// result frame, `executor_error` for an error frame, `malformed` for any
@@ -372,7 +413,7 @@ fn record_executor_call(
         Ok(frame) => match &frame.message {
             Message::Result(_) => "ok",
             Message::Error(e) => {
-                if let Some(limit) = stage_metrics::sandbox_limit(e.code) {
+                if let Some(limit) = stage_metrics::sandbox_limit_for(e.code, e.detail.as_deref()) {
                     metrics.record_sandbox_trip(app_id, limit);
                 }
                 "executor_error"
@@ -451,6 +492,7 @@ pub async fn invoke_transform(
         Message::Error(e) => Err(InvokeError::ExecutorError {
             code: e.code,
             message: e.message,
+            detail: e.detail,
         }),
         _ => Err(InvokeError::MalformedPayload(
             "expected result or error frame".to_string(),
@@ -758,14 +800,17 @@ pub struct ProcessDeps<S: SpineOps> {
     /// for the distinct, louder behavior when the password *was* configured
     /// but the connection itself failed.
     pub db_wiring: Option<crate::capabilities::DbWiring>,
-    /// Per-source circuit breaker for guest faults (connector spec SS0
-    /// condition 5, `circuit_breaker` crate module doc): a bundle-executor
-    /// trap/deadline(incl. fuel exhaustion, bucketed as `CallTimeout`)/
-    /// memory-cap hit records a failure against `d.stream` (the closest
-    /// thing this loop has to a source identity); `FAILURE_THRESHOLD`
-    /// faults in `FAILURE_WINDOW` opens the breaker for `OPEN_BACKOFF`,
-    /// dead-lettered (retryable) as `DlqErrorKind::BundleDisabled` rather
-    /// than invoked at all -- one shared instance per pod (process-local,
+    /// Per-(app, source) circuit breaker for guest faults (connector spec
+    /// SS0 condition 5, `circuit_breaker` crate module doc): a bundle-
+    /// executor trap/deadline(incl. fuel exhaustion, bucketed as
+    /// `CallTimeout`)/memory-cap hit records a failure against
+    /// [`breaker_key`] (`{app_id}|{stream}`; the stream is the closest
+    /// thing this loop has to a source identity, the app prefix isolates
+    /// co-consuming apps); `pool_exhausted` back-pressure never counts;
+    /// `FAILURE_THRESHOLD` faults in `FAILURE_WINDOW` opens the breaker for
+    /// `OPEN_BACKOFF`, and entries arriving meanwhile are dead-lettered
+    /// (parked in the DLQ -- NOT auto-replayed) as
+    /// `DlqErrorKind::BundleDisabled` rather than invoked at all -- one shared instance per pod (process-local,
     /// not cross-pod: this pod's fixed source shard is the complete
     /// blast-radius containment, see that crate's module doc), cloned into
     /// both the legacy and multi-tenant startup paths.
@@ -870,18 +915,25 @@ async fn handle_delivered_inner<S: SpineOps>(
             .map(|()| StageResult::DeadLettered);
     }
 
-    // Connector spec SS0 condition 5: a source the breaker has tripped
-    // open (repeated guest faults, see `ProcessDeps::breaker`'s doc) is
-    // never invoked at all -- fail fast, before the PII-tokenization RPC
-    // below, rather than spending a hub-api round trip on a known-bad
-    // source. Retryable (`BundleDisabled.never_retry()` is `false`): the
-    // entry is redelivered and succeeds once the breaker's backoff elapses
-    // or another consumer owns this source's shard.
-    if !deps.breaker.allow(&d.stream) {
-        tracing::warn!(
+    // Connector spec SS0 condition 5: an (app, source) the breaker has
+    // tripped open (repeated guest faults, see `ProcessDeps::breaker`'s
+    // doc) is never invoked at all -- fail fast, before the PII-tokenization
+    // RPC below, rather than spending a hub-api round trip on a known-bad
+    // source. NOTE the entry is parked in the DLQ (`dead_letter_raw` is
+    // XADD-to-DLQ then XACK): it is consumed, NOT redelivered, and nothing
+    // auto-replays it when the backoff elapses -- an operator/replay tool
+    // must re-drive it (`BundleDisabled.never_retry()` is `false`, i.e.
+    // replay-eligible, but eligibility is not an automatic retry).
+    let breaker_key = breaker_key(&deps.app_id, &d.stream);
+    if !deps.breaker.allow(&breaker_key) {
+        // debug, not warn: while the breaker is open EVERY entry for this
+        // key lands here, so a per-entry warn is a log flood under load.
+        // The single operator-visible signal is the one `error!(alert)` the
+        // breaker itself emits on the OPEN transition.
+        tracing::debug!(
             app_id = %d.env.app_id,
             stream = %d.stream,
-            "circuit breaker open for this source, dead-lettering without invoking (retryable)"
+            "circuit breaker open for this app/source, dead-lettering without invoking (parked in DLQ)"
         );
         let err = DlqError {
             kind: DlqErrorKind::BundleDisabled,
@@ -1194,20 +1246,21 @@ async fn handle_delivered_inner<S: SpineOps>(
     .await;
 
     let event_out = match outcome {
-        Err(InvokeError::ExecutorError { code, message }) => {
+        Err(InvokeError::ExecutorError {
+            code,
+            message,
+            detail,
+        }) => {
             let kind = error_code_to_dlq_kind(code);
             // Connector spec SS0 condition 5: only an actual GUEST fault
             // (trap, epoch deadline -- fuel exhaustion is bucketed here
             // too, see `bundle_executor::invoke::on_invoke`'s doc -- or a
-            // memory-cap hit) counts against this source's breaker; a
-            // broken bundle registration (`BundleError`) or a denied/failed
-            // host call is a manifest/permissions problem, not evidence
-            // this source's guest code is misbehaving.
-            if matches!(
-                kind,
-                DlqErrorKind::BundleTrap | DlqErrorKind::CallTimeout | DlqErrorKind::MemoryLimit
-            ) {
-                deps.breaker.record_failure(&d.stream);
+            // memory-cap hit) counts against this (app, source)'s breaker; a
+            // broken bundle registration (`BundleError`), a denied/failed
+            // host call, or `pool_exhausted` back-pressure is not evidence
+            // this source's guest code is misbehaving (see `is_guest_fault`).
+            if is_guest_fault(kind, detail.as_deref()) {
+                deps.breaker.record_failure(&breaker_key);
             }
             // Diagnosability fix (regression: multi_tenant path sent
             // bare-hex digest to Invoke, UnknownBundle despite loaded
@@ -1219,12 +1272,15 @@ async fn handle_delivered_inner<S: SpineOps>(
             // `digest`'s own prefix explicitly so this is diagnosable even
             // when `message` is empty.
             let digest_prefix = bundle_active_set::digest_prefix(&digest);
-            tracing::error!(app_id = %deps.app_id, ?code, digest_prefix, %message, "transform invoke failed, dead-lettering");
+            tracing::error!(app_id = %deps.app_id, ?code, detail = detail.as_deref().unwrap_or(""), digest_prefix, %message, "transform invoke failed, dead-lettering");
             let err = DlqError {
                 kind,
                 code: format!("{code:?}"),
                 message,
-                detail: None,
+                // Surfaces `fuel_exhausted` / `pool_exhausted` on the DLQ
+                // record so a fuel trap is distinguishable from a wall-
+                // clock deadline (both are `CallTimeout`).
+                detail,
                 artifact_digest: Some(digest.clone()),
                 consumer_id: deps.consumer_id.clone(),
             };
@@ -1267,7 +1323,7 @@ async fn handle_delivered_inner<S: SpineOps>(
                 .map(|()| StageResult::DeadLettered);
         }
         Ok(TransformOutcome::NoReply) => {
-            deps.breaker.record_success(&d.stream);
+            deps.breaker.record_success(&breaker_key);
             tracing::info!(app_id = %deps.app_id, "transform returned no reply");
             return deps
                 .spine
@@ -1276,7 +1332,7 @@ async fn handle_delivered_inner<S: SpineOps>(
                 .map(|()| StageResult::NoReply);
         }
         Ok(TransformOutcome::Reply(event)) => {
-            deps.breaker.record_success(&d.stream);
+            deps.breaker.record_success(&breaker_key);
             *event
         }
     };
@@ -3762,7 +3818,9 @@ mod tests {
         /// Like [`connected_registry_with_fake_executor`], but the executor
         /// answers its first request (`load` or `invoke`) with `reply`
         /// instead of a result -- e.g. a sandbox-trip `error` frame.
-        async fn connected_registry_replying_with(reply: Message) -> Arc<ConnectionRegistry> {
+        pub(super) async fn connected_registry_replying_with(
+            reply: Message,
+        ) -> Arc<ConnectionRegistry> {
             use crate::capabilities::DenyAllCapabilities;
             use penguin_bundle_host::wire::{
                 read_frame, write_frame, Frame, HelloBody, HelloOkBody, SandboxInfo,
@@ -3817,7 +3875,7 @@ mod tests {
             registry
         }
 
-        fn error_frame(code: ErrorCode) -> Message {
+        pub(super) fn error_frame(code: ErrorCode) -> Message {
             Message::Error(penguin_bundle_host::wire::ErrorBody {
                 code,
                 message: "scripted".to_string(),
@@ -3837,7 +3895,7 @@ mod tests {
             .unwrap()
         }
 
-        fn deps_for(
+        pub(super) fn deps_for(
             app_id: &str,
             connections: Arc<ConnectionRegistry>,
         ) -> ProcessDeps<FakeSpineOps> {
@@ -4237,6 +4295,179 @@ mod tests {
             // so assert "at least these two samples (2 and 0) landed".
             assert!(after.value >= before.0 + 2.0, "{before:?} -> {after:?}");
             assert!(after.sum >= before.1 + 2.0, "{before:?} -> {after:?}");
+        }
+    }
+
+    /// Circuit-breaker SEMANTICS (adversarial review of #467): executor
+    /// back-pressure is not a guest fault, and the breaker is isolated per
+    /// `(app, stream)`, not per stream alone. Each test drives a REAL
+    /// `handle_delivered` against a scripted executor connection.
+    mod breaker_semantics {
+        use super::metrics_emission::{connected_registry_replying_with, deps_for, error_frame};
+        use super::*;
+        use circuit_breaker::FAILURE_THRESHOLD;
+
+        fn error_frame_with_detail(code: ErrorCode, detail: Option<&str>) -> Message {
+            Message::Error(penguin_bundle_host::wire::ErrorBody {
+                code,
+                message: "scripted".to_string(),
+                detail: detail.map(str::to_string),
+            })
+        }
+
+        /// Feeds `FAILURE_THRESHOLD` deliveries of `d` through `deps`, each
+        /// against a fresh executor connection that replies with `reply`.
+        async fn fault_n_times(
+            deps: &mut ProcessDeps<FakeSpineOps>,
+            d: &Delivered,
+            reply: impl Fn() -> Message,
+        ) {
+            for _ in 0..FAILURE_THRESHOLD {
+                deps.connections = connected_registry_replying_with(reply()).await;
+                handle_delivered(d, deps).await.unwrap();
+            }
+        }
+
+        fn kinds(deps: &ProcessDeps<FakeSpineOps>) -> Vec<DlqErrorKind> {
+            deps.spine
+                .dead_lettered
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, k, _)| *k)
+                .collect()
+        }
+
+        /// regression: #467 review HIGH 1 -- saturating the executor's pool
+        /// (`pool_exhausted`, wire code `ExecutorDeadline`) times out innocent
+        /// sources but must leave their breaker CLOSED.
+        #[tokio::test]
+        async fn pool_exhausted_back_pressure_never_opens_the_breaker() {
+            let ring = test_ring();
+            let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+            let app = "breaker.sem.pool";
+            let mut deps = deps_for(app, Arc::new(ConnectionRegistry::new()));
+
+            fault_n_times(&mut deps, &d, || {
+                error_frame_with_detail(ErrorCode::ExecutorDeadline, Some("pool_exhausted"))
+            })
+            .await;
+            // One more than the threshold is still never a trip.
+            deps.connections = connected_registry_replying_with(error_frame_with_detail(
+                ErrorCode::ExecutorDeadline,
+                Some("pool_exhausted"),
+            ))
+            .await;
+            handle_delivered(&d, &deps).await.unwrap();
+
+            assert!(
+                deps.breaker.allow(&breaker_key(app, &d.stream)),
+                "back-pressure must leave the breaker CLOSED"
+            );
+            let kinds = kinds(&deps);
+            assert_eq!(kinds.len() as u32, FAILURE_THRESHOLD + 1);
+            assert!(
+                kinds.iter().all(|k| *k == DlqErrorKind::CallTimeout),
+                "every entry timed out but none was short-circuited by an open breaker: {kinds:?}"
+            );
+        }
+
+        /// The control for the test above: a genuine timeout, a fuel trap and
+        /// a wasm trap all DO count and open the breaker.
+        #[tokio::test]
+        async fn genuine_guest_faults_still_open_the_breaker() {
+            let ring = test_ring();
+            for (i, (code, detail)) in [
+                (ErrorCode::ExecutorDeadline, None),
+                (ErrorCode::ExecutorDeadline, Some("fuel_exhausted")),
+                (ErrorCode::WasmTrap, None),
+                (ErrorCode::MemoryLimit, None),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+                let app = format!("breaker.sem.fault.{i}");
+                let mut deps = deps_for(&app, Arc::new(ConnectionRegistry::new()));
+                fault_n_times(&mut deps, &d, || error_frame_with_detail(code, detail)).await;
+                assert!(
+                    !deps.breaker.allow(&breaker_key(&app, &d.stream)),
+                    "{code:?}/{detail:?} must open the breaker"
+                );
+                // The next delivery is short-circuited without any executor.
+                handle_delivered(&d, &deps).await.unwrap();
+                assert_eq!(
+                    kinds(&deps).last().copied(),
+                    Some(DlqErrorKind::BundleDisabled)
+                );
+            }
+        }
+
+        /// regression: #467 review HIGH 2 -- app A's faults open A's breaker
+        /// but never block app B consuming the SAME source stream through the
+        /// SAME shared breaker instance.
+        #[tokio::test]
+        async fn one_apps_faults_never_block_another_app_on_the_same_stream() {
+            let ring = test_ring();
+            let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+
+            let mut deps_a = deps_for("breaker.sem.app-a", Arc::new(ConnectionRegistry::new()));
+            let mut deps_b = deps_for(
+                "breaker.sem.app-b",
+                connected_registry_with_fake_executor(serde_json::json!(null)).await,
+            );
+            // `source_supervisor` shares ONE breaker across all bindings.
+            deps_b.breaker = Arc::clone(&deps_a.breaker);
+
+            fault_n_times(&mut deps_a, &d, || error_frame(ErrorCode::WasmTrap)).await;
+            assert!(
+                !deps_a
+                    .breaker
+                    .allow(&breaker_key("breaker.sem.app-a", &d.stream)),
+                "app A's breaker is open"
+            );
+            handle_delivered(&d, &deps_a).await.unwrap();
+            assert_eq!(
+                kinds(&deps_a).last().copied(),
+                Some(DlqErrorKind::BundleDisabled),
+                "app A is short-circuited"
+            );
+
+            // App B, same stream, same shared breaker: must still be invoked
+            // and acked, never short-circuited.
+            handle_delivered(&d, &deps_b).await.unwrap();
+            assert!(
+                kinds(&deps_b).is_empty(),
+                "app B must not be dead-lettered by app A's faults: {:?}",
+                kinds(&deps_b)
+            );
+            assert_eq!(
+                *deps_b.spine.acked.lock().unwrap(),
+                vec![d.entry_id.clone()]
+            );
+        }
+
+        #[test]
+        fn breaker_key_is_app_prefixed() {
+            assert_eq!(breaker_key("app.a", "stream-1"), "app.a|stream-1");
+            assert_ne!(breaker_key("app.a", "s"), breaker_key("app.b", "s"));
+        }
+
+        #[test]
+        fn is_guest_fault_excludes_only_pool_exhausted_back_pressure() {
+            assert!(is_guest_fault(DlqErrorKind::CallTimeout, None));
+            assert!(is_guest_fault(
+                DlqErrorKind::CallTimeout,
+                Some("fuel_exhausted")
+            ));
+            assert!(is_guest_fault(DlqErrorKind::BundleTrap, None));
+            assert!(is_guest_fault(DlqErrorKind::MemoryLimit, None));
+            assert!(!is_guest_fault(
+                DlqErrorKind::CallTimeout,
+                Some("pool_exhausted")
+            ));
+            assert!(!is_guest_fault(DlqErrorKind::BundleError, None));
+            assert!(!is_guest_fault(DlqErrorKind::HostCallDenied, None));
         }
     }
 

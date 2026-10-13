@@ -8,9 +8,11 @@
 //! every stage service that invokes bundle-executor per some unit of
 //! traffic:
 //!
-//! - `svc_process`: keyed by `Delivered.stream` -- the closest thing it has
-//!   to a source/connection identity (the dataplane-scale design keys
-//!   streams by `hash(source_id)`)
+//! - `svc_process`: keyed by `{app_id}|{stream}` -- the stream is the
+//!   closest thing it has to a source/connection identity (the
+//!   dataplane-scale design keys streams by `hash(source_id)`), and the
+//!   `app_id` prefix keeps one app's faults from disabling every other
+//!   app's consumer on the same stream
 //! - `svc_action`: keyed by a composite of `(app_id, scope, destination)` --
 //!   see `svc_action::dispatch`'s own doc for why all three dimensions are
 //!   folded into one key rather than three independent breakers
@@ -46,15 +48,28 @@ pub const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 /// tripping the same fault again in a tight loop.
 pub const OPEN_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Soft cap on tracked keys before [`CircuitBreaker::record_failure`] sweeps
+/// out entries that carry no live state (closed with every failure aged out
+/// of [`FAILURE_WINDOW`], or open with an elapsed backoff). Keeps the map
+/// from growing without bound on a key space with high churn (every distinct
+/// app/stream/destination that ever faulted once).
+pub const SWEEP_THRESHOLD: usize = 1024;
+
 /// Optional counters a caller can wire to Prometheus
 /// (`crate::telemetry::CircuitBreakerMetrics`); `()` is a no-op impl so unit
 /// tests and any call site that doesn't care about metrics can skip it.
+///
+/// Deliberately takes NO per-key argument: the key is an unbounded
+/// identifier space (stream / app|scope|destination), and a metric label
+/// drawn from it is a cardinality bomb. Per-key attribution lives in the
+/// `error!` log emitted on the OPEN transition, never in a label.
 pub trait CircuitBreakerMetrics: Send + Sync {
-    fn transition(&self, source: &str, action: &str);
+    /// `action` is exactly `"opened"` or `"closed"`.
+    fn transition(&self, action: &str);
 }
 
 impl CircuitBreakerMetrics for () {
-    fn transition(&self, _source: &str, _action: &str) {}
+    fn transition(&self, _action: &str) {}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,30 +142,57 @@ impl CircuitBreaker {
     /// map key, task instruction 2's isolation requirement).
     pub fn allow(&self, source: &str) -> bool {
         let mut sources = self.lock_sources();
-        match sources.get_mut(source) {
-            None => true,
+        let elapsed = match sources.get(source) {
+            None => return true,
             Some(entry) => match entry.state {
-                SourceState::Closed => true,
-                SourceState::Open { until } if Instant::now() >= until => {
-                    entry.state = SourceState::Closed;
-                    entry.failures.clear();
-                    info!(source, "circuit breaker backoff elapsed, source re-enabled");
-                    self.metrics.transition(source, "closed");
-                    true
-                }
-                SourceState::Open { .. } => false,
+                SourceState::Closed => return true,
+                SourceState::Open { until } => Instant::now() >= until,
             },
+        };
+        if !elapsed {
+            return false;
         }
+        // Backoff elapsed: a re-enabled key carries no state worth keeping
+        // (its failure history is cleared on reset), so evict it -- the map
+        // only ever holds keys with live state.
+        sources.remove(source);
+        info!(source, "circuit breaker backoff elapsed, source re-enabled");
+        self.metrics.transition("closed");
+        true
     }
 
     /// Records a successful invocation, clearing this source's failure
     /// history -- a source that is working again should not carry stale
-    /// failure count toward a future trip.
+    /// failure count toward a future trip. A closed entry with no failures
+    /// is indistinguishable from an absent one, so it is evicted; an open
+    /// entry is left alone (a success racing an open breaker must not
+    /// silently re-enable it before its backoff elapses).
     pub fn record_success(&self, source: &str) {
         let mut sources = self.lock_sources();
-        if let Some(entry) = sources.get_mut(source) {
-            entry.failures.clear();
+        let evict = match sources.get_mut(source) {
+            Some(entry) if matches!(entry.state, SourceState::Closed) => {
+                entry.failures.clear();
+                true
+            }
+            _ => false,
+        };
+        if evict {
+            sources.remove(source);
         }
+    }
+
+    /// Drops every entry that carries no live state: closed with all
+    /// failures aged out of [`FAILURE_WINDOW`], or open with an elapsed
+    /// backoff. Called under the map lock from [`Self::record_failure`] once
+    /// the map passes [`SWEEP_THRESHOLD`].
+    fn sweep(sources: &mut HashMap<String, SourceEntry>, now: Instant) {
+        sources.retain(|_, entry| match entry.state {
+            SourceState::Closed => entry
+                .failures
+                .iter()
+                .any(|t| now.duration_since(*t) < FAILURE_WINDOW),
+            SourceState::Open { until } => now < until,
+        });
     }
 
     /// Records a guest fault (trap/timeout/fuel exhaustion/OOM) for
@@ -158,14 +200,19 @@ impl CircuitBreaker {
     /// open (so the caller can alert exactly once per trip, not once per
     /// failure). Failures outside [`FAILURE_WINDOW`] are pruned before
     /// counting, per task instruction 4 "N failures in a window".
+    ///
+    /// Callers must NOT call this for back-pressure signals (e.g. the
+    /// executor's `pool_exhausted`): those say nothing about the guest.
     pub fn record_failure(&self, source: &str) -> bool {
         let mut sources = self.lock_sources();
+        let now = Instant::now();
+        if sources.len() >= SWEEP_THRESHOLD && !sources.contains_key(source) {
+            Self::sweep(&mut sources, now);
+        }
         let entry = sources
             .entry(source.to_string())
             .or_insert_with(SourceEntry::new);
-        self.metrics.transition(source, "failure");
 
-        let now = Instant::now();
         entry
             .failures
             .retain(|t| now.duration_since(*t) < FAILURE_WINDOW);
@@ -190,10 +237,16 @@ impl CircuitBreaker {
                 "circuit breaker OPEN: source disabled after repeated guest faults \
                  (trap/timeout/fuel exhaustion) -- other sources and tenants unaffected"
             );
-            self.metrics.transition(source, "opened");
+            self.metrics.transition("opened");
             return true;
         }
         false
+    }
+
+    /// Number of keys currently tracked (test/diagnostic visibility into
+    /// the eviction behavior).
+    pub fn tracked_keys(&self) -> usize {
+        self.lock_sources().len()
     }
 }
 
@@ -278,15 +331,12 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingMetrics {
-        transitions: Mutex<Vec<(String, String)>>,
+        transitions: Mutex<Vec<String>>,
     }
 
     impl CircuitBreakerMetrics for RecordingMetrics {
-        fn transition(&self, source: &str, action: &str) {
-            self.transitions
-                .lock()
-                .unwrap()
-                .push((source.to_string(), action.to_string()));
+        fn transition(&self, action: &str) {
+            self.transitions.lock().unwrap().push(action.to_string());
         }
     }
 
@@ -298,8 +348,70 @@ mod tests {
             breaker.record_failure("source-a");
         }
         let transitions = metrics.transitions.lock().unwrap();
-        assert!(transitions
-            .iter()
-            .any(|(s, a)| s == "source-a" && a == "opened"));
+        assert_eq!(
+            *transitions,
+            vec!["opened".to_string()],
+            "exactly one low-cardinality `opened` transition, no per-fault `failure` noise"
+        );
+    }
+
+    #[test]
+    fn metrics_record_closed_on_reset_and_evict_the_entry() {
+        let metrics = Arc::new(RecordingMetrics::default());
+        let breaker = CircuitBreaker::new(metrics.clone() as Arc<dyn CircuitBreakerMetrics>);
+        for _ in 0..FAILURE_THRESHOLD {
+            breaker.record_failure("source-a");
+        }
+        {
+            let mut sources = breaker.sources.lock().unwrap();
+            sources.get_mut("source-a").unwrap().state = SourceState::Open {
+                until: Instant::now() - Duration::from_millis(1),
+            };
+        }
+        assert!(breaker.allow("source-a"));
+        assert_eq!(breaker.tracked_keys(), 0, "a re-enabled key is evicted");
+        assert_eq!(
+            *metrics.transitions.lock().unwrap(),
+            vec!["opened".to_string(), "closed".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_success_evicts_a_closed_entry_but_never_an_open_one() {
+        let breaker = CircuitBreaker::new_for_test();
+        breaker.record_failure("source-a");
+        assert_eq!(breaker.tracked_keys(), 1);
+        breaker.record_success("source-a");
+        assert_eq!(breaker.tracked_keys(), 0);
+
+        for _ in 0..FAILURE_THRESHOLD {
+            breaker.record_failure("source-b");
+        }
+        breaker.record_success("source-b");
+        assert!(
+            !breaker.allow("source-b"),
+            "a success must not re-enable an open breaker before its backoff"
+        );
+    }
+
+    #[test]
+    fn stale_closed_entries_are_swept_so_the_map_cannot_grow_unbounded() {
+        let breaker = CircuitBreaker::new_for_test();
+        let long_ago = Instant::now() - FAILURE_WINDOW - Duration::from_secs(1);
+        {
+            let mut sources = breaker.sources.lock().unwrap();
+            for i in 0..SWEEP_THRESHOLD {
+                let mut entry = SourceEntry::new();
+                entry.failures.push(long_ago);
+                sources.insert(format!("stale-{i}"), entry);
+            }
+        }
+        assert_eq!(breaker.tracked_keys(), SWEEP_THRESHOLD);
+        breaker.record_failure("fresh");
+        assert_eq!(
+            breaker.tracked_keys(),
+            1,
+            "stale entries are evicted once the map passes the sweep threshold"
+        );
     }
 }

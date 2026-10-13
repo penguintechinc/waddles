@@ -53,7 +53,7 @@ use penguin_bundle_host::wire::{
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
@@ -492,6 +492,25 @@ fn export_label(kind: &ExportKind) -> &'static str {
     }
 }
 
+/// The error reported when fuel accounting is unavailable on a store this
+/// executor built. `LoadFailed` (the executor's existing "internal, not a
+/// guest fault" bucket, also used for result-encode failures) so no stage
+/// circuit breaker ever counts a host invariant breach against a guest.
+fn fuel_invariant_error_body(message: String) -> ErrorBody {
+    ErrorBody {
+        code: ErrorCode::LoadFailed,
+        message,
+        detail: Some(DETAIL_FUEL_ACCOUNTING_UNAVAILABLE.to_string()),
+    }
+}
+
+/// `ErrorBody::detail` for a `Trap::OutOfFuel` (see [`trap_to_error_body`]).
+const DETAIL_FUEL_EXHAUSTED: &str = "fuel_exhausted";
+
+/// `ErrorBody::detail` for the host-side invariant breach where wasmtime
+/// fuel accounting is unavailable on a store this executor built.
+const DETAIL_FUEL_ACCOUNTING_UNAVAILABLE: &str = "fuel_accounting_unavailable";
+
 fn error_body(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
     ErrorBody {
         code,
@@ -888,10 +907,26 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         let outcome = self.invoke_inner(body, invoke_id, connection).await;
         let (result, trip) = match &outcome {
             Ok(_) => ("ok", None),
-            Err(e) => (
-                metrics::error_code_label(e.code),
-                metrics::sandbox_limit(e.code),
-            ),
+            Err(e) => {
+                // A fuel trap is the sandbox firing on a runaway guest: log
+                // it (type + message only -- no payload, no secrets) so it is
+                // diagnosable beyond the metric, and label it distinctly
+                // from a wall-clock deadline.
+                if e.detail.as_deref() == Some(DETAIL_FUEL_EXHAUSTED) {
+                    warn!(
+                        app_id = %app_id,
+                        export,
+                        invoke_id,
+                        code = ?e.code,
+                        message = %e.message,
+                        "guest exhausted its fuel budget (trap)"
+                    );
+                }
+                (
+                    metrics::error_label(e.code, e.detail.as_deref()),
+                    metrics::trip_limit(e.code, e.detail.as_deref()),
+                )
+            }
         };
         self.metrics
             .record_invoke(&app_id, export, result, trip, started.elapsed());
@@ -1045,10 +1080,18 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
     // traps immediately unless armed here on every call -- armed BEFORE
     // instantiation so a heavy start function is metered too.
     store.set_fuel(fuel_budget).map_err(|e| {
-        error_body(
-            ErrorCode::WasmTrap,
-            format!("failed to arm fuel budget: {e}"),
-        )
+        // A set_fuel failure means fuel accounting is OFF on an engine that
+        // `build_engine` always configures with `consume_fuel(true)` -- a
+        // host/executor invariant breach, NOT a guest trap. Report it as an
+        // internal failure (never `WasmTrap`, which stage circuit breakers
+        // count against the guest) and shout about it.
+        error!(
+            app_id = %body.app_id,
+            invoke_id,
+            error = %e,
+            "invariant breach: could not arm the fuel budget (fuel accounting disabled?)"
+        );
+        fuel_invariant_error_body(format!("failed to arm fuel budget: {e}"))
     })?;
 
     let start = std::time::Instant::now();
@@ -1117,10 +1160,25 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
     // budget minus what remains is exactly what this invocation spent
     // (spec SS0 condition 4's overhead-measurement requirement). `get_fuel`
     // only errs when fuel accounting is disabled, which never happens here
-    // (`crate::engine::build_engine` always enables it) -- fall back to the
-    // full budget (fuel_used=0) rather than panicking on an invariant this
-    // store can't actually violate.
-    let fuel_remaining = store.get_fuel().unwrap_or(fuel_budget);
+    // (`crate::engine::build_engine` always enables it). If it ever does,
+    // that is an invariant breach: fail loud rather than silently reporting
+    // fuel_used=0 (which would hide a runaway guest from the overhead
+    // measurement the metering exists to provide).
+    let fuel_remaining = match store.get_fuel() {
+        Ok(remaining) => remaining,
+        Err(e) => {
+            error!(
+                app_id = %body.app_id,
+                invoke_id,
+                error = %e,
+                "invariant breach: could not read remaining fuel after a completed call \
+                 (fuel accounting disabled?)"
+            );
+            return Err(fuel_invariant_error_body(format!(
+                "failed to read remaining fuel: {e}"
+            )));
+        }
+    };
     let fuel_used = fuel_budget.saturating_sub(fuel_remaining);
 
     Ok(ResultBody {
@@ -1233,7 +1291,7 @@ fn trap_to_error_body(err: wasmtime::Error, memory_cap_hit: bool) -> ErrorBody {
         Some(wasmtime::Trap::OutOfFuel) => ErrorBody {
             code: ErrorCode::ExecutorDeadline,
             message: full_chain,
-            detail: Some("fuel_exhausted".to_string()),
+            detail: Some(DETAIL_FUEL_EXHAUSTED.to_string()),
         },
         _ => error_body(ErrorCode::WasmTrap, full_chain),
     }
@@ -2298,6 +2356,22 @@ mod tests {
         assert!(matches!(result.code, ErrorCode::MemoryLimit));
     }
 
+    /// A fuel-accounting invariant breach (set/get_fuel failing on an engine
+    /// that always enables fuel) is an executor-internal failure: it must NOT
+    /// be labeled `WasmTrap` (which stage circuit breakers count against the
+    /// guest) and must carry its own distinguishing detail.
+    #[test]
+    fn fuel_accounting_invariant_breach_is_not_labeled_a_guest_trap() {
+        let body = fuel_invariant_error_body("failed to arm fuel budget: boom".to_string());
+        assert!(!matches!(body.code, ErrorCode::WasmTrap));
+        assert!(!matches!(body.code, ErrorCode::ExecutorDeadline));
+        assert_eq!(
+            body.detail.as_deref(),
+            Some(DETAIL_FUEL_ACCOUNTING_UNAVAILABLE)
+        );
+        assert!(body.message.contains("boom"));
+    }
+
     /// Positive case for connector spec SS0 condition 4's fuel
     /// classification: a real, engine-produced `Trap::OutOfFuel` (never a
     /// hand-built string) must classify as `EXECUTOR_DEADLINE` with
@@ -3069,9 +3143,16 @@ mod tests {
         use crate::metrics::test_support::Harness;
 
         fn executor_with<S: ComponentSource>(source: S) -> (Harness, Executor<S>) {
+            executor_with_config(source, test_config())
+        }
+
+        fn executor_with_config<S: ComponentSource>(
+            source: S,
+            cfg: CliConfig,
+        ) -> (Harness, Executor<S>) {
             let harness = Harness::new();
             let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
-            let executor = Executor::new(&test_config(), source)
+            let executor = Executor::new(&cfg, source)
                 .expect("executor builds")
                 .with_metrics(metrics);
             (harness, executor)
@@ -3406,7 +3487,12 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn a_runaway_guest_records_a_timeout_trip() {
             crate::init_test_tracing();
-            let (h, executor) = executor_with(FixtureSource);
+            // Fuel effectively unbounded so the EPOCH deadline -- not fuel
+            // exhaustion, which now has its own `fuel` label -- is what
+            // stops the loop; otherwise this test races the two.
+            let mut cfg = test_config();
+            cfg.executor_fuel_limit_transform = u64::MAX;
+            let (h, executor) = executor_with_config(FixtureSource, cfg);
             executor
                 .on_load(fixture_load_body("waddles.mx.busy"))
                 .await
@@ -3453,6 +3539,57 @@ mod tests {
                 guest.sum >= 0.1,
                 "guest ran for a deadline of ~200ms, recorded {}",
                 guest.sum
+            );
+        }
+
+        /// A runaway guest stopped by its FUEL budget (not the epoch
+        /// deadline) is labeled distinctly: `limit="fuel"` on the trip counter
+        /// and `result="fuel_exhausted"` on the invoke histogram -- never
+        /// folded into `timeout`/`executor_deadline`.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_fuel_exhausted_guest_records_a_fuel_trip_not_a_timeout() {
+            crate::init_test_tracing();
+            let mut cfg = test_config();
+            cfg.executor_fuel_limit_transform = 5_000_000;
+            let (h, executor) = executor_with_config(FixtureSource, cfg);
+            executor
+                .on_load(fixture_load_body("waddles.mx.fuelhog"))
+                .await
+                .expect("load");
+            let err = invoke_event(
+                &executor,
+                "waddles.mx.fuelhog",
+                ExportKind::Transform,
+                event("busy-loop"),
+                10_000,
+            )
+            .await
+            .expect_err("the fuel budget must stop the loop");
+            assert_eq!(err.detail.as_deref(), Some("fuel_exhausted"));
+
+            assert_eq!(
+                h.count(
+                    "waddles_executor_sandbox_trip_total",
+                    &[("app_id", "waddles.mx.fuelhog"), ("limit", "fuel")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_executor_sandbox_trip_total",
+                    &[("app_id", "waddles.mx.fuelhog"), ("limit", "timeout")]
+                ),
+                0.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_executor_invoke_seconds",
+                    &[
+                        ("app_id", "waddles.mx.fuelhog"),
+                        ("result", "fuel_exhausted")
+                    ]
+                ),
+                1.0
             );
         }
 

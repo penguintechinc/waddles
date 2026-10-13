@@ -316,8 +316,9 @@ pub fn register_dispatch_supervisor_metrics(
 
 /// Prometheus-backed `circuit_breaker::CircuitBreakerMetrics` impl
 /// (connector spec SS0 condition 5) -- one `IntCounterVec` labeled by
-/// `source`/`action` ("opened"/"closed", the only two transitions the
-/// `circuit_breaker` crate reports), registered once at startup and shared
+/// `action` ("opened"/"closed", the only two transitions the
+/// `circuit_breaker` crate reports; deliberately NO per-key label -- the
+/// key space is unbounded, see `circuit_breaker::CircuitBreakerMetrics`), registered once at startup and shared
 /// (behind the trait object) across every `DispatchDeps::breaker`/
 /// `dispatch_supervisor::SupervisorDeps::breaker` instance this pod
 /// constructs. Direct port of `core/svc_process::telemetry::
@@ -328,10 +329,8 @@ pub struct CircuitBreakerPromMetrics {
 }
 
 impl circuit_breaker::CircuitBreakerMetrics for CircuitBreakerPromMetrics {
-    fn transition(&self, source: &str, action: &str) {
-        self.transitions_total
-            .with_label_values(&[source, action])
-            .inc();
+    fn transition(&self, action: &str) {
+        self.transitions_total.with_label_values(&[action]).inc();
     }
 }
 
@@ -343,9 +342,9 @@ pub fn register_circuit_breaker_metrics(
     let transitions_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(
             "svc_action_circuit_breaker_transitions_total",
-            "Per-(app_id, scope, destination) circuit breaker open/close transitions, labeled by source and action",
+            "Per-(app_id, scope, destination) circuit breaker open/close transitions, labeled by action",
         ),
-        &["source", "action"],
+        &["action"],
     )
     .expect("valid metric definition");
     registry

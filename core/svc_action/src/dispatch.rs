@@ -45,37 +45,43 @@ use crate::retry::{dispatch_with_retry, AttemptOutcome, DispatchRecord, Jitter};
 use crate::stage_metrics::{self, StageResult};
 use crate::usage::UsageBatcher;
 
-/// Whether `code` (an `InvokeError::ExecutorError`'s `Debug`-formatted
-/// `penguin_bundle_host::wire::ErrorCode`, see [`handle_delivered`]'s match
-/// arm) names a guest fault -- a bundle-executor trap, epoch/fuel timeout,
-/// or memory-cap OOM -- as opposed to a broken bundle registration or a
-/// connection-level problem. The same three-variant set `core/svc_process/
-/// src/spine.rs`'s equivalent classification matches on, compared by string
-/// since this module only ever sees the error code after it has already
-/// been `Debug`-formatted into a `String` (`InvokeError::ExecutorError.code`).
-fn is_guest_fault(code: &str) -> bool {
+/// Whether an `InvokeError::ExecutorError` names a guest fault -- a
+/// bundle-executor trap, epoch/fuel timeout, or memory-cap OOM -- as opposed
+/// to a broken bundle registration, a connection-level problem, or executor
+/// `pool_exhausted` back-pressure. `code` is the `Debug`-formatted
+/// `penguin_bundle_host::wire::ErrorCode` (this module only sees it
+/// stringified); `detail` is the executor's `ErrorBody::detail`. The
+/// back-pressure case arrives with wire code `ExecutorDeadline` (the pinned
+/// wire crate has no dedicated code) but says nothing about the guest, so it
+/// must never trip the breaker for innocent destinations.
+fn is_guest_fault(code: &str, detail: Option<&str>) -> bool {
+    if detail == Some("pool_exhausted") {
+        return false;
+    }
     matches!(code, "ExecutorDeadline" | "MemoryLimit" | "WasmTrap")
 }
 
 /// Connector spec SS0 condition 5's composite circuit-breaker key for
-/// action-stage dispatch: `(app_id, tenant:community, destination)`. Unlike
-/// `svc_process`'s single `Delivered.stream` key, a dispatch attempt's
-/// isolation unit is all three dimensions together -- the same bundle can
-/// serve multiple tenants/communities (scope) and send to multiple
-/// platform channels (destination), and a fault talking to one destination
-/// must never disable the bundle for every other destination or tenant it
-/// also serves.
-fn breaker_key(app_id: &str, env: &StageEnvelope) -> String {
-    format!(
-        "{app_id}|{}:{}|{}",
+/// action-stage dispatch: `{app_id}|{tenant}:{community}|{channel_id}`
+/// (same `{app_id}|...` scheme `svc_process` keys on). Unlike
+/// `svc_process`'s `(app, stream)` key, a dispatch attempt's isolation unit
+/// is all three dimensions together -- the same bundle can serve multiple
+/// tenants/communities (scope) and send to multiple platform channels
+/// (destination), and a fault talking to one destination must never disable
+/// the bundle for every other destination or tenant it also serves.
+///
+/// Returns `None` for an event with no `channel_id`: there is no
+/// destination to isolate, and folding all such events onto one shared
+/// placeholder key would let a single bad one disable every channel-less
+/// event. Keyless events simply bypass the breaker (they still dispatch,
+/// retry and dead-letter normally).
+fn breaker_key(app_id: &str, env: &StageEnvelope) -> Option<String> {
+    let channel_id = env.event.source.as_ref()?.channel_id.as_deref()?;
+    Some(format!(
+        "{app_id}|{}:{}|{channel_id}",
         env.tenant,
         env.community.as_deref().unwrap_or("-"),
-        env.event
-            .source
-            .as_ref()
-            .and_then(|s| s.channel_id.clone())
-            .unwrap_or_else(|| "unknown".to_string()),
-    )
+    ))
 }
 
 /// Where [`DispatchDeps`] gets the digest to `load`/`invoke` with on every
@@ -198,7 +204,14 @@ pub enum InvokeError {
     #[error("host-api error: {0}")]
     HostApi(#[from] HostApiError),
     #[error("executor reported error {code:?}: {message}")]
-    ExecutorError { code: String, message: String },
+    ExecutorError {
+        code: String,
+        message: String,
+        /// The executor's wire `detail` discriminator (`ErrorBody::detail`),
+        /// e.g. `pool_exhausted` (back-pressure, NOT a guest fault) or
+        /// `fuel_exhausted`. `None` for synthesized (non-wire) errors.
+        detail: Option<String>,
+    },
     #[error("invoke result payload was not valid JSON: {0}")]
     MalformedPayload(String),
 }
@@ -281,10 +294,12 @@ async fn load_round_trip(
         Message::Error(e) => Err(InvokeError::ExecutorError {
             code: format!("{:?}", e.code),
             message: e.message,
+            detail: e.detail,
         }),
         _ => Err(InvokeError::ExecutorError {
             code: "UNEXPECTED_FRAME".to_string(),
             message: "expected loaded or error".to_string(),
+            detail: None,
         }),
     }
 }
@@ -318,10 +333,12 @@ pub async fn ensure_unloaded(
         Message::Error(e) => Err(InvokeError::ExecutorError {
             code: format!("{:?}", e.code),
             message: e.message,
+            detail: e.detail,
         }),
         _ => Err(InvokeError::ExecutorError {
             code: "UNEXPECTED_FRAME".to_string(),
             message: "expected unloaded or error".to_string(),
+            detail: None,
         }),
     }
 }
@@ -383,7 +400,7 @@ fn record_executor_call(
         Ok(frame) => match &frame.message {
             Message::Result(_) => "ok",
             Message::Error(e) => {
-                if let Some(limit) = stage_metrics::sandbox_limit(e.code) {
+                if let Some(limit) = stage_metrics::sandbox_limit_for(e.code, e.detail.as_deref()) {
                     metrics.record_sandbox_trip(app_id, limit);
                 }
                 "executor_error"
@@ -467,10 +484,12 @@ pub async fn invoke_dispatch(
         Message::Error(e) => Err(InvokeError::ExecutorError {
             code: format!("{:?}", e.code),
             message: e.message,
+            detail: e.detail,
         }),
         _ => Err(InvokeError::ExecutorError {
             code: "UNEXPECTED_FRAME".to_string(),
             message: "expected result or error".to_string(),
+            detail: None,
         }),
     }
 }
@@ -751,30 +770,38 @@ async fn handle_delivered_inner<A: AuditSink, T: TenantResolver, S: SpineOps>(
     }
 
     // Connector spec SS0 condition 5: a (app_id, scope, destination) tuple
-    // with too many recent guest faults is disabled -- dead-lettered for
-    // redelivery without ever reaching the executor, so a bad destination
-    // (or a faulting bundle version for one tenant) cannot burn executor
-    // capacity other destinations/tenants need.
+    // with too many recent guest faults is disabled -- dead-lettered
+    // without ever reaching the executor, so a bad destination (or a
+    // faulting bundle version for one tenant) cannot burn executor capacity
+    // other destinations/tenants need. NOTE the entry is parked in the DLQ
+    // (`dead_letter_raw` is XADD-to-DLQ then XACK): consumed, NOT
+    // redelivered, and nothing auto-replays it when the backoff elapses.
     let breaker_key = breaker_key(&deps.app_id, &d.env);
-    if !deps.breaker.allow(&breaker_key) {
-        tracing::warn!(
-            app_id = %deps.app_id,
-            key = %breaker_key,
-            "circuit breaker open for this app/scope/destination, dead-lettering without invoking"
-        );
-        let err = penguin_spine::DlqError {
-            kind: penguin_spine::DlqErrorKind::ExecutorUnavailable,
-            code: "DISPATCH_CIRCUIT_OPEN".to_string(),
-            message: format!("{breaker_key} disabled by circuit breaker"),
-            detail: None,
-            artifact_digest: deps.digest_source.current(),
-            consumer_id: deps.consumer_id.clone(),
-        };
-        return deps
-            .spine
-            .dead_letter(d, &err)
-            .await
-            .map(|()| StageResult::DeadLettered);
+    if let Some(key) = breaker_key.as_deref() {
+        if !deps.breaker.allow(key) {
+            // debug, not warn: while the breaker is open EVERY entry for
+            // this key lands here, so a per-entry warn is a log flood under
+            // load. The one operator-visible signal is the `error!(alert)`
+            // the breaker itself emits on the OPEN transition.
+            tracing::debug!(
+                app_id = %deps.app_id,
+                key = %key,
+                "circuit breaker open for this app/scope/destination, dead-lettering without invoking (parked in DLQ)"
+            );
+            let err = penguin_spine::DlqError {
+                kind: penguin_spine::DlqErrorKind::ExecutorUnavailable,
+                code: "DISPATCH_CIRCUIT_OPEN".to_string(),
+                message: format!("{key} disabled by circuit breaker"),
+                detail: None,
+                artifact_digest: deps.digest_source.current(),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps
+                .spine
+                .dead_letter(d, &err)
+                .await
+                .map(|()| StageResult::DeadLettered);
+        }
     }
 
     // Resolve the digest to invoke with BEFORE ever checking for an
@@ -959,7 +986,9 @@ async fn handle_delivered_inner<A: AuditSink, T: TenantResolver, S: SpineOps>(
             .await
             {
                 Ok(p) => {
-                    deps.breaker.record_success(&breaker_key);
+                    if let Some(key) = breaker_key.as_deref() {
+                        deps.breaker.record_success(key);
+                    }
                     interpret_dispatch_payload(&p, "irc_relay")
                 }
                 Err(e) => {
@@ -968,9 +997,11 @@ async fn handle_delivered_inner<A: AuditSink, T: TenantResolver, S: SpineOps>(
                     // tuple's breaker -- a broken bundle registration or a
                     // connection-level problem is not evidence this
                     // destination's guest code is misbehaving.
-                    if let InvokeError::ExecutorError { code, .. } = &e {
-                        if is_guest_fault(code) {
-                            deps.breaker.record_failure(&breaker_key);
+                    if let (Some(key), InvokeError::ExecutorError { code, detail, .. }) =
+                        (breaker_key.as_deref(), &e)
+                    {
+                        if is_guest_fault(code, detail.as_deref()) {
+                            deps.breaker.record_failure(key);
                         }
                     }
                     // Diagnosability fix (regression: multi_tenant path
@@ -2634,7 +2665,7 @@ mod tests {
         .await
         .expect_err("executor error reply must surface as an error");
         match err {
-            InvokeError::ExecutorError { code, message } => {
+            InvokeError::ExecutorError { code, message, .. } => {
                 assert_eq!(code, "DigestMismatch");
                 assert_eq!(message, "digest mismatch");
             }
@@ -2738,7 +2769,9 @@ mod tests {
         /// Like [`connected_registry_with_fake_executor`], but the executor
         /// answers its first request (`load` or `invoke`) with `reply`
         /// instead of a result -- e.g. a sandbox-trip `error` frame.
-        async fn connected_registry_replying_with(reply: Message) -> Arc<ConnectionRegistry> {
+        pub(super) async fn connected_registry_replying_with(
+            reply: Message,
+        ) -> Arc<ConnectionRegistry> {
             use penguin_bundle_host::wire::{
                 read_frame, write_frame, Frame, HelloBody, HelloOkBody, SandboxInfo,
             };
@@ -3201,6 +3234,200 @@ mod tests {
             // so assert "at least these two samples (2 and 0) landed".
             assert!(after.value >= before.0 + 2.0, "{before:?} -> {after:?}");
             assert!(after.sum >= before.1 + 2.0, "{before:?} -> {after:?}");
+        }
+    }
+
+    /// Circuit-breaker SEMANTICS (adversarial review of #467): executor
+    /// back-pressure is not a guest fault, and an event with no destination
+    /// has no breaker key. Each test drives a REAL `handle_delivered`
+    /// against a scripted executor connection.
+    mod breaker_semantics {
+        use super::metrics_emission::connected_registry_replying_with;
+        use super::*;
+        use circuit_breaker::FAILURE_THRESHOLD;
+        use penguin_bundle_host::wire::{ErrorBody, ErrorCode};
+
+        fn error_with_detail(code: ErrorCode, detail: Option<&str>) -> Message {
+            Message::Error(ErrorBody {
+                code,
+                message: "scripted".to_string(),
+                detail: detail.map(str::to_string),
+            })
+        }
+
+        /// A delivered entry for `app` whose event names a destination
+        /// (`channel_id`), plus deps carrying that same app id.
+        fn delivered_with_channel(
+            app: &str,
+            channel_id: Option<&str>,
+        ) -> (
+            Delivered,
+            String,
+            DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps>,
+        ) {
+            let ring = test_ring();
+            let mac = mac_for(&ring, "acme");
+            let mut d = fixture_delivered("acme", app, mac, "k1");
+            d.env.event.source = channel_id.map(|c| {
+                serde_json::from_value(serde_json::json!({
+                    "platform": "twitch",
+                    "account_id": "bot-1",
+                    "channel_id": c,
+                }))
+                .unwrap()
+            });
+            let stream_key = d.stream.clone();
+            let mut deps = test_deps(FakeSpineOps::default(), Arc::new(ConnectionRegistry::new()));
+            deps.app_id = app.to_string();
+            (d, stream_key, deps)
+        }
+
+        /// Runs `n` deliveries of `d`, each against a fresh executor
+        /// connection answering `reply`.
+        async fn deliver_n(
+            deps: &mut DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps>,
+            d: &Delivered,
+            key: &str,
+            n: u32,
+            reply: impl Fn() -> Message,
+        ) {
+            for _ in 0..n {
+                deps.connections = connected_registry_replying_with(reply()).await;
+                handle_delivered(d, key, deps).await.unwrap();
+            }
+        }
+
+        /// regression: #467 review HIGH 1 -- saturating the executor's pool
+        /// (`pool_exhausted`, wire code `ExecutorDeadline`) fails innocent
+        /// destinations but must leave their breaker CLOSED.
+        #[tokio::test]
+        async fn pool_exhausted_back_pressure_never_opens_the_breaker() {
+            let app = "waddles.btest.pool.v1";
+            let (d, key, mut deps) = delivered_with_channel(app, Some("chan-1"));
+            let n = FAILURE_THRESHOLD + 1;
+            deliver_n(&mut deps, &d, &key, n, || {
+                error_with_detail(ErrorCode::ExecutorDeadline, Some("pool_exhausted"))
+            })
+            .await;
+
+            let bkey = breaker_key(app, &d.env).expect("event has a destination");
+            assert!(
+                deps.breaker.allow(&bkey),
+                "back-pressure must leave the breaker CLOSED"
+            );
+            assert!(
+                deps.spine.dead_lettered.lock().unwrap().is_empty(),
+                "no entry may be short-circuited by an open breaker"
+            );
+            assert_eq!(deps.spine.acked.lock().unwrap().len() as u32, n);
+        }
+
+        /// The control: genuine guest faults DO open the breaker, after which
+        /// the next entry is dead-lettered without reaching the executor.
+        #[tokio::test]
+        async fn genuine_guest_faults_still_open_the_breaker() {
+            for (i, (code, detail)) in [
+                (ErrorCode::ExecutorDeadline, None),
+                (ErrorCode::ExecutorDeadline, Some("fuel_exhausted")),
+                (ErrorCode::WasmTrap, None),
+                (ErrorCode::MemoryLimit, None),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let app = format!("waddles.btest.fault{i}.v1");
+                let (d, key, mut deps) = delivered_with_channel(&app, Some("chan-1"));
+                deliver_n(&mut deps, &d, &key, FAILURE_THRESHOLD, || {
+                    error_with_detail(code, detail)
+                })
+                .await;
+                let bkey = breaker_key(&app, &d.env).unwrap();
+                assert!(
+                    !deps.breaker.allow(&bkey),
+                    "{code:?}/{detail:?} must open the breaker"
+                );
+                handle_delivered(&d, &key, &deps).await.unwrap();
+                let dl = deps.spine.dead_lettered.lock().unwrap();
+                assert_eq!(dl.len(), 1);
+                assert_eq!(dl[0].1, penguin_spine::DlqErrorKind::ExecutorUnavailable);
+            }
+        }
+
+        /// Per-channel isolation: one destination's faults never disable
+        /// another destination of the same app.
+        #[tokio::test]
+        async fn one_destinations_faults_never_block_another_destination() {
+            let app = "waddles.btest.dest.v1";
+            let (d_bad, key, mut deps) = delivered_with_channel(app, Some("chan-bad"));
+            deliver_n(&mut deps, &d_bad, &key, FAILURE_THRESHOLD, || {
+                error_with_detail(ErrorCode::WasmTrap, None)
+            })
+            .await;
+            let (d_ok, _, _) = delivered_with_channel(app, Some("chan-ok"));
+            assert!(!deps.breaker.allow(&breaker_key(app, &d_bad.env).unwrap()));
+            assert!(deps.breaker.allow(&breaker_key(app, &d_ok.env).unwrap()));
+        }
+
+        /// An event with no `channel_id` has no destination to isolate: it
+        /// must bypass the breaker rather than share one global "unknown"
+        /// key that a single bad event could open for every keyless event.
+        #[tokio::test]
+        async fn keyless_events_bypass_the_breaker_instead_of_sharing_a_key() {
+            let app = "waddles.btest.keyless.v1";
+            let (d, key, mut deps) = delivered_with_channel(app, None);
+            assert!(breaker_key(app, &d.env).is_none());
+            let n = FAILURE_THRESHOLD + 2;
+            deliver_n(&mut deps, &d, &key, n, || {
+                error_with_detail(ErrorCode::WasmTrap, None)
+            })
+            .await;
+            assert_eq!(
+                deps.breaker.tracked_keys(),
+                0,
+                "a keyless event must never create breaker state"
+            );
+            assert!(
+                deps.spine.dead_lettered.lock().unwrap().is_empty(),
+                "keyless events are never short-circuited"
+            );
+        }
+
+        #[test]
+        fn breaker_key_is_app_prefixed_and_destination_scoped() {
+            let ring = test_ring();
+            let mk = |app: &str, ch: Option<&str>| {
+                let mut d = fixture_delivered("acme", app, mac_for(&ring, "acme"), "k1");
+                d.env.event.source = ch.map(|c| {
+                    serde_json::from_value(serde_json::json!({
+                        "platform": "twitch", "account_id": "b", "channel_id": c
+                    }))
+                    .unwrap()
+                });
+                d.env
+            };
+            assert_eq!(
+                breaker_key("waddles.app.a.v1", &mk("waddles.app.a.v1", Some("c1"))).as_deref(),
+                Some("waddles.app.a.v1|acme:main|c1")
+            );
+            assert_ne!(
+                breaker_key("waddles.app.a.v1", &mk("waddles.app.a.v1", Some("c1"))),
+                breaker_key("waddles.app.b.v1", &mk("waddles.app.b.v1", Some("c1")))
+            );
+            assert_eq!(
+                breaker_key("waddles.app.a.v1", &mk("waddles.app.a.v1", None)),
+                None
+            );
+        }
+
+        #[test]
+        fn is_guest_fault_excludes_only_pool_exhausted_back_pressure() {
+            assert!(is_guest_fault("ExecutorDeadline", None));
+            assert!(is_guest_fault("ExecutorDeadline", Some("fuel_exhausted")));
+            assert!(is_guest_fault("WasmTrap", None));
+            assert!(is_guest_fault("MemoryLimit", None));
+            assert!(!is_guest_fault("ExecutorDeadline", Some("pool_exhausted")));
+            assert!(!is_guest_fault("LoadFailed", None));
+            assert!(!is_guest_fault("UNEXPECTED_FRAME", None));
         }
     }
 
