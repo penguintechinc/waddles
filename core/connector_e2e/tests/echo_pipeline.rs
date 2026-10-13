@@ -512,3 +512,30 @@ async fn a_digest_the_executor_never_pinned_is_refused_not_rerouted() {
         "{err:?}"
     );
 }
+
+/// `NoSource` serves no stage components: a fetch fails typed (naming the
+/// requested key) rather than returning fabricated bytes.
+#[tokio::test]
+async fn the_harness_component_source_refuses_every_fetch_typed() {
+    use bundle_executor::invoke::ComponentSource;
+
+    let err = connector_e2e::NoSource
+        .fetch("core/some-stage.wasm", "core/some-stage.json")
+        .await
+        .expect_err("NoSource must never serve a component");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("core/some-stage.wasm"),
+        "error names the requested key: {msg}"
+    );
+}
+
+/// `digest_of` yields the `sha256:<hex>` form the executor pins by.
+#[test]
+fn digest_of_is_the_sha256_prefixed_hex_form() {
+    // sha256("") -- the well-known empty-input digest.
+    assert_eq!(
+        connector_e2e::digest_of(b""),
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}

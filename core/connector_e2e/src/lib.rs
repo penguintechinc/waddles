@@ -16,6 +16,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bundle_executor::config::CliConfig;
 use bundle_executor::connector::ConnectorLimits;
@@ -35,6 +36,10 @@ use tokio::task::JoinHandle;
 /// Bytes the in-memory pipe buffers each way: far above one frame so a test
 /// never blocks on pipe back-pressure it does not mean to exercise.
 const PIPE_BYTES: usize = 4 << 20;
+
+/// How long [`WireRig::reconnect`] lets a replaced executor connection wind
+/// down on its own before aborting it.
+const OLD_CONNECTION_GRACE: Duration = Duration::from_secs(5);
 
 /// A [`ComponentSource`] that never serves anything: connectors are pinned
 /// directly (never fetched over the wire), so a stage `load` reaching this
@@ -152,9 +157,7 @@ impl WireRig {
     /// Test harness: a failed handshake is a loud panic.
     #[allow(clippy::expect_used)]
     pub async fn reconnect(&mut self) {
-        if let Some(old) = self.connection.take() {
-            old.abort();
-        }
+        let previous = self.connection.take();
         let (stage_io, exec_io) = duplex(PIPE_BYTES);
         let executor = Arc::clone(&self.executor);
         let hello = executor.hello(false, "runc");
@@ -172,6 +175,18 @@ impl WireRig {
             .attach(stage_io)
             .await
             .expect("host-api handshake completes");
+        if let Some(old) = previous {
+            // Attaching replaced (and closed) the old session, so the old
+            // executor connection sees EOF and winds down on its own; give it
+            // a bounded moment to do so, and abort it if it somehow does not.
+            let abort = old.abort_handle();
+            if tokio::time::timeout(OLD_CONNECTION_GRACE, old)
+                .await
+                .is_err()
+            {
+                abort.abort();
+            }
+        }
     }
 
     /// Drops the executor connection without a replacement (a crashed
