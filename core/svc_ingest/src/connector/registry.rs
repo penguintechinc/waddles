@@ -85,7 +85,9 @@ impl ConnectorRegistry {
             return Err(RegistryError::Invalid("platform must be non-empty"));
         }
         if connector.app_id.is_empty() || connector.digest.is_empty() {
-            return Err(RegistryError::Invalid("app_id and digest must be non-empty"));
+            return Err(RegistryError::Invalid(
+                "app_id and digest must be non-empty",
+            ));
         }
         if connector.max_frame_bytes == 0 || connector.max_events_per_frame == 0 {
             return Err(RegistryError::Invalid(
@@ -164,7 +166,10 @@ mod tests {
     fn invalid_entries_are_refused() {
         let mut r = ConnectorRegistry::new();
         let mut bad = pinned("");
-        assert!(matches!(r.register(bad.clone()), Err(RegistryError::Invalid(_))));
+        assert!(matches!(
+            r.register(bad.clone()),
+            Err(RegistryError::Invalid(_))
+        ));
         bad = pinned("echo");
         bad.max_frame_bytes = 0;
         assert!(matches!(r.register(bad), Err(RegistryError::Invalid(_))));

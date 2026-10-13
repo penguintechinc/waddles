@@ -130,8 +130,7 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
             if report.end == ConnectionEnd::Shutdown {
                 return Ok(());
             }
-            if report.frames_ok > 0
-                || (report.established && started.elapsed() >= STABILITY_WINDOW)
+            if report.frames_ok > 0 || (report.established && started.elapsed() >= STABILITY_WINDOW)
             {
                 backoff.reset();
             }
@@ -172,7 +171,10 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                 actual: ctx.platform,
             });
         }
-        self.metrics.connects_total.with_label_values(&[&platform, "ok"]).inc();
+        self.metrics
+            .connects_total
+            .with_label_values(&[&platform, "ok"])
+            .inc();
 
         let handshake = match self.invoker.on_connect(&platform, &ctx).await {
             Ok(handshake) => handshake,
@@ -189,9 +191,17 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         }
 
         info!(platform = %platform, connection_id = %ctx.connection_id, "connector connection established");
-        self.metrics.connection_up.with_label_values(&[&platform]).set(1);
-        let (end, frames_ok) = self.pump(transport, shutdown, &platform, &pinned, &ctx).await;
-        self.metrics.connection_up.with_label_values(&[&platform]).set(0);
+        self.metrics
+            .connection_up
+            .with_label_values(&[&platform])
+            .set(1);
+        let (end, frames_ok) = self
+            .pump(transport, shutdown, &platform, &pinned, &ctx)
+            .await;
+        self.metrics
+            .connection_up
+            .with_label_values(&[&platform])
+            .set(0);
 
         let reason = end_reason(end);
         if let Err(e) = self.invoker.on_disconnect(&platform, &ctx, reason).await {

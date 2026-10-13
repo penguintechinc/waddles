@@ -40,16 +40,10 @@ pub mod sink;
 pub mod transport;
 pub mod types;
 
-pub use driver::{
-    ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError,
-};
+pub use driver::{ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError};
 pub use invoker::{ConnectorInvokeError, ConnectorInvoker, UnwiredInvoker};
 pub use metrics::{register_connector_metrics, ConnectorMetrics};
-pub use registry::{
-    ConnectorRegistry, PinnedConnector, RegistryError, MAX_EVENTS_PER_FRAME,
-};
+pub use registry::{ConnectorRegistry, PinnedConnector, RegistryError, MAX_EVENTS_PER_FRAME};
 pub use sink::{to_platform_event, EventSink, SinkError, SpineEventSink};
 pub use transport::{Transport, TransportError};
-pub use types::{
-    ConnectionCtx, ConnectorEvent, ConnectorFrameError, Handshake, RawFrame,
-};
+pub use types::{ConnectionCtx, ConnectorEvent, ConnectorFrameError, Handshake, RawFrame};

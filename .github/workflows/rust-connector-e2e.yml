@@ -1,0 +1,44 @@
+name: Rust connector-e2e (real-path connector host harness)
+
+# core/connector_e2e links svc-ingest (the host: Transport, driver, sink) and
+# bundle-executor (the real wasmtime invoker) into one process and drives a
+# real compiled WASM connector end to end (issue #840 B0). It path-depends on
+# both crates, so a change in EITHER re-runs it -- the contract between the
+# host driver and the executor's connector invocation is only proven here.
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/connector_e2e/**'
+      - 'core/svc_ingest/**'
+      - 'core/bundle_executor/**'
+      - 'wit/waddle-connector/**'
+      - '.github/workflows/rust-connector-e2e.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/connector_e2e/**'
+      - 'core/svc_ingest/**'
+      - 'core/bundle_executor/**'
+      - 'wit/waddle-connector/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: connector-e2e
+      working_directory: core/connector_e2e
+      # ring/aws-lc-sys need a C/C++ toolchain; cmake for aws-lc-sys.
+      extra_apt_packages: 'cmake build-essential'
+      extra_apt_reason: 'for aws-lc-sys/ring (cmake, C/C++ toolchain)'

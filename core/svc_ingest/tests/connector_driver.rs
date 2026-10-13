@@ -16,8 +16,8 @@ use std::time::Duration;
 use svc_ingest::connector::{
     register_connector_metrics, ConnectionCtx, ConnectionEnd, ConnectorDriver, ConnectorEvent,
     ConnectorFrameError, ConnectorInvokeError, ConnectorInvoker, ConnectorMetrics,
-    ConnectorRegistry, DriverError, EventSink, Handshake, PinnedConnector, RawFrame,
-    RegistryError, SinkError, Transport, TransportError, UnwiredInvoker,
+    ConnectorRegistry, DriverError, EventSink, Handshake, PinnedConnector, RawFrame, RegistryError,
+    SinkError, Transport, TransportError, UnwiredInvoker,
 };
 use tokio::sync::oneshot;
 
@@ -168,7 +168,10 @@ impl ConnectorInvoker for ScriptedInvoker {
         _ctx: &ConnectionCtx,
         reason: &str,
     ) -> Result<(), ConnectorInvokeError> {
-        self.disconnect_reasons.lock().unwrap().push(reason.to_string());
+        self.disconnect_reasons
+            .lock()
+            .unwrap()
+            .push(reason.to_string());
         Ok(())
     }
 }
@@ -252,7 +255,10 @@ fn never_shutdown() -> (oneshot::Sender<()>, oneshot::Receiver<()>) {
 
 #[tokio::test]
 async fn a_good_frame_publishes_its_events_with_the_connection_as_context() {
-    let r = rig(ScriptedInvoker::with_frames(vec![Ok(vec![event(1), event(2)])]), 4096);
+    let r = rig(
+        ScriptedInvoker::with_frames(vec![Ok(vec![event(1), event(2)])]),
+        4096,
+    );
     let mut t = ScriptedTransport::new(vec![frames(&[b"frame"])]);
     let (_keep, mut rx) = never_shutdown();
     let report = r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
@@ -268,13 +274,19 @@ async fn a_good_frame_publishes_its_events_with_the_connection_as_context() {
     // The handshake crossed to the transport with the secret handle intact
     // (the transport, not the driver, substitutes it at send time).
     let hs = t.handshakes.lock().unwrap();
-    assert_eq!(hs[0].secret_refs, vec![("token".to_string(), "handle-1".to_string())]);
+    assert_eq!(
+        hs[0].secret_refs,
+        vec![("token".to_string(), "handle-1".to_string())]
+    );
     assert_eq!(
         r.metrics.connection_up.with_label_values(&[PLATFORM]).get(),
         0,
         "the up gauge must be back to 0 after the connection ended"
     );
-    assert_eq!(*r.invoker.disconnect_reasons.lock().unwrap(), vec!["remote_closed"]);
+    assert_eq!(
+        *r.invoker.disconnect_reasons.lock().unwrap(),
+        vec!["remote_closed"]
+    );
 }
 
 #[tokio::test]
@@ -284,7 +296,11 @@ async fn an_oversize_frame_is_dropped_before_any_guest_runs_and_the_connection_c
     let (_keep, mut rx) = never_shutdown();
     let report = r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
 
-    assert_eq!(*r.invoker.frame_calls.lock().unwrap(), 1, "the oversize frame must never reach the guest");
+    assert_eq!(
+        *r.invoker.frame_calls.lock().unwrap(),
+        1,
+        "the oversize frame must never reach the guest"
+    );
     assert_eq!(count(&r.metrics, "frames", PLATFORM, "oversize"), 1);
     assert_eq!(report.frames_ok, 1);
     assert_eq!(r.sink.published.lock().unwrap().len(), 1);
@@ -294,7 +310,9 @@ async fn an_oversize_frame_is_dropped_before_any_guest_runs_and_the_connection_c
 async fn a_guest_frame_error_drops_only_that_frame() {
     let r = rig(
         ScriptedInvoker::with_frames(vec![
-            Err(ConnectorInvokeError::Guest(ConnectorFrameError::Malformed("x".into()))),
+            Err(ConnectorInvokeError::Guest(ConnectorFrameError::Malformed(
+                "x".into(),
+            ))),
             Ok(vec![event(7)]),
         ]),
         4096,
@@ -306,7 +324,11 @@ async fn a_guest_frame_error_drops_only_that_frame() {
     assert_eq!(report.end, ConnectionEnd::RemoteClosed);
     assert_eq!(report.frames_ok, 1);
     assert_eq!(count(&r.metrics, "frames", PLATFORM, "guest_error"), 1);
-    assert_eq!(count(&r.metrics, "trap", PLATFORM, "guest_error"), 0, "a bad frame is not a trap");
+    assert_eq!(
+        count(&r.metrics, "trap", PLATFORM, "guest_error"),
+        0,
+        "a bad frame is not a trap"
+    );
     assert_eq!(r.sink.published.lock().unwrap().len(), 1);
 }
 
@@ -327,7 +349,10 @@ async fn events_beyond_the_per_frame_cap_are_truncated_and_counted() {
 async fn an_event_claiming_another_platform_is_refused_not_routed() {
     let mut spoof = event(1);
     spoof.platform = "discord".to_string();
-    let r = rig(ScriptedInvoker::with_frames(vec![Ok(vec![spoof, event(2)])]), 4096);
+    let r = rig(
+        ScriptedInvoker::with_frames(vec![Ok(vec![spoof, event(2)])]),
+        4096,
+    );
     let mut t = ScriptedTransport::new(vec![frames(&[b"f"])]);
     let (_keep, mut rx) = never_shutdown();
     r.driver.serve_connection(&mut t, &mut rx).await.unwrap();
@@ -335,12 +360,18 @@ async fn an_event_claiming_another_platform_is_refused_not_routed() {
     let published = r.sink.published.lock().unwrap();
     assert_eq!(published.len(), 1);
     assert_eq!(published[0].1.platform, PLATFORM);
-    assert_eq!(count(&r.metrics, "events", PLATFORM, "platform_mismatch"), 1);
+    assert_eq!(
+        count(&r.metrics, "events", PLATFORM, "platform_mismatch"),
+        1
+    );
 }
 
 #[tokio::test]
 async fn a_sink_failure_is_counted_and_the_next_event_still_publishes() {
-    let r = rig(ScriptedInvoker::with_frames(vec![Ok(vec![event(1), event(2)])]), 4096);
+    let r = rig(
+        ScriptedInvoker::with_frames(vec![Ok(vec![event(1), event(2)])]),
+        4096,
+    );
     *r.sink.fail_n.lock().unwrap() = 1;
     let mut t = ScriptedTransport::new(vec![frames(&[b"f"])]);
     let (_keep, mut rx) = never_shutdown();
@@ -365,8 +396,15 @@ async fn a_sandbox_trip_tears_the_connection_down_and_is_counted_by_kind() {
 
     assert_eq!(report.end, ConnectionEnd::ConnectorFault("trap"));
     assert_eq!(count(&r.metrics, "trap", PLATFORM, "trap"), 1);
-    assert_eq!(*r.invoker.frame_calls.lock().unwrap(), 1, "the frame after a trap must not be processed on this connection");
-    assert_eq!(*r.invoker.disconnect_reasons.lock().unwrap(), vec!["connector_fault"]);
+    assert_eq!(
+        *r.invoker.frame_calls.lock().unwrap(),
+        1,
+        "the frame after a trap must not be processed on this connection"
+    );
+    assert_eq!(
+        *r.invoker.disconnect_reasons.lock().unwrap(),
+        vec!["connector_fault"]
+    );
     assert_eq!(*t.closes.lock().unwrap(), vec!["connector_fault"]);
 }
 
@@ -394,7 +432,10 @@ async fn run_reconnects_after_a_trip_under_backoff_and_then_delivers() {
         if sink.published.lock().unwrap().len() == 1 {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "the reconnect never delivered");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the reconnect never delivered"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     tx.send(()).unwrap();
@@ -436,7 +477,11 @@ async fn a_failed_handshake_send_and_a_failed_connect_are_distinct_outcomes() {
     t.handshake_fails = true;
     let (_keep, mut rx) = never_shutdown();
     assert_eq!(
-        r.driver.serve_connection(&mut t, &mut rx).await.unwrap().end,
+        r.driver
+            .serve_connection(&mut t, &mut rx)
+            .await
+            .unwrap()
+            .end,
         ConnectionEnd::HandshakeFailed
     );
 
@@ -487,7 +532,10 @@ async fn a_transport_with_no_pinned_connector_is_a_fatal_typed_error() {
     let mut t = ScriptedTransport::new(vec![frames(&[b"f"])]);
     let (_keep, mut rx) = never_shutdown();
     let err = driver.serve_connection(&mut t, &mut rx).await.unwrap_err();
-    assert!(matches!(err, DriverError::Registry(RegistryError::NotRegistered(_))), "{err:?}");
+    assert!(
+        matches!(err, DriverError::Registry(RegistryError::NotRegistered(_))),
+        "{err:?}"
+    );
     assert!(
         t.handshakes.lock().unwrap().is_empty(),
         "nothing may be connected or sent for an unregistered platform"
@@ -502,6 +550,13 @@ async fn a_context_for_a_different_platform_is_a_fatal_typed_error() {
     wrong.platform = "discord".to_string();
     t.connects = VecDeque::from(vec![Ok(wrong)]);
     let (_keep, mut rx) = never_shutdown();
-    let err = r.driver.serve_connection(&mut t, &mut rx).await.unwrap_err();
-    assert!(matches!(err, DriverError::ContextPlatformMismatch { .. }), "{err:?}");
+    let err = r
+        .driver
+        .serve_connection(&mut t, &mut rx)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DriverError::ContextPlatformMismatch { .. }),
+        "{err:?}"
+    );
 }

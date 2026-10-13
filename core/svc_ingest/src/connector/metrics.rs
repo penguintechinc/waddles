@@ -101,12 +101,16 @@ pub fn register_connector_metrics(
 impl ConnectorMetrics {
     /// Counts one frame outcome.
     pub fn frame(&self, platform: &str, outcome: &str) {
-        self.frames_total.with_label_values(&[platform, outcome]).inc();
+        self.frames_total
+            .with_label_values(&[platform, outcome])
+            .inc();
     }
 
     /// Counts one event outcome.
     pub fn event(&self, platform: &str, outcome: &str) {
-        self.events_total.with_label_values(&[platform, outcome]).inc();
+        self.events_total
+            .with_label_values(&[platform, outcome])
+            .inc();
     }
 
     /// Counts one teardown cause.
@@ -133,6 +137,10 @@ mod tests {
         m.connects_total.with_label_values(&["echo", "ok"]).inc();
         assert!(register_connector_metrics(&registry).is_err());
         let families = registry.gather();
-        assert_eq!(families.len(), 6, "all six connector series must be exported");
+        assert_eq!(
+            families.len(),
+            6,
+            "all six connector series must be exported"
+        );
     }
 }

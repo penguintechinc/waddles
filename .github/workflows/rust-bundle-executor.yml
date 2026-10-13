@@ -6,6 +6,7 @@ on:
     paths:
       - 'core/bundle_executor/**'
       - 'wit/waddle-bundle/**'
+      - 'wit/waddle-connector/**'
       - 'sdk/waddle-sdk/src/**'
       - '.github/workflows/rust-bundle-executor.yml'
       - '.github/workflows/rust-crate-ci.yml'
@@ -14,6 +15,7 @@ on:
     paths:
       - 'core/bundle_executor/**'
       - 'wit/waddle-bundle/**'
+      - 'wit/waddle-connector/**'
       - 'sdk/waddle-sdk/src/**'
   workflow_dispatch:
 

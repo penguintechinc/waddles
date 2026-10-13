@@ -51,7 +51,9 @@ pub fn to_platform_event(
     let payload: serde_json::Value = serde_json::from_str(&event.payload_json)
         .map_err(|e| SinkError::Invalid(format!("payload is not valid JSON: {e}")))?;
     if !payload.is_object() {
-        return Err(SinkError::Invalid("payload must be a JSON object".to_string()));
+        return Err(SinkError::Invalid(
+            "payload must be a JSON object".to_string(),
+        ));
     }
     let candidate = serde_json::json!({
         "platform": event.platform,
@@ -95,6 +97,13 @@ impl<A: EventAppender, M: SpineMetrics> SpineEventSink<A, M> {
             active_kid: active_kid.into(),
             scope,
         }
+    }
+}
+
+impl<A: EventAppender, M: SpineMetrics> SpineEventSink<A, M> {
+    /// The underlying appender (tests read a recording fake back through it).
+    pub fn appender(&self) -> &A {
+        &self.appender
     }
 }
 
@@ -167,16 +176,25 @@ mod tests {
     fn a_bad_timestamp_or_empty_event_type_is_invalid() {
         let mut e = event();
         e.occurred_at = "yesterday".to_string();
-        assert!(matches!(to_platform_event(&ctx(), e), Err(SinkError::Invalid(_))));
+        assert!(matches!(
+            to_platform_event(&ctx(), e),
+            Err(SinkError::Invalid(_))
+        ));
         let mut e = event();
         e.event_type.clear();
-        assert!(matches!(to_platform_event(&ctx(), e), Err(SinkError::Invalid(_))));
+        assert!(matches!(
+            to_platform_event(&ctx(), e),
+            Err(SinkError::Invalid(_))
+        ));
     }
 
     #[test]
     fn an_event_whose_platform_differs_from_the_connection_is_invalid() {
         let mut e = event();
         e.platform = "discord".to_string();
-        assert!(matches!(to_platform_event(&ctx(), e), Err(SinkError::Invalid(_))));
+        assert!(matches!(
+            to_platform_event(&ctx(), e),
+            Err(SinkError::Invalid(_))
+        ));
     }
 }

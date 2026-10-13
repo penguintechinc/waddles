@@ -49,3 +49,11 @@ startup error, not a silent loss of graceful shutdown.
 (`*drain*`), compile-off-reactor (`cold_load_compile_does_not_starve_the_async_runtime`),
 and a real `SIGTERM` delivered to the test process (`lib::tests::a_real_sigterm_*`,
 `shutdown_signal_*`).
+
+## Connector exports (`src/connector.rs`)
+
+`ConnectorHost` invokes a core `waddle:connector@1.0.0` component's `receiver` exports (`on-connect`, `on-frame`,
+`on-heartbeat-due`, `on-disconnect`) under a fresh, fuel-/epoch-/memory-bounded `Store` per call, with typed
+`ConnectorCallError`s for guest errors, traps, fuel exhaustion, deadline, memory cap and pool exhaustion. Knobs:
+`EXECUTOR_CONNECTOR_FUEL_LIMIT`, `EXECUTOR_CONNECTOR_POOL_SIZE`. It is an in-process API for now: the host-API wire
+(`penguin-libs` `ExportKind`) has no connector kinds yet. Design note: `docs/connector-host-capability.md`.

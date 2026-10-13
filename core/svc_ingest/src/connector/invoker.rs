@@ -9,9 +9,7 @@
 //! empty result. The real-path harness (`core/connector_e2e`) implements this
 //! trait over the executor's in-process `ConnectorHost`.
 
-use super::types::{
-    ConnectionCtx, ConnectorEvent, ConnectorFrameError, Handshake, RawFrame,
-};
+use super::types::{ConnectionCtx, ConnectorEvent, ConnectorFrameError, Handshake, RawFrame};
 
 /// Every way a connector invocation can fail, in the three classes the host
 /// reacts to differently (spec S2.6).
@@ -141,5 +139,57 @@ impl ConnectorInvoker for UnwiredInvoker {
         _reason: &str,
     ) -> Result<(), ConnectorInvokeError> {
         Err(ConnectorInvokeError::Unavailable(UNWIRED.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> ConnectionCtx {
+        ConnectionCtx {
+            platform: "echo".to_string(),
+            source_id: "s".to_string(),
+            connection_id: "c".to_string(),
+            session_token: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_unwired_invoker_fails_every_export_with_a_typed_unavailable_error() {
+        let inv = UnwiredInvoker;
+        let frame = RawFrame {
+            ctx: ctx(),
+            bytes: vec![1],
+            received_at: "2026-10-12T00:00:00.000Z".to_string(),
+        };
+        let results = [
+            inv.on_connect("echo", &ctx()).await.err(),
+            inv.on_frame("echo", frame).await.err(),
+            inv.on_heartbeat_due("echo", &ctx()).await.err(),
+            inv.on_disconnect("echo", &ctx(), "r").await.err(),
+        ];
+        assert_eq!(results.len(), 4);
+        for err in results {
+            let err = err.expect("every export must fail loudly");
+            assert!(
+                matches!(err, ConnectorInvokeError::Unavailable(ref m) if m.contains("unavailable"))
+            );
+            assert!(err.tears_down_connection());
+            assert_eq!(err.kind(), "unavailable");
+        }
+    }
+
+    #[test]
+    fn only_a_guest_frame_error_keeps_the_connection_up() {
+        let guest = ConnectorInvokeError::Guest(ConnectorFrameError::Malformed("x".into()));
+        assert!(!guest.tears_down_connection());
+        assert_eq!(guest.kind(), "guest_error");
+        let trip = ConnectorInvokeError::SandboxTrip {
+            kind: "trap",
+            message: String::new(),
+        };
+        assert!(trip.tears_down_connection());
+        assert_eq!(trip.kind(), "trap");
     }
 }
