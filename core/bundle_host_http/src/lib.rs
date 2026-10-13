@@ -77,3 +77,4 @@
 //! (superseding CGNAT's prior always-forbidden treatment).
 
 pub mod egress;
+pub mod redact;

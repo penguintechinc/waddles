@@ -633,29 +633,20 @@ fn strip_query_secret_params(url: &mut reqwest::Url, secrets: &[(String, String)
     }
 }
 
-/// Drops everything from `url` that is unsafe to log or echo in an error:
-/// the whole query (host-injected secret *and* bundle-supplied parameters,
-/// which may carry user-identifying data), the fragment, and any userinfo.
-fn strip_url_for_log(url: &mut reqwest::Url) {
-    url.set_query(None);
-    url.set_fragment(None);
-    // `set_username`/`set_password` only fail for cannot-be-a-base URLs,
-    // which carry no userinfo to strip in the first place.
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-}
-
-/// `url` with its query/fragment/userinfo removed ([`strip_url_for_log`]) --
-/// the only form of a request URL that may appear in a log line, span or
-/// `Debug` output. Unparseable input yields a fixed placeholder, never the
-/// raw string.
+/// `url` reduced to scheme/host plus a default-deny redacted path
+/// ([`crate::redact::redact_url`]: query, fragment and userinfo dropped,
+/// path segments such as a Discord webhook id/token masked) -- the only form
+/// of a request URL that may appear in a log line, span or `Debug` output.
+/// Unparseable or host-less input yields a fixed placeholder, never the raw
+/// string.
 fn redact_url_for_log(url: &str) -> String {
-    match reqwest::Url::parse(url) {
-        Ok(mut parsed) => {
-            strip_url_for_log(&mut parsed);
-            parsed.to_string()
-        }
-        Err(_) => "<unparseable-url>".to_string(),
+    match reqwest::Url::parse(url)
+        .ok()
+        .as_ref()
+        .and_then(crate::redact::redact_url)
+    {
+        Some(redacted) => redacted.to_string(),
+        None => "<unparseable-url>".to_string(),
     }
 }
 
@@ -2455,18 +2446,20 @@ impl HttpTransport for ReqwestTransport {
 /// best-effort, never load-bearing for the SSRF property itself (that is
 /// enforced entirely before this function is ever reached).
 ///
-/// **The request URL is stripped of its query/fragment/userinfo first**
-/// ([`strip_url_for_log`]): `reqwest::Error`'s `Display` embeds the full URL
-/// (`error sending request for url (https://host/path?key=<secret>)`), and
-/// the query of a `?<param>` secret ref carries a host-injected credential
-/// (while bundle-supplied parameters may carry user-identifying data). This
-/// is the transport-level layer; [`EgressGuard::send_checked`] additionally
-/// scrubs the exact resolved secret values from whatever any
-/// [`HttpTransport`] returns.
-fn classify_send_error(mut err: reqwest::Error) -> HostResultError {
-    if let Some(url) = err.url_mut() {
-        strip_url_for_log(url);
-    }
+/// **The request URL is redacted first** ([`crate::redact::scrub_error_url`]):
+/// `reqwest::Error`'s `Display` embeds the full URL
+/// (`error sending request for url (https://host/path?key=<secret>)`). The
+/// query of a `?<param>` secret ref carries a host-injected credential
+/// (bundle-supplied parameters may carry user-identifying data), and a
+/// Discord webhook carries its bearer token in the URL *path*
+/// (`/api/webhooks/{id}/{token}`), so dropping only the query/fragment/
+/// userinfo still leaked it into every
+/// `HostResultError` message, DLQ detail and bundle log. Only the host and a
+/// default-deny redacted path survive. This is the transport-level layer;
+/// [`EgressGuard::send_checked`] additionally scrubs the exact resolved
+/// secret values from whatever any [`HttpTransport`] returns.
+fn classify_send_error(err: reqwest::Error) -> HostResultError {
+    let err = crate::redact::scrub_error_url(err);
     let err = &err;
     if err.is_timeout() {
         return denied("timeout", err.to_string());
@@ -6163,7 +6156,8 @@ mod tests {
         assert!(!rendered.contains(QS_SECRET), "{rendered}");
         assert!(!rendered.contains(QS_HEADER_SECRET), "{rendered}");
         assert!(!rendered.contains("London"), "{rendered}");
-        assert!(rendered.contains("api.weatherapi.com/v1/current.json"));
+        // Host + version survive; non-structural path segments are masked.
+        assert!(rendered.contains("api.weatherapi.com/v1/***"));
         assert!(rendered.contains("Authorization"));
     }
 
@@ -6278,12 +6272,37 @@ mod tests {
     fn redact_url_for_log_drops_query_fragment_and_userinfo() {
         assert_eq!(
             redact_url_for_log("https://user:pw@api.weatherapi.com/v1/x.json?key=abc&q=1#f"),
-            "https://api.weatherapi.com/v1/x.json"
+            "https://api.weatherapi.com/v1/***"
+        );
+        // regression: the Discord webhook token is a path segment and must
+        // never reach the guard's debug log line / `TransportRequest` Debug.
+        assert_eq!(
+            redact_url_for_log("https://discord.com/api/webhooks/123/tok-secret?wait=true"),
+            "https://discord.com/api/webhooks/***/***"
         );
         assert_eq!(
             redact_url_for_log("not a url ?key=abc"),
             "<unparseable-url>"
         );
+    }
+
+    /// regression: `{:?}` of a `TransportRequest` carrying a Discord webhook
+    /// URL (token in the *path*) must not render the id or token.
+    #[test]
+    fn transport_request_debug_masks_the_webhook_path_token() {
+        let req = TransportRequest {
+            method: "POST".to_string(),
+            url: "https://discord.com/api/webhooks/1234567890/tok-Zk3Xw9-secret?wait=true"
+                .to_string(),
+            pinned_addr: "93.184.216.34:443".parse().unwrap(),
+            headers: vec![],
+            body: None,
+        };
+        let rendered = format!("{req:?}");
+        for needle in ["tok-Zk3Xw9-secret", "1234567890", "wait=true"] {
+            assert!(!rendered.contains(needle), "{needle} leaked in {rendered}");
+        }
+        assert!(rendered.contains("/api/webhooks/***/***"), "{rendered}");
     }
 
     #[test]
