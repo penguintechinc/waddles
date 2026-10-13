@@ -206,11 +206,17 @@ impl SrtListener {
         loop {
             match incoming.incoming().next().await {
                 Some(request) => {
-                    tokio::spawn(handle_connection(
-                        request,
-                        tx.clone(),
-                        active_keys.clone(),
-                        self.auth.clone(),
+                    // No remote address on the span: a publisher's IP is
+                    // personal data and must not reach the trace backend.
+                    let span = tracing::info_span!("srt_connection");
+                    tokio::spawn(tracing::Instrument::instrument(
+                        handle_connection(
+                            request,
+                            tx.clone(),
+                            active_keys.clone(),
+                            self.auth.clone(),
+                        ),
+                        span,
                     ));
                 }
                 None => {
@@ -439,6 +445,7 @@ async fn handle_connection(
             rx: data_rx,
             partial: Bytes::new(),
         }),
+        span: tracing::Span::current(),
     };
 
     if tx.send(session).await.is_err() {

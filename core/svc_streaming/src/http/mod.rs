@@ -154,21 +154,10 @@ pub const UNMATCHED_ROUTE: &str = "unmatched";
 /// "which endpoint" in a metric label, span, or log line goes through here
 /// (`rules/critical-rules.md` Token & Secret Hygiene; Observability).
 /// Requests that matched no route collapse to [`UNMATCHED_ROUTE`].
-pub fn route_template(req: &Request) -> String {
+pub fn route_template<B>(req: &axum::http::Request<B>) -> String {
     req.extensions()
         .get::<MatchedPath>()
         .map_or_else(|| UNMATCHED_ROUTE.to_string(), |m| m.as_str().to_string())
-}
-
-/// Builds the per-request tracing span from the method and the matched route
-/// template only -- `TraceLayer`'s default span records the full `uri`, which
-/// would write the WHIP token into every span (and the OTLP trace export).
-fn request_span(req: &Request) -> tracing::Span {
-    tracing::debug_span!(
-        "request",
-        method = %req.method(),
-        route = %route_template(req),
-    )
 }
 
 /// Records every request into [`AppState::request_metrics`]: a labeled
@@ -241,7 +230,13 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             record_http_metrics,
         ))
-        .layer(TraceLayer::new_for_http().make_span_with(request_span))
+        // `request_span` parents each request span to an incoming W3C
+        // `traceparent` and records the route template, not the raw URI
+        // (which can carry WHIP/WHEP tokens) -- see `telemetry::trace_context`.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(crate::telemetry::trace_context::request_span::<axum::body::Body>),
+        )
 }
 
 /// Builds the secondary Prometheus metrics router, bound to its own port

@@ -156,6 +156,7 @@ impl Harness {
                 kind: IngestKind::Rtmp,
                 key: key.to_string(),
                 stream: Box::new(reader),
+                span: tracing::Span::none(),
             })
             .await
             .expect("orchestrator accepts the session");

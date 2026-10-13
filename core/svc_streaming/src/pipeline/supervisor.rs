@@ -74,6 +74,7 @@ use crate::pipeline::model::{
 use crate::pipeline::process_group::{self, Delivery, GroupSignal};
 use crate::redact::scrub_diagnostic;
 use crate::store::{SecretRef, SecretResolver};
+use crate::telemetry::stream::{Stage, StreamMetrics};
 
 /// How often [`wait_for_exit`] re-checks child liveness between event-channel
 /// reads. Short enough that a clean exit is noticed within a frame or two.
@@ -228,12 +229,19 @@ struct Metrics {
     teardown_duration_ms: Histogram<u64>,
     teardown_failures_total: Counter<u64>,
     encodes_started_total: Counter<u64>,
+    /// Shared stream data-plane instruments: the ffmpeg lifecycle stages
+    /// (`ffmpeg_spawn`, `ffmpeg_first_progress`, `ffmpeg_stop`) land in the
+    /// same `stream_stage_duration_seconds{stage}` histogram as the
+    /// orchestrator's setup stages, so one panel shows the whole pipeline
+    /// timeline.
+    stream: StreamMetrics,
 }
 
 impl Metrics {
     fn new() -> Self {
         let meter = global::meter("svc_streaming_pipeline");
         Self {
+            stream: StreamMetrics::shared(),
             pipeline_start_ms: meter
                 .u64_histogram("pipeline_start_ms")
                 .with_description("Time from ffmpeg spawn to first progress event")
@@ -710,7 +718,11 @@ async fn run_pipeline(
         // supervisor never observes EOF. See `process_group::signal_group`.
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(cmd.as_inner_mut(), 0);
+        let spawn_syscall_start = Instant::now();
         let spawn_result = attempt_span.in_scope(|| cmd.spawn());
+        metrics
+            .stream
+            .record_stage(Stage::FfmpegSpawn, spawn_syscall_start.elapsed());
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(err) => {
@@ -804,7 +816,11 @@ async fn run_pipeline(
             tokio::select! {
                 _ = slot.stop_notify.notified() => {
                     if slot.stopping.load(Ordering::SeqCst) {
+                        let stop_started = Instant::now();
                         graceful_stop(id, &mut child, &mut rx, &slot, &config, &metrics).await;
+                        metrics
+                            .stream
+                            .record_stage(Stage::FfmpegStop, stop_started.elapsed());
                         break 'attempt;
                     }
                 }
@@ -815,6 +831,9 @@ async fn run_pipeline(
                                 metrics
                                     .pipeline_start_ms
                                     .record(spawn_start.elapsed().as_millis() as u64, &pid_kv);
+                                metrics
+                                    .stream
+                                    .record_stage(Stage::FfmpegFirstProgress, spawn_start.elapsed());
                                 got_first_progress = true;
                             }
                             metrics.encode_speed.record(p.speed as f64, &pid_kv);

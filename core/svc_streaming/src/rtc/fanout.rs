@@ -15,11 +15,29 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use rtc::rtp::Packet;
 use webrtc::runtime::{broadcast_channel, BroadcastReceiver, BroadcastRecvError, BroadcastSender};
 
 use crate::rtc::metrics::RtcMetrics;
+use crate::telemetry::stream::{MediaKind, StreamMetrics};
+
+/// A subscriber records one fanout-latency sample per this many packets it
+/// receives (the first packet always sampled). A video track carries
+/// thousands of packets per second per viewer; recording every one into an
+/// OTel histogram would cost more than forwarding it, while 1-in-16 still
+/// yields hundreds of samples a minute per active viewer.
+const LATENCY_SAMPLE_EVERY: u64 = 16;
+
+/// An RTP packet plus the instant it entered the fanout -- the zero point
+/// for `stream_fanout_latency_seconds`. Internal: subscribers still receive
+/// a plain [`Packet`].
+#[derive(Debug, Clone)]
+struct Stamped {
+    published_at: Instant,
+    packet: Packet,
+}
 
 /// Bounded broadcast capacity: packets a subscriber may fall behind by
 /// before it starts losing them to [`BroadcastRecvError::Lagged`]. 512
@@ -35,17 +53,40 @@ const FANOUT_CAPACITY: usize = 512;
 /// every subscriber and the publisher hold the same fanout.
 #[derive(Debug)]
 pub struct TrackFanout {
-    tx: BroadcastSender<Packet>,
+    tx: BroadcastSender<Stamped>,
     subscriber_count: AtomicUsize,
+    /// Media kind for the latency histogram's `kind` attribute; `None`
+    /// (labeled `unknown`) for a fanout created without one.
+    kind: Option<MediaKind>,
+    metrics: StreamMetrics,
 }
 
 impl TrackFanout {
-    /// Creates an empty fanout with no publisher or subscribers yet.
+    /// Creates an empty fanout with no publisher or subscribers yet. Its
+    /// latency samples are labeled `kind="unknown"` -- prefer
+    /// [`Self::with_kind`] where the media kind is known.
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new(Self::build(None, StreamMetrics::shared()))
+    }
+
+    /// Like [`Self::new`], labeling latency samples with `kind`.
+    pub fn with_kind(kind: MediaKind) -> Arc<Self> {
+        Arc::new(Self::build(Some(kind), StreamMetrics::shared()))
+    }
+
+    /// Like [`Self::with_kind`], recording into an explicit
+    /// [`StreamMetrics`] -- for tests that install their own meter provider.
+    pub fn with_kind_and_metrics(kind: Option<MediaKind>, metrics: StreamMetrics) -> Arc<Self> {
+        Arc::new(Self::build(kind, metrics))
+    }
+
+    fn build(kind: Option<MediaKind>, metrics: StreamMetrics) -> Self {
+        Self {
             tx: broadcast_channel(FANOUT_CAPACITY),
             subscriber_count: AtomicUsize::new(0),
-        })
+            kind,
+            metrics,
+        }
     }
 
     /// Publishes one RTP packet to every current subscriber. Never blocks
@@ -55,7 +96,10 @@ impl TrackFanout {
     /// `recv`), so one stuck viewer can never stall the publisher or any
     /// other viewer. A publish with zero subscribers is a no-op.
     pub fn publish(&self, packet: Packet) {
-        let _ = self.tx.send(packet);
+        let _ = self.tx.send(Stamped {
+            published_at: Instant::now(),
+            packet,
+        });
     }
 
     /// Subscribes a new WHEP viewer, returning a handle whose `recv` drives
@@ -67,6 +111,7 @@ impl TrackFanout {
         FanoutSubscriber {
             rx: self.tx.subscribe(),
             fanout: Arc::clone(self),
+            received: 0,
         }
     }
 
@@ -83,10 +128,7 @@ impl Default for TrackFanout {
         // this type satisfies derive bounds elsewhere without callers
         // reaching for `Arc::new(TrackFanout::new_inner())` -- prefer
         // `TrackFanout::new()`, which already returns the `Arc`.
-        Self {
-            tx: broadcast_channel(FANOUT_CAPACITY),
-            subscriber_count: AtomicUsize::new(0),
-        }
+        Self::build(None, StreamMetrics::shared())
     }
 }
 
@@ -94,19 +136,33 @@ impl Default for TrackFanout {
 /// each viewer's forwarding task owns exactly one, so `Drop` accurately
 /// reflects unsubscription.
 pub struct FanoutSubscriber {
-    rx: BroadcastReceiver<Packet>,
+    rx: BroadcastReceiver<Stamped>,
     fanout: Arc<TrackFanout>,
+    /// Packets delivered so far -- drives 1-in-[`LATENCY_SAMPLE_EVERY`]
+    /// latency sampling.
+    received: u64,
 }
 
 impl FanoutSubscriber {
     /// Waits for the next packet, transparently skipping past any gap and
     /// recording it in `metrics.packets_dropped_total`. Returns `None` once
     /// the fanout's publisher side is gone and the backlog is drained --
-    /// the caller's forwarding loop should end.
+    /// the caller's forwarding loop should end. Samples the packet's dwell
+    /// time in the fanout into `stream_fanout_latency_seconds` (see
+    /// [`LATENCY_SAMPLE_EVERY`]).
     pub async fn recv(&mut self, metrics: &RtcMetrics) -> Option<Packet> {
         loop {
             match self.rx.recv().await {
-                Ok(packet) => return Some(packet),
+                Ok(stamped) => {
+                    if self.received.is_multiple_of(LATENCY_SAMPLE_EVERY) {
+                        self.fanout.metrics.record_fanout_latency(
+                            self.fanout.kind,
+                            stamped.published_at.elapsed(),
+                        );
+                    }
+                    self.received = self.received.wrapping_add(1);
+                    return Some(stamped.packet);
+                }
                 Err(BroadcastRecvError::Lagged(skipped)) => {
                     metrics.packets_dropped_total.inc_by(skipped);
                     continue;
@@ -140,8 +196,8 @@ pub struct MediaFanouts {
 impl MediaFanouts {
     pub fn new() -> Self {
         Self {
-            video: TrackFanout::new(),
-            audio: TrackFanout::new(),
+            video: TrackFanout::with_kind(MediaKind::Video),
+            audio: TrackFanout::with_kind(MediaKind::Audio),
         }
     }
 }
@@ -229,5 +285,72 @@ mod tests {
         let fanout = TrackFanout::new();
         fanout.publish(sample_packet(1));
         assert_eq!(fanout.subscriber_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn latency_is_sampled_on_the_first_packet_then_one_in_sixteen() {
+        use crate::telemetry::stream::test_support::{harness, histogram};
+
+        let (stream_metrics, provider, exporter) = harness();
+        let fanout = TrackFanout::with_kind_and_metrics(Some(MediaKind::Video), stream_metrics);
+        let mut sub = fanout.subscribe();
+        let metrics = RtcMetrics::register(&prometheus::Registry::new()).unwrap();
+
+        // 33 packets -> samples at packet index 0, 16, 32 = 3.
+        for seq in 0..33u16 {
+            fanout.publish(sample_packet(seq));
+        }
+        for seq in 0..33u16 {
+            let packet = sub.recv(&metrics).await.expect("delivered");
+            assert_eq!(packet.header.sequence_number, seq, "order preserved");
+        }
+        let (count, sum) = histogram(
+            &provider,
+            &exporter,
+            "stream_fanout_latency_seconds",
+            &[("kind", "video")],
+        );
+        assert_eq!(count, 3);
+        assert!(
+            (0.0..5.0).contains(&sum),
+            "in-process dwell time is tiny and non-negative, got {sum}"
+        );
+    }
+
+    #[tokio::test]
+    async fn latency_is_labeled_unknown_for_an_untyped_fanout_and_audio_for_media_fanouts() {
+        use crate::telemetry::stream::test_support::{harness, histogram};
+
+        let (stream_metrics, provider, exporter) = harness();
+        let untyped = TrackFanout::with_kind_and_metrics(None, stream_metrics.clone());
+        let audio = TrackFanout::with_kind_and_metrics(Some(MediaKind::Audio), stream_metrics);
+        let metrics = RtcMetrics::register(&prometheus::Registry::new()).unwrap();
+        for fanout in [&untyped, &audio] {
+            let mut sub = fanout.subscribe();
+            fanout.publish(sample_packet(1));
+            sub.recv(&metrics).await.expect("delivered");
+        }
+        for kind in ["unknown", "audio"] {
+            assert_eq!(
+                histogram(
+                    &provider,
+                    &exporter,
+                    "stream_fanout_latency_seconds",
+                    &[("kind", kind)]
+                )
+                .0,
+                1,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn media_fanouts_carry_their_kind_and_default_fanout_builds() {
+        let fanouts = MediaFanouts::new();
+        assert_eq!(fanouts.video.kind, Some(MediaKind::Video));
+        assert_eq!(fanouts.audio.kind, Some(MediaKind::Audio));
+        assert_eq!(TrackFanout::default().kind, None);
+        assert_eq!(TrackFanout::new().kind, None);
     }
 }

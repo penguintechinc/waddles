@@ -332,6 +332,7 @@ fn debug_renderings_of_ingest_credentials_never_contain_the_raw_value() {
         kind: IngestKind::Rtmp,
         key: KEY.to_string(),
         stream: Box::new(tokio::io::empty()),
+        span: tracing::Span::none(),
     };
     let inputs = vec![
         InputSpec::Rtmp {
