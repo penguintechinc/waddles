@@ -63,6 +63,7 @@
 //! dependency, unlike `svc_process`/`svc_action`.
 
 pub mod config;
+pub mod connector;
 pub mod crypto;
 pub mod discord_rest;
 pub mod error;
