@@ -827,6 +827,15 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.uptime
+    version: "1.0.0"
+    language: python
+    source_dir: python/uptime
+    manifest_path: uptime.manifest.yaml
+    artifact_path: uptime.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
   - app_id: waddles.core.example.weather
     version: "1.0.0"
     language: python
