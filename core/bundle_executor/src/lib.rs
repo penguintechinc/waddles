@@ -32,6 +32,7 @@
 pub mod bucket;
 pub mod config;
 pub mod connector;
+pub mod connector_wire;
 pub mod engine;
 pub mod error;
 pub mod heartbeat;
