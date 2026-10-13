@@ -3485,8 +3485,9 @@ mod tests {
             ("ratio", DbValue::Int(0)),
             ("ratio", DbValue::Null),
         ] {
-            validate_column_value(&schema, column, &value)
-                .unwrap_or_else(|e| panic!("{column}={value:?} should fit: {e:?}"));
+            if let Err(e) = validate_column_value(&schema, column, &value) {
+                panic!("{column}={value:?} should fit: {e:?}");
+            }
         }
     }
 }
