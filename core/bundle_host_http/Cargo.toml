@@ -25,7 +25,7 @@ prometheus = "=0.14.0"
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 base64 = "=0.22.1"
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b063b7ba49f8544f95dba0d23dcbe0e109b7b16c", package = "penguin-bundle-host", version = "=0.2.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "eef86927d015f530c14d8ed54d311494c1a8000d", package = "penguin-bundle-host", version = "=0.3.0" }
 # Same-repo path dependency (not a penguin-libs crate) -- the shared signed
 # egress-allowlist assertion wire format (PR #468), also depended on by
 # core/egress_proxy's verifier so the two crates can never drift apart.
