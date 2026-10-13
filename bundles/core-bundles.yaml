@@ -631,6 +631,15 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.discord
+    version: "1.0.0"
+    language: python
+    source_dir: python/discord
+    manifest_path: discord.manifest.yaml
+    artifact_path: discord.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
   - app_id: waddles.core.example.vote
     version: "1.0.1"
     language: python
