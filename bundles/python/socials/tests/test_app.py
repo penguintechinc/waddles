@@ -357,6 +357,23 @@ def test_invalid_url_rejected_and_not_stored(
     assert "socials.link.twitter" not in host.kv.store
 
 
+@pytest.mark.parametrize(
+    "url", ["https://example.com:99999/x", "https://example.com:abc/x", "https://[::1"]
+)
+def test_bad_port_url_is_explicit_reject_with_pii_free_debug_log(
+    url: str, host: types.SimpleNamespace
+) -> None:
+    """A URL whose parse raises ValueError is rejected loudly (reply + DEBUG log), never defaulted."""
+    reply = _say(f"!socials set twitter {url}", is_mod=True)
+    assert reply == "that doesn't look like a valid URL"
+    assert host.kv.store == {}
+    invalid = [c for c in host.log_calls if "socials.invalid_url" in c[1]]
+    assert len(invalid) == 1
+    _lvl, _msg, fields = invalid[0]
+    assert "ValueError" in fields
+    assert "example.com" not in fields and "99999" not in fields
+
+
 def test_url_error_messages_are_specific(host: types.SimpleNamespace) -> None:
     assert "https://" in _say("!socials set twitter ftp://x.com", is_mod=True)
     assert "no host" in _say("!socials set twitter https://", is_mod=True)

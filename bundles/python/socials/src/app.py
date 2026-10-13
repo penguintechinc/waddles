@@ -180,7 +180,9 @@ def _validate_url(url: str) -> str | None:
         parts = urlsplit(url)
         host = parts.hostname
         _ = parts.port  # raises ValueError for an out-of-range / non-numeric port
-    except ValueError:
+    except ValueError as exc:
+        # Explicit reject (never a default): PII-free -- only the exception type, not the URL.
+        log.debug("socials.invalid_url", error_type=type(exc).__name__)
         return "that doesn't look like a valid URL"
     if parts.scheme.lower() not in _ALLOWED_SCHEMES:
         return "links must start with https:// (or http://)"
