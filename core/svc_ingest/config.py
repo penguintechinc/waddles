@@ -163,6 +163,16 @@ class Config:
         "SOCKET_LEASE_RUN_WITHOUT_ON_UNAVAILABLE", "true"
     ).strip().lower() in {"1", "true", "yes", "on"}
 
+    # Identity-field envelope encryption (`identity_crypto.py`) -- empty
+    # (the production default) means `app.py.build_dek_provider` uses
+    # `HubApiDekProvider` (hub-api-brokered DEKs, per the tenant-envelope-
+    # encryption design S5; the broker endpoint itself is a documented gap,
+    # see that function's docstring). Setting this to a >=32-byte local KEK
+    # switches to `LocalDevDekProvider` for local/alpha environments with
+    # no live hub-api broker -- NEVER set in beta/gamma/prod. Never a
+    # hardcoded default; unset means "no dev fallback".
+    INGEST_DEV_KEK = os.getenv("INGEST_DEV_KEK", "")
+
     # Twitch EventSub webhook (`eventsub.py`, mounted at
     # POST /eventsub/twitch/webhook). Empty secret disables the endpoint's
     # signature verification path entirely -- `app.py`'s startup skips
