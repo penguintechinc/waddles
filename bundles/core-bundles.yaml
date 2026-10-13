@@ -872,3 +872,21 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.donate
+    version: "1.0.0"
+    language: python
+    source_dir: python/donate
+    manifest_path: donate.manifest.yaml
+    artifact_path: donate.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.merch
+    version: "1.0.0"
+    language: python
+    source_dir: python/merch
+    manifest_path: merch.manifest.yaml
+    artifact_path: merch.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
