@@ -155,7 +155,10 @@ def test_every_gate_helper_denies_hostile_badges_and_admits_real_ones(
 def _command_text(app_path: Path) -> str:
     manifest = yaml.safe_load((app_path.parent.parent / "bundle.yaml").read_text(encoding="utf-8"))
     consumes = manifest["stages"]["process"]["consumes"]
-    return str(consumes[0]["filters"]["command_prefix"][0])
+    # A bundle that deliberately consumes ALL chat (e.g. `greeter`) declares no `filters` /
+    # `command_prefix` (an absent filter key is "not a constraint"); probe it with its own command.
+    prefixes = (consumes[0].get("filters") or {}).get("command_prefix")
+    return str(prefixes[0]) if prefixes else f"!{app_path.parent.parent.name}"
 
 
 def test_transform_never_launders_a_string_badge_into_true(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -613,6 +613,15 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.greeter
+    version: "1.0.0"
+    language: python
+    source_dir: python/greeter
+    manifest_path: greeter.manifest.yaml
+    artifact_path: greeter.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
   - app_id: waddles.core.example.heist
     version: "1.0.1"
     language: python
