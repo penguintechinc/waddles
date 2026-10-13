@@ -836,6 +836,15 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.pronouns
+    version: "1.0.0"
+    language: python
+    source_dir: python/pronouns
+    manifest_path: pronouns.manifest.yaml
+    artifact_path: pronouns.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
   - app_id: waddles.core.example.secret
     version: "1.0.0"
     language: python

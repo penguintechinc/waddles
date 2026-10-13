@@ -1,0 +1,44 @@
+[project]
+name = "waddle-bundle-pronouns"
+version = "1.0.0"
+description = "`!pronouns` -> per-user pronouns (set your own, read your own or another user's, clear), kv-backed under a SHA-256 hashed per-user key; self-only set, not mod-gated."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3", "pytest-cov==6.0.0", "mypy==1.14.1", "ruff==0.14.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+
+# `waddle-sdk` ships no `py.typed` marker (pre-existing SDK packaging gap, out of this
+# bundle's scope). Silencing `import-untyped` here only, so `--strict` still catches real
+# type errors in this bundle's own code (`app.py` `cast()`s the `kv.get` result).
+[[tool.mypy.overrides]]
+module = "waddle_sdk.*"
+ignore_missing_imports = true
+
+# `wit_world` is generated per-build, only inside a real compiled component, never
+# pip-installable -- mirrors sdk/waddle-sdk/pyproject.toml's own override.
+[[tool.mypy.overrides]]
+module = ["wit_world"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "D", "UP", "B", "ASYNC", "S"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test names are self-documenting (pytest convention); S101 is standard pytest usage; D1xx
+# docstrings are not required on every test function.
+"tests/*" = ["D100", "D101", "D102", "D103", "D104", "S101"]
