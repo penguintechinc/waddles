@@ -1279,7 +1279,12 @@ pipeline:
   #   - No Slack / YouTube / Kick / Spectrum Rust receivers yet (TODO(M5) in svc_ingest's
   #     lib.rs); the generic webhook/JWT intake and D31 usage metering are also TODO(M5).
   #   - Source configuration is static single-source config (env/CLI), not per-community.
-  #   - The bundle executor cannot yet invoke connector exports.
+  #   - Connector bundles (#840 B0): the executor library can now invoke connector exports
+  #     (core/bundle_executor/src/connector.rs ConnectorHost) and svc_ingest has the host-side
+  #     Transport/driver skeleton (core/svc_ingest/src/connector), proven end to end by
+  #     core/connector_e2e. The deployed pods cannot yet run a connector: the executor host-API
+  #     wire (penguin-libs ExportKind) has no connector export kinds, so svc_ingest's production
+  #     invoker is UnwiredInvoker, which fails every call loudly. No real platform Transport exists yet.
   #   - svc_ingest has no host-API listener.
   #
   # HIDDEN SECOND GATE -- read before enabling (src/license.rs:32 flag key, :115 check):

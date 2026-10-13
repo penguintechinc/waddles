@@ -174,3 +174,30 @@ rm -f src/bindings.rs   # generated, not committed
 
 Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against
 `wit-bindgen-rt 0.44.0` (same toolchain as `reputation_fixture.wasm`).
+
+## `echo_connector.wasm` and `faulty_connector.wasm`
+
+Real, compiled `waddle:connector@1.0.0` components for the connector host capability (issue #840 B0; design note
+`docs/connector-host-capability.md`), used by `tests/connector_invocation.rs` and by `core/connector_e2e`.
+
+- `echo-connector-src/` -- the Echo reference/smoke connector: a faithful port of
+  `core/svc_ingest/builtin_handlers/echo_ingest.py::normalize` (`source`/`text` required, trimmed `text`, default
+  `event_type` `message` and actor `unknown`). Malformed input is `frame-error::malformed`, never a trap. The
+  `sender` export is `frame-error::unsupported` (sender wiring is a later phase).
+- `faulty-connector-src/` -- fault injection: `on-frame` bytes `ok` / `malformed` / `trap` / `spin` / `grow` /
+  `flood:<N>` make it return an event, a frame-error, trap, loop forever, hog memory, or return N events.
+
+Both use a trimmed `connector.wit` (receiver/sender/types byte-identical to the normative file; no reused
+`waddle:bundle` imports and no `identity`, which neither calls), like `connector_fixture.wasm` above.
+
+### Regenerating
+
+```bash
+cd echo-connector-src   # or faulty-connector-src
+cargo component build --release
+cp "${CARGO_TARGET_DIR:-target}/wasm32-wasip1/release/echo_connector.wasm" ../echo_connector.wasm
+rm -f src/bindings.rs   # generated, not committed
+```
+
+Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against `wit-bindgen-rt 0.44.0` (same toolchain as the
+fixtures above); `serde`/`serde_json` are exact-pinned in `echo-connector-src/Cargo.toml`.

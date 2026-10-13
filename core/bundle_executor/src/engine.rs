@@ -131,6 +131,23 @@ pub const EPOCH_TICK: Duration = Duration::from_millis(50);
 /// `tests` below assert it matches `Cargo.toml`.
 pub const WASMTIME_VERSION: &str = "49.0.2";
 
+/// Spawns the task that advances `engine`'s epoch every [`EPOCH_TICK`].
+///
+/// **Required for any in-process caller of `crate::connector::ConnectorHost`:**
+/// a `Store`'s epoch deadline only fires when something advances the engine
+/// epoch, so a host whose engine nobody ticks has fuel as its ONLY CPU bound
+/// (`crate::invoke::Executor::new` runs its own equivalent ticker). The
+/// returned handle should be aborted (or the runtime dropped) on shutdown.
+pub fn spawn_epoch_ticker(engine: &Engine) -> tokio::task::JoinHandle<()> {
+    let ticker_engine = engine.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(EPOCH_TICK).await;
+            ticker_engine.increment_epoch();
+        }
+    })
+}
+
 /// Converts a wall-clock deadline in milliseconds into the number of
 /// epoch ticks [`wasmtime::Store::set_epoch_deadline`] should be armed
 /// with, rounding up so a deadline shorter than one tick still gets at

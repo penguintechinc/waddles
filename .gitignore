@@ -104,6 +104,10 @@ core/bundle_executor/tests/fixtures/hostile-fixture-src/src/bindings.rs
 # (spec docs/superpowers/specs/2026-09-28-connector-bundles.md S1/S3.2.1).
 core/bundle_executor/tests/fixtures/connector-fixture-src/src/bindings.rs
 
+# Echo reference + fault-injection connector fixtures (issue #840 B0).
+core/bundle_executor/tests/fixtures/echo-connector-src/src/bindings.rs
+core/bundle_executor/tests/fixtures/faulty-connector-src/src/bindings.rs
+
 # Same rule for bundle-host-http's http.send wire e2e fixture source
 # (core/bundle_host_http/tests/fixtures/README.md).
 core/bundle_host_http/tests/fixtures/http-fixture-src/src/bindings.rs

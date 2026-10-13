@@ -98,6 +98,8 @@ Notes:
 | `waddles_executor_loads_total` | counter | `result` | `ok`, `already_resident`, `digest_mismatch`, `load_failed` |
 | `waddles_executor_unloads_total` | counter | `result` | `evicted`, `still_referenced`, `orphaned`, `unknown_bundle` |
 | `waddles_executor_orphaned_unloads_total` | counter | — | duplicate/orphaned unloads (replaces the unexported `orphaned_unload_total` atomic, which still counts) |
+| `waddles_executor_connector_calls_total` | counter | `app_id, export, outcome` | connector-world export calls (`on-connect`/`on-frame`/`on-heartbeat-due`/`on-disconnect`); `outcome`: `ok`, `guest_error`, `fuel_exhausted`, `deadline`, `memory_limit`, `trap`, `pool_exhausted`, `instantiate_failed`, `internal`. No connection/source label (unbounded cardinality) |
+| `waddles_executor_connector_call_seconds` | histogram | `app_id, export, outcome` | one connector export call, slot wait excluded |
 | `waddles_executor_invoke_seconds` | histogram | `app_id, export, result` | one invoke end to end; `result` is `ok` or the wire error code (`executor_deadline`, `memory_limit`, `wasm_trap`, `unknown_bundle`, ...) |
 | `waddles_executor_instantiate_seconds` | histogram | `app_id` | component instantiation per invoke |
 | `waddles_executor_guest_seconds` | histogram | `app_id, export` | guest export execution, host-call waits included; recorded for trapped guests too |

@@ -40,6 +40,7 @@ jobs:
           - bundle_host_http
           - bundle_host_kv
           - circuit_breaker
+          - connector_e2e
           - egress_assertion
           - egress_detokenizer
           - egress_proxy
