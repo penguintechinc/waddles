@@ -83,6 +83,27 @@ pub struct CliConfig {
     )]
     pub executor_fuel_limit_dispatch: u64,
 
+    /// Wasmtime fuel budget armed on every connector-world export call
+    /// (`receiver.on-connect`/`on-frame`/`on-heartbeat-due`/`on-disconnect`,
+    /// connector spec SS3.5 "`on-frame` fuel (Gemini condition 4)"). An
+    /// instruction-count bound independent of, and in addition to, the epoch
+    /// deadline; whichever trips first aborts the call into a typed
+    /// `crate::connector::ConnectorCallError`. Per-platform tuning is
+    /// expected; this is the global default.
+    #[arg(
+        long,
+        env = "EXECUTOR_CONNECTOR_FUEL_LIMIT",
+        default_value_t = 50_000_000
+    )]
+    pub executor_connector_fuel_limit: u64,
+
+    /// Concurrent in-flight calls per always-pinned connector bundle (connector
+    /// spec SS2.3: "sized to the replica's executor worker-thread count").
+    /// A call beyond this waits `EXECUTOR_POOL_WAIT_MS`, then fails
+    /// `pool_exhausted` rather than queueing unboundedly.
+    #[arg(long, env = "EXECUTOR_CONNECTOR_POOL_SIZE", default_value_t = 8)]
+    pub executor_connector_pool_size: u32,
+
     /// Global ceiling on in-flight calls across all loaded bundles (spec
     /// SS7.2) -- enforced by a process-wide semaphore; also the size of the
     /// slice of the tokio blocking pool guest execution may occupy.
@@ -294,6 +315,8 @@ impl CliConfig {
             executor_instances_per_bundle: 4,
             executor_fuel_limit_transform: 500_000_000,
             executor_fuel_limit_dispatch: 500_000_000,
+            executor_connector_fuel_limit: 50_000_000,
+            executor_connector_pool_size: 8,
             executor_max_concurrent_calls: 32,
             executor_pool_wait_ms: 500,
             executor_precompile_dir: PathBuf::from("/var/cache/waddles/wasm"),
@@ -353,6 +376,16 @@ impl CliConfig {
         if self.executor_fuel_limit_dispatch == 0 {
             return Err(ExecutorError::Config(
                 "EXECUTOR_FUEL_LIMIT_DISPATCH must be > 0".to_string(),
+            ));
+        }
+        if self.executor_connector_fuel_limit == 0 {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_CONNECTOR_FUEL_LIMIT must be > 0".to_string(),
+            ));
+        }
+        if self.executor_connector_pool_size == 0 {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_CONNECTOR_POOL_SIZE must be > 0".to_string(),
             ));
         }
         if self.executor_instances_per_bundle == 0

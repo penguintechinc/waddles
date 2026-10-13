@@ -542,7 +542,11 @@ fn error_body(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
 /// `grep -n "Store::new" core/bundle_executor/src/invoke.rs` (this crate's
 /// only production module that ever runs a guest) must show exactly one hit:
 /// the one inside this function's own body.
-fn new_bounded_store(engine: &Engine, exec_state: ExecState, deadline_ms: u64) -> Store<ExecState> {
+pub(crate) fn new_bounded_store(
+    engine: &Engine,
+    exec_state: ExecState,
+    deadline_ms: u64,
+) -> Store<ExecState> {
     let mut store = Store::new(engine, exec_state);
     store.set_epoch_deadline(ticks_for_deadline(deadline_ms));
     store.epoch_deadline_trap();

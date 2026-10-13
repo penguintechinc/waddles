@@ -31,6 +31,7 @@
 
 pub mod bucket;
 pub mod config;
+pub mod connector;
 pub mod engine;
 pub mod error;
 pub mod heartbeat;

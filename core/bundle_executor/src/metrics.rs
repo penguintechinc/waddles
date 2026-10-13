@@ -45,7 +45,7 @@ pub const SLOW_BUCKETS_S: [f64; 13] = [
 
 /// Every instrument name this module registers -- asserted against emitted
 /// data in tests and mirrored in `docs/observability/data-plane-metrics.md`.
-pub const METRIC_NAMES: [&str; 17] = [
+pub const METRIC_NAMES: [&str; 19] = [
     "waddles_executor_load_seconds",
     "waddles_executor_loads_total",
     "waddles_executor_unloads_total",
@@ -63,6 +63,8 @@ pub const METRIC_NAMES: [&str; 17] = [
     "waddles_executor_reconnects_total",
     "waddles_executor_heartbeat_timeouts_total",
     "waddles_executor_orphaned_unloads_total",
+    "waddles_executor_connector_calls_total",
+    "waddles_executor_connector_call_seconds",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -199,6 +201,8 @@ pub struct ExecutorMetrics {
     reconnects: Counter<u64>,
     heartbeat_timeouts: Counter<u64>,
     orphaned_unloads: Counter<u64>,
+    connector_calls: Counter<u64>,
+    connector_call_seconds: Histogram<f64>,
 }
 
 /// Keeps `waddles_executor_invocations_active` accurate on every exit path
@@ -308,6 +312,16 @@ impl ExecutorMetrics {
             orphaned_unloads: counter(
                 "waddles_executor_orphaned_unloads_total",
                 "Unloads naming a scope that did not reference the digest (duplicate or orphaned)",
+            ),
+            connector_calls: counter(
+                "waddles_executor_connector_calls_total",
+                "Connector-world export calls by export and outcome (ok, guest_error, fuel_exhausted, \
+                 deadline, memory_limit, trap, pool_exhausted, instantiate_failed, internal)",
+            ),
+            connector_call_seconds: hist(
+                "waddles_executor_connector_call_seconds",
+                "Connector-world export call time (slot wait excluded), by export and outcome",
+                &LATENCY_BUCKETS_S,
             ),
         }
     }
@@ -431,6 +445,30 @@ impl ExecutorMetrics {
                 KeyValue::new("result", result),
             ],
         );
+    }
+
+    /// Records one connector-world export call
+    /// (`waddles_executor_connector_calls_total` +
+    /// `waddles_executor_connector_call_seconds`). `export` is the WIT
+    /// function name and `outcome` a [`crate::connector::ConnectorCallError::kind`]
+    /// label or `ok` -- both `&'static str` constants, never guest- or
+    /// platform-supplied, so the label set is bounded. Deliberately carries
+    /// no connection/source id: that would be an unbounded-cardinality label.
+    pub fn record_connector_call(
+        &self,
+        app_id: &str,
+        export: &'static str,
+        outcome: &'static str,
+        elapsed: Duration,
+    ) {
+        let attrs = [
+            KeyValue::new("app_id", app_id.to_string()),
+            KeyValue::new("export", export),
+            KeyValue::new("outcome", outcome),
+        ];
+        self.connector_calls.add(1, &attrs);
+        self.connector_call_seconds
+            .record(elapsed.as_secs_f64(), &attrs);
     }
 
     /// Counts one host-API connection attempt (`connected` or `failed`).
@@ -962,6 +1000,7 @@ mod tests {
         m.record_outage(Duration::from_secs(1));
         m.record_reconnect();
         m.record_heartbeat_timeout();
+        m.record_connector_call("a", "on-frame", "ok", Duration::from_millis(1));
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -973,7 +1012,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 17);
+        assert_eq!(METRIC_NAMES.len(), 19);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",
