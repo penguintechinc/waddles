@@ -182,7 +182,7 @@ mod tests {
                 "https://api.telegram.org/***/***",
             ),
             (
-                "https://hooks.slack.com/services/T000/B000/XXXXsecretXXXX",
+                "https://hooks.slack.com/services/T000/B000/Zq9secretValue77",
                 "https://hooks.slack.com/***/***/***/***",
             ),
             (
