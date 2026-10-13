@@ -44,11 +44,13 @@ from typing import Any
 from waddle_sdk.kv import InvalidKvKeyError, validate_key
 
 __all__ = [
+    "FakeAiHost",
     "FakeEconomyHost",
     "FakeIdentityHost",
     "FakeKvHost",
     "FakeReputationHost",
     "InvalidKvKeyError",
+    "install_fake_ai_host",
     "install_fake_economy_host",
     "install_fake_identity_host",
     "install_fake_kv_host",
@@ -425,5 +427,75 @@ def install_fake_identity_host(
     )
     fake_wit_world = types.ModuleType("wit_world")
     fake_wit_world.imports = types.SimpleNamespace(identity=identity_mod)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+    return host
+
+
+_Error_TooManyTokens = _variant("Error_TooManyTokens", True)
+_Error_ContentFiltered = _variant("Error_ContentFiltered", False)
+
+
+@dataclass
+class _FakeAiOptions:
+    """Stand-in for the generated ``ai.Options`` record."""
+
+    max_tokens: int | None
+    temperature: float | None
+    json: bool
+
+
+@dataclass(slots=True)
+class FakeAiHost:
+    """In-memory stand-in for `wit_world.imports.ai`, refusing what the real host refuses.
+
+    Mirrors the stage's guard order: `granted` False denies `not_granted`;
+    `max_tokens` over 512 is `Error_TooManyTokens(512)`; a prompt over ~2000
+    tokens (3 bytes each, the host's conservative estimate) is
+    `Error_TooManyTokens(2000)`; a prompt containing an `@` (a crude stand-in for
+    the host's email/handle/PII patterns) is `Error_Denied("contains_pii")`; more
+    than `rate_limit` calls is `Error_Denied("rate_limited")`. Replies with
+    `reply` (or raises `Error_ContentFiltered` when it is empty) and records
+    every accepted call in `calls` as `(prompt, max_tokens, temperature, json)`.
+    Every refusal raises the same-named `Error_*` variant the generated binding
+    would, wrapped in an `Err`-shaped exception.
+    """
+
+    granted: bool = True
+    reply: str = "a generated line"
+    rate_limit: int = 10
+    calls: list[tuple[str, int | None, float | None, bool]] = field(default_factory=list)
+    _attempts: int = 0
+
+    def Options(  # noqa: N802 - mirrors the generated record's constructor name
+        self, max_tokens: int | None, temperature: float | None, json: bool
+    ) -> _FakeAiOptions:
+        """Build the options record, like `wit_world.imports.ai.Options(...)`."""
+        return _FakeAiOptions(max_tokens=max_tokens, temperature=temperature, json=json)
+
+    def generate(self, prompt: str, opts: _FakeAiOptions) -> str:
+        """Apply the host's guard order, then answer `reply`."""
+        if not self.granted:
+            raise _FakeWitError(_Error_Denied("not_granted"))
+        self._attempts += 1
+        if self._attempts > self.rate_limit:
+            raise _FakeWitError(_Error_Denied("rate_limited"))
+        if opts.max_tokens is not None and opts.max_tokens > 512:
+            raise _FakeWitError(_Error_TooManyTokens(512))
+        if len(prompt.encode()) > 2_000 * 3:
+            raise _FakeWitError(_Error_TooManyTokens(2_000))
+        if "@" in prompt:
+            raise _FakeWitError(_Error_Denied("contains_pii"))
+        if not self.reply.strip():
+            raise _FakeWitError(_Error_ContentFiltered())
+        self.calls.append((prompt, opts.max_tokens, opts.temperature, opts.json))
+        return self.reply
+
+
+def install_fake_ai_host(monkeypatch: Any) -> FakeAiHost:
+    """Install a fresh `FakeAiHost` as `wit_world.imports.ai` and return it."""
+    host = FakeAiHost()
+    ai_mod = types.SimpleNamespace(generate=host.generate, Options=host.Options)
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(ai=ai_mod)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
     return host

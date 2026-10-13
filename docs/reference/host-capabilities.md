@@ -39,7 +39,7 @@ Verified against `release/v3.0.X` (`1e6b0056`) plus in-flight PRs #741, #749, #7
 | Overlay widgets | `overlay.media` | Dangerous | `overlay` (stage-next) | WIT MERGED; no host handler |
 | Streaming hooks | `streaming.lifecycle.subscribe` | Normal | `streaming-lifecycle` export (stage-next) | WIT MERGED; host registration deferred |
 | Moderation | `moderation.<platform>` | Dangerous | none | CATALOG-ONLY |
-| AI generation | `ai.generate` | Dangerous | none | CATALOG-ONLY |
+| AI generation | `ai.generate` | Dangerous | `ai` (stage-next) | PENDING SECURITY REVIEW (`svc_process` only; self-hosted model; flag `waddles.bundle-ai-capability`) |
 | Object storage | `storage.objects` | Normal | none | CATALOG-ONLY |
 | User profile read | `users.profile.read` | Normal | none | CATALOG-ONLY |
 | Telemetry | `telemetry.logs`, `telemetry.metrics` | Normal | none | CATALOG-ONLY |
@@ -186,7 +186,7 @@ No `dm.*` permission family exists in source.
 | Permission | Tier | Catalog quota | Notes |
 |---|---|---|---|
 | `moderation.<platform>` | Dangerous | Relay authz + `UsageBatcher` | No WIT import |
-| `ai.generate` | Dangerous | 10 / 60 s | Enterprise gate at marketplace time, not in gate |
+| `ai.generate` | Dangerous | 10 / 60 s | Now has a WIT import + `svc_process` handler (see `bundle-host-imports.md` `ai`); Enterprise gate at marketplace time, not in gate |
 | `storage.objects` | Normal | 1k objects / 500 MB per (tenant, app) | No WIT import |
 | `users.profile.read` | Normal | Unlimited | Reputation-scoped membership check; non-identifying attributes only |
 | `telemetry.logs`, `telemetry.metrics` | Normal | Declared instruments only | Mechanics owned by a separate doc |

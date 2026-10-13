@@ -87,7 +87,7 @@ pub fn instrument_name(documented: &str) -> &str {
 /// Host-call op names that may appear as the `op` label. Anything else is
 /// folded to `"other"` -- the op string comes straight off the guest's
 /// `host-call` frame and must never mint a new series.
-pub const KNOWN_OPS: [&str; 25] = [
+pub const KNOWN_OPS: [&str; 26] = [
     "get",
     "set",
     "delete",
@@ -110,6 +110,7 @@ pub const KNOWN_OPS: [&str; 25] = [
     "adjust",
     "resolve_actor",
     "resolve_mention",
+    "generate",
     "list",
     "count",
     "other",
@@ -119,7 +120,7 @@ pub const KNOWN_OPS: [&str; 25] = [
 /// the egress guard, a quota) refused it, as opposed to an operational
 /// failure. Folded into `result="denied"`; everything else non-ok is
 /// `result="error"`.
-const DENIED_CODES: [&str; 15] = [
+const DENIED_CODES: [&str; 16] = [
     "not_granted",
     "quota_exceeded",
     "rate_limited",
@@ -129,6 +130,7 @@ const DENIED_CODES: [&str; 15] = [
     "amount_out_of_bounds",
     "unsupported_platform",
     "contains_pii",
+    "too_many_tokens",
     "instance_denied",
     "host_denylisted",
     "redirect_off_allowlist",
@@ -165,7 +167,7 @@ impl StageResult {
 
 /// Maps a host-call [`CapabilityKind`] plus its guest-supplied `op` string
 /// to the bounded `(capability, op)` label pair. `db`-kind calls whose op is
-/// namespaced (`reputation.*`, `economy.*`, `identity.*`) are attributed to
+/// namespaced (`reputation.*`, `economy.*`, `identity.*`, `ai.*`) are attributed to
 /// that namespace as their own capability, matching how the dispatcher
 /// routes them.
 pub fn host_call_labels(kind: CapabilityKind, op: &str) -> (&'static str, &'static str) {
@@ -181,6 +183,7 @@ pub fn host_call_labels(kind: CapabilityKind, op: &str) -> (&'static str, &'stat
             Some(("reputation", rest)) => ("reputation", rest),
             Some(("economy", rest)) => ("economy", rest),
             Some(("identity", rest)) => ("identity", rest),
+            Some(("ai", rest)) => ("ai", rest),
             _ => ("db", op),
         },
     };
@@ -1091,6 +1094,14 @@ mod tests {
         assert_eq!(
             host_call_labels(CapabilityKind::Db, "identity.resolve_actor"),
             ("identity", "resolve_actor")
+        );
+        assert_eq!(
+            host_call_labels(CapabilityKind::Db, "ai.generate"),
+            ("ai", "generate")
+        );
+        assert_eq!(
+            host_call_labels(CapabilityKind::Db, "ai.shutdown_everything"),
+            ("ai", "other")
         );
         assert_eq!(
             host_call_labels(CapabilityKind::Db, "insert"),

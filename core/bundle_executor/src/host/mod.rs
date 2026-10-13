@@ -9,6 +9,7 @@ pub mod bridge;
 pub mod connector_imports;
 pub(crate) mod http_wire;
 pub mod imports;
+pub mod stage_next_ai;
 pub mod stage_next_economy;
 pub mod stage_next_identity;
 pub mod stage_next_imports;
