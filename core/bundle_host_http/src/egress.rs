@@ -6156,7 +6156,8 @@ mod tests {
         assert!(!rendered.contains(QS_SECRET), "{rendered}");
         assert!(!rendered.contains(QS_HEADER_SECRET), "{rendered}");
         assert!(!rendered.contains("London"), "{rendered}");
-        assert!(rendered.contains("api.weatherapi.com/v1/current.json"));
+        // Host + version survive; non-structural path segments are masked.
+        assert!(rendered.contains("api.weatherapi.com/v1/***"));
         assert!(rendered.contains("Authorization"));
     }
 
@@ -6283,6 +6284,25 @@ mod tests {
             redact_url_for_log("not a url ?key=abc"),
             "<unparseable-url>"
         );
+    }
+
+    /// regression: `{:?}` of a `TransportRequest` carrying a Discord webhook
+    /// URL (token in the *path*) must not render the id or token.
+    #[test]
+    fn transport_request_debug_masks_the_webhook_path_token() {
+        let req = TransportRequest {
+            method: "POST".to_string(),
+            url: "https://discord.com/api/webhooks/1234567890/tok-Zk3Xw9-secret?wait=true"
+                .to_string(),
+            pinned_addr: "93.184.216.34:443".parse().unwrap(),
+            headers: vec![],
+            body: None,
+        };
+        let rendered = format!("{req:?}");
+        for needle in ["tok-Zk3Xw9-secret", "1234567890", "wait=true"] {
+            assert!(!rendered.contains(needle), "{needle} leaked in {rendered}");
+        }
+        assert!(rendered.contains("/api/webhooks/***/***"), "{rendered}");
     }
 
     #[test]
