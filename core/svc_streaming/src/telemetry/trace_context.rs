@@ -83,6 +83,9 @@ pub fn request_span<B>(request: &Request<B>) -> tracing::Span {
         otel.kind = "server",
         http.request.method = method,
         http.route = route,
+        // Short alias kept for the C1 regression
+        // (`tests/http_metric_label_no_token.rs`) and plain-text log readers.
+        route = %route,
     );
     if request.headers().contains_key("traceparent") {
         // `Err` only when the span isn't backed by an OTel layer (no

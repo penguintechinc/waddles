@@ -499,7 +499,12 @@ impl Poller {
         pending.sort_by_key(|entry| entry.modified);
 
         for entry in pending {
-            let duration_s = durations.get(&entry.name).copied().unwrap_or_default();
+            // `retain` above guarantees the playlist lists this segment; skip
+            // (and log) rather than invent a 0s duration if that ever breaks.
+            let Some(&duration_s) = durations.get(&entry.name) else {
+                tracing::debug!(segment = %entry.name, "hls segment has no playlist duration");
+                continue;
+            };
             self.stream_metrics
                 .record_segment(label, duration_s, entry.len);
             tracing::debug!(

@@ -95,9 +95,9 @@ async fn route_template_not_raw_path_labels_metrics_and_spans() {
         !rendered.contains(SECRET_TOKEN) && !rendered.contains("scanner/probe"),
         "raw request path leaked into the /metrics scrape surface:\n{rendered}"
     );
-    assert!(rendered.contains(r#"path="/whip/{token}""#), "{rendered}");
-    assert!(rendered.contains(r#"path="unmatched""#), "{rendered}");
-    assert!(rendered.contains(r#"path="/health""#), "{rendered}");
+    assert!(rendered.contains(r#"route="/whip/{token}""#), "{rendered}");
+    assert!(rendered.contains(r#"route="unmatched""#), "{rendered}");
+    assert!(rendered.contains(r#"route="/health""#), "{rendered}");
 
     // --- Spans: route template, no secret, parented to the traceparent.
     let spans = otel.spans();
