@@ -406,3 +406,19 @@ def test_logs_never_contain_url_actor_or_message_text(host: Any) -> None:
         blob = f"{message} {fields}".lower()
         for sentinel in ("piiurl", "piipath", "piiraw", "piiactor", "alice", "notaurl"):
             assert sentinel not in blob
+
+
+def test_malformed_port_raises_internally_and_logs_exc_type_only(host: Any) -> None:
+    """The `ValueError` from a bad port is reclassified + propagated (not swallowed to a default)."""
+    import app
+
+    with pytest.raises(app._InvalidUrl) as info:
+        app._validate_url("https://PIIHOST.example:notaport/x")
+    assert isinstance(info.value.__cause__, ValueError)
+
+    reply = _say("!discord set https://PIIHOST.example:notaport/x", mod=True) or ""
+    assert "valid URL" in reply
+    assert INVITE_KEY not in host.kv.store
+    invalid = [f for _l, m, f in host.log_calls if "invalid_url" in m]
+    assert invalid and "ValueError" in str(invalid[-1])
+    assert "piihost" not in str(host.log_calls).lower()

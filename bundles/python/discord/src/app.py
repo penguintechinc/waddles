@@ -62,6 +62,14 @@ class _KvFailure(Exception):
     """
 
 
+class _InvalidUrl(Exception):
+    """Internal-only: the supplied invite URL was rejected; `str(exc)` is the user-facing reason.
+
+    Raised by `_validate_url` and caught in `transform`, which logs it (exception type only,
+    never the URL) and replies -- so a rejection is an explicit signal, never a swallowed default.
+    """
+
+
 async def _kv_get(key: str) -> bytes | None:
     """`kv.get`, reclassifying the generated WIT `Err` into `_KvFailure` (fail-loud)."""
     try:
@@ -104,25 +112,26 @@ def _is_privileged(event: PlatformEvent) -> bool:
     )
 
 
-def _validate_url(raw: str) -> str | None:
-    """Return an error message, or `None` if `raw` is an acceptable invite URL."""
+def _validate_url(raw: str) -> None:
+    """Raise `_InvalidUrl` (user-facing message) unless `raw` is an acceptable invite URL."""
     if len(raw) > MAX_URL_LEN:
-        return f"That link is too long (max {MAX_URL_LEN} characters)."
+        raise _InvalidUrl(f"That link is too long (max {MAX_URL_LEN} characters).")
     if any(ch.isspace() or ord(ch) < 32 for ch in raw):
-        return "The invite link must be a single URL with no spaces."
+        raise _InvalidUrl("The invite link must be a single URL with no spaces.")
     try:
         parts = urlsplit(raw)
         # `.port` validates the port lazily and raises ValueError on a malformed one.
         _ = parts.port
-    except ValueError:
-        return "That doesn't look like a valid URL."
+    except ValueError as exc:
+        raise _InvalidUrl("That doesn't look like a valid URL.") from exc
     if parts.scheme.lower() not in ("http", "https"):
-        return "The invite link must start with https:// (or http://)."
+        raise _InvalidUrl("The invite link must start with https:// (or http://).")
     if not parts.hostname:
-        return "The invite link must include a host, e.g. https://discord.gg/abc123"
+        raise _InvalidUrl(
+            "The invite link must include a host, e.g. https://discord.gg/abc123"
+        )
     if "@" in parts.netloc:
-        return "The invite link must not contain embedded credentials."
-    return None
+        raise _InvalidUrl("The invite link must not contain embedded credentials.")
 
 
 def _looks_like_discord(raw: str) -> bool:
@@ -152,10 +161,7 @@ async def _handle_set(args: str | None, event: PlatformEvent) -> str:
         return _NOT_PERMITTED
     if args is None:
         return "Usage: !discord set <url>"
-    error = _validate_url(args)
-    if error is not None:
-        log.info("discord.invalid_url", platform=event.platform)
-        return error
+    _validate_url(args)
     await _kv_set(INVITE_KEY, args.encode("utf-8"))
     log.info("discord.invite_set", platform=event.platform)
     if _looks_like_discord(args):
@@ -208,6 +214,14 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
             reply = _USAGE
     except CommandUsageError as exc:
         reply = f"{exc}. {_USAGE}"
+    except _InvalidUrl as exc:
+        cause = exc.__cause__ or exc
+        log.info(
+            "discord.invalid_url",
+            error_type=type(cause).__name__,
+            platform=event.platform,
+        )
+        reply = str(exc)
     except _KvFailure as exc:
         cause = exc.__cause__ or exc
         log.error(
