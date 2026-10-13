@@ -154,3 +154,93 @@ impl ConnectorInvoker for ExecutorInvoker {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn every_frame_error_variant_maps_one_to_one() {
+        assert_eq!(
+            map_frame_error(FrameError::Unsupported("a".into())),
+            ConnectorFrameError::Unsupported("a".into())
+        );
+        assert_eq!(
+            map_frame_error(FrameError::Malformed("b".into())),
+            ConnectorFrameError::Malformed("b".into())
+        );
+        assert_eq!(
+            map_frame_error(FrameError::Backend("c".into())),
+            ConnectorFrameError::Backend("c".into())
+        );
+    }
+
+    /// The three-class taxonomy of spec S2.6: guest frame-error keeps the
+    /// connection; every sandbox containment tears it down; everything else is
+    /// "unavailable" and never blamed on the guest.
+    #[test]
+    fn call_errors_map_onto_the_three_failure_classes() {
+        let guest = map_call_error(ConnectorCallError::Guest(FrameError::Malformed("x".into())));
+        assert!(matches!(guest, ConnectorInvokeError::Guest(_)));
+        assert!(!guest.tears_down_connection());
+
+        for (err, kind) in [
+            (
+                ConnectorCallError::FuelExhausted("f".into()),
+                "fuel_exhausted",
+            ),
+            (ConnectorCallError::DeadlineExceeded("d".into()), "deadline"),
+            (ConnectorCallError::MemoryLimit("m".into()), "memory_limit"),
+            (ConnectorCallError::Trap("t".into()), "trap"),
+        ] {
+            let mapped = map_call_error(err);
+            assert!(
+                matches!(&mapped, ConnectorInvokeError::SandboxTrip { kind: k, .. } if *k == kind),
+                "{mapped:?} must be a {kind} sandbox trip"
+            );
+            assert!(mapped.tears_down_connection());
+        }
+
+        for err in [
+            ConnectorCallError::PoolExhausted { in_flight: 4 },
+            ConnectorCallError::InstantiateFailed("i".into()),
+            ConnectorCallError::Internal("n".into()),
+        ] {
+            let mapped = map_call_error(err);
+            assert!(
+                matches!(mapped, ConnectorInvokeError::Unavailable(_)),
+                "{mapped:?} must be unavailable, not a guest fault"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_platform_is_a_typed_unavailable_error_for_every_export() {
+        let inv = ExecutorInvoker::new();
+        let ctx = ConnectionCtx {
+            platform: "nope".to_string(),
+            source_id: "s".to_string(),
+            connection_id: "c".to_string(),
+            session_token: None,
+        };
+        let frame = RawFrame {
+            ctx: ctx.clone(),
+            bytes: vec![],
+            received_at: "2026-10-12T00:00:00.000Z".to_string(),
+        };
+        let errs = [
+            inv.on_connect("nope", &ctx).await.err(),
+            inv.on_frame("nope", frame).await.err(),
+            inv.on_heartbeat_due("nope", &ctx).await.err(),
+            inv.on_disconnect("nope", &ctx, "r").await.err(),
+        ];
+        assert_eq!(errs.len(), 4);
+        for e in errs {
+            assert!(
+                matches!(e, Some(ConnectorInvokeError::Unavailable(_))),
+                "{e:?}"
+            );
+        }
+    }
+}

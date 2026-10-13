@@ -359,3 +359,70 @@ async fn an_unregistered_platform_never_connects_and_fails_loudly() {
     assert!(err.to_string().contains("no connector is pinned"), "{err}");
     assert!(handshakes.lock().unwrap().is_empty());
 }
+
+/// The executor adapter carries every `receiver` export, not just `on-frame`:
+/// the fault connector supplies a non-default heartbeat body, and a connector
+/// `frame-error::unsupported` crosses back as a typed guest error.
+#[tokio::test]
+async fn the_invoker_reaches_heartbeat_and_disconnect_and_maps_guest_frame_errors() {
+    use svc_ingest::connector::{
+        ConnectorFrameError, ConnectorInvokeError, ConnectorInvoker, RawFrame,
+    };
+
+    let cfg = CliConfig::try_parse_from([
+        "bundle-executor",
+        "--stage-host-api-addr",
+        "svc-process:8301",
+    ])
+    .unwrap();
+    let engine = build_engine(&cfg).unwrap();
+    let _ticker = spawn_epoch_ticker(&engine);
+    let manifest = VerifiedManifest::new(
+        "waddles.core.test.faulty",
+        digest_of(FAULTY_WASM),
+        WitWorld::Connector,
+        HashSet::new(),
+    );
+    let host = ConnectorHost::load(
+        &engine,
+        &LinkerCache::new(engine.clone()),
+        &manifest,
+        FAULTY_WASM.to_vec(),
+        ConnectorLimits::from_config(&cfg),
+        None,
+    )
+    .await
+    .unwrap();
+    let inv = ExecutorInvoker::new().with_host("faulty", host);
+    let ctx = ConnectionCtx {
+        platform: "faulty".to_string(),
+        source_id: "s".to_string(),
+        connection_id: "c".to_string(),
+        session_token: None,
+    };
+
+    assert_eq!(
+        inv.on_heartbeat_due("faulty", &ctx).await.unwrap(),
+        Some(b"faulty-ping".to_vec())
+    );
+    inv.on_disconnect("faulty", &ctx, "test").await.unwrap();
+
+    let err = inv
+        .on_frame(
+            "faulty",
+            RawFrame {
+                ctx: ctx.clone(),
+                bytes: b"???".to_vec(),
+                received_at: "2026-10-12T00:00:00.000Z".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ConnectorInvokeError::Guest(ConnectorFrameError::Unsupported(_))
+        ),
+        "{err:?}"
+    );
+}
