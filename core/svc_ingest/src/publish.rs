@@ -24,7 +24,8 @@
 
 use penguin_spine::{
     compute_binding_mac, trace_id_from_traceparent, Binding, BindingError, KeyRing, PlatformEvent,
-    Scope, SpineClient, SpineError, SpineMetrics, StageEnvelope, Trace, LEGACY_ENVELOPE_SCHEMA_VERSION,
+    Scope, SpineClient, SpineError, SpineMetrics, StageEnvelope, Trace,
+    LEGACY_ENVELOPE_SCHEMA_VERSION,
 };
 use uuid::Uuid;
 

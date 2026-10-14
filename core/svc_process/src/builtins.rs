@@ -251,6 +251,49 @@ mod tests {
         .unwrap()
     }
 
+    /// regression: numeric-scope -- the synthetic enforcement envelope reuses the
+    /// source's `binding`, so on a schema-v3 envelope it MUST carry the same
+    /// `schema_version`/`tenant_id`/`community_id` or the next hop's
+    /// `verify_binding` (which covers the ids) would fail -- or, worse, an id
+    /// re-derived by the stage would be unauthenticated.
+    #[test]
+    fn enforcement_envelope_preserves_v3_numeric_scope_and_its_mac_verifies() {
+        use penguin_spine::{compute_binding_mac_v3, verify_binding, KeyRing};
+        let ring = KeyRing::new(vec![("k1".to_string(), vec![7u8; 32])]);
+        let mut source = fixture_envelope();
+        source.schema_version = penguin_spine::ENVELOPE_SCHEMA_VERSION;
+        source.tenant_id = Some(10);
+        source.community_id = Some(7);
+        source.binding.mac = compute_binding_mac_v3(
+            &ring,
+            "k1",
+            10,
+            7,
+            &source.tenant,
+            source.community.as_deref(),
+            &source.workstream_id,
+            &source.event_id,
+            None,
+        )
+        .unwrap();
+        assert!(verify_binding(&ring, &source).is_ok());
+
+        let stamp = serde_json::json!({"action": "timeout"});
+        let out = maybe_build_enforcement_envelope(&source, Some(&stamp)).unwrap();
+        assert_eq!(out.schema_version, penguin_spine::ENVELOPE_SCHEMA_VERSION);
+        assert_eq!(out.tenant_id, Some(10));
+        assert_eq!(out.community_id, Some(7));
+        assert!(
+            verify_binding(&ring, &out).is_ok(),
+            "the carried binding must still verify on the synthetic envelope"
+        );
+
+        // A tampered id on the forwarded envelope is rejected.
+        let mut tampered = out;
+        tampered.tenant_id = Some(20);
+        assert!(verify_binding(&ring, &tampered).is_err());
+    }
+
     #[test]
     fn no_target_app_id_key_is_same_app() {
         let mut payload = serde_json::Map::new();
