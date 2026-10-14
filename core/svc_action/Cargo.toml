@@ -82,7 +82,7 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # landed `binding` module (a separate follow-up, re-verified against this
 # rev's own canonical test vectors, not done here), and `src/dispatch.rs`'s
 # `fixture_delivered` for the `group` field this rev added.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "bfa3be4cf3d8141f109153f77f6ead30d3d0f124", package = "penguin-spine", version = "=0.2.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ce638ec24f0bca0e2afd7655b99d1f9162030156", package = "penguin-spine", version = "=0.2.0" }
 # `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
@@ -106,7 +106,7 @@ hex = "=0.4.3"
 # mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8302`: this
 # crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
 # (the client side) with the roles reversed. Same exact version pins.
-rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "tls12"] }
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
 rustls-pki-types = "=1.15.1"
 # `relay` host capability (Twitch outbound, spec SS7.4) LPUSHes onto
