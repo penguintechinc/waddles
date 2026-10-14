@@ -1,4 +1,4 @@
-.PHONY: openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: codemod-app-bundles-activation-only openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -305,6 +305,11 @@ verify-core-bundles-reproducible:
 # local/manual entry point.
 test-bundle-flag-on-command-e2e:
 	@bash scripts/test-bundle-flag-on-command-e2e.sh
+
+# Idempotent codemod: app (command) bundles are activation-gated only, not
+# flag-gated (scripts/codemod_app_bundles_activation_only.py; --apply to edit).
+codemod-app-bundles-activation-only:
+	@python3 scripts/codemod_app_bundles_activation_only.py
 
 # Generates the Ed25519 signing keypair for hub-api's per-service machine
 # JWTs (feature/eddsa-machine-jwt) and applies the resulting k8s Secret --

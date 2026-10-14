@@ -331,24 +331,11 @@ async fn drive_stage<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
                         "message_id": "msg-e2e-1",
                         "config_json": "{}",
                     }),
-                    (CapabilityKind::Flags, "enabled") => {
-                        let key = call.args["key"]
-                            .as_str()
-                            .expect("flags.enabled call carries a string key");
-                        assert_eq!(
-                            key, FLAG_KEY,
-                            "eightball asked for an unexpected flag key -- FLAG_ENV_VAR mapping is stale"
-                        );
-                        let default_value = call.args["default_value"].as_bool().unwrap_or(false);
-                        let enabled = match std::env::var(FLAG_ENV_VAR) {
-                            Ok(raw) => matches!(
-                                raw.trim().to_ascii_lowercase().as_str(),
-                                "true" | "1" | "on" | "yes"
-                            ),
-                            Err(_) => default_value,
-                        };
-                        serde_json::json!({ "enabled": enabled })
-                    }
+                    (CapabilityKind::Flags, "enabled") => panic!(
+                        "app (command) bundles are activation-gated only: eightball must NOT \
+                         call flags.enabled (args={:?})",
+                        call.args
+                    ),
                     (CapabilityKind::Log, "write") => serde_json::json!({}),
                     other => panic!(
                         "flag_on_command_e2e: unexpected host-call {other:?} (args={:?}) -- \
@@ -435,54 +422,38 @@ async fn run_one_transform(wasm: &[u8], digest: &str) -> serde_json::Value {
     payload
 }
 
-/// THE regression test: a real, freshly-compiled `eightball` component,
-/// loaded into the real wasmtime host with the real `flags` capability
-/// wired, driven by the Docker-ENV flag baseline this test actually sets
-/// via `std::env`. Flag ON must produce a real, non-empty 8-ball reply;
-/// flag OFF must produce no reply at all -- proving the WIT `%flags`
-/// import exists in the compiled component, this executor's host
-/// capability round-trips it correctly, and the bundle's own logic
-/// actually branches on the result, in both directions.
+/// Activation-only regression test: a real, freshly-compiled `eightball`
+/// component (its SDK entry still eager-imports `%flags`, but the manifest
+/// no longer grants `flags.read` -- `Load` carries `capabilities: []`) must
+/// instantiate in the real wasmtime host and reply REGARDLESS of the
+/// legacy `FLAG_WADDLES_COMMAND_8BALL` env var, never calling
+/// `flags.enabled`.
 #[tokio::test]
-async fn flag_on_8ball_replies_flag_off_drops_it() {
+async fn app_bundle_8ball_replies_without_flag_gate() {
     let (wasm, digest) = eightball_wasm();
 
-    // --- Flag ON ---------------------------------------------------------
-    std::env::set_var(FLAG_ENV_VAR, "true");
-    let on_payload = run_one_transform(wasm, digest).await;
-    assert!(
-        !on_payload.is_null(),
-        "flag ON ({FLAG_ENV_VAR}=true): expected a real 8ball reply, got null (no reply) -- \
-         the %flags WIT import, this executor's flags host capability, or the Docker-ENV \
-         baseline is broken (this is exactly the 2026-10-04 stale-wasm/missing-import \
-         incident's failure mode: a wasm trap silently drops the reply with no error)"
-    );
-    let on_payload_json = on_payload["payload_json"]
-        .as_str()
-        .expect("transform reply has a string payload_json field");
-    let on_reply: serde_json::Value =
-        serde_json::from_str(on_payload_json).expect("payload_json is valid JSON");
-    let text = on_reply["text"]
-        .as_str()
-        .expect("8ball reply JSON has a text field");
-    assert!(
-        text.starts_with('\u{1f3b1}') && text.len() > "\u{1f3b1} ".len(),
-        "8ball reply text missing its emoji-prefixed, non-empty answer: {text:?}"
-    );
-    assert_eq!(
-        on_reply["channel_id"],
-        serde_json::json!("chan-e2e"),
-        "reply must carry back the inbound channel_id for the action stage to relay to"
-    );
-
-    // --- Flag OFF ----------------------------------------------------------
-    std::env::set_var(FLAG_ENV_VAR, "false");
-    let off_payload = run_one_transform(wasm, digest).await;
-    assert!(
-        off_payload.is_null(),
-        "flag OFF ({FLAG_ENV_VAR}=false): expected no reply (None), got {off_payload:?} -- \
-         eightball's transform() is not honoring the flags.enabled gate"
-    );
-
+    for flag_env in [None, Some("false"), Some("true")] {
+        match flag_env {
+            Some(v) => std::env::set_var(FLAG_ENV_VAR, v),
+            None => std::env::remove_var(FLAG_ENV_VAR),
+        }
+        let payload = run_one_transform(wasm, digest).await;
+        assert!(
+            !payload.is_null(),
+            "{FLAG_ENV_VAR}={flag_env:?}: expected a real 8ball reply, got null -- \
+             app bundles must be activation-gated only"
+        );
+        let inner = payload["payload_json"]
+            .as_str()
+            .expect("transform reply has a string payload_json field");
+        let reply: serde_json::Value =
+            serde_json::from_str(inner).expect("payload_json is valid JSON");
+        let text = reply["text"].as_str().expect("8ball reply has text");
+        assert!(
+            text.starts_with('\u{1f3b1}') && text.len() > "\u{1f3b1} ".len(),
+            "8ball reply text malformed: {text:?}"
+        );
+        assert_eq!(reply["channel_id"], serde_json::json!("chan-e2e"));
+    }
     std::env::remove_var(FLAG_ENV_VAR);
 }
