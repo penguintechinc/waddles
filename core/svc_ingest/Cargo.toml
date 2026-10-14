@@ -186,7 +186,7 @@ subtle = "=2.6.1"
 # Wipes decrypted OAuth token buffers (`connections::dto::AccessToken`, the raw
 # resolve response body) on drop so they do not linger in freed heap memory.
 # Already resolves to this exact version transitively (confirmed in `Cargo.lock`).
-zeroize = "=1.9.0"
+zeroize = "=1.9.1"
 # `service_auth::MachineJwtClient`: SA-token -> hub-api EdDSA machine JWT, used
 # by `src/connections/` to authenticate the dynamic Twitch connection
 # resolver's calls to hub-api's internal provider-connections REST routes
