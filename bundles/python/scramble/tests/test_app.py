@@ -141,11 +141,6 @@ def test_non_chat_payload_ignored(fake_host: _FakeHost) -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_reply(fake_host: _FakeHost) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_event("!scramble"))) is None
-
-
 def test_start_scrambles_a_bank_word_differently(fake_host: _FakeHost) -> None:
     for _ in range(25):
         fake_host.store.clear()

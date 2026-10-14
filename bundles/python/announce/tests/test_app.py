@@ -238,12 +238,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring(fake_host: _FakeHost) 
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _FakeHost(flag_enabled=False)
-    _install(monkeypatch, host)
-    assert _run(transform(_sample_event("!announce welcome"))) is None
-
-
 # -- dispatch(): get -----------------------------------------------------------
 
 

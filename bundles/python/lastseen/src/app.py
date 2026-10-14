@@ -30,7 +30,8 @@ the command path is logged (`lastseen.kv_failure`) AND answered explicitly; on t
 recording path (no reply is possible) it is logged at ERROR and the message is otherwise
 unaffected -- never swallowed silently.
 
-Gated behind the PostHog flag ``waddles.command-lastseen``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -40,10 +41,8 @@ import uuid
 from typing import Any, cast
 
 from waddle_sdk import clock, kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-lastseen"
 COMMAND = "!lastseen"
 KEY_PREFIX = "lastseen.user."
 
@@ -184,14 +183,12 @@ async def _answer(args: list[str], event: PlatformEvent, actor: str | None) -> s
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: stamp activity and answer `!lastseen`.
 
-    Returns `None` for non-chat payloads, a disabled flag, and every non-command message
+    Returns `None` for non-chat payloads, and every non-command message
     (which is still stamped as a side effect). Command-path `kv` failures are logged and
     answered explicitly; passive-stamp failures are logged at ERROR (no reply possible).
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     actor = _actor_uuid(event)

@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.memories
 name: Memories Bundle (Python)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -41,6 +41,4 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists each user's remembered facts as one hashed per-user JSON blob"
-  - id: flags.read
-    justification: "gates the commands behind their waddles.command-memories feature flag"
 routes_to: []

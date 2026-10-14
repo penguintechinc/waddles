@@ -141,12 +141,6 @@ def test_non_matching_text_is_ignored(text: str, fake_host) -> None:
     assert fake_host.kv.calls == []  # cheap-skip: zero kv ops
 
 
-def test_disabled_flag_suppresses_every_reply(fake_host) -> None:
-    fake_host.flag_state["enabled"] = False
-    assert _run(transform(_event("!wheel add tacos", is_mod=True))) is None
-    assert fake_host.kv.calls == []
-
-
 def test_non_chat_payload_is_ignored(fake_host) -> None:
     event = PlatformEvent(
         platform="twitch",

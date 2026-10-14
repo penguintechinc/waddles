@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-greeter"
-version = "1.0.0"
+version = "1.0.1"
 description = "greeter: opt-in keyword auto-responder (greet, mention, thanks) with a per-user cooldown and a mod-only !greeter toggle command."
 requires-python = ">=3.13"
 dependencies = []

@@ -87,7 +87,6 @@ bot>    slots cooldown set to 60s
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists per-community slot-machine tallies, cooldown timestamps and config. |
-| `flags.read` | Gates the command behind its `waddles.command-slots` feature flag. |
 
 No `db` (`data.tables: []`), no egress. Mod gate: `set cooldown` requires a real `is_mod` or
 `is_broadcaster` `True`; **absent** badge fields (e.g. the Discord normalizer today) are **denied**
@@ -117,11 +116,9 @@ Logs carry only `command`, `op`, `community`, `role_signal`, `platform` and exce
 never typed arguments, grammar text or `event.actor`. Regression:
 `tests/test_backfill.py::test_no_log_line_in_any_flow_contains_typed_text_or_the_raw_actor`.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-slots`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!slots` command-name match and
-before the real grammar parse.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 
@@ -155,8 +152,8 @@ pytest --cov=src --cov-branch --cov-report=term-missing   # 100% line + branch
 
 `tests/conftest.py` puts `src/` and `sdk/waddle-sdk/src` on `sys.path`, so no package install is
 needed. `test_app.py` covers grammar/game logic; `test_backfill.py` adds the mod-gate matrix, reel
-table + payout invariants, cooldown bounds/TTL, corrupt-state healing, PII-free-log regression,
-flag fail-closed and `_entry_wiring`.
+table + payout invariants, cooldown bounds/TTL, corrupt-state healing, PII-free-log regression and
+`_entry_wiring`.
 
 ## Activation
 

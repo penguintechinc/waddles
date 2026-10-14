@@ -45,15 +45,12 @@ _ a _ _ _ _ -- guessed: a, z (5 lives left)
 | id | Why |
 |---|---|
 | `storage.kv` | Persists the in-progress per-community game (the word, guessed letters, wrong count). |
-| `flags.read` | Reads the `waddles.command-hangman` feature flag that gates the command. |
 
 No `db`, no egress (`egress: []`), no other capability.
 
-## Feature flag
+## Gating
 
-`waddles.command-hangman`, default **OFF** (`critical-rules.md` Feature Flags & License Tiers).
-Checked in `transform()` after the cheap `!hangman` head match, so unrelated chat costs no
-flag/`kv` lookups. Flag off => no reply at all.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

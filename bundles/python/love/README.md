@@ -69,7 +69,6 @@ I don't know who '!!!' is -- try !love @username.
 | id | Why |
 |---|---|
 | `storage.kv` | Persists the caller's own per-community ship counter and best-match high score. |
-| `flags.read` | Reads the `waddles.command-love` feature flag that gates the command. |
 
 No `db`, no egress (`egress: []`, `data.tables: []`). No role/mod gate -- every command is open to
 any chatter, so there is no moderator path to fail closed.
@@ -127,11 +126,9 @@ a leaderboard needs a real `db` capability with an `order_by`/pagination surface
 lookup against an actual community member list -- `kv` has no such roster. A shape-valid but
 nonexistent target still resolves as a normal pairing; documented v1 limitation, not a bug.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-love`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!love`/`!ship` command-name match and
-before the real grammar classification.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 

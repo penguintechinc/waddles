@@ -42,7 +42,6 @@ no `is_mod`/`is_broadcaster` on the event (Discord today) `set cooldown` is deni
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-coinflip` |
 | `storage.kv` | persists per-community coin-flip tallies and state |
 
 ## State (kv, community-scoped only)
@@ -73,11 +72,9 @@ no `!flip leaderboard` command is declared, and nothing here is a stand-in stub 
 Also out of scope: any wallet/points-economy integration (betting an actual balance, redeeming a
 payout) -- the no-betting-ties rule above, not partially stubbed.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-coinflip`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!flip`/`!coinflip` command-name match
-and before the real grammar parse.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 

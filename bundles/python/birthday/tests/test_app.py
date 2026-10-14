@@ -18,7 +18,6 @@ from waddle_sdk.command import CommandUsageError
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 from app import (
-    FLAG_KEY,
     KEY_PREFIX,
     DispatchResult,
     dispatch,
@@ -172,14 +171,6 @@ def test_missing_text_key_returns_none(host: _Host) -> None:
         platform="twitch", event_type="channel.follow", actor=None, payload={}, occurred_at=""
     )
     assert _run(transform(event)) is None
-
-
-def test_flag_off_returns_none_and_touches_no_kv(host: _Host) -> None:
-    host.flag_enabled = False
-    assert _run(transform(_event("!birthday set 03-25"))) is None
-    assert host.flag_keys == [FLAG_KEY]
-    assert FLAG_KEY == "waddles.command-birthday"
-    assert host.kv.calls == []
 
 
 def test_command_match_is_case_and_whitespace_insensitive(host: _Host) -> None:
@@ -489,7 +480,7 @@ def test_logs_never_contain_birthday_actor_or_target(host: _Host) -> None:
 def test_host_imports_are_eager_module_attributes() -> None:
     import app
 
-    for name in ("kv", "log", "relay", "feature_enabled"):
+    for name in ("kv", "log", "relay"):
         assert hasattr(app, name), f"{name} must be imported at module top (componentize-py)"
 
 

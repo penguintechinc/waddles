@@ -170,13 +170,6 @@ def test_transform_ignores_other_text(host: _FakeHost, text: str) -> None:
     assert _run(transform(_event(text))) is None
 
 
-def test_transform_non_string_and_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _FakeHost(), flag=False)
-    assert _run(transform(_event("!heist 5"))) is None
-    ev = PlatformEvent("twitch", "chat.message", "v", {"text": None}, "")
-    assert _run(transform(ev)) is None
-
-
 def test_transform_badges(host: _FakeHost) -> None:
     out = _run(transform(_event("!heist", is_mod=True, is_broadcaster=False)))
     assert out is not None

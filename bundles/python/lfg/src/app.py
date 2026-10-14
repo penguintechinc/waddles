@@ -19,7 +19,8 @@ group, `MAX_DESC_LEN` characters per description. When the owner leaves, or the 
 leaves, the group is disbanded.
 
 Logs are PII-free: op, counts, exception-type names -- never the description or an identity.
-Gated behind the PostHog flag ``waddles.command-lfg``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -30,10 +31,8 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-lfg"
 COMMAND = "!lfg"
 
 GROUPS_KEY = "lfg.groups"
@@ -265,7 +264,7 @@ async def _handle(rest: str, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!lfg` and build the reply.
 
-    Exact first-token match (so `!lfgx` never matches) comes before the flag check; a `kv`
+    Exact first-token match (so `!lfgx` never matches) is the only precondition; a `kv`
     failure is logged loudly (PII-free) and answered with an error reply, never swallowed.
     """
     text = event.payload.get("text")
@@ -273,8 +272,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

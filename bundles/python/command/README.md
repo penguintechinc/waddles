@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| Flag | `waddles.command-customcommands` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped; **community is required** (no tenant-wide fallback) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -39,7 +39,6 @@ exists in the `stage` WIT world, so nothing fires. Every timer reply says so exp
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-customcommands` |
 | `storage.kv` | persists the per-community custom command registry |
 
 ## State

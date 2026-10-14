@@ -63,12 +63,11 @@ invalid lurk message: unknown placeholder(s): nope (allowed: $(username), $(dura
 | id | Why |
 |---|---|
 | `storage.kv` | Persists per-community lurk state (start timestamps, template, AI toggle). Without it `_derive_capabilities()` never grants `kv` at all. |
-| `flags.read` | Reads the `waddles.command-lurk` feature flag (and the license tier for the AI toggle). |
+| `flags.read` | Reads the license tier for the AI toggle (the command itself is not flag-gated). |
 
-## Feature flag
+## Gating
 
-`waddles.command-lurk`, default **OFF** (`critical-rules.md` Feature Flags & License Tiers),
-checked in `transform()` after the cheap command-name match. Flag off => no reply.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

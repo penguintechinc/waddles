@@ -174,14 +174,6 @@ def test_non_string_text_is_ignored(host: types.SimpleNamespace) -> None:
     assert _run(transform(event)) is None
 
 
-def test_flag_off_suppresses_reply_and_touches_no_kv(
-    host: types.SimpleNamespace,
-) -> None:
-    host.flag_state["enabled"] = False
-    assert _run(transform(_mod(f"!socials set twitter {TWITTER}"))) is None
-    assert host.kv.calls == []
-
-
 def test_uppercase_command_head_is_recognized(host: types.SimpleNamespace) -> None:
     assert _say("!SOCIALS") == "No socials have been set yet."
 

@@ -46,9 +46,8 @@ forwards the normalized action + raw argument text (no `kv` access) --
 `dispatch` performs every `kv` read/write, the time-token parsing, and the
 relay reply, mirroring `first`'s own process/action-stage split.
 
-Gated behind the PostHog flag ``waddles.command-countdown``, default OFF --
-see `bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (checked only after the command-text match).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -60,10 +59,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-countdown"
 
 SPEC = CommandSpec(name="countdown", sub_modules=frozenset())
 
@@ -188,7 +184,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     No `kv` access here -- only command recognition and forwarding the
     normalized action + raw argument text for `dispatch`. Returns `None` for
     any non-chat payload, text that isn't `!countdown`-shaped (cheap-skip,
-    zero `kv` cost), and while `waddles.command-countdown` is disabled.
+    zero `kv` cost).
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -197,9 +193,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.split(maxsplit=1)[0].lower() if stripped else ""
     if head != f"!{SPEC.name}":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     action: str

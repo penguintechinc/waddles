@@ -97,9 +97,8 @@ and extracts the normalized badge signal (no kv access, no side effect) --
 `dispatch` performs all state reads/writes and the relay confirmation,
 mirroring `pyping`'s own process/action-stage split.
 
-Gated behind the PostHog flag ``waddles.command-lurk`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -110,10 +109,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, kv, log, relay
 from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-lurk"
 
 #: 24h -- well under the host's 30-day `KV_MAX_TTL_S` cap (spec kv limits).
 #: A lurk is a per-session affordance; if a caller never `!unlurk`s, the
@@ -182,9 +178,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         else:
             command, arg = "usage", None
     else:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     log.info("lurk.transform matched", command=command)

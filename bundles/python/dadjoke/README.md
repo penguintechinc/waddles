@@ -7,7 +7,7 @@ with a distinct bank.
 
 | | |
 |---|---|
-| Flag | `waddles.command-dadjoke` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped; **community is required** (no tenant-wide fallback) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -36,7 +36,6 @@ never silently dropped. A pool of exactly one joke still replies.
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-dadjoke` |
 | `storage.kv` | persists custom dad jokes and the last-served joke per community |
 
 ## State

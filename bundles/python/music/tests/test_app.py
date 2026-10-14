@@ -291,13 +291,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _FakeHost()
-    _install(monkeypatch, host, flag_enabled=False)
-    assert _run(transform(_sample_event("!music"))) is None
-    assert _run(transform(_sample_event("!sr some song"))) is None
-
-
 def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:
     result = _run(transform(_sample_event("!music", is_mod=True, is_broadcaster=False)))
     assert result is not None
@@ -1272,19 +1265,6 @@ def test_transform_forwards_only_the_fields_dispatch_needs(
     result = _run(transform(_sample_event(text)))
     assert result is not None
     assert set(result.payload) == keys
-
-
-def test_flag_is_checked_by_key_and_defaults_off(fake_host: _FakeHost) -> None:
-    seen: list[tuple[str, bool]] = []
-
-    def _enabled(key: str, default_value: bool) -> bool:
-        seen.append((key, default_value))
-        return False
-
-    sys.modules["wit_world"].imports.flags = types.SimpleNamespace(enabled=_enabled)
-    assert _run(transform(_sample_event("!sr a song"))) is None
-    assert seen == [("waddles.command-music", False)]
-    assert fake_host.kv_calls == []
 
 
 # -- kv key charset -- regression: gh-631 ---------------------------------------------------------

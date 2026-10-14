@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-scramble"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!scramble` -> a per-community word-unscramble game (!scramble start, !scramble <word>, !scramble giveup). Uses waddle_sdk.community_kv."
 requires-python = ">=3.13"
 dependencies = []

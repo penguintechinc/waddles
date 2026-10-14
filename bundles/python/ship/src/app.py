@@ -1,8 +1,8 @@
 """`!ship <userA> <userB>` -> a fun compatibility percentage. Stateless, deterministic.
 
-No `kv` (only `flags.read` is declared). The percent is a pure function of the two users' UUIDs
-(SHA-256 of the sorted UUID pair, so order never matters): the same pair always gets the same
-answer. A user shipped with themselves gets 100%.
+No `kv` (no permission is declared). The percent is a pure function of the two users' UUIDs (SHA-256
+of the sorted UUID pair, so order never matters): the same pair always gets the same answer. A user
+shipped with themselves gets 100%.
 
 **Users are referenced by UUID, never by username (PII rule).** Each target is resolved by
 `_resolve_target()` (literal UUID, Discord mention, or handle hashed into a UUIDv5 and
@@ -11,7 +11,8 @@ stored or logged -- logs carry only the command name / platform.
 
 Fail-loud: wrong argument count -> usage reply; an unidentifiable target -> explicit reply.
 
-Gated behind the PostHog flag ``waddles.command-ship``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -22,10 +23,8 @@ import uuid
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-ship"
 COMMAND = "!ship"
 
 _USAGE = "Usage: !ship <userA> <userB>"
@@ -89,7 +88,7 @@ def _compute_match(uuid_a: str, uuid_b: str) -> tuple[int, str]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!ship` and build the reply.
 
-    Exact first-token match comes before the flag check. Malformed input is answered
+    Exact first-token match is the only precondition. Malformed input is answered
     explicitly, never silently dropped.
     """
     text = event.payload.get("text")
@@ -97,8 +96,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     args = rest.split()

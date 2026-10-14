@@ -107,11 +107,6 @@ def test_missing_text_ignored_and_wiring_exports(host: _Host) -> None:
     assert _entry_wiring.bundle_dispatch is dispatch
 
 
-def test_flag_off_returns_none(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!iq"))) is None
-
-
 def test_dispatch_relays_and_rejects_bad_payload(host: _Host) -> None:
     out = _run(transform(_event("!iq")))
     assert out is not None

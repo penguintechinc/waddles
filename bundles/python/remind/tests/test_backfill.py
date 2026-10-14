@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from typing import Any
 
 import pytest
@@ -34,7 +33,6 @@ import _entry_wiring
 import app
 from app import (
     _STALE_AFTER_SECONDS,
-    FLAG_KEY,
     _counter_key,
     _format_duration,
     _items_key,
@@ -241,27 +239,6 @@ def test_overdue_and_upcoming_reminders_are_labelled_distinctly(fake_host: _Fake
 
 
 # -- flag fail-closed
-def test_flag_is_requested_with_a_fail_closed_default(fake_host: _FakeHost) -> None:
-    seen: list[tuple[str, bool]] = []
-    sys.modules["wit_world"].imports.flags.enabled = (
-        lambda key, default_value: seen.append((key, default_value)) or default_value
-    )
-    assert _run(transform(_sample_event("!remind"))) is None
-    assert seen == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-remind"
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)
-    assert _run(transform(_sample_event("!remind"))) is None
-
-
-def test_flag_off_does_no_io_and_logs_nothing(fake_host: _FakeHost) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_sample_event(f"!remind set 5m {CANARY}"))) is None
-    assert fake_host.log_calls == [] and fake_host.kv_calls == []
-
-
 # -- PII-free logs
 def test_no_log_line_in_any_flow_contains_reminder_text_duration_or_actor(
     fake_host: _FakeHost,

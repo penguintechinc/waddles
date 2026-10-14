@@ -225,12 +225,6 @@ def _dc(text: str, uid: str = "777", ts: str = "2026-10-05T00:00:00.000Z"):
     return _event(text, platform="discord", extra={"author_id": uid}, occurred_at=ts)
 
 
-def test_disabled_flag_does_nothing(fake_host) -> None:
-    fake_host.flag_state["enabled"] = False
-    assert _run(transform(_tw("!lastseen"))) is None
-    assert fake_host.kv.calls == []
-
-
 def test_chat_message_stamps_activity_silently(fake_host) -> None:
     assert _run(transform(_tw("just chatting", ts="2026-10-05T01:02:03.000Z"))) is None
     key = f"lastseen.user.{_uid('twitch', '555')}"

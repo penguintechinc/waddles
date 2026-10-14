@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from typing import Any
 
 import pytest
@@ -37,7 +36,6 @@ from app import (
     _REEL_TABLE,
     _USAGE,
     DEFAULT_COOLDOWN_SECONDS,
-    FLAG_KEY,
     MAX_COOLDOWN_SECONDS,
     MIN_COOLDOWN_SECONDS,
     _bestpayout_key,
@@ -311,28 +309,6 @@ def test_kv_failure_log_carries_only_op_and_exception_type(
 
 
 # -- flag fail-closed
-def test_flag_is_requested_with_a_fail_closed_default(host: _FakeHost) -> None:
-    seen: list[tuple[str, bool]] = []
-    sys.modules["wit_world"].imports.flags.enabled = (
-        lambda key, default_value: seen.append((key, default_value)) or default_value
-    )
-    assert _run(transform(_sample_event("!slots"))) is None
-    assert seen == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-slots"
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)
-    assert _run(transform(_sample_event("!slots"))) is None
-
-
-def test_flag_off_does_no_io_and_logs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    state = _FakeHost()
-    _install(monkeypatch, state, flag_enabled=False)
-    assert _run(transform(_sample_event(f"!slots {CANARY}", is_mod=True))) is None
-    assert state.log_calls == [] and state.kv_calls == []
-
-
 # -- PII-free logs
 def test_no_log_line_in_any_flow_contains_typed_text_or_the_raw_actor(
     host: _FakeHost, monkeypatch: pytest.MonkeyPatch

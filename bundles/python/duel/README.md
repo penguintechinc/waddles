@@ -50,7 +50,6 @@ no `is_mod`/`is_broadcaster` on the event (Discord today) `set cooldown` is deni
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-duel` |
 | `storage.kv` | persists per-community duel state and win/loss tallies |
 
 ## State (kv, community-scoped only)
@@ -84,11 +83,9 @@ nonexistent target still resolves as a normal duel; documented v1 limitation, no
 
 Also out of scope for this kv-only v1: wagers/stakes, a ranking ladder, and tournaments.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-duel`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!duel` command-name match and before
-the real grammar classification.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 

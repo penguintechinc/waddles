@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from typing import Any
 
 import pytest
@@ -38,7 +37,6 @@ from app import (
     _NO_ENTRANTS_MSG,
     _NOT_OPEN_MSG,
     _PERMISSION_DENIED_MSG,
-    FLAG_KEY,
     MAX_ENTRANTS,
     dispatch,
     transform,
@@ -220,28 +218,6 @@ def test_enter_alias_is_case_insensitive_and_shares_the_raffle_with_bare_raffle(
 
 
 # -- flag fail-closed
-def test_flag_is_requested_with_a_fail_closed_default(fake_host: _FakeExtras) -> None:
-    seen: list[tuple[str, bool]] = []
-    sys.modules["wit_world"].imports.flags.enabled = (
-        lambda key, default_value: seen.append((key, default_value)) or default_value
-    )
-    assert _run(transform(_sample_event("!raffle"))) is None
-    assert seen == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-raffle"
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)
-    assert _run(transform(_sample_event("!raffle"))) is None
-    assert _run(transform(_sample_event("!enter"))) is None
-
-
-def test_flag_off_does_no_io_and_logs_nothing(fake_host: _FakeExtras, fake_kv: FakeKvHost) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_sample_event(f"!raffle {CANARY}", is_mod=True))) is None
-    assert fake_host.log_calls == [] and fake_kv.calls == []
-
-
 # -- PII-free logs
 def test_no_log_line_in_any_flow_contains_typed_text_or_the_raw_actor(
     fake_host: _FakeExtras, fake_kv: FakeKvHost

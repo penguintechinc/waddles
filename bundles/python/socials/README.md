@@ -7,7 +7,7 @@ Distinct from the `social` bundle (`!hug`/`!highfive`/`!pat`/`!social stats`).
 
 | | |
 |---|---|
-| Flag | `waddles.command-socials` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped (platform names + URLs) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -36,7 +36,6 @@ Unknown option, wrong argument count or an unimplemented grammar verb replies wi
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-socials` |
 | `storage.kv` | persists per-community social links and their platform registry |
 
 ## State

@@ -52,10 +52,8 @@ this bundle never stores or logs `event.actor` anywhere (no per-caller state
 at all, unlike `lurk`'s hashed-actor keys), so there is nothing to tokenize
 here in the first place.
 
-Gated behind the PostHog flag ``waddles.command-wheel`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (command-text match first, flag check second, so an
-unrelated event never pays for a host round trip it doesn't need).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -66,11 +64,7 @@ from typing import Any, cast
 
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.flask_core import get_bundle_context
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention (`critical-rules.md`).
-FLAG_KEY = "waddles.command-wheel"
 
 #: The command word this bundle answers to -- matched case-insensitively,
 #: and only as a whole token (`!wheel`/`!wheel ...`), never as a prefix of a
@@ -283,9 +277,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     lowered = stripped.lower()
     if lowered != COMMAND_WORD and not lowered.startswith(COMMAND_WORD + " "):
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     rest = stripped[len(COMMAND_WORD) :].strip()

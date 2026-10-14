@@ -27,7 +27,6 @@ from app import (
     _KV_ERROR_MSG,
     _PERMISSION_DENIED_MSG,
     _USAGE,
-    FLAG_KEY,
     MAX_OPTION_LEN,
     MAX_OPTIONS,
     OPTIONS_KEY,
@@ -279,27 +278,6 @@ def test_every_kv_key_written_passes_the_host_charset_check(fake_host: Any) -> N
 
 
 # -- flag fail-closed
-def test_flag_is_requested_with_a_fail_closed_default(fake_host: Any) -> None:
-    seen: list[tuple[str, bool]] = []
-    fake_host.wit_world.imports.flags.enabled = (
-        lambda key, default_value: seen.append((key, default_value)) or default_value
-    )
-    assert _transform_in("comm-1", "!wheel") is None
-    assert seen == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-wheel"
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)
-    assert _run(transform(_event("!wheel"))) is None
-
-
-def test_flag_off_does_no_io_and_logs_nothing(fake_host: Any) -> None:
-    fake_host.flag_state["enabled"] = False
-    assert _transform_in("comm-1", f"!wheel add {CANARY}", is_mod=True) is None
-    assert fake_host.log_calls == [] and fake_host.kv.calls == []
-
-
 def test_entry_wiring_exports_the_stage_functions() -> None:
     assert _entry_wiring.bundle_transform is app.transform
     assert _entry_wiring.bundle_dispatch is app.dispatch

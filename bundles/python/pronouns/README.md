@@ -5,7 +5,7 @@ First-party (`provider: builtin`, `app_id: waddles.core.example.pronouns`), kv-o
 
 | | |
 |---|---|
-| Flag | `waddles.command-pronouns` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, one hashed key per user, community-scoped by the host |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -43,7 +43,6 @@ itself because it is not an SDK verb. A Twitch handle that equals a reserved ver
 | id | why |
 |---|---|
 | `storage.kv` | persists each user's pronouns under a hashed per-user key |
-| `flags.read` | gates the command behind `waddles.command-pronouns` |
 
 ## State
 
@@ -71,7 +70,7 @@ The raw handle/id is hashed and dropped -- never stored, logged, or put in a key
   and replies "something went wrong"; stored data is never overwritten on a failed/corrupt read.
 - **PII-free logs.** Only op names, command kinds, reason codes and exception types -- never the
   pronouns text, the actor, or a typed target.
-- Eager host imports (`kv`, `log`, `relay`, `feature_enabled`) at module top, required for
+- Eager host imports (`kv`, `log`, `relay`) at module top, required for
   componentize-py wizening (`docs/reference/bundle-host-imports.md`).
 - `transform()` runs the command and builds the reply; `dispatch()` is a pure relay.
 

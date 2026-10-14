@@ -93,15 +93,6 @@ def test_non_chat_payload_is_ignored() -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    world = types.ModuleType("wit_world")
-    world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        flags=types.SimpleNamespace(enabled=lambda key, default_value: False)
-    )
-    monkeypatch.setitem(sys.modules, "wit_world", world)
-    assert _run(transform(_event("!fortune"))) is None
-
-
 @pytest.mark.parametrize("platform", ["twitch", "discord"])
 def test_dispatch_relays_to_origin_platform(platform: str, host) -> None:
     relays, _ = host

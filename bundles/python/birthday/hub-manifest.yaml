@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.birthday
 name: Birthday Bundle (Python)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -36,6 +36,4 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists each user's own month-day-only birthday under a hashed per-user key (birthday.<sha256>)"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-birthday feature flag"
 routes_to: []

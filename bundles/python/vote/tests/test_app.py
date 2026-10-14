@@ -174,17 +174,6 @@ def test_non_matching_ignored(text, host) -> None:
     assert host.kv.store == {}
 
 
-def test_flag_off_and_non_chat(host) -> None:
-    host.flag["on"] = False
-    assert _run(transform(_ev("!vote start", **MOD))) is None
-    assert host.kv.store == {}
-    host.flag["on"] = True
-    ev = PlatformEvent(
-        platform="twitch", event_type="x", actor=None, payload={}, occurred_at=""
-    )
-    assert _run(transform(ev)) is None
-
-
 def test_kv_failure_replies_and_does_not_crash(host) -> None:
     host.kv.fail = True
     assert "went wrong" in _say("!vote")

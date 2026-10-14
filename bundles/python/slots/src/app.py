@@ -52,10 +52,8 @@ stub:
   redeeming payouts) -- out of scope per the no-currency-ties rule above,
   not partially stubbed.
 
-Gated behind the PostHog flag ``waddles.command-slots`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -68,10 +66,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-slots"
 
 #: No sub-modules declared for v1 -- every `VERBS` token other than
 #: `list`/`set` resolves to a usage reply (see `_resolve_command`), never a
@@ -201,8 +196,8 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!slots` and its grammar, via `parse_command`.
 
-    Cheap-skip first (no leading `!slots` token -- `None`, zero cost), flag
-    check second, real grammar parse last -- same ordering as `fish`'s own
+    Cheap-skip first (no leading `!slots` token -- `None`, zero cost), real grammar parse last --
+    same ordering as `fish`'s own
     documented rationale. A recognized-but-malformed `!slots ...` (a
     `CommandUsageError`, or an option this bundle doesn't implement, e.g.
     `!slots enable`) still produces a reply (`"usage"`) since the caller did
@@ -215,9 +210,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() != "!slots":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

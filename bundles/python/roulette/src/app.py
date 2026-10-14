@@ -86,10 +86,8 @@ stub:
 - Any wallet/points-economy integration -- out of scope per the
   no-currency-ties rule above, not partially stubbed.
 
-Gated behind the PostHog flag ``waddles.command-roulette`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -100,10 +98,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-roulette"
 
 #: No sub-modules declared for v1 -- every `VERBS` token other than
 #: `list`/`set` resolves to a usage reply (see `_resolve_command`), never a
@@ -210,7 +205,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!roulette` and its grammar.
 
     Cheap-skip first (no leading `!roulette` token -- `None`, zero cost),
-    flag check second, real grammar parse last -- same ordering as
+    real grammar parse last -- same ordering as
     `slots`/`fish`'s own documented rationale. A recognized-but-malformed
     `!roulette ...` (a `CommandUsageError`, or an option this bundle
     doesn't implement, e.g. `!roulette enable`) still produces a reply
@@ -224,9 +219,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() != "!roulette":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

@@ -5,7 +5,7 @@ First-party (`provider: builtin`, `app_id: waddles.core.example.discord`), kv-on
 
 | | |
 |---|---|
-| Flag | `waddles.command-discord` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped (one key: the invite URL) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -36,7 +36,6 @@ still stored, with a soft warning in the reply. Bad input gets a clear reply, no
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-discord` |
 | `storage.kv` | persists the per-community Discord invite link |
 
 ## State keys

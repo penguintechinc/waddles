@@ -16,7 +16,6 @@ import pytest
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 from app import (
-    FLAG_KEY,
     MAX_URL_LEN,
     URL_KEY,
     DispatchResult,
@@ -175,14 +174,6 @@ def test_missing_text_key_returns_none(host: _Host) -> None:
         platform="twitch", event_type="channel.follow", actor=None, payload={}, occurred_at=""
     )
     assert _run(transform(event)) is None
-
-
-def test_flag_off_returns_none_and_touches_no_kv(host: _Host) -> None:
-    host.flag_enabled = False
-    assert _run(transform(_event("!merch set " + _GOOD_URL, badges=_MOD))) is None
-    assert host.flag_keys == [FLAG_KEY]
-    assert FLAG_KEY == "waddles.command-merch"
-    assert host.kv.calls == []
 
 
 def test_command_match_is_case_and_whitespace_insensitive(host: _Host) -> None:
@@ -475,7 +466,7 @@ def test_logs_never_contain_url_text_or_actor(host: _Host) -> None:
 def test_host_imports_are_eager_module_attributes() -> None:
     import app
 
-    for name in ("kv", "log", "relay", "feature_enabled"):
+    for name in ("kv", "log", "relay"):
         assert hasattr(app, name), f"{name} must be imported at module top (componentize-py)"
 
 

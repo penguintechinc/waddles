@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Flag | `waddles.command-about` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped (`community_id=None` = valid tenant-wide sentinel) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -31,7 +31,6 @@ usage -- never silently dropped. `!bot` is a pure alias, normalized onto `!about
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-about` |
 | `storage.kv` | persists the per-community custom blurb |
 
 No egress, no DB tables.

@@ -242,12 +242,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring(fake_host: _FakeHost) 
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_every_reply(fake_host: _FakeHost) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_sample_event("!first"))) is None
-    assert _run(transform(_sample_event("!first list"))) is None
-
-
 # ---------------------------------------------------------------------------
 # claim: first-wins / subsequent-callers
 # ---------------------------------------------------------------------------

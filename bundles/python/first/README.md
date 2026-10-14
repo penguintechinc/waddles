@@ -7,7 +7,7 @@ baked into the day's keys, so a new day is simply a fresh empty window.
 
 | | |
 |---|---|
-| Flag | `waddles.command-first` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped; **community is required** (no tenant-wide fallback) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -36,7 +36,6 @@ usage -- never silently dropped.
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-first` |
 | `storage.kv` | persists per-community first-claimer state and the leaderboard registry |
 
 ## State

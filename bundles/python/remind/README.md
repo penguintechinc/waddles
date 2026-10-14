@@ -59,17 +59,14 @@ delivery; `list` never mutates, so an ancient overdue reminder still shows until
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists per-community reminders and their counters. |
-| `flags.read` | Gates the command behind its `waddles.command-remind` feature flag. |
 
 The bundle also reads the host `clock` (`now_millis`) to compute due times. No `db`
 (`data.tables: []`), no egress, no moderator-gated verb (every caller manages only their own
 reminders).
 
-## Feature flag
+## Gating
 
-`waddles.command-remind`, **default OFF**, checked after the cheap command match and before the
-grammar parse, requested with `default=False` (flag outage / missing `wit_world` -> off). While off
-nothing is parsed, stored or logged.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

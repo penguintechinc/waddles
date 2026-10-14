@@ -10,13 +10,12 @@ State is community-scoped without any manual hashing: the key is a plain literal
 (`core/bundle_host_kv/src/scope.rs::KvScope`). The key uses `.`, never `:` (the host's
 reserved namespace separator, gh-631). No actor identity is stored.
 
-Ordering inside `transform()`: cheap command match first, then the PostHog flag
-``waddles.command-uptime`` (default OFF), then command-grammar parsing, then `kv`. A `kv`
-failure is reclassified into a private `_KvError`, logged at ERROR and answered with an
-explicit reply -- never a silent no-op. Logs are PII-free: only op names and exception
-types are ever logged, never message text or the actor.
+Ordering inside `transform()`: cheap command match first, then command-grammar parsing, then `kv`. A
+`kv` failure is reclassified into a private `_KvError`, logged at ERROR and answered with an
+explicit reply -- never a silent no-op. Logs are PII-free: only op names and exception types are
+ever logged, never message text or the actor.
 
-`kv`, `log`, `relay`, `clock` and `feature_enabled` are imported at MODULE LOAD on purpose:
+`kv`, `log`, `relay` and `clock` are imported at MODULE LOAD on purpose:
 componentize-py only wizens a WIT host-import that is imported eagerly, so a capability
 imported only inside a function is absent from `wit_world.imports` at runtime
 (`docs/reference/bundle-host-imports.md`).
@@ -28,11 +27,7 @@ from typing import Any, cast
 
 from waddle_sdk import clock, kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention (default OFF).
-FLAG_KEY = "waddles.command-uptime"
 
 #: The single `kv` key this bundle owns (community-scoped by the host; `.`, never `:`).
 START_KEY = "uptime.start"
@@ -126,9 +121,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head = text.strip().partition(" ")[0]
     if head.lower() != _COMMAND:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

@@ -143,13 +143,6 @@ def test_unknown_ticket_usage_and_nonmatching(host: _Host) -> None:
     )  # only the two lookups above; non-matching text costs none
 
 
-def test_flag_off_and_key_charset(host: _Host) -> None:
-    _say("!ticket broken")
-    assert all(":" not in k for k in host.kv.store)
-    host.flag = False
-    assert _run(transform(_event("!ticket again"))) is None
-
-
 def test_creator_stored_as_uuid_not_username(host: _Host) -> None:
     _say("!ticket broken", actor="SecretName")
     raw = host.kv.store["ticket.item.1"].decode()

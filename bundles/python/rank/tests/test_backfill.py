@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from typing import Any
 
 import pytest
@@ -30,7 +29,6 @@ import app
 from app import (
     _KNOWN_COMMANDS,
     _PERMISSION_DENIED_MSG,
-    FLAG_KEY,
     _index_key,
     _pseudonym,
     _resolve_adjust,
@@ -216,27 +214,6 @@ def test_kv_failure_log_carries_only_op_and_exception_type(
 
 
 # -- flag fail-closed
-def test_flag_is_requested_with_a_fail_closed_default(host: _FakeHost) -> None:
-    seen: list[tuple[str, bool]] = []
-    sys.modules["wit_world"].imports.flags.enabled = (
-        lambda key, default_value: seen.append((key, default_value)) or default_value
-    )
-    assert _run(transform(_sample_event("!rank"))) is None
-    assert seen == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-rank"
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)
-    assert _run(transform(_sample_event("!rank"))) is None
-
-
-def test_flag_off_does_no_io_and_logs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    off = _install(monkeypatch, flag_enabled=False)
-    assert _run(transform(_sample_event(f"!rank add 5 {CANARY}", is_mod=True))) is None
-    assert off.log_calls == [] and off.kv.calls == [] and off.db.calls == []
-
-
 # -- PII-free logs
 def test_no_log_line_in_any_flow_contains_a_typed_target_or_the_raw_actor(host: _FakeHost) -> None:
     """PII-free-log regression: typed targets / amounts / grammar text and the actor never log."""

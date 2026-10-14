@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| Flag | `waddles.command-memories` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, one hashed per-user JSON-blob key |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -41,7 +41,6 @@ as `3`.
 | id | why |
 |---|---|
 | `storage.kv` | persists each user's memories as one hashed JSON blob |
-| `flags.read` | gates the commands behind `waddles.command-memories` |
 
 ## State
 
@@ -75,7 +74,7 @@ nobody has written to simply reads as "They have no memories yet."
 - **Not atomic.** Read-modify-write on the blob can lose one of two *simultaneous* writes from the
   *same* user. Accepted for chat-rate traffic; documented rather than hidden.
 - Memory text is user-authored and publicly readable -- do not `!remember` anything private.
-- Eager host imports (`kv`, `log`, `relay`, `feature_enabled`) at module top, required for
+- Eager host imports (`kv`, `log`, `relay`) at module top, required for
   componentize-py wizening (`docs/reference/bundle-host-imports.md`).
 - The shared `waddle_sdk.command` grammar is not used: it models one command name with a fixed verb
   set, while this bundle owns three command heads with free-text / id / mention arguments.

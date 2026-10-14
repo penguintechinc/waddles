@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.guess
 name: Guess Bundle (Python)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -36,6 +36,4 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the in-progress per-community guess round (secret number, bounds, attempt count)"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-guess feature flag"
 routes_to: []

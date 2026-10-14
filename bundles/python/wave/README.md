@@ -33,16 +33,13 @@ target. All logic runs in `transform()`; `dispatch()` is a pure relay.
 
 | Id | Why |
 |---|---|
-| `flags.read` | Reads the `waddles.command-wave` PostHog flag via `feature_enabled` to gate the command. |
 
 Nothing else: no `storage.kv`/`db` (stateless), no egress. Replies go over the `relay` host
 import.
 
-## Feature flag
+## Gating
 
-`waddles.command-wave`, **default OFF** -- checked after the cheap `!wave` match and before target
-classification, requested with `default=False` so a flag outage or missing `wit_world` fails
-closed. While off the bundle neither replies, draws, nor logs.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

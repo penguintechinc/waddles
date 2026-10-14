@@ -283,12 +283,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _FakeHost()
-    _install(monkeypatch, host, flag_enabled=False)
-    assert _run(transform(_sample_event("!flip"))) is None
-
-
 def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:
     result = _run(transform(_sample_event("!flip", is_mod=True, is_broadcaster=False)))
     assert result is not None

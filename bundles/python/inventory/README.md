@@ -57,7 +57,6 @@ only moderators/broadcasters can adjust inventories
 | id | Why |
 |---|---|
 | `storage.kv` | Per-user `item -> row_id` directory (`inventory.dir.<pseudonym>`) -- the only way to list/lookup a user's rows, since the `db` interface has no column-equality query. |
-| `flags.read` | Reads the `waddles.command-inventory` feature flag that gates the command. |
 
 The `db` capability itself is granted by the manifest's `data.tables: [inventory_items]` (not by a
 `permissions` entry). No egress (`egress: []`).
@@ -140,11 +139,9 @@ gh-674; the suite drives every command and outcome with a sentinel string as act
 target, and asserts its absence plus the exact per-message field set). Per-user keys and the
 `actor_hash` column are SHA-256 pseudonyms, never raw names.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-inventory`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap alias match and before the real
-grammar parse.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Known, pre-existing platform gap (not fixed by this PR)
 

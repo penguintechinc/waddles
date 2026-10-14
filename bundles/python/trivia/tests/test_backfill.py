@@ -36,7 +36,6 @@ from app import (
     _ACTIVE_TTL_SECONDS,
     _SCORE_REGISTRY_KEY,
     _SCORE_TOP_N,
-    FLAG_KEY,
     QUESTION_BANK,
     _display_handle,
     _normalize_answer,
@@ -275,27 +274,6 @@ def test_kv_backend_error_log_carries_only_op_and_exception_type(
 
 
 # -- flag fail-closed
-def test_flag_is_requested_with_a_fail_closed_default(fake_host: _FakeHost) -> None:
-    seen: list[tuple[str, bool]] = []
-    sys.modules["wit_world"].imports.flags.enabled = (
-        lambda key, default_value: seen.append((key, default_value)) or default_value
-    )
-    assert _run(transform(_sample_event("!trivia"))) is None
-    assert seen == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-trivia"
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)
-    assert _run(transform(_sample_event("!trivia"))) is None
-
-
-def test_flag_off_does_no_io_and_logs_nothing(fake_host: _FakeHost) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_sample_event(f"!trivia answer {CANARY}"))) is None
-    assert fake_host.log_calls == [] and fake_host.kv_calls == []
-
-
 # -- PII-free logs / keys
 def test_raw_actor_never_reaches_a_kv_key_or_value(fake_host: _FakeHost) -> None:
     _win(fake_host, f"{CANARY}_actor")

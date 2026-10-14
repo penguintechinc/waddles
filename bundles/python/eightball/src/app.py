@@ -8,13 +8,9 @@ may currently be a raw username rather than an opaque token. Modeled on
 caveat: routed through a hand-authored `_entry_wiring.py`, not
 `bundle_compiler`, which is still stubbed).
 
-Gated behind the PostHog flag ``waddles.command-8ball`` (`critical-rules.md`
-Feature Flags -- new flags default OFF until validated) via
-``waddle_sdk.flask_core.feature_flags.feature_enabled``, the WIT ``%flags``
-import shim. The flag check runs only *after* the command-text match (not
-before) so an unrelated event never pays for a host round trip it doesn't
-need -- a flag-disabled `!8ball` is indistinguishable from an unrecognized
-command: no reply, no action-stage invocation.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs. `transform()` only matches the command text -- an unrelated
+event never pays for a host round trip it doesn't need.
 
 Answers drawn via the stdlib ``random`` module: the `stage` WIT world
 (`wit/waddle-bundle/stage.wit`) declares no dedicated ``random`` import, but
@@ -32,11 +28,7 @@ import re
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention (`critical-rules.md`).
-FLAG_KEY = "waddles.command-8ball"
 
 #: Matches `!8ball` alone or `!8ball <anything>` -- the question's content is
 #: never inspected (the reply doesn't depend on it), only whether the command
@@ -68,15 +60,11 @@ ANSWERS: tuple[str, ...] = (
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: `!8ball` -> a random canned-answer reply.
 
-    Returns `None` (no reply, event dropped) for any non-matching payload or
-    while the `waddles.command-8ball` flag is disabled -- never raises over
+    Returns `None` (no reply, event dropped) for any non-matching payload -- never raises over
     an event this bundle was never meant to react to.
     """
     text = event.payload.get("text")
     if not isinstance(text, str) or not COMMAND_PATTERN.match(text.strip()):
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     answer = random.choice(ANSWERS)  # noqa: S311 - a game reply, not a security decision

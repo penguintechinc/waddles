@@ -217,12 +217,6 @@ def _registry(fake_host) -> dict:
     return json.loads(fake_host.kv.store[app.REGISTRY_KEY])
 
 
-def test_disabled_flag_suppresses_everything(fake_host) -> None:
-    fake_host.flag_state["enabled"] = False
-    assert _run(transform(_mod("!alias set hi !hello"))) is None
-    assert fake_host.kv.calls == []
-
-
 def test_bang_message_without_alias_costs_one_kv_get(fake_host) -> None:
     assert _run(transform(_event("!whatever"))) is None
     assert fake_host.kv.calls == [("get", (app.REGISTRY_KEY,))]

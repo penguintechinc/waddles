@@ -104,16 +104,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring() -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`waddles.command-slap` OFF -> a matching command still produces no reply."""
-    flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: False)
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(flags=flags_mod)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-    assert _run(transform(_sample_event("!slap"))) is None
-
-
 def _sample_envelope(platform: str, text: str, *, channel_id: str | None = "12345") -> StageEnvelope:
     return StageEnvelope(
         tenant="tenant-1",

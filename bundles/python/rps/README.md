@@ -73,7 +73,6 @@ bot>    rps cooldown set to 0s
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists per-community rock-paper-scissors tallies, cooldown timestamps and config. |
-| `flags.read` | Gates the command behind its `waddles.command-rps` feature flag. |
 
 No `db` (`data.tables: []`), no egress. Mod gate: `set cooldown` requires a real `is_mod` or
 `is_broadcaster` `True`; **absent** badge fields (e.g. the Discord normalizer today) are **denied**
@@ -101,11 +100,9 @@ Logs carry only `command`, `detail` (`invalid_choice`/`cooldown`/`win`/`lose`/`t
 arguments, grammar text or `event.actor`. Regression:
 `tests/test_backfill.py::test_no_log_line_in_any_flow_contains_typed_text_or_the_raw_actor`.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-rps`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!rps` command-name match and before
-the real grammar classification.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 

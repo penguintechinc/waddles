@@ -89,7 +89,7 @@ up to 200 entries.
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists the per-community shoutout template and auto-shoutout list (plus the `auto`/`ai` sub-module flags). |
-| `flags.read` | Gates the command behind its `waddles.command-shoutout` feature flag (and reads the license tier for `enable ai`). |
+| `flags.read` | Reads the license tier for `enable ai` (the command itself is not flag-gated). |
 
 No `db` (`data.tables: []`) and no egress. See `bundle.yaml` / `hub-manifest.yaml`.
 
@@ -114,10 +114,9 @@ Logs carry only `command`, `op`, `community`, `sub_module`, `role_signal` and ex
 -- never a target username, template text, grammar text or `event.actor`. Regression:
 `tests/test_backfill.py::test_no_log_line_in_any_flow_contains_a_target_template_or_actor`.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-shoutout`, defaulted OFF -- checked in `transform()` after the cheap
-`!so` command-name match and before the real grammar resolution.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 

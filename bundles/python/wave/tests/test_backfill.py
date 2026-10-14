@@ -21,7 +21,6 @@ from app import (
     _SOLO_WAVES,
     _TARGETED_WAVES,
     _USAGE,
-    FLAG_KEY,
     DispatchResult,
     _normalize_target,
     dispatch,
@@ -166,34 +165,6 @@ def test_malformed_targets_reply_usage_and_never_pick_a_template(
 
     monkeypatch.setattr(app.random, "choice", _boom)
     assert _reply_text(_run(transform(_event(f"!wave {bad}")))) == _USAGE
-
-
-def test_flag_is_checked_with_a_fail_closed_default(host: _Host) -> None:
-    _run(transform(_event("!wave")))
-    assert host.flag_calls == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-wave"
-
-
-def test_flag_server_outage_echoing_the_default_keeps_the_command_off(host: _Host) -> None:
-    host.flag_value = None
-    assert _run(transform(_event("!wave bob"))) is None
-    assert host.log_calls == []
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)  # makes `import wit_world` raise
-    assert _run(transform(_event("!wave"))) is None
-
-
-def test_flag_off_does_not_log_or_draw(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
-    host.flag_value = False
-
-    def _boom(_seq: Any) -> str:
-        raise AssertionError("random.choice must not run while the flag is off")
-
-    monkeypatch.setattr(app.random, "choice", _boom)
-    assert _run(transform(_event("!wave bob"))) is None
-    assert host.log_calls == []
 
 
 @pytest.mark.parametrize("payload", [{}, {"text": None}, {"text": 7}, {"text": ["!wave"]}])

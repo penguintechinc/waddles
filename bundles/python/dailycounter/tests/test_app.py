@@ -224,12 +224,6 @@ def _make(fake_host, name: str = "deaths") -> None:
     assert "Created" in _say(_m(f"!dailycounter add {name}"))
 
 
-def test_disabled_flag_suppresses_everything(fake_host) -> None:
-    fake_host.flag_state["enabled"] = False
-    assert _run(transform(_m("!dailycounter add deaths"))) is None
-    assert fake_host.kv.calls == []
-
-
 def test_unregistered_bang_costs_one_registry_get(fake_host) -> None:
     assert _run(transform(_event("!nothing"))) is None
     assert fake_host.kv.calls == [("get", (app.REGISTRY_KEY,))]

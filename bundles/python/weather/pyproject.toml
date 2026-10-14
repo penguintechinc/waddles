@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-weather"
-version = "1.0.0"
+version = "1.0.1"
 description = "!weather <location> -> current conditions from WeatherAPI.com (API key via secret-ref only)"
 requires-python = ">=3.13"
 dependencies = []

@@ -32,14 +32,13 @@ reply -- never a hashed guess; a handle that is also a verb (``list``, ``add``, 
 looked up directly. The host scopes `kv` per `(tenant, community, app_id)` so pronouns are
 per-community; a user sets them once in each community.
 
-Ordering inside `transform()`: cheap command match, then the PostHog flag
-``waddles.command-pronouns`` (default OFF), then grammar classification, then `kv`. A `kv`
-failure (or a corrupt stored value) is reclassified into a private `_KvError`, logged at ERROR
-and answered with an explicit failure notice -- never a silent no-op. Logs are PII-free: only
-op names, command kinds, reason codes and exception types -- never the pronouns text, the
-actor, or a typed target.
+Ordering inside `transform()`: cheap command match, then grammar classification, then `kv`. A `kv`
+failure (or a corrupt stored value) is reclassified into a private `_KvError`, logged at ERROR and
+answered with an explicit failure notice -- never a silent no-op. Logs are PII-free: only op names,
+command kinds, reason codes and exception types -- never the pronouns text, the actor, or a typed
+target.
 
-`kv`, `log`, `relay` and `feature_enabled` are imported at MODULE LOAD on purpose:
+`kv`, `log` and `relay` are imported at MODULE LOAD on purpose:
 componentize-py only wizens a WIT host-import that is imported eagerly, so a capability
 imported only inside a function is absent from `wit_world.imports` at runtime
 (`docs/reference/bundle-host-imports.md`).
@@ -54,11 +53,7 @@ from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
 from waddle_sdk.command import VERBS, CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention (default OFF).
-FLAG_KEY = "waddles.command-pronouns"
 
 #: `kv` key prefix; the full key is `pronouns.<sha256 hex>` (colon-free, 73 bytes).
 KEY_PREFIX = "pronouns."
@@ -340,9 +335,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head = text.strip().partition(" ")[0]
     if head.lower() != _COMMAND:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     command = _classify(text)

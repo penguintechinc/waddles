@@ -53,17 +53,14 @@ activation shape today, so refusing it would make the bundle nonfunctional there
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists the per-community rules text. |
-| `flags.read` | Gates the command behind its `waddles.command-rules` feature flag. |
 
 No `db`, no egress. Mod gate: `set`/`clear` require a real `is_mod` or `is_broadcaster` `True`;
 **absent** badge fields (e.g. the Discord normalizer today) are **denied** (fail closed) with zero
 `kv` access, and the denial log carries only `command` + the role signal -- never the attempted text.
 
-## Feature flag
+## Gating
 
-`waddles.command-rules`, **default OFF**, checked after the cheap `!rules` match and before grammar
-resolution, requested with `default=False` (flag outage / missing `wit_world` -> off). While off
-nothing is parsed, stored or logged.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

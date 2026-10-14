@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Flag | `waddles.command-choose` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`, no DB, no egress) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -32,13 +32,11 @@ Bounds (all fail loud with a reply -- never truncated or dropped): fewer than 2 
 
 | id | why |
 |---|---|
-| `flags.read` | reads the `waddles.command-choose` PostHog flag to gate the command |
 
 All logic runs in `transform()`; `dispatch()` is a pure relay to the event's own platform.
 
 ## Behavior notes
 
-- **Flag fails closed** (`default=False`); flag OFF = no reply, same as an unrecognized command.
 - **PII-free logs.** Only platform + option *count* are logged -- never the option text, the
   actor, or the raw argument (gh-674). The chosen option goes back to the same public channel.
 
