@@ -3177,6 +3177,13 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "connections:resolve"
+        # feature/dataplane-scope-resolver (numeric-id migration, Slice A) -- svc-ingest has no DB;
+        # it resolves (platform, guild/channel) -> numeric (tenant_id, community_id) through
+        # hub-api's GET /api/v1/internal/dataplane/resolve-scope. A SEPARATE scope from
+        # connections:resolve (least privilege: this one returns ids only, never a token), granted
+        # to this identity alone and, like the grant above, only rendered while
+        # pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled is true.
+        - "dataplane:resolve-scope"
   # Every calling pod projects its own ServiceAccount token bound to
   # `bootstrapAudience` -- this is the bootstrap credential, no shared
   # secret distributed to callers. Reusable via the

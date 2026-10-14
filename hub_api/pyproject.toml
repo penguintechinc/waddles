@@ -61,6 +61,7 @@ convention = "google"
 # opt in), not a naming-convention slip.
 "blueprints/v1/auth.py" = ["S101", "N815"]
 "blueprints/v1/identity.py" = ["N815"]
+"blueprints/v1/dataplane_scope.py" = ["N815"]  # wire DTOs are camelCase by API contract
 "blueprints/v1/passkey.py" = ["N815"]
 "blueprints/v1/profile.py" = ["N815"]
 "blueprints/v1/user_management.py" = ["N815"]
