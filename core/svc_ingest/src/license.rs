@@ -137,11 +137,13 @@ pub const DYNAMIC_CONNECTIONS_ENV: &str = "FLAG_WADDLES_INGEST_DYNAMIC_CONNECTIO
 /// [`dynamic_connections_enabled`] for why bypass is deliberately excluded.
 fn resolve_feature_flag(posthog: Option<bool>, env_raw: Option<&str>) -> bool {
     posthog
-        .or_else(|| match env_raw.map(|raw| raw.trim().to_ascii_lowercase()) {
-            Some(v) if matches!(v.as_str(), "true" | "1" | "on" | "yes") => Some(true),
-            Some(v) if matches!(v.as_str(), "false" | "0" | "off" | "no") => Some(false),
-            _ => None, // unset or unrecognized: fall through to the default
-        })
+        .or_else(
+            || match env_raw.map(|raw| raw.trim().to_ascii_lowercase()) {
+                Some(v) if matches!(v.as_str(), "true" | "1" | "on" | "yes") => Some(true),
+                Some(v) if matches!(v.as_str(), "false" | "0" | "off" | "no") => Some(false),
+                _ => None, // unset or unrecognized: fall through to the default
+            },
+        )
         .unwrap_or(false)
 }
 
@@ -307,7 +309,10 @@ mod tests {
             }))
             .collect();
         assert_eq!(derived, DYNAMIC_CONNECTIONS_ENV);
-        assert_eq!(DYNAMIC_CONNECTIONS_FLAG, "waddles.ingest-dynamic-connections");
+        assert_eq!(
+            DYNAMIC_CONNECTIONS_FLAG,
+            "waddles.ingest-dynamic-connections"
+        );
     }
 
     #[test]
@@ -344,7 +349,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         // SAFETY: serialized by ENV_LOCK.
         unsafe { std::env::remove_var(DYNAMIC_CONNECTIONS_ENV) };
-        assert!(!dynamic_connections_enabled(None), "no client, no env -> OFF");
+        assert!(
+            !dynamic_connections_enabled(None),
+            "no client, no env -> OFF"
+        );
         assert!(
             !dynamic_connections_enabled(Some(&client)),
             "bypass must NOT turn a default-OFF capability flag on"

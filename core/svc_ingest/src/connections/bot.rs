@@ -209,7 +209,10 @@ async fn acquire<C: ConnectionsApi>(
                     drop_member("identity_mismatch");
                     continue;
                 }
-                metrics.tokens_acquired_total.with_label_values(&[cause]).inc();
+                metrics
+                    .tokens_acquired_total
+                    .with_label_values(&[cause])
+                    .inc();
                 if token.is_none() {
                     token = Some(creds.access_token);
                 }
@@ -348,7 +351,10 @@ pub async fn run_bot<C, A, M>(
             }
         };
 
-        metrics.bot_reconnects_total.with_label_values(&[cause]).inc();
+        metrics
+            .bot_reconnects_total
+            .with_label_values(&[cause])
+            .inc();
         let channels = join_list(&members);
         let irc_cfg = twitch::irc_config(
             &irc.host,
@@ -375,7 +381,11 @@ pub async fn run_bot<C, A, M>(
             Ok(conn) => conn,
             Err(err) => {
                 let auth_rejected = matches!(err, TwitchError::RegistrationRejected(_));
-                cause = if auth_rejected { "auth_rejected" } else { "error" };
+                cause = if auth_rejected {
+                    "auth_rejected"
+                } else {
+                    "error"
+                };
                 if auth_rejected {
                     // Re-resolve (hub-api refreshes) on the next pass -- never
                     // stop forever on an auth failure a refresh may cure.
@@ -462,12 +472,18 @@ async fn route_message<A: EventAppender, M: SpineMetrics>(
     msg: &ChatMessage,
 ) {
     if crate::normalize::is_self_message(&msg.sender, bot_login) {
-        metrics.events_routed_total.with_label_values(&["self_echo"]).inc();
+        metrics
+            .events_routed_total
+            .with_label_values(&["self_echo"])
+            .inc();
         return;
     }
     let channel = msg.channel.trim_start_matches('#').to_ascii_lowercase();
     let Some(owners) = routes.get(channel.as_str()) else {
-        metrics.events_routed_total.with_label_values(&["unrouted"]).inc();
+        metrics
+            .events_routed_total
+            .with_label_values(&["unrouted"])
+            .inc();
         tracing::debug!("message for a channel this bot does not serve; dropped");
         return;
     };
@@ -488,7 +504,10 @@ async fn route_message<A: EventAppender, M: SpineMetrics>(
         )
         .await
         {
-            Ok(_) => metrics.events_routed_total.with_label_values(&["published"]).inc(),
+            Ok(_) => metrics
+                .events_routed_total
+                .with_label_values(&["published"])
+                .inc(),
             Err(err) => {
                 metrics
                     .events_routed_total

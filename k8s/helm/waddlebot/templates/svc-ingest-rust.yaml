@@ -56,7 +56,12 @@ spec:
         app.kubernetes.io/component: svc-ingest-rust
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      # Dedicated identity (dynamic Twitch connections, flag waddles.ingest-dynamic-connections)
+      # -- hub-api's machine-JWT bootstrap TokenReviews this pod's projected token and maps
+      # the ServiceAccount to serviceJwt.identities.svc-ingest (scope connections:resolve,
+      # `system` tenant); see templates/service-jwt-rbac.yaml. Mounted unconditionally (a
+      # flag-OFF pod simply never reads it) so flipping the flag never needs a pod spec change.
+      serviceAccountName: svc-ingest
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -169,10 +174,40 @@ spec:
               name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: TWITCH_OAUTH_TOKEN
               optional: true
-        - name: TWITCH_NICK
+        # fix/svc-ingest-twitch-env-names -- the binary (core/svc_ingest/src/config.rs) reads
+        # TWITCH_IRC_NICK / TWITCH_IRC_CHANNEL; this Deployment used to set TWITCH_NICK /
+        # TWITCH_CHANNELS (the legacy Python names), which the Rust receiver never saw, so the
+        # static fallback silently never started. The binary takes ONE channel, so only the
+        # first entry of the (legacy, plural) oauth.twitch.channels list is passed. This is the
+        # STATIC path -- superseded when the dynamic-connections flag is ON.
+        - name: TWITCH_IRC_NICK
           value: {{ .Values.oauth.twitch.nick | default "" | quote }}
-        - name: TWITCH_CHANNELS
-          value: {{ .Values.oauth.twitch.channels | default "" | quote }}
+        - name: TWITCH_IRC_CHANNEL
+          value: {{ .Values.oauth.twitch.channels | default "" | splitList "," | first | trim | quote }}
+        # Dynamic Twitch connections (flag waddles.ingest-dynamic-connections, default OFF;
+        # see values.yaml pipeline.rustDataPlane.svcIngest.dynamicConnections). hub-api's
+        # machine-JWT bootstrap endpoint + this pod's audience-scoped projected SA token
+        # (mounted below) -- mirrors templates/svc-action-rust.yaml. HUB_API_URL above is the
+        # REST base: hub-api serves REST as plain in-cluster HTTP (no CA to mount); an https
+        # HUB_API_URL plus HUB_API_REST_CA_FILE is supported by the binary for when it does.
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        # Audience-scoped projected token (waddlebot.serviceJwtBootstrapVolume below) -- NOT the
+        # generic default k8s SA token path (wrong audience; hub-api's TokenReview rejects it).
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        {{- $dynamicConnections := .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict }}
+        - name: INGEST_CONNECTIONS_POLL_SECS
+          value: {{ $dynamicConnections.pollSeconds | default 60 | quote }}
+        - name: INGEST_DYNAMIC_SCOPE_MODE
+          value: {{ $dynamicConnections.scopeMode | default "binding" | quote }}
+        # Docker ENV baseline for data-plane feature flags (`FLAG_<KEY>`), same convention as
+        # svc-process-rust.yaml's extraEnv. The dynamic-connections flag is OFF unless set
+        # here (alpha) or ON in PostHog. NOT usable for license-gated flags.
+        {{- range $key, $value := .Values.pipeline.rustDataPlane.svcIngest.extraEnv }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
         {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
@@ -204,12 +239,14 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
 ---
 apiVersion: v1
 kind: Service

@@ -280,7 +280,10 @@ mod tests {
         let debug = format!("{r:?}");
         let display = r.access_token.to_string();
         assert!(!debug.contains("SUPER-SECRET"), "Debug leaked: {debug}");
-        assert!(!display.contains("SUPER-SECRET"), "Display leaked: {display}");
+        assert!(
+            !display.contains("SUPER-SECRET"),
+            "Display leaked: {display}"
+        );
         assert!(debug.contains("redacted"));
     }
 
@@ -295,7 +298,10 @@ mod tests {
 
     #[test]
     fn normalize_login_is_a_strict_allow_list() {
-        assert_eq!(normalize_login("#SomeChannel").as_deref(), Some("somechannel"));
+        assert_eq!(
+            normalize_login("#SomeChannel").as_deref(),
+            Some("somechannel")
+        );
         assert_eq!(normalize_login("  bot_01 ").as_deref(), Some("bot_01"));
         assert_eq!(normalize_login(""), None);
         assert_eq!(normalize_login("#"), None);
@@ -311,7 +317,11 @@ mod tests {
             "chan:evil",
             "../x",
         ] {
-            assert_eq!(normalize_login(hostile), None, "{hostile:?} must be rejected");
+            assert_eq!(
+                normalize_login(hostile),
+                None,
+                "{hostile:?} must be rejected"
+            );
         }
     }
 }

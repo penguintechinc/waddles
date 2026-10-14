@@ -1384,6 +1384,25 @@ pipeline:
       # global.envelopeBindingKeys once any receiver is used, same requirement as
       # svcAction's own field below.
       envelopeBindingActiveKid: ""
+      # Dynamic Twitch connections (core/svc_ingest src/connections/; see its README).
+      # The feature itself is gated by the flag `waddles.ingest-dynamic-connections`
+      # (DEFAULT OFF -- nothing below changes behavior while it is OFF): ON replaces the
+      # static TWITCH_IRC_* receiver with a supervisor that resolves channels + OAuth tokens
+      # from hub-api's connection store. Enable via PostHog, or -- with no PostHog (alpha) --
+      # the Docker ENV baseline `extraEnv.FLAG_WADDLES_INGEST_DYNAMIC_CONNECTIONS: "true"`.
+      dynamicConnections:
+        # INGEST_CONNECTIONS_POLL_SECS -- seconds between hub-api list/reconcile passes (5..3600).
+        pollSeconds: 60
+        # INGEST_DYNAMIC_SCOPE_MODE -- how a binding maps to its spine tenant/community scope.
+        #   binding (default, fail closed): use the binding's own tenantSlug/communityName,
+        #     skipping (and counting) any binding hub-api sends without them.
+        #   runner: publish everything under pipeline.runnerTenantSlug -- SINGLE-TENANT
+        #     deployments only (alpha); an explicit opt-in, never a silent fallback.
+        scopeMode: "binding"
+      # Docker ENV baseline for data-plane feature flags (`FLAG_<KEY>`: key uppercased,
+      # `.`/`-` -> `_`) -- the same convention as svcProcess.extraEnv. NOT usable for
+      # license-gated flags. Example: FLAG_WADDLES_INGEST_DYNAMIC_CONNECTIONS: "true".
+      extraEnv: {}
       resources:
         requests:
           cpu: "100m"
@@ -3152,10 +3171,21 @@ serviceJwt:
       serviceAccount: svc-presentation
       allowedScopes:
         - "identity:displayname:read"
-    # svc-ingest isn't in this Rust-data-plane identities map yet (still
-    # legacy/Python) but is one of egressProxy.allowedCallerServices --
-    # add its identity+`egress:connect` scope here once it mints machine
-    # JWTs, matching svc-process/svc-action above.
+    # Dynamic Twitch connections (core/svc_ingest src/connections/, flag
+    # waddles.ingest-dynamic-connections): svc-ingest-rust resolves Twitch IRC channels +
+    # OAuth tokens from hub-api's internal provider-connections REST routes
+    # (hub_api/blueprints/v1/provider_connections.py). Those routes require scope
+    # `connections:resolve` AND a `system` tenant claim (operator plane, cross-tenant) --
+    # the issuer stamps `tenant` from THIS allow-list entry, never from the caller. Exactly
+    # one scope: this identity never mints pseudonyms, resolves display names, or uses
+    # egress. (svc-ingest is also one of egressProxy.allowedCallerServices -- add
+    # `egress:connect` here only once it actually calls the egress proxy.)
+    svc-ingest:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-ingest"
+      serviceAccount: svc-ingest
+      tenant: system
+      allowedScopes:
+        - "connections:resolve"
   # Every calling pod projects its own ServiceAccount token bound to
   # `bootstrapAudience` -- this is the bootstrap credential, no shared
   # secret distributed to callers. Reusable via the

@@ -25,6 +25,20 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-action
 ---
+# Dynamic Twitch connections (core/svc_ingest `src/connections/`, flag
+# waddles.ingest-dynamic-connections) -- svc-ingest-rust authenticates to hub-api's internal
+# provider-connections REST routes with a machine JWT (scope connections:resolve, `system`
+# tenant) minted from this ServiceAccount's audience-scoped projected token. Its own identity
+# so a stolen bootstrap token from any other pod in the namespace cannot mint it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: svc-ingest
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-ingest-rust
+---
 # Overlay detokenization (core/svc_presentation) resolves display names through hub-api's
 # internal gRPC -- its own identity, allow-listed for identity:displayname:read only.
 apiVersion: v1

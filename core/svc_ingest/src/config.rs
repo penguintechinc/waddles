@@ -141,7 +141,11 @@ pub struct CliConfig {
 
     /// Per-request timeout, in seconds, for hub-api list/resolve calls.
     /// 1..=120.
-    #[arg(long, env = "INGEST_CONNECTIONS_HTTP_TIMEOUT_SECS", default_value_t = 10)]
+    #[arg(
+        long,
+        env = "INGEST_CONNECTIONS_HTTP_TIMEOUT_SECS",
+        default_value_t = 10
+    )]
     pub connections_http_timeout_secs: u64,
 
     /// How a dynamic binding maps to a spine scope: `binding` (default; use the

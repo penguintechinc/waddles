@@ -87,7 +87,10 @@ impl ScopeMode {
         match self {
             Self::Runner(scope) => Some(scope.clone()),
             Self::Binding => {
-                let tenant = binding.tenant_slug.as_deref().filter(|s| valid_segment(s))?;
+                let tenant = binding
+                    .tenant_slug
+                    .as_deref()
+                    .filter(|s| valid_segment(s))?;
                 // `communityId == 0` is the tenant-wide sentinel; any real
                 // community must name itself, or the event would silently be
                 // published tenant-wide.
@@ -132,7 +135,10 @@ pub fn group_bindings(
     metrics: &ConnectionsMetrics,
 ) -> BTreeMap<String, BotSpec> {
     let skip = |reason: &str| {
-        metrics.bindings_skipped_total.with_label_values(&[reason]).inc();
+        metrics
+            .bindings_skipped_total
+            .with_label_values(&[reason])
+            .inc();
     };
     let mut specs: BTreeMap<String, BotSpec> = BTreeMap::new();
     let mut seen_grants: Vec<i64> = Vec::new();
@@ -153,7 +159,11 @@ pub fn group_bindings(
             skip("wrong_provider");
             continue;
         }
-        if !binding.capabilities.iter().any(|c| c == CAPABILITY_CHAT_INGEST) {
+        if !binding
+            .capabilities
+            .iter()
+            .any(|c| c == CAPABILITY_CHAT_INGEST)
+        {
             skip("missing_capability");
             continue;
         }
@@ -337,7 +347,10 @@ where
         {
             Ok(listed) => listed,
             Err(err) => {
-                self.metrics.reconcile_total.with_label_values(&["list_failed"]).inc();
+                self.metrics
+                    .reconcile_total
+                    .with_label_values(&["list_failed"])
+                    .inc();
                 self.metrics
                     .reconcile_duration_seconds
                     .with_label_values(&["list_failed"])
@@ -345,7 +358,9 @@ where
                 return Err(ReconcileError::List(err));
             }
         };
-        self.metrics.bindings_listed.set(i64::try_from(listed.len()).unwrap_or(i64::MAX));
+        self.metrics
+            .bindings_listed
+            .set(i64::try_from(listed.len()).unwrap_or(i64::MAX));
 
         // A refusal sticks only while the same binding version is listed.
         self.rejected.retain(|grant_id, stamp| {
@@ -408,7 +423,10 @@ where
             report.spawned += 1;
         }
 
-        self.metrics.reconcile_total.with_label_values(&["ok"]).inc();
+        self.metrics
+            .reconcile_total
+            .with_label_values(&["ok"])
+            .inc();
         self.metrics
             .reconcile_duration_seconds
             .with_label_values(&["ok"])
@@ -468,7 +486,9 @@ where
                 Err(err) => {
                     failures = failures.saturating_add(1);
                     let retry = Duration::from_secs(
-                        1u64.checked_shl(failures.min(10)).unwrap_or(u64::MAX).saturating_mul(2),
+                        1u64.checked_shl(failures.min(10))
+                            .unwrap_or(u64::MAX)
+                            .saturating_mul(2),
                     )
                     .min(self.settings.poll_interval);
                     match &err {
@@ -498,7 +518,10 @@ async fn stop_bot(mut handle: BotHandle) {
     if let Some(tx) = handle.shutdown_tx.take() {
         let _ = tx.send(());
     }
-    if tokio::time::timeout(STOP_GRACE, &mut handle.join).await.is_err() {
+    if tokio::time::timeout(STOP_GRACE, &mut handle.join)
+        .await
+        .is_err()
+    {
         tracing::warn!("dynamic bot did not stop within the grace period; aborting its task");
         handle.join.abort();
     }
@@ -552,7 +575,10 @@ mod tests {
         assert_eq!(specs.len(), 2, "two distinct bot accounts -> two sockets");
         let wb = &specs["waddlebots"];
         assert_eq!(
-            wb.members.iter().map(|m| (m.grant_id, m.channel.as_str())).collect::<Vec<_>>(),
+            wb.members
+                .iter()
+                .map(|m| (m.grant_id, m.channel.as_str()))
+                .collect::<Vec<_>>(),
             vec![(1, "chan_a"), (3, "chan_c"), (4, "chan_d")],
             "login case-insensitive, members sorted by grant id"
         );
@@ -564,7 +590,13 @@ mod tests {
         let m = metrics();
         let listed = vec![
             binding(1, "bot", "chan", 1, json!({"provider": "discord"})),
-            binding(2, "bot", "chan", 1, json!({"capabilities": ["action_relay"]})),
+            binding(
+                2,
+                "bot",
+                "chan",
+                1,
+                json!({"capabilities": ["action_relay"]}),
+            ),
             binding(3, "bot", "bad chan\r\nQUIT", 1, json!({})),
             binding(4, "bot,other", "chan", 1, json!({})),
             binding(5, "bot", "good", 1, json!({})),
@@ -590,16 +622,36 @@ mod tests {
             // Real community but no community name -> skipped, not tenant-wide.
             binding(3, "bot", "c_chan", 9, json!({"tenantSlug": "acme"})),
             // Fully scoped.
-            binding(4, "bot", "d_chan", 9, json!({"tenantSlug": "acme", "communityName": "main"})),
+            binding(
+                4,
+                "bot",
+                "d_chan",
+                9,
+                json!({"tenantSlug": "acme", "communityName": "main"}),
+            ),
             // Hostile segment (key separator) -> skipped.
-            binding(5, "bot", "e_chan", 9, json!({"tenantSlug": "a:b", "communityName": "main"})),
+            binding(
+                5,
+                "bot",
+                "e_chan",
+                9,
+                json!({"tenantSlug": "a:b", "communityName": "main"}),
+            ),
         ];
         let specs = group_bindings(&listed, &mode, &HashMap::new(), &m);
         let members = &specs["bot"].members;
         assert_eq!(members.len(), 2);
         assert_eq!(members[0].scope, Scope::new("acme", None));
-        assert_eq!(members[1].scope, Scope::new("acme", Some("main".to_string())));
-        assert_eq!(m.bindings_skipped_total.with_label_values(&["no_scope"]).get(), 3);
+        assert_eq!(
+            members[1].scope,
+            Scope::new("acme", Some("main".to_string()))
+        );
+        assert_eq!(
+            m.bindings_skipped_total
+                .with_label_values(&["no_scope"])
+                .get(),
+            3
+        );
     }
 
     #[test]
@@ -610,13 +662,19 @@ mod tests {
             binding(2, "bot", "b_chan", 7, json!({})),
         ];
         let specs = group_bindings(&listed, &runner(), &HashMap::new(), &m);
-        assert!(specs["bot"].members.iter().all(|m| m.scope == Scope::new("global", None)));
+        assert!(specs["bot"]
+            .members
+            .iter()
+            .all(|m| m.scope == Scope::new("global", None)));
     }
 
     #[test]
     fn rejected_bindings_are_excluded_until_updated_at_changes() {
         let m = metrics();
-        let listed = vec![binding(1, "bot", "a_chan", 1, json!({})), binding(2, "bot", "b_chan", 1, json!({}))];
+        let listed = vec![
+            binding(1, "bot", "a_chan", 1, json!({})),
+            binding(2, "bot", "b_chan", 1, json!({})),
+        ];
         let mut rejected = HashMap::new();
         rejected.insert(1, Some("v1".to_string()));
         let specs = group_bindings(&listed, &runner(), &rejected, &m);
@@ -632,7 +690,10 @@ mod tests {
     #[test]
     fn duplicate_grant_ids_are_collapsed() {
         let m = metrics();
-        let listed = vec![binding(1, "bot", "a_chan", 1, json!({})), binding(1, "bot", "a_chan", 1, json!({}))];
+        let listed = vec![
+            binding(1, "bot", "a_chan", 1, json!({})),
+            binding(1, "bot", "a_chan", 1, json!({})),
+        ];
         let specs = group_bindings(&listed, &runner(), &HashMap::new(), &m);
         assert_eq!(specs["bot"].members.len(), 1);
     }
@@ -640,8 +701,14 @@ mod tests {
     #[test]
     fn scope_mode_parses_and_rejects_unknown_values() {
         let scope = Scope::new("global", None);
-        assert_eq!(ScopeMode::parse("binding", scope.clone()), Ok(ScopeMode::Binding));
-        assert_eq!(ScopeMode::parse(" Runner ", scope.clone()), Ok(ScopeMode::Runner(scope.clone())));
+        assert_eq!(
+            ScopeMode::parse("binding", scope.clone()),
+            Ok(ScopeMode::Binding)
+        );
+        assert_eq!(
+            ScopeMode::parse(" Runner ", scope.clone()),
+            Ok(ScopeMode::Runner(scope.clone()))
+        );
         assert!(ScopeMode::parse("auto", scope).is_err());
     }
 

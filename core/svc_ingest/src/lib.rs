@@ -468,14 +468,16 @@ fn try_start_twitch_dynamic(
              way to authenticate to hub-api (no silent fallback to the static TWITCH_IRC_* path)"
         );
     }
-    let keyring = resolve_binding_keyring(config, "twitch dynamic connections").ok_or_else(|| {
-        anyhow::anyhow!(
+    let keyring =
+        resolve_binding_keyring(config, "twitch dynamic connections").ok_or_else(|| {
+            anyhow::anyhow!(
             "{flag} is ON but ENVELOPE_BINDING_KEYS/ENVELOPE_BINDING_ACTIVE_KID are missing or \
              invalid; refusing to start (events cannot be minted)"
         )
+        })?;
+    let spine_cfg = penguin_spine::SpineConfig::from_env().map_err(|err| {
+        anyhow::anyhow!("{flag} is ON but the spine config is unavailable: {err}")
     })?;
-    let spine_cfg = penguin_spine::SpineConfig::from_env()
-        .map_err(|err| anyhow::anyhow!("{flag} is ON but the spine config is unavailable: {err}"))?;
     let scope_mode =
         connections::supervisor::ScopeMode::parse(&cli.dynamic_scope_mode, config.ingest_scope())
             .map_err(anyhow::Error::msg)?;
@@ -1211,10 +1213,40 @@ mod tests {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("REDIS_URL");
             }
-            start_dynamic(&dynamic_ready_config()).err().map(|e| e.to_string())
+            start_dynamic(&dynamic_ready_config())
+                .err()
+                .map(|e| e.to_string())
         };
         let err = err.expect("a missing spine config must fail startup");
         assert!(err.contains("spine config is unavailable"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn dynamic_start_spawns_when_everything_is_valid() {
+        crypto::ensure_installed();
+        let result = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+            }
+            let mut config = dynamic_ready_config();
+            // Runner scope mode + a static Twitch identity also exercises the
+            // two operator warnings (single-tenant scope, static path superseded).
+            config.cli.dynamic_scope_mode = "runner".to_string();
+            config.cli.twitch_irc_nick = "waddlebot".to_string();
+            config.cli.twitch_irc_channel = "somechannel".to_string();
+            config.twitch_irc_oauth_token = Some(crate::config::Secret::new("test-token"));
+            let result = start_dynamic(&config);
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::remove_var("VALKEY_URL");
+                std::env::remove_var("VALKEY_PASSWORD");
+            }
+            result
+        };
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]
@@ -1249,7 +1281,10 @@ mod tests {
             (scope_err, url_err, ca_err)
         };
         let scope_err = scope_err.expect("invalid scope mode must fail startup");
-        assert!(scope_err.contains("INGEST_DYNAMIC_SCOPE_MODE"), "{scope_err}");
+        assert!(
+            scope_err.contains("INGEST_DYNAMIC_SCOPE_MODE"),
+            "{scope_err}"
+        );
         let url_err = url_err.expect("invalid hub URL must fail startup");
         assert!(url_err.contains("invalid hub-api base URL"), "{url_err}");
         let ca_err = ca_err.expect("a CA with an http:// URL must fail startup");

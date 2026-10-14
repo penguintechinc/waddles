@@ -153,7 +153,9 @@ pub async fn list_all<C: ConnectionsApi>(
     let mut all = Vec::new();
     let mut after: i64 = 0;
     for _ in 0..MAX_PAGES {
-        let page = api.list_page(provider, capability, after, page_size).await?;
+        let page = api
+            .list_page(provider, capability, after, page_size)
+            .await?;
         all.extend(page.items);
         match page.next_after {
             None => return Ok(all),
@@ -299,16 +301,16 @@ impl<B: BearerSource> HubConnectionsClient<B> {
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
-            .map_err(|err| ClientError::Transient(format!("request failed: {}", err.without_url())))?;
+            .map_err(|err| {
+                ClientError::Transient(format!("request failed: {}", err.without_url()))
+            })?;
         let status = response.status();
 
         // Read at most MAX_BODY_BYTES; a body past the cap is a protocol fault.
         let mut body: Vec<u8> = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|err| ClientError::Transient(format!("body read failed: {}", err.without_url())))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|err| {
+            ClientError::Transient(format!("body read failed: {}", err.without_url()))
+        })? {
             if body.len() + chunk.len() > MAX_BODY_BYTES {
                 return Err(ClientError::Transient(format!(
                     "response body exceeds {MAX_BODY_BYTES} bytes"
@@ -365,7 +367,11 @@ fn parse_error_fields(body: &[u8]) -> (String, String) {
             .map_or_else(|| "unknown".to_string(), str::to_string)
     };
     let code = pick(error.and_then(|e| e.get("code")));
-    let reason = pick(error.and_then(|e| e.get("details")).and_then(|d| d.get("reason")));
+    let reason = pick(
+        error
+            .and_then(|e| e.get("details"))
+            .and_then(|d| d.get("reason")),
+    );
     (code, reason)
 }
 
@@ -407,7 +413,10 @@ impl<B: BearerSource> ConnectionsApi for HubConnectionsClient<B> {
     ) -> Result<BindingPage, ClientError> {
         let request = self
             .http
-            .get(format!("{}/api/v1/internal/provider-connections", self.base))
+            .get(format!(
+                "{}/api/v1/internal/provider-connections",
+                self.base
+            ))
             .query(&[
                 ("provider", provider),
                 ("capability", capability),
@@ -518,15 +527,19 @@ mod tests {
     #[test]
     fn classify_other_4xx_is_permanent() {
         assert!(matches!(
-            classify_error(StatusCode::BAD_REQUEST, br#"{"error":{"code":"BAD_REQUEST"}}"#),
+            classify_error(
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"BAD_REQUEST"}}"#
+            ),
             ClientError::Permanent { status: 400, .. }
         ));
     }
 
     #[test]
     fn error_fields_reject_oversize_and_hostile_values_and_never_echo_the_body() {
-        let hostile = json!({"error": {"code": "has space", "details": {"reason": "x".repeat(200)}}})
-            .to_string();
+        let hostile =
+            json!({"error": {"code": "has space", "details": {"reason": "x".repeat(200)}}})
+                .to_string();
         let (code, reason) = parse_error_fields(hostile.as_bytes());
         assert_eq!((code.as_str(), reason.as_str()), ("unknown", "unknown"));
         let (c, r) = parse_error_fields(b"<html>not json oauth:SECRET</html>");
@@ -638,7 +651,11 @@ mod tests {
     #[tokio::test]
     async fn list_all_follows_the_cursor_across_pages() {
         let api = PagedApi {
-            pages: Mutex::new(vec![page(&[1, 2], Some(2)), page(&[3, 4], Some(4)), page(&[5], None)]),
+            pages: Mutex::new(vec![
+                page(&[1, 2], Some(2)),
+                page(&[3, 4], Some(4)),
+                page(&[5], None),
+            ]),
             seen_after: Mutex::new(vec![]),
         };
         let all = list_all(&api, "twitch", "chat_ingest", 2).await.unwrap();
@@ -658,7 +675,9 @@ mod tests {
             ]),
             seen_after: Mutex::new(vec![]),
         };
-        let err = list_all(&api, "twitch", "chat_ingest", 2).await.unwrap_err();
+        let err = list_all(&api, "twitch", "chat_ingest", 2)
+            .await
+            .unwrap_err();
         assert!(matches!(err, ClientError::Transient(_)));
     }
 
@@ -668,19 +687,30 @@ mod tests {
             pages: Mutex::new(vec![page(&[1], Some(5)), page(&[2], Some(5))]),
             seen_after: Mutex::new(vec![]),
         };
-        let err = list_all(&api, "twitch", "chat_ingest", 1).await.unwrap_err();
+        let err = list_all(&api, "twitch", "chat_ingest", 1)
+            .await
+            .unwrap_err();
         assert!(matches!(&err, ClientError::Transient(m) if m.contains("did not advance")));
     }
 
     #[test]
     fn outcome_labels_are_bounded() {
         assert_eq!(
-            ClientError::NotUsable { status: 409, code: "c".into(), reason: "r".into() }.outcome(),
+            ClientError::NotUsable {
+                status: 409,
+                code: "c".into(),
+                reason: "r".into()
+            }
+            .outcome(),
             "not_usable"
         );
         assert_eq!(ClientError::Transient("x".into()).outcome(), "transient");
         assert_eq!(
-            ClientError::Permanent { status: 400, code: "c".into() }.outcome(),
+            ClientError::Permanent {
+                status: 400,
+                code: "c".into()
+            }
+            .outcome(),
             "permanent"
         );
     }

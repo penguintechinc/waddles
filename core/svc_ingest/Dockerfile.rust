@@ -6,9 +6,15 @@
 # core/svc_streaming/Dockerfile.rust for the identical pattern already in
 # use there).
 #
-# Build (context = this directory, not the repo root -- no shared libs to
-# pull in for a Rust crate):
-#   docker build -f Dockerfile.rust -t localhost:32000/waddlebot/svc-ingest-rust:alpha-<epoch> .
+# Build (context = core/, the PARENT of this directory -- NOT this directory
+# alone. svc-ingest's Cargo.toml declares a same-repo path dependency on the
+# sibling crate `service_auth` (`service_auth = { path = "../service_auth" }`,
+# the machine-JWT client the dynamic Twitch connections resolver authenticates
+# to hub-api with, `src/connections/`), so the build context must include
+# core/service_auth or `cargo build` fails closed with "unable to update
+# /service_auth" -- same failure class as svc_action's `bundle_active_set`
+# path dependency. Run from core/:
+#   docker build -f svc_ingest/Dockerfile.rust -t localhost:32000/waddlebot/svc-ingest-rust:alpha-<epoch> .
 # ("svc-ingest-rust", not "svc-ingest" -- fix/helm-alpha-self-provisioning gives the Rust
 # build its own repository so it never collides with the Python Deployment's tag while
 # both coexist in alpha; the Helm chart's rustDataPlane.svcIngest.imageRepository default
@@ -22,8 +28,10 @@
 FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
 
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+COPY svc_ingest/Cargo.toml svc_ingest/Cargo.lock ./svc_ingest/
+COPY svc_ingest/src ./svc_ingest/src
+COPY service_auth ./service_auth
+WORKDIR /build/svc_ingest
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
@@ -44,7 +52,7 @@ RUN groupadd --system --gid 10001 appuser \
     && useradd --system --uid 10001 --gid appuser --home-dir /nonexistent \
        --shell /usr/sbin/nologin appuser
 
-COPY --from=builder --chown=appuser:appuser /build/target/release/svc-ingest /app/svc-ingest
+COPY --from=builder --chown=appuser:appuser /build/svc_ingest/target/release/svc-ingest /app/svc-ingest
 
 WORKDIR /app
 USER appuser

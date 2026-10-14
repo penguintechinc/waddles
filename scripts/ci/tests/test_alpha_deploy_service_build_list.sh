@@ -141,6 +141,16 @@ assert_built "svc-process (rust)" "core/svc_process/Dockerfile.rust"
 assert_built "svc-action (rust)" "core/svc_action/Dockerfile.rust"
 
 echo ""
+echo "Test: svc-ingest's Rust image is built from the core/ context (service_auth path dependency)"
+if grep -qE "STUB-CALLED docker buildx build .*-f core/svc_ingest/Dockerfile.rust .* core\$" "$LOG_FILE"; then
+    echo "  - svc-ingest built with context core/ (its Dockerfile COPYs the sibling service_auth crate)"
+    cases_passed=$((cases_passed + 1))
+else
+    echo "  x svc-ingest NOT built with the core/ context -- the service_auth path dependency would fail to resolve"
+    cases_failed=$((cases_failed + 1))
+fi
+
+echo ""
 echo "Test: bundle-executor is built from the repo-root context (#538)"
 assert_built "bundle-executor" "core/bundle_executor/Dockerfile.rust"
 if grep -qE "STUB-CALLED docker buildx build .*-t localhost:32000/waddlebot/bundle-executor:" "$LOG_FILE"; then

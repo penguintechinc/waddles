@@ -12,14 +12,14 @@
 //! outcome, a bounded refusal reason), so cardinality is bounded and PII
 //! cannot reach the metrics sink.
 
-use prometheus::{
-    HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry,
-};
+use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry};
 
 /// Latency buckets (seconds) for hub-api REST calls and reconcile passes: a
 /// healthy in-cluster call is a few ms, a refresh-under-lock resolve can reach
 /// seconds, and the client's own timeout bounds the tail.
-const LATENCY_BUCKETS: &[f64] = &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+const LATENCY_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
 
 /// The fixed vocabulary of hub-api refusal reasons (`ConnectionNotUsable.
 /// reason`, `hub_api/services/provider_connections/errors.py`) a metric label

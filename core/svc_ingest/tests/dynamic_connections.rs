@@ -41,9 +41,20 @@ const BEARER: &str = "test-machine-jwt";
 /// What the mock answers for one `(community, connection)` resolve.
 #[derive(Clone)]
 enum Behavior {
-    Ok { token: String, bot: String },
-    Fail { status: u16, body: Value },
-    FailThenOk { fails_left: u32, status: u16, token: String, bot: String },
+    Ok {
+        token: String,
+        bot: String,
+    },
+    Fail {
+        status: u16,
+        body: Value,
+    },
+    FailThenOk {
+        fails_left: u32,
+        status: u16,
+        token: String,
+        bot: String,
+    },
 }
 
 #[derive(Default)]
@@ -51,9 +62,18 @@ struct HubState {
     bindings: Vec<Value>,
     behaviors: HashMap<(i64, i64), Behavior>,
     list_status: Option<u16>,
+    /// Replaces the list answer wholesale (status, body) -- malformed/oversized
+    /// body tests.
+    list_override: Option<(u16, Value)>,
     resolve_calls: Vec<(i64, i64)>,
     list_queries: Vec<HashMap<String, String>>,
     bad_auth: u32,
+    /// The bearer the mock accepts (`None` = the static test bearer).
+    expected_bearer: Option<String>,
+    /// `POST /internal/service-token` calls: (SA bearer token, JSON body).
+    token_requests: Vec<(String, Value)>,
+    /// Status the token endpoint answers with (0 = 200 + a minted token).
+    token_status: u16,
 }
 
 #[derive(Clone)]
@@ -62,11 +82,41 @@ struct MockHub {
     addr: SocketAddr,
 }
 
-fn auth_ok(headers: &HeaderMap) -> bool {
+fn auth_ok(st: &HubState, headers: &HeaderMap) -> bool {
+    let want = st.expected_bearer.as_deref().unwrap_or(BEARER);
     headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == format!("Bearer {BEARER}"))
+        .is_some_and(|v| v == format!("Bearer {want}"))
+}
+
+/// The machine JWT the mock token endpoint mints.
+const MINTED_JWT: &str = "minted-machine-jwt";
+
+/// hub-api's machine-JWT bootstrap (`POST /internal/service-token`).
+async fn hub_service_token(
+    State(state): State<Arc<Mutex<HubState>>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let mut st = state.lock().unwrap();
+    let sa = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default()
+        .to_string();
+    st.token_requests.push((sa, body));
+    if st.token_status != 0 {
+        return (
+            StatusCode::from_u16(st.token_status).unwrap(),
+            Json(json!({"error": "denied"})),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({"token": MINTED_JWT, "expires_in": 600})),
+    )
 }
 
 async fn hub_list(
@@ -75,19 +125,30 @@ async fn hub_list(
     Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Json<Value>) {
     let mut st = state.lock().unwrap();
-    if !auth_ok(&headers) {
+    if !auth_ok(&st, &headers) {
         st.bad_auth += 1;
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        );
     }
     st.list_queries.push(query.clone());
+    if let Some((status, body)) = st.list_override.clone() {
+        return (StatusCode::from_u16(status).unwrap(), Json(body));
+    }
     if let Some(status) = st.list_status {
         return (
             StatusCode::from_u16(status).unwrap(),
-            Json(json!({"success": false, "error": {"code": "CONNECTIONS_UNAVAILABLE", "message": "x"}})),
+            Json(
+                json!({"success": false, "error": {"code": "CONNECTIONS_UNAVAILABLE", "message": "x"}}),
+            ),
         );
     }
     let after: i64 = query.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let limit: usize = query.get("limit").and_then(|v| v.parse().ok()).unwrap_or(500);
+    let limit: usize = query
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
     let page: Vec<Value> = st
         .bindings
         .iter()
@@ -112,9 +173,12 @@ async fn hub_resolve(
     Path((community, connection)): Path<(i64, i64)>,
 ) -> (StatusCode, Json<Value>) {
     let mut st = state.lock().unwrap();
-    if !auth_ok(&headers) {
+    if !auth_ok(&st, &headers) {
         st.bad_auth += 1;
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        );
     }
     st.resolve_calls.push((community, connection));
     let key = (community, connection);
@@ -131,12 +195,24 @@ async fn hub_resolve(
     };
     match behavior {
         Some(Behavior::Ok { token, bot }) => ok(&token, &bot),
-        Some(Behavior::Fail { status, body }) => (StatusCode::from_u16(status).unwrap(), Json(body)),
-        Some(Behavior::FailThenOk { fails_left, status, token, bot }) => {
+        Some(Behavior::Fail { status, body }) => {
+            (StatusCode::from_u16(status).unwrap(), Json(body))
+        }
+        Some(Behavior::FailThenOk {
+            fails_left,
+            status,
+            token,
+            bot,
+        }) => {
             if fails_left > 0 {
                 st.behaviors.insert(
                     key,
-                    Behavior::FailThenOk { fails_left: fails_left - 1, status, token, bot },
+                    Behavior::FailThenOk {
+                        fails_left: fails_left - 1,
+                        status,
+                        token,
+                        bot,
+                    },
                 );
                 (
                     StatusCode::from_u16(status).unwrap(),
@@ -157,6 +233,7 @@ impl MockHub {
     async fn start() -> Self {
         let state = Arc::new(Mutex::new(HubState::default()));
         let app = Router::new()
+            .route("/internal/service-token", post(hub_service_token))
             .route("/api/v1/internal/provider-connections", get(hub_list))
             .route(
                 "/api/v1/internal/communities/{community}/provider-connections/{connection}/resolve",
@@ -191,7 +268,10 @@ impl MockHub {
         st.bindings.push(binding);
         st.behaviors.insert(
             (id, id),
-            Behavior::Ok { token: format!("tok-{bot}-secret"), bot: bot.to_string() },
+            Behavior::Ok {
+                token: format!("tok-{bot}-secret"),
+                bot: bot.to_string(),
+            },
         );
     }
 
@@ -204,7 +284,11 @@ impl MockHub {
     }
 
     fn set_behavior(&self, id: i64, behavior: Behavior) {
-        self.state.lock().unwrap().behaviors.insert((id, id), behavior);
+        self.state
+            .lock()
+            .unwrap()
+            .behaviors
+            .insert((id, id), behavior);
     }
 
     fn resolves_for(&self, id: i64) -> usize {
@@ -240,6 +324,8 @@ struct FakeIrc {
     state: Arc<Mutex<IrcState>>,
     push: broadcast::Sender<String>,
     kill: watch::Sender<u64>,
+    /// While `true` the server withholds its `001` registration reply.
+    stall: watch::Sender<bool>,
 }
 
 impl FakeIrc {
@@ -249,10 +335,19 @@ impl FakeIrc {
         let state = Arc::new(Mutex::new(IrcState::default()));
         let (push, _) = broadcast::channel::<String>(64);
         let (kill, _) = watch::channel(0u64);
-        let this = Self { port, state: state.clone(), push: push.clone(), kill: kill.clone() };
+        let (stall, _) = watch::channel(false);
+        let this = Self {
+            port,
+            state: state.clone(),
+            push: push.clone(),
+            kill: kill.clone(),
+            stall: stall.clone(),
+        };
         tokio::spawn(async move {
             loop {
-                let Ok((socket, _)) = listener.accept().await else { return };
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
                 let idx = {
                     let mut st = state.lock().unwrap();
                     st.conns.push(Vec::new());
@@ -262,6 +357,7 @@ impl FakeIrc {
                 let state = state.clone();
                 let mut push_rx = push.subscribe();
                 let mut kill_rx = kill.subscribe();
+                let mut stall_rx = stall.subscribe();
                 tokio::spawn(async move {
                     let (read, mut write) = socket.into_split();
                     let mut reader = BufReader::new(read);
@@ -280,6 +376,9 @@ impl FakeIrc {
                                         let reject = state.lock().unwrap().reject_auth;
                                         state.lock().unwrap().conns[idx].push(text.clone());
                                         if text.starts_with("NICK ") {
+                                            while *stall_rx.borrow() {
+                                                if stall_rx.changed().await.is_err() { break; }
+                                            }
                                             let reply = if reject {
                                                 ":tmi.twitch.tv 464 * :Password incorrect\r\n"
                                             } else {
@@ -296,6 +395,17 @@ impl FakeIrc {
                             }
                             pushed = push_rx.recv(), if joined => {
                                 if let Ok(raw) = pushed {
+                                    // `\u{2}`: deliver invalid UTF-8 to every joined
+                                    // connection (a corrupted line).
+                                    if raw.starts_with('\u{2}') {
+                                        if write.write_all(b"\xff\xfe\r\n").await.is_err() { break; }
+                                        continue;
+                                    }
+                                    // `\u{1}`: deliver regardless of the JOINed set.
+                                    if let Some(forced) = raw.strip_prefix('\u{1}') {
+                                        if write.write_all(format!("{forced}\r\n").as_bytes()).await.is_err() { break; }
+                                        continue;
+                                    }
                                     let channel = raw
                                         .split(" PRIVMSG ")
                                         .nth(1)
@@ -319,11 +429,21 @@ impl FakeIrc {
     }
 
     fn settings(&self) -> IrcSettings {
-        IrcSettings { host: "127.0.0.1".into(), port: self.port, use_tls: false }
+        IrcSettings {
+            host: "127.0.0.1".into(),
+            port: self.port,
+            use_tls: false,
+        }
     }
 
     fn lines(&self, conn: usize) -> Vec<String> {
-        self.state.lock().unwrap().conns.get(conn).cloned().unwrap_or_default()
+        self.state
+            .lock()
+            .unwrap()
+            .conns
+            .get(conn)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn conn_count(&self) -> usize {
@@ -336,23 +456,46 @@ impl FakeIrc {
 
     /// The JOIN line connection `conn` sent, if any.
     fn join_line(&self, conn: usize) -> Option<String> {
-        self.lines(conn).into_iter().find(|l| l.starts_with("JOIN "))
+        self.lines(conn)
+            .into_iter()
+            .find(|l| l.starts_with("JOIN "))
     }
 
     fn pass_line(&self, conn: usize) -> Option<String> {
-        self.lines(conn).into_iter().find(|l| l.starts_with("PASS "))
+        self.lines(conn)
+            .into_iter()
+            .find(|l| l.starts_with("PASS "))
     }
 
     /// Finds the connection whose NICK is `nick`.
     fn conn_for_nick(&self, nick: &str) -> Option<usize> {
         let st = self.state.lock().unwrap();
-        (0..st.conns.len()).rev().find(|i| st.conns[*i].iter().any(|l| l == &format!("NICK {nick}")))
+        (0..st.conns.len())
+            .rev()
+            .find(|i| st.conns[*i].iter().any(|l| l == &format!("NICK {nick}")))
     }
 
     fn send_privmsg(&self, channel: &str, sender: &str, text: &str) {
-        let _ = self
-            .push
-            .send(format!(":{sender}!{sender}@{sender}.tmi.twitch.tv PRIVMSG #{channel} :{text}"));
+        let _ = self.push.send(format!(
+            ":{sender}!{sender}@{sender}.tmi.twitch.tv PRIVMSG #{channel} :{text}"
+        ));
+    }
+
+    /// Delivers a PRIVMSG for `channel` to every joined connection even if it
+    /// never JOINed that channel (a stray/late line).
+    fn send_privmsg_unfiltered(&self, channel: &str, sender: &str, text: &str) {
+        let _ = self.push.send(format!(
+            "\u{1}:{sender}!{sender}@{sender}.tmi.twitch.tv PRIVMSG #{channel} :{text}"
+        ));
+    }
+
+    /// Sends an invalid-UTF-8 line to every joined connection.
+    fn send_garbage(&self) {
+        let _ = self.push.send("\u{2}".to_string());
+    }
+
+    fn set_stall(&self, stall: bool) {
+        self.stall.send_replace(stall);
     }
 
     fn drop_all_connections(&self) {
@@ -371,11 +514,19 @@ impl FakeIrc {
 #[derive(Default)]
 struct RecordingAppender {
     calls: Mutex<Vec<(String, StageEnvelope)>>,
+    /// When set, every `append` fails (a Valkey outage).
+    fail: std::sync::atomic::AtomicBool,
 }
 
 impl EventAppender for RecordingAppender {
     async fn append(&self, stream: &str, env: &StageEnvelope) -> Result<String, SpineError> {
-        self.calls.lock().unwrap().push((stream.to_string(), env.clone()));
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SpineError::Config("simulated valkey outage".to_string()));
+        }
+        self.calls
+            .lock()
+            .unwrap()
+            .push((stream.to_string(), env.clone()));
         Ok("1-0".to_string())
     }
 }
@@ -429,7 +580,8 @@ fn install_log_capture() -> (LogCapture, tracing::subscriber::DefaultGuard) {
     (capture, guard)
 }
 
-type TestSupervisor = Supervisor<HubConnectionsClient<StaticBearer>, RecordingAppender, NoopMetrics>;
+type TestSupervisor =
+    Supervisor<HubConnectionsClient<StaticBearer>, RecordingAppender, NoopMetrics>;
 
 struct Harness {
     hub: MockHub,
@@ -477,7 +629,13 @@ async fn harness_with(mode: ScopeMode, page_size: u32) -> Harness {
             reconnect_backoff_cap: Duration::from_millis(200),
         },
     );
-    Harness { hub, irc, appender: publish, metrics, supervisor }
+    Harness {
+        hub,
+        irc,
+        appender: publish,
+        metrics,
+        supervisor,
+    }
 }
 
 async fn harness() -> Harness {
@@ -516,19 +674,32 @@ async fn one_socket_per_bot_joins_all_channels_and_publishes_under_scope() {
     assert_eq!((report.listed, report.spawned), (3, 2));
 
     eventually("both bots joined", || {
-        h.irc.conn_for_nick("waddlebots").and_then(|c| h.irc.join_line(c)).is_some()
-            && h.irc.conn_for_nick("otherbot").and_then(|c| h.irc.join_line(c)).is_some()
+        h.irc
+            .conn_for_nick("waddlebots")
+            .and_then(|c| h.irc.join_line(c))
+            .is_some()
+            && h.irc
+                .conn_for_nick("otherbot")
+                .and_then(|c| h.irc.join_line(c))
+                .is_some()
     })
     .await;
 
-    assert_eq!(h.irc.conn_count(), 2, "ONE socket per bot account, never one per channel");
+    assert_eq!(
+        h.irc.conn_count(),
+        2,
+        "ONE socket per bot account, never one per channel"
+    );
     let wb = h.irc.conn_for_nick("waddlebots").unwrap();
     assert_eq!(
         h.irc.join_line(wb).as_deref(),
         Some("JOIN #chan_a,#chan_b"),
         "all of one bot's channels in a single JOIN"
     );
-    assert_eq!(h.irc.pass_line(wb).as_deref(), Some("PASS oauth:tok-waddlebots-secret"));
+    assert_eq!(
+        h.irc.pass_line(wb).as_deref(),
+        Some("PASS oauth:tok-waddlebots-secret")
+    );
     let ob = h.irc.conn_for_nick("otherbot").unwrap();
     assert_eq!(h.irc.join_line(ob).as_deref(), Some("JOIN #chan_c"));
 
@@ -538,8 +709,15 @@ async fn one_socket_per_bot_joins_all_channels_and_publishes_under_scope() {
         assert_eq!(st.list_queries[0]["provider"], "twitch");
         assert_eq!(st.list_queries[0]["capability"], "chat_ingest");
         assert_eq!(st.list_queries[0]["after"], "0");
-        assert_eq!(st.bad_auth, 0, "every request must carry the machine JWT bearer");
-        assert_eq!(st.resolve_calls.len(), 3, "one resolve per binding on first connect");
+        assert_eq!(
+            st.bad_auth, 0,
+            "every request must carry the machine JWT bearer"
+        );
+        assert_eq!(
+            st.resolve_calls.len(),
+            3,
+            "one resolve per binding on first connect"
+        );
     }
 
     // Inbound chat routes to the spine; the bot's own echo does not.
@@ -557,13 +735,19 @@ async fn one_socket_per_bot_joins_all_channels_and_publishes_under_scope() {
         "waddles:t:global:c:_tenant:src:twitch:tw-chan_b:events",
         "waddles:t:global:c:_tenant:src:twitch:tw-chan_c:events",
     ] {
-        assert!(streams.contains(&expected), "missing stream {expected}: {streams:?}");
+        assert!(
+            streams.contains(&expected),
+            "missing stream {expected}: {streams:?}"
+        );
     }
 
     assert_eq!(h.metrics.bots_running.get(), 2);
     assert_eq!(h.metrics.channels_joined.get(), 3);
     assert_eq!(
-        h.metrics.events_routed_total.with_label_values(&["published"]).get(),
+        h.metrics
+            .events_routed_total
+            .with_label_values(&["published"])
+            .get(),
         3
     );
 
@@ -592,13 +776,19 @@ async fn a_409_drops_that_channel_for_good_without_retry_and_serves_the_rest() {
 
     h.supervisor.reconcile_once().await.unwrap();
     eventually("bot joined the surviving channel only", || {
-        h.irc.conn_for_nick("waddlebots").and_then(|c| h.irc.join_line(c)).as_deref()
+        h.irc
+            .conn_for_nick("waddlebots")
+            .and_then(|c| h.irc.join_line(c))
+            .as_deref()
             == Some("JOIN #chan_a")
     })
     .await;
     assert_eq!(h.hub.resolves_for(2), 1);
     assert_eq!(
-        h.metrics.resolve_not_usable_total.with_label_values(&["revoked_grant"]).get(),
+        h.metrics
+            .resolve_not_usable_total
+            .with_label_values(&["revoked_grant"])
+            .get(),
         1
     );
 
@@ -609,7 +799,11 @@ async fn a_409_drops_that_channel_for_good_without_retry_and_serves_the_rest() {
     }
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(h.hub.resolves_for(2), 1, "a 409 must never be retried");
-    assert_eq!(h.irc.conn_count(), 1, "surviving channel's socket must not churn");
+    assert_eq!(
+        h.irc.conn_count(),
+        1,
+        "surviving channel's socket must not churn"
+    );
 
     // Editing the binding (new updatedAt) makes it eligible again.
     {
@@ -620,7 +814,13 @@ async fn a_409_drops_that_channel_for_good_without_retry_and_serves_the_rest() {
             }
         }
     }
-    h.hub.set_behavior(2, Behavior::Ok { token: "tok-waddlebots-secret".into(), bot: "waddlebots".into() });
+    h.hub.set_behavior(
+        2,
+        Behavior::Ok {
+            token: "tok-waddlebots-secret".into(),
+            bot: "waddlebots".into(),
+        },
+    );
     h.supervisor.reconcile_once().await.unwrap();
     eventually("edited binding rejoined", || {
         h.irc
@@ -648,7 +848,11 @@ async fn a_bot_whose_every_channel_is_refused_exits_and_is_not_respawned() {
     let report = h.supervisor.reconcile_once().await.unwrap();
     assert_eq!(report.spawned, 0);
     assert_eq!(h.supervisor.running_bots(), 0);
-    assert_eq!(h.irc.conn_count(), 0, "a refused-only bot never opens an IRC socket");
+    assert_eq!(
+        h.irc.conn_count(),
+        0,
+        "a refused-only bot never opens an IRC socket"
+    );
     assert_eq!(h.hub.resolves_for(1), 1);
 }
 
@@ -667,12 +871,21 @@ async fn a_503_on_resolve_is_retried_with_backoff_not_dropped() {
     );
     h.supervisor.reconcile_once().await.unwrap();
     eventually("bot eventually connects after transient failures", || {
-        h.irc.conn_for_nick("waddlebots").and_then(|c| h.irc.join_line(c)).is_some()
+        h.irc
+            .conn_for_nick("waddlebots")
+            .and_then(|c| h.irc.join_line(c))
+            .is_some()
     })
     .await;
-    assert!(h.hub.resolves_for(1) >= 3, "2 transient failures then success");
+    assert!(
+        h.hub.resolves_for(1) >= 3,
+        "2 transient failures then success"
+    );
     assert_eq!(
-        h.metrics.resolve_not_usable_total.with_label_values(&["other"]).get(),
+        h.metrics
+            .resolve_not_usable_total
+            .with_label_values(&["other"])
+            .get(),
         0,
         "a 503 is retryable, never counted as a drop"
     );
@@ -720,12 +933,25 @@ async fn a_failed_list_leaves_running_bots_untouched() {
 
     h.hub.state.lock().unwrap().list_status = Some(503);
     let err = h.supervisor.reconcile_once().await.unwrap_err();
-    assert!(matches!(err, ReconcileError::List(ClientError::Transient(_))));
+    assert!(matches!(
+        err,
+        ReconcileError::List(ClientError::Transient(_))
+    ));
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(h.supervisor.running_bots(), 1, "an outage must not tear bots down");
+    assert_eq!(
+        h.supervisor.running_bots(),
+        1,
+        "an outage must not tear bots down"
+    );
     assert_eq!(h.irc.open_count(), 1);
     assert_eq!(h.irc.conn_count(), 1, "and must not churn the socket");
-    assert_eq!(h.metrics.reconcile_total.with_label_values(&["list_failed"]).get(), 1);
+    assert_eq!(
+        h.metrics
+            .reconcile_total
+            .with_label_values(&["list_failed"])
+            .get(),
+        1
+    );
 
     h.hub.state.lock().unwrap().list_status = None;
     h.supervisor.reconcile_once().await.unwrap();
@@ -764,21 +990,34 @@ async fn a_dropped_irc_connection_re_resolves_a_fresh_token_on_reconnect() {
     h.hub.add(1, "waddlebots", "chan_a");
     h.supervisor.reconcile_once().await.unwrap();
     eventually("connected", || h.irc.join_line(0).is_some()).await;
-    assert_eq!(h.irc.pass_line(0).as_deref(), Some("PASS oauth:tok-waddlebots-secret"));
+    assert_eq!(
+        h.irc.pass_line(0).as_deref(),
+        Some("PASS oauth:tok-waddlebots-secret")
+    );
     assert_eq!(h.hub.resolves_for(1), 1);
 
     // hub-api rotates the token (refresh); the socket then drops.
     h.hub.set_behavior(
         1,
-        Behavior::Ok { token: "tok-rotated-secret".into(), bot: "waddlebots".into() },
+        Behavior::Ok {
+            token: "tok-rotated-secret".into(),
+            bot: "waddlebots".into(),
+        },
     );
     h.irc.drop_all_connections();
     eventually("reconnected with the rotated token", || {
         h.irc.conn_count() >= 2 && h.irc.pass_line(1).is_some()
     })
     .await;
-    assert_eq!(h.irc.pass_line(1).as_deref(), Some("PASS oauth:tok-rotated-secret"));
-    assert_eq!(h.hub.resolves_for(1), 2, "token re-resolved on reconnect, never cached");
+    assert_eq!(
+        h.irc.pass_line(1).as_deref(),
+        Some("PASS oauth:tok-rotated-secret")
+    );
+    assert_eq!(
+        h.hub.resolves_for(1),
+        2,
+        "token re-resolved on reconnect, never cached"
+    );
     h.supervisor.stop_all().await;
 }
 
@@ -788,16 +1027,23 @@ async fn twitch_auth_rejection_re_resolves_and_keeps_retrying_instead_of_stoppin
     h.irc.set_reject_auth(true);
     h.hub.add(1, "waddlebots", "chan_a");
     h.supervisor.reconcile_once().await.unwrap();
-    eventually("at least two resolve attempts while auth is rejected", || {
-        h.hub.resolves_for(1) >= 2
-    })
+    eventually(
+        "at least two resolve attempts while auth is rejected",
+        || h.hub.resolves_for(1) >= 2,
+    )
     .await;
-    assert_eq!(h.supervisor.running_bots(), 1, "auth rejection must not stop the bot for good");
+    assert_eq!(
+        h.supervisor.running_bots(),
+        1,
+        "auth rejection must not stop the bot for good"
+    );
 
     // Once Twitch accepts the (refreshed) token the bot recovers on its own.
     h.irc.set_reject_auth(false);
     eventually("recovered", || {
-        h.irc.conn_for_nick("waddlebots").is_some_and(|c| h.irc.join_line(c).is_some())
+        h.irc
+            .conn_for_nick("waddlebots")
+            .is_some_and(|c| h.irc.join_line(c).is_some())
     })
     .await;
     h.supervisor.stop_all().await;
@@ -808,14 +1054,28 @@ async fn a_token_for_a_different_bot_login_is_refused_not_used() {
     let mut h = harness().await;
     h.hub.add(1, "waddlebots", "chan_a");
     // hub-api claims this connection authenticates as someone else.
-    h.hub.set_behavior(1, Behavior::Ok { token: "tok-impostor-secret".into(), bot: "someoneelse".into() });
+    h.hub.set_behavior(
+        1,
+        Behavior::Ok {
+            token: "tok-impostor-secret".into(),
+            bot: "someoneelse".into(),
+        },
+    );
     h.supervisor.reconcile_once().await.unwrap();
     eventually("refused", || {
-        h.metrics.resolve_not_usable_total.with_label_values(&["identity_mismatch"]).get() == 1
+        h.metrics
+            .resolve_not_usable_total
+            .with_label_values(&["identity_mismatch"])
+            .get()
+            == 1
     })
     .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(h.irc.conn_count(), 0, "a mismatched identity must never reach Twitch");
+    assert_eq!(
+        h.irc.conn_count(),
+        0,
+        "a mismatched identity must never reach Twitch"
+    );
 }
 
 #[tokio::test]
@@ -832,17 +1092,30 @@ async fn binding_scope_mode_fails_closed_without_a_slug_and_scopes_events_with_o
         json!({"tenantSlug": "acme", "communityName": "main"}),
     );
     h.supervisor.reconcile_once().await.unwrap();
-    assert_eq!(h.metrics.bindings_skipped_total.with_label_values(&["no_scope"]).get(), 1);
+    assert_eq!(
+        h.metrics
+            .bindings_skipped_total
+            .with_label_values(&["no_scope"])
+            .get(),
+        1
+    );
     eventually("joined only the scoped channel", || {
         h.irc.join_line(0).as_deref() == Some("JOIN #chan_scoped")
     })
     .await;
-    assert_eq!(h.hub.resolves_for(1), 0, "an unscoped binding is never even resolved");
+    assert_eq!(
+        h.hub.resolves_for(1),
+        0,
+        "an unscoped binding is never even resolved"
+    );
 
     h.irc.send_privmsg("chan_scoped", "viewer", "scoped hello");
     eventually("published", || !published(&h).is_empty()).await;
     let calls = published(&h);
-    assert_eq!(calls[0].0, "waddles:t:acme:c:main:src:twitch:tw-chan_scoped:events");
+    assert_eq!(
+        calls[0].0,
+        "waddles:t:acme:c:main:src:twitch:tw-chan_scoped:events"
+    );
     assert_eq!(calls[0].1.tenant, "acme");
     assert_eq!(calls[0].1.community.as_deref(), Some("main"));
     assert!(!logs.text().contains("tok-waddlebots-secret"));
@@ -852,7 +1125,13 @@ async fn binding_scope_mode_fails_closed_without_a_slug_and_scopes_events_with_o
 #[tokio::test]
 async fn run_loop_picks_up_new_bindings_and_stops_every_bot_on_shutdown() {
     let h = harness().await;
-    let Harness { hub, irc, metrics, supervisor, .. } = h;
+    let Harness {
+        hub,
+        irc,
+        metrics,
+        supervisor,
+        ..
+    } = h;
     let (tx, rx) = oneshot::channel();
     let task = tokio::spawn(supervisor.run(rx));
 
@@ -872,4 +1151,481 @@ async fn run_loop_picks_up_new_bindings_and_stops_every_bot_on_shutdown() {
         .unwrap();
     eventually("socket closed on shutdown", || irc.open_count() == 0).await;
     assert_eq!(metrics.bots_running.get(), 0);
+}
+
+#[tokio::test]
+async fn a_publish_failure_is_counted_and_the_bot_keeps_serving() {
+    let mut h = harness().await;
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("connected", || h.irc.join_line(0).is_some()).await;
+
+    // Valkey outage: the XADD fails, the failure is counted, the socket stays up.
+    h.appender
+        .appender
+        .fail
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    h.irc.send_privmsg("chan_a", "viewer", "lost");
+    eventually("publish failure counted", || {
+        h.metrics
+            .events_routed_total
+            .with_label_values(&["publish_failed"])
+            .get()
+            == 1
+    })
+    .await;
+    assert_eq!(
+        h.irc.conn_count(),
+        1,
+        "a spine outage must not drop the IRC socket"
+    );
+
+    // Recovery: the very next message publishes normally.
+    h.appender
+        .appender
+        .fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    h.irc.send_privmsg("chan_a", "viewer", "delivered");
+    eventually("published after recovery", || !published(&h).is_empty()).await;
+    h.supervisor.stop_all().await;
+}
+
+#[tokio::test]
+async fn a_permanent_4xx_on_resolve_drops_the_channel_as_other() {
+    let mut h = harness().await;
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.hub.add(2, "waddlebots", "chan_bad");
+    h.hub.set_behavior(
+        2,
+        Behavior::Fail {
+            status: 400,
+            body: json!({"error": {"code": "BAD_REQUEST"}}),
+        },
+    );
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("joined only the good channel", || {
+        h.irc.join_line(0).as_deref() == Some("JOIN #chan_a")
+    })
+    .await;
+    assert_eq!(
+        h.metrics
+            .resolve_not_usable_total
+            .with_label_values(&["other"])
+            .get(),
+        1
+    );
+    h.supervisor.stop_all().await;
+}
+
+#[tokio::test]
+async fn a_stray_message_for_an_unjoined_channel_is_counted_unrouted_not_published() {
+    let mut h = harness().await;
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("connected", || h.irc.join_line(0).is_some()).await;
+    h.irc
+        .send_privmsg_unfiltered("chan_zzz", "viewer", "wrong room");
+    eventually("unrouted counted", || {
+        h.metrics
+            .events_routed_total
+            .with_label_values(&["unrouted"])
+            .get()
+            == 1
+    })
+    .await;
+    assert!(published(&h).is_empty());
+    h.supervisor.stop_all().await;
+}
+
+#[tokio::test]
+async fn a_corrupted_line_reconnects_and_a_proven_session_resets_backoff() {
+    let mut h = harness().await;
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("connected", || h.irc.join_line(0).is_some()).await;
+
+    // A delivered line proves the session; the corrupted line then breaks it.
+    h.irc.send_privmsg("chan_a", "viewer", "proof of life");
+    eventually("proved", || !published(&h).is_empty()).await;
+    h.irc.send_garbage();
+    eventually("reconnected after the recv error", || {
+        h.irc.conn_count() >= 2 && h.irc.join_line(1).is_some()
+    })
+    .await;
+    assert!(
+        h.metrics
+            .bot_reconnects_total
+            .with_label_values(&["error"])
+            .get()
+            >= 1
+    );
+    h.supervisor.stop_all().await;
+}
+
+#[tokio::test]
+async fn an_unreachable_irc_server_backs_off_and_keeps_retrying() {
+    let mut h = harness().await;
+    // Nothing listens on port 1: every connect is refused.
+    h.supervisor = {
+        let metrics = h.metrics.clone();
+        let client = HubConnectionsClient::new(
+            &HubClientConfig {
+                base_url: format!("http://{}", h.hub.addr),
+                ca_file: None,
+                request_timeout: Duration::from_secs(5),
+                connect_timeout: Duration::from_secs(2),
+            },
+            StaticBearer,
+            metrics.clone(),
+        )
+        .unwrap();
+        Supervisor::new(
+            Arc::new(client),
+            h.appender.clone(),
+            metrics,
+            ScopeMode::Runner(runner_scope()),
+            SupervisorSettings {
+                poll_interval: Duration::from_millis(150),
+                page_size: 500,
+                irc: IrcSettings {
+                    host: "127.0.0.1".into(),
+                    port: 1,
+                    use_tls: false,
+                },
+                reconnect_backoff_cap: Duration::from_millis(100),
+            },
+        )
+    };
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("connect failures retried", || {
+        h.metrics
+            .bot_reconnects_total
+            .with_label_values(&["error"])
+            .get()
+            >= 2
+    })
+    .await;
+    assert_eq!(
+        h.supervisor.running_bots(),
+        1,
+        "a connect failure never stops the bot"
+    );
+    assert_eq!(h.metrics.channels_joined.get(), 0);
+    h.supervisor.stop_all().await;
+}
+
+#[tokio::test]
+async fn a_membership_change_during_a_stalled_connect_restarts_it_with_the_new_set() {
+    let mut h = harness().await;
+    h.irc.set_stall(true);
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("first connection is mid-registration", || {
+        h.irc.conn_for_nick("waddlebots").is_some()
+    })
+    .await;
+
+    h.hub.add(2, "waddlebots", "chan_b");
+    h.irc.set_stall(false);
+    let report = h.supervisor.reconcile_once().await.unwrap();
+    assert_eq!(report.updated, 1);
+    eventually("joined both channels on a fresh connection", || {
+        (0..h.irc.conn_count())
+            .any(|c| h.irc.join_line(c).as_deref() == Some("JOIN #chan_a,#chan_b"))
+    })
+    .await;
+    h.supervisor.stop_all().await;
+}
+
+#[tokio::test]
+async fn shutdown_while_backing_off_returns_promptly() {
+    let mut h = harness().await;
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.hub.set_behavior(
+        1,
+        Behavior::Fail {
+            status: 503,
+            body: json!({"error": {"code": "CONNECTIONS_UNAVAILABLE"}}),
+        },
+    );
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("retrying resolve", || h.hub.resolves_for(1) >= 2).await;
+    let started = std::time::Instant::now();
+    h.supervisor.stop_all().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a bot in backoff must stop immediately, not wait out the delay"
+    );
+    assert_eq!(h.metrics.bots_running.get(), 0);
+    assert_eq!(h.irc.conn_count(), 0);
+}
+
+// -- client-level behavior over real HTTP ------------------------------------
+
+fn bare_client<B: BearerSource>(hub: &MockHub, bearer: B) -> HubConnectionsClient<B> {
+    svc_ingest::crypto::ensure_installed();
+    HubConnectionsClient::new(
+        &HubClientConfig {
+            base_url: format!("http://{}", hub.addr),
+            ca_file: None,
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(2),
+        },
+        bearer,
+        Arc::new(ConnectionsMetrics::register(&prometheus::Registry::new()).unwrap()),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn client_classifies_every_hub_answer_over_real_http() {
+    use svc_ingest::connections::client::ConnectionsApi;
+    let hub = MockHub::start().await;
+    hub.add(1, "waddlebots", "chan_a");
+    let client = bare_client(&hub, StaticBearer);
+
+    // list: 503 retryable; 200 with an undecodable body retryable; an oversize
+    // body is refused rather than buffered.
+    hub.state.lock().unwrap().list_override =
+        Some((503, json!({"error": {"code": "CONNECTIONS_UNAVAILABLE"}})));
+    let err = client
+        .list_page("twitch", "chat_ingest", 0, 10)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ClientError::Transient(_)), "{err:?}");
+    hub.state.lock().unwrap().list_override = Some((200, json!("not a page")));
+    let err = client
+        .list_page("twitch", "chat_ingest", 0, 10)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Transient(m) if m.contains("undecodable")),
+        "{err:?}"
+    );
+    hub.state.lock().unwrap().list_override = Some((200, json!("x".repeat(9 * 1024 * 1024))));
+    let err = client
+        .list_page("twitch", "chat_ingest", 0, 10)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Transient(m) if m.contains("exceeds")),
+        "{err:?}"
+    );
+    hub.state.lock().unwrap().list_override = None;
+    let page = client
+        .list_page("twitch", "chat_ingest", 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+
+    // resolve: unknown connection -> NotUsable(not_found); 400 -> Permanent;
+    // garbage / empty token -> Transient; the happy path carries the token.
+    let err = client.resolve(9, 9).await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::NotUsable { status: 404, reason, .. } if reason == "not_found"),
+        "{err:?}"
+    );
+    hub.set_behavior(
+        1,
+        Behavior::Fail {
+            status: 400,
+            body: json!({"error": {"code": "BAD_REQUEST"}}),
+        },
+    );
+    assert!(matches!(
+        client.resolve(1, 1).await.unwrap_err(),
+        ClientError::Permanent { status: 400, .. }
+    ));
+    hub.set_behavior(
+        1,
+        Behavior::Fail {
+            status: 200,
+            body: json!("garbage"),
+        },
+    );
+    assert!(matches!(
+        client.resolve(1, 1).await.unwrap_err(),
+        ClientError::Transient(_)
+    ));
+    hub.set_behavior(
+        1,
+        Behavior::Ok {
+            token: String::new(),
+            bot: "waddlebots".into(),
+        },
+    );
+    let err = client.resolve(1, 1).await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Transient(m) if m.contains("empty access token")),
+        "{err:?}"
+    );
+    hub.set_behavior(
+        1,
+        Behavior::Ok {
+            token: "tok-happy".into(),
+            bot: "waddlebots".into(),
+        },
+    );
+    let creds = client.resolve(1, 1).await.unwrap();
+    assert_eq!(creds.access_token.expose(), "tok-happy");
+    assert_eq!(creds.bot_login().as_deref(), Some("waddlebots"));
+
+    // A wrong bearer is rejected by hub-api (401 -> retryable, re-mint later).
+    struct WrongBearer;
+    impl BearerSource for WrongBearer {
+        async fn bearer(&self) -> Result<Arc<str>, ClientError> {
+            Ok(Arc::from("not-the-jwt"))
+        }
+    }
+    let wrong = bare_client(&hub, WrongBearer);
+    let err = wrong.resolve(1, 1).await.unwrap_err();
+    assert!(matches!(err, ClientError::Transient(_)), "{err:?}");
+    assert!(hub.state.lock().unwrap().bad_auth >= 1);
+}
+
+#[tokio::test]
+async fn client_reports_a_refused_connection_as_transient() {
+    use svc_ingest::connections::client::ConnectionsApi;
+    svc_ingest::crypto::ensure_installed();
+    let metrics = Arc::new(ConnectionsMetrics::register(&prometheus::Registry::new()).unwrap());
+    let cfg = HubClientConfig {
+        base_url: "http://127.0.0.1:1".to_string(),
+        ca_file: None,
+        request_timeout: Duration::from_secs(2),
+        connect_timeout: Duration::from_secs(1),
+    };
+    let client = HubConnectionsClient::new(&cfg, StaticBearer, metrics.clone()).unwrap();
+    let err = client.resolve(1, 1).await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Transient(m) if m.contains("request failed")),
+        "{err:?}"
+    );
+    assert_eq!(
+        metrics
+            .requests_total
+            .with_label_values(&["resolve", "transient"])
+            .get(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn machine_jwt_bootstrap_mints_the_bearer_once_and_never_leaks_the_sa_token() {
+    use svc_ingest::connections::client::{list_all, ConnectionsApi, SCOPE_CONNECTIONS_RESOLVE};
+    let (logs, _guard) = install_log_capture();
+    let hub = MockHub::start().await;
+    hub.add(1, "waddlebots", "chan_a");
+    hub.state.lock().unwrap().expected_bearer = Some(MINTED_JWT.to_string());
+
+    let dir = std::env::temp_dir().join(format!("svc-ingest-sa-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sa_path = dir.join("token");
+    std::fs::write(&sa_path, "projected-sa-token-secret\n").unwrap();
+    let mint = |addr: SocketAddr, path: &str| {
+        service_auth::MachineJwtClient::with_timeouts(
+            format!("http://{addr}/internal/service-token"),
+            path.to_string(),
+            SCOPE_CONNECTIONS_RESOLVE,
+            service_auth::HttpTimeouts::from_env(),
+        )
+        .unwrap()
+    };
+    let client = bare_client(&hub, mint(hub.addr, &sa_path.to_string_lossy()));
+
+    let all = list_all(&client, "twitch", "chat_ingest", 100)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 1);
+    let creds = client.resolve(1, 1).await.unwrap();
+    assert_eq!(creds.access_token.expose(), "tok-waddlebots-secret");
+
+    {
+        let st = hub.state.lock().unwrap();
+        assert_eq!(
+            st.bad_auth, 0,
+            "both calls must carry the freshly minted machine JWT"
+        );
+        assert_eq!(
+            st.token_requests.len(),
+            1,
+            "the machine JWT is cached across calls"
+        );
+        assert_eq!(st.token_requests[0].0, "projected-sa-token-secret");
+        assert_eq!(st.token_requests[0].1["scope"], SCOPE_CONNECTIONS_RESOLVE);
+    }
+
+    // A rejected bootstrap surfaces as a retryable transient failure -- and the
+    // SA token never reaches the error text or any log line.
+    let hub2 = MockHub::start().await;
+    hub2.state.lock().unwrap().token_status = 403;
+    let client2 = bare_client(&hub2, mint(hub2.addr, &sa_path.to_string_lossy()));
+    let err = client2.resolve(1, 1).await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Transient(m) if m.contains("machine JWT mint failed")),
+        "{err:?}"
+    );
+    assert!(!format!("{err:?}").contains("projected-sa-token-secret"));
+
+    // An unreadable SA token file is the same class of failure.
+    let err = bare_client(&hub, mint(hub.addr, "/nonexistent/sa-token"))
+        .resolve(1, 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ClientError::Transient(_)));
+
+    let captured = logs.text();
+    for secret in [
+        "projected-sa-token-secret",
+        MINTED_JWT,
+        "tok-waddlebots-secret",
+    ] {
+        assert!(!captured.contains(secret), "log output leaked {secret:?}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A public, self-signed test CA certificate (no private key retained) --
+/// exercises the explicit-CA https path of `HubConnectionsClient::new`.
+const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBkTCCATegAwIBAgIUYy1MuFb0jwuOkA69e4KDgezEk28wCgYIKoZIzj0EAwIw
+HTEbMBkGA1UEAwwSc3ZjLWluZ2VzdC10ZXN0LWNhMCAXDTI2MTAxNDEzNTgzOVoY
+DzIxMjYwOTIwMTM1ODM5WjAdMRswGQYDVQQDDBJzdmMtaW5nZXN0LXRlc3QtY2Ew
+WTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARaPt5lGVDmlpk5TnS/3RRLe/CjKPl6
+oJfqxi22A2x3ZVc8/zJd7OWkGcF693dLaTwmkVKT260PA3BDnqDPbSgVo1MwUTAd
+BgNVHQ4EFgQUdvS/GR3MkPGz3efzBKoGUR6nE2AwHwYDVR0jBBgwFoAUdvS/GR3M
+kPGz3efzBKoGUR6nE2AwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBF
+AiBrkS6cHJyD0oe8tr/1LK445c/UaAfHwtkK9YPiWMed3gIhALKHeSCitnFC++nt
+yZBAUeSQHAH5Zn2Ky4FSSnRXLOZZ
+-----END CERTIFICATE-----
+";
+
+#[tokio::test]
+async fn an_https_base_with_an_explicit_ca_builds_and_is_not_plaintext() {
+    svc_ingest::crypto::ensure_installed();
+    let dir = std::env::temp_dir().join(format!("svc-ingest-ca-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ca = dir.join("ca.pem");
+    std::fs::write(&ca, TEST_CA_PEM).unwrap();
+    let metrics = Arc::new(ConnectionsMetrics::register(&prometheus::Registry::new()).unwrap());
+    let cfg = HubClientConfig {
+        base_url: "https://hub-api.waddlebot.svc:8204".to_string(),
+        ca_file: Some(ca),
+        request_timeout: Duration::from_secs(2),
+        connect_timeout: Duration::from_secs(1),
+    };
+    let client = HubConnectionsClient::new(&cfg, StaticBearer, metrics.clone()).unwrap();
+    assert!(!client.is_plaintext());
+    let plain = HubConnectionsClient::new(
+        &HubClientConfig {
+            base_url: "http://hub-api:8204".into(),
+            ca_file: None,
+            ..cfg
+        },
+        StaticBearer,
+        metrics,
+    )
+    .unwrap();
+    assert!(plain.is_plaintext());
+    let _ = std::fs::remove_dir_all(dir);
 }
