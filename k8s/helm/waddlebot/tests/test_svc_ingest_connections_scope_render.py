@@ -31,37 +31,47 @@ _CHART_DIR = Path(__file__).resolve().parents[1]
 _ALPHA_VALUES = _CHART_DIR / "values-alpha.yaml"
 
 
-@pytest.fixture(scope="module")
-def docs() -> list[dict[str, Any]]:
+def _render(*extra_set: str) -> list[dict[str, Any]]:
     """Render the alpha chart with the Rust data plane on (svc-ingest-rust Deployment present)."""
     if not shutil.which("helm"):
         if os.getenv("CI"):
             pytest.fail("helm CLI is required in CI")
         pytest.skip("helm CLI not available in this environment")
-    result = subprocess.run(
-        [
-            "helm",
-            "template",
-            "waddlebot",
-            str(_CHART_DIR),
-            "--kube-version",
-            "1.30.0",
-            "--values",
-            str(_ALPHA_VALUES),
-            "--set",
-            "pipeline.rustDataPlane.enabled=true",
-            "--set",
-            "pipeline.rustDataPlane.svcIngest.enabled=true",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    sets = [
+        "pipeline.rustDataPlane.enabled=true",
+        "pipeline.rustDataPlane.svcIngest.enabled=true",
+        *extra_set,
+    ]
+    argv = [
+        "helm",
+        "template",
+        "waddlebot",
+        str(_CHART_DIR),
+        "--kube-version",
+        "1.30.0",
+        "--values",
+        str(_ALPHA_VALUES),
+    ]
+    for item in sets:
+        argv += ["--set", item]
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         pytest.fail(f"helm template failed:\n{result.stdout}\n{result.stderr}")
     rendered = [doc for doc in yaml.safe_load_all(result.stdout) if doc]
     assert rendered, "helm template produced zero documents -- cannot be a pass"
     return rendered
+
+
+@pytest.fixture(scope="module")
+def docs() -> list[dict[str, Any]]:
+    """Alpha render: dynamicConnections.enabled is true in values-alpha.yaml."""
+    return _render()
+
+
+@pytest.fixture(scope="module")
+def disabled_docs() -> list[dict[str, Any]]:
+    """Same render with dynamicConnections.enabled=false (the beta/prod default)."""
+    return _render("dynamicConnections.enabled=false")
 
 
 def _identities(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -133,3 +143,37 @@ def test_svc_ingest_deployment_projects_the_audience_scoped_bootstrap_token(
     env = {e["name"]: e.get("value") for e in container["env"]}
     assert env["SERVICE_JWT_SA_TOKEN_PATH"].endswith("/service-jwt-bootstrap-token")
     assert env["SERVICE_JWT_TOKEN_ENDPOINT"].endswith("/internal/service-token")
+
+
+def test_dynamic_connections_defaults_off_in_base_values_and_on_only_in_alpha() -> None:
+    base = yaml.safe_load((_CHART_DIR / "values.yaml").read_text())
+    alpha = yaml.safe_load(_ALPHA_VALUES.read_text())
+    assert base["dynamicConnections"]["enabled"] is False
+    assert alpha["dynamicConnections"]["enabled"] is True
+
+
+def test_disabled_renders_no_svc_ingest_grant(disabled_docs: list[dict[str, Any]]) -> None:
+    identities = _identities(disabled_docs)
+    assert "svc-ingest" not in identities
+    assert len(identities) >= 3, identities.keys()  # other identities still rendered
+    for name, entry in identities.items():
+        assert "connections:resolve" not in entry["allowed_scopes"], name
+
+
+def test_disabled_renders_no_service_jwt_mount_or_env_on_svc_ingest(
+    disabled_docs: list[dict[str, Any]],
+) -> None:
+    pod = _svc_ingest_deployment(disabled_docs)["spec"]["template"]["spec"]
+    assert "service-jwt-bootstrap-token" not in [v["name"] for v in pod["volumes"]]
+    container = pod["containers"][0]
+    assert "service-jwt-bootstrap-token" not in [m["name"] for m in container["volumeMounts"]]
+    env_names = {e["name"] for e in container["env"]}
+    assert not {n for n in env_names if n.startswith("SERVICE_JWT_")}
+
+
+def test_enabled_renders_grant_mount_and_env(docs: list[dict[str, Any]]) -> None:
+    assert "svc-ingest" in _identities(docs)
+    pod = _svc_ingest_deployment(docs)["spec"]["template"]["spec"]
+    assert "service-jwt-bootstrap-token" in [v["name"] for v in pod["volumes"]]
+    env_names = {e["name"] for e in pod["containers"][0]["env"]}
+    assert {"SERVICE_JWT_TOKEN_ENDPOINT", "SERVICE_JWT_SA_TOKEN_PATH"} <= env_names

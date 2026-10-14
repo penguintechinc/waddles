@@ -5,6 +5,11 @@ webui:
   # `localhost` -- the LAN-IP publicUrl above is rejected by their OAuth consent screens.
   connectionsCallbackBaseUrl: "http://localhost:30879"
 
+# F4 -- svc-ingest dynamic provider-connections wiring (machine-JWT grant + env + token mount).
+# Alpha only; base values.yaml defaults it OFF so beta/prod never render the grant.
+dynamicConnections:
+  enabled: true
+
 global:
   # fix/alpha-helm-deploy -- was "" (empty), which (a) rendered every
   # pipeline app container on its shared stock base image instead of its own

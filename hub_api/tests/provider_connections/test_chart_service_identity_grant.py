@@ -42,7 +42,7 @@ _SVC_INGEST = "spiffe://penguintech.io/alpha/svc-ingest"
 _SCOPE = "connections:resolve"
 
 
-def _render_identities_env() -> str:
+def _render_identities_env(*extra_set: str) -> str:
     """Render the alpha chart and return hub-api's raw ``SERVICE_JWT_IDENTITIES`` JSON string."""
     if not shutil.which("helm"):
         if os.getenv("CI"):
@@ -58,6 +58,7 @@ def _render_identities_env() -> str:
             "1.30.0",
             "--values",
             str(_CHART_DIR / "values-alpha.yaml"),
+            *[arg for item in extra_set for arg in ("--set", item)],
         ],
         capture_output=True,
         text=True,
@@ -254,3 +255,23 @@ async def test_an_admin_disabled_binding_is_hidden_until_re_enabled(
     assert patched.status_code == 200
     items = (await (await client.get(url, headers=headers)).get_json())["items"]
     assert [i["connectionId"] for i in items] == [body["id"]]
+
+
+def test_svc_ingest_grant_is_absent_when_dynamic_connections_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F4: with dynamicConnections.enabled=false (beta/prod default) no svc-ingest identity exists."""
+    env = _render_identities_env("dynamicConnections.enabled=false")
+    monkeypatch.setenv("SERVICE_JWT_IDENTITIES", env)
+    identities = load_identities_from_env(env="alpha")
+    assert len(identities) >= 3, "other identities must still render"  # denominator
+    ids = {identity.service_id for identity in identities}
+    assert _SVC_INGEST not in ids
+    assert all(_SCOPE not in identity.allowed_scopes for identity in identities)
+    assert _SCOPE not in env
+
+
+def test_svc_ingest_grant_is_present_when_dynamic_connections_is_enabled(
+    chart_identities: dict[str, ServiceIdentity],
+) -> None:
+    assert _SVC_INGEST in chart_identities

@@ -3178,6 +3178,16 @@ serviceJwt:
     expirationSeconds: 3600
     path: service-jwt-bootstrap-token
 
+# feature/svc-ingest-connections-scope (F4) -- gates svc-ingest's DYNAMIC provider-connections
+# consumer wiring: the `serviceJwt.identities.svc-ingest` grant (scope connections:resolve on the
+# cross-tenant `system` tenant), the SERVICE_JWT_* env and the audience-scoped SA-token mount in
+# templates/svc-ingest-rust.yaml. svc-ingest is internet-facing (webhooks/IRC/Discord); while the
+# feature is OFF a compromised pod must not be able to mint a `system` token and resolve every
+# tenant's decrypted OAuth tokens, so NOTHING renders unless this is true. Default false; only
+# values-alpha.yaml turns it on.
+dynamicConnections:
+  enabled: false
+
 # feature/helm-auto-provision-keys -- deploys must never require a human to run a
 # script before `helm install`/`helm upgrade` succeeds. Every Secret below is looked
 # up first (an existing Secret is KEPT untouched, never regenerated/rotated by this
