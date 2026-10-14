@@ -92,15 +92,19 @@ pub enum PublishError {
 /// async-fn-in-traits isn't `dyn`-safe without boxing, and nothing here
 /// needs runtime polymorphism across implementations.
 ///
-/// `#[allow(async_fn_in_trait)]`: this trait must be `pub` (it appears in
-/// `publish_event`'s public signature), so the crate-level "you can
-/// suppress this if the trait is only used in your own code" escape hatch
-/// applies literally -- `svc-ingest` is a deployed service binary, not a
-/// published library other crates implement this trait against.
-#[allow(async_fn_in_trait)]
+/// `append` returns `impl Future + Send` (rather than a bare `async fn`) so a
+/// generic caller can `tokio::spawn` a task that awaits it -- the dynamic
+/// connection supervisor (`crate::connections`) is generic over this trait and
+/// spawns one task per bot, which a non-`Send`-bounded `async fn` in a trait
+/// cannot prove for an unnamed `A`. Implementors still write a plain
+/// `async fn append`; it is accepted as long as its future is `Send`.
 pub trait EventAppender: Send + Sync {
     /// Performs the `XADD`, returning the new entry id.
-    async fn append(&self, stream: &str, env: &StageEnvelope) -> Result<String, SpineError>;
+    fn append(
+        &self,
+        stream: &str,
+        env: &StageEnvelope,
+    ) -> impl std::future::Future<Output = Result<String, SpineError>> + Send;
 }
 
 impl EventAppender for SpineClient {

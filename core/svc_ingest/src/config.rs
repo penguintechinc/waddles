@@ -92,13 +92,65 @@ pub struct CliConfig {
     #[arg(long, env = "RUNNER_COMMUNITY", default_value = "")]
     pub runner_community: String,
 
-    /// Base URL of hub-api's distribution endpoint this service will poll
-    /// once the generic-intake work lands (`GET
-    /// {HUB_API_URL}/api/v1/distribution/sources`, spec S4.1). Only used
-    /// today to report a configuration snapshot on `/health` -- no
-    /// outbound call is made yet.
+    /// Base URL of hub-api's REST surface. Used by the dynamic Twitch
+    /// connections resolver (`crate::connections`, flag
+    /// `waddles.ingest-dynamic-connections`) for the internal
+    /// provider-connections routes, and reported as a configuration snapshot
+    /// on `/health`. hub-api serves this port as plain in-cluster HTTP (same
+    /// listener as the machine-JWT token endpoint); an `https://` base is
+    /// supported together with [`Self::hub_api_rest_ca_file`].
     #[arg(long, env = "HUB_API_URL", default_value = "http://hub-api:8204")]
     pub hub_api_url: String,
+
+    /// PEM CA bundle trusted for an `https://` [`Self::hub_api_url`] -- the
+    /// ONLY trust anchor when set (system roots disabled), mirroring
+    /// `core/svc_action`'s `HUB_API_GRPC_CA_FILE`. Empty (default) for the
+    /// plain in-cluster HTTP base; setting it with an `http://` URL is a
+    /// startup error (it would imply TLS protection that is not there).
+    #[arg(long, env = "HUB_API_REST_CA_FILE", default_value = "")]
+    pub hub_api_rest_ca_file: String,
+
+    /// hub-api's machine-JWT bootstrap endpoint (`POST /internal/
+    /// service-token`, `service_auth::MachineJwtClient`), e.g.
+    /// `http://waddlebot-hub-api-v3:8204/internal/service-token`. Required
+    /// when `waddles.ingest-dynamic-connections` is ON -- startup fails loud
+    /// without it (no silent fallback to the static path). Same env var name
+    /// as `core/svc_action`.
+    #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT", default_value = "")]
+    pub service_jwt_token_endpoint: String,
+
+    /// Path to this pod's audience-scoped projected ServiceAccount token,
+    /// exchanged for a machine JWT (`connections:resolve`). Same default and
+    /// env var name as `core/svc_action`.
+    #[arg(
+        long,
+        env = "SERVICE_JWT_SA_TOKEN_PATH",
+        default_value = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    )]
+    pub service_jwt_sa_token_path: String,
+
+    /// Seconds between dynamic-connection reconcile passes (list bindings, diff
+    /// against running bots). 5..=3600.
+    #[arg(long, env = "INGEST_CONNECTIONS_POLL_SECS", default_value_t = 60)]
+    pub connections_poll_secs: u64,
+
+    /// Page size for hub-api's cursor-paged binding list. 1..=1000 (hub-api's
+    /// own `MAX_PAGE_SIZE`).
+    #[arg(long, env = "INGEST_CONNECTIONS_PAGE_SIZE", default_value_t = 500)]
+    pub connections_page_size: u32,
+
+    /// Per-request timeout, in seconds, for hub-api list/resolve calls.
+    /// 1..=120.
+    #[arg(long, env = "INGEST_CONNECTIONS_HTTP_TIMEOUT_SECS", default_value_t = 10)]
+    pub connections_http_timeout_secs: u64,
+
+    /// How a dynamic binding maps to a spine scope: `binding` (default; use the
+    /// binding's `tenantSlug`/`communityName`, skip bindings without them --
+    /// fail closed) or `runner` (publish everything under
+    /// `RUNNER_TENANT_SLUG`/`RUNNER_COMMUNITY`, single-tenant deployments only
+    /// -- an explicit opt-in, see `crate::connections::supervisor::ScopeMode`).
+    #[arg(long, env = "INGEST_DYNAMIC_SCOPE_MODE", default_value = "binding")]
+    pub dynamic_scope_mode: String,
 
     /// The `kid` every newly-minted `binding.mac` is stamped with
     /// (`penguin_spine::compute_binding_mac`'s `kid` argument) -- must name
@@ -163,6 +215,45 @@ impl CliConfig {
             return Err(ConfigError::InvalidValue {
                 field: "http_port/metrics_port",
                 reason: "port 0 is not a valid bind port".to_string(),
+            });
+        }
+        if !(5..=3600).contains(&self.connections_poll_secs) {
+            return Err(ConfigError::InvalidValue {
+                field: "connections_poll_secs",
+                reason: format!(
+                    "INGEST_CONNECTIONS_POLL_SECS must be 5..=3600, got {}",
+                    self.connections_poll_secs
+                ),
+            });
+        }
+        if !(1..=1000).contains(&self.connections_page_size) {
+            return Err(ConfigError::InvalidValue {
+                field: "connections_page_size",
+                reason: format!(
+                    "INGEST_CONNECTIONS_PAGE_SIZE must be 1..=1000, got {}",
+                    self.connections_page_size
+                ),
+            });
+        }
+        if !(1..=120).contains(&self.connections_http_timeout_secs) {
+            return Err(ConfigError::InvalidValue {
+                field: "connections_http_timeout_secs",
+                reason: format!(
+                    "INGEST_CONNECTIONS_HTTP_TIMEOUT_SECS must be 1..=120, got {}",
+                    self.connections_http_timeout_secs
+                ),
+            });
+        }
+        if !matches!(
+            self.dynamic_scope_mode.trim().to_ascii_lowercase().as_str(),
+            "binding" | "runner"
+        ) {
+            return Err(ConfigError::InvalidValue {
+                field: "dynamic_scope_mode",
+                reason: format!(
+                    "INGEST_DYNAMIC_SCOPE_MODE must be `binding` or `runner`, got {:?}",
+                    self.dynamic_scope_mode
+                ),
             });
         }
         Ok(())
@@ -346,6 +437,40 @@ mod tests {
     fn zero_http_port_fails_validation() {
         let cli = CliConfig::parse_from(["svc-ingest", "--http-port", "0"]);
         assert!(cli.validate().is_err());
+    }
+
+    #[test]
+    fn dynamic_connections_defaults_are_valid_and_conservative() {
+        let cli = CliConfig::parse_from(["svc-ingest"]);
+        assert_eq!(cli.connections_poll_secs, 60);
+        assert_eq!(cli.connections_page_size, 500);
+        assert_eq!(cli.connections_http_timeout_secs, 10);
+        assert_eq!(cli.dynamic_scope_mode, "binding", "fail-closed default");
+        assert_eq!(cli.hub_api_rest_ca_file, "");
+        assert_eq!(cli.service_jwt_token_endpoint, "");
+        assert_eq!(
+            cli.service_jwt_sa_token_path,
+            "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        );
+        cli.validate().expect("defaults valid");
+    }
+
+    #[test]
+    fn dynamic_connections_bounds_are_enforced() {
+        for args in [
+            ["--connections-poll-secs", "4"],
+            ["--connections-poll-secs", "3601"],
+            ["--connections-page-size", "0"],
+            ["--connections-page-size", "1001"],
+            ["--connections-http-timeout-secs", "0"],
+            ["--connections-http-timeout-secs", "121"],
+            ["--dynamic-scope-mode", "auto"],
+        ] {
+            let cli = CliConfig::parse_from(["svc-ingest", args[0], args[1]]);
+            assert!(cli.validate().is_err(), "{args:?} must fail validation");
+        }
+        let ok = CliConfig::parse_from(["svc-ingest", "--dynamic-scope-mode", "Runner"]);
+        assert!(ok.validate().is_ok(), "mode is case-insensitive");
     }
 
     #[test]
