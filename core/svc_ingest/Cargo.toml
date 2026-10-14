@@ -101,7 +101,7 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # constructs a `Delivered` (it never reads a stage stream), so this bump
 # is a pure no-op for this crate's own call sites; taken anyway to stay on
 # the same finalized spine rev as svc_process/svc_action.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "bfa3be4cf3d8141f109153f77f6ead30d3d0f124", package = "penguin-spine", version = "=0.2.0" }
 # `penguin-licensing`: the `waddles.core.rust-data-plane` feature-flag gate
 # on the receive/produce/outbound-drain loops (spec S13.5) -- see
 # `try_start_license_client`/`rust_data_plane_enabled` in `src/lib.rs`.

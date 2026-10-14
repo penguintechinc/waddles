@@ -23,7 +23,7 @@ tokio = { version = "=1.53.1", features = ["full", "test-util"] }
 clap = { version = "=4.6.6", features = ["derive", "env"] }
 sha2 = "=0.10.9"
 prometheus = "=0.14.0"
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "bfa3be4cf3d8141f109153f77f6ead30d3d0f124", package = "penguin-spine", version = "=0.2.0" }
 
 [lints.clippy]
 unwrap_used = "deny"

@@ -98,7 +98,7 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # instead of guessing from `d.env.app_id` -- the exact "shared ingest-source
 # stream" bug this crate's own `src/hop.rs` doc comment already called out
 # (env.app_id never identifies the reading bundle on a shared stream).
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "bfa3be4cf3d8141f109153f77f6ead30d3d0f124", package = "penguin-spine", version = "=0.2.0" }
 # `penguin-licensing` (spec SS13.5): gates the process-stage drain loop on
 # the `waddles.core.rust-data-plane` PostHog-compatible flag (default OFF,
 # fail-closed on an unreachable license server) -- see `src/license.rs`.

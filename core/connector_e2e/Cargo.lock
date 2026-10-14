@@ -2056,8 +2056,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-spine"
-version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=586b8dadfcad26f2e8207b91cd2deb81afb6630f#586b8dadfcad26f2e8207b91cd2deb81afb6630f"
+version = "0.2.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=bfa3be4cf3d8141f109153f77f6ead30d3d0f124#bfa3be4cf3d8141f109153f77f6ead30d3d0f124"
 dependencies = [
  "chrono",
  "hex",

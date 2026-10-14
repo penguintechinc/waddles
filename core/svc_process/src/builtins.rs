@@ -187,9 +187,13 @@ pub fn maybe_build_enforcement_envelope(
     }
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     Some(StageEnvelope {
-        schema_version: penguin_spine::ENVELOPE_SCHEMA_VERSION,
+        // Verbatim from `source` (see the MAC note above): the binding covers
+        // the numeric scope on a v3 envelope, so it must be carried across.
+        schema_version: source.schema_version,
         tenant: source.tenant.clone(),
         community: source.community.clone(),
+        tenant_id: source.tenant_id,
+        community_id: source.community_id,
         app_id: MODERATION_ENFORCE_APP_ID.to_string(),
         stage: "action".to_string(),
         event: PlatformEvent {

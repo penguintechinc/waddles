@@ -232,3 +232,28 @@ stop; there is no code path that substitutes the tokenized pseudonym for a UUID.
 | Scope | multi-tenant (changelog-consumer) path only; the legacy env-only single-bundle path runs at the `(0, 0)` fail-closed scope where every community-scoped capability refuses `invalid_args` |
 | Wire | like reputation/economy: `capability = db`, ops `identity.resolve_actor` / `identity.resolve_mention`; refusal codes `not_linked`, `not_a_member`, `not_found`, `ambiguous`, `invalid_args`, `unavailable`, `backend` |
 | Placeholder pseudonyms | `core/svc_process/src/pii_tokenize.rs` mints a `handle:<name>` placeholder pseudonym for every free-text `@handle` (it needs an opaque token for the text). That row is a token, not an identity: hub-api's handle matcher (`identity_resolution_service._HANDLE_CANDIDATES_SQL`) excludes `platform_user_id LIKE 'handle:%'`, otherwise every mentioned Twitch `@bob` would turn into an `ambiguous` pair next to the real chatter's row. The placeholder still detokenizes (`ResolveDisplayNames`). The tokenizer's scanner also no longer reads the digits inside a Discord `<@123>` as a second `@123` handle mention |
+
+
+## Numeric scope: `world stage-v2`
+
+`tenant-id` (s64, >= 1) and `community-id` (s32, 0 = tenant-wide) are the AUTHORITATIVE scope keys; the `tenant` slug and
+`community` name are display-only (never a lookup, cache, routing or authz key). A WIT record's layout is baked into every
+compiled component, so the ids could not be added to the frozen v1 `types.stage-envelope` / `context.bundle-context`. They live
+in parallel interfaces instead, and the executor links and serves both families on one registry:
+
+| | v1 (`stage`, `stage-next`) | v2 (`stage-v2`) |
+|---|---|---|
+| context import | `context.get-context` (strings) | `context-v2.get-context` (+ `tenant-id`, `community-id`) |
+| action export | `action-stage.dispatch(types.stage-envelope)` | `action-stage-v2.dispatch(types-v2.stage-envelope)` |
+| `process-stage`, every other import/export | shared, unchanged | shared, unchanged |
+| selected by | no `action-stage-v2` export (default) | the component exports `waddle:bundle/action-stage-v2@1.0.0` |
+
+Fail-closed behaviour (host side, `core/bundle_executor`): `context-v2.get-context` returns the empty context with
+`tenant-id == 0` (a bundle MUST treat that as "no scope" and refuse to act) when the stage supplied no valid ids; an
+`action-stage-v2` invoke frame without valid ids (`tenant_id >= 1`, `community_id >= 0`) is rejected `MALFORMED_FRAME` and the
+guest is never called. A bundle moves to v2 only when rebuilt against `world stage-v2`; extend `stage-next` and `stage-v2`
+together when adding a capability.
+
+Integrity: the spine envelope's `binding.mac` covers both ids from schema v3 (`penguin_spine::compute_binding_mac_v3`), so
+mutating either id invalidates the MAC. Schema v2 envelopes (no ids) still verify under the original formula and may not carry
+ids.

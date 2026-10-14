@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Numeric-scope envelope contract (data-plane numeric-id migration, slice A foundation): `tenant_id` (i64) + `community_id` (i32,
+  0 = tenant-wide) are now the AUTHORITATIVE scope keys on the spine `StageEnvelope` (schema v3; slug/name strings become
+  display-only), bound into `binding.mac` by a new domain-tagged, length-framed formula (penguin-libs `penguin-spine` 0.2.0,
+  penguin-libs#137) so a swapped id fails verification. WIT is versioned, not mutated: new `types-v2`/`context-v2`/
+  `action-stage-v2` + `world stage-v2`; `bundle_executor` serves BOTH families, so already-compiled v1 bundles keep running
+  untouched. v2 is accepted alongside v3 on read; producers still stamp v2 and the stage-side numeric wiring follows. Python:
+  `flask_core.StageEnvelope` + the bundle SDK `StageEnvelope` carry the ids. See `docs/reference/bundle-host-imports.md`.
+
 ### Security
 - GDPR Art. 17 erasure now covers every user-keyed table, not ~16 of ~121 (GRC audit HIGH): a declarative erasure registry
   (`hub_api/services/erasure_registry.py`, run by `erasure_executor.py` inside the single erasure transaction) deletes the
