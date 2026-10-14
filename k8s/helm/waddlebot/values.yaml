@@ -3152,10 +3152,22 @@ serviceJwt:
       serviceAccount: svc-presentation
       allowedScopes:
         - "identity:displayname:read"
-    # svc-ingest isn't in this Rust-data-plane identities map yet (still
-    # legacy/Python) but is one of egressProxy.allowedCallerServices --
-    # add its identity+`egress:connect` scope here once it mints machine
-    # JWTs, matching svc-process/svc-action above.
+    # feature/svc-ingest-connections-scope -- Rust svc-ingest is a data-plane CONSUMER of the
+    # provider-connections store: it lists usable bindings and resolves a fresh token through
+    # hub-api's internal routes (hub_api/blueprints/v1/provider_connections.py
+    # `_service_authenticated`), which demand a machine JWT with scope `connections:resolve`
+    # AND `tenant == system` (the routes deliberately span tenants). Exactly that one scope --
+    # least privilege: no identity/egress scope rides along. `egress:connect` (svc-ingest is in
+    # egressProxy.allowedCallerServices) is deliberately NOT granted here; add it in its own
+    # change when svc-ingest actually dials the egress proxy. The identity is pinned to the
+    # DEDICATED `svc-ingest` ServiceAccount (templates/service-jwt-rbac.yaml), never the
+    # chart-wide shared one, so no other pod can bootstrap this identity.
+    svc-ingest:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-ingest"
+      serviceAccount: svc-ingest
+      tenant: system
+      allowedScopes:
+        - "connections:resolve"
   # Every calling pod projects its own ServiceAccount token bound to
   # `bootstrapAudience` -- this is the bootstrap credential, no shared
   # secret distributed to callers. Reusable via the

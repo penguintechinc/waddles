@@ -25,6 +25,17 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-action
 ---
+# Rust svc-ingest reads provider connections through hub-api's internal data-plane routes
+# (machine JWT, scope connections:resolve only) -- its own identity, never the shared one.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: svc-ingest
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-ingest-rust
+---
 # Overlay detokenization (core/svc_presentation) resolves display names through hub-api's
 # internal gRPC -- its own identity, allow-listed for identity:displayname:read only.
 apiVersion: v1

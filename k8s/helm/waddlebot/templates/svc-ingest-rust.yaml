@@ -56,7 +56,11 @@ spec:
         app.kubernetes.io/component: svc-ingest-rust
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      # feature/svc-ingest-connections-scope -- dedicated identity so hub-api's TokenReview-backed
+      # machine-JWT bootstrap can tell this pod from every other workload in the namespace
+      # (templates/service-jwt-rbac.yaml; serviceJwt.identities.svc-ingest, scope
+      # connections:resolve only) -- same pattern as svc-action/svc-process/svc-presentation.
+      serviceAccountName: svc-ingest
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -107,6 +111,14 @@ spec:
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+        # Machine-JWT bootstrap for hub-api's internal provider-connections routes. The endpoint
+        # defaults to hub-api's own in-cluster Service (same default as svc-action/svc-process).
+        # The audience-scoped projected token is mounted below -- NOT the generic k8s SA token
+        # path (wrong audience; hub-api's TokenReview would reject it).
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
         {{- if .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid }}
         - name: ENVELOPE_BINDING_ACTIVE_KID
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid | quote }}
@@ -204,9 +216,11 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
