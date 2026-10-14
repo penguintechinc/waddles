@@ -445,10 +445,17 @@ impl<B: BearerSource> ConnectionsApi for HubConnectionsClient<B> {
             self.base
         ));
         let body = self.send("resolve", request).await?;
-        // The decode error is `serde_json`'s -- it names a field/position, never
-        // echoes the value, so a malformed body cannot leak the token.
+        // serde's error *text* can quote the offending value ("invalid type:
+        // integer `123`, expected a string") -- which, for a malformed
+        // `accessToken`, would be the token itself. Only the error's category and
+        // position are reported, never its message.
         let resolved: ResolvedCredentials = serde_json::from_slice(&body).map_err(|err| {
-            ClientError::Transient(format!("undecodable resolve response: {err}"))
+            ClientError::Transient(format!(
+                "undecodable resolve response ({:?} error at line {} column {})",
+                err.classify(),
+                err.line(),
+                err.column()
+            ))
         })?;
         if resolved.access_token.is_empty() {
             return Err(ClientError::Transient(

@@ -25,7 +25,7 @@ asks hub-api which connections to run and for a fresh token to run them with.
 | Provider adapter interface + registry | **shipped (this change)** |
 | Twitch adapter (bot account + channel resolution + refresh) | **shipped (this change)** |
 | `GET/POST /api/v1/internal/...` data-plane endpoints (list + resolve) | **shipped (this change)** |
-| `svc-ingest` (Rust) resolves connections dynamically instead of static env | follow-up (paired PR) |
+| `svc-ingest` (Rust) resolves connections dynamically instead of static env | **shipped** -- flag `waddles.ingest-dynamic-connections` (default OFF), see `core/svc_ingest/README.md` |
 | webui connection UI, CLI connection commands | follow-ups (call the API below unchanged) |
 | Discord / Slack / Kick / YouTube adapters | follow-ups (one adapter + one registry line each) |
 | Redirect-style installs (OAuth connect, Discord invite link) | follow-up -- see [Limitations](#limitations-and-follow-ups) |
@@ -221,10 +221,18 @@ svc-ingest                              hub-api
 * Two tenants may legitimately connect the **same** channel, so the list can hold several bindings
   for one `resourceId`. Open one IRC session per `(provider, resourceId)` and fan events out to every
   binding, or one session per binding -- the framework deliberately does not decide that for you.
-* Responses are `Cache-Control: no-store`. `svc-ingest` has no entry in the chart's
-  `serviceJwt.identities` yet (see the note beside that map in `values.yaml`); the follow-up adds one
-  with `tenant: system` and `allowedScopes: ["connections:resolve"]`, which is also what the
-  data-plane routes require of the token.
+* Responses are `Cache-Control: no-store`. `svc-ingest` has its own entry in the chart's
+  `serviceJwt.identities` (dedicated `svc-ingest` ServiceAccount, `tenant: system`,
+  `allowedScopes: ["connections:resolve"]`), which is what the data-plane routes require of the token.
+* **Implemented consumer:** `core/svc_ingest/src/connections/` (see its README) groups bindings by
+  `bot_login` and runs **one IRC socket per bot account** joined to all of that account's channels
+  (one session per bot, fanning events out per binding scope). It resolves every member on each
+  (re)connect, drops a channel on `409`/`404`, and retries `5xx`/`429`/transport with backoff.
+* **Known gap (hub-api follow-up):** the list DTO has only numeric `tenantId`/`communityId`, but
+  the spine's stream keys use the tenant *slug* and community *name*. Until hub-api also emits
+  `tenantSlug`/`communityName` on `DataPlaneBindingDTO`, svc-ingest can only scope events safely
+  in its explicit single-tenant `INGEST_DYNAMIC_SCOPE_MODE=runner` (alpha); the default `binding`
+  mode skips unscoped bindings rather than guess.
 
 ## Adding a provider
 

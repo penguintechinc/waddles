@@ -1448,6 +1448,27 @@ async fn client_classifies_every_hub_answer_over_real_http() {
         client.resolve(1, 1).await.unwrap_err(),
         ClientError::Transient(_)
     ));
+    // A token of the wrong JSON type is a decode failure -- and serde's own error
+    // text would quote it. The reported error must carry no trace of the value.
+    hub.set_behavior(
+        1,
+        Behavior::Fail {
+            status: 200,
+            body: json!({
+                "success": true, "connectionId": 1, "communityId": 1, "provider": "twitch",
+                "accessToken": 424242424242_u64, "metadata": {}
+            }),
+        },
+    );
+    let err = client.resolve(1, 1).await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Transient(m) if m.contains("undecodable resolve response")),
+        "{err:?}"
+    );
+    assert!(
+        !format!("{err:?}{err}").contains("424242424242"),
+        "decode error leaked the token value: {err}"
+    );
     hub.set_behavior(
         1,
         Behavior::Ok {
