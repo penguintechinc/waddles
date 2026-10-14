@@ -221,18 +221,107 @@ svc-ingest                              hub-api
 * Two tenants may legitimately connect the **same** channel, so the list can hold several bindings
   for one `resourceId`. Open one IRC session per `(provider, resourceId)` and fan events out to every
   binding, or one session per binding -- the framework deliberately does not decide that for you.
-* Responses are `Cache-Control: no-store`. `svc-ingest` has its own entry in the chart's
-  `serviceJwt.identities` (dedicated `svc-ingest` ServiceAccount, `tenant: system`,
-  `allowedScopes: ["connections:resolve"]`), which is what the data-plane routes require of the token.
+* Responses are `Cache-Control: no-store`.
 * **Implemented consumer:** `core/svc_ingest/src/connections/` (see its README) groups bindings by
   `bot_login` and runs **one IRC socket per bot account** joined to all of that account's channels
   (one session per bot, fanning events out per binding scope). It resolves every member on each
-  (re)connect, drops a channel on `409`/`404`, and retries `5xx`/`429`/transport with backoff.
+  (re)connect. A channel is dropped for good ONLY on a terminal refusal (`409 CONNECTION_NOT_USABLE` /
+  `REFRESH_REJECTED`, or a `404` whose envelope says `NOT_FOUND`); everything else (`5xx`/`429`,
+  `401`/`403`, `409 REFRESH_NOT_CONFIGURED`/`CONFLICT`, a bare `404` from a replica mid-rollout, other
+  `4xx`, transport faults) is retried with backoff, so fixing the cause recovers without a restart.
+  A member that cannot resolve right now is **skipped -- never joined under another member's token** --
+  and re-probed in the background; a resolve answer without a verifiable `bot_login` is refused
+  (fail closed). A `401`/`403` invalidates the cached machine JWT and replays the call once with a
+  freshly minted one (survives a hub-api signing-key rotation).
+* **Transport:** `HUB_API_URL` defaults to plaintext in-cluster `http://` (acceptable for alpha/local
+  only: the machine JWT goes out and the decrypted OAuth token comes back over it). With the flag ON,
+  svc-ingest **refuses to start** on a plaintext hub-api URL when `DEPLOYMENT_TIER` is not
+  `alpha`/`local`, unless `HUB_API_ALLOW_INSECURE_HTTP=true` acknowledges the risk. Use an `https://`
+  `HUB_API_URL` + `HUB_API_REST_CA_FILE` elsewhere.
 * **Known gap (hub-api follow-up):** the list DTO has only numeric `tenantId`/`communityId`, but
   the spine's stream keys use the tenant *slug* and community *name*. Until hub-api also emits
   `tenantSlug`/`communityName` on `DataPlaneBindingDTO`, svc-ingest can only scope events safely
   in its explicit single-tenant `INGEST_DYNAMIC_SCOPE_MODE=runner` (alpha); the default `binding`
   mode skips unscoped bindings rather than guess.
+
+### svc-ingest's service identity (the scope grant)
+
+hub-api's token endpoint (`hub_api/blueprints/service_jwt_bp.py`) only mints a scope the caller's
+allow-listed identity carries. The allow-list is chart config, rendered into hub-api's
+`SERVICE_JWT_IDENTITIES` env var and parsed at startup by
+`flask_core.service_jwt.load_identities_from_env`:
+
+| Piece | Where |
+|---|---|
+| Identity + scope policy | `k8s/helm/waddlebot/values.yaml` `serviceJwt.identities.svc-ingest` -- `spiffe://penguintech.io/<env>/svc-ingest`, `allowedScopes: ["connections:resolve"]` (only), `tenant: system` |
+| Dedicated ServiceAccount | `k8s/helm/waddlebot/templates/service-jwt-rbac.yaml` (`svc-ingest`); the identity matches on namespace + this name, so no other pod can bootstrap it |
+| Caller wiring | `templates/svc-ingest-rust.yaml`: `serviceAccountName: svc-ingest`, projected token (audience `hub-api`), `SERVICE_JWT_TOKEN_ENDPOINT`, `SERVICE_JWT_SA_TOKEN_PATH` |
+| Verification | `hub_api/tests/provider_connections/test_chart_service_identity_grant.py` (renders the chart, mints through the real issuer, hits the real routes) and `k8s/helm/waddlebot/tests/test_svc_ingest_connections_scope_render.py` |
+
+**Rendered only when `pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=true`** (default false in `values.yaml`, true in `values-alpha.yaml`): the grant, the `SERVICE_JWT_*` env and the bootstrap-token mount are absent otherwise, so an internet-facing svc-ingest pod cannot mint a cross-tenant `system` token while the feature is off.
+
+`egress:connect` (svc-ingest is also in `egressProxy.allowedCallerServices`) is deliberately **not**
+granted here; add it in its own change when svc-ingest dials the egress proxy.
+
+### Binding lifecycle: how a connection becomes visible to svc-ingest
+
+The data-plane list returns only **usable** bindings (grant `approved` and `enabled`, link
+`active`). Through the connection API there is **no manual approval step**:
+
+1. `POST /api/v1/communities/<c>/provider-connections` (`create`, `service.py` ->
+   `store.insert_connection`) inserts the link with `status=active` and this community's grant with
+   `status=approved` (approver = the installing community admin, whose authority was already checked
+   by `authorize_community`) and `enabled` = the request's `enabled` (default `true`).
+2. The next `GET /api/v1/internal/provider-connections?provider=twitch&capability=chat_ingest` lists
+   it (`service.list_for_dataplane` -> `store.list_dataplane`).
+3. The only optional step is an admin's own toggle: `create` with `"enabled": false` (or a later
+   `PATCH {"enabled": false}`) hides it until `PATCH {"enabled": true}`.
+
+Prerequisites outside the framework: the tenant needs the flag
+`waddles.integrations.provider_connections` ON **and** the Professional tier (admin routes return
+`402` otherwise), and the platform Twitch app (`TWITCH_CLIENT_ID`/`TWITCH_CLIENT_SECRET`) must be the
+app that minted the bot token, or refresh is refused (`409 CONNECTION_NOT_USABLE` / `refresh_not_configured`).
+
+> **Gap -- the webui "Connect Twitch" OAuth buttons do NOT feed this store.** There are two OAuth
+> flows today and neither creates a `platform_connections` row *with* a
+> `community_connection_access` grant:
+>
+> | Flow | Callback | Writes |
+> |---|---|---|
+> | Community Connections page (`community_connections.py`, `services/community_connections.py`) | `/api/v1/connections/callback/<provider>` | `platform_integrations` (legacy store) |
+> | Tenant Twitch bot-install (`tenant_twitch_install.py`, Bar Citizen role-sync) | `/api/v1/tenant/twitch-install/callback` | `tenant_platform_apps` + `platform_connections` with **no grant** (`twitch_install_credentials.py`) |
+>
+> A channel connected only through those flows therefore never appears in the data-plane list. Until
+> the webui gains a provider-connections UI (listed as a follow-up above), register the binding with
+> the API: `POST /api/v1/communities/<c>/provider-connections` with
+> `{"provider":"twitch","credentials":{"access_token":"...","refresh_token":"..."},"metadata":{"channel_login":"penguinzplays"}}`.
+> An OAuth-driven path needs a product decision first -- the channel to join is an admin input
+> (bot account and channel differ, e.g. bot `waddlebots` joining `penguinzplays`), which the OAuth
+> flow cannot infer.
+
+### Redirect URIs (register these in the provider console)
+
+`<base>` = `CONNECTIONS_CALLBACK_BASE_URL`, falling back to `PUBLIC_WEBUI_URL`
+(`hub_api/config.py`; Helm: `webui.connectionsCallbackBaseUrl` / `webui.publicUrl`). The URI must
+match the provider app's registered redirect **exactly** (scheme, host, port, path, no trailing
+slash). Twitch accepts `http://` only for `localhost`, which is why alpha sets the callback base to
+`localhost` while `publicUrl` stays the LAN address.
+
+| Flow | URI |
+|---|---|
+| Community Connections OAuth (Twitch) | `<base>/api/v1/connections/callback/twitch` |
+| Tenant Twitch bot-install | `<base>/api/v1/tenant/twitch-install/callback` |
+
+Alpha (`values-alpha.yaml`: `connectionsCallbackBaseUrl: "http://localhost:30879"`, webui NodePort
+30879) -- the literal URIs to register:
+
+```
+http://localhost:30879/api/v1/connections/callback/twitch
+http://localhost:30879/api/v1/tenant/twitch-install/callback
+```
+
+The browser completing the consent must be able to reach `localhost:30879` (run it on the node, or
+SSH-tunnel `-L 30879:localhost:30879`).
 
 ## Adding a provider
 

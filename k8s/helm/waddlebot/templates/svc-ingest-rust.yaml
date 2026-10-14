@@ -56,11 +56,10 @@ spec:
         app.kubernetes.io/component: svc-ingest-rust
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
-      # Dedicated identity (dynamic Twitch connections, flag waddles.ingest-dynamic-connections)
-      # -- hub-api's machine-JWT bootstrap TokenReviews this pod's projected token and maps
-      # the ServiceAccount to serviceJwt.identities.svc-ingest (scope connections:resolve,
-      # `system` tenant); see templates/service-jwt-rbac.yaml. Mounted unconditionally (a
-      # flag-OFF pod simply never reads it) so flipping the flag never needs a pod spec change.
+      # feature/svc-ingest-connections-scope -- dedicated identity so hub-api's TokenReview-backed
+      # machine-JWT bootstrap can tell this pod from every other workload in the namespace
+      # (templates/service-jwt-rbac.yaml; serviceJwt.identities.svc-ingest, scope
+      # connections:resolve only) -- same pattern as svc-action/svc-process/svc-presentation.
       serviceAccountName: svc-ingest
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -110,8 +109,24 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.metricsPort | quote }}
         - name: RUNNER_TENANT_SLUG
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
+        # F3 -- the dynamic-connections consumer sends a bearer machine JWT to hub-api and gets a
+        # DECRYPTED OAuth token back over this URL. The default below is plaintext in-cluster http://,
+        # acceptable for alpha/local ONLY: with the flag ON, the binary REFUSES TO START on a plaintext
+        # URL when DEPLOYMENT_TIER (shared ConfigMap) is not alpha/local, unless the explicit
+        # dynamicConnections.allowInsecureHttp acknowledgement is set. Outside alpha set
+        # dynamicConnections.hubApiUrl to an https:// base (and HUB_API_REST_CA_FILE in the pod).
         - name: HUB_API_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+          value: {{ (.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict).hubApiUrl | default (printf "http://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        {{- if (.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict).enabled }}
+        # Machine-JWT bootstrap for hub-api's internal provider-connections routes. The endpoint
+        # defaults to hub-api's own in-cluster Service (same default as svc-action/svc-process).
+        # The audience-scoped projected token is mounted below -- NOT the generic k8s SA token
+        # path (wrong audience; hub-api's TokenReview would reject it).
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid }}
         - name: ENVELOPE_BINDING_ACTIVE_KID
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid | quote }}
@@ -184,23 +199,17 @@ spec:
           value: {{ .Values.oauth.twitch.nick | default "" | quote }}
         - name: TWITCH_IRC_CHANNEL
           value: {{ .Values.oauth.twitch.channels | default "" | splitList "," | first | trim | quote }}
-        # Dynamic Twitch connections (flag waddles.ingest-dynamic-connections, default OFF;
-        # see values.yaml pipeline.rustDataPlane.svcIngest.dynamicConnections). hub-api's
-        # machine-JWT bootstrap endpoint + this pod's audience-scoped projected SA token
-        # (mounted below) -- mirrors templates/svc-action-rust.yaml. HUB_API_URL above is the
-        # REST base: hub-api serves REST as plain in-cluster HTTP (no CA to mount); an https
-        # HUB_API_URL plus HUB_API_REST_CA_FILE is supported by the binary for when it does.
-        - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
-        # Audience-scoped projected token (waddlebot.serviceJwtBootstrapVolume below) -- NOT the
-        # generic default k8s SA token path (wrong audience; hub-api's TokenReview rejects it).
-        - name: SERVICE_JWT_SA_TOKEN_PATH
-          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
         {{- $dynamicConnections := .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict }}
         - name: INGEST_CONNECTIONS_POLL_SECS
           value: {{ $dynamicConnections.pollSeconds | default 60 | quote }}
         - name: INGEST_DYNAMIC_SCOPE_MODE
           value: {{ $dynamicConnections.scopeMode | default "binding" | quote }}
+        {{- if $dynamicConnections.allowInsecureHttp }}
+        # EXPLICIT acknowledgement that plaintext http:// to hub-api is acceptable outside alpha/local
+        # (e.g. the CNI encrypts all pod traffic). Off by default -- see the HUB_API_URL comment.
+        - name: HUB_API_ALLOW_INSECURE_HTTP
+          value: "true"
+        {{- end }}
         # Docker ENV baseline for data-plane feature flags (`FLAG_<KEY>`), same convention as
         # svc-process-rust.yaml's extraEnv. The dynamic-connections flag is OFF unless set
         # here (alpha) or ON in PostHog. NOT usable for license-gated flags.
@@ -239,14 +248,18 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- if (.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict).enabled }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- if (.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict).enabled }}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
+      {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
-      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
 ---
 apiVersion: v1
 kind: Service

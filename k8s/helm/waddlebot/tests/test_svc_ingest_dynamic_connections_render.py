@@ -173,3 +173,50 @@ def test_the_flag_is_off_by_default_and_on_only_via_the_alpha_env_baseline() -> 
     assert _FLAG_ENV not in off_env
     # Fail closed: without an explicit runner opt-in the scope mode is `binding`.
     assert off_env["INGEST_DYNAMIC_SCOPE_MODE"]["value"] == "binding"
+
+
+# -- F4: the grant/mount/env render only when dynamicConnections.enabled ------------------
+_GATE = "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled"
+
+
+def test_f4_nothing_cross_tenant_renders_when_dynamic_connections_is_disabled() -> None:
+    docs = _render("--set", f"{_GATE}=false")
+    assert "svc-ingest" not in _identities(docs), "no system-tenant grant for svc-ingest"
+    deployment = _ingest_deployment(docs)
+    spec = deployment["spec"]["template"]["spec"]
+    assert "service-jwt-bootstrap-token" not in [v["name"] for v in spec["volumes"]]
+    assert "service-jwt-bootstrap-token" not in [
+        m["name"] for m in spec["containers"][0]["volumeMounts"]
+    ]
+    assert not [n for n in _env(deployment) if n.startswith("SERVICE_JWT_")]
+
+
+# -- F3: plaintext http:// to hub-api is alpha-only; chart exposes https + explicit ack ----
+def test_f3_hub_api_url_defaults_to_in_cluster_http_and_has_no_insecure_ack() -> None:
+    env = _env(_ingest_deployment(_render()))
+    assert env["HUB_API_URL"]["value"].startswith("http://")
+    assert "HUB_API_ALLOW_INSECURE_HTTP" not in env, "the ack must be an explicit opt-in"
+
+
+def test_f3_hub_api_url_can_be_an_https_base() -> None:
+    env = _env(
+        _ingest_deployment(
+            _render(
+                "--set",
+                "pipeline.rustDataPlane.svcIngest.dynamicConnections.hubApiUrl=https://hub-api.waddlebot.svc:8204",
+            )
+        )
+    )
+    assert env["HUB_API_URL"]["value"] == "https://hub-api.waddlebot.svc:8204"
+
+
+def test_f3_insecure_http_ack_renders_only_when_explicitly_set() -> None:
+    env = _env(
+        _ingest_deployment(
+            _render(
+                "--set",
+                "pipeline.rustDataPlane.svcIngest.dynamicConnections.allowInsecureHttp=true",
+            )
+        )
+    )
+    assert env["HUB_API_ALLOW_INSECURE_HTTP"]["value"] == "true"

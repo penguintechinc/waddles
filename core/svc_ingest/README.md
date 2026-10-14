@@ -55,7 +55,9 @@ stays env-driven; the Twitch *outbound* relay (`crate::outbound`) still uses the
 
 | Env | Default | Purpose |
 |---|---|---|
-| `HUB_API_URL` | `http://hub-api:8204` | hub-api REST base (plain in-cluster HTTP) |
+| `HUB_API_URL` | `http://hub-api:8204` | hub-api REST base. Plain in-cluster HTTP is **alpha/local only** (see `DEPLOYMENT_TIER`) |
+| `DEPLOYMENT_TIER` | `production` (chart ConfigMap sets it) | with the flag ON, a plaintext `http://` `HUB_API_URL` is a **startup error** unless the tier is `alpha`/`local` (unset fails closed) |
+| `HUB_API_ALLOW_INSECURE_HTTP` | `false` | explicit acknowledgement that plaintext `http://` is acceptable outside alpha/local (e.g. CNI-encrypted pod traffic); prefer `https://` + `HUB_API_REST_CA_FILE` |
 | `HUB_API_REST_CA_FILE` | empty | PEM CA for an `https://` base -- the *only* trust anchor when set; setting it with `http://` is a startup error |
 | `SERVICE_JWT_TOKEN_ENDPOINT` | empty (**required** when flag ON) | hub-api `POST /internal/service-token` |
 | `SERVICE_JWT_SA_TOKEN_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | projected, audience-scoped SA token (chart mounts `/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token`) |
@@ -71,8 +73,10 @@ stays env-driven; the Twitch *outbound* relay (`crate::outbound`) still uses the
 | Situation | Behavior |
 |---|---|
 | hub-api list fails (any page) | whole listing discarded; running bots untouched; retry sooner than the poll interval |
-| resolve `409`/`404` | **drop that channel, never retry** (until the binding's `updatedAt` changes or it leaves the list); other channels keep running |
-| resolve `5xx`/`429`/`401`/`403`/transport | retry with jittered backoff; the bot is never dropped for these |
+| resolve `409 CONNECTION_NOT_USABLE`/`REFRESH_REJECTED`, or `404` with error code `NOT_FOUND` | **terminal: drop that channel, never retry** (until the binding's `updatedAt` changes or it leaves the list); other channels keep running |
+| resolve anything else (`5xx`/`429`/`401`/`403`, `409 REFRESH_NOT_CONFIGURED`/`CONFLICT`, a bare `404` from a mid-rollout hub-api replica, other `4xx`, transport) | **retryable**: the channel is skipped (never joined under another member's token) and re-probed in the background with jittered backoff; one reconnect joins it once it resolves, so fixing the cause needs no restart |
+| `401`/`403` from hub-api | the cached machine JWT is invalidated and the call replayed ONCE with a freshly minted token (hub-api signing-key rotation); a second rejection is retryable |
+| resolve answer without a valid `bot_login` for this bot | refused (`identity_mismatch`), **fail closed** |
 | every channel of a bot refused | the bot exits; not respawned while the refusals stand |
 | Twitch rejects registration (auth) | re-resolve (hub-api refreshes the token) and retry with backoff -- never stop for good |
 | IRC drop / reconnect | re-resolve every member (token never cached past a reconnect) |
@@ -107,7 +111,7 @@ point; Prometheus (`:9090`):
 | `svc_ingest_hubconn_request_duration_seconds{op,outcome}` | histogram (list / resolve latency) |
 | `svc_ingest_hubconn_reconcile_duration_seconds{result}` | histogram |
 | `svc_ingest_hubconn_requests_total{op,outcome}` | counter |
-| `svc_ingest_hubconn_resolve_not_usable_total{reason}` | counter (409/404 drops, bounded reasons) |
+| `svc_ingest_hubconn_resolve_not_usable_total{reason}` | counter (terminal drops, bounded reasons) |
 | `svc_ingest_hubconn_tokens_acquired_total{cause}` | counter (resolve = hub-api refreshed-if-stale) |
 | `svc_ingest_hubconn_bindings_skipped_total{reason}` | counter |
 | `svc_ingest_hubconn_bot_reconnects_total{cause}` | counter |
@@ -125,8 +129,12 @@ point; Prometheus (`:9090`):
   but spine stream keys use the tenant *slug* and community *name*. `binding` scope mode reads
   optional `tenantSlug`/`communityName` fields (forward-compatible, not emitted by hub-api yet), so
   it skips every binding today; alpha uses `runner` mode.
-- REST to hub-api is plaintext in-cluster HTTP (like the token endpoint); the binary supports an
-  `https://` base + `HUB_API_REST_CA_FILE` for when hub-api's REST listener gets TLS.
+- REST to hub-api is plaintext in-cluster HTTP by default (like the token endpoint) -- acceptable for
+  alpha/local only; the binary refuses to start with the flag ON on a plaintext URL elsewhere
+  (`HUB_API_ALLOW_INSECURE_HTTP` acknowledges it) and supports an `https://` base +
+  `HUB_API_REST_CA_FILE` for when hub-api's REST listener gets TLS.
+- Decrypted tokens are held in `AccessToken` (zeroized on drop) and the raw resolve body is wiped after
+  decode; the IRC connector's own copy of the `PASS` line is outside this crate's control.
 - The twitch outbound relay still uses the static identity.
 
 ### Tests

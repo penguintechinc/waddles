@@ -1391,6 +1391,24 @@ pipeline:
       # from hub-api's connection store. Enable via PostHog, or -- with no PostHog (alpha) --
       # the Docker ENV baseline `extraEnv.FLAG_WADDLES_INGEST_DYNAMIC_CONNECTIONS: "true"`.
       dynamicConnections:
+        # feature/svc-ingest-connections-scope (F4) -- gates svc-ingest's `serviceJwt.identities.
+        # svc-ingest` grant (scope connections:resolve on the cross-tenant `system` tenant), the
+        # SERVICE_JWT_* env and the audience-scoped SA-token mount in templates/svc-ingest-rust.yaml.
+        # svc-ingest is internet-facing (webhooks/IRC/Discord): while the feature is OFF a
+        # compromised pod must not be able to mint a `system` token and resolve every tenant's
+        # decrypted OAuth tokens, so NOTHING of that renders unless this is true. Default false;
+        # only values-alpha.yaml enables it. (Independent of the PostHog/ENV flag above, which
+        # gates the *behavior*.)
+        enabled: false
+        # HUB_API_URL override. Empty (default) = plaintext in-cluster http://<hub-api-v3>:<port>,
+        # which is for alpha/local ONLY: the machine JWT goes out and the decrypted OAuth token comes
+        # back over it. With the flag ON the binary refuses to start on a plaintext URL when
+        # DEPLOYMENT_TIER is not alpha/local (see core/svc_ingest connections::client::
+        # enforce_transport_policy). For beta/gamma/production set an https:// base here.
+        hubApiUrl: ""
+        # Explicit acknowledgement (HUB_API_ALLOW_INSECURE_HTTP=true) that plaintext http:// is
+        # acceptable outside alpha/local -- only if the CNI already encrypts pod traffic. Default false.
+        allowInsecureHttp: false
         # INGEST_CONNECTIONS_POLL_SECS -- seconds between hub-api list/reconcile passes (5..3600).
         pollSeconds: 60
         # INGEST_DYNAMIC_SCOPE_MODE -- how a binding maps to its spine tenant/community scope.
@@ -3171,15 +3189,16 @@ serviceJwt:
       serviceAccount: svc-presentation
       allowedScopes:
         - "identity:displayname:read"
-    # Dynamic Twitch connections (core/svc_ingest src/connections/, flag
-    # waddles.ingest-dynamic-connections): svc-ingest-rust resolves Twitch IRC channels +
-    # OAuth tokens from hub-api's internal provider-connections REST routes
-    # (hub_api/blueprints/v1/provider_connections.py). Those routes require scope
-    # `connections:resolve` AND a `system` tenant claim (operator plane, cross-tenant) --
-    # the issuer stamps `tenant` from THIS allow-list entry, never from the caller. Exactly
-    # one scope: this identity never mints pseudonyms, resolves display names, or uses
-    # egress. (svc-ingest is also one of egressProxy.allowedCallerServices -- add
-    # `egress:connect` here only once it actually calls the egress proxy.)
+    # feature/svc-ingest-connections-scope -- Rust svc-ingest is a data-plane CONSUMER of the
+    # provider-connections store: it lists usable bindings and resolves a fresh token through
+    # hub-api's internal routes (hub_api/blueprints/v1/provider_connections.py
+    # `_service_authenticated`), which demand a machine JWT with scope `connections:resolve`
+    # AND `tenant == system` (the routes deliberately span tenants). Exactly that one scope --
+    # least privilege: no identity/egress scope rides along. `egress:connect` (svc-ingest is in
+    # egressProxy.allowedCallerServices) is deliberately NOT granted here; add it in its own
+    # change when svc-ingest actually dials the egress proxy. The identity is pinned to the
+    # DEDICATED `svc-ingest` ServiceAccount (templates/service-jwt-rbac.yaml), never the
+    # chart-wide shared one, so no other pod can bootstrap this identity.
     svc-ingest:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-ingest"
       serviceAccount: svc-ingest
