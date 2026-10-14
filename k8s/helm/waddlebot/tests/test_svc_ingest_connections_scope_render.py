@@ -103,7 +103,7 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
     docs: list[dict[str, Any]],
 ) -> None:
     entry = _identities(docs)["svc-ingest"]
-    assert entry["allowed_scopes"] == ["connections:resolve"]
+    assert entry["allowed_scopes"] == ["connections:resolve", "dataplane:resolve-scope"]
     assert entry["tenant"] == "system"
     assert entry["k8s_service_account"] == "svc-ingest"
     parsed = urlparse(entry["service_id"])
@@ -180,3 +180,24 @@ def test_enabled_renders_grant_mount_and_env(docs: list[dict[str, Any]]) -> None
     assert "service-jwt-bootstrap-token" in [v["name"] for v in pod["volumes"]]
     env_names = {e["name"] for e in pod["containers"][0]["env"]}
     assert {"SERVICE_JWT_TOKEN_ENDPOINT", "SERVICE_JWT_SA_TOKEN_PATH"} <= env_names
+
+
+_RESOLVER_SCOPE = "dataplane:resolve-scope"
+
+
+def test_dataplane_resolve_scope_is_granted_to_svc_ingest_alone(docs: list[dict[str, Any]]) -> None:
+    identities = _identities(docs)
+    assert _RESOLVER_SCOPE in identities["svc-ingest"]["allowed_scopes"]
+    assert len(identities) >= 3, identities.keys()  # denominator: the others were examined
+    for name, entry in identities.items():
+        if name != "svc-ingest":
+            assert _RESOLVER_SCOPE not in entry["allowed_scopes"], name
+
+
+def test_dataplane_resolve_scope_is_not_rendered_when_dynamic_connections_is_off(
+    disabled_docs: list[dict[str, Any]],
+) -> None:
+    identities = _identities(disabled_docs)
+    assert len(identities) >= 3, identities.keys()
+    for name, entry in identities.items():
+        assert _RESOLVER_SCOPE not in entry["allowed_scopes"], name
