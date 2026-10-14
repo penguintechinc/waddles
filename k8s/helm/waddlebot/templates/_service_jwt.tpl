@@ -58,8 +58,8 @@ hub-api's own Deployment env (the only consumer):
 {{- $identities := list -}}
 {{- range $key, $identity := .Values.serviceJwt.identities }}
 {{- /* svc-ingest's connections:resolve grant is a cross-tenant `system` credential on an
-internet-facing pod: render it ONLY when dynamicConnections.enabled (default false). */ -}}
-{{- if or (ne $key "svc-ingest") $root.Values.dynamicConnections.enabled }}
+internet-facing pod: render it ONLY when pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (default false). */ -}}
+{{- if or (ne $key "svc-ingest") $root.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
 {{- $spiffeId := tpl $identity.spiffeId $root -}}
 {{- $identities = append $identities (dict "service_id" $spiffeId "k8s_namespace" $root.Values.namespace "k8s_service_account" $identity.serviceAccount "allowed_scopes" $identity.allowedScopes "tenant" ($identity.tenant | default "")) -}}
 {{- end }}

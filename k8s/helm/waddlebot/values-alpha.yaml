@@ -5,11 +5,6 @@ webui:
   # `localhost` -- the LAN-IP publicUrl above is rejected by their OAuth consent screens.
   connectionsCallbackBaseUrl: "http://localhost:30879"
 
-# F4 -- svc-ingest dynamic provider-connections wiring (machine-JWT grant + env + token mount).
-# Alpha only; base values.yaml defaults it OFF so beta/prod never render the grant.
-dynamicConnections:
-  enabled: true
-
 global:
   # fix/alpha-helm-deploy -- was "" (empty), which (a) rendered every
   # pipeline app container on its shared stock base image instead of its own
@@ -307,6 +302,10 @@ pipeline:
       # receiver's envelope signing (core/svc_ingest/src/config.rs) -- DISCORD_BOT_TOKEN
       # already reaches this pod via envFrom/explicit secretKeyRef either way.
       envelopeBindingActiveKid: "e2e1"
+      # F4 -- turns on svc-ingest's machine-JWT grant + SERVICE_JWT_* env + token mount
+      # (alpha only; the base values.yaml default is false so beta/prod never render them).
+      dynamicConnections:
+        enabled: true
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }

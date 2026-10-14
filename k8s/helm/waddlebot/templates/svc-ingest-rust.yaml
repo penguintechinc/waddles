@@ -111,7 +111,7 @@ spec:
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
-        {{- if .Values.dynamicConnections.enabled }}
+        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         # Machine-JWT bootstrap for hub-api's internal provider-connections routes. The endpoint
         # defaults to hub-api's own in-cluster Service (same default as svc-action/svc-process).
         # The audience-scoped projected token is mounted below -- NOT the generic k8s SA token
@@ -218,13 +218,13 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
-        {{- if .Values.dynamicConnections.enabled }}
+        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
         {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
-      {{- if .Values.dynamicConnections.enabled }}
+      {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
       {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}

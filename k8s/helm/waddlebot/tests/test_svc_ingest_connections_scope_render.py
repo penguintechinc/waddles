@@ -64,14 +64,14 @@ def _render(*extra_set: str) -> list[dict[str, Any]]:
 
 @pytest.fixture(scope="module")
 def docs() -> list[dict[str, Any]]:
-    """Alpha render: dynamicConnections.enabled is true in values-alpha.yaml."""
+    """Alpha render: svcIngest.dynamicConnections.enabled is true in values-alpha.yaml."""
     return _render()
 
 
 @pytest.fixture(scope="module")
 def disabled_docs() -> list[dict[str, Any]]:
-    """Same render with dynamicConnections.enabled=false (the beta/prod default)."""
-    return _render("dynamicConnections.enabled=false")
+    """Same render with svcIngest.dynamicConnections.enabled=false (the beta/prod default)."""
+    return _render("pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false")
 
 
 def _identities(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -148,8 +148,8 @@ def test_svc_ingest_deployment_projects_the_audience_scoped_bootstrap_token(
 def test_dynamic_connections_defaults_off_in_base_values_and_on_only_in_alpha() -> None:
     base = yaml.safe_load((_CHART_DIR / "values.yaml").read_text())
     alpha = yaml.safe_load(_ALPHA_VALUES.read_text())
-    assert base["dynamicConnections"]["enabled"] is False
-    assert alpha["dynamicConnections"]["enabled"] is True
+    assert base["pipeline"]["rustDataPlane"]["svcIngest"]["dynamicConnections"]["enabled"] is False
+    assert alpha["pipeline"]["rustDataPlane"]["svcIngest"]["dynamicConnections"]["enabled"] is True
 
 
 def test_disabled_renders_no_svc_ingest_grant(disabled_docs: list[dict[str, Any]]) -> None:

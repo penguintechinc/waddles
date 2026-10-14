@@ -260,8 +260,10 @@ async def test_an_admin_disabled_binding_is_hidden_until_re_enabled(
 def test_svc_ingest_grant_is_absent_when_dynamic_connections_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F4: with dynamicConnections.enabled=false (beta/prod default) no svc-ingest identity exists."""
-    env = _render_identities_env("dynamicConnections.enabled=false")
+    """F4: with svcIngest.dynamicConnections.enabled=false (beta/prod default) no svc-ingest identity exists."""
+    env = _render_identities_env(
+        "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false"
+    )
     monkeypatch.setenv("SERVICE_JWT_IDENTITIES", env)
     identities = load_identities_from_env(env="alpha")
     assert len(identities) >= 3, "other identities must still render"  # denominator
