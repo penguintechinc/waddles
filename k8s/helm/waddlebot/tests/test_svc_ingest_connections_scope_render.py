@@ -18,6 +18,7 @@ is a skip locally but a FAILURE in CI.
 from __future__ import annotations
 
 import json
+from urllib.parse import urlparse
 import os
 import shutil
 import subprocess
@@ -105,7 +106,9 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
     assert entry["allowed_scopes"] == ["connections:resolve"]
     assert entry["tenant"] == "system"
     assert entry["k8s_service_account"] == "svc-ingest"
-    assert entry["service_id"].startswith("spiffe://penguintech.io/")
+    parsed = urlparse(entry["service_id"])
+    assert (parsed.scheme, parsed.netloc) == ("spiffe", "penguintech.io")
+    assert parsed.path.rstrip("/").endswith("/svc-ingest")
 
 
 def test_connections_resolve_is_granted_to_no_other_identity(docs: list[dict[str, Any]]) -> None:
