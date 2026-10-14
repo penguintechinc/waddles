@@ -20,12 +20,24 @@
 //! not be replayed to a redirect target) and ambient proxy variables are
 //! ignored.
 //!
-//! **Error taxonomy** ([`ClientError`]) is the contract the supervisor acts on:
-//! `409`/`404` mean *drop this channel, do not retry*; `5xx`/`429`/`401`/`403`/
-//! transport faults mean *retry with backoff*; any other `4xx` is a permanent
-//! client-side fault. Error bodies are reduced to two short, charset-checked
-//! fields (`error.code`, `error.details.reason`) -- the response body text is
-//! never copied into an error, a log line, or a metric label.
+//! **Error taxonomy** ([`ClientError`]) is the contract the supervisor acts on.
+//! A channel is dropped permanently ONLY for a *terminal* refusal: 409
+//! `CONNECTION_NOT_USABLE`, 409 `REFRESH_REJECTED`, or a 404 whose JSON envelope
+//! carries `code == NOT_FOUND` (the connection genuinely does not exist). Every
+//! other non-2xx -- 5xx/429, 401/403, a 404 *without* that code (a hub-api
+//! replica mid-rollout that lacks the routes), 409 `REFRESH_NOT_CONFIGURED`/
+//! `CONFLICT` (operator-fixable or transient), any other 4xx -- is retried with
+//! the caller's backoff, so fixing the cause (setting a missing secret, finishing
+//! the rollout) recovers without a pod restart.
+//!
+//! **401/403 re-mint:** a 401/403 invalidates the cached machine JWT
+//! ([`BearerSource::invalidate`]) and replays the request ONCE with a freshly
+//! minted token, so a hub-api signing-key rotation costs one extra round trip
+//! instead of up to an hour of rejected calls.
+//!
+//! Error bodies are reduced to two short, charset-checked fields (`error.code`,
+//! `error.details.reason`) -- the response body text is never copied into an
+//! error, a log line, or a metric label.
 //!
 //! **Tokens are never logged**: the only place a token value is held is
 //! [`AccessToken`], whose formatting traits are redacted.
@@ -54,6 +66,13 @@ const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// terminates must not spin the supervisor forever.
 const MAX_PAGES: usize = 10_000;
 
+/// hub-api `error.code` of a connection that exists but cannot be used (409).
+const CODE_NOT_USABLE: &str = "CONNECTION_NOT_USABLE";
+/// hub-api `error.code` of a refresh the provider definitively rejected (409).
+const CODE_REFRESH_REJECTED: &str = "REFRESH_REJECTED";
+/// hub-api `error.code` of a connection that does not exist (404 envelope).
+const CODE_NOT_FOUND: &str = "NOT_FOUND";
+
 /// Longest `error.code` / `error.details.reason` value copied out of an error
 /// body.
 const MAX_ERROR_FIELD_LEN: usize = 64;
@@ -62,9 +81,9 @@ const MAX_ERROR_FIELD_LEN: usize = 64;
 /// decision.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ClientError {
-    /// hub-api refused to hand out this connection (HTTP 409 `CONNECTION_NOT_
-    /// USABLE`/`REFRESH_REJECTED`/..., or 404): **drop the channel, do not
-    /// retry**.
+    /// hub-api definitively refused to hand out this connection (HTTP 409
+    /// `CONNECTION_NOT_USABLE`/`REFRESH_REJECTED`, or a 404 enveloped
+    /// `NOT_FOUND`): **drop the channel, do not retry**.
     #[error("connection not usable (status {status}, code {code}, reason {reason})")]
     NotUsable {
         /// HTTP status (409 or 404).
@@ -75,11 +94,16 @@ pub enum ClientError {
         reason: String,
     },
     /// A fault worth retrying with backoff: 5xx (502/503/504), 429, 401/403
-    /// (machine JWT rejected -- re-mint on the next attempt), a transport or
-    /// timeout error, or an undecodable 2xx body.
+    /// (machine JWT rejected -- re-minted and replayed once, then retried), a
+    /// 404/409 that is not a terminal refusal (route missing mid-rollout,
+    /// `REFRESH_NOT_CONFIGURED`, `CONFLICT`), a transport or timeout error, or an
+    /// undecodable 2xx body.
     #[error("transient hub-api failure: {0}")]
     Transient(String),
-    /// A client-side fault retrying cannot fix (any other 4xx, e.g. 400).
+    /// Any other 4xx (e.g. 400): a request-shape fault this client cannot fix
+    /// itself. Callers still *retry* it with backoff (a hub-api deploy may fix
+    /// it) -- it is a distinct variant only so it is labeled `permanent` in
+    /// metrics and logged louder than a transient blip.
     #[error("hub-api rejected the request (status {status}, code {code})")]
     Permanent {
         /// HTTP status.
@@ -101,11 +125,52 @@ impl ClientError {
     }
 }
 
+/// Refuses a plaintext `http://` hub-api base outside `alpha`/`local`.
+///
+/// The machine JWT travels to hub-api and the **decrypted OAuth access token
+/// travels back** over this channel, so cleartext is acceptable only for the
+/// in-cluster alpha/local tiers. Any other tier must use `https://` (with
+/// `HUB_API_REST_CA_FILE`), or set `HUB_API_ALLOW_INSECURE_HTTP=true` -- an
+/// explicit, greppable acknowledgement (e.g. the CNI encrypts pod traffic).
+/// `tier` is compared case-insensitively; anything but `alpha`/`local`
+/// (including an empty/unknown value) counts as non-alpha, i.e. fails closed.
+///
+/// # Errors
+///
+/// Returns a human-readable startup error when the base is plaintext, the tier
+/// is not alpha/local, and `insecure_ack` is false.
+pub fn enforce_transport_policy(
+    plaintext: bool,
+    tier: &str,
+    insecure_ack: bool,
+) -> Result<(), String> {
+    if !plaintext || insecure_ack {
+        return Ok(());
+    }
+    let tier = tier.trim().to_ascii_lowercase();
+    if matches!(tier.as_str(), "alpha" | "local") {
+        return Ok(());
+    }
+    Err(format!(
+        "HUB_API_URL is plaintext http:// but DEPLOYMENT_TIER={tier:?} is not alpha/local: the \
+         machine JWT and the decrypted OAuth tokens would cross the network in cleartext. Set an \
+         https:// HUB_API_URL with HUB_API_REST_CA_FILE, or (only if the network is already \
+         encrypted) set HUB_API_ALLOW_INSECURE_HTTP=true to acknowledge the risk"
+    ))
+}
+
 /// Supplies the bearer token for hub-api calls. A trait so tests substitute a
 /// static bearer for the real SA-token-minting client.
 pub trait BearerSource: Send + Sync + 'static {
     /// A currently valid machine JWT.
     fn bearer(&self) -> impl Future<Output = Result<Arc<str>, ClientError>> + Send;
+
+    /// Called with the bearer hub-api just refused (401/403) so the source can
+    /// discard it and mint a fresh one on the next [`bearer`](Self::bearer).
+    /// Default: no-op (a static bearer has nothing to refresh).
+    fn invalidate(&self, _rejected: &str) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 impl BearerSource for service_auth::MachineJwtClient {
@@ -115,6 +180,15 @@ impl BearerSource for service_auth::MachineJwtClient {
             // a token (see `core/service_auth/src/lib.rs`).
             ClientError::Transient(format!("machine JWT mint failed: {err}"))
         })
+    }
+
+    async fn invalidate(&self, rejected: &str) {
+        // Compare-and-clear: only drops the cache if it still holds `rejected`.
+        let dropped = service_auth::MachineJwtClient::invalidate(self, rejected).await;
+        tracing::debug!(
+            dropped,
+            "hub-api rejected the machine JWT; cache invalidated"
+        );
     }
 }
 
@@ -294,44 +368,108 @@ impl<B: BearerSource> HubConnectionsClient<B> {
         result
     }
 
+    /// Sends `request`; on a 401/403 invalidates the cached machine JWT and
+    /// replays the request exactly ONCE with a freshly minted token. The replay
+    /// is bounded (one extra attempt, never a loop) and a second 401/403 is
+    /// returned as the usual retryable [`ClientError::Transient`].
     async fn send_inner(&self, request: reqwest::RequestBuilder) -> Result<Vec<u8>, ClientError> {
-        let bearer = self.bearer.bearer().await?;
-        let mut response = request
+        // Body-less requests (GET list, POST resolve) are always cloneable.
+        let replay = request.try_clone();
+        match self.send_once(request).await {
+            Attempt::Done(result) => result,
+            Attempt::AuthRejected { bearer, err } => {
+                self.bearer.invalidate(&bearer).await;
+                drop(bearer);
+                let Some(replay) = replay else {
+                    return Err(err);
+                };
+                tracing::warn!("hub-api rejected the machine JWT; re-minting and retrying once");
+                match self.send_once(replay).await {
+                    Attempt::Done(result) => result,
+                    Attempt::AuthRejected { err, .. } => Err(err),
+                }
+            }
+        }
+    }
+
+    async fn send_once(&self, request: reqwest::RequestBuilder) -> Attempt {
+        let bearer = match self.bearer.bearer().await {
+            Ok(bearer) => bearer,
+            Err(err) => return Attempt::Done(Err(err)),
+        };
+        let mut response = match request
             .bearer_auth(&*bearer)
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
-            .map_err(|err| {
-                ClientError::Transient(format!("request failed: {}", err.without_url()))
-            })?;
+        {
+            Ok(response) => response,
+            Err(err) => {
+                return Attempt::Done(Err(ClientError::Transient(format!(
+                    "request failed: {}",
+                    err.without_url()
+                ))));
+            }
+        };
         let status = response.status();
 
         // Read at most MAX_BODY_BYTES; a body past the cap is a protocol fault.
         let mut body: Vec<u8> = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|err| {
-            ClientError::Transient(format!("body read failed: {}", err.without_url()))
-        })? {
-            if body.len() + chunk.len() > MAX_BODY_BYTES {
-                return Err(ClientError::Transient(format!(
-                    "response body exceeds {MAX_BODY_BYTES} bytes"
-                )));
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if body.len() + chunk.len() > MAX_BODY_BYTES {
+                        return Attempt::Done(Err(ClientError::Transient(format!(
+                            "response body exceeds {MAX_BODY_BYTES} bytes"
+                        ))));
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    return Attempt::Done(Err(ClientError::Transient(format!(
+                        "body read failed: {}",
+                        err.without_url()
+                    ))));
+                }
             }
-            body.extend_from_slice(&chunk);
         }
 
         if status.is_success() {
-            return Ok(body);
+            return Attempt::Done(Ok(body));
         }
-        Err(classify_error(status, &body))
+        let err = classify_error(status, &body);
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Attempt::AuthRejected { bearer, err };
+        }
+        Attempt::Done(Err(err))
     }
+}
+
+/// Result of one HTTP attempt: finished, or refused for auth (carrying the
+/// rejected bearer so the caller can invalidate exactly that token).
+enum Attempt {
+    Done(Result<Vec<u8>, ClientError>),
+    AuthRejected { bearer: Arc<str>, err: ClientError },
 }
 
 /// Maps a non-2xx response to a [`ClientError`]. Only the two charset-checked
 /// error fields are extracted; the body text itself is discarded.
+///
+/// Only a *terminal* refusal is [`ClientError::NotUsable`] (the caller drops the
+/// channel for good): 409 `CONNECTION_NOT_USABLE` / `REFRESH_REJECTED`, or 404
+/// whose envelope says `NOT_FOUND`. A bare 404 (no JSON envelope -- a replica
+/// that lacks the routes mid-rollout), 409 `REFRESH_NOT_CONFIGURED`/`CONFLICT`
+/// and every other 4xx are retryable.
 fn classify_error(status: StatusCode, body: &[u8]) -> ClientError {
     let (code, reason) = parse_error_fields(body);
-    match status.as_u16() {
-        409 | 404 => ClientError::NotUsable {
+    let terminal = match status.as_u16() {
+        409 => matches!(code.as_str(), CODE_NOT_USABLE | CODE_REFRESH_REJECTED),
+        404 => code == CODE_NOT_FOUND,
+        _ => false,
+    };
+    if terminal {
+        return ClientError::NotUsable {
             status: status.as_u16(),
             code,
             reason: if status == StatusCode::NOT_FOUND && reason == "unknown" {
@@ -339,8 +477,12 @@ fn classify_error(status: StatusCode, body: &[u8]) -> ClientError {
             } else {
                 reason
             },
-        },
-        401 | 403 | 408 | 425 | 429 => {
+        };
+    }
+    match status.as_u16() {
+        // Retryable by design: re-mint (401/403), throttling, server faults,
+        // and a 404/409 that is not a terminal refusal.
+        401 | 403 | 404 | 408 | 409 | 425 | 429 => {
             ClientError::Transient(format!("hub-api answered {status} (code {code})"))
         }
         s if (500..=599).contains(&s) => {
@@ -449,7 +591,12 @@ impl<B: BearerSource> ConnectionsApi for HubConnectionsClient<B> {
         // integer `123`, expected a string") -- which, for a malformed
         // `accessToken`, would be the token itself. Only the error's category and
         // position are reported, never its message.
-        let resolved: ResolvedCredentials = serde_json::from_slice(&body).map_err(|err| {
+        let mut body = body;
+        let decoded: Result<ResolvedCredentials, _> = serde_json::from_slice(&body);
+        // The raw response body carries the plaintext token: wipe the buffer
+        // now that it is decoded (or has failed to decode).
+        zeroize::Zeroize::zeroize(&mut body);
+        let resolved = decoded.map_err(|err| {
             ClientError::Transient(format!(
                 "undecodable resolve response ({:?} error at line {} column {})",
                 err.classify(),
@@ -502,15 +649,54 @@ mod tests {
                 reason: "revoked_grant".into()
             }
         );
-        let nf = classify_error(StatusCode::NOT_FOUND, b"{}");
+        let nf = classify_error(
+            StatusCode::NOT_FOUND,
+            br#"{"success":false,"error":{"code":"NOT_FOUND","message":"x"}}"#,
+        );
         assert_eq!(
             nf,
             ClientError::NotUsable {
                 status: 404,
-                code: "unknown".into(),
+                code: "NOT_FOUND".into(),
                 reason: "not_found".into()
             }
         );
+        let refresh_rejected = classify_error(
+            StatusCode::CONFLICT,
+            br#"{"error":{"code":"REFRESH_REJECTED","details":{"reason":"revoked_grant"}}}"#,
+        );
+        assert!(matches!(
+            refresh_rejected,
+            ClientError::NotUsable { status: 409, .. }
+        ));
+    }
+
+    // regression: F1 -- operator-fixable / rollout-transient 4xx must NOT be a
+    // sticky permanent drop.
+    #[test]
+    fn non_terminal_404_and_409_are_retryable_not_a_permanent_drop() {
+        for (status, body) in [
+            // route-level 404 from a hub-api replica that lacks the routes: no envelope
+            (StatusCode::NOT_FOUND, &b"<html>404 Not Found</html>"[..]),
+            (StatusCode::NOT_FOUND, &b"{}"[..]),
+            (
+                StatusCode::NOT_FOUND,
+                br#"{"error":{"code":"ROUTE_MISSING"}}"#,
+            ),
+            // operator-fixable: refresh secret not configured yet
+            (
+                StatusCode::CONFLICT,
+                br#"{"error":{"code":"REFRESH_NOT_CONFIGURED"}}"#,
+            ),
+            (StatusCode::CONFLICT, br#"{"error":{"code":"CONFLICT"}}"#),
+            (StatusCode::CONFLICT, &b""[..]),
+        ] {
+            assert!(
+                matches!(classify_error(status, body), ClientError::Transient(_)),
+                "{status} {:?} must be retryable",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]
@@ -554,6 +740,26 @@ mod tests {
         // `error` as a bare string (the auth failures' shape) is tolerated.
         let (c, r) = parse_error_fields(br#"{"error": "unauthorized"}"#);
         assert_eq!((c.as_str(), r.as_str()), ("unknown", "unknown"));
+    }
+
+    // F3: plaintext http:// to hub-api is a startup error outside alpha/local.
+    #[test]
+    fn transport_policy_refuses_plaintext_outside_alpha_unless_acknowledged() {
+        for tier in ["beta", "gamma", "production", "", "Prod", "alpha-ish"] {
+            let err = enforce_transport_policy(true, tier, false)
+                .expect_err("plaintext must be refused outside alpha/local");
+            assert!(err.contains("cleartext") && err.contains("HUB_API_ALLOW_INSECURE_HTTP"));
+        }
+        for tier in ["alpha", "local", " ALPHA ", "Local"] {
+            assert!(
+                enforce_transport_policy(true, tier, false).is_ok(),
+                "{tier:?}"
+            );
+        }
+        // Explicit ack lifts it for any tier; https is never restricted.
+        assert!(enforce_transport_policy(true, "production", true).is_ok());
+        assert!(enforce_transport_policy(false, "production", false).is_ok());
+        assert!(enforce_transport_policy(false, "beta", false).is_ok());
     }
 
     #[test]

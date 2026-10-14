@@ -513,6 +513,14 @@ fn try_start_twitch_dynamic(
         bearer,
         connections_metrics.clone(),
     )?;
+    // Hard startup error (never a warning) for cleartext hub-api outside
+    // alpha/local unless explicitly acknowledged.
+    connections::client::enforce_transport_policy(
+        client.is_plaintext(),
+        &cli.deployment_tier,
+        cli.hub_api_allow_insecure_http,
+    )
+    .map_err(|reason| anyhow::anyhow!("{flag} is ON: {reason}"))?;
     if client.is_plaintext() {
         tracing::warn!(
             "hub-api REST base URL is plaintext http:// (in-cluster); resolved OAuth tokens cross \
@@ -1172,6 +1180,9 @@ mod tests {
         config.cli.service_jwt_token_endpoint =
             "http://hub-api:8204/internal/service-token".to_string();
         config.cli.binding_active_kid = "k1".to_string();
+        // Alpha tolerates the plaintext in-cluster hub-api base; the F3 tests below
+        // override the tier to prove every other tier fails closed.
+        config.cli.deployment_tier = "alpha".to_string();
         config.envelope_binding_keys = Some(crate::config::Secret::new(
             "k1:0102030405060708090a0b0c0d0e0f10",
         ));
@@ -1247,6 +1258,63 @@ mod tests {
             result
         };
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// F3: a bearer JWT goes out and a decrypted OAuth token comes back over this
+    /// channel, so plaintext http:// is a hard startup error outside alpha/local
+    /// unless explicitly acknowledged; https:// and alpha stay accepted.
+    #[tokio::test]
+    async fn dynamic_start_refuses_plaintext_hub_url_outside_alpha_unless_acknowledged() {
+        crypto::ensure_installed();
+        let (refused, unset_tier, acked, https_ok, alpha_ok) = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+            }
+            let mut config = dynamic_ready_config();
+            config.cli.hub_api_url = "http://hub-api:8204".to_string();
+            config.cli.deployment_tier = "beta".to_string();
+            let refused = start_dynamic(&config).err().map(|e| e.to_string());
+
+            // The CLI default (unset DEPLOYMENT_TIER) is production: fail closed.
+            let mut config = dynamic_ready_config();
+            config.cli.deployment_tier =
+                crate::config::CliConfig::parse_from(["svc-ingest"]).deployment_tier;
+            let unset_tier = start_dynamic(&config).err().map(|e| e.to_string());
+
+            let mut config = dynamic_ready_config();
+            config.cli.deployment_tier = "production".to_string();
+            config.cli.hub_api_allow_insecure_http = true;
+            let acked = start_dynamic(&config);
+
+            let mut config = dynamic_ready_config();
+            config.cli.deployment_tier = "gamma".to_string();
+            config.cli.hub_api_url = "https://hub-api.waddlebot.svc:8204".to_string();
+            let https_ok = start_dynamic(&config);
+
+            let alpha_ok = start_dynamic(&dynamic_ready_config());
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::remove_var("VALKEY_URL");
+                std::env::remove_var("VALKEY_PASSWORD");
+            }
+            (refused, unset_tier, acked, https_ok, alpha_ok)
+        };
+        let refused = refused.expect("plaintext hub-api on beta must fail startup");
+        assert!(refused.contains("HUB_API_ALLOW_INSECURE_HTTP"), "{refused}");
+        assert!(refused.contains("cleartext"), "{refused}");
+        assert!(
+            unset_tier.is_some(),
+            "an unset DEPLOYMENT_TIER must fail closed on a plaintext hub-api URL"
+        );
+        assert!(acked.is_ok(), "explicit insecure-ack must start: {acked:?}");
+        assert!(https_ok.is_ok(), "https hub-api must start: {https_ok:?}");
+        assert!(
+            alpha_ok.is_ok(),
+            "alpha over http must keep working: {alpha_ok:?}"
+        );
     }
 
     #[tokio::test]

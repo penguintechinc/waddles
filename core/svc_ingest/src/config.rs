@@ -110,6 +110,25 @@ pub struct CliConfig {
     #[arg(long, env = "HUB_API_REST_CA_FILE", default_value = "")]
     pub hub_api_rest_ca_file: String,
 
+    /// Deployment tier -- set chart-wide via the shared ConfigMap's
+    /// `DEPLOYMENT_TIER` key (`global.deploymentTier`). Consulted only by the
+    /// dynamic-connections transport policy
+    /// ([`crate::connections::client::enforce_transport_policy`]): plaintext
+    /// `http://` to hub-api is tolerated for `alpha`/`local` only. Defaults to
+    /// `production` so an unset value **fails closed** (a bare binary run never
+    /// silently gets the alpha allowance).
+    #[arg(long, env = "DEPLOYMENT_TIER", default_value = "production")]
+    pub deployment_tier: String,
+
+    /// Explicit acknowledgement that a plaintext `http://` [`Self::hub_api_url`]
+    /// is acceptable OUTSIDE alpha/local (e.g. a CNI that encrypts all pod
+    /// traffic). Without it a non-alpha deployment with the dynamic-connections
+    /// flag ON refuses to start: the bearer machine JWT goes out, and the
+    /// decrypted OAuth token comes back, in cleartext. Prefer an `https://`
+    /// base + `HUB_API_REST_CA_FILE`.
+    #[arg(long, env = "HUB_API_ALLOW_INSECURE_HTTP", default_value_t = false)]
+    pub hub_api_allow_insecure_http: bool,
+
     /// hub-api's machine-JWT bootstrap endpoint (`POST /internal/
     /// service-token`, `service_auth::MachineJwtClient`), e.g.
     /// `http://waddlebot-hub-api-v3:8204/internal/service-token`. Required
@@ -451,6 +470,11 @@ mod tests {
         assert_eq!(cli.connections_http_timeout_secs, 10);
         assert_eq!(cli.dynamic_scope_mode, "binding", "fail-closed default");
         assert_eq!(cli.hub_api_rest_ca_file, "");
+        assert_eq!(cli.deployment_tier, "production", "unset tier fails closed");
+        assert!(
+            !cli.hub_api_allow_insecure_http,
+            "insecure-ack defaults off"
+        );
         assert_eq!(cli.service_jwt_token_endpoint, "");
         assert_eq!(
             cli.service_jwt_sa_token_path,

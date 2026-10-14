@@ -71,7 +71,7 @@ pub struct ConnectionsMetrics {
     /// Wall-clock duration of one reconcile pass.
     pub reconcile_duration_seconds: HistogramVec,
     /// Per-bot IRC socket (re)connects, labeled `cause`
-    /// (`initial`/`membership_changed`/`closed`/`error`/`auth_rejected`).
+    /// (`initial`/`membership_changed`/`member_recovered`/`closed`/`error`/`auth_rejected`).
     pub bot_reconnects_total: IntCounterVec,
     /// Chat events routed to the spine, labeled `result` (`published`/
     /// `publish_failed`/`self_echo`/`unrouted`).

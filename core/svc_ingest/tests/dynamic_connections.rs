@@ -74,6 +74,9 @@ struct HubState {
     token_requests: Vec<(String, Value)>,
     /// Status the token endpoint answers with (0 = 200 + a minted token).
     token_status: u16,
+    /// Tokens the token endpoint mints in order (then `MINTED_JWT`) -- lets a
+    /// test simulate hub-api rotating its signing key between two mints.
+    mint_queue: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -113,9 +116,14 @@ async fn hub_service_token(
             Json(json!({"error": "denied"})),
         );
     }
+    let token = if st.mint_queue.is_empty() {
+        MINTED_JWT.to_string()
+    } else {
+        st.mint_queue.remove(0)
+    };
     (
         StatusCode::OK,
-        Json(json!({"token": MINTED_JWT, "expires_in": 600})),
+        Json(json!({"token": token, "expires_in": 600})),
     )
 }
 
@@ -184,12 +192,18 @@ async fn hub_resolve(
     let key = (community, connection);
     let behavior = st.behaviors.get(&key).cloned();
     let ok = |token: &str, bot: &str| {
+        // An empty `bot` means "hub-api sent no bot_login at all" (fail-closed test).
+        let metadata = if bot.is_empty() {
+            json!({"channel_login": "ignored"})
+        } else {
+            json!({"bot_login": bot, "channel_login": "ignored"})
+        };
         (
             StatusCode::OK,
             Json(json!({
                 "success": true, "connectionId": connection, "communityId": community,
                 "provider": "twitch", "accessToken": token, "expiresAt": null,
-                "metadata": {"bot_login": bot, "channel_login": "ignored"}
+                "metadata": metadata
             })),
         )
     };
@@ -580,6 +594,38 @@ fn install_log_capture() -> (LogCapture, tracing::subscriber::DefaultGuard) {
     (capture, guard)
 }
 
+/// Every secret value the tests feed through the pipeline (resolved OAuth
+/// tokens, the IRC `PASS` prefix, machine JWTs). None may ever reach a log line.
+const TOKEN_SECRETS: &[&str] = &[
+    "tok-waddlebots-secret",
+    "tok-otherbot-secret",
+    "tok-impostor-secret",
+    "tok-rotated-secret",
+    "tok-late-secret",
+    "oauth:",
+    MINTED_JWT,
+    BEARER,
+    "old-jwt-secret",
+    "new-jwt-secret",
+];
+
+/// F6: asserts the captured TRACE-level logs saw the run (non-empty) and carry
+/// no token / machine-JWT value -- applied on every failure path, not just the
+/// happy path.
+fn assert_logs_clean(logs: &LogCapture, path: &str) {
+    let captured = logs.text();
+    assert!(
+        !captured.is_empty(),
+        "{path}: log capture must have seen the run (a silent capture proves nothing)"
+    );
+    for secret in TOKEN_SECRETS {
+        assert!(
+            !captured.contains(secret),
+            "{path}: log output leaked {secret:?}"
+        );
+    }
+}
+
 type TestSupervisor =
     Supervisor<HubConnectionsClient<StaticBearer>, RecordingAppender, NoopMetrics>;
 
@@ -762,6 +808,7 @@ async fn one_socket_per_bot_joins_all_channels_and_publishes_under_scope() {
 
 #[tokio::test]
 async fn a_409_drops_that_channel_for_good_without_retry_and_serves_the_rest() {
+    let (logs, _guard) = install_log_capture();
     let mut h = harness().await;
     h.hub.add(1, "waddlebots", "chan_a");
     h.hub.add(2, "waddlebots", "chan_dead");
@@ -831,6 +878,7 @@ async fn a_409_drops_that_channel_for_good_without_retry_and_serves_the_rest() {
     })
     .await;
     h.supervisor.stop_all().await;
+    assert_logs_clean(&logs, "409 not-usable");
 }
 
 #[tokio::test]
@@ -858,6 +906,7 @@ async fn a_bot_whose_every_channel_is_refused_exits_and_is_not_respawned() {
 
 #[tokio::test]
 async fn a_503_on_resolve_is_retried_with_backoff_not_dropped() {
+    let (logs, _guard) = install_log_capture();
     let mut h = harness().await;
     h.hub.add(1, "waddlebots", "chan_a");
     h.hub.set_behavior(
@@ -890,6 +939,7 @@ async fn a_503_on_resolve_is_retried_with_backoff_not_dropped() {
         "a 503 is retryable, never counted as a drop"
     );
     h.supervisor.stop_all().await;
+    assert_logs_clean(&logs, "503 transient");
 }
 
 #[tokio::test]
@@ -1023,6 +1073,7 @@ async fn a_dropped_irc_connection_re_resolves_a_fresh_token_on_reconnect() {
 
 #[tokio::test]
 async fn twitch_auth_rejection_re_resolves_and_keeps_retrying_instead_of_stopping() {
+    let (logs, _guard) = install_log_capture();
     let mut h = harness().await;
     h.irc.set_reject_auth(true);
     h.hub.add(1, "waddlebots", "chan_a");
@@ -1047,10 +1098,12 @@ async fn twitch_auth_rejection_re_resolves_and_keeps_retrying_instead_of_stoppin
     })
     .await;
     h.supervisor.stop_all().await;
+    assert_logs_clean(&logs, "twitch auth rejection");
 }
 
 #[tokio::test]
 async fn a_token_for_a_different_bot_login_is_refused_not_used() {
+    let (logs, _guard) = install_log_capture();
     let mut h = harness().await;
     h.hub.add(1, "waddlebots", "chan_a");
     // hub-api claims this connection authenticates as someone else.
@@ -1076,6 +1129,39 @@ async fn a_token_for_a_different_bot_login_is_refused_not_used() {
         0,
         "a mismatched identity must never reach Twitch"
     );
+    assert_logs_clean(&logs, "login mismatch");
+}
+
+// regression: F5 -- a resolve answer with NO bot_login must fail closed, never be
+// accepted as "no claim to contradict".
+#[tokio::test]
+async fn a_resolve_without_a_bot_login_is_refused_fail_closed() {
+    let (logs, _guard) = install_log_capture();
+    let mut h = harness().await;
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.hub.set_behavior(
+        1,
+        Behavior::Ok {
+            token: "tok-impostor-secret".into(),
+            bot: String::new(), // metadata carries no bot_login at all
+        },
+    );
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("refused as identity_mismatch", || {
+        h.metrics
+            .resolve_not_usable_total
+            .with_label_values(&["identity_mismatch"])
+            .get()
+            == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        h.irc.conn_count(),
+        0,
+        "an unverifiable identity must never reach Twitch"
+    );
+    assert_logs_clean(&logs, "missing bot_login");
 }
 
 #[tokio::test]
@@ -1155,6 +1241,7 @@ async fn run_loop_picks_up_new_bindings_and_stops_every_bot_on_shutdown() {
 
 #[tokio::test]
 async fn a_publish_failure_is_counted_and_the_bot_keeps_serving() {
+    let (logs, _guard) = install_log_capture();
     let mut h = harness().await;
     h.hub.add(1, "waddlebots", "chan_a");
     h.supervisor.reconcile_once().await.unwrap();
@@ -1188,10 +1275,15 @@ async fn a_publish_failure_is_counted_and_the_bot_keeps_serving() {
     h.irc.send_privmsg("chan_a", "viewer", "delivered");
     eventually("published after recovery", || !published(&h).is_empty()).await;
     h.supervisor.stop_all().await;
+    assert_logs_clean(&logs, "publish failure");
 }
 
+// regression: F1 -- only a TERMINAL refusal is a sticky drop. A bare 400 (or any
+// non-terminal 4xx) is retried, never counted as a drop, and its channel is
+// skipped (not joined under another member's token) until it resolves.
 #[tokio::test]
-async fn a_permanent_4xx_on_resolve_drops_the_channel_as_other() {
+async fn a_non_terminal_4xx_on_resolve_skips_the_channel_and_retries_instead_of_dropping() {
+    let (logs, _guard) = install_log_capture();
     let mut h = harness().await;
     h.hub.add(1, "waddlebots", "chan_a");
     h.hub.add(2, "waddlebots", "chan_bad");
@@ -1203,8 +1295,12 @@ async fn a_permanent_4xx_on_resolve_drops_the_channel_as_other() {
         },
     );
     h.supervisor.reconcile_once().await.unwrap();
-    eventually("joined only the good channel", || {
+    eventually("joined only the resolvable channel", || {
         h.irc.join_line(0).as_deref() == Some("JOIN #chan_a")
+    })
+    .await;
+    eventually("the failing member is re-probed", || {
+        h.hub.resolves_for(2) >= 2
     })
     .await;
     assert_eq!(
@@ -1212,9 +1308,191 @@ async fn a_permanent_4xx_on_resolve_drops_the_channel_as_other() {
             .resolve_not_usable_total
             .with_label_values(&["other"])
             .get(),
-        1
+        0,
+        "a non-terminal 4xx is never counted as a drop"
     );
     h.supervisor.stop_all().await;
+    assert_logs_clean(&logs, "non-terminal 4xx");
+}
+
+// regression: F1 -- hub-api answers 409 REFRESH_NOT_CONFIGURED while an operator has
+// not yet set the refresh secret. Fixing the secret must recover with NO restart
+// and NO binding edit.
+#[tokio::test]
+async fn a_409_refresh_not_configured_recovers_once_the_operator_fixes_it() {
+    let (logs, _guard) = install_log_capture();
+    let mut h = harness().await;
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.hub.set_behavior(
+        1,
+        Behavior::Fail {
+            status: 409,
+            body: json!({"success": false, "error": {
+                "code": "REFRESH_NOT_CONFIGURED", "message": "set the secret"}}),
+        },
+    );
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("the bot keeps retrying the resolve", || {
+        h.hub.resolves_for(1) >= 3
+    })
+    .await;
+    assert_eq!(h.irc.conn_count(), 0, "nothing to join yet");
+    assert_eq!(
+        h.supervisor.running_bots(),
+        1,
+        "an operator-fixable 409 must not end the bot"
+    );
+    assert_eq!(
+        h.metrics
+            .resolve_not_usable_total
+            .with_label_values(&["other"])
+            .get(),
+        0
+    );
+
+    // Operator sets the secret: the very same binding (same updatedAt) recovers.
+    h.hub.set_behavior(
+        1,
+        Behavior::Ok {
+            token: "tok-waddlebots-secret".into(),
+            bot: "waddlebots".into(),
+        },
+    );
+    eventually("recovered without restart", || {
+        h.irc.join_line(0).as_deref() == Some("JOIN #chan_a")
+    })
+    .await;
+    h.supervisor.stop_all().await;
+    assert_logs_clean(&logs, "409 REFRESH_NOT_CONFIGURED");
+}
+
+// regression: F1 -- a route-level 404 (no JSON error envelope) is a hub-api replica
+// that lacks the routes mid-rollout. It must recover when the rollout finishes.
+#[tokio::test]
+async fn a_mid_rollout_route_404_recovers_when_the_rollout_finishes() {
+    let (logs, _guard) = install_log_capture();
+    let mut h = harness().await;
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.hub.set_behavior(
+        1,
+        Behavior::Fail {
+            status: 404,
+            body: json!("<html>404 Not Found</html>"),
+        },
+    );
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("retrying through the 404s", || h.hub.resolves_for(1) >= 3).await;
+    assert_eq!(h.supervisor.running_bots(), 1, "a bare 404 is not terminal");
+    h.hub.set_behavior(
+        1,
+        Behavior::Ok {
+            token: "tok-waddlebots-secret".into(),
+            bot: "waddlebots".into(),
+        },
+    );
+    eventually("recovered after the rollout", || {
+        h.irc.join_line(0).as_deref() == Some("JOIN #chan_a")
+    })
+    .await;
+    h.supervisor.stop_all().await;
+    assert_logs_clean(&logs, "mid-rollout 404");
+}
+
+// A GENUINE terminal refusal stays dropped: an enveloped 404 NOT_FOUND and a 409
+// REFRESH_REJECTED are never retried.
+#[tokio::test]
+async fn enveloped_not_found_and_refresh_rejected_stay_dropped_for_good() {
+    let mut h = harness().await;
+    h.hub.add(1, "gone", "chan_gone");
+    h.hub.add(2, "rejected", "chan_rejected");
+    h.hub.set_behavior(
+        1,
+        Behavior::Fail {
+            status: 404,
+            body: json!({"success": false, "error": {"code": "NOT_FOUND"}}),
+        },
+    );
+    h.hub.set_behavior(
+        2,
+        Behavior::Fail {
+            status: 409,
+            body: json!({"success": false, "error": {
+                "code": "REFRESH_REJECTED", "details": {"reason": "revoked_grant"}}}),
+        },
+    );
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("both refused", || {
+        h.hub.resolves_for(1) >= 1 && h.hub.resolves_for(2) >= 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..3 {
+        h.supervisor.reconcile_once().await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(h.hub.resolves_for(1), 1, "NOT_FOUND must never be retried");
+    assert_eq!(
+        h.hub.resolves_for(2),
+        1,
+        "REFRESH_REJECTED must never be retried"
+    );
+    assert_eq!(h.irc.conn_count(), 0);
+}
+
+// regression: F5 -- a member whose resolve fails transiently is NOT joined under
+// another member's token; a background probe joins it as soon as it resolves,
+// without churning the healthy member's socket while it keeps failing.
+#[tokio::test]
+async fn a_transiently_failing_member_is_not_joined_under_another_members_token() {
+    let (logs, _guard) = install_log_capture();
+    let mut h = harness().await;
+    h.hub.add(1, "waddlebots", "chan_a");
+    h.hub.add(2, "waddlebots", "chan_b");
+    h.hub.set_behavior(
+        2,
+        Behavior::Fail {
+            status: 503,
+            body: json!({"error": {"code": "CONNECTIONS_UNAVAILABLE"}}),
+        },
+    );
+    h.supervisor.reconcile_once().await.unwrap();
+    eventually("healthy member joined alone", || {
+        h.irc.join_line(0).as_deref() == Some("JOIN #chan_a")
+    })
+    .await;
+    eventually("the failing member is probed in the background", || {
+        h.hub.resolves_for(2) >= 3
+    })
+    .await;
+    assert_eq!(
+        h.irc.conn_count(),
+        1,
+        "probing a failing member must not churn the live socket"
+    );
+    assert_eq!(h.irc.join_line(0).as_deref(), Some("JOIN #chan_a"));
+
+    // Member 2 recovers (with its own token): ONE reconnect joins both channels.
+    h.hub.set_behavior(
+        2,
+        Behavior::Ok {
+            token: "tok-late-secret".into(),
+            bot: "waddlebots".into(),
+        },
+    );
+    eventually("reconnected with both channels", || {
+        (0..h.irc.conn_count())
+            .any(|c| h.irc.join_line(c).as_deref() == Some("JOIN #chan_a,#chan_b"))
+    })
+    .await;
+    assert!(
+        h.metrics
+            .bot_reconnects_total
+            .with_label_values(&["member_recovered"])
+            .get()
+            >= 1
+    );
+    h.supervisor.stop_all().await;
+    assert_logs_clean(&logs, "member recovery");
 }
 
 #[tokio::test]
@@ -1603,6 +1881,88 @@ async fn machine_jwt_bootstrap_mints_the_bearer_once_and_never_leaks_the_sa_toke
     ] {
         assert!(!captured.contains(secret), "log output leaked {secret:?}");
     }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// regression: F2 -- hub-api rotates its signing key: the cached machine JWT is now
+// rejected (401). The client must invalidate it, re-mint, and replay ONCE, instead
+// of failing until the cached token's own expiry.
+#[tokio::test]
+async fn a_401_invalidates_the_cached_machine_jwt_and_replays_once_with_a_fresh_one() {
+    use svc_ingest::connections::client::{ConnectionsApi, SCOPE_CONNECTIONS_RESOLVE};
+    let (logs, _guard) = install_log_capture();
+    let hub = MockHub::start().await;
+    hub.add(1, "waddlebots", "chan_a");
+    {
+        let mut st = hub.state.lock().unwrap();
+        // Mint #1 is the pre-rotation token hub-api no longer accepts; mint #2 is valid.
+        st.mint_queue = vec!["old-jwt-secret".to_string(), "new-jwt-secret".to_string()];
+        st.expected_bearer = Some("new-jwt-secret".to_string());
+    }
+    let dir = std::env::temp_dir().join(format!("svc-ingest-sa-remint-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sa_path = dir.join("token");
+    std::fs::write(&sa_path, "projected-sa-token-secret\n").unwrap();
+    let minter = service_auth::MachineJwtClient::with_timeouts(
+        format!("http://{}/internal/service-token", hub.addr),
+        sa_path.to_string_lossy().to_string(),
+        SCOPE_CONNECTIONS_RESOLVE,
+        service_auth::HttpTimeouts::from_env(),
+    )
+    .unwrap();
+    let client = bare_client(&hub, minter);
+
+    let creds = client
+        .resolve(1, 1)
+        .await
+        .expect("a 401 must be healed by one re-mint + replay");
+    assert_eq!(creds.access_token.expose(), "tok-waddlebots-secret");
+    {
+        let st = hub.state.lock().unwrap();
+        assert_eq!(st.bad_auth, 1, "exactly the one rejected attempt");
+        assert_eq!(
+            st.token_requests.len(),
+            2,
+            "the 401 triggered exactly one re-mint"
+        );
+    }
+    // The fresh token is cached: the next call needs no further mint.
+    client.resolve(1, 1).await.unwrap();
+    assert_eq!(hub.state.lock().unwrap().token_requests.len(), 2);
+    assert_logs_clean(&logs, "401 re-mint");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// F2: the replay is bounded -- a hub-api that keeps rejecting costs exactly two
+// attempts and two mints per call, never a loop, and surfaces as retryable.
+#[tokio::test]
+async fn a_persistent_401_is_replayed_exactly_once_and_stays_retryable() {
+    use svc_ingest::connections::client::{ConnectionsApi, SCOPE_CONNECTIONS_RESOLVE};
+    let hub = MockHub::start().await;
+    hub.add(1, "waddlebots", "chan_a");
+    hub.state.lock().unwrap().expected_bearer = Some("never-minted".to_string());
+    let dir = std::env::temp_dir().join(format!("svc-ingest-sa-401loop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sa_path = dir.join("token");
+    std::fs::write(&sa_path, "sa\n").unwrap();
+    let minter = service_auth::MachineJwtClient::with_timeouts(
+        format!("http://{}/internal/service-token", hub.addr),
+        sa_path.to_string_lossy().to_string(),
+        SCOPE_CONNECTIONS_RESOLVE,
+        service_auth::HttpTimeouts::from_env(),
+    )
+    .unwrap();
+    let client = bare_client(&hub, minter);
+    let err = client.resolve(1, 1).await.unwrap_err();
+    assert!(matches!(err, ClientError::Transient(_)), "{err:?}");
+    let st = hub.state.lock().unwrap();
+    assert_eq!(st.bad_auth, 2, "original attempt + exactly one replay");
+    assert_eq!(
+        st.token_requests.len(),
+        2,
+        "initial mint + exactly one re-mint"
+    );
+    drop(st);
     let _ = std::fs::remove_dir_all(dir);
 }
 

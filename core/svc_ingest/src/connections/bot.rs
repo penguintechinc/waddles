@@ -8,10 +8,18 @@
 //! 1. **Acquire credentials.** Every (re)connect re-resolves each member's
 //!    connection through hub-api -- the token is never cached past a reconnect;
 //!    hub-api refreshes a stale one inside the call. The first successful token
-//!    wins (tokens for one bot login are interchangeable for IRC identity).
-//!    A refusal (`ClientError::NotUsable`, HTTP 409/404) **drops that member for
-//!    good** and is reported to the supervisor; transient failures retry with
-//!    backoff.
+//!    wins -- every member's token is first verified to authenticate as THIS
+//!    bot's login (a missing/malformed `bot_login` fails closed), so tokens in
+//!    one group are interchangeable for IRC identity.
+//!    A *terminal* refusal (`ClientError::NotUsable`: 409 `CONNECTION_NOT_USABLE`
+//!    / `REFRESH_REJECTED`, or an enveloped 404 `NOT_FOUND`) **drops that member
+//!    for good** and is reported to the supervisor. Anything else (5xx, 401/403,
+//!    409 `REFRESH_NOT_CONFIGURED`, a bare 404 from a mid-rollout replica, ...)
+//!    is transient: a member that cannot resolve right now is **skipped -- its
+//!    channels are never joined under another member's token** -- while a
+//!    background probe re-tries it with backoff and, the moment it resolves,
+//!    triggers one reconnect that joins it. A bot with no usable token at all
+//!    backs off and retries the whole pass.
 //! 2. **Connect and JOIN all channels on ONE socket**
 //!    (`penguin_connector_twitch`'s `IrcConfig::channel` carries a
 //!    comma-separated list, rendered as a single `JOIN #a,#b,#c`).
@@ -47,7 +55,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::client::{ClientError, ConnectionsApi};
-use super::dto::{AccessToken, PROVIDER_TWITCH};
+use super::dto::{AccessToken, ResolvedCredentials, PROVIDER_TWITCH};
 use super::metrics::ConnectionsMetrics;
 use crate::ingest::{twitch, Backoff, STABILITY_WINDOW};
 use crate::publish::{deterministic_workstream_id, publish_event, EventAppender};
@@ -156,24 +164,114 @@ impl Drop for JoinedGuard {
 
 /// Outcome of one credential-acquisition pass over a bot's members.
 enum Acquired {
-    /// A token plus the members still believed usable.
+    /// A token, the members that resolved (their channels get joined), and the
+    /// members that failed *transiently* (skipped this session, probed in the
+    /// background until they resolve).
     Ready {
         token: AccessToken,
         members: Vec<Member>,
+        pending: Vec<Member>,
     },
-    /// Every member was refused -- nothing left to serve; the bot exits.
+    /// Every member was terminally refused -- nothing left to serve; the bot
+    /// exits.
     AllDropped,
-    /// No token yet but at least one member may still be usable -- back off.
+    /// No token yet but at least one member may still resolve -- back off.
     Retry,
 }
 
-/// Resolves every member's connection, dropping refused ones.
+/// Outcome of resolving ONE member's connection.
+enum MemberOutcome {
+    /// A token verified to authenticate as this bot's login.
+    Usable(AccessToken),
+    /// A terminal refusal (reason label): drop the member for good.
+    Refused(String),
+    /// Not resolvable right now: retry later. The member must NOT be joined
+    /// under another member's token in the meantime.
+    Transient,
+}
+
+/// True iff `creds` is a Twitch token that authenticates as `bot_login`.
+///
+/// Fails **closed**: a resolve answer without a valid `bot_login` is rejected,
+/// never accepted -- authenticating the socket as an account we could not
+/// confirm would attribute chat to the wrong identity.
+fn identity_matches(creds: &ResolvedCredentials, bot_login: &str) -> bool {
+    creds.provider == PROVIDER_TWITCH && creds.bot_login().is_some_and(|login| login == bot_login)
+}
+
+/// Resolves one member and classifies the answer (see [`MemberOutcome`]).
+/// Logs carry numeric ids and the redacted bot reference only -- never a token.
+async fn resolve_member<C: ConnectionsApi>(
+    api: &C,
+    bot_login: &str,
+    member: &Member,
+) -> MemberOutcome {
+    match api.resolve(member.community_id, member.connection_id).await {
+        Ok(creds) => {
+            if identity_matches(&creds, bot_login) {
+                MemberOutcome::Usable(creds.access_token)
+            } else {
+                MemberOutcome::Refused("identity_mismatch".to_string())
+            }
+        }
+        Err(ClientError::NotUsable { reason, .. }) => MemberOutcome::Refused(reason),
+        Err(ClientError::Permanent { status, code }) => {
+            tracing::warn!(
+                bot = %bot_ref(bot_login),
+                grant_id = member.grant_id,
+                connection_id = member.connection_id,
+                community_id = member.community_id,
+                status,
+                code = %code,
+                "hub-api rejected the resolve request; channel skipped, will retry with backoff"
+            );
+            MemberOutcome::Transient
+        }
+        Err(ClientError::Transient(err)) => {
+            tracing::warn!(
+                bot = %bot_ref(bot_login),
+                grant_id = member.grant_id,
+                connection_id = member.connection_id,
+                community_id = member.community_id,
+                error = %err,
+                "transient hub-api failure resolving credentials; channel skipped, will retry"
+            );
+            MemberOutcome::Transient
+        }
+    }
+}
+
+/// Counts + logs a terminal refusal and tells the supervisor to stop
+/// re-admitting this binding until it changes.
+fn refuse_member(
+    metrics: &ConnectionsMetrics,
+    events: &mpsc::UnboundedSender<BotEvent>,
+    bot_login: &str,
+    member: &Member,
+    reason: &str,
+) {
+    metrics.record_not_usable(reason);
+    tracing::warn!(
+        bot = %bot_ref(bot_login),
+        grant_id = member.grant_id,
+        connection_id = member.connection_id,
+        community_id = member.community_id,
+        reason = super::metrics::bounded_reason(reason),
+        "hub-api refused connection; dropping channel (no retry)"
+    );
+    let _ = events.send(BotEvent::MemberDropped {
+        grant_id: member.grant_id,
+        updated_at: member.updated_at.clone(),
+    });
+}
+
+/// Resolves every member's connection: terminally refused ones are dropped,
+/// transiently failing ones are set aside as `pending`.
 ///
 /// Resolves are sequential (a bot has a handful of members; hub-api resolve
-/// takes a row lock). A token for a different bot login than the group's, or
-/// for a different provider, is treated as a refusal (`identity_mismatch`):
-/// authenticating the socket as another account would attribute chat to the
-/// wrong identity.
+/// takes a row lock). A token for a different bot login than the group's (or
+/// with no verifiable login), or for a different provider, is a refusal
+/// (`identity_mismatch`).
 async fn acquire<C: ConnectionsApi>(
     api: &C,
     metrics: &ConnectionsMetrics,
@@ -184,52 +282,24 @@ async fn acquire<C: ConnectionsApi>(
 ) -> Acquired {
     let mut token: Option<AccessToken> = None;
     let mut keep: Vec<Member> = Vec::with_capacity(members.len());
+    let mut pending: Vec<Member> = Vec::new();
 
     for member in members {
-        let drop_member = |reason: &str| {
-            metrics.record_not_usable(reason);
-            tracing::warn!(
-                bot = %bot_ref(bot_login),
-                grant_id = member.grant_id,
-                connection_id = member.connection_id,
-                community_id = member.community_id,
-                reason = super::metrics::bounded_reason(reason),
-                "hub-api refused connection; dropping channel (no retry)"
-            );
-            let _ = events.send(BotEvent::MemberDropped {
-                grant_id: member.grant_id,
-                updated_at: member.updated_at.clone(),
-            });
-        };
-        match api.resolve(member.community_id, member.connection_id).await {
-            Ok(creds) => {
-                let wrong_provider = creds.provider != PROVIDER_TWITCH;
-                let wrong_login = creds.bot_login().is_some_and(|login| login != bot_login);
-                if wrong_provider || wrong_login {
-                    drop_member("identity_mismatch");
-                    continue;
-                }
+        match resolve_member(api, bot_login, member).await {
+            MemberOutcome::Usable(creds_token) => {
                 metrics
                     .tokens_acquired_total
                     .with_label_values(&[cause])
                     .inc();
                 if token.is_none() {
-                    token = Some(creds.access_token);
+                    token = Some(creds_token);
                 }
                 keep.push(member.clone());
             }
-            Err(ClientError::NotUsable { reason, .. }) => drop_member(&reason),
-            Err(ClientError::Permanent { .. }) => drop_member("other"),
-            Err(ClientError::Transient(err)) => {
-                tracing::warn!(
-                    bot = %bot_ref(bot_login),
-                    grant_id = member.grant_id,
-                    connection_id = member.connection_id,
-                    error = %err,
-                    "transient hub-api failure resolving credentials; will retry"
-                );
-                keep.push(member.clone());
+            MemberOutcome::Refused(reason) => {
+                refuse_member(metrics, events, bot_login, member, &reason);
             }
+            MemberOutcome::Transient => pending.push(member.clone()),
         }
     }
 
@@ -237,10 +307,69 @@ async fn acquire<C: ConnectionsApi>(
         Some(token) => Acquired::Ready {
             token,
             members: keep,
+            pending,
         },
-        None if keep.is_empty() => Acquired::AllDropped,
+        None if pending.is_empty() => Acquired::AllDropped,
         None => Acquired::Retry,
     }
+}
+
+/// Aborts the recovery-probe task when a session ends (reconnect, shutdown,
+/// exit) so a probe never outlives the connection it was started for.
+struct ProbeGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Background re-try of the members skipped as transient. Re-resolves them with
+/// backoff -- a *probe only*, it never touches the live IRC socket -- and fires
+/// the returned receiver once any of them resolves, so the bot reconnects ONCE
+/// to join it. A probe-time terminal refusal is reported like any other drop;
+/// the task ends silently (receiver errors) once nothing is left to probe. A
+/// persistently failing member therefore costs one resolve per backoff interval
+/// and never churns the healthy channels' socket.
+fn spawn_recovery_probe<C: ConnectionsApi>(
+    api: Arc<C>,
+    metrics: Arc<ConnectionsMetrics>,
+    events: mpsc::UnboundedSender<BotEvent>,
+    bot_login: String,
+    pending: Vec<Member>,
+    backoff_cap: Duration,
+) -> (ProbeGuard, oneshot::Receiver<()>) {
+    let (tx, rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let mut backoff = Backoff::new(backoff_cap);
+        let mut pending = pending;
+        loop {
+            tokio::time::sleep(backoff.delay()).await;
+            let mut still: Vec<Member> = Vec::new();
+            let mut recovered = false;
+            for member in pending {
+                match resolve_member(api.as_ref(), &bot_login, &member).await {
+                    MemberOutcome::Usable(token) => {
+                        drop(token);
+                        recovered = true;
+                    }
+                    MemberOutcome::Refused(reason) => {
+                        refuse_member(&metrics, &events, &bot_login, &member, &reason);
+                    }
+                    MemberOutcome::Transient => still.push(member),
+                }
+            }
+            if recovered {
+                let _ = tx.send(());
+                return;
+            }
+            if still.is_empty() {
+                return;
+            }
+            pending = still;
+        }
+    });
+    (ProbeGuard(handle), rx)
 }
 
 /// Renders `members`' distinct channels as the comma-separated `#a,#b` list the
@@ -335,8 +464,12 @@ pub async fn run_bot<C, A, M>(
             _ = &mut shutdown => return,
             acquired = acquire(api.as_ref(), &metrics, &events, &spec.bot_login, &spec.members, cause) => acquired,
         };
-        let (token, members) = match acquired {
-            Acquired::Ready { token, members } => (token, members),
+        let (token, members, pending) = match acquired {
+            Acquired::Ready {
+                token,
+                members,
+                pending,
+            } => (token, members, pending),
             Acquired::AllDropped => {
                 tracing::warn!(bot = %bot, "every channel for this bot was refused by hub-api; exiting");
                 return;
@@ -412,6 +545,29 @@ pub async fn run_bot<C, A, M>(
         let routes = route_table(&members);
         let mut proven = false;
 
+        // Members that could not resolve this pass are NOT joined (never under
+        // another member's token); a probe re-tries them and signals one
+        // reconnect when any resolves.
+        let mut probe_live = !pending.is_empty();
+        let (_probe_guard, mut recovery_rx) = if pending.is_empty() {
+            (None, oneshot::channel().1)
+        } else {
+            tracing::warn!(
+                bot = %bot,
+                skipped = pending.len(),
+                "some channels could not resolve credentials; serving the rest, probing the skipped ones"
+            );
+            let (guard, rx) = spawn_recovery_probe(
+                Arc::clone(&api),
+                Arc::clone(&metrics),
+                events.clone(),
+                spec.bot_login.clone(),
+                pending,
+                backoff_cap,
+            );
+            (Some(guard), rx)
+        };
+
         loop {
             let recv = tokio::select! {
                 _ = &mut shutdown => return,
@@ -421,6 +577,17 @@ pub async fn run_bot<C, A, M>(
                     cause = "membership_changed";
                     drop(joined);
                     continue 'outer;
+                }
+                recovered = &mut recovery_rx, if probe_live => {
+                    probe_live = false;
+                    if recovered.is_ok() {
+                        tracing::info!(bot = %bot, "a skipped channel's credentials resolved; reconnecting to join it");
+                        cause = "member_recovered";
+                        drop(joined);
+                        continue 'outer;
+                    }
+                    // Probe ended with nothing left to retry (all refused).
+                    continue;
                 }
                 recv = conn.recv() => recv,
             };
@@ -580,6 +747,41 @@ mod tests {
         assert_eq!(a.len(), 8);
         assert!(!a.contains("waddle"));
         assert_ne!(a, bot_ref("otherbot"));
+    }
+
+    fn creds(provider: &str, metadata: serde_json::Value) -> ResolvedCredentials {
+        serde_json::from_value(serde_json::json!({
+            "success": true, "connectionId": 1, "communityId": 1, "provider": provider,
+            "accessToken": "tok", "metadata": metadata
+        }))
+        .unwrap()
+    }
+
+    // regression: F5 -- a resolve answer whose bot_login is missing or malformed
+    // must FAIL CLOSED (rejected), not be accepted as "nothing to contradict".
+    #[test]
+    fn identity_matches_fails_closed_without_a_verifiable_bot_login() {
+        let good = creds("twitch", serde_json::json!({"bot_login": "waddlebots"}));
+        assert!(identity_matches(&good, "waddlebots"));
+        // Normalization applies (case, leading '#') but never widens the match.
+        let cased = creds("twitch", serde_json::json!({"bot_login": "WaddleBots"}));
+        assert!(identity_matches(&cased, "waddlebots"));
+
+        assert!(!identity_matches(&good, "someoneelse"), "wrong login");
+        for metadata in [
+            serde_json::json!({}),
+            serde_json::json!({"bot_login": ""}),
+            serde_json::json!({"bot_login": "has space"}),
+            serde_json::json!({"bot_login": 42}),
+            serde_json::json!({"bot_login": null}),
+        ] {
+            assert!(
+                !identity_matches(&creds("twitch", metadata.clone()), "waddlebots"),
+                "missing/invalid bot_login {metadata} must be rejected"
+            );
+        }
+        let wrong_provider = creds("discord", serde_json::json!({"bot_login": "waddlebots"}));
+        assert!(!identity_matches(&wrong_provider, "waddlebots"));
     }
 
     #[test]

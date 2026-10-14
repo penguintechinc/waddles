@@ -74,6 +74,16 @@ impl PartialEq for AccessToken {
 
 impl Eq for AccessToken {}
 
+impl Drop for AccessToken {
+    /// Overwrites the token's heap buffer before it is freed so the decrypted
+    /// OAuth value does not linger in released memory (best effort: copies the
+    /// IRC connector makes of the `PASS` line are outside this type's reach).
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
 /// One (community, connection) pair the data plane should run. Carries no
 /// token (`DataPlaneBindingDTO`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
