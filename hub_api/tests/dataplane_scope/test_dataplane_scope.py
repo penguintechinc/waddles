@@ -246,11 +246,13 @@ class TestResolve:
         )
         assert response.status_code == 404
 
-    async def test_guild_linked_to_two_communities_with_one_primary_picks_the_primary(
+    async def test_same_tenant_two_communities_one_primary_picks_the_primary(
         self, app: Quart, db: Any, issuer: ServiceJwtIssuer
     ) -> None:
+        # Same-tenant primary disambiguation still works (regression for the cross-tenant fix).
+        sibling = int(db.dal.communities.insert(name="sibling", tenant_id=db.seed.demo_tenant))
         db.dal.community_servers.insert(
-            community_id=db.seed.other_community,
+            community_id=sibling,
             platform="discord",
             platform_server_id=GUILD,
             status="approved",
@@ -262,11 +264,182 @@ class TestResolve:
         )
         assert (await response.get_json())["communityId"] == db.seed.demo_community
 
+    async def test_cross_tenant_verified_links_are_409_even_with_one_primary(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        # Security review of 5937b709: a source claimed by two tenants fails closed; primary flags
+        # never adjudicate across tenants.
+        db.dal.community_servers.insert(
+            community_id=db.seed.other_community,
+            platform="discord",
+            platform_server_id=GUILD,
+            status="approved",
+            is_primary=False,
+        )
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id={GUILD}", headers=_auth(issuer)
+        )
+        assert response.status_code == 409
+        assert "communityId" not in await response.get_json()
+
+    async def test_attacker_legacy_claim_cannot_hijack_a_verified_source(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        # Attacker (tenant B) sets its own communities.platform_server_id to the victim's guild.
+        # Victim has an approved link on a DIFFERENT community row without legacy claim.
+        victim = int(db.dal.communities.insert(name="victim", tenant_id=db.seed.demo_tenant))
+        db.dal.community_servers.insert(
+            community_id=victim,
+            platform="discord",
+            platform_server_id="123123123",
+            status="approved",
+            is_primary=True,
+        )
+        db.dal.communities.insert(
+            name="attacker",
+            tenant_id=db.seed.other_tenant,
+            platform="discord",
+            platform_server_id="123123123",
+        )
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id=123123123", headers=_auth(issuer)
+        )
+        body = await response.get_json()
+        assert response.status_code == 200
+        assert (body["tenantId"], body["communityId"]) == (db.seed.demo_tenant, victim)
+
+    async def test_attacker_legacy_claim_against_verified_legacy_owner_is_409(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        # Attacker copies the guild id of the demo community (verified link + legacy primary):
+        # the attacker's legacy row must not be force-marked primary nor win -- the verified owner
+        # is the only verified claim, so it resolves to the owner, never the attacker.
+        attacker = int(
+            db.dal.communities.insert(
+                name="attacker",
+                tenant_id=db.seed.other_tenant,
+                platform="discord",
+                platform_server_id=GUILD,
+            )
+        )
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id={GUILD}", headers=_auth(issuer)
+        )
+        body = await response.get_json()
+        assert response.status_code == 200
+        assert body["communityId"] == db.seed.demo_community != attacker
+        assert body["tenantId"] == db.seed.demo_tenant
+
+    async def test_inactive_verified_owner_does_not_fall_through_to_legacy_attacker(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        # Review of #867: deactivating the verified owner must not hand the source to a legacy
+        # claimant in another tenant.
+        victim = int(db.dal.communities.insert(name="victim", tenant_id=db.seed.demo_tenant))
+        db.dal.communities.insert(
+            name="attacker",
+            tenant_id=db.seed.other_tenant,
+            platform="discord",
+            platform_server_id="31313131",
+        )
+        db.dal.community_servers.insert(
+            community_id=victim,
+            platform="discord",
+            platform_server_id="31313131",
+            status="approved",
+            is_primary=True,
+        )
+        db.dal(db.dal.communities.id == victim).update(is_active=False)
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id=31313131", headers=_auth(issuer)
+        )
+        assert response.status_code == 404
+        assert "tenantId" not in await response.get_json()
+
+    async def test_orphaned_verified_owner_does_not_fall_through_to_legacy_attacker(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        victim = int(db.dal.communities.insert(name="orphaned", tenant_id=None))
+        db.dal.communities.insert(
+            name="attacker",
+            tenant_id=db.seed.other_tenant,
+            platform="discord",
+            platform_server_id="32323232",
+        )
+        db.dal.community_servers.insert(
+            community_id=victim,
+            platform="discord",
+            platform_server_id="32323232",
+            status="approved",
+            is_primary=True,
+        )
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id=32323232", headers=_auth(issuer)
+        )
+        assert response.status_code == 404
+
+    async def test_same_tenant_verified_wins_and_legacy_never_tie_breaks(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        legacy_only = int(
+            db.dal.communities.insert(
+                name="legacy-sib",
+                tenant_id=db.seed.demo_tenant,
+                platform="discord",
+                platform_server_id="33333333",
+            )
+        )
+        verified_c = int(db.dal.communities.insert(name="ver-sib", tenant_id=db.seed.demo_tenant))
+        db.dal.community_servers.insert(
+            community_id=verified_c,
+            platform="discord",
+            platform_server_id="33333333",
+            status="approved",
+            is_primary=False,
+        )
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id=33333333", headers=_auth(issuer)
+        )
+        body = await response.get_json()
+        assert response.status_code == 200
+        assert body["communityId"] == verified_c != legacy_only
+
+    async def test_contested_legacy_only_claims_across_tenants_are_409(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        for name, tenant in (("a", db.seed.demo_tenant), ("b", db.seed.other_tenant)):
+            db.dal.communities.insert(
+                name=name, tenant_id=tenant, platform="discord", platform_server_id="42424242"
+            )
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id=42424242", headers=_auth(issuer)
+        )
+        assert response.status_code == 409
+
+    async def test_inactive_tenant_does_not_resolve(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        db.dal(db.dal.tenants.id == db.seed.demo_tenant).update(is_active=False)
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id={GUILD}", headers=_auth(issuer)
+        )
+        assert response.status_code == 404
+        assert "tenantId" not in await response.get_json()
+
     async def test_guild_claimed_by_two_primaries_is_409_never_a_guess(
         self, app: Quart, db: Any, issuer: ServiceJwtIssuer
     ) -> None:
+        sibling = int(db.dal.communities.insert(name="sibling2", tenant_id=db.seed.demo_tenant))
         db.dal.community_servers.insert(
-            community_id=db.seed.other_community,
+            community_id=sibling,
             platform="discord",
             platform_server_id=GUILD,
             status="approved",
