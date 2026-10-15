@@ -96,12 +96,18 @@ async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str)
 
     Raises :class:`InvalidSourceError`, :class:`ScopeNotFoundError` or
     :class:`AmbiguousScopeError`; never returns a guess.
-    Inactive communities and communities with no tenant never resolve.
+    Inactive communities/tenants and communities with no tenant never resolve; a source claimed
+    across tenants is ambiguous (fail closed).
     """
     plat, src = normalize(platform, source_id)
     bind_admin_tables(dal)  # idempotent lazy bind of community_servers (see schema.py)
 
+    # ``verified`` = communities with an APPROVED community_servers link (a reviewed claim);
+    # ``legacy`` = communities that merely self-assert the source in communities.platform_server_id
+    # (an unreviewed column). Security review of 5937b709: a legacy row must never out-rank a
+    # verified link nor mint cross-tenant "primary" authority.
     primary_flag: dict[int, bool] = {}
+    verified: set[int] = set()
     links = await async_dal.select_async(
         dal(
             (dal.community_servers.platform == plat)
@@ -111,14 +117,19 @@ async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str)
     )
     for link in links:
         cid = int(link.community_id)
+        verified.add(cid)
         primary_flag[cid] = primary_flag.get(cid, False) or bool(link.is_primary)
 
     legacy = await async_dal.select_async(
         dal((dal.communities.platform == plat) & (dal.communities.platform_server_id == src))
     )
-    for row in legacy:
-        # The community's own primary server is, by definition, its primary link.
-        primary_flag[int(row.id)] = True
+    legacy_ids = {int(row.id) for row in legacy}
+    for cid in legacy_ids:
+        primary_flag.setdefault(cid, False)
+        if cid in verified:
+            # Backed by an approved link: its own primary server is its primary link. Only ever
+            # used to break a tie *within one tenant* (see below).
+            primary_flag[cid] = True
 
     if not primary_flag:
         raise ScopeNotFoundError("no community is linked to this source")
@@ -130,6 +141,22 @@ async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str)
     candidates = [cid for cid in primary_flag if cid in communities]
     if not candidates:
         raise ScopeNotFoundError("no active community is linked to this source")
+
+    # A verified claim beats a self-asserted one: legacy-only communities cannot contest (or
+    # hijack) a source another community has had approved. With no verified claim at all, the
+    # legacy-only communities are the only evidence and are held to the contention rules below.
+    if any(cid in verified for cid in candidates):
+        candidates = [cid for cid in candidates if cid in verified]
+
+    # A source claimed across tenant boundaries is a misconfiguration (or an attack): refuse, never
+    # adjudicate by primary flag -- a tenant must not be able to win by asserting primary.
+    if len({int(communities[cid].tenant_id) for cid in candidates}) > 1:
+        logger.warning(
+            "dataplane_scope.cross_tenant_contention platform=%s candidates=%d",
+            plat,
+            len(candidates),
+        )
+        raise AmbiguousScopeError("source is claimed by more than one tenant")
 
     if len(candidates) > 1:
         primaries = [cid for cid in candidates if primary_flag[cid]]
@@ -146,6 +173,15 @@ async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str)
         # A community pointing at a tenant that does not exist is corrupt data: refuse, never
         # emit a tenant id nothing can authorise.
         raise ScopeNotFoundError("community has no valid tenant")
+    if not _truthy_active(tenant_rows[0]):
+        # tenants.is_active (058_tenants_and_claims.sql): a suspended tenant must not keep flowing
+        # through the data plane. Caller fails to the community_id 0 sentinel.
+        logger.warning(
+            "dataplane_scope.tenant_inactive tenant_id=%d community_id=%d",
+            int(community.tenant_id),
+            int(community.id),
+        )
+        raise ScopeNotFoundError("tenant is not active")
     return ResolvedScope(
         tenant_id=int(community.tenant_id),
         community_id=int(community.id),
