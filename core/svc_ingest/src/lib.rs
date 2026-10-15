@@ -63,6 +63,7 @@
 //! dependency, unlike `svc_process`/`svc_action`.
 
 pub mod config;
+pub mod connections;
 pub mod connector;
 pub mod crypto;
 pub mod discord_rest;
@@ -253,6 +254,12 @@ where
     );
 
     let ingest_metrics = Arc::new(telemetry::register_ingest_metrics(&prom_registry));
+    // Registered unconditionally (cheap) so the dynamic-connections series
+    // exist at zero even while the flag is OFF -- dashboards and the
+    // telemetry smoke gate never see a missing metric family.
+    let connections_metrics = Arc::new(connections::metrics::ConnectionsMetrics::register(
+        &prom_registry,
+    )?);
     let mut state = http::AppState::new(config.clone(), prom_registry);
     let receiver_readiness = Arc::clone(&state.receiver_readiness);
 
@@ -272,11 +279,24 @@ where
         // YouTube/Kick receivers, the generic webhook/JWT intake, and D31
         // usage metering are `// TODO(M5)` -- not started here, see this
         // module's doc comment.
-        try_start_twitch_irc(
-            &config,
-            ingest_metrics.clone(),
-            Arc::clone(&receiver_readiness),
-        );
+        // `waddles.ingest-dynamic-connections` (default OFF): ON hands Twitch to
+        // the hub-api-driven supervisor (`crate::connections`) and the static
+        // `TWITCH_IRC_*` receiver is superseded; OFF leaves the static path
+        // exactly as it was. Discord is out of scope and stays env-driven.
+        if license::dynamic_connections_enabled(license_client.as_ref()) {
+            try_start_twitch_dynamic(
+                &config,
+                ingest_metrics.clone(),
+                connections_metrics.clone(),
+                Arc::clone(&receiver_readiness),
+            )?;
+        } else {
+            try_start_twitch_irc(
+                &config,
+                ingest_metrics.clone(),
+                Arc::clone(&receiver_readiness),
+            );
+        }
         try_start_discord(
             &config,
             ingest_metrics.clone(),
@@ -419,6 +439,159 @@ fn try_start_twitch_irc(
         )
         .await;
     });
+}
+
+/// Starts the dynamic Twitch connection supervisor (`crate::connections`):
+/// resolves IRC channels + OAuth tokens from hub-api's connection store
+/// instead of the static `TWITCH_IRC_*` environment, one IRC socket per bot
+/// account. Only called when `waddles.ingest-dynamic-connections` is ON.
+///
+/// **Fails loud, never falls back.** Unlike the static `try_start_*`
+/// functions (which log and skip when unconfigured), a flag-ON deployment that
+/// cannot authenticate to hub-api, mint envelopes, or reach the spine returns
+/// `Err` so the process exits and Kubernetes restarts it visibly -- silently
+/// running with no Twitch ingest, or silently reverting to the static path the
+/// operator just turned off, would be a masked failure. Startup-only: once
+/// running, hub-api outages degrade (the supervisor keeps its bots and retries)
+/// but never exit the process.
+fn try_start_twitch_dynamic(
+    config: &config::Config,
+    metrics: Arc<telemetry::IngestMetrics>,
+    connections_metrics: Arc<connections::metrics::ConnectionsMetrics>,
+    readiness: Arc<ReceiverReadiness>,
+) -> anyhow::Result<()> {
+    let cli = &config.cli;
+    let flag = license::DYNAMIC_CONNECTIONS_FLAG;
+    if cli.service_jwt_token_endpoint.trim().is_empty() {
+        anyhow::bail!(
+            "{flag} is ON but SERVICE_JWT_TOKEN_ENDPOINT is unset; refusing to start without a \
+             way to authenticate to hub-api (no silent fallback to the static TWITCH_IRC_* path)"
+        );
+    }
+    let keyring =
+        resolve_binding_keyring(config, "twitch dynamic connections").ok_or_else(|| {
+            anyhow::anyhow!(
+            "{flag} is ON but ENVELOPE_BINDING_KEYS/ENVELOPE_BINDING_ACTIVE_KID are missing or \
+             invalid; refusing to start (events cannot be minted)"
+        )
+        })?;
+    let spine_cfg = penguin_spine::SpineConfig::from_env().map_err(|err| {
+        anyhow::anyhow!("{flag} is ON but the spine config is unavailable: {err}")
+    })?;
+    let scope_mode =
+        connections::supervisor::ScopeMode::parse(&cli.dynamic_scope_mode, config.ingest_scope())
+            .map_err(anyhow::Error::msg)?;
+    if matches!(scope_mode, connections::supervisor::ScopeMode::Runner(_)) {
+        tracing::warn!(
+            "INGEST_DYNAMIC_SCOPE_MODE=runner: every dynamic binding publishes under the runner's \
+             fixed tenant/community scope -- correct for a single-tenant deployment only"
+        );
+    }
+    if config.twitch_irc_enabled() {
+        tracing::warn!(
+            "static TWITCH_IRC_NICK/_CHANNEL/_OAUTH_TOKEN are set but superseded by dynamic \
+             connections ({flag} ON); the static Twitch IRC receiver is NOT started"
+        );
+    }
+
+    let bearer = service_auth::MachineJwtClient::with_timeouts(
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        connections::client::SCOPE_CONNECTIONS_RESOLVE,
+        service_auth::HttpTimeouts::from_env(),
+    )?;
+    let request_timeout = Duration::from_secs(cli.connections_http_timeout_secs);
+    let client_cfg = connections::client::HubClientConfig {
+        base_url: cli.hub_api_url.clone(),
+        ca_file: (!cli.hub_api_rest_ca_file.trim().is_empty())
+            .then(|| std::path::PathBuf::from(cli.hub_api_rest_ca_file.trim())),
+        request_timeout,
+        connect_timeout: request_timeout.min(Duration::from_secs(3)),
+    };
+    let client = connections::client::HubConnectionsClient::new(
+        &client_cfg,
+        bearer,
+        connections_metrics.clone(),
+    )?;
+    // Hard startup error (never a warning) for cleartext hub-api outside
+    // alpha/local unless explicitly acknowledged.
+    connections::client::enforce_transport_policy(
+        client.is_plaintext(),
+        &cli.deployment_tier,
+        cli.hub_api_allow_insecure_http,
+    )
+    .map_err(|reason| anyhow::anyhow!("{flag} is ON: {reason}"))?;
+    if client.is_plaintext() {
+        tracing::warn!(
+            "hub-api REST base URL is plaintext http:// (in-cluster); resolved OAuth tokens cross \
+             the cluster network unencrypted unless the CNI encrypts pod traffic -- set an https \
+             HUB_API_URL + HUB_API_REST_CA_FILE to require TLS"
+        );
+    }
+
+    let settings = connections::supervisor::SupervisorSettings {
+        poll_interval: Duration::from_secs(cli.connections_poll_secs),
+        page_size: cli.connections_page_size,
+        irc: connections::bot::IrcSettings {
+            host: cli.twitch_irc_host.clone(),
+            port: cli.twitch_irc_port,
+            use_tls: cli.twitch_irc_use_tls,
+        },
+        reconnect_backoff_cap: Duration::from_secs(30),
+    };
+    let active_kid = cli.binding_active_kid.clone();
+    let backoff_max = Duration::from_secs(cli.spine_connect_backoff_max_secs);
+    let grace = Duration::from_secs(cli.spine_connect_grace_secs);
+    tracing::info!(
+        flag,
+        poll_secs = cli.connections_poll_secs,
+        page_size = cli.connections_page_size,
+        "dynamic twitch connections enabled"
+    );
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(());
+    });
+    tokio::spawn(async move {
+        let spine_metrics: Arc<dyn penguin_spine::SpineMetrics> = metrics.clone();
+        let grace_deadline = Instant::now() + grace;
+        let Some(appender) = connect_spine_with_retry(
+            spine_cfg,
+            spine_metrics,
+            metrics.as_ref(),
+            "twitch_irc",
+            &readiness.twitch_irc,
+            backoff_max,
+            grace_deadline,
+        )
+        .await
+        else {
+            tracing::error!(
+                grace_secs = grace.as_secs(),
+                "spine connect still failing after grace period; exiting so Kubernetes restarts \
+                 this pod visibly (dynamic twitch connections never started)"
+            );
+            std::process::exit(1);
+        };
+        let publish = Arc::new(connections::bot::PublishCtx {
+            appender,
+            metrics: metrics.as_ref().clone(),
+            keyring,
+            active_kid,
+        });
+        connections::supervisor::Supervisor::new(
+            Arc::new(client),
+            publish,
+            connections_metrics,
+            scope_mode,
+            settings,
+        )
+        .run(shutdown_rx)
+        .await;
+    });
+    Ok(())
 }
 
 /// Attempts to start the Discord Gateway receiver
@@ -991,6 +1164,199 @@ mod tests {
         // `telemetry::init`) -- `tracing::info!`/`warn!` are harmless
         // no-ops without one.
         try_start_twitch_irc(&base_config(), test_ingest_metrics(), test_readiness());
+    }
+
+    fn test_connections_metrics() -> Arc<connections::metrics::ConnectionsMetrics> {
+        Arc::new(
+            connections::metrics::ConnectionsMetrics::register(&prometheus::Registry::new())
+                .unwrap(),
+        )
+    }
+
+    /// A flag-ON config that passes every fail-loud precondition except the
+    /// one a given test removes.
+    fn dynamic_ready_config() -> config::Config {
+        let mut config = base_config();
+        config.cli.service_jwt_token_endpoint =
+            "http://hub-api:8204/internal/service-token".to_string();
+        config.cli.binding_active_kid = "k1".to_string();
+        // Alpha tolerates the plaintext in-cluster hub-api base; the F3 tests below
+        // override the tier to prove every other tier fails closed.
+        config.cli.deployment_tier = "alpha".to_string();
+        config.envelope_binding_keys = Some(crate::config::Secret::new(
+            "k1:0102030405060708090a0b0c0d0e0f10",
+        ));
+        config
+    }
+
+    fn start_dynamic(config: &config::Config) -> anyhow::Result<()> {
+        try_start_twitch_dynamic(
+            config,
+            test_ingest_metrics(),
+            test_connections_metrics(),
+            test_readiness(),
+        )
+    }
+
+    #[tokio::test]
+    async fn dynamic_start_fails_loud_without_a_token_endpoint() {
+        let mut config = dynamic_ready_config();
+        config.cli.service_jwt_token_endpoint = "  ".to_string();
+        let err = start_dynamic(&config).unwrap_err().to_string();
+        assert!(err.contains("SERVICE_JWT_TOKEN_ENDPOINT"), "{err}");
+        assert!(err.contains("no silent fallback"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn dynamic_start_fails_loud_without_a_binding_keyring() {
+        let mut config = dynamic_ready_config();
+        config.envelope_binding_keys = None;
+        let err = start_dynamic(&config).unwrap_err().to_string();
+        assert!(err.contains("ENVELOPE_BINDING_KEYS"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn dynamic_start_fails_loud_when_the_spine_config_is_unavailable() {
+        let err = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::remove_var("VALKEY_URL");
+                std::env::remove_var("REDIS_URL");
+            }
+            start_dynamic(&dynamic_ready_config())
+                .err()
+                .map(|e| e.to_string())
+        };
+        let err = err.expect("a missing spine config must fail startup");
+        assert!(err.contains("spine config is unavailable"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn dynamic_start_spawns_when_everything_is_valid() {
+        crypto::ensure_installed();
+        let result = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+            }
+            let mut config = dynamic_ready_config();
+            // Runner scope mode + a static Twitch identity also exercises the
+            // two operator warnings (single-tenant scope, static path superseded).
+            config.cli.dynamic_scope_mode = "runner".to_string();
+            config.cli.twitch_irc_nick = "waddlebot".to_string();
+            config.cli.twitch_irc_channel = "somechannel".to_string();
+            config.twitch_irc_oauth_token = Some(crate::config::Secret::new("test-token"));
+            let result = start_dynamic(&config);
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::remove_var("VALKEY_URL");
+                std::env::remove_var("VALKEY_PASSWORD");
+            }
+            result
+        };
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// F3: a bearer JWT goes out and a decrypted OAuth token comes back over this
+    /// channel, so plaintext http:// is a hard startup error outside alpha/local
+    /// unless explicitly acknowledged; https:// and alpha stay accepted.
+    #[tokio::test]
+    async fn dynamic_start_refuses_plaintext_hub_url_outside_alpha_unless_acknowledged() {
+        crypto::ensure_installed();
+        let (refused, unset_tier, acked, https_ok, alpha_ok) = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+            }
+            let mut config = dynamic_ready_config();
+            config.cli.hub_api_url = "http://hub-api:8204".to_string();
+            config.cli.deployment_tier = "beta".to_string();
+            let refused = start_dynamic(&config).err().map(|e| e.to_string());
+
+            // The CLI default (unset DEPLOYMENT_TIER) is production: fail closed.
+            let mut config = dynamic_ready_config();
+            config.cli.deployment_tier =
+                crate::config::CliConfig::parse_from(["svc-ingest"]).deployment_tier;
+            let unset_tier = start_dynamic(&config).err().map(|e| e.to_string());
+
+            let mut config = dynamic_ready_config();
+            config.cli.deployment_tier = "production".to_string();
+            config.cli.hub_api_allow_insecure_http = true;
+            let acked = start_dynamic(&config);
+
+            let mut config = dynamic_ready_config();
+            config.cli.deployment_tier = "gamma".to_string();
+            config.cli.hub_api_url = "https://hub-api.waddlebot.svc:8204".to_string();
+            let https_ok = start_dynamic(&config);
+
+            let alpha_ok = start_dynamic(&dynamic_ready_config());
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::remove_var("VALKEY_URL");
+                std::env::remove_var("VALKEY_PASSWORD");
+            }
+            (refused, unset_tier, acked, https_ok, alpha_ok)
+        };
+        let refused = refused.expect("plaintext hub-api on beta must fail startup");
+        assert!(refused.contains("HUB_API_ALLOW_INSECURE_HTTP"), "{refused}");
+        assert!(refused.contains("cleartext"), "{refused}");
+        assert!(
+            unset_tier.is_some(),
+            "an unset DEPLOYMENT_TIER must fail closed on a plaintext hub-api URL"
+        );
+        assert!(acked.is_ok(), "explicit insecure-ack must start: {acked:?}");
+        assert!(https_ok.is_ok(), "https hub-api must start: {https_ok:?}");
+        assert!(
+            alpha_ok.is_ok(),
+            "alpha over http must keep working: {alpha_ok:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_start_fails_loud_on_an_invalid_scope_mode_or_hub_url() {
+        crypto::ensure_installed();
+        // Errors are collected under the env lock, asserted after it is
+        // released -- a failed assertion must never poison `ENV_LOCK` for the
+        // other env-mutating tests in this module.
+        let (scope_err, url_err, ca_err) = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+            }
+            let mut config = dynamic_ready_config();
+            config.cli.dynamic_scope_mode = "auto".to_string();
+            let scope_err = start_dynamic(&config).err().map(|e| e.to_string());
+
+            let mut config = dynamic_ready_config();
+            config.cli.hub_api_url = "ftp://hub-api".to_string();
+            let url_err = start_dynamic(&config).err().map(|e| e.to_string());
+
+            let mut config = dynamic_ready_config();
+            config.cli.hub_api_rest_ca_file = "/nonexistent/ca.pem".to_string();
+            let ca_err = start_dynamic(&config).err().map(|e| e.to_string());
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::remove_var("VALKEY_URL");
+                std::env::remove_var("VALKEY_PASSWORD");
+            }
+            (scope_err, url_err, ca_err)
+        };
+        let scope_err = scope_err.expect("invalid scope mode must fail startup");
+        assert!(
+            scope_err.contains("INGEST_DYNAMIC_SCOPE_MODE"),
+            "{scope_err}"
+        );
+        let url_err = url_err.expect("invalid hub URL must fail startup");
+        assert!(url_err.contains("invalid hub-api base URL"), "{url_err}");
+        let ca_err = ca_err.expect("a CA with an http:// URL must fail startup");
+        assert!(ca_err.contains("plaintext"), "{ca_err}");
     }
 
     #[tokio::test]

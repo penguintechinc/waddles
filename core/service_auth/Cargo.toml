@@ -40,7 +40,7 @@ jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws
 # and core/svc_action's own thiserror pin too.
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
-async-trait = "=0.1.89"
+async-trait = ">=0.1.89, <0.1.93"
 # JWT Phase-0 hardening (`src/jwt_hardening.rs`): the JOSE header is decoded
 # by hand (base64url + JSON) BEFORE `jsonwebtoken` sees the token, so a
 # hostile `alg`/`jku`/`jwk`/`x5u`/`x5c`/`crit`/`kid` is named precisely and

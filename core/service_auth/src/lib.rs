@@ -703,6 +703,29 @@ impl MachineJwtClient {
         self.refresh(now).await
     }
 
+    /// Drops the cached token **iff** it is `rejected` -- the value a relying
+    /// party just refused with 401/403 -- so the next [`get_token`](Self::get_token)
+    /// re-mints instead of replaying a token the verifier no longer trusts
+    /// (e.g. hub-api rotated its signing key, which would otherwise leave every
+    /// call failing until the cached token's own expiry, up to an hour).
+    ///
+    /// Compare-and-clear: when several in-flight requests are rejected with the
+    /// same stale token, the first clears it, a concurrent caller then mints a
+    /// fresh one, and the later `invalidate` calls (still holding the *old*
+    /// value) leave that fresh token alone -- no stampede of re-mints. Returns
+    /// whether a cached token was actually dropped. The token value is only
+    /// compared, never logged.
+    pub async fn invalidate(&self, rejected: &str) -> bool {
+        let mut cached = self.cached.write().await;
+        match cached.as_ref() {
+            Some(current) if &*current.token == rejected => {
+                *cached = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
     async fn refresh(&self, now: u64) -> Result<Arc<str>, ServiceAuthError> {
         let sa_token = tokio::fs::read_to_string(&self.sa_token_path).await?;
         let response = self
@@ -1386,6 +1409,50 @@ mod tests {
         assert_eq!(&*client.get_token().await.expect("first"), "tok-1");
         assert_eq!(&*client.get_token().await.expect("second"), "tok-2");
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn machine_client_invalidate_forces_a_remint() {
+        let first = serde_json::json!({"token":"tok-1","expires_in":900}).to_string();
+        let second = serde_json::json!({"token":"tok-2","expires_in":900}).to_string();
+        let (url, hits) = mock_server(vec![(200, first), (200, second)]).await;
+        let sa = temp_sa_token("invalidate", "sa");
+        let client = MachineJwtClient::new(url, sa.clone(), "s");
+        assert_eq!(&*client.get_token().await.expect("first"), "tok-1");
+        assert_eq!(&*client.get_token().await.expect("cached"), "tok-1");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        assert!(
+            client.invalidate("tok-1").await,
+            "the rejected token is dropped"
+        );
+        assert_eq!(&*client.get_token().await.expect("re-minted"), "tok-2");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "invalidate caused exactly one re-mint"
+        );
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn machine_client_invalidate_ignores_a_stale_rejected_token() {
+        let first = serde_json::json!({"token":"tok-1","expires_in":900}).to_string();
+        let second = serde_json::json!({"token":"tok-2","expires_in":900}).to_string();
+        let (url, hits) = mock_server(vec![(200, first), (200, second)]).await;
+        let sa = temp_sa_token("invalidate-stale", "sa");
+        let client = MachineJwtClient::new(url, sa.clone(), "s");
+        client.get_token().await.expect("first");
+        assert!(client.invalidate("tok-1").await);
+        assert_eq!(&*client.get_token().await.expect("fresh"), "tok-2");
+        // A concurrent caller that was also rejected on tok-1 must not wipe tok-2.
+        assert!(!client.invalidate("tok-1").await);
+        assert_eq!(&*client.get_token().await.expect("still cached"), "tok-2");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        // Invalidating on an empty cache is a harmless no-op.
+        let empty = MachineJwtClient::new("http://127.0.0.1:1/t", sa.clone(), "s");
+        assert!(!empty.invalidate("anything").await);
         let _ = std::fs::remove_file(sa);
     }
 

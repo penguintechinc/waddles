@@ -281,8 +281,7 @@ service_context() {
         # bundle-executor's Dockerfile COPYs core/bundle_executor AND wit/ from the repo
         # root (see its own header comment) -- same "." context as hub-api et al.
         hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|reputation-module|bundle-executor) echo "." ;;
-        svc-ingest) echo "core/svc_ingest" ;;
-        svc-process|svc-action|waddlebot-egress-proxy|svc-presentation) echo "core" ;;
+        svc-ingest|svc-process|svc-action|waddlebot-egress-proxy|svc-presentation) echo "core" ;;
         svc-streaming) echo "core/svc_streaming" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac

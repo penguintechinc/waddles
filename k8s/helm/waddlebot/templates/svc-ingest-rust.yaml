@@ -109,9 +109,15 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.metricsPort | quote }}
         - name: RUNNER_TENANT_SLUG
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
+        # F3 -- the dynamic-connections consumer sends a bearer machine JWT to hub-api and gets a
+        # DECRYPTED OAuth token back over this URL. The default below is plaintext in-cluster http://,
+        # acceptable for alpha/local ONLY: with the flag ON, the binary REFUSES TO START on a plaintext
+        # URL when DEPLOYMENT_TIER (shared ConfigMap) is not alpha/local, unless the explicit
+        # dynamicConnections.allowInsecureHttp acknowledgement is set. Outside alpha set
+        # dynamicConnections.hubApiUrl to an https:// base (and HUB_API_REST_CA_FILE in the pod).
         - name: HUB_API_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
-        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+          value: {{ (.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict).hubApiUrl | default (printf "http://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        {{- if (.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict).enabled }}
         # Machine-JWT bootstrap for hub-api's internal provider-connections routes. The endpoint
         # defaults to hub-api's own in-cluster Service (same default as svc-action/svc-process).
         # The audience-scoped projected token is mounted below -- NOT the generic k8s SA token
@@ -183,10 +189,34 @@ spec:
               name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: TWITCH_OAUTH_TOKEN
               optional: true
-        - name: TWITCH_NICK
+        # fix/svc-ingest-twitch-env-names -- the binary (core/svc_ingest/src/config.rs) reads
+        # TWITCH_IRC_NICK / TWITCH_IRC_CHANNEL; this Deployment used to set TWITCH_NICK /
+        # TWITCH_CHANNELS (the legacy Python names), which the Rust receiver never saw, so the
+        # static fallback silently never started. The binary takes ONE channel, so only the
+        # first entry of the (legacy, plural) oauth.twitch.channels list is passed. This is the
+        # STATIC path -- superseded when the dynamic-connections flag is ON.
+        - name: TWITCH_IRC_NICK
           value: {{ .Values.oauth.twitch.nick | default "" | quote }}
-        - name: TWITCH_CHANNELS
-          value: {{ .Values.oauth.twitch.channels | default "" | quote }}
+        - name: TWITCH_IRC_CHANNEL
+          value: {{ .Values.oauth.twitch.channels | default "" | splitList "," | first | trim | quote }}
+        {{- $dynamicConnections := .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict }}
+        - name: INGEST_CONNECTIONS_POLL_SECS
+          value: {{ $dynamicConnections.pollSeconds | default 60 | quote }}
+        - name: INGEST_DYNAMIC_SCOPE_MODE
+          value: {{ $dynamicConnections.scopeMode | default "binding" | quote }}
+        {{- if $dynamicConnections.allowInsecureHttp }}
+        # EXPLICIT acknowledgement that plaintext http:// to hub-api is acceptable outside alpha/local
+        # (e.g. the CNI encrypts all pod traffic). Off by default -- see the HUB_API_URL comment.
+        - name: HUB_API_ALLOW_INSECURE_HTTP
+          value: "true"
+        {{- end }}
+        # Docker ENV baseline for data-plane feature flags (`FLAG_<KEY>`), same convention as
+        # svc-process-rust.yaml's extraEnv. The dynamic-connections flag is OFF unless set
+        # here (alpha) or ON in PostHog. NOT usable for license-gated flags.
+        {{- range $key, $value := .Values.pipeline.rustDataPlane.svcIngest.extraEnv }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
         {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
@@ -218,13 +248,13 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
-        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        {{- if (.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict).enabled }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
         {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
-      {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+      {{- if (.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections | default dict).enabled }}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
       {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}

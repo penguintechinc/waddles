@@ -1384,15 +1384,43 @@ pipeline:
       # global.envelopeBindingKeys once any receiver is used, same requirement as
       # svcAction's own field below.
       envelopeBindingActiveKid: ""
-      # feature/svc-ingest-connections-scope (F4) -- dynamic provider-connections wiring.
-      # `dynamicConnections.enabled` gates svc-ingest's `serviceJwt.identities.svc-ingest` grant
-      # (scope connections:resolve on the cross-tenant `system` tenant), the SERVICE_JWT_* env
-      # and the audience-scoped SA-token mount in templates/svc-ingest-rust.yaml. svc-ingest is
-      # internet-facing (webhooks/IRC/Discord): while the feature is OFF a compromised pod must
-      # not be able to mint a `system` token and resolve every tenant's decrypted OAuth tokens,
-      # so NOTHING renders unless this is true. Default false; only values-alpha.yaml enables it.
+      # Dynamic Twitch connections (core/svc_ingest src/connections/; see its README).
+      # The feature itself is gated by the flag `waddles.ingest-dynamic-connections`
+      # (DEFAULT OFF -- nothing below changes behavior while it is OFF): ON replaces the
+      # static TWITCH_IRC_* receiver with a supervisor that resolves channels + OAuth tokens
+      # from hub-api's connection store. Enable via PostHog, or -- with no PostHog (alpha) --
+      # the Docker ENV baseline `extraEnv.FLAG_WADDLES_INGEST_DYNAMIC_CONNECTIONS: "true"`.
       dynamicConnections:
+        # feature/svc-ingest-connections-scope (F4) -- gates svc-ingest's `serviceJwt.identities.
+        # svc-ingest` grant (scope connections:resolve on the cross-tenant `system` tenant), the
+        # SERVICE_JWT_* env and the audience-scoped SA-token mount in templates/svc-ingest-rust.yaml.
+        # svc-ingest is internet-facing (webhooks/IRC/Discord): while the feature is OFF a
+        # compromised pod must not be able to mint a `system` token and resolve every tenant's
+        # decrypted OAuth tokens, so NOTHING of that renders unless this is true. Default false;
+        # only values-alpha.yaml enables it. (Independent of the PostHog/ENV flag above, which
+        # gates the *behavior*.)
         enabled: false
+        # HUB_API_URL override. Empty (default) = plaintext in-cluster http://<hub-api-v3>:<port>,
+        # which is for alpha/local ONLY: the machine JWT goes out and the decrypted OAuth token comes
+        # back over it. With the flag ON the binary refuses to start on a plaintext URL when
+        # DEPLOYMENT_TIER is not alpha/local (see core/svc_ingest connections::client::
+        # enforce_transport_policy). For beta/gamma/production set an https:// base here.
+        hubApiUrl: ""
+        # Explicit acknowledgement (HUB_API_ALLOW_INSECURE_HTTP=true) that plaintext http:// is
+        # acceptable outside alpha/local -- only if the CNI already encrypts pod traffic. Default false.
+        allowInsecureHttp: false
+        # INGEST_CONNECTIONS_POLL_SECS -- seconds between hub-api list/reconcile passes (5..3600).
+        pollSeconds: 60
+        # INGEST_DYNAMIC_SCOPE_MODE -- how a binding maps to its spine tenant/community scope.
+        #   binding (default, fail closed): use the binding's own tenantSlug/communityName,
+        #     skipping (and counting) any binding hub-api sends without them.
+        #   runner: publish everything under pipeline.runnerTenantSlug -- SINGLE-TENANT
+        #     deployments only (alpha); an explicit opt-in, never a silent fallback.
+        scopeMode: "binding"
+      # Docker ENV baseline for data-plane feature flags (`FLAG_<KEY>`: key uppercased,
+      # `.`/`-` -> `_`) -- the same convention as svcProcess.extraEnv. NOT usable for
+      # license-gated flags. Example: FLAG_WADDLES_INGEST_DYNAMIC_CONNECTIONS: "true".
+      extraEnv: {}
       resources:
         requests:
           cpu: "100m"

@@ -13,8 +13,9 @@ name: Build svc-ingest
 # severity-gated vulnerability scan. This workflow inlines the multi-arch
 # build/merge pattern from containers.yml plus a real (non-masked) Trivy gate.
 #
-# Build context is `core/svc_ingest` (not the repo root) -- the Rust crate
-# has no shared libs to pull in, per Dockerfile.rust's own header comment.
+# Build context is `core/` (not the repo root, not `core/svc_ingest`) -- the
+# crate path-depends on the sibling `core/service_auth` crate, per
+# Dockerfile.rust's own header comment.
 #
 # PR/merge_group builds run in a dedicated `build-pr` job (contents:read
 # only, amd64-only, push:false/load:true) with a gated Trivy scan against
@@ -31,12 +32,14 @@ on:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'core/svc_ingest/**'
+      - 'core/service_auth/**'
       - '.version'
       - '.github/workflows/build-svc-ingest.yml'
   pull_request:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'core/svc_ingest/**'
+      - 'core/service_auth/**'
   merge_group:
     types: [checks_requested]
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
@@ -56,6 +59,14 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   MODULE_NAME: svc-ingest-rust
   MODULE_PATH: core/svc_ingest
+  # Dockerfile.rust COPYs the sibling `service_auth` crate (same-repo path
+  # dependency, the dynamic Twitch connections resolver's machine-JWT client),
+  # so the build context must be `core/` (the parent of MODULE_PATH), not
+  # MODULE_PATH itself -- see the Dockerfile.rust header comment. `file` stays
+  # MODULE_PATH-relative since docker/build-push-action resolves `file`
+  # relative to the workflow's working directory, not the context. (Same shape
+  # as build-svc-action.yml's BUILD_CONTEXT.)
+  BUILD_CONTEXT: core
   # TEMPORARY amd64-only (user-approved 2026-10-03). Re-enable arm64 near
   # release / for the mixed-arch Minisforum alpha cluster by setting
   # BUILD_PLATFORMS=linux/amd64,linux/arm64 (this is the single toggle --
@@ -217,7 +228,7 @@ jobs:
         id: build
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
-          context: ${{ env.MODULE_PATH }}
+          context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
           push: true
           platforms: ${{ matrix.platform }}
@@ -247,7 +258,7 @@ jobs:
       - name: Build image (amd64 only, not pushed)
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
-          context: ${{ env.MODULE_PATH }}
+          context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
           push: false
           load: true

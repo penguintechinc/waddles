@@ -25,7 +25,7 @@ asks hub-api which connections to run and for a fresh token to run them with.
 | Provider adapter interface + registry | **shipped (this change)** |
 | Twitch adapter (bot account + channel resolution + refresh) | **shipped (this change)** |
 | `GET/POST /api/v1/internal/...` data-plane endpoints (list + resolve) | **shipped (this change)** |
-| `svc-ingest` (Rust) resolves connections dynamically instead of static env | follow-up (paired PR) |
+| `svc-ingest` (Rust) resolves connections dynamically instead of static env | **shipped** -- flag `waddles.ingest-dynamic-connections` (default OFF), see `core/svc_ingest/README.md` |
 | webui connection UI, CLI connection commands | follow-ups (call the API below unchanged) |
 | Discord / Slack / Kick / YouTube adapters | follow-ups (one adapter + one registry line each) |
 | Redirect-style installs (OAuth connect, Discord invite link) | follow-up -- see [Limitations](#limitations-and-follow-ups) |
@@ -222,6 +222,27 @@ svc-ingest                              hub-api
   for one `resourceId`. Open one IRC session per `(provider, resourceId)` and fan events out to every
   binding, or one session per binding -- the framework deliberately does not decide that for you.
 * Responses are `Cache-Control: no-store`.
+* **Implemented consumer:** `core/svc_ingest/src/connections/` (see its README) groups bindings by
+  `bot_login` and runs **one IRC socket per bot account** joined to all of that account's channels
+  (one session per bot, fanning events out per binding scope). It resolves every member on each
+  (re)connect. A channel is dropped for good ONLY on a terminal refusal (`409 CONNECTION_NOT_USABLE` /
+  `REFRESH_REJECTED`, or a `404` whose envelope says `NOT_FOUND`); everything else (`5xx`/`429`,
+  `401`/`403`, `409 REFRESH_NOT_CONFIGURED`/`CONFLICT`, a bare `404` from a replica mid-rollout, other
+  `4xx`, transport faults) is retried with backoff, so fixing the cause recovers without a restart.
+  A member that cannot resolve right now is **skipped -- never joined under another member's token** --
+  and re-probed in the background; a resolve answer without a verifiable `bot_login` is refused
+  (fail closed). A `401`/`403` invalidates the cached machine JWT and replays the call once with a
+  freshly minted one (survives a hub-api signing-key rotation).
+* **Transport:** `HUB_API_URL` defaults to plaintext in-cluster `http://` (acceptable for alpha/local
+  only: the machine JWT goes out and the decrypted OAuth token comes back over it). With the flag ON,
+  svc-ingest **refuses to start** on a plaintext hub-api URL when `DEPLOYMENT_TIER` is not
+  `alpha`/`local`, unless `HUB_API_ALLOW_INSECURE_HTTP=true` acknowledges the risk. Use an `https://`
+  `HUB_API_URL` + `HUB_API_REST_CA_FILE` elsewhere.
+* **Known gap (hub-api follow-up):** the list DTO has only numeric `tenantId`/`communityId`, but
+  the spine's stream keys use the tenant *slug* and community *name*. Until hub-api also emits
+  `tenantSlug`/`communityName` on `DataPlaneBindingDTO`, svc-ingest can only scope events safely
+  in its explicit single-tenant `INGEST_DYNAMIC_SCOPE_MODE=runner` (alpha); the default `binding`
+  mode skips unscoped bindings rather than guess.
 
 ### svc-ingest's service identity (the scope grant)
 
@@ -232,10 +253,12 @@ allow-listed identity carries. The allow-list is chart config, rendered into hub
 
 | Piece | Where |
 |---|---|
-| Identity + scope policy | `k8s/helm/waddlebot/values.yaml` `serviceJwt.identities.svc-ingest` -- `spiffe://penguintech.io/<env>/svc-ingest`, `allowedScopes: ["connections:resolve"]` (only), `tenant: system` | **Rendered only when `pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=true`** (default false in `values.yaml`, true in `values-alpha.yaml`): the grant, the `SERVICE_JWT_*` env and the bootstrap-token mount are absent otherwise, so an internet-facing svc-ingest pod cannot mint a cross-tenant `system` token while the feature is off.
+| Identity + scope policy | `k8s/helm/waddlebot/values.yaml` `serviceJwt.identities.svc-ingest` -- `spiffe://penguintech.io/<env>/svc-ingest`, `allowedScopes: ["connections:resolve"]` (only), `tenant: system` |
 | Dedicated ServiceAccount | `k8s/helm/waddlebot/templates/service-jwt-rbac.yaml` (`svc-ingest`); the identity matches on namespace + this name, so no other pod can bootstrap it |
 | Caller wiring | `templates/svc-ingest-rust.yaml`: `serviceAccountName: svc-ingest`, projected token (audience `hub-api`), `SERVICE_JWT_TOKEN_ENDPOINT`, `SERVICE_JWT_SA_TOKEN_PATH` |
 | Verification | `hub_api/tests/provider_connections/test_chart_service_identity_grant.py` (renders the chart, mints through the real issuer, hits the real routes) and `k8s/helm/waddlebot/tests/test_svc_ingest_connections_scope_render.py` |
+
+**Rendered only when `pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=true`** (default false in `values.yaml`, true in `values-alpha.yaml`): the grant, the `SERVICE_JWT_*` env and the bootstrap-token mount are absent otherwise, so an internet-facing svc-ingest pod cannot mint a cross-tenant `system` token while the feature is off.
 
 `egress:connect` (svc-ingest is also in `egressProxy.allowedCallerServices`) is deliberately **not**
 granted here; add it in its own change when svc-ingest dials the egress proxy.

@@ -121,6 +121,70 @@ pub async fn rust_data_plane_enabled(
     }
 }
 
+/// The flag gating the dynamic Twitch connection resolver
+/// (`crate::connections`): ON replaces the static `TWITCH_IRC_*` receiver with a
+/// supervisor driven by hub-api's connection store. Default OFF.
+pub const DYNAMIC_CONNECTIONS_FLAG: &str = "waddles.ingest-dynamic-connections";
+
+/// This flag's Docker ENV baseline variable -- `FLAG_` + the key uppercased
+/// with `.`/`-` -> `_`, the repo-wide convention (`core/svc_process/src/
+/// license.rs::env_flag_var_name`).
+pub const DYNAMIC_CONNECTIONS_ENV: &str = "FLAG_WADDLES_INGEST_DYNAMIC_CONNECTIONS";
+
+/// Pure resolution order for a feature flag, mirroring the repo's
+/// `resolve_flag_with` (PostHog wins when it defines the flag, otherwise the
+/// ENV baseline, otherwise OFF) minus its license-bypass short circuit -- see
+/// [`dynamic_connections_enabled`] for why bypass is deliberately excluded.
+fn resolve_feature_flag(posthog: Option<bool>, env_raw: Option<&str>) -> bool {
+    posthog
+        .or_else(
+            || match env_raw.map(|raw| raw.trim().to_ascii_lowercase()) {
+                Some(v) if matches!(v.as_str(), "true" | "1" | "on" | "yes") => Some(true),
+                Some(v) if matches!(v.as_str(), "false" | "0" | "off" | "no") => Some(false),
+                _ => None, // unset or unrecognized: fall through to the default
+            },
+        )
+        .unwrap_or(false)
+}
+
+/// Whether dynamic Twitch connections are enabled. Resolution: the PostHog
+/// snapshot's value if it defines the flag, else the
+/// [`DYNAMIC_CONNECTIONS_ENV`] baseline, else OFF.
+///
+/// **License bypass is deliberately NOT honored here**, unlike
+/// [`rust_data_plane_enabled`]. `build_license_client` hardcodes a
+/// `*.waddles.app` deployment domain, so `bypass_active()` is true in every
+/// deployment of this service and `LicenseClient::flag_enabled` would return
+/// `true` for every flag -- a bypass-honoring check would make "default OFF"
+/// meaningless for a capability change that moves OAuth tokens onto the data
+/// plane. This is an operator rollout flag, not a licensed entitlement; it is
+/// never evaluated through the license server's tier checks (and the ENV
+/// baseline is never consulted for licensed features -- see
+/// `rules/critical-rules.md` Feature Flags & License Tiers).
+///
+/// Non-blocking and read once at startup (the same documented limitation as
+/// the rust-data-plane gate: flipping the flag later needs a restart).
+pub fn dynamic_connections_enabled(client: Option<&Arc<penguin_licensing::LicenseClient>>) -> bool {
+    let posthog = client
+        .and_then(|c| c.snapshot())
+        .and_then(|snap| snap.flags.get(DYNAMIC_CONNECTIONS_FLAG).copied());
+    let env_raw = std::env::var(DYNAMIC_CONNECTIONS_ENV).ok();
+    let enabled = resolve_feature_flag(posthog, env_raw.as_deref());
+    tracing::info!(
+        flag = DYNAMIC_CONNECTIONS_FLAG,
+        enabled,
+        source = if posthog.is_some() {
+            "posthog"
+        } else if env_raw.is_some() {
+            "env"
+        } else {
+            "default"
+        },
+        "dynamic twitch connections flag resolved"
+    );
+    enabled
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +298,73 @@ mod tests {
     #[test]
     fn flag_key_matches_the_spec_s13_5_convention() {
         assert_eq!(RUST_DATA_PLANE_FLAG, "waddles.core.rust-data-plane");
+    }
+
+    #[test]
+    fn dynamic_connections_env_var_name_follows_the_repo_convention() {
+        let derived: String = std::iter::once("FLAG_".to_string())
+            .chain(DYNAMIC_CONNECTIONS_FLAG.chars().map(|c| match c {
+                '.' | '-' => "_".to_string(),
+                c => c.to_uppercase().collect(),
+            }))
+            .collect();
+        assert_eq!(derived, DYNAMIC_CONNECTIONS_ENV);
+        assert_eq!(
+            DYNAMIC_CONNECTIONS_FLAG,
+            "waddles.ingest-dynamic-connections"
+        );
+    }
+
+    #[test]
+    fn resolve_feature_flag_truth_table() {
+        // PostHog wins over the env baseline in both directions.
+        assert!(resolve_feature_flag(Some(true), Some("false")));
+        assert!(!resolve_feature_flag(Some(false), Some("true")));
+        // No PostHog value: env baseline, any recognized spelling.
+        for on in ["true", "TRUE", " 1 ", "on", "yes"] {
+            assert!(resolve_feature_flag(None, Some(on)), "{on:?}");
+        }
+        for off in ["false", "0", "off", "no"] {
+            assert!(!resolve_feature_flag(None, Some(off)), "{off:?}");
+        }
+        // Unset or unrecognized: default OFF.
+        assert!(!resolve_feature_flag(None, None));
+        assert!(!resolve_feature_flag(None, Some("maybe")));
+        assert!(!resolve_feature_flag(None, Some("")));
+    }
+
+    #[tokio::test]
+    async fn dynamic_connections_flag_is_off_by_default_and_ignores_license_bypass() {
+        crate::crypto::ensure_installed();
+        // A bypass-domain client makes `flag_enabled` true for every flag; this
+        // flag must still be OFF -- that is the whole point of excluding bypass.
+        // (Awaited before taking ENV_LOCK: never hold a std mutex across .await.)
+        let cfg = penguin_licensing::LicenseConfig::new("test-product")
+            .expect("default config is always valid")
+            .with_deployment_domain("svc-ingest.penguintech.cloud");
+        let client = penguin_licensing::LicenseClient::new(cfg).expect("client construction");
+        assert!(client.bypass_active());
+        assert!(client.flag_enabled(DYNAMIC_CONNECTIONS_FLAG).await);
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::remove_var(DYNAMIC_CONNECTIONS_ENV) };
+        assert!(
+            !dynamic_connections_enabled(None),
+            "no client, no env -> OFF"
+        );
+        assert!(
+            !dynamic_connections_enabled(Some(&client)),
+            "bypass must NOT turn a default-OFF capability flag on"
+        );
+
+        // The ENV baseline is the alpha switch.
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::set_var(DYNAMIC_CONNECTIONS_ENV, "true") };
+        assert!(dynamic_connections_enabled(Some(&client)));
+        assert!(dynamic_connections_enabled(None));
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::remove_var(DYNAMIC_CONNECTIONS_ENV) };
     }
 
     #[test]

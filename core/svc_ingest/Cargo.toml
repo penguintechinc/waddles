@@ -183,6 +183,19 @@ sha2 = "=0.10.9"
 # security-sensitive check. Already resolves to this exact version
 # transitively (via `hmac`/`digest`, confirmed in `Cargo.lock`).
 subtle = "=2.6.1"
+# Wipes decrypted OAuth token buffers (`connections::dto::AccessToken`, the raw
+# resolve response body) on drop so they do not linger in freed heap memory.
+# Already resolves to this exact version transitively (confirmed in `Cargo.lock`).
+zeroize = "=1.9.1"
+# `service_auth::MachineJwtClient`: SA-token -> hub-api EdDSA machine JWT, used
+# by `src/connections/` to authenticate the dynamic Twitch connection
+# resolver's calls to hub-api's internal provider-connections REST routes
+# (scope `connections:resolve`). Same-repo path dependency, same rationale and
+# convention as `core/svc_action`'s `hub_client`/`bundle-active-set` path
+# deps: it is this repo's own crate, not a penguin-libs one, so a remote
+# rev pin would only ever point at a stale copy of it. A path dependency
+# widens this crate's Docker build context to `core/` -- see `Dockerfile.rust`.
+service_auth = { path = "../service_auth", version = "=0.1.0" }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
@@ -218,6 +231,11 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # `rest.rs` tests (see that crate's `Cargo.toml`), kept in lockstep so a
 # future bump there is a known-compatible precedent here too.
 wiremock = "=0.6.5"
+# Test-only: `connections::tests` captures every rendered `tracing` event
+# (all levels, incl. DEBUG) into an in-memory buffer and asserts that no OAuth
+# token value ever reaches log output -- never linked into the release binary.
+# Same exact pin `core/service_auth` and `penguin-logging` already resolve.
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
 
 [profile.release]
 opt-level = 3
