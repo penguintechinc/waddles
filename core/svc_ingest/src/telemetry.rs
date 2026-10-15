@@ -135,8 +135,8 @@ pub struct IngestMetrics {
     pub consumer_loop_running: prometheus::IntGaugeVec,
     /// Dataplane scope-resolver outcomes, labeled by platform/outcome
     /// (`hit`/`resolved`/`not_found`/`ambiguous`/`invalid`/`inconsistent`/
-    /// `error`/`no_source`) -- every non-`hit`/`resolved` outcome is a
-    /// fail-closed fall back to the tenant-wide sentinel, so a rising
+    /// `error`/`no_source`) -- every non-`hit`/`resolved` outcome means the
+    /// event was DROPPED (never defaulted to a tenant), so a rising
     /// miss rate is the operator's signal that guilds/channels are unlinked.
     pub scope_resolutions_total: prometheus::IntCounterVec,
 }
@@ -263,7 +263,7 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         prometheus::Opts::new(
             "svc_ingest_scope_resolutions_total",
             "Dataplane scope-resolver outcomes, labeled by platform/outcome \
-             (non-hit/resolved outcomes failed closed to the tenant-wide sentinel)",
+             (non-hit/resolved outcomes: the event was dropped, never defaulted)",
         ),
         &["platform", "outcome"],
     )

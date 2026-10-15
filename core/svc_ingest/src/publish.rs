@@ -31,7 +31,9 @@ use penguin_spine::{
 };
 use uuid::Uuid;
 
-use crate::scope_resolver::{HubScopeSource, ResolvedScope, ScopeResolver, ScopeSource};
+use crate::scope_resolver::{
+    HubScopeSource, ResolvedScope, ScopeResolver, ScopeSource, Unresolved,
+};
 
 /// The process-wide dataplane scope resolver. Set once at startup, only when
 /// `waddles.ingest-dynamic-connections` is ON and the resolver is fully
@@ -98,6 +100,11 @@ pub enum PublishError {
     /// `EventAppender::append` (the `XADD`) failed.
     #[error("spine append failed: {0}")]
     Append(#[from] SpineError),
+    /// Dynamic-connections mode could not resolve the event's source to a
+    /// real scope: the event is DROPPED (never published, never given a
+    /// default tenant/community -- svc-ingest is a cross-tenant ingest point).
+    #[error("event dropped, scope unresolved: {0}")]
+    Unresolved(Unresolved),
     /// The numeric scope disagrees with the display strings about to be
     /// stamped -- a producer bug; refused loudly rather than published.
     #[error("inconsistent scope refused: {0}")]
@@ -173,7 +180,7 @@ fn mint_trace() -> Trace {
 ///
 /// With the dynamic-connections resolver installed ([`install_scope_resolver`])
 /// the envelope is a schema-v3 one: numeric `tenant_id`/`community_id` resolved
-/// from the event's platform source (fail-closed to the tenant-wide sentinel),
+/// from the event's platform source (an unresolvable source is dropped, never defaulted),
 /// bound by `compute_binding_mac_v3`, and `scope` is ignored in favor of the
 /// resolved scope. Without it, behavior is the unchanged v2/static path.
 #[allow(clippy::too_many_arguments)]
@@ -220,12 +227,25 @@ pub async fn publish_event_with<A: EventAppender, M: SpineMetrics + ?Sized, S: S
 ) -> Result<String, PublishError> {
     // v3: resolve the authoritative numeric scope from the event's platform
     // source (Discord guild id / Twitch channel login = `source.account_id`).
-    // A DM or sourceless event has nothing to resolve -> tenant-wide sentinel.
+    // A DM / sourceless event, a miss, or a failed lookup is DROPPED: there is
+    // no default scope to stamp, and processing under one would mis-route
+    // another tenant's message.
     let resolved = match resolver {
-        Some(r) => Some(match event.source.as_ref().map(|s| s.account_id.as_str()) {
-            Some(src) if !src.is_empty() && src != "dm" => r.resolve(&event.platform, src).await,
-            _ => r.no_source(&event.platform),
-        }),
+        Some(r) => {
+            let outcome = match event.source.as_ref().map(|s| s.account_id.as_str()) {
+                Some(src) if !src.is_empty() && src != "dm" => {
+                    r.resolve(&event.platform, src).await
+                }
+                _ => Err(r.no_source(&event.platform)),
+            };
+            match outcome {
+                Ok(scope) => Some(scope),
+                Err(why) => {
+                    tracing::warn!(platform = %event.platform, reason = why.label(), "dropping event: scope unresolved");
+                    return Err(PublishError::Unresolved(why));
+                }
+            }
+        }
         None => None,
     };
     let v3_scope = resolved.as_ref().map(ResolvedScope::spine_scope);
@@ -719,5 +739,249 @@ mod tests {
             WORKSTREAM_NAMESPACE.to_string(),
             "2c9e1a40-6f8b-4c1d-9a3e-7d2f510a8b6c"
         );
+    }
+
+    // ---- schema-v3 producer (dataplane scope resolver wired) ----
+
+    use crate::scope_resolver::{
+        FetchError, RawScope, ResolverConfig, ResolverMetrics, ScopeResolver, ScopeSource,
+    };
+    use penguin_spine::verify_binding;
+
+    struct FixedSource(Result<RawScope, FetchError>);
+    impl ScopeSource for FixedSource {
+        async fn fetch(&self, _p: &str, _s: &str) -> Result<RawScope, FetchError> {
+            self.0.clone()
+        }
+    }
+
+    struct NoMetrics;
+    impl ResolverMetrics for NoMetrics {
+        fn scope_resolution(&self, _platform: &str, _outcome: &'static str) {}
+    }
+
+    fn resolver_for(reply: Result<RawScope, FetchError>) -> ScopeResolver<FixedSource> {
+        ScopeResolver::new(
+            FixedSource(reply),
+            ResolverConfig::default(),
+            Arc::new(NoMetrics),
+        )
+    }
+
+    fn resolved_ok() -> Result<RawScope, FetchError> {
+        Ok(RawScope {
+            tenant_id: 2,
+            community_id: 9,
+            tenant_slug: "acme".to_string(),
+            community_name: "main".to_string(),
+        })
+    }
+
+    async fn publish_v3(
+        resolver: Option<&ScopeResolver<FixedSource>>,
+    ) -> (String, StageEnvelope, KeyRing) {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let keyring = test_keyring();
+        publish_event_with(
+            resolver,
+            &appender,
+            &RecordingMetrics::default(),
+            &keyring,
+            "test-kid",
+            &Scope::new("static-tenant", None),
+            "tw-channelA",
+            "ws-1",
+            None,
+            test_event(),
+        )
+        .await
+        .unwrap();
+        let (stream, env) = appender.calls.lock().unwrap()[0].clone();
+        (stream, env, keyring)
+    }
+
+    #[tokio::test]
+    async fn resolver_on_stamps_v3_ids_and_a_verifiable_v3_mac() {
+        let r = resolver_for(resolved_ok());
+        let (stream, env, ring) = publish_v3(Some(&r)).await;
+        assert_eq!(env.schema_version, ENVELOPE_SCHEMA_VERSION);
+        assert_eq!((env.tenant_id, env.community_id), (Some(2), Some(9)));
+        // Display strings are present, and the stream key is built from them
+        // (what verify_hop string-compares) -- never from the static scope.
+        assert_eq!(
+            (env.tenant.as_str(), env.community.as_deref()),
+            ("acme", Some("main"))
+        );
+        assert_eq!(
+            stream,
+            "waddles:t:acme:c:main:src:twitch:tw-channelA:events"
+        );
+        verify_binding(&ring, &env).expect("v3 binding.mac verifies");
+    }
+
+    #[tokio::test]
+    async fn mutating_any_id_or_display_string_invalidates_the_v3_mac() {
+        let r = resolver_for(resolved_ok());
+        let (_s, env, ring) = publish_v3(Some(&r)).await;
+        let mut t = env.clone();
+        t.tenant_id = Some(3);
+        assert!(verify_binding(&ring, &t).is_err(), "tenant_id swap");
+        let mut c = env.clone();
+        c.community_id = Some(10);
+        assert!(verify_binding(&ring, &c).is_err(), "community_id swap");
+        let mut d = env.clone();
+        d.tenant = "evil".to_string();
+        assert!(
+            verify_binding(&ring, &d).is_err(),
+            "display string is MAC-bound too"
+        );
+        let mut dg = env.clone();
+        dg.schema_version = LEGACY_ENVELOPE_SCHEMA_VERSION;
+        dg.tenant_id = None;
+        dg.community_id = None;
+        assert!(
+            verify_binding(&ring, &dg).is_err(),
+            "v3 mac never verifies as v2"
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolvable_sources_are_dropped_never_stamped_with_a_default_scope() {
+        for err in [
+            FetchError::NotFound,
+            FetchError::Ambiguous,
+            FetchError::Invalid,
+            FetchError::Transient("down"),
+        ] {
+            let r = resolver_for(Err(err));
+            let appender = FakeAppender {
+                calls: Mutex::new(vec![]),
+                fail: false,
+            };
+            let res = publish_event_with(
+                Some(&r),
+                &appender,
+                &RecordingMetrics::default(),
+                &test_keyring(),
+                "test-kid",
+                &Scope::new("static-tenant", None),
+                "tw-channelA",
+                "ws-1",
+                None,
+                test_event(),
+            )
+            .await;
+            assert!(matches!(res, Err(PublishError::Unresolved(_))), "{res:?}");
+            assert!(
+                appender.calls.lock().unwrap().is_empty(),
+                "nothing may be published (no default tenant/community)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sourceless_and_dm_events_are_dropped_without_resolving() {
+        let r = resolver_for(resolved_ok());
+        for source in [None, Some("dm")] {
+            let mut ev = test_event();
+            ev.source = source.map(|a| Source {
+                platform: "discord".to_string(),
+                account_id: a.to_string(),
+                channel_id: None,
+            });
+            let appender = FakeAppender {
+                calls: Mutex::new(vec![]),
+                fail: false,
+            };
+            let res = publish_event_with(
+                Some(&r),
+                &appender,
+                &RecordingMetrics::default(),
+                &test_keyring(),
+                "test-kid",
+                &Scope::new("static-tenant", None),
+                "dg-1",
+                "ws-1",
+                None,
+                ev,
+            )
+            .await;
+            assert!(matches!(
+                res,
+                Err(PublishError::Unresolved(Unresolved::NoSource))
+            ));
+            assert!(appender.calls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn flag_off_resolver_none_keeps_the_v2_static_output_unchanged() {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let keyring = test_keyring();
+        publish_event_with::<_, _, FixedSource>(
+            None,
+            &appender,
+            &RecordingMetrics::default(),
+            &keyring,
+            "test-kid",
+            &Scope::new("acme", Some("main".to_string())),
+            "tw-channelA",
+            "ws-1",
+            None,
+            test_event(),
+        )
+        .await
+        .unwrap();
+        let (stream, env) = appender.calls.lock().unwrap()[0].clone();
+        assert_eq!(
+            stream,
+            "waddles:t:acme:c:main:src:twitch:tw-channelA:events"
+        );
+        assert_eq!(env.schema_version, LEGACY_ENVELOPE_SCHEMA_VERSION);
+        assert_eq!((env.tenant_id, env.community_id), (None, None));
+        verify_binding(&keyring, &env).expect("v2 mac verifies");
+        let trace_id = env
+            .trace
+            .as_ref()
+            .and_then(|t| trace_id_from_traceparent(&t.traceparent))
+            .map(str::to_string);
+        let v2 = compute_binding_mac(
+            &keyring,
+            "test-kid",
+            "acme",
+            Some("main"),
+            &env.workstream_id,
+            &env.event_id,
+            trace_id.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(env.binding.mac, v2, "exactly today's v2 MAC");
+    }
+
+    #[test]
+    fn producer_assertion_rejects_numeric_string_divergence() {
+        let ok = ResolvedScope::validated(2, 9, "acme", Some("main")).unwrap();
+        assert!(assert_scope_consistent(&ok, &ok.spine_scope()).is_ok());
+        // community string present but id says tenant-wide
+        let mut bad = ok.clone();
+        bad.community_id = 0;
+        assert!(matches!(
+            assert_scope_consistent(&bad, &ok.spine_scope()),
+            Err(PublishError::InconsistentScope(_))
+        ));
+        // tenant-wide id but a community string
+        let wide = ResolvedScope::validated(2, 0, "acme", None).unwrap();
+        assert!(assert_scope_consistent(&wide, &Scope::new("acme", Some("main".into()))).is_err());
+        // display strings diverge from the resolved scope
+        assert!(assert_scope_consistent(&ok, &Scope::new("acme", Some("other".into()))).is_err());
+        let mut neg = ok.clone();
+        neg.tenant_id = 0;
+        assert!(assert_scope_consistent(&neg, &ok.spine_scope()).is_err());
     }
 }

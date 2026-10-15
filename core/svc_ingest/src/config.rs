@@ -92,18 +92,12 @@ pub struct CliConfig {
     #[arg(long, env = "RUNNER_COMMUNITY", default_value = "")]
     pub runner_community: String,
 
-    /// Env baseline for the `waddles.ingest-dynamic-connections` flag: when
-    /// ON (or the PostHog/license flag is ON) svc-ingest resolves each
+    /// Env baseline for the `waddles.ingest-dynamic-connections` flag (env
+    /// only -- see `crate::try_install_scope_resolver`): when ON svc-ingest resolves each
     /// event's guild/channel to a numeric scope via hub-api and stamps
     /// schema-v3 envelopes. Default OFF = today's static v2 behavior.
     #[arg(long, env = "INGEST_DYNAMIC_CONNECTIONS", default_value_t = false)]
     pub dynamic_connections: bool,
-
-    /// Numeric id of the configured runner tenant (`RUNNER_TENANT_SLUG`):
-    /// the tenant of the fail-closed `(tenant_id, community 0)` sentinel.
-    /// Required (>= 1) while dynamic connections are enabled.
-    #[arg(long, env = "RUNNER_TENANT_ID", default_value_t = 0)]
-    pub runner_tenant_id: i64,
 
     /// Deployment environment label (`alpha`/`beta`/`gamma`/`production`) --
     /// plaintext `http://` to hub-api is only tolerated in `alpha`.

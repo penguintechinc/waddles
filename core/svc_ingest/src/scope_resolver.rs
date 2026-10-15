@@ -12,15 +12,16 @@
 //! - serves from an in-memory **LRU cache** (capacity-bounded, short TTL);
 //! - **single-flights** cold misses -- N concurrent events for one source make
 //!   exactly one upstream call (per-key lock, followers re-read the cache);
-//! - **fails closed**: a 404/409/transport/auth/parse failure, or a response
-//!   that fails the id/string consistency checks, resolves to the tenant-wide
-//!   sentinel `(configured tenant id, community 0)` -- it never guesses and
-//!   never mis-routes. Failures are cached for a short negative TTL so a sick
-//!   hub-api is not hammered, and every outcome is counted in a metric.
+//! - **never defaults a scope**: svc-ingest is a cross-tenant ingest point, so
+//!   an unresolvable source (404/409/400, inconsistent upstream data, DM /
+//!   sourceless event) or a failed lookup (hub-api down, timeout, 5xx, auth)
+//!   yields `Err(Unresolved)` and the caller DROPS the event (counted in a
+//!   metric, never published, never stamped with any tenant/community).
+//!   Transient failures are retried with bounded backoff before giving up and
+//!   are negatively cached very briefly so a sick hub-api is not hammered.
 //!
-//! Nothing here logs a token, a source id's message content, or any PII: log
-//! lines carry only the platform, the outcome and (for the sentinel path) the
-//! numeric ids.
+//! Nothing here logs a token or message content: log lines carry only the
+//! platform and the outcome label.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,6 +37,11 @@ pub const RESOLVE_SCOPE_JWT_SCOPE: &str = "dataplane:resolve-scope";
 pub const INGEST_DYNAMIC_CONNECTIONS_FLAG: &str = "waddles.ingest-dynamic-connections";
 /// `community_id` meaning "tenant-wide" (the `_tenant` stream segment).
 pub const TENANT_WIDE_COMMUNITY_ID: i32 = 0;
+
+/// Upstream attempts per cold miss for transient failures (1 + 2 retries).
+const MAX_ATTEMPTS: u32 = 3;
+/// First retry delay; doubles per retry.
+const RETRY_BASE: Duration = Duration::from_millis(100);
 
 /// Cache sizing and lifetimes. Positive TTL mirrors hub-api's own
 /// `Cache-Control: private, max-age=30`.
@@ -141,16 +147,6 @@ impl ResolvedScope {
         Ok(scope)
     }
 
-    /// The tenant-wide sentinel for `tenant_id` under `tenant_slug`.
-    pub fn sentinel(tenant_id: i64, tenant_slug: &str) -> Self {
-        Self {
-            tenant_id,
-            community_id: TENANT_WIDE_COMMUNITY_ID,
-            tenant_slug: tenant_slug.to_string(),
-            community_name: None,
-        }
-    }
-
     /// The spine string scope (stream key / hop-verification display scope).
     pub fn spine_scope(&self) -> penguin_spine::Scope {
         penguin_spine::Scope::new(self.tenant_slug.clone(), self.community_name.clone())
@@ -219,17 +215,58 @@ pub struct RawScope {
 /// Counter sink for resolver outcomes -- implemented over Prometheus in
 /// production ([`crate::telemetry::IngestMetrics`]) and a recorder in tests.
 pub trait ResolverMetrics: Send + Sync {
-    /// Records one resolution outcome (`hit`, `resolved`, `not_found`,
-    /// `ambiguous`, `invalid`, `inconsistent`, `error`, `no_source`).
+    /// Records one resolution outcome: `hit`, `resolved`, or an
+    /// [`Unresolved::label`] (each of which means the event is dropped).
     fn scope_resolution(&self, platform: &str, outcome: &'static str);
 }
 
 /// `(lowercased platform, source id)`.
 type CacheKey = (String, String);
 
+/// Why a source could not be resolved; every variant means the event is
+/// dropped, never routed under a default scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Unresolved {
+    /// 404: no active community linked to this source.
+    #[error("source is not mapped to a community")]
+    NotFound,
+    /// 409: source maps to more than one community.
+    #[error("source maps to more than one community")]
+    Ambiguous,
+    /// 400: hub-api refused the source id.
+    #[error("source id is invalid")]
+    Invalid,
+    /// Upstream payload failed the id/string consistency checks.
+    #[error("upstream scope failed consistency checks")]
+    Inconsistent,
+    /// Lookup failed (hub-api down/timeout/5xx/auth) after bounded retries.
+    #[error("scope lookup failed")]
+    Transient,
+    /// The event carried no resolvable platform source (DM / sourceless).
+    #[error("event has no resolvable platform source")]
+    NoSource,
+}
+
+impl Unresolved {
+    /// Metric / log label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Ambiguous => "ambiguous",
+            Self::Invalid => "invalid",
+            Self::Inconsistent => "inconsistent",
+            Self::Transient => "error",
+            Self::NoSource => "no_source",
+        }
+    }
+}
+
+/// A cached resolution: the real scope, or why there is none.
+type Resolution = Result<ResolvedScope, Unresolved>;
+
 #[derive(Clone)]
 struct Entry {
-    scope: ResolvedScope,
+    scope: Resolution,
     expires: Instant,
     last_used: u64,
 }
@@ -243,7 +280,6 @@ struct Cache {
 pub struct ScopeResolver<S: ScopeSource> {
     source: S,
     cfg: ResolverConfig,
-    sentinel: ResolvedScope,
     metrics: Arc<dyn ResolverMetrics>,
     cache: Mutex<Cache>,
     /// Per-key single-flight locks; entries are dropped when idle.
@@ -251,18 +287,11 @@ pub struct ScopeResolver<S: ScopeSource> {
 }
 
 impl<S: ScopeSource> ScopeResolver<S> {
-    /// `sentinel` is the fail-closed scope `(configured tenant id, community 0)`.
-    pub fn new(
-        source: S,
-        cfg: ResolverConfig,
-        sentinel: ResolvedScope,
-        metrics: Arc<dyn ResolverMetrics>,
-    ) -> Self {
-        debug_assert_eq!(sentinel.community_id, TENANT_WIDE_COMMUNITY_ID);
+    /// Builds a resolver over `source`.
+    pub fn new(source: S, cfg: ResolverConfig, metrics: Arc<dyn ResolverMetrics>) -> Self {
         Self {
             source,
             cfg,
-            sentinel,
             metrics,
             cache: Mutex::new(Cache {
                 map: HashMap::new(),
@@ -272,21 +301,17 @@ impl<S: ScopeSource> ScopeResolver<S> {
         }
     }
 
-    /// The fail-closed scope this resolver returns on any miss.
-    pub fn sentinel(&self) -> &ResolvedScope {
-        &self.sentinel
-    }
-
     /// Records that an event carried no resolvable source (e.g. a Discord DM)
-    /// and returns the sentinel without any upstream call.
-    pub fn no_source(&self, platform: &str) -> ResolvedScope {
-        self.metrics.scope_resolution(platform, "no_source");
-        self.sentinel.clone()
+    /// and returns the drop reason -- no upstream call, no default scope.
+    pub fn no_source(&self, platform: &str) -> Unresolved {
+        self.metrics
+            .scope_resolution(platform, Unresolved::NoSource.label());
+        Unresolved::NoSource
     }
 
-    /// Resolves a source to its scope; **never fails** -- every failure mode
-    /// returns the tenant-wide sentinel (fail closed).
-    pub async fn resolve(&self, platform: &str, source_id: &str) -> ResolvedScope {
+    /// Resolves a source to its real scope, or says why it cannot be (the
+    /// caller must then drop the event -- there is no default scope).
+    pub async fn resolve(&self, platform: &str, source_id: &str) -> Resolution {
         let key = (platform.to_ascii_lowercase(), source_id.to_string());
         if let Some(hit) = self.lookup(&key).await {
             self.metrics.scope_resolution(platform, "hit");
@@ -320,13 +345,19 @@ impl<S: ScopeSource> ScopeResolver<S> {
         result
     }
 
-    async fn fetch_and_store(
-        &self,
-        key: &(String, String),
-        platform: &str,
-        source_id: &str,
-    ) -> ResolvedScope {
-        let (scope, outcome, ttl) = match self.source.fetch(platform, source_id).await {
+    async fn fetch_and_store(&self, key: &CacheKey, platform: &str, source_id: &str) -> Resolution {
+        let mut attempt = 0u32;
+        let fetched = loop {
+            match self.source.fetch(platform, source_id).await {
+                Err(FetchError::Transient(reason)) if attempt + 1 < MAX_ATTEMPTS => {
+                    tracing::debug!(platform, reason, attempt, "scope lookup failed; retrying");
+                    tokio::time::sleep(RETRY_BASE * 2u32.pow(attempt)).await;
+                    attempt += 1;
+                }
+                other => break other,
+            }
+        };
+        let (scope, ttl): (Resolution, Duration) = match fetched {
             Ok(raw) => {
                 let name = (!raw.community_name.is_empty()).then_some(raw.community_name.as_str());
                 match ResolvedScope::validated(
@@ -335,39 +366,37 @@ impl<S: ScopeSource> ScopeResolver<S> {
                     &raw.tenant_slug,
                     name,
                 ) {
-                    Ok(scope) => (scope, "resolved", self.cfg.ttl),
+                    Ok(scope) => (Ok(scope), self.cfg.ttl),
                     Err(why) => {
-                        tracing::error!(
-                            platform,
-                            reason = %why,
-                            "scope resolver returned an inconsistent scope; failing closed to tenant-wide sentinel"
-                        );
-                        (self.sentinel.clone(), "inconsistent", self.cfg.negative_ttl)
+                        tracing::error!(platform, reason = %why, "scope resolver returned an inconsistent scope; event will be dropped");
+                        (Err(Unresolved::Inconsistent), self.cfg.negative_ttl)
                     }
                 }
             }
-            Err(FetchError::NotFound) => {
-                (self.sentinel.clone(), "not_found", self.cfg.negative_ttl)
-            }
-            Err(FetchError::Ambiguous) => {
-                (self.sentinel.clone(), "ambiguous", self.cfg.negative_ttl)
-            }
-            Err(FetchError::Invalid) => (self.sentinel.clone(), "invalid", self.cfg.negative_ttl),
+            Err(FetchError::NotFound) => (Err(Unresolved::NotFound), self.cfg.negative_ttl),
+            Err(FetchError::Ambiguous) => (Err(Unresolved::Ambiguous), self.cfg.negative_ttl),
+            Err(FetchError::Invalid) => (Err(Unresolved::Invalid), self.cfg.negative_ttl),
             Err(FetchError::Transient(reason)) => {
                 tracing::warn!(
                     platform,
                     reason,
-                    "scope resolve failed; failing closed to tenant-wide sentinel"
+                    "scope lookup failed after retries; event will be dropped"
                 );
-                (self.sentinel.clone(), "error", self.cfg.error_ttl)
+                (Err(Unresolved::Transient), self.cfg.error_ttl)
             }
         };
-        self.metrics.scope_resolution(platform, outcome);
+        self.metrics.scope_resolution(
+            platform,
+            match &scope {
+                Ok(_) => "resolved",
+                Err(u) => u.label(),
+            },
+        );
         self.store(key.clone(), scope.clone(), ttl).await;
         scope
     }
 
-    async fn lookup(&self, key: &(String, String)) -> Option<ResolvedScope> {
+    async fn lookup(&self, key: &CacheKey) -> Option<Resolution> {
         let mut cache = self.cache.lock().await;
         cache.tick += 1;
         let tick = cache.tick;
@@ -385,7 +414,7 @@ impl<S: ScopeSource> ScopeResolver<S> {
         }
     }
 
-    async fn store(&self, key: (String, String), scope: ResolvedScope, ttl: Duration) {
+    async fn store(&self, key: CacheKey, scope: Resolution, ttl: Duration) {
         let mut cache = self.cache.lock().await;
         cache.tick += 1;
         let tick = cache.tick;
@@ -562,12 +591,7 @@ mod tests {
 
     fn resolver(fake: &Arc<Fake>, cfg: ResolverConfig) -> (ScopeResolver<Arc<Fake>>, Arc<Rec>) {
         let rec = Arc::new(Rec::default());
-        let r = ScopeResolver::new(
-            Arc::clone(fake),
-            cfg,
-            ResolvedScope::sentinel(7, "global"),
-            rec.clone(),
-        );
+        let r = ScopeResolver::new(Arc::clone(fake), cfg, rec.clone());
         (r, rec)
     }
 
@@ -575,8 +599,8 @@ mod tests {
     async fn resolves_then_serves_from_cache() {
         let fake = Arc::new(Fake::new(Ok(raw(2, 9, "acme", "main"))));
         let (r, rec) = resolver(&fake, ResolverConfig::default());
-        let a = r.resolve("discord", "111").await;
-        let b = r.resolve("discord", "111").await;
+        let a = r.resolve("discord", "111").await.unwrap();
+        let b = r.resolve("discord", "111").await.unwrap();
         assert_eq!(a, b);
         assert_eq!((a.tenant_id, a.community_id), (2, 9));
         assert_eq!(a.community_name.as_deref(), Some("main"));
@@ -602,7 +626,7 @@ mod tests {
             ));
         }
         for t in tasks {
-            assert_eq!(t.await.unwrap().community_id, 9);
+            assert_eq!(t.await.unwrap().unwrap().community_id, 9);
         }
         assert_eq!(
             fake.calls.load(Ordering::SeqCst),
@@ -616,40 +640,63 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn not_found_and_ambiguous_fail_closed_to_sentinel() {
-        for (err, label) in [
-            (FetchError::NotFound, "not_found"),
-            (FetchError::Ambiguous, "ambiguous"),
-            (FetchError::Invalid, "invalid"),
-            (FetchError::Transient("transport"), "error"),
+    async fn misses_and_failures_are_unresolved_never_a_default_scope() {
+        for (err, want, calls) in [
+            (FetchError::NotFound, Unresolved::NotFound, 1),
+            (FetchError::Ambiguous, Unresolved::Ambiguous, 1),
+            (FetchError::Invalid, Unresolved::Invalid, 1),
+            // transient: 1 try + 2 bounded retries, then give up
+            (FetchError::Transient("transport"), Unresolved::Transient, 3),
         ] {
             let fake = Arc::new(Fake::new(Err(err)));
             let (r, rec) = resolver(&fake, ResolverConfig::default());
-            let got = r.resolve("twitch", "chan").await;
-            assert_eq!((got.tenant_id, got.community_id), (7, 0), "{label}");
-            assert_eq!(got.community_name, None);
-            assert_eq!(rec.count(label), 1, "{label} counted");
+            assert_eq!(r.resolve("twitch", "chan").await, Err(want));
+            assert_eq!(fake.calls.load(Ordering::SeqCst), calls, "{want:?}");
+            assert_eq!(rec.count(want.label()), 1, "{want:?} counted");
+            // negatively cached: no further upstream call within the TTL
+            assert_eq!(r.resolve("twitch", "chan").await, Err(want));
+            assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_failure_recovers_within_the_retry_budget() {
+        struct Flaky(AtomicUsize);
+        impl ScopeSource for Flaky {
+            async fn fetch(&self, _p: &str, _s: &str) -> Result<RawScope, FetchError> {
+                if self.0.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(FetchError::Transient("timeout"))
+                } else {
+                    Ok(raw(2, 9, "acme", "main"))
+                }
+            }
+        }
+        let r = ScopeResolver::new(
+            Flaky(AtomicUsize::new(0)),
+            ResolverConfig::default(),
+            Arc::new(Rec::default()),
+        );
+        assert_eq!(r.resolve("discord", "1").await.unwrap().community_id, 9);
     }
 
     #[tokio::test(start_paused = true)]
     async fn ttl_expiry_refetches_and_picks_up_the_new_scope() {
         let fake = Arc::new(Fake::new(Err(FetchError::NotFound)));
         let (r, _rec) = resolver(&fake, ResolverConfig::default());
-        assert_eq!(r.resolve("discord", "1").await.community_id, 0);
+        assert_eq!(r.resolve("discord", "1").await, Err(Unresolved::NotFound));
         // The link is created upstream; still negatively cached inside the TTL.
         *fake.reply.lock().unwrap() = Ok(raw(2, 9, "acme", "main"));
-        assert_eq!(r.resolve("discord", "1").await.community_id, 0);
+        assert_eq!(r.resolve("discord", "1").await, Err(Unresolved::NotFound));
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         tokio::time::advance(Duration::from_secs(11)).await;
         assert_eq!(
-            r.resolve("discord", "1").await.community_id,
+            r.resolve("discord", "1").await.unwrap().community_id,
             9,
             "negative TTL expired"
         );
         assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
         tokio::time::advance(Duration::from_secs(31)).await;
-        r.resolve("discord", "1").await;
+        r.resolve("discord", "1").await.unwrap();
         assert_eq!(fake.calls.load(Ordering::SeqCst), 3, "positive TTL expired");
     }
 
@@ -661,19 +708,19 @@ mod tests {
             ..ResolverConfig::default()
         };
         let (r, _rec) = resolver(&fake, cfg);
-        r.resolve("discord", "a").await;
-        r.resolve("discord", "b").await;
-        r.resolve("discord", "a").await; // a is now most recent
-        r.resolve("discord", "c").await; // evicts b
+        r.resolve("discord", "a").await.unwrap();
+        r.resolve("discord", "b").await.unwrap();
+        r.resolve("discord", "a").await.unwrap(); // a is now most recent
+        r.resolve("discord", "c").await.unwrap(); // evicts b
         assert_eq!(fake.calls.load(Ordering::SeqCst), 3);
-        r.resolve("discord", "a").await;
+        r.resolve("discord", "a").await.unwrap();
         assert_eq!(fake.calls.load(Ordering::SeqCst), 3, "a survived");
-        r.resolve("discord", "b").await;
+        r.resolve("discord", "b").await.unwrap();
         assert_eq!(fake.calls.load(Ordering::SeqCst), 4, "b was evicted");
     }
 
     #[tokio::test(start_paused = true)]
-    async fn inconsistent_upstream_data_fails_closed() {
+    async fn inconsistent_upstream_data_is_unresolved() {
         for bad in [
             raw(2, 9, "acme", ""),                           // community id without a name
             raw(2, 0, "acme", "main"),                       // name with the tenant-wide id
@@ -686,7 +733,7 @@ mod tests {
             let fake = Arc::new(Fake::new(Ok(bad.clone())));
             let (r, rec) = resolver(&fake, ResolverConfig::default());
             let got = r.resolve("discord", "1").await;
-            assert_eq!((got.tenant_id, got.community_id), (7, 0), "{bad:?}");
+            assert_eq!(got, Err(Unresolved::Inconsistent), "{bad:?}");
             assert_eq!(rec.count("inconsistent"), 1, "{bad:?}");
         }
     }
@@ -710,5 +757,84 @@ mod tests {
         assert!(check_transport("http://hub:8204", "beta").is_err());
         assert!(check_transport("http://hub:8204", "").is_err());
         assert!(check_transport("ftp://x", "alpha").is_err());
+    }
+
+    // ---- HubScopeSource over real HTTP (wiremock) ----
+
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn hub_source(server: &MockServer) -> (HubScopeSource, std::path::PathBuf) {
+        Mock::given(method("POST"))
+            .and(path("/internal/service-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"token": "machine.jwt.value", "expires_in": 3600}),
+            ))
+            .mount(server)
+            .await;
+        let sa = std::env::temp_dir().join(format!("svc-ingest-sa-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&sa, "projected-sa-token").unwrap();
+        let jwt = Arc::new(service_auth::MachineJwtClient::new(
+            format!("{}/internal/service-token", server.uri()),
+            sa.to_string_lossy().to_string(),
+            RESOLVE_SCOPE_JWT_SCOPE,
+        ));
+        (HubScopeSource::new(&server.uri(), jwt).unwrap(), sa)
+    }
+
+    #[tokio::test]
+    async fn hub_source_calls_endpoint_with_machine_jwt_and_parses_scope() {
+        let server = MockServer::start().await;
+        let (src, sa) = hub_source(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/internal/dataplane/resolve-scope"))
+            .and(query_param("platform", "discord"))
+            .and(query_param("source_id", "111"))
+            .and(header("authorization", "Bearer machine.jwt.value"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true, "tenantId": 2, "communityId": 9,
+                "tenantSlug": "acme", "communityName": "main"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let got = src.fetch("discord", "111").await.unwrap();
+        assert_eq!(got, raw(2, 9, "acme", "main"));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn hub_source_maps_status_codes_to_fetch_errors() {
+        for (status, want) in [
+            (404, FetchError::NotFound),
+            (409, FetchError::Ambiguous),
+            (400, FetchError::Invalid),
+            (403, FetchError::Transient("auth")),
+            (500, FetchError::Transient("status")),
+        ] {
+            let server = MockServer::start().await;
+            let (src, sa) = hub_source(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/internal/dataplane/resolve-scope"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            assert_eq!(src.fetch("twitch", "chan").await, Err(want), "{status}");
+            let _ = std::fs::remove_file(sa);
+        }
+    }
+
+    #[tokio::test]
+    async fn hub_source_without_a_token_is_transient_not_a_panic() {
+        let jwt = Arc::new(service_auth::MachineJwtClient::new(
+            "http://127.0.0.1:1/token",
+            "/nonexistent/sa-token",
+            RESOLVE_SCOPE_JWT_SCOPE,
+        ));
+        let src = HubScopeSource::new("http://127.0.0.1:1", jwt).unwrap();
+        assert_eq!(
+            src.fetch("twitch", "c").await,
+            Err(FetchError::Transient("token"))
+        );
     }
 }
