@@ -43,7 +43,6 @@ from typing import Any, ParamSpec, TypeVar, cast
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
-from flask_core.service_jwt import SYSTEM_TENANT, InvalidServiceToken, UnknownKeyId
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from pydantic import ConfigDict
 from quart import Blueprint, Response, current_app, request
@@ -52,6 +51,7 @@ from quart_schema import validate_request, validate_response
 from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, forbidden, payment_required
+from services.machine_auth import machine_authenticated
 from services.provider_connections import (
     AdapterSpec,
     PlatformKeyVault,
@@ -581,43 +581,14 @@ async def delete_provider_connection(community_id: int, connection_id: int) -> D
 # --------------------------------------------------------------------------
 
 
-def _service_authenticated(handler: Callable[..., Any]) -> Callable[..., Any]:
-    """Require a valid machine JWT with ``connections:resolve`` from the operator-plane tenant.
-
-    Fails closed at every step and never says which check failed. The ``system`` tenant claim is
-    stamped by the issuer from the allow-listed identity (never by the caller), and is required
-    because these routes deliberately span tenants.
-    """
-
-    @wraps(handler)
-    async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        verifier = current_app.config.get("SERVICE_JWT_VERIFIER")
-        if verifier is None:
-            # Not configured is a deployment fault to be seen, not a reason to fall back to a
-            # weaker mechanism.
-            logger.error("provider_connections.service_auth_unconfigured")
-            return {"error": "service authentication is not configured"}, 503
-        header = request.headers.get("Authorization", "")
-        if not header.startswith("Bearer "):
-            return {"error": "unauthorized"}, 401
-        try:
-            claims = verifier.verify(
-                header[len("Bearer ") :], required_scope=SCOPE_CONNECTIONS_RESOLVE
-            )
-        except (UnknownKeyId, InvalidServiceToken) as exc:
-            log_failure(
-                logger,
-                "provider_connections.service_auth_rejected",
-                exc,
-                level=logging.WARNING,
-            )
-            return {"error": "unauthorized"}, 401
-        if claims.get("tenant") != SYSTEM_TENANT:
-            logger.warning("provider_connections.service_auth_wrong_tenant")
-            return {"error": "forbidden"}, 403
-        return await handler(*args, **kwargs)
-
-    return wrapper
+#: Requires a valid machine JWT with ``connections:resolve`` from the operator-plane tenant; the
+#: fail-closed ladder lives in :func:`services.machine_auth.machine_authenticated`.
+_service_authenticated = machine_authenticated(
+    SCOPE_CONNECTIONS_RESOLVE,
+    unconfigured_event="provider_connections.service_auth_unconfigured",
+    rejected_event="provider_connections.service_auth_rejected",
+    wrong_tenant_event="provider_connections.service_auth_wrong_tenant",
+)
 
 
 @provider_connections_internal_bp.after_request

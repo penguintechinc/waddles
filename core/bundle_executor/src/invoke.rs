@@ -58,7 +58,8 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::config::CliConfig;
-use crate::engine::{ticks_for_deadline, StagePre};
+use crate::engine::stage_v2_world::{StageV2, StageV2Pre};
+use crate::engine::{ticks_for_deadline, Stage, StagePre};
 use crate::error::ExecutorError;
 use crate::host::{ExecState, HostBridge};
 use crate::metrics::{self, ExecutorMetrics};
@@ -107,6 +108,46 @@ impl ComponentSource for UnimplementedBucketSource {
 /// unsafe).
 type Scope = (i32, i32, String);
 
+/// Fully-qualified export a `world stage-v2` component carries INSTEAD of
+/// `action-stage@1.0.0`; its presence is what selects the v2 (numeric scope)
+/// path for a component. Detection is by this one export name, never by
+/// try-v1-then-fall-back, so a malformed component can't silently take the
+/// other path.
+const ACTION_STAGE_V2_EXPORT: &str = "waddle:bundle/action-stage-v2@1.0.0";
+
+/// A pre-linked component of either WIT-world family the executor serves:
+/// the frozen v1 `stage`/`stage-next` family (string scope) or `stage-v2`
+/// (authoritative numeric scope). Both share one registry, one linker and one
+/// `Store` discipline -- only the typed export surface differs.
+#[derive(Clone)]
+enum GuestPre {
+    V1(StagePre<ExecState>),
+    V2(StageV2Pre<ExecState>),
+}
+
+impl GuestPre {
+    /// Pre-links `component`, choosing the family from its exports.
+    fn new(
+        component: &Component,
+        instance_pre: wasmtime::component::InstancePre<ExecState>,
+    ) -> wasmtime::Result<Self> {
+        if component
+            .get_export_index(None, ACTION_STAGE_V2_EXPORT)
+            .is_some()
+        {
+            Ok(Self::V2(StageV2Pre::new(instance_pre)?))
+        } else {
+            Ok(Self::V1(StagePre::new(instance_pre)?))
+        }
+    }
+}
+
+/// A live instance of either family (see [`GuestPre`]).
+enum GuestInstance {
+    V1(Stage),
+    V2(StageV2),
+}
+
 struct LoadedBundle {
     /// The `app_id` from the FIRST `load` call that registered this digest
     /// -- informational only (logging/error messages): the registry's real
@@ -120,7 +161,7 @@ struct LoadedBundle {
     /// (and therefore fresh guest state) is still created per call -- the
     /// digest is shared across tenants, so reusing a live instance would
     /// leak guest state between them.
-    pre: StagePre<ExecState>,
+    pre: GuestPre,
     /// `EXECUTOR_INSTANCES_PER_BUNDLE` permits: caps concurrent in-flight
     /// instances of THIS digest so one hot bundle can't consume every
     /// global call slot.
@@ -174,7 +215,7 @@ impl<S: ComponentSource> Executor<S> {
 impl LoadedBundle {
     /// Test seam: the shareable parts a hand-built second registry entry
     /// needs (`component`, pre-linked form, slot semaphore).
-    fn test_parts(&self) -> (StagePre<ExecState>, Arc<Semaphore>) {
+    fn test_parts(&self) -> (GuestPre, Arc<Semaphore>) {
         (self.pre.clone(), Arc::clone(&self.slots))
     }
 }
@@ -278,7 +319,7 @@ pub struct Executor<S: ComponentSource> {
 /// (`StagePre` owns the compiled `Component`).
 #[derive(Clone)]
 struct Compiled {
-    pre: StagePre<ExecState>,
+    pre: GuestPre,
 }
 
 /// How [`Executor::drain`] ended.
@@ -720,7 +761,7 @@ impl<S: ComponentSource> Executor<S> {
                 let compiled = tokio::task::spawn_blocking(move || {
                     let _permit = compile_permit;
                     let component = Component::new(&engine, &bytes)?;
-                    let pre = StagePre::new(linker.instantiate_pre(&component)?)?;
+                    let pre = GuestPre::new(&component, linker.instantiate_pre(&component)?)?;
                     Ok::<_, wasmtime::Error>(Compiled { pre })
                 })
                 .await
@@ -1050,7 +1091,7 @@ impl<S: ComponentSource> Executor<S> {
 /// blocking-pool thread.
 struct GuestJob {
     engine: Engine,
-    pre: StagePre<ExecState>,
+    pre: GuestPre,
     metrics: Arc<ExecutorMetrics>,
     body: InvokeBody,
     invoke_id: u64,
@@ -1099,7 +1140,11 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
     })?;
 
     let start = std::time::Instant::now();
-    let stage = match pre.instantiate_async(&mut store).await {
+    let instantiated = match &pre {
+        GuestPre::V1(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V1),
+        GuestPre::V2(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V2),
+    };
+    let stage = match instantiated {
         Ok(stage) => stage,
         Err(err) => {
             // Instantiation itself can trap (a heavy/looping start function
@@ -1124,10 +1169,18 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
         ExportKind::Transform => {
             let event = serde_json::from_value(body.payload)
                 .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
-            let outcome = stage
-                .waddle_bundle_process_stage()
-                .call_transform(&mut store, &event)
-                .await;
+            let outcome = match &stage {
+                GuestInstance::V1(st) => {
+                    st.waddle_bundle_process_stage()
+                        .call_transform(&mut store, &event)
+                        .await
+                }
+                GuestInstance::V2(st) => {
+                    st.waddle_bundle_process_stage()
+                        .call_transform(&mut store, &event)
+                        .await
+                }
+            };
             metrics.record_guest(&body.app_id, "transform", guest_started.elapsed());
             match outcome {
                 Ok(Ok(reply)) => serde_json::to_value(reply),
@@ -1140,12 +1193,37 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
             }
         }
         ExportKind::Dispatch => {
-            let envelope: EnvelopeAndConfig = serde_json::from_value(body.payload)
-                .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
-            let outcome = stage
-                .waddle_bundle_action_stage()
-                .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
-                .await;
+            let outcome = match &stage {
+                GuestInstance::V1(st) => {
+                    let envelope: EnvelopeAndConfig = serde_json::from_value(body.payload)
+                        .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
+                    st.waddle_bundle_action_stage()
+                        .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
+                        .await
+                }
+                GuestInstance::V2(st) => {
+                    let envelope: EnvelopeAndConfigV2 = serde_json::from_value(body.payload)
+                        .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
+                    // Authoritative-scope range check BEFORE the guest sees
+                    // it: a real tenant id is >= 1, a community id >= 0
+                    // (0 = tenant-wide). A frame outside that is malformed,
+                    // never passed through to a bundle that would key on it.
+                    let e = &envelope.envelope;
+                    if e.tenant_id < 1 || e.community_id < 0 {
+                        return Err(error_body(
+                            ErrorCode::MalformedFrame,
+                            format!(
+                                "stage-v2 envelope numeric scope out of range \
+                                 (tenant_id={}, community_id={}; need tenant_id >= 1, community_id >= 0)",
+                                e.tenant_id, e.community_id
+                            ),
+                        ));
+                    }
+                    st.waddle_bundle_action_stage_v2()
+                        .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
+                        .await
+                }
+            };
             metrics.record_guest(&body.app_id, "dispatch", guest_started.elapsed());
             match outcome {
                 Ok(Ok(reply)) => serde_json::to_value(reply),
@@ -1234,6 +1312,16 @@ impl<S: ComponentSource> RequestHandler for Arc<Executor<S>> {
 #[derive(serde::Deserialize)]
 struct EnvelopeAndConfig {
     envelope: crate::engine::waddle::bundle::types::StageEnvelope,
+    config: String,
+}
+
+/// `EnvelopeAndConfig`'s `stage-v2` twin: the same `{envelope, config}` frame
+/// but the envelope is `types-v2.stage-envelope`, which REQUIRES numeric
+/// `tenant_id`/`community_id` (serde rejects a frame without them, so a stage
+/// that has not been taught numeric scope cannot drive a v2 bundle).
+#[derive(serde::Deserialize)]
+struct EnvelopeAndConfigV2 {
+    envelope: crate::engine::stage_v2_world::waddle::bundle::types_v2::StageEnvelope,
     config: String,
 }
 

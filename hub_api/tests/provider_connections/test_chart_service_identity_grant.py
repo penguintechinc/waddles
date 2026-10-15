@@ -114,7 +114,8 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
     chart_identities: dict[str, ServiceIdentity],
 ) -> None:
     identity = chart_identities[_SVC_INGEST]
-    assert identity.allowed_scopes == frozenset({_SCOPE})  # minimum: that one scope, nothing else
+    # Minimum: the two data-plane scopes (connections + scope resolver), nothing else.
+    assert identity.allowed_scopes == frozenset({_SCOPE, "dataplane:resolve-scope"})
     assert identity.tenant == "system"
     # Pinned to the dedicated ServiceAccount, never the chart-wide shared one.
     assert (identity.k8s_namespace, identity.k8s_service_account) != ("", "")

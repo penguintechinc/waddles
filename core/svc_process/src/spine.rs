@@ -1389,9 +1389,15 @@ async fn handle_delivered_inner<S: SpineOps>(
     let dest_stream = scope.action_stream(&dest_app_id);
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let envelope_out = StageEnvelope {
-        schema_version: penguin_spine::ENVELOPE_SCHEMA_VERSION,
+        // Scope + schema version are copied VERBATIM from the verified
+        // inbound envelope (never re-derived): the copied `binding` covers
+        // exactly these fields, so a v3 envelope's numeric ids must travel
+        // with it or the next hop's MAC verification would (correctly) fail.
+        schema_version: d.env.schema_version,
         tenant: d.env.tenant.clone(),
         community: d.env.community.clone(),
+        tenant_id: d.env.tenant_id,
+        community_id: d.env.community_id,
         app_id: dest_app_id,
         stage: "action".to_string(),
         event: event_out,

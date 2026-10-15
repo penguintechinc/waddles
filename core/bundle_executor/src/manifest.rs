@@ -25,6 +25,10 @@ pub enum WitWorld {
     /// `world stage-next` (issue #726): `stage` plus the additive
     /// `overlay`/`reputation` imports.
     StageNext,
+    /// `world stage-v2`: `stage-next` plus the AUTHORITATIVE numeric scope
+    /// (`context-v2`/`action-stage-v2`); a v1/`stage-next` bundle never
+    /// declares it and keeps running untouched.
+    StageV2,
     Connector,
 }
 

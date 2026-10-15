@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 from flask_core.stream_pipeline import (
+    ENVELOPE_SCHEMA_VERSION,
+    TENANT_WIDE_COMMUNITY_ID,
     Binding,
     EnvelopeError,
     PlatformEvent,
@@ -245,3 +247,72 @@ def test_binding_missing_kid_raises() -> None:
 def test_binding_unknown_key_raises() -> None:
     with pytest.raises(EnvelopeError, match="binding"):
         Binding.from_dict({"kid": "2026-09", "mac": "a" * 64, "bogus": "nope"})
+
+
+# --- Schema v3: authoritative numeric scope (tenant_id / community_id) ---
+
+
+def test_v3_tenant_wide_numeric_scope_deserializes() -> None:
+    envelope = StageEnvelope.from_dict(
+        _load(VALID_DIR / "stage_envelope_numeric_scope_tenant_wide_v3.json")
+    )
+    assert envelope.schema_version == ENVELOPE_SCHEMA_VERSION == 3
+    assert envelope.tenant_id == 10
+    assert envelope.community_id == TENANT_WIDE_COMMUNITY_ID == 0
+    # the strings are display-only metadata and survive alongside the ids
+    assert envelope.tenant == "global"
+    assert envelope.community is None
+
+
+def test_v3_community_numeric_scope_round_trips() -> None:
+    data = _load(VALID_DIR / "stage_envelope_numeric_scope_community_v3.json")
+    envelope = StageEnvelope.from_dict(data)
+    assert (envelope.tenant_id, envelope.community_id) == (10, 7)
+    assert envelope.community == "main"
+    assert envelope.to_dict()["tenant_id"] == 10
+    assert envelope.to_dict()["community_id"] == 7
+    assert StageEnvelope.from_dict(envelope.to_dict()) == envelope
+
+
+def test_v2_envelope_serializes_without_numeric_ids() -> None:
+    """A v2 / legacy envelope's wire form is unchanged: no id keys at all."""
+    envelope = StageEnvelope.from_dict(_load(VALID_DIR / "stage_envelope_full_d30.json"))
+    assert envelope.tenant_id is None and envelope.community_id is None
+    out = envelope.to_dict()
+    assert "tenant_id" not in out
+    assert "community_id" not in out
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "v3_missing_numeric_ids",
+        "v3_missing_community_id",
+        "v3_missing_tenant_id",
+        "v3_tenant_id_zero",
+        "v3_community_id_negative",
+        "v3_tenant_id_wrong_type_string",
+        "v3_tenant_id_wrong_type_bool",
+        "v3_community_id_overflows_i32",
+        "v2_smuggles_numeric_ids",
+        "schema_version_value_four",
+    ],
+)
+def test_numeric_scope_invalid_fixtures_are_each_rejected(name: str) -> None:
+    """Every named fixture exists (zero examined is a failure) and is refused."""
+    path = INVALID_DIR / f"{name}.json"
+    assert path.exists(), f"missing fixture {path.name}"
+    with pytest.raises(EnvelopeError):
+        StageEnvelope.from_dict(_load(path))
+
+
+def test_numeric_scope_dataclass_rejects_contradiction_with_schema_version() -> None:
+    """The dataclass itself enforces the contract, not only `from_dict`."""
+    base = StageEnvelope.from_dict(_load(VALID_DIR / "stage_envelope_full_d30.json"))
+    with pytest.raises(EnvelopeError, match="tenant_id"):
+        dataclasses.replace(base, tenant_id=10, community_id=0)  # v2 + ids
+    v3 = StageEnvelope.from_dict(
+        _load(VALID_DIR / "stage_envelope_numeric_scope_community_v3.json")
+    )
+    with pytest.raises(EnvelopeError, match="tenant_id"):
+        dataclasses.replace(v3, tenant_id=None)  # v3 without ids
