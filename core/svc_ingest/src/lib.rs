@@ -74,6 +74,7 @@ pub mod normalize;
 pub mod outbound;
 pub mod outbound_ops;
 pub mod publish;
+pub mod scope_resolver;
 pub mod telemetry;
 
 use std::net::SocketAddr;
@@ -265,6 +266,11 @@ where
     // regardless of license/flag-server reachability.
     let license_client = license::build_license_client();
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
+        // Schema-v3 producer: resolver is installed BEFORE any receiver can
+        // publish. A flag that is ON but misconfigured fails the process
+        // loudly -- never a silent downgrade to the v2/static path.
+        try_install_scope_resolver(&config, license_client.as_ref(), ingest_metrics.clone())
+            .await?;
         // Twitch IRC (primary e2e path), Discord Gateway (secondary), the
         // Twitch outbound relay drain, and the Twitch EventSub webhook
         // receiver each independently no-op with a logged reason when
@@ -313,6 +319,78 @@ where
         async { metrics_server.await.map_err(anyhow::Error::from) },
     )?;
 
+    Ok(())
+}
+
+/// Installs the dataplane scope resolver when
+/// `waddles.ingest-dynamic-connections` is ON (env baseline
+/// `INGEST_DYNAMIC_CONNECTIONS`, or the PostHog/license flag). Flag OFF is a
+/// no-op: every event keeps the unchanged v2/static envelope. Flag ON with a
+/// missing tenant id, missing machine-JWT bootstrap config, or a plaintext
+/// `http://` hub-api outside alpha is an `Err` -- fail loud, never silently
+/// fall back.
+async fn try_install_scope_resolver(
+    config: &config::Config,
+    license_client: Option<&Arc<penguin_licensing::LicenseClient>>,
+    metrics: Arc<telemetry::IngestMetrics>,
+) -> anyhow::Result<()> {
+    let flag_on = config.cli.dynamic_connections
+        || match license_client {
+            Some(c) => {
+                c.flag_enabled(scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG)
+                    .await
+            }
+            None => false,
+        };
+    if !flag_on {
+        tracing::info!(
+            flag = scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG,
+            "flag is OFF; publishing schema-v2 static-scope envelopes"
+        );
+        return Ok(());
+    }
+    let cli = &config.cli;
+    if cli.runner_tenant_id < 1 {
+        anyhow::bail!(
+            "{} is ON but RUNNER_TENANT_ID is unset/<1: the fail-closed tenant-wide sentinel needs the configured tenant's numeric id",
+            scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG
+        );
+    }
+    if cli.service_jwt_token_endpoint.is_empty() {
+        anyhow::bail!(
+            "{} is ON but SERVICE_JWT_TOKEN_ENDPOINT is unset: no machine JWT for the resolver",
+            scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG
+        );
+    }
+    scope_resolver::check_transport(&cli.hub_api_url, &cli.environment)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let jwt = Arc::new(service_auth::MachineJwtClient::new(
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        scope_resolver::RESOLVE_SCOPE_JWT_SCOPE,
+    ));
+    let source = scope_resolver::HubScopeSource::new(&cli.hub_api_url, jwt)?;
+    let sentinel = scope_resolver::ResolvedScope::validated(
+        cli.runner_tenant_id,
+        0,
+        &cli.runner_tenant_slug,
+        None,
+    )
+    .map_err(|e| anyhow::anyhow!("configured runner tenant is unusable as the sentinel: {e}"))?;
+    let resolver = Arc::new(scope_resolver::ScopeResolver::new(
+        source,
+        scope_resolver::ResolverConfig::default(),
+        sentinel,
+        metrics,
+    ));
+    if !publish::install_scope_resolver(resolver) {
+        anyhow::bail!("scope resolver was already installed");
+    }
+    tracing::info!(
+        flag = scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG,
+        tenant_id = cli.runner_tenant_id,
+        "flag is ON; publishing schema-v3 envelopes with resolver-supplied numeric scope"
+    );
     Ok(())
 }
 

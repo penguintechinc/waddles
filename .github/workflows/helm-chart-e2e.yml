@@ -116,14 +116,14 @@ jobs:
           set -euo pipefail
           # Build context per Dockerfile's own COPY paths, not a blanket root/subdir
           # guess: hub_api/Dockerfile COPYs "hub_api/..." + "libs/flask_core" (root
-          # context); svc_ingest's Dockerfile.rust COPYs "Cargo.toml"/"src" bare (its
-          # own dir); svc_process/svc_action COPY "svc_process/..." + sibling
+          # context); svc_ingest's Dockerfile.rust COPYs "svc_ingest/..." + sibling
+          # "service_auth" (the "core" dir, like svc_process); svc_process/svc_action COPY "svc_process/..." + sibling
           # "bundle_active_set"/"bundle_host_http" (the shared "core" dir, one level up).
           declare -a IMAGES=(
             "waddlebot-migrations:ci:migrations/Dockerfile:."
             "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
             "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
-            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core/svc_ingest"
+            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core"
             "svc-process-rust:ci:core/svc_process/Dockerfile.rust:core"
             "svc-action-rust:ci:core/svc_action/Dockerfile.rust:core"
           )
@@ -466,14 +466,14 @@ jobs:
           set -euo pipefail
           # Build context per Dockerfile's own COPY paths, not a blanket root/subdir
           # guess: hub_api/Dockerfile COPYs "hub_api/..." + "libs/flask_core" (root
-          # context); svc_ingest's Dockerfile.rust COPYs "Cargo.toml"/"src" bare (its
-          # own dir); svc_process/svc_action COPY "svc_process/..." + sibling
+          # context); svc_ingest's Dockerfile.rust COPYs "svc_ingest/..." + sibling
+          # "service_auth" (the "core" dir, like svc_process); svc_process/svc_action COPY "svc_process/..." + sibling
           # "bundle_active_set"/"bundle_host_http" (the shared "core" dir, one level up).
           declare -a IMAGES=(
             "waddlebot-migrations:ci:migrations/Dockerfile:."
             "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
             "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
-            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core/svc_ingest"
+            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core"
             "svc-process-rust:ci:core/svc_process/Dockerfile.rust:core"
             "svc-action-rust:ci:core/svc_action/Dockerfile.rust:core"
           )

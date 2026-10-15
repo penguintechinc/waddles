@@ -22,12 +22,26 @@
 //! `publish_event` records nothing onto `waddles:usage` today; wiring it in
 //! is `// TODO(M5)`, blocked on that module landing in `penguin-spine`.
 
+use std::sync::{Arc, OnceLock};
+
 use penguin_spine::{
-    compute_binding_mac, trace_id_from_traceparent, Binding, BindingError, KeyRing, PlatformEvent,
-    Scope, SpineClient, SpineError, SpineMetrics, StageEnvelope, Trace,
-    LEGACY_ENVELOPE_SCHEMA_VERSION,
+    compute_binding_mac, compute_binding_mac_v3, trace_id_from_traceparent, Binding, BindingError,
+    KeyRing, PlatformEvent, Scope, SpineClient, SpineError, SpineMetrics, StageEnvelope, Trace,
+    ENVELOPE_SCHEMA_VERSION, LEGACY_ENVELOPE_SCHEMA_VERSION,
 };
 use uuid::Uuid;
+
+use crate::scope_resolver::{HubScopeSource, ResolvedScope, ScopeResolver, ScopeSource};
+
+/// The process-wide dataplane scope resolver. Set once at startup, only when
+/// `waddles.ingest-dynamic-connections` is ON and the resolver is fully
+/// configured; unset means every event takes the unchanged v2/static path.
+static SCOPE_RESOLVER: OnceLock<Arc<ScopeResolver<HubScopeSource>>> = OnceLock::new();
+
+/// Installs the process-wide resolver; `false` if one was already installed.
+pub fn install_scope_resolver(resolver: Arc<ScopeResolver<HubScopeSource>>) -> bool {
+    SCOPE_RESOLVER.set(resolver).is_ok()
+}
 
 /// Fixed namespace for PA-WORKSTREAM's deterministic fixed-platform
 /// workstream ids. Generated once and never regenerated -- changing it
@@ -84,6 +98,31 @@ pub enum PublishError {
     /// `EventAppender::append` (the `XADD`) failed.
     #[error("spine append failed: {0}")]
     Append(#[from] SpineError),
+    /// The numeric scope disagrees with the display strings about to be
+    /// stamped -- a producer bug; refused loudly rather than published.
+    #[error("inconsistent scope refused: {0}")]
+    InconsistentScope(String),
+}
+
+/// Producer-side guard (finding 4): the authoritative numeric scope and the
+/// string scope (stream key / `verify_hop` display scope) must agree --
+/// `community.is_none() == (community_id == 0)`, positive tenant id, and the
+/// strings are exactly what the numeric scope's resolution produced.
+fn assert_scope_consistent(resolved: &ResolvedScope, scope: &Scope) -> Result<(), PublishError> {
+    let bad = |why: &str| Err(PublishError::InconsistentScope(why.to_string()));
+    if resolved.tenant_id < 1 {
+        return bad("tenant_id must be >= 1");
+    }
+    if resolved.community_id < 0 {
+        return bad("community_id must be >= 0");
+    }
+    if scope.community.is_none() != (resolved.community_id == 0) {
+        return bad("community presence must match (community_id == 0)");
+    }
+    if scope.tenant != resolved.tenant_slug || scope.community != resolved.community_name {
+        return bad("display strings diverge from the resolved scope");
+    }
+    Ok(())
 }
 
 /// Wraps `penguin_spine::SpineClient::append` behind a trait so callers
@@ -131,6 +170,12 @@ fn mint_trace() -> Trace {
 /// ([`deterministic_workstream_id`] for a fixed-platform source, PA-
 /// WORKSTREAM); `active_kid`/`keyring` mint `binding.mac` under the
 /// operator-configured active key version (`crate::config`).
+///
+/// With the dynamic-connections resolver installed ([`install_scope_resolver`])
+/// the envelope is a schema-v3 one: numeric `tenant_id`/`community_id` resolved
+/// from the event's platform source (fail-closed to the tenant-wide sentinel),
+/// bound by `compute_binding_mac_v3`, and `scope` is ignored in favor of the
+/// resolved scope. Without it, behavior is the unchanged v2/static path.
 #[allow(clippy::too_many_arguments)]
 pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
     appender: &A,
@@ -143,6 +188,54 @@ pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
     session_id: Option<&str>,
     event: PlatformEvent,
 ) -> Result<String, PublishError> {
+    publish_event_with(
+        SCOPE_RESOLVER.get().map(Arc::as_ref),
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        source_id,
+        workstream_id,
+        session_id,
+        event,
+    )
+    .await
+}
+
+/// [`publish_event`] with an explicit resolver (`None` = v2/static path) --
+/// the seam tests drive directly instead of the process-wide static.
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_event_with<A: EventAppender, M: SpineMetrics + ?Sized, S: ScopeSource>(
+    resolver: Option<&ScopeResolver<S>>,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    source_id: &str,
+    workstream_id: &str,
+    session_id: Option<&str>,
+    event: PlatformEvent,
+) -> Result<String, PublishError> {
+    // v3: resolve the authoritative numeric scope from the event's platform
+    // source (Discord guild id / Twitch channel login = `source.account_id`).
+    // A DM or sourceless event has nothing to resolve -> tenant-wide sentinel.
+    let resolved = match resolver {
+        Some(r) => Some(match event.source.as_ref().map(|s| s.account_id.as_str()) {
+            Some(src) if !src.is_empty() && src != "dm" => r.resolve(&event.platform, src).await,
+            _ => r.no_source(&event.platform),
+        }),
+        None => None,
+    };
+    let v3_scope = resolved.as_ref().map(ResolvedScope::spine_scope);
+    let scope = match (&resolved, &v3_scope) {
+        (Some(res), Some(sc)) => {
+            assert_scope_consistent(res, sc)?;
+            sc
+        }
+        _ => scope,
+    };
     let stream = scope.source_stream(&event.platform, source_id);
     let platform = event.platform.clone();
 
@@ -152,30 +245,46 @@ pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
         .to_string();
     let event_id = Uuid::new_v4().to_string();
 
-    let mac = compute_binding_mac(
-        keyring,
-        active_kid,
-        &scope.tenant,
-        scope.community.as_deref(),
-        workstream_id,
-        &event_id,
-        Some(&trace_id),
-    )?;
+    let mac = match &resolved {
+        Some(res) => compute_binding_mac_v3(
+            keyring,
+            active_kid,
+            res.tenant_id,
+            res.community_id,
+            &scope.tenant,
+            scope.community.as_deref(),
+            workstream_id,
+            &event_id,
+            Some(&trace_id),
+        )?,
+        None => compute_binding_mac(
+            keyring,
+            active_kid,
+            &scope.tenant,
+            scope.community.as_deref(),
+            workstream_id,
+            &event_id,
+            Some(&trace_id),
+        )?,
+    };
     let binding = Binding {
         kid: active_kid.to_string(),
         mac,
     };
 
     let env = StageEnvelope {
-        // Still the string-scope v2 shape: this producer does not yet resolve
-        // numeric scope (follow-up: ingest resolver stamps schema v3 + ids,
-        // bound by `compute_binding_mac_v3`). The ids MUST stay `None` here --
-        // a v2 `binding.mac` does not cover them.
-        schema_version: LEGACY_ENVELOPE_SCHEMA_VERSION,
+        // Resolver on -> schema v3 with the numeric ids (covered by the v3 MAC;
+        // the strings are display-only). Resolver off -> the string-scope v2
+        // shape, where the ids MUST stay `None` (a v2 MAC does not cover them).
+        schema_version: if resolved.is_some() {
+            ENVELOPE_SCHEMA_VERSION
+        } else {
+            LEGACY_ENVELOPE_SCHEMA_VERSION
+        },
         tenant: scope.tenant.clone(),
         community: scope.community.clone(),
-        tenant_id: None,
-        community_id: None,
+        tenant_id: resolved.as_ref().map(|r| r.tenant_id),
+        community_id: resolved.as_ref().map(|r| r.community_id),
         app_id: format!(
             "waddles.ingest.{}.{}",
             app_id_slug(&platform),
