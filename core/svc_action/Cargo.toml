@@ -99,9 +99,7 @@ penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git"
 # now implements the identical formula -- `src/hop.rs`'s module doc records
 # the cross-check against that module's canonical test vectors and why this
 # crate keeps its own copy rather than switching over in this landing.
-hmac = "=0.12.1"
 sha2 = "=0.10.9"
-subtle = "=2.6.1"
 hex = "=0.4.3"
 # mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8302`: this
 # crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
