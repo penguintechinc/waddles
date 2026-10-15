@@ -404,8 +404,8 @@ async fn dispatch_v2_rejects_frame_scope_not_matching_loaded_scope() {
         )),
     ])
     .await;
-    for i in 0..3 {
-        match &out[i] {
+    for (i, o) in out.iter().enumerate().take(3) {
+        match o {
             Err((code, msg)) => {
                 assert_eq!(*code, ErrorCode::MalformedFrame, "case {i}");
                 assert!(msg.contains("does not match"), "case {i}: {msg}");
