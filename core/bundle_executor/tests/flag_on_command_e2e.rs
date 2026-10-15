@@ -35,28 +35,11 @@
 //! `rust-crate-ci.yml`, every push/PR touching `core/bundle_executor/**`),
 //! and reachable directly via `make test-bundle-flag-on-command-e2e`.
 //!
-//! **Live finding (2026-10-04, this test's first run against
-//! `release/v3.0.X` tip `62f55acc`, PRs #596/#597 both merged):** this test
-//! FAILS at the "flag ON" assertion -- not with the original trap, but
-//! silently returning no reply, same as flag-off. `wasm-tools component
-//! wit` on the freshly built component confirms `import
-//! waddle:bundle/%flags@1.0.0;` IS present at the Component Model type
-//! level (PR #596's own claim holds), but `dir(wit_world.imports)` at
-//! *runtime*, inside the running component, has no `flags` (or `clock`)
-//! attribute -- only the capabilities something else in
-//! `waddle_sdk`/`_component_entry.py` references at Python *import* time
-//! (`context`, `db`, `http`, `kv`, `log`, `relay`, `types`) end up attached
-//! to the `wit_world.imports` package object; `flags`/`clock` are only ever
-//! referenced inside function bodies, so componentize-py's wizening
-//! snapshot never imports those submodules, and
-//! `feature_flags.py`'s `getattr(wit_world.imports, "flags", None)` -- a
-//! plain attribute read, not an import -- can never see them, fresh build
-//! or not. PR #596's fix treats this as a stale-artifact guard; it is
-//! actually load-bearing on EVERY build. Root cause and fix (likely: an
-//! explicit `import wit_world.imports.flags` / `importlib.import_module`
-//! somewhere in `waddle_sdk`'s eagerly-imported module graph) are out of
-//! this task's scope ("test harness + e2e test + gate wiring, don't change
-//! app/bundle logic") -- this test is intentionally left red to track it.
+//! **Post-activation-only update:** app bundles no longer gate on feature
+//! flags (Global:INSTALLED -> Tenant:ENABLED -> Community:ACTIVATED is the
+//! only gate), so `eightball` must reply with the legacy flag env var unset,
+//! `false`, or `true`, and must NEVER issue a `flags.enabled` host-call. The
+//! real build + real wasmtime host path (the point of this test) is unchanged.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -76,13 +59,9 @@ use std::sync::Arc;
 
 const APP_ID: &str = "waddles.core.example.eightball";
 
-/// The exact PostHog flag key `bundles/python/eightball/src/app.py` checks
-/// (`FLAG_KEY = "waddles.command-8ball"`), and the exact Docker-ENV
-/// baseline variable `core/svc_process/src/license.rs::env_flag_var_name`
-/// derives from it (`feature/alpha-command-flag-envs`,
-/// `feature/flags-env-baseline`). Asserted, not assumed -- see
-/// `drive_stage`'s `flags`/`enabled` handler below.
-const FLAG_KEY: &str = "waddles.command-8ball";
+/// Legacy Docker-ENV flag-baseline variable the old `eightball` flag gate read
+/// (`waddles.command-8ball` -> `FLAG_WADDLES_COMMAND_8BALL`). App bundles are now
+/// activation-gated only, so the test sets it to every value and asserts it is IGNORED.
 const FLAG_ENV_VAR: &str = "FLAG_WADDLES_COMMAND_8BALL";
 
 /// Hands back one freshly-built component's bytes regardless of key --
@@ -339,8 +318,8 @@ async fn drive_stage<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
                     (CapabilityKind::Log, "write") => serde_json::json!({}),
                     other => panic!(
                         "flag_on_command_e2e: unexpected host-call {other:?} (args={:?}) -- \
-                         eightball's transform() should only ever call flags.enabled and, \
-                         when enabled, log.write",
+                         eightball's transform() should only ever call context.get-context \
+                         and log.write",
                         call.args
                     ),
                 };
