@@ -68,6 +68,22 @@ pub struct ExecState {
     /// establishes it; it is fresh per call (like every other field here),
     /// so a tenant can never leak from one invocation into the next.
     pub(crate) identity_tenant: Option<String>,
+    /// The scope guard for a `stage-v2` invocation (`None` for v1 bundles,
+    /// which never see numeric ids). Set by `crate::invoke::run_guest` from the
+    /// `Load`-registered scopes plus, for a dispatch, the verified frame ids;
+    /// `context-v2.get-context` reads it so the id the guest sees through the
+    /// host-call is the SAME verified value as the dispatch frame's.
+    pub(crate) v2_scope: Option<V2ScopeGuard>,
+}
+
+/// The verified numeric scope a `stage-v2` invocation may observe.
+#[derive(Debug, Clone, Default)]
+pub struct V2ScopeGuard {
+    /// `(tenant_id, community_id)` pairs this bundle was `Load`ed under.
+    pub allowed: Vec<(i32, i32)>,
+    /// The ids carried (and verified against `allowed`) by the dispatch
+    /// frame, when the export is a dispatch. `get-context` must agree with it.
+    pub frame: Option<(i32, i32)>,
 }
 
 impl ExecState {
@@ -84,6 +100,7 @@ impl ExecState {
             call_id,
             limits: CapTrackingLimits::new(StoreLimitsBuilder::new().build()),
             identity_tenant: None,
+            v2_scope: None,
         }
     }
 

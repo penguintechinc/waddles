@@ -122,6 +122,7 @@ except ImportError:
 # guard already handles.
 for _wit_capability in (
     "context",
+    "context_v2",  # stage-v2 only (numeric scope); absent from every v1 world, hence the guard
     "http",
     "kv",
     "db",
@@ -178,6 +179,28 @@ def _run_coro(coro: Any) -> Any:
         asyncio.set_event_loop(None)
 
 
+def _wit_context() -> tuple[Any, int | None, int | None]:
+    """Read the host's bundle context from whichever WIT family this component targets.
+
+    A ``world stage-v2`` component imports ``context-v2`` (authoritative
+    numeric ``tenant_id``/``community_id``); every v1 world imports
+    ``context``. Returns ``(context, tenant_id, community_id)`` with the ids
+    ``None`` for v1. A v2 ``tenant_id == 0`` means the host could not supply a
+    scope: fail CLOSED (raise) rather than act under a guessed scope.
+    """
+    import wit_world
+
+    v2 = getattr(wit_world.imports, "context_v2", None)
+    if v2 is None:
+        return wit_world.imports.context.get_context(), None, None
+    ctx = v2.get_context()
+    if ctx.tenant_id == 0:
+        raise RuntimeError(
+            "stage-v2 host supplied no numeric scope (tenant-id == 0); refusing to act"
+        )
+    return ctx, ctx.tenant_id, ctx.community_id
+
+
 def _transform_impl(event: Any) -> Any:
     """Implement the exported ``process-stage.transform`` WIT function.
 
@@ -189,7 +212,7 @@ def _transform_impl(event: Any) -> Any:
     import wit_world
 
     sdk_event = PlatformEvent.from_wit_record(event)
-    ctx = wit_world.imports.context.get_context()
+    ctx, tenant_id, community_id = _wit_context()
 
     if _entry_wiring is None or not hasattr(_entry_wiring, "bundle_transform"):
         from componentize_py_types import Err
@@ -197,7 +220,13 @@ def _transform_impl(event: Any) -> Any:
         raise Err(wit_world.imports.types.UnsupportedStage(stage="process"))
 
     async def _run() -> PlatformEvent | None:
-        with bundle_context(tenant=ctx.tenant, community=ctx.community, app_id=ctx.app_id):
+        with bundle_context(
+            tenant=ctx.tenant,
+            community=ctx.community,
+            app_id=ctx.app_id,
+            tenant_id=tenant_id,
+            community_id=community_id,
+        ):
             # _entry_wiring is generated per-bundle at build time (module
             # docstring) -- mypy has no stub for it and treats every
             # attribute as Any; the real static contract is the WIT
@@ -240,6 +269,8 @@ def _dispatch_impl(envelope: Any, config: str) -> Any:
             tenant=sdk_envelope.tenant,
             community=sdk_envelope.community,
             app_id=sdk_envelope.app_id,
+            tenant_id=sdk_envelope.tenant_id,
+            community_id=sdk_envelope.community_id,
         ):
             return await _entry_wiring.bundle_dispatch(
                 sdk_envelope, config_dict, http_client=HttpClient()
@@ -300,6 +331,27 @@ class ActionStage:
 
     def dispatch(self, envelope: Any, config: str) -> Any:
         """Implement the exported ``action-stage.dispatch`` WIT function.
+
+        See :func:`_dispatch_impl`.
+        """
+        return _dispatch_impl(envelope, config)
+
+
+class ActionStageV2:
+    """componentize-py's app-class name for the ``action-stage-v2`` export (``world stage-v2``).
+
+    ``world stage-v2`` exports ``action-stage-v2`` (envelope carries the
+    authoritative numeric ``tenant-id``/``community-id``) instead of
+    ``action-stage``; componentize-py resolves it by ``getattr(app_module,
+    "ActionStageV2")``. Shares :func:`_dispatch_impl` with :class:`ActionStage`
+    -- ``StageEnvelope.from_wit_record`` already reads the ids off a v2 record
+    -- so a bundle author writes the same ``dispatch`` and reads the ids from
+    ``get_bundle_context()`` / ``envelope.tenant_id``. Unused (and harmless)
+    when the component is built against a v1 world.
+    """
+
+    def dispatch(self, envelope: Any, config: str) -> Any:
+        """Implement the exported ``action-stage-v2.dispatch`` WIT function.
 
         See :func:`_dispatch_impl`.
         """

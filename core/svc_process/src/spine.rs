@@ -867,6 +867,29 @@ pub struct ProcessDeps<S: SpineOps> {
 /// it in would currently be a no-op); spec §5.3's consumer-side `consumes.
 /// event_types`/`filters` cheap-skip optimization (needs the bundle's
 /// resolved manifest, itself blocked on the same distribution poll gap).
+/// The numeric `(tenant_id, community_id)` of a MAC-verified v3 envelope,
+/// narrowed to the executor's i32 scope. `Ok(None)` for a legacy envelope.
+/// `Err` when an id exceeds `i32::MAX`, or when this loop is bound to a
+/// resolved scope (`bound_tenant != 0`) that the envelope disagrees with --
+/// the confused-deputy case (guest would see scope B, capabilities stay A).
+fn verified_numeric_scope(
+    env: &StageEnvelope,
+    bound_tenant: i32,
+    bound_community: i32,
+) -> Result<Option<(i32, i32)>, String> {
+    let (Some(t), Some(c)) = (env.tenant_id, env.community_id) else {
+        return Ok(None);
+    };
+    let t = i32::try_from(t)
+        .map_err(|_| format!("envelope tenant_id {t} exceeds the executor's i32 scope"))?;
+    if bound_tenant != 0 && (t, c) != (bound_tenant, bound_community) {
+        return Err(format!(
+            "envelope scope ({t}, {c}) does not match this stage's bound scope ({bound_tenant}, {bound_community})"
+        ));
+    }
+    Ok(Some((t, c)))
+}
+
 async fn handle_delivered<S: SpineOps>(
     d: &Delivered,
     deps: &ProcessDeps<S>,
@@ -1187,6 +1210,31 @@ async fn handle_delivered_inner<S: SpineOps>(
     // singleton (`ProcessDeps::egress`'s doc). `gate` authorizes every
     // capability call, `http` included, before the egress guard ever runs
     // (module doc, `crate::capabilities`'s own module doc).
+    // The numeric scope of the MAC-verified envelope (v3), narrowed to the
+    // executor's i32 scope. Fail closed: an id that does not fit, or that
+    // disagrees with the scope this loop's capabilities are bound to, is a
+    // tenant-boundary violation -- dead-lettered, guest never called.
+    let verified_scope = match verified_numeric_scope(&d.env, deps.tenant_id, deps.community_id) {
+        Ok(v) => v,
+        Err(message) => {
+            tracing::error!(app_id = %deps.app_id, %message, "envelope numeric scope rejected, dead-lettering");
+            deps.metrics
+                .tenant_boundary_violation("process", "numeric_scope_mismatch");
+            let err = DlqError {
+                kind: DlqErrorKind::TenantBoundary,
+                code: "TENANT_BOUNDARY".to_string(),
+                message,
+                detail: None,
+                artifact_digest: Some(digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps
+                .spine
+                .dead_letter(d, &err)
+                .await
+                .map(|()| StageResult::DeadLettered);
+        }
+    };
     let capabilities: Arc<dyn CapabilityHandler> = {
         let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
             d.env.tenant.clone(),
@@ -1198,6 +1246,7 @@ async fn handle_delivered_inner<S: SpineOps>(
             Arc::clone(&deps.egress),
             Arc::clone(&deps.gate),
         );
+        let caps = caps.with_verified_scope(verified_scope);
         let caps = match &deps.kv_conn {
             Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
             None => caps,
@@ -1725,6 +1774,40 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    fn env_with_scope(t: Option<i64>, c: Option<i32>) -> StageEnvelope {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": if t.is_some() { 3 } else { 2 },
+            "tenant": "acme", "community": "main",
+            "tenant_id": t, "community_id": c,
+            "app_id": "waddles.bot.commands.default", "stage": "process",
+            "event": {"platform": "twitch", "event_type": "chat.message", "actor": null,
+                      "payload": {}, "occurred_at": "2026-10-14T00:00:00.000Z"},
+            "ts": "2026-10-14T00:00:00.000Z", "target_app_id": null,
+            "workstream_id": "11111111-1111-4111-8111-111111111111", "event_id": "22222222-2222-4222-8222-222222222222", "session_id": "33333333-3333-4333-8333-333333333333", "trace": null,
+            "binding": {"kid": "k1", "mac": "0".repeat(64)},
+        }))
+        .expect("fixture parses")
+    }
+
+    #[test]
+    fn verified_numeric_scope_guards_the_confused_deputy_and_the_i32_cap() {
+        // legacy envelope: no numeric scope, never an error
+        assert_eq!(
+            verified_numeric_scope(&env_with_scope(None, None), 5, 1),
+            Ok(None)
+        );
+        // v3 matching the bound scope, and an unconfigured (0) bound scope
+        let v3 = env_with_scope(Some(10), Some(7));
+        assert_eq!(verified_numeric_scope(&v3, 10, 7), Ok(Some((10, 7))));
+        assert_eq!(verified_numeric_scope(&v3, 0, 0), Ok(Some((10, 7))));
+        // v3 for a DIFFERENT scope than the one capabilities are bound to
+        assert!(verified_numeric_scope(&v3, 11, 7).is_err());
+        assert!(verified_numeric_scope(&v3, 10, 8).is_err());
+        // id above i32::MAX never wraps
+        let big = env_with_scope(Some(i64::from(i32::MAX) + 1), Some(0));
+        assert!(verified_numeric_scope(&big, 0, 0).is_err());
+    }
 
     // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
     #[test]
