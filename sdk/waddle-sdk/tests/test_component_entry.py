@@ -404,3 +404,104 @@ def test_dispatch_result_with_no_http_status_still_maps_to_ok_true(
     result = component_entry.ActionStage().dispatch(envelope, "{}")
     assert result.ok is True
     assert result.status is None
+
+
+def _install_v2_context(monkeypatch: pytest.MonkeyPatch, *, tenant_id: int, community_id: int):
+    """Add a `context_v2` import (a stage-v2 world) next to the v1 fakes."""
+    import wit_world  # the fake module installed by `_install_fake_component_modules`
+
+    wit_world.imports.context_v2 = types.SimpleNamespace(  # type: ignore[attr-defined]
+        get_context=lambda: types.SimpleNamespace(
+            tenant_id=tenant_id,
+            community_id=community_id,
+            tenant="acme",
+            community="main",
+            app_id="waddles.social.alias.default",
+            feature="f",
+            version="1",
+            message_id="m",
+            config_json="{}",
+        )
+    )
+
+
+def _transform_event() -> wit_shapes.WitPlatformEvent:
+    return wit_shapes.WitPlatformEvent(
+        platform="discord",
+        event_type="chat.message",
+        actor="u1",
+        payload_json="{}",
+        occurred_at="ts",
+    )
+
+
+def test_action_stage_v2_app_class_exists_alongside_v1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """componentize-py `-w stage-v2` resolves `ActionStageV2`; the v1 classes stay."""
+    _install_fake_component_modules(monkeypatch, entry_wiring=None)
+    component_entry = _reload_component_entry()
+    assert hasattr(component_entry.ActionStageV2, "dispatch")
+    assert component_entry.ActionStageV2 is not component_entry.ActionStage
+    assert hasattr(component_entry, "ProcessStage") and hasattr(component_entry, "ActionStage")
+
+
+def test_v2_transform_binds_the_numeric_ids_from_context_v2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stage-v2 component's bundle sees tenant_id/community_id in its bundle context."""
+    from waddle_sdk.flask_core.bundle_runtime import get_bundle_context
+
+    seen: list[object] = []
+
+    async def bundle_transform(event):
+        seen.append(get_bundle_context())
+        return event
+
+    entry_wiring = types.ModuleType("_entry_wiring")
+    entry_wiring.bundle_transform = bundle_transform  # type: ignore[attr-defined]
+    _install_fake_component_modules(monkeypatch, entry_wiring=entry_wiring)
+    _install_v2_context(monkeypatch, tenant_id=10, community_id=7)
+    component_entry = _reload_component_entry()
+
+    component_entry.ProcessStage().transform(_transform_event())
+    ctx = seen[0]
+    assert (ctx.tenant_id, ctx.community_id) == (10, 7)  # type: ignore[attr-defined]
+
+
+def test_v2_transform_fails_closed_when_the_host_supplies_no_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`tenant-id == 0` (no scope) must refuse to act, never run the bundle."""
+    ran: list[bool] = []
+
+    async def bundle_transform(event):
+        ran.append(True)
+        return event
+
+    entry_wiring = types.ModuleType("_entry_wiring")
+    entry_wiring.bundle_transform = bundle_transform  # type: ignore[attr-defined]
+    _install_fake_component_modules(monkeypatch, entry_wiring=entry_wiring)
+    _install_v2_context(monkeypatch, tenant_id=0, community_id=0)
+    component_entry = _reload_component_entry()
+
+    with pytest.raises(RuntimeError, match="no numeric scope"):
+        component_entry.ProcessStage().transform(_transform_event())
+    assert ran == []
+
+
+def test_v1_transform_leaves_numeric_ids_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A v1 world (no `context_v2`) is unchanged: ids stay None."""
+    from waddle_sdk.flask_core.bundle_runtime import get_bundle_context
+
+    seen: list[object] = []
+
+    async def bundle_transform(event):
+        seen.append(get_bundle_context())
+        return event
+
+    entry_wiring = types.ModuleType("_entry_wiring")
+    entry_wiring.bundle_transform = bundle_transform  # type: ignore[attr-defined]
+    _install_fake_component_modules(monkeypatch, entry_wiring=entry_wiring)
+    component_entry = _reload_component_entry()
+
+    component_entry.ProcessStage().transform(_transform_event())
+    assert (seen[0].tenant_id, seen[0].community_id) == (None, None)  # type: ignore[attr-defined]

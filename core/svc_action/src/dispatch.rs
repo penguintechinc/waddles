@@ -367,7 +367,7 @@ pub async fn ensure_unloaded(
 fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, InvokeError> {
     let payload_json = serde_json::to_string(&env.event.payload)
         .map_err(|e| InvokeError::MalformedPayload(e.to_string()))?;
-    Ok(serde_json::json!({
+    let mut wire = serde_json::json!({
         "tenant": env.tenant,
         "community": env.community,
         "app_id": env.app_id,
@@ -382,7 +382,31 @@ fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, Invok
         "ts": env.ts,
         "target_app_id": env.target_app_id,
         "trace_context": env.trace.as_ref().map(|t| t.traceparent.clone()),
-    }))
+    });
+    // v2 (`stage-v2`) shape: add the authoritative numeric scope ONLY when the
+    // MAC-verified inbound envelope carries it (a v3 envelope). Copied from
+    // `env` and nowhere else; a v1/legacy envelope keeps the v1 frame
+    // unchanged (a `stage-v2` bundle then fails closed in the executor).
+    if let (Some(tenant_id), Some(community_id)) = (env.tenant_id, env.community_id) {
+        wire["tenant_id"] = serde_json::json!(tenant_id);
+        wire["community_id"] = serde_json::json!(community_id);
+    }
+    Ok(wire)
+}
+
+/// The numeric `(tenant_id, community_id)` of a MAC-verified v3 envelope,
+/// narrowed to the executor's i32 scope. `Ok(None)` for a legacy (v2-schema)
+/// envelope; `Err` when a v3 id cannot be represented (> `i32::MAX`) -- the
+/// caller dead-letters rather than letting an id silently wrap or mis-match.
+fn verified_numeric_scope(env: &StageEnvelope) -> Result<Option<(i32, i32)>, String> {
+    match (env.tenant_id, env.community_id) {
+        (Some(t), Some(c)) => {
+            let t = i32::try_from(t)
+                .map_err(|_| format!("envelope tenant_id {t} exceeds the executor's i32 scope"))?;
+            Ok(Some((t, c)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Records the executor-call histogram for one `invoke` reply and, when the
@@ -963,12 +987,36 @@ async fn handle_delivered_inner<A: AuditSink, T: TenantResolver, S: SpineOps>(
     // SS5.1) -- an unresolvable tenant/community falls back to the `(0, 0)`
     // sentinel, which fails closed (never matches a real grant row) rather
     // than skipping the gate.
-    let (tenant_id, community_id) = deps
-        .tenants
-        .resolve(&d.env.tenant, d.env.community.as_deref())
-        .await
-        .map(|(t, c)| (t, c.unwrap_or(0)))
-        .unwrap_or((0, 0));
+    // A v3 envelope's numeric ids are MAC-verified (hop check above) and
+    // authoritative: they -- not a slug lookup -- scope the capabilities AND
+    // are what the guest sees. A legacy envelope still resolves by slug.
+    let (tenant_id, community_id) = match verified_numeric_scope(&d.env) {
+        Ok(Some(ids)) => ids,
+        Ok(None) => deps
+            .tenants
+            .resolve(&d.env.tenant, d.env.community.as_deref())
+            .await
+            .map(|(t, c)| (t, c.unwrap_or(0)))
+            .unwrap_or((0, 0)),
+        Err(message) => {
+            tracing::error!(app_id = %deps.app_id, %message, "numeric scope out of range, dead-lettering");
+            deps.metrics
+                .tenant_boundary_violation("action", "numeric_scope_out_of_range");
+            let err = penguin_spine::DlqError {
+                kind: penguin_spine::DlqErrorKind::TenantBoundary,
+                code: "TENANT_BOUNDARY".to_string(),
+                message,
+                detail: None,
+                artifact_digest: Some(digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps
+                .spine
+                .dead_letter(d, &err)
+                .await
+                .map(|()| StageResult::DeadLettered);
+        }
+    };
 
     let (record, attempts) = dispatch_with_retry(
         |_attempt| async {
@@ -1505,6 +1553,28 @@ mod tests {
         assert!(wire.get("event_id").is_none());
         assert!(wire.get("session_id").is_none());
         assert!(wire.get("binding").is_none());
+    }
+
+    #[test]
+    fn wire_frame_carries_numeric_scope_only_from_a_v3_envelope() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let mut d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        // legacy envelope: the v1 frame is unchanged (no ids at all).
+        let v1 = envelope_to_wire_json(&d.env).expect("serializes");
+        assert!(v1.get("tenant_id").is_none() && v1.get("community_id").is_none());
+        assert_eq!(verified_numeric_scope(&d.env), Ok(None));
+        // v3 envelope: the v2 frame carries exactly the envelope's ids.
+        d.env.schema_version = penguin_spine::ENVELOPE_SCHEMA_VERSION;
+        d.env.tenant_id = Some(10);
+        d.env.community_id = Some(7);
+        let v2 = envelope_to_wire_json(&d.env).expect("serializes");
+        assert_eq!(v2["tenant_id"], 10);
+        assert_eq!(v2["community_id"], 7);
+        assert_eq!(verified_numeric_scope(&d.env), Ok(Some((10, 7))));
+        // an id the i32 executor scope cannot hold is refused, never wrapped.
+        d.env.tenant_id = Some(i64::from(i32::MAX) + 1);
+        assert!(verified_numeric_scope(&d.env).is_err());
     }
 
     #[test]

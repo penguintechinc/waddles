@@ -437,6 +437,12 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// event it delivered, never from guest input. Paired with [`Self::identity`]
     /// by [`Self::with_identity`].
     invocation_identity: Option<Arc<InvocationIdentity>>,
+    /// The authoritative numeric `(tenant_id, community_id)` of the
+    /// MAC-verified v3 envelope this invoke serves, supplied to a `stage-v2`
+    /// guest through `get-context`. `None` for a legacy envelope (the v2
+    /// guest then sees no scope and fails closed). Set only via
+    /// [`Self::with_verified_scope`] from the verified envelope.
+    verified_scope: Option<(i32, i32)>,
     /// The OTel instruments every `host-call` served by this value is timed
     /// into (`waddles_host_call_latency_seconds`). Always the process-wide
     /// set in production; tests swap it via `with_stage_metrics` so they can
@@ -485,8 +491,18 @@ impl<K: KvBackend> StageCapabilities<K> {
             ai: None,
             ai_deadline: None,
             invocation_identity: None,
+            verified_scope: None,
             stage_metrics: stage_metrics::stage_metrics(),
         }
+    }
+
+    /// Records the numeric scope of the MAC-verified inbound envelope so
+    /// `get-context` can hand it to a `stage-v2` guest. Callers pass ids ONLY
+    /// from a hop-verified envelope (never an unverified source).
+    #[must_use]
+    pub fn with_verified_scope(mut self, scope: Option<(i32, i32)>) -> Self {
+        self.verified_scope = scope;
+        self
     }
 
     /// Test seam: routes this value's host-call timings into `metrics`
@@ -1461,11 +1477,18 @@ impl<K: KvBackend> StageCapabilities<K> {
             .map_err(denied_from_gate)?;
         // Spec §7.4: "Tenant and community come from the key, never from
         // payload." Never includes a credential or secret.
-        Ok(serde_json::json!({
+        let mut ctx = serde_json::json!({
             "tenant": self.tenant,
             "community": self.community,
             "app_id": self.app_id,
-        }))
+        });
+        // Authoritative numeric scope for `context-v2` guests, from the
+        // verified envelope only; v1 guests ignore the extra keys.
+        if let Some((tenant_id, community_id)) = self.verified_scope {
+            ctx["tenant_id"] = serde_json::json!(i64::from(tenant_id));
+            ctx["community_id"] = serde_json::json!(community_id);
+        }
+        Ok(ctx)
     }
 
     fn handle_log(&self, args: &serde_json::Value) -> Result<serde_json::Value, HostResultError> {
@@ -2227,6 +2250,18 @@ mod tests {
     /// The default fixture: [`test_egress`] (an empty catalog, so every
     /// `http` call denies `host_not_declared` once the gate has already
     /// granted the classified permission) plus a [`permissive_gate`].
+    /// A v3 envelope's verified ids reach `get-context`; without them the
+    /// numeric keys are absent (a v2 guest fails closed).
+    #[test]
+    fn get_context_carries_verified_scope_only_when_supplied() {
+        let with = caps().with_verified_scope(Some((10, 7)));
+        let ctx = with.handle_context().expect("context");
+        assert_eq!(ctx["tenant_id"], 10);
+        assert_eq!(ctx["community_id"], 7);
+        let without = caps().handle_context().expect("context");
+        assert!(without.get("tenant_id").is_none() && without.get("community_id").is_none());
+    }
+
     fn caps() -> StageCapabilities {
         StageCapabilities::new(
             "acme".to_string(),

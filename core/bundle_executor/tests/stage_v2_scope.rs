@@ -55,6 +55,8 @@ struct Step {
     payload: serde_json::Value,
     /// The JSON the stage answers the bundle's `get-context` host-call with.
     context: serde_json::Value,
+    /// The `(tenant_id, community_id)` the bundle is `Load`ed under.
+    load_scope: (i32, i32),
 }
 
 /// A step's outcome: the result payload, or the protocol error code+message.
@@ -101,8 +103,8 @@ async fn drive(steps: Vec<Step>) -> Vec<Outcome> {
                     &Frame::new(
                         next_id,
                         Message::Load(LoadBody {
-                            tenant_id: 10,
-                            community_id: 7,
+                            tenant_id: s.load_scope.0,
+                            community_id: s.load_scope.1,
                             app_id: s.app_id.to_string(),
                             version: "1".to_string(),
                             digest: digest_of(s.wasm),
@@ -237,6 +239,7 @@ fn transform_step(
         export: ExportKind::Transform,
         payload: event_payload(ev),
         context: ctx,
+        load_scope: (10, 7),
     }
 }
 
@@ -264,6 +267,7 @@ fn dispatch_step(payload: serde_json::Value) -> Step {
         export: ExportKind::Dispatch,
         payload,
         context: serde_json::json!({}),
+        load_scope: (10, 7),
     }
 }
 
@@ -318,15 +322,20 @@ async fn v1_and_v2_bundles_coexist_and_v1_ignores_numeric_scope() {
 /// `context-v2` yields the authoritative ids; tenant-wide is community 0.
 #[tokio::test]
 async fn context_v2_supplies_the_authoritative_numeric_scope() {
-    let out = drive(vec![
-        transform_step(
+    let out = drive(vec![Step {
+        load_scope: (20, 0),
+        ..transform_step(
             V2_APP,
             V2_WASM,
             "scope",
             ctx_with_ids(
                 serde_json::json!({ "tenant_id": 20, "community_id": 0, "community": null }),
             ),
-        ),
+        )
+    }])
+    .await;
+    assert_eq!(result_tag(&out[0]), "20:0:acme:");
+    let out = drive(vec![
         // display strings disagreeing with the ids must NOT influence the ids
         transform_step(
             V2_APP,
@@ -338,8 +347,7 @@ async fn context_v2_supplies_the_authoritative_numeric_scope() {
         ),
     ])
     .await;
-    assert_eq!(result_tag(&out[0]), "20:0:acme:");
-    assert_eq!(result_tag(&out[1]), "10:7:evil:main");
+    assert_eq!(result_tag(&out[0]), "10:7:evil:main");
 }
 
 /// Fail closed: a stage that did not supply a valid numeric scope yields
@@ -368,17 +376,102 @@ async fn context_v2_fails_closed_without_a_valid_numeric_scope() {
 /// `action-stage-v2.dispatch` carries the numeric scope to the guest intact.
 #[tokio::test]
 async fn dispatch_v2_carries_numeric_scope_to_the_guest() {
-    let out = drive(vec![
-        dispatch_step(v2_envelope(serde_json::json!({ "tenant_id": 10, "community_id": 7 }))),
-        dispatch_step(v2_envelope(
-            serde_json::json!({ "tenant_id": 9_000_000_000_i64, "community_id": 0, "community": null }),
-        )),
-    ])
+    let out = drive(vec![dispatch_step(v2_envelope(
+        serde_json::json!({ "tenant_id": 10, "community_id": 7 }),
+    ))])
     .await;
     let r0 = out[0].as_ref().expect("dispatch result");
     assert_eq!(r0["provider_message_id"], "10:7:acme:main");
-    let r1 = out[1].as_ref().expect("dispatch result");
-    assert_eq!(r1["provider_message_id"], "9000000000:0:acme:");
+}
+
+/// Confused-deputy guard: a frame whose ids differ from the loaded scope
+/// (other tenant, other community, tenant-wide vs community) is
+/// MALFORMED_FRAME; the matching frame still runs afterwards.
+#[tokio::test]
+async fn dispatch_v2_rejects_frame_scope_not_matching_loaded_scope() {
+    let out = drive(vec![
+        dispatch_step(v2_envelope(
+            serde_json::json!({ "tenant_id": 11, "community_id": 7 }),
+        )),
+        dispatch_step(v2_envelope(
+            serde_json::json!({ "tenant_id": 10, "community_id": 8 }),
+        )),
+        dispatch_step(v2_envelope(
+            serde_json::json!({ "tenant_id": 10, "community_id": 0 }),
+        )),
+        dispatch_step(v2_envelope(
+            serde_json::json!({ "tenant_id": 10, "community_id": 7 }),
+        )),
+    ])
+    .await;
+    for i in 0..3 {
+        match &out[i] {
+            Err((code, msg)) => {
+                assert_eq!(*code, ErrorCode::MalformedFrame, "case {i}");
+                assert!(msg.contains("does not match"), "case {i}: {msg}");
+            }
+            Ok(p) => panic!("case {i} must be rejected, got {p}"),
+        }
+    }
+    assert_eq!(
+        out[3].as_ref().expect("matching frame runs")["provider_message_id"],
+        "10:7:acme:main"
+    );
+}
+
+/// An id above i32::MAX (valid v3 i64) can never match the i32 Load scope:
+/// rejected, even when the bundle is loaded for the truncated value.
+#[tokio::test]
+async fn dispatch_v2_rejects_tenant_id_above_i32_max() {
+    let big = i64::from(i32::MAX) + 1;
+    let wrapped = vec![
+        Step {
+            load_scope: (i32::MAX, 0),
+            ..dispatch_step(v2_envelope(
+                serde_json::json!({ "tenant_id": big, "community_id": 0 }),
+            ))
+        },
+        // exactly i32::MAX is the largest accepted id
+        Step {
+            load_scope: (i32::MAX, 0),
+            ..dispatch_step(v2_envelope(
+                serde_json::json!({ "tenant_id": i32::MAX, "community_id": 0 }),
+            ))
+        },
+    ];
+    let out = drive(wrapped).await;
+    assert!(
+        matches!(&out[0], Err((ErrorCode::MalformedFrame, _))),
+        "{:?}",
+        out[0]
+    );
+    assert_eq!(
+        out[1].as_ref().expect("i32::MAX accepted")["provider_message_id"],
+        "2147483647:0:acme:main"
+    );
+}
+
+/// Unified id source: `get-context-v2` must not hand the guest a scope other
+/// than a loaded one -- a host-call reply for another tenant fails closed.
+#[tokio::test]
+async fn context_v2_rejects_scope_not_loaded() {
+    let out = drive(vec![
+        transform_step(
+            V2_APP,
+            V2_WASM,
+            "scope",
+            ctx_with_ids(serde_json::json!({ "tenant_id": 11, "community_id": 7 })),
+        ),
+        transform_step(
+            V2_APP,
+            V2_WASM,
+            "scope",
+            ctx_with_ids(serde_json::json!({ "tenant_id": 9_000_000_000_i64, "community_id": 7 })),
+        ),
+    ])
+    .await;
+    assert_eq!(result_tag(&out[0]), "no-scope");
+    assert_eq!(result_tag(&out[1]), "no-scope");
 }
 
 /// A v2 dispatch frame without (or with out-of-range) numeric scope is a

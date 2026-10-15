@@ -1727,11 +1727,20 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             .map_err(denied_from_gate)?;
         // Spec §7.4: "Tenant and community come from the key, never from
         // payload." Never includes a credential or secret.
-        Ok(serde_json::json!({
+        let mut ctx = serde_json::json!({
             "tenant": scope.tenant,
             "community": scope.community,
             "app_id": scope.app_id,
-        }))
+        });
+        // Authoritative numeric scope for `context-v2` guests: the SAME
+        // host-derived ids the dispatch frame/capabilities are bound to
+        // (verified-envelope ids for a v3 envelope). Omitted when
+        // unresolved (0) so a v2 bundle fails closed; v1 ignores the keys.
+        if scope.tenant_id >= 1 && scope.community_id >= 0 {
+            ctx["tenant_id"] = serde_json::json!(i64::from(scope.tenant_id));
+            ctx["community_id"] = serde_json::json!(scope.community_id);
+        }
+        Ok(ctx)
     }
 
     fn handle_log(
@@ -2674,6 +2683,15 @@ mod tests {
             community_id: 3,
             app_version: 1,
         }
+    }
+
+    /// `context.get-context` hands a v2 guest the host-derived numeric ids.
+    #[test]
+    fn get_context_supplies_the_host_derived_numeric_ids() {
+        let h = caps(FakeRelayQueue::default());
+        let ctx = h.handle_context(&scope()).expect("context");
+        assert_eq!(ctx["tenant_id"], 7);
+        assert_eq!(ctx["community_id"], 3);
     }
 
     /// Same as [`scope`] but carrying an origin channel id, as

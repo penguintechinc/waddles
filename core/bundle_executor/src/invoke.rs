@@ -1030,7 +1030,7 @@ impl<S: ComponentSource> Executor<S> {
         // unrecognized digest is always `UNKNOWN_BUNDLE`, even if some OTHER
         // digest is currently resident for this same `app_id` under a
         // different scope.
-        let (pre, slots, memory_limit_mb) = {
+        let (pre, slots, memory_limit_mb, allowed_scopes) = {
             let bundles = self.bundles.read().await;
             let loaded = bundles
                 .get(&body.digest)
@@ -1039,6 +1039,14 @@ impl<S: ComponentSource> Executor<S> {
                 loaded.pre.clone(),
                 Arc::clone(&loaded.slots),
                 loaded.memory_limit_mb,
+                // The `(tenant, community)` scopes THIS app_id was loaded
+                // under -- the only scopes a v2 frame / context may carry.
+                loaded
+                    .scopes
+                    .iter()
+                    .filter(|(_, _, app)| *app == body.app_id)
+                    .map(|(t, c, _)| (*t, *c))
+                    .collect::<Vec<(i32, i32)>>(),
             )
         };
 
@@ -1064,6 +1072,7 @@ impl<S: ComponentSource> Executor<S> {
             memory_limit_mb,
             deadline_ms,
             fuel_budget,
+            allowed_scopes,
         };
         // Guest execution is synchronous CPU between host-call awaits (the
         // epoch deadline traps rather than yields), so it runs on a
@@ -1099,6 +1108,9 @@ struct GuestJob {
     memory_limit_mb: u32,
     deadline_ms: u64,
     fuel_budget: u64,
+    /// `(tenant_id, community_id)` scopes the invoked `app_id` was `Load`ed
+    /// under; the confused-deputy guard checks v2 frame ids against it.
+    allowed_scopes: Vec<(i32, i32)>,
 }
 
 /// Instantiates (from the pre-linked component, in a fresh bounded `Store`)
@@ -1115,10 +1127,71 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
         memory_limit_mb,
         deadline_ms,
         fuel_budget,
+        allowed_scopes,
     } = job;
     let bridge = HostBridge::new(connection);
     let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
         .with_memory_limit_mb(memory_limit_mb);
+    let mut exec_state = exec_state;
+    if matches!(pre, GuestPre::V2(_)) {
+        exec_state.v2_scope = Some(crate::host::V2ScopeGuard {
+            allowed: allowed_scopes.clone(),
+            frame: None,
+        });
+    }
+    // `stage-v2` dispatch: parse + scope-check the frame BEFORE instantiating,
+    // so a mismatched frame never even starts the guest.
+    let mut v2_dispatch: Option<EnvelopeAndConfigV2> = None;
+    let mut body = body;
+    if matches!(pre, GuestPre::V2(_)) && matches!(body.export, ExportKind::Dispatch) {
+        let envelope: EnvelopeAndConfigV2 =
+            serde_json::from_value(std::mem::take(&mut body.payload))
+                .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
+        // Confused-deputy guard, BEFORE the guest is ever called:
+        // the frame's authoritative ids must (a) be in range, (b)
+        // fit the executor's i32 scope (v3 ids are i64; anything
+        // above i32::MAX can never equal a Load scope), and (c)
+        // equal a scope this bundle was loaded under -- the one
+        // the kv/db/relay capabilities are bound to. Otherwise
+        // the guest would see scope B while capabilities stay A.
+        let e = &envelope.envelope;
+        let frame_scope = match i32::try_from(e.tenant_id) {
+            Ok(t) if t >= 1 && e.community_id >= 0 => (t, e.community_id),
+            _ => {
+                return Err(error_body(
+                        ErrorCode::MalformedFrame,
+                        format!(
+                            "stage-v2 envelope numeric scope out of range \
+                             (tenant_id={}, community_id={}; need 1 <= tenant_id <= {}, community_id >= 0)",
+                            e.tenant_id,
+                            e.community_id,
+                            i32::MAX
+                        ),
+                    ));
+            }
+        };
+        if !allowed_scopes.contains(&frame_scope) {
+            error!(
+                app_id = %body.app_id,
+                invoke_id,
+                frame_tenant_id = frame_scope.0,
+                frame_community_id = frame_scope.1,
+                "confused-deputy guard: frame scope does not match any loaded scope; guest not called"
+            );
+            return Err(error_body(
+                    ErrorCode::MalformedFrame,
+                    format!(
+                        "stage-v2 envelope scope (tenant_id={}, community_id={}) does not match the scope this bundle was loaded for",
+                        frame_scope.0, frame_scope.1
+                    ),
+                ));
+        }
+        // One verified source: get-context-v2 must now agree.
+        if let Some(g) = exec_state.v2_scope.as_mut() {
+            g.frame = Some(frame_scope);
+        }
+        v2_dispatch = Some(envelope);
+    }
     let mut store = new_bounded_store(&engine, exec_state, deadline_ms);
     // The engine was built with `consume_fuel(true)`
     // (`crate::engine::build_engine`) so a `Store` starts at zero fuel and
@@ -1202,23 +1275,9 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
                         .await
                 }
                 GuestInstance::V2(st) => {
-                    let envelope: EnvelopeAndConfigV2 = serde_json::from_value(body.payload)
-                        .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
-                    // Authoritative-scope range check BEFORE the guest sees
-                    // it: a real tenant id is >= 1, a community id >= 0
-                    // (0 = tenant-wide). A frame outside that is malformed,
-                    // never passed through to a bundle that would key on it.
-                    let e = &envelope.envelope;
-                    if e.tenant_id < 1 || e.community_id < 0 {
-                        return Err(error_body(
-                            ErrorCode::MalformedFrame,
-                            format!(
-                                "stage-v2 envelope numeric scope out of range \
-                                 (tenant_id={}, community_id={}; need tenant_id >= 1, community_id >= 0)",
-                                e.tenant_id, e.community_id
-                            ),
-                        ));
-                    }
+                    let envelope = v2_dispatch.take().ok_or_else(|| {
+                        error_body(ErrorCode::MalformedFrame, "v2 dispatch frame missing")
+                    })?;
                     st.waddle_bundle_action_stage_v2()
                         .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
                         .await
