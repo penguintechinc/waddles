@@ -24,7 +24,8 @@
 
 use penguin_spine::{
     compute_binding_mac, trace_id_from_traceparent, Binding, BindingError, KeyRing, PlatformEvent,
-    Scope, SpineClient, SpineError, SpineMetrics, StageEnvelope, Trace, ENVELOPE_SCHEMA_VERSION,
+    Scope, SpineClient, SpineError, SpineMetrics, StageEnvelope, Trace,
+    LEGACY_ENVELOPE_SCHEMA_VERSION,
 };
 use uuid::Uuid;
 
@@ -166,9 +167,15 @@ pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
     };
 
     let env = StageEnvelope {
-        schema_version: ENVELOPE_SCHEMA_VERSION,
+        // Still the string-scope v2 shape: this producer does not yet resolve
+        // numeric scope (follow-up: ingest resolver stamps schema v3 + ids,
+        // bound by `compute_binding_mac_v3`). The ids MUST stay `None` here --
+        // a v2 `binding.mac` does not cover them.
+        schema_version: LEGACY_ENVELOPE_SCHEMA_VERSION,
         tenant: scope.tenant.clone(),
         community: scope.community.clone(),
+        tenant_id: None,
+        community_id: None,
         app_id: format!(
             "waddles.ingest.{}.{}",
             app_id_slug(&platform),
@@ -300,7 +307,7 @@ mod tests {
             stream,
             "waddles:t:acme:c:main:src:twitch:tw-channelA:events"
         );
-        assert_eq!(env.schema_version, ENVELOPE_SCHEMA_VERSION);
+        assert_eq!(env.schema_version, LEGACY_ENVELOPE_SCHEMA_VERSION);
         assert_eq!(env.stage, "process");
         assert_eq!(env.app_id, "waddles.ingest.twitch.tw-channela");
         assert_eq!(env.target_app_id, None);

@@ -229,3 +229,18 @@ rm -f src/bindings.rs   # generated, not committed
 
 Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against `wit-bindgen-rt 0.44.0` (same toolchain as the
 fixtures above); `serde`/`serde_json` are exact-pinned in `echo-connector-src/Cargo.toml`.
+
+## `stage_v2_fixture.wasm`
+
+A real `world stage-v2` component (`stage-v2-fixture-src/`, numeric-scope contract proof, `tests/stage_v2_scope.rs`): `transform`
+event `scope` echoes `context-v2.get-context`'s numeric ids (or `no-scope` when `tenant-id == 0`), and `action-stage-v2.dispatch`
+echoes the envelope's ids in `provider-message-id`. The `wit/stage.wit` copy is the committed `wit/waddle-bundle/stage.wit`.
+
+```bash
+cd stage-v2-fixture-src
+cargo component build --release
+cp "$CARGO_TARGET_DIR/wasm32-wasip1/release/stage_v2_fixture.wasm" ../stage_v2_fixture.wasm   # or target/wasm32-wasip1/...
+rm -f src/bindings.rs   # generated, not committed
+```
+
+Built with `cargo-component` / `wit-bindgen-rt 0.44.0`, same toolchain as the fixtures above.

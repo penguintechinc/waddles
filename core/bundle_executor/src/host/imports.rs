@@ -13,6 +13,7 @@
 use penguin_bundle_host::wire::CapabilityKind;
 use tracing::{debug, error, warn};
 
+use crate::engine::stage_v2_world::waddle::bundle::context_v2;
 use crate::engine::waddle::bundle::{clock, context, db, flags, http, kv, log, relay, types};
 use crate::error::ExecutorError;
 use crate::host::http_wire;
@@ -100,6 +101,95 @@ struct BundleContextWire {
     message_id: String,
     #[serde(default)]
     config_json: String,
+    /// Authoritative numeric scope, supplied by the stage for `stage-v2`
+    /// bundles. Absent from a stage that predates numeric scope; the v1
+    /// `context.get-context` ignores it, `context-v2.get-context` treats
+    /// absence as "no scope" (fail closed).
+    #[serde(default)]
+    tenant_id: Option<i64>,
+    #[serde(default)]
+    community_id: Option<i32>,
+}
+
+/// `context-v2`: identical host-call (`context`/`get-context`) as v1, plus the
+/// authoritative numeric scope the stage now supplies. Fails CLOSED: a
+/// missing or out-of-range id (`tenant_id < 1`, `community_id < 0`) -- a stage
+/// that has not been taught to resolve numeric scope, or a tampered frame --
+/// is logged at ERROR and answered with the empty context (`tenant-id == 0`,
+/// which a bundle must treat as "no scope"), never with a fabricated or
+/// string-derived id. The string fields stay display-only.
+impl context_v2::Host for ExecState {
+    async fn get_context(&mut self) -> context_v2::BundleContext {
+        let wire = match call(
+            self,
+            CapabilityKind::Context,
+            "get-context",
+            serde_json::json!({}),
+        )
+        .await
+        {
+            Ok(value) => match serde_json::from_value::<BundleContextWire>(value) {
+                Ok(w) => w,
+                Err(e) => {
+                    error!(error = %e, "get-context-v2: malformed host-result, using empty context");
+                    BundleContextWire::default()
+                }
+            },
+            Err(e) => {
+                error!(error = %e, "get-context-v2 host-call failed, using empty context");
+                BundleContextWire::default()
+            }
+        };
+        match (wire.tenant_id, wire.community_id) {
+            (Some(tenant_id), Some(community_id)) if tenant_id >= 1 && community_id >= 0 => {
+                context_v2::BundleContext {
+                    tenant_id,
+                    community_id,
+                    tenant: wire.tenant,
+                    community: wire.community,
+                    app_id: wire.app_id,
+                    feature: wire.feature,
+                    version: wire.version,
+                    message_id: wire.message_id,
+                    config_json: if wire.config_json.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        wire.config_json
+                    },
+                }
+            }
+            (tenant_id, community_id) => {
+                error!(
+                    ?tenant_id,
+                    ?community_id,
+                    "get-context-v2: stage did not supply a valid numeric scope \
+                     (tenant_id >= 1, community_id >= 0); returning the empty context"
+                );
+                BundleContextWire::default().into_v2()
+            }
+        }
+    }
+}
+
+impl BundleContextWire {
+    /// The empty-but-well-formed v2 context: `tenant-id == 0` (no scope).
+    fn into_v2(self) -> context_v2::BundleContext {
+        context_v2::BundleContext {
+            tenant_id: 0,
+            community_id: 0,
+            tenant: self.tenant,
+            community: self.community,
+            app_id: self.app_id,
+            feature: self.feature,
+            version: self.version,
+            message_id: self.message_id,
+            config_json: if self.config_json.is_empty() {
+                "{}".to_string()
+            } else {
+                self.config_json
+            },
+        }
+    }
 }
 
 impl From<BundleContextWire> for context::BundleContext {
