@@ -145,8 +145,18 @@ async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str)
     # A verified claim beats a self-asserted one: legacy-only communities cannot contest (or
     # hijack) a source another community has had approved. With no verified claim at all, the
     # legacy-only communities are the only evidence and are held to the contention rules below.
-    if any(cid in verified for cid in candidates):
-        candidates = [cid for cid in candidates if cid in verified]
+    # Decided on the PRE-filter ``verified`` set: if the verified owner is inactive/orphaned we must
+    # fail closed, never fall through to a legacy claimant (hijack by deactivating the owner).
+    if verified:
+        survivors = [cid for cid in candidates if cid in verified]
+        if not survivors:
+            logger.warning(
+                "dataplane_scope.verified_claimant_unusable platform=%s verified=%d",
+                plat,
+                len(verified),
+            )
+            raise ScopeNotFoundError("verified claimant is inactive; refusing legacy fallback")
+        candidates = survivors
 
     # A source claimed across tenant boundaries is a misconfiguration (or an attack): refuse, never
     # adjudicate by primary flag -- a tenant must not be able to win by asserting primary.

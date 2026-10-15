@@ -333,6 +333,83 @@ class TestResolve:
         assert body["communityId"] == db.seed.demo_community != attacker
         assert body["tenantId"] == db.seed.demo_tenant
 
+    async def test_inactive_verified_owner_does_not_fall_through_to_legacy_attacker(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        # Review of #867: deactivating the verified owner must not hand the source to a legacy
+        # claimant in another tenant.
+        victim = int(db.dal.communities.insert(name="victim", tenant_id=db.seed.demo_tenant))
+        db.dal.communities.insert(
+            name="attacker",
+            tenant_id=db.seed.other_tenant,
+            platform="discord",
+            platform_server_id="31313131",
+        )
+        db.dal.community_servers.insert(
+            community_id=victim,
+            platform="discord",
+            platform_server_id="31313131",
+            status="approved",
+            is_primary=True,
+        )
+        db.dal(db.dal.communities.id == victim).update(is_active=False)
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id=31313131", headers=_auth(issuer)
+        )
+        assert response.status_code == 404
+        assert "tenantId" not in await response.get_json()
+
+    async def test_orphaned_verified_owner_does_not_fall_through_to_legacy_attacker(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        victim = int(db.dal.communities.insert(name="orphaned", tenant_id=None))
+        db.dal.communities.insert(
+            name="attacker",
+            tenant_id=db.seed.other_tenant,
+            platform="discord",
+            platform_server_id="32323232",
+        )
+        db.dal.community_servers.insert(
+            community_id=victim,
+            platform="discord",
+            platform_server_id="32323232",
+            status="approved",
+            is_primary=True,
+        )
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id=32323232", headers=_auth(issuer)
+        )
+        assert response.status_code == 404
+
+    async def test_same_tenant_verified_wins_and_legacy_never_tie_breaks(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        legacy_only = int(
+            db.dal.communities.insert(
+                name="legacy-sib",
+                tenant_id=db.seed.demo_tenant,
+                platform="discord",
+                platform_server_id="33333333",
+            )
+        )
+        verified_c = int(db.dal.communities.insert(name="ver-sib", tenant_id=db.seed.demo_tenant))
+        db.dal.community_servers.insert(
+            community_id=verified_c,
+            platform="discord",
+            platform_server_id="33333333",
+            status="approved",
+            is_primary=False,
+        )
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=discord&source_id=33333333", headers=_auth(issuer)
+        )
+        body = await response.get_json()
+        assert response.status_code == 200
+        assert body["communityId"] == verified_c != legacy_only
+
     async def test_contested_legacy_only_claims_across_tenants_are_409(
         self, app: Quart, db: Any, issuer: ServiceJwtIssuer
     ) -> None:
