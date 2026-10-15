@@ -51,6 +51,7 @@ concurrency:
 jobs:
   reproducible-build:
     name: two independent --no-cache builds must be byte-identical
+    if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

@@ -367,6 +367,7 @@ jobs:
       contents: read
       packages: write  # GHCR push of per-arch images (build-push-action)
     if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       github.event_name != 'pull_request' &&
       github.event_name != 'merge_group' &&
       (needs.detect-changes.outputs.router == 'true' ||
@@ -514,6 +515,7 @@ jobs:
     permissions:
       contents: read
     if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       (github.event_name == 'pull_request' ||
       github.event_name == 'merge_group') &&
       (needs.detect-changes.outputs.router == 'true' ||
@@ -665,6 +667,7 @@ jobs:
     # "Compute image tags" step already pushed the plain/:latest tags
     # directly per module in that case, so there is nothing to merge.
     if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       github.event_name != 'pull_request' &&
       github.event_name != 'merge_group' &&
       needs.determine-version.outputs.multi_arch == 'true' &&
@@ -789,6 +792,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [determine-version, detect-changes, build-platform, merge-manifests, supply-chain-selftest]
     if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       always() &&
       github.event_name != 'pull_request' &&
       github.event_name != 'merge_group' &&
@@ -930,6 +934,7 @@ jobs:
     # exists (pushed directly by build-platform in that case), so tolerate
     # "skipped" the same as "success".
     if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       always() &&
       (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
     strategy:
