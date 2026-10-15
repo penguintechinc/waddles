@@ -221,6 +221,16 @@ impl PlatformPublicKeys {
     }
 }
 
+/// Strips an optional `sha256:` prefix and lowercases, so bare-hex and
+/// prefixed spellings of the same digest compare equal. Comparison-only:
+/// never applied to the bytes that get signed/verified.
+fn normalize_digest(digest: &str) -> String {
+    digest
+        .strip_prefix("sha256:")
+        .unwrap_or(digest)
+        .to_ascii_lowercase()
+}
+
 /// Parses `sidecar_bytes` as a [`SignedSidecar`] and verifies its embedded
 /// Ed25519 signature against `keys`, cross-checking every swap-prevention
 /// field (`app_id`/`version`/`digest`) against the values the **stage**
@@ -262,7 +272,12 @@ pub fn verify_artifact_signature(
             sidecar.version
         )));
     }
-    if sidecar.digest != expected_digest {
+    // regression: digest-format -- the control plane signs/writes the sidecar with the
+    // bare-hex `app_versions.artifact_digest`, while the load frame carries the canonical
+    // `sha256:`-prefixed form (bundle_active_set::canonical_digest). Compare the digest
+    // VALUE, not the string. The signature below is still verified over `sidecar.digest`
+    // exactly as written, so this does not weaken the signed-payload check.
+    if normalize_digest(&sidecar.digest) != normalize_digest(expected_digest) {
         return Err(ExecutorError::SignatureInvalid(format!(
             "sidecar digest {:?} does not match the load frame's digest {expected_digest:?}",
             sidecar.digest
@@ -407,6 +422,33 @@ mod tests {
         let keys = PlatformPublicKeys::from_json(&test_public_keys_json("k1", &signing_key))?;
         let sidecar = sign_sidecar(&signing_key, "k1", APP_ID, VERSION, DIGEST, APPROVAL_ID);
         verify_artifact_signature(&sidecar, &keys, APP_ID, VERSION, DIGEST)
+    }
+
+    /// regression: digest-format -- a sidecar signed over the bare-hex digest
+    /// (what the control plane writes) must verify against the `sha256:`-prefixed
+    /// load-frame digest, and vice versa.
+    #[test]
+    fn verify_artifact_signature_accepts_bare_hex_sidecar_vs_prefixed_load_frame(
+    ) -> Result<(), ExecutorError> {
+        let signing_key = test_signing_key();
+        let keys = PlatformPublicKeys::from_json(&test_public_keys_json("k1", &signing_key))?;
+        let bare = DIGEST.strip_prefix("sha256:").expect("prefixed fixture");
+
+        let bare_sidecar = sign_sidecar(&signing_key, "k1", APP_ID, VERSION, bare, APPROVAL_ID);
+        verify_artifact_signature(&bare_sidecar, &keys, APP_ID, VERSION, DIGEST)?;
+        verify_artifact_signature(&bare_sidecar, &keys, APP_ID, VERSION, bare)?;
+
+        let prefixed_sidecar =
+            sign_sidecar(&signing_key, "k1", APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        verify_artifact_signature(&prefixed_sidecar, &keys, APP_ID, VERSION, bare)?;
+
+        // A genuinely different digest still fails, prefixed or not.
+        let other = "b".repeat(64);
+        assert!(matches!(
+            verify_artifact_signature(&bare_sidecar, &keys, APP_ID, VERSION, &other),
+            Err(ExecutorError::SignatureInvalid(_))
+        ));
+        Ok(())
     }
 
     #[test]
