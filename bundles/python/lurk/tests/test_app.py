@@ -251,15 +251,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring(fake_host: _FakeHost) 
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: False)
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(flags=flags_mod)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-    assert _run(transform(_sample_event("!lurk"))) is None
-
-
 # -- lurk / unlurk state machine ---------------------------------------------
 
 
@@ -1000,22 +991,6 @@ def test_transform_forwards_only_command_channel_arg_and_badges(fake_host: _Fake
     result = _run(transform(event))
     assert result is not None
     assert set(result.payload) == {"command", "channel_id", "arg", "is_mod"}
-
-
-def test_flag_is_checked_by_key_and_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str, bool]] = []
-
-    def _enabled(key: str, default_value: bool) -> bool:
-        seen.append((key, default_value))
-        return False
-
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        flags=types.SimpleNamespace(enabled=_enabled)
-    )
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-    assert _run(transform(_sample_event("!lurk"))) is None
-    assert seen == [("waddles.command-lurk", False)]
 
 
 # -- kv failure on every op of every command: fail loud, never silent -----------------

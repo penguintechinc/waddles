@@ -101,10 +101,8 @@ phase, not something this bundle's own PR is positioned to fix.
 - **Strict mod gate.** Badges are read with an identity check; a string badge (`"false"`) is
   never truthy.
 
-Gated behind the PostHog flag ``waddles.command-loyalty`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -115,10 +113,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, db, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-loyalty"
 
 #: `top` is this bundle's only sub-module -- see `_resolve_command()` for the extra,
 #: documented `!points <user>` shape the shared grammar alone cannot express.
@@ -219,7 +214,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!points` and its grammar.
 
     Cheap-skip first (no leading `!points` token -- `None`, zero cost),
-    flag check second, real grammar parse last -- same ordering as
+    real grammar parse last -- same ordering as
     `eightball`/`fish`'s own documented rationale. A recognized-but-
     malformed `!points ...` still produces a reply (`"usage"`) since the
     caller did invoke this command -- never silently dropped.
@@ -231,9 +226,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() != "!points":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

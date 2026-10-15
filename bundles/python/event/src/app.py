@@ -34,8 +34,8 @@ tenant-wide sentinel, passed straight through like `about`). Keys use `.` only (
 Index / RSVP updates are read-modify-write (kv has no list/CAS); concurrent writers within one
 community can lose an update. Acceptable for a chat-scale light bundle, documented not hidden.
 
-Gated behind the PostHog flag ``waddles.command-event`` (default OFF; cheap command-match first,
-flag check second, grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -45,10 +45,7 @@ import uuid
 from typing import Any, NoReturn, cast
 
 from waddle_sdk import community_kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-event"
 
 _EVENT_HEAD = "!event"
 _RSVP_HEAD = "!rsvp"
@@ -149,7 +146,7 @@ def _parse(head: str, rest: str) -> dict[str, Any]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!event`/`!rsvp` and parse its grammar.
 
-    Returns `None` for non-matching text or while the flag is off. A recognized-but-malformed
+    Returns `None` for non-matching text. A recognized-but-malformed
     command still yields a `usage` reply -- the caller did invoke it, never silently dropped.
     """
     text = event.payload.get("text")
@@ -160,9 +157,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     head, _, rest = stripped.partition(" ")
     head = head.lower()
     if head not in (_EVENT_HEAD, _RSVP_HEAD):
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     payload = _parse(head, rest)

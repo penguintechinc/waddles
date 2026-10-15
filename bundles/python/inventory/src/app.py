@@ -108,10 +108,8 @@ bundle_data_schema.py`) that would let hub-api provision this bundle's
 table columns automatically has, by that module's own docstring, no
 onboarding-time wiring yet -- identical note to `loyalty`'s own docstring.
 
-Gated behind the PostHog flag ``waddles.command-inventory`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -125,10 +123,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, db, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-inventory"
 
 #: Canonical command name `parse_command()` is invoked with -- both `!inventory` and `!inv`
 #: (this bundle's two chat aliases) are normalized onto this before parsing, see `transform()`.
@@ -267,7 +262,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!inventory`/`!inv` and its grammar.
 
     Cheap-skip first (no leading `!inventory`/`!inv` token -- `None`, zero
-    cost), flag check second, real grammar parse last -- same ordering as
+    cost), real grammar parse last -- same ordering as
     `eightball`/`fish`/`loyalty`'s own documented rationale. A recognized-
     but-malformed input still produces a reply (`"usage"`) since the
     caller did invoke this command -- never silently dropped.
@@ -279,9 +274,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head, _, rest = stripped.partition(" ")
     if head.lower() not in _ALIASES:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     rest = rest.strip()

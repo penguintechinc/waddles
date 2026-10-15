@@ -295,12 +295,6 @@ def _say(text: str) -> str:
     return _reply(_run(transform(_event(text))))
 
 
-def test_disabled_flag_makes_no_call(fake_host, api) -> None:
-    fake_host.flag_state["enabled"] = False
-    assert _run(transform(_event("!weather paris"))) is None
-    assert api.requests == []
-
-
 @pytest.mark.parametrize("text", ["!weatherx paris", "weather paris", "!forecast paris"])
 def test_other_commands_ignored(text: str, fake_host, api) -> None:
     assert _run(transform(_event(text))) is None

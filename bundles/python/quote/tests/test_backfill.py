@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from typing import Any
 
 import pytest
@@ -28,7 +27,6 @@ from app import (
     _PERMISSION_DENIED_ADD,
     _PERMISSION_DENIED_REMOVE,
     _UNAVAILABLE_MSG,
-    FLAG_KEY,
     MAX_QUOTE_LEN,
     dispatch,
     transform,
@@ -335,30 +333,6 @@ def test_every_kv_key_written_passes_the_host_charset_check(host: _FakeHost) -> 
 
 
 # -- flag fail-closed
-def test_flag_is_requested_with_a_fail_closed_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str, bool]] = []
-    _install(monkeypatch)
-    import wit_world  # noqa: PLC0415 - installed into sys.modules by `_install`
-
-    wit_world.imports.flags.enabled = (
-        lambda key, default_value: seen.append((key, default_value)) or default_value
-    )
-    assert _run(transform(_sample_event("!quote random"))) is None
-    assert seen == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-quote"
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)
-    assert _run(transform(_sample_event("!quote random"))) is None
-
-
-def test_flag_off_logs_nothing_and_does_no_io(monkeypatch: pytest.MonkeyPatch) -> None:
-    off = _install(monkeypatch, flag_enabled=False)
-    assert _run(transform(_sample_event(f"!quote add {CANARY}", is_mod=True))) is None
-    assert off.log_calls == [] and off.kv.calls == [] and off.db.calls == []
-
-
 def test_known_commands_cover_every_command_transform_can_emit(host: _FakeHost) -> None:
     texts = {
         "add": "!quote add x",

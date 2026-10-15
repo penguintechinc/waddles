@@ -38,10 +38,10 @@ this a non-issue in practice; documented rather than papered over.
 Replies are capped at `MAX_REPLY_CHARS` (Twitch's 500-char chat limit): a longer list is
 truncated with an explicit ``(+N more)`` suffix.
 
-Gated behind the PostHog flag ``waddles.command-memories`` (default OFF). Ordering inside
-`transform()`: cheap command match, then flag, then parsing/`kv`. `kv`, `log`, `relay` and
-`feature_enabled` are imported at MODULE LOAD on purpose: componentize-py only wizens a WIT
-host-import that is imported eagerly (`docs/reference/bundle-host-imports.md`).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs. Ordering inside `transform()`: cheap command match, then
+parsing/`kv`. `kv`, `log` and `relay` are imported at MODULE LOAD on purpose: componentize-py only
+wizens a WIT host-import that is imported eagerly (`docs/reference/bundle-host-imports.md`).
 
 The shared `waddle_sdk.command` grammar parser is intentionally NOT used: it models
 ``!<command> [sub-module] <verb> <input>`` for ONE command name from a fixed verb set, while
@@ -58,11 +58,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention (default OFF).
-FLAG_KEY = "waddles.command-memories"
 
 #: Per-user `kv` key prefix (`.`, never `:`); the suffix is a SHA-256 hex digest.
 KEY_PREFIX = "memories."
@@ -374,9 +370,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head = match.group(1).lower()
     if head not in _COMMANDS:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     rest = (match.group(2) or "").strip()

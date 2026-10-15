@@ -33,10 +33,8 @@ the resolved command name and option count (`choose.transform matched`) --
 same PII posture as `eightball`'s own module docstring (ahead of the
 tokenization pipeline, #427/#429).
 
-Gated behind the PostHog flag ``waddles.command-choose`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -45,11 +43,7 @@ import random
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention (`critical-rules.md`).
-FLAG_KEY = "waddles.command-choose"
 
 #: Bounds on the caller's own option list -- keeps a pathological input
 #: (hundreds of options, or a multi-kilobyte single option) from producing
@@ -89,8 +83,7 @@ def _parse_options(rest: str) -> list[str] | str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: `!choose ...` -> a random-pick or usage reply.
 
-    Returns `None` (no reply, event dropped) for any non-matching payload or
-    while the `waddles.command-choose` flag is disabled -- never raises over
+    Returns `None` (no reply, event dropped) for any non-matching payload -- never raises over
     an event this bundle was never meant to react to. A recognized-but-
     malformed `!choose ...` (too few/many options, one too long) still
     produces a reply -- the command was invoked, so it is never silently
@@ -103,9 +96,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head, _, rest = stripped.partition(" ")
     if head.lower() != "!choose":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     parsed = _parse_options(rest)

@@ -2,7 +2,8 @@ schema_version: 2
 app_id: waddles.core.example.command
 name: Custom Text Commands & Timers Bundle (Python)
 # 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
-version: 1.0.3
+# 1.0.4: activation-gated only -- removed the in-bundle waddles.command-command feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.4
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -51,12 +52,10 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the per-community custom command registry"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-customcommands feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.3"
-  min_version: "1.0.3"
+  tested_with: "1.0.4"
+  min_version: "1.0.4"
   max_version: null

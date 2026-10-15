@@ -56,7 +56,6 @@ Platforms: Twitch + Discord (`chat.message`). Mod/broadcaster gate **fails close
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-announce` |
 | `storage.kv` | persists the per-community announcement registry |
 
 ## State (kv, community-scoped only)
@@ -75,11 +74,9 @@ namespace separator. Individual announcement keys are themselves JSON object key
 one value, not `kv` keys on their own, but are further restricted to a conservative
 letters/digits/`_`/`-` charset regardless.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-announce`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!announce` command-name match and
-before the real grammar resolution.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from typing import Any
 
 import pytest
@@ -43,7 +42,6 @@ from app import (
     _TEMPLATE_KEY,
     _USAGE,
     DEFAULT_TEMPLATE,
-    FLAG_KEY,
     MAX_AUTO_LIST_SIZE,
     MAX_TEMPLATE_LEN,
     dispatch,
@@ -308,32 +306,6 @@ def test_corrupt_template_logs_at_error_and_falls_back_to_the_default(
 
 
 # -- flag fail-closed
-def test_flag_is_requested_with_a_fail_closed_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    host = _FakeHost()
-    _install(monkeypatch, host)
-    seen: list[tuple[str, bool]] = []
-    sys.modules["wit_world"].imports.flags.enabled = (
-        lambda key, default_value: seen.append((key, default_value)) or default_value
-    )
-    assert _run(transform(_sample_event("!so penguin"))) is None
-    assert seen == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-shoutout"
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)
-    assert _run(transform(_sample_event("!so penguin"))) is None
-
-
-def test_flag_off_does_no_io_and_logs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _FakeHost()
-    _install(monkeypatch, host, flag_enabled=False)
-    assert _run(transform(_sample_event(f"!so {CANARY}", is_mod=True))) is None
-    assert host.log_calls == [] and host.kv_calls == []
-
-
 # -- PII-free logs
 def test_no_log_line_in_any_flow_contains_a_target_template_or_actor(
     monkeypatch: pytest.MonkeyPatch,

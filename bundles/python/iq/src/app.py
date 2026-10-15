@@ -1,7 +1,7 @@
 """`!iq [@user]` -> a fun, deterministic "IQ" number per user. Stateless.
 
-No `kv` (only `flags.read` is declared). The score is a pure function of the user's UUID
-(SHA-256 -> 60..180), so a given user always gets the same number. Purely for fun.
+No `kv` (no permission is declared). The score is a pure function of the user's UUID (SHA-256 ->
+60..180), so a given user always gets the same number. Purely for fun.
 
 **Users are referenced by UUID, never by username (PII rule).** Bare `!iq` scores the caller
 (`_actor_uuid`); `!iq <user>` resolves the target via `_resolve_target()` (literal UUID,
@@ -10,7 +10,8 @@ first 8 hex chars; typed targets are never echoed, stored or logged.
 
 Fail-loud: more than one argument -> usage reply; unidentifiable target -> explicit reply.
 
-Gated behind the PostHog flag ``waddles.command-iq``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -21,10 +22,8 @@ import uuid
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-iq"
 COMMAND = "!iq"
 
 _USAGE = "Usage: !iq [<user>]"
@@ -99,7 +98,7 @@ def _flavor(iq: int) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!iq` and build the reply.
 
-    Exact first-token match comes before the flag check. Malformed input is answered
+    Exact first-token match is the only precondition. Malformed input is answered
     explicitly, never silently dropped.
     """
     text = event.payload.get("text")
@@ -107,8 +106,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     args = rest.split()

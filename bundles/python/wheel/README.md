@@ -53,18 +53,15 @@ relay of the text `transform()` built.
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists the per-community wheel options list. |
-| `flags.read` | Gates the command behind its `waddles.command-wheel` feature flag. |
 
 No `db`, no egress. Mod gate: `add`/`remove`/`reset` require a real `is_mod` or `is_broadcaster`
 boolean `True` (a string badge such as `"false"` is **not** truthy here -- 1.0.3 fixed a bypass where
 `bool("false")` let non-moderators mutate the wheel); when **neither** badge field is present as a `bool` (e.g. the Discord normalizer today) the
 caller is **denied** (fail closed), with a DEBUG `wheel.role_info_unavailable` log.
 
-## Feature flag
+## Gating
 
-`waddles.command-wheel`, **default OFF**, checked after the command-text match and before any `kv`
-access, requested with `default=False` (flag outage / missing `wit_world` -> off). While off nothing
-is parsed, stored or logged.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

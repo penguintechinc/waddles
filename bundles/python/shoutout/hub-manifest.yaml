@@ -5,7 +5,7 @@
 schema_version: 2
 app_id: waddles.core.example.shoutout
 name: Shoutout Bundle (Python)
-version: 1.0.3
+version: 1.0.4
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -49,5 +49,5 @@ permissions:
   - id: storage.kv
     justification: "persists the per-community shoutout template and auto-shoutout list"
   - id: flags.read
-    justification: "gates the command behind its waddles.command-shoutout feature flag"
+    justification: "reads the tenant license tier (flags.tier) for tier-gated sub-features; not a command gate"
 routes_to: []

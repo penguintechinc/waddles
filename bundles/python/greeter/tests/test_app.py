@@ -245,15 +245,6 @@ def test_not_ours_returns_none(host: types.SimpleNamespace, text: Any) -> None:
     assert _run(_event(text)) is None
 
 
-def test_flag_off_returns_none_without_touching_kv(host: types.SimpleNamespace) -> None:
-    _enable(host, "greet")
-    host.state["flag"] = False
-    host.kv.calls.clear()
-    assert _run(_event("hello")) is None
-    assert _run(_mod_event("!greeter list")) is None
-    assert host.kv.calls == []
-
-
 def test_communities_are_isolated(host: types.SimpleNamespace) -> None:
     _enable(host, "greet", community="comm-2")
     assert _run(_event("hello"), community="comm-1") is None

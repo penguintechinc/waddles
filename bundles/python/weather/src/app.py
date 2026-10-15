@@ -28,7 +28,8 @@ only) AND replies with an explicit message -- there is no default weather, no ca
 but is NEVER logged, stored or echoed from the user's text -- the reply names the place as
 the provider resolved it. No `kv`, no user identity is touched at all.
 
-Gated behind the PostHog flag ``waddles.command-weather``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -38,11 +39,9 @@ from typing import Any
 from urllib.parse import quote
 
 from waddle_sdk import log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.http import HttpClient, resolve_secret
 
-FLAG_KEY = "waddles.command-weather"
 COMMAND = "!weather"
 
 API_HOST = "api.weatherapi.com"
@@ -151,7 +150,7 @@ async def _fetch(location: str) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!weather <location>` and reply.
 
-    Exact first-token match comes before the flag check. Every failure replies explicitly
+    Exact first-token match is the only precondition. Every failure replies explicitly
     (see module docstring); nothing is ever silently dropped or defaulted.
     """
     text = event.payload.get("text")
@@ -159,8 +158,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     location = rest.strip()

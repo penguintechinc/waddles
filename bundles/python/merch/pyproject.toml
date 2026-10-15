@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-merch"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!merch` -> show / set (mod-only) / reset (mod-only) the community merch store link (kv-backed, strict URL validation)."
 requires-python = ">=3.13"
 dependencies = []

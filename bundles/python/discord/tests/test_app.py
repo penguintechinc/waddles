@@ -122,13 +122,6 @@ def test_non_string_text_returns_none(host: Any) -> None:
     assert _run(transform(event)) is None
 
 
-def test_flag_off_suppresses_everything(host: Any) -> None:
-    host.flag_state["enabled"] = False
-    assert _say("!discord") is None
-    assert _say(f"!discord set {_URL}", mod=True) is None
-    assert host.kv.calls == []
-
-
 def test_command_match_is_case_insensitive(host: Any) -> None:
     assert "No Discord link" in (_say("!DISCORD") or "")
 

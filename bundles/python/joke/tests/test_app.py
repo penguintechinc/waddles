@@ -196,11 +196,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(fake_host: _FakeHost) -> None:
-    fake_host.flag_state["enabled"] = False
-    assert _run(transform(_event("!joke"))) is None
-
-
 def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:
     result = _run(transform(_event("!joke add hi", is_mod=True, is_broadcaster=False)))
     assert result is not None
@@ -897,14 +892,3 @@ def test_communities_never_share_custom_jokes(fake_host: _FakeHost) -> None:
     assert _last_reply(fake_host) == _NO_CUSTOM_JOKES_MSG
 
 
-def test_flag_is_checked_by_key_and_defaults_off(fake_host: _FakeHost) -> None:
-    seen: list[tuple[str, bool]] = []
-
-    def _enabled(key: str, default_value: bool) -> bool:
-        seen.append((key, default_value))
-        return False
-
-    sys.modules["wit_world"].imports.flags = types.SimpleNamespace(enabled=_enabled)
-    assert _run(transform(_event("!joke"))) is None
-    assert seen == [("waddles.command-joke", False)]
-    assert fake_host.kv.calls == []

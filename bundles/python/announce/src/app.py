@@ -75,10 +75,8 @@ further restricted to `_KEY_ALLOWED_CHARS` -- conservative, but not
 load-bearing for the kv charset itself (they never become `kv` key text on
 their own; the whole registry lives under the one fixed `_REGISTRY_KEY`).
 
-Gated behind the PostHog flag ``waddles.command-announce`` -- checked in
-`transform()` after the cheap command-head match and before any grammar
-resolution (`eightball`/`fish`/`music`'s own documented ordering
-rationale).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 
 DO NOT BUILD in v1 -- clean, documented extension points, never a silent
 stub:
@@ -101,10 +99,7 @@ from typing import Any, NoReturn, cast
 
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-announce"
 
 #: No sub-modules declared -- every token other than the grammar's own
 #: `set`/`remove`/`list` verbs is either a bare key (see `_resolve_command`)
@@ -213,7 +208,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!announce` and its grammar.
 
     Cheap-skip first (no leading `!announce` token -- `None`, zero cost),
-    flag check second, real grammar resolution last -- same ordering as
+    real grammar resolution last -- same ordering as
     `eightball`/`fish`/`music`'s own documented rationale. A recognized-but-
     malformed `!announce ...` still produces a reply (`"usage"`), never a
     silent drop.
@@ -225,9 +220,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head, _, rest = stripped.partition(" ")
     if head.lower() != "!announce":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     command, arg = _resolve_command(rest.strip())

@@ -3,7 +3,8 @@ app_id: waddles.core.example.memories
 name: Memories Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !remember <text> / !memories [@user] / !forget <id|all>.
 # Per-user, self-managed, public read, 20-item cap. See src/app.py's module docstring.
-version: 1.0.0
+# 1.0.1: activation-gated only -- removed the in-bundle waddles.command-memories feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -46,12 +47,10 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists each user's remembered facts as one hashed per-user JSON blob"
-  - id: flags.read
-    justification: "gates the commands behind their waddles.command-memories feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null

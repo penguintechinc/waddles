@@ -4,7 +4,7 @@
 (`provider: builtin`, `app_id: waddles.core.example.chat`), stateless, WASI component.
 
 **Status: BUILD-ONLY / INERT, and the read path is unavailable by design.** Both commands
-recognize, stay flag-gated, and always reply with an explicit "not available from this bundle
+recognize and always reply with an explicit "not available from this bundle
 yet" message citing [#678](https://github.com/penguintechinc/waddles/issues/678) -- never a
 crash, never a silent drop. The data (`hub_chat_messages`) is hub-api-owned; the structured
 `waddle_sdk.db` facade only reaches a bundle's own table and no host capability grants a
@@ -12,7 +12,7 @@ cross-service read. Cut-over from the `community_chat_process` monolith is a lat
 
 | | |
 |---|---|
-| Flag | `waddles.command-chat` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`, no DB, no egress) |
 | Catalog | **not registered** in `bundles/core-bundles.yaml` (inert) |
@@ -37,7 +37,6 @@ replies with the parser's usage error. Open to anyone (read-only, no mod gate).
 
 | id | why |
 |---|---|
-| `flags.read` | reads the `waddles.command-chat` PostHog flag to gate the command |
 
 Deliberately no `storage.kv` / `storage.db` -- the bundle uses neither.
 
@@ -45,7 +44,6 @@ Deliberately no `storage.kv` / `storage.db` -- the bundle uses neither.
 
 - **No silent fallback.** The unavailable reply is the honest result of a missing capability;
   tests pin that every recognized invocation produces a non-empty reply and a WARN log.
-- **Flag fails closed** (`default=False`); flag OFF = no reply.
 - **PII-free logs.** Only the command name (`chat-history`/`channels`) and platform are logged
   -- never the actor, message text, or any typed argument (gh-674).
 

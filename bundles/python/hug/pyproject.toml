@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-hug"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!hug [target]` -> a wholesome flavor-text reply that wraps people in comically wholesome hugs, relayed back to the caller's own origin platform. Relay only, no kv/db state. Modeled on bundles/python/slap."
 requires-python = ">=3.13"
 dependencies = []

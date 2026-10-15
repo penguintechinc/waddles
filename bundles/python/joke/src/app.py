@@ -42,10 +42,8 @@ reserving `:` as its own server-side namespace separator. See
 rule exists to prevent; `tests/test_app.py::
 test_kv_key_constants_satisfy_host_guest_key_charset` pins it here too.
 
-Gated behind the PostHog flag ``waddles.command-joke`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -56,10 +54,7 @@ from typing import Any, NoReturn, cast
 
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-joke"
 
 #: No sub-modules declared -- `add`/`remove`/`list` are all already members
 #: of the shared grammar's `VERBS` vocabulary (`waddle_sdk.command.VERBS`).
@@ -183,8 +178,8 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!joke` and its grammar, via `parse_command`.
 
-    Cheap-skip first (no leading `!joke` token -- `None`, zero cost), flag
-    check second, real grammar parse last -- same ordering as `eightball`'s
+    Cheap-skip first (no leading `!joke` token -- `None`, zero cost), real grammar parse last --
+    same ordering as `eightball`'s
     and `fish`'s own documented rationale. A recognized-but-malformed
     `!joke ...` (a `CommandUsageError`, or a grammar-legal verb this bundle
     doesn't implement, e.g. `!joke enable`) still produces a reply
@@ -198,9 +193,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() != "!joke":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

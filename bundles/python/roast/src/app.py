@@ -1,7 +1,7 @@
 """`!roast [@user]` -> a playful, family-friendly roast from a built-in list. Stateless.
 
-No `kv` (only `flags.read` is declared): the roast pool is a fixed, original, SFW tuple and
-nothing is persisted. Bare `!roast` roasts the caller; `!roast <user>` roasts the target.
+No `kv` (no permission is declared): the roast pool is a fixed, original, SFW tuple and nothing is
+persisted. Bare `!roast` roasts the caller; `!roast <user>` roasts the target.
 
 **Users are referenced by UUID, never by username (PII rule).** `_resolve_target()` accepts a
 literal UUID, a Discord mention `<@id>`, or a `@name`/`name` handle (hashed into a UUIDv5 and
@@ -11,7 +11,8 @@ target is never echoed, stored or logged. Logs carry only the command name / err
 Fail-loud: an unidentifiable target gets an explicit reply (never a silent drop and never a
 substituted default target); `!roast` with more than one argument gets a usage reply.
 
-Gated behind the PostHog flag ``waddles.command-roast``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -22,10 +23,8 @@ import uuid
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-roast"
 COMMAND = "!roast"
 
 _USAGE = "Usage: !roast [<user>]"
@@ -104,7 +103,7 @@ def _pick(pool: tuple[str, ...]) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!roast` and build the reply.
 
-    Exact first-token match (so `!roasts` never matches) comes before the flag check. A
+    Exact first-token match (so `!roasts` never matches) is the only precondition. A
     malformed or unidentifiable target is answered explicitly, never silently dropped.
     """
     text = event.payload.get("text")
@@ -112,8 +111,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     args = rest.split()

@@ -106,12 +106,6 @@ class TestTransformRouting:
         )
         assert _run(transform(event)) is None
 
-    def test_disabled_flag_suppresses_reply(self, fake_host: Any) -> None:
-        fake_host.flag_state["enabled"] = False
-        assert _run(transform(_event("!chat-history"))) is None
-        assert _run(transform(_event("!channels"))) is None
-
-
 class TestChatHistoryCommand:
     """`!chat-history` / `!chat-history list` -- always the architecture-gap reply today."""
 
@@ -309,22 +303,6 @@ class TestRegressionsAndFailLoud:
             blob = f"{message} {fields_json}".lower()
             for sentinel in ("piiactor_alice", "piiextra_secret", "piiauthor_id"):
                 assert sentinel not in blob
-
-    def test_flag_is_queried_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        asked: list[tuple[str, bool]] = []
-
-        def _enabled(key: str, default_value: bool) -> bool:
-            asked.append((key, default_value))
-            return default_value
-
-        fake_wit_world = types.ModuleType("wit_world")
-        fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-            flags=types.SimpleNamespace(enabled=_enabled)
-        )
-        monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-        assert _run(transform(_event("!channels"))) is None
-        assert asked == [("waddles.command-chat", False)]
 
     def test_dispatch_empty_text_raises(self, fake_host: Any) -> None:
         """`transform` never emits empty text; an empty one reaching `dispatch` fails loud."""

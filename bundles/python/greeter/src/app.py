@@ -12,22 +12,21 @@ Hybrid shape -- two paths through one `transform()`:
   grammar comes from `waddle_sdk.command` (`CommandSpec(name="greeter", sub_modules=...)`).
 - **Free text** (any message NOT starting with `!`): classified into at most one category
   (`greet` > `mention` > `thanks`, the same precedence `bot_process` uses), then gated by the
-  flag, the sub-module and the cooldown. Anything else returns `None` (no reply).
+  sub-module and the cooldown. Anything else returns `None` (no reply).
 
 Consume filter: this bundle must see ordinary chat lines, not only `!greeter`, so its manifests
-declare `consumes` with NO `filters.command_prefix` (an absent filter key is "not a
-constraint", rust-data-plane design spec §5.3/§6). The stage is therefore woken for every
-`chat.message`, which is why `transform()` orders its checks cheapest-first (pure string checks,
-then the flag, then regex, and kv only once a category actually matched).
+declare `consumes` with NO `filters.command_prefix` (an absent filter key is "not a constraint",
+rust-data-plane design spec §5.3/§6). The stage is therefore woken for every `chat.message`, which
+is why `transform()` orders its checks cheapest-first (pure string checks, then regex, and kv only
+once a category actually matched).
 
 Fail-closed ordering for the free-text path:
 1. not a `str` / empty / any other `!command` -> `None`
-2. flag `waddles.command-greeter` OFF (default) -> `None`
-3. author is the bot itself or another bot -> `None` (see `_is_bot_author`)
-4. no category matches (token-boundary regexes) -> `None`
-5. first matching category whose sub-module is enabled (default OFF) -> else `None`
-6. that (user, category) is inside its cooldown window -> `None`
-7. otherwise record the cooldown and reply.
+2. author is the bot itself or another bot -> `None` (see `_is_bot_author`)
+3. no category matches (token-boundary regexes) -> `None`
+4. first matching category whose sub-module is enabled (default OFF) -> else `None`
+5. that (user, category) is inside its cooldown window -> `None`
+6. otherwise record the cooldown and reply.
 
 Bot detection: the ingest normalizers (`core/svc_ingest/src/normalize.rs`) drop the bot's own
 echoed messages upstream and do not (yet) emit an `is_bot` flag, so absence of a flag means
@@ -42,8 +41,8 @@ the stable identity) and never in a log line. This bundle reads free text, so NO
 carries the message text, actor, author id or a mention target -- only community/op/category/
 counts/exception-type.
 
-Declares `storage.kv` (sub-module toggles + cooldowns) and `flags.read`. `kv`, `log`, `relay`,
-`clock`, `feature_flags` and `sub_modules` are imported eagerly at module top on purpose:
+Declares `storage.kv` (sub-module toggles + cooldowns). `kv`, `log`, `relay`,
+`clock` and `sub_modules` are imported eagerly at module top on purpose:
 componentize-py only wizens a WIT host-import that is imported at module load (see
 `docs/reference/bundle-host-imports.md`).
 """
@@ -58,12 +57,8 @@ from waddle_sdk import clock, community_kv, kv, log, relay  # noqa: F401 -- eage
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
 from waddle_sdk.flask_core.bundle_runtime import get_bundle_context
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.sub_modules import SubModuleGate
-
-#: PostHog flag key, `{product}.{feature-name}` convention. Default OFF.
-FLAG_KEY = "waddles.command-greeter"
 
 #: Responder categories == the command's sub-modules, in reply-precedence order.
 CATEGORIES: tuple[str, ...] = ("greet", "mention", "thanks")
@@ -289,7 +284,7 @@ async def _handle_command(event: PlatformEvent, text: str, community: str) -> st
 
 
 async def _handle_text(event: PlatformEvent, text: str, community: str) -> str | None:
-    """Free-text path: flag -> bot guard -> classify -> sub-module -> cooldown -> reply text."""
+    """Free-text path: bot guard -> classify -> sub-module -> cooldown -> reply text."""
     if _is_bot_author(event):
         log.debug("greeter.skipped_bot_author")
         return None
@@ -314,7 +309,7 @@ async def _handle_text(event: PlatformEvent, text: str, community: str) -> str |
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: answer `!greeter`, or auto-reply to matching chatter.
 
-    Returns `None` for non-text payloads, other `!commands`, the flag being OFF, bot authors,
+    Returns `None` for non-text payloads, other `!commands`, bot authors,
     non-matching text, a disabled sub-module and an active cooldown. A kv failure on the
     free-text path raises (fail loud, never a silent no-reply); on the `!greeter` command path
     it is logged and answered with an error reply so the moderator sees it.
@@ -328,9 +323,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
 
     is_command = text.startswith("!")
     if is_command and text.split(maxsplit=1)[0].lower() != "!greeter":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     community = _scope(get_bundle_context().community)

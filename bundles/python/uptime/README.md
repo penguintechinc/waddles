@@ -5,7 +5,7 @@ First-party (`provider: builtin`, `app_id: waddles.core.example.uptime`), kv-onl
 
 | | |
 |---|---|
-| Flag | `waddles.command-uptime` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped (one key: the start timestamp) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -31,7 +31,6 @@ No sub-modules. Grammar via `waddle_sdk.command` (`CommandSpec(name="uptime")`).
 | id | why |
 |---|---|
 | `storage.kv` | persists the per-community start timestamp |
-| `flags.read` | gates the command behind `waddles.command-uptime` |
 | `platform.clock` | reads the current time to compute elapsed time (`clock` is not a catalog id) |
 
 ## State
@@ -48,7 +47,7 @@ Colon-free key (gh-631 -- the `kv` host rejects `:`). Host scopes by tenant/comm
   ERROR and replies "something went wrong" -- the stored start is never overwritten on corruption.
 - **PII-free logs.** Only op names and exception types; never message text or the actor.
 - **Clock skew.** A stored start in the future clamps to `up 0s`.
-- Eager host imports (`kv`, `log`, `relay`, `clock`, `feature_enabled`) at module top, required
+- Eager host imports (`kv`, `log`, `relay`, `clock`) at module top, required
   for componentize-py wizening (`docs/reference/bundle-host-imports.md`).
 - `transform()` builds the reply; `dispatch()` is a pure relay.
 

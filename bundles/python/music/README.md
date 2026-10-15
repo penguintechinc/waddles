@@ -53,7 +53,6 @@ only moderators/broadcasters can do that
 | id | Why |
 |---|---|
 | `storage.kv` | Persists the per-community song-request queue, its id sequence, and the max-per-user limit. |
-| `flags.read` | Reads the `waddles.command-music` feature flag that gates the command. |
 
 No `db` (the queue is one per-community JSON array under one kv key), no egress (`egress: []`).
 
@@ -123,11 +122,9 @@ plus the exact per-message field set). Known residual: the `music.state_corrupt`
 corrupt queue *entry* interpolates the underlying parse error, which can echo the corrupt stored
 `id`/`ts` value -- bundle-written integers, never chat text.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-music`, defaulted OFF (`critical-rules.md` Feature Flags & License
-Tiers) -- checked in `transform()` after the cheap command-head match and before the real grammar
-resolution.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 

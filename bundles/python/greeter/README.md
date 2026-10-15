@@ -8,15 +8,15 @@ kv-only, WASI component.
 
 | | |
 |---|---|
-| Flag | `waddles.command-greeter` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped (responder toggles + per-user cooldowns) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
 
 ## Behavior at a glance
 
-- **Defaults OFF, twice.** The feature flag is OFF by default, and every responder is a
-  sub-module that is OFF per community until a mod enables it (`SubModuleGate`). A community that
+- **Defaults OFF.** Every responder is a sub-module that is OFF per community until a mod
+  enables it (`SubModuleGate`); there is no feature flag. A community that
   never enabled anything gets **zero** auto-replies.
 - **No self-reply, no loops.** Never answers the bot's own messages or another bot (see below).
 - **Per-user cooldown.** After replying to a user in a category, that user is not answered again
@@ -59,7 +59,7 @@ fall through to a lower-precedence category).
 `twitch` + `discord` `chat.message` with **no `filters.command_prefix`**. Per the data-plane
 design spec an absent filter key is "not a constraint", so the stage is woken for every chat
 line. `transform()` therefore orders its work cheapest-first: non-text / other `!commands` ->
-flag (default OFF) -> bot guard -> regex -> kv only after a category actually matched. Messages
+bot guard -> regex -> kv only after a category actually matched. Messages
 that match nothing cost zero kv operations.
 
 ## No self-reply / bot guard
@@ -79,7 +79,6 @@ The bot's own replies are also written to avoid re-triggering any category.
 | id | why |
 |---|---|
 | `storage.kv` | per-community responder toggles and per-user reply cooldowns |
-| `flags.read` | gates the bundle behind `waddles.command-greeter` |
 
 ## State keys
 
@@ -103,7 +102,7 @@ re-checked on read, so a host that serves an expired entry cannot let a burst th
   text, the actor, an author id or a mention target. The actor appears only in the visible chat
   reply to that same user (`Hey @<user>!`), as in `lurk`.
 - `transform()` builds the reply; `dispatch()` is a pure `relay.push` of it. Host imports (`kv`,
-  `log`, `relay`, `clock`, feature flags, sub-modules) are imported eagerly at module top
+  `log`, `relay`, `clock`, sub-modules) are imported eagerly at module top
   (`docs/reference/bundle-host-imports.md`).
 
 ## Test

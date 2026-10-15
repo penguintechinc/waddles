@@ -21,10 +21,10 @@ doesn't look like a Discord domain is still stored, with a soft warning in the r
 Logs are PII-free: platform/op/exception-type only -- never the URL value, the actor, or any
 message text.
 
-`kv`, `log`, `relay` and `feature_enabled` are imported at MODULE LOAD on purpose --
+`kv`, `log` and `relay` are imported at MODULE LOAD on purpose --
 componentize-py only wizens WIT host-imports imported eagerly (see
-`docs/reference/bundle-host-imports.md`). Gated behind PostHog flag
-``waddles.command-discord`` (default OFF; cheap command-match first, flag check second).
+`docs/reference/bundle-host-imports.md`). Activation-gated only -- no feature flag: the platform's
+installed -> enabled -> activated check decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -34,10 +34,7 @@ from urllib.parse import urlsplit
 
 from waddle_sdk import kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-discord"
 
 COMMAND = "!discord"
 
@@ -197,9 +194,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.split(maxsplit=1)[0].lower() if stripped else ""
     if head != COMMAND:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

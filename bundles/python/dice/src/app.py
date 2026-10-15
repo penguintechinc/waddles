@@ -7,9 +7,8 @@ username rather than an opaque token. Modeled on `bundles/python/pyping`'s
 hand-built structure (see that module's own docstring for the
 `_entry_wiring.py` caveat).
 
-Gated behind the PostHog flag ``waddles.command-dice`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (command match first, flag check second).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 
 Randomness via the stdlib ``random`` module -- see `eightball`'s own
 docstring for why no dedicated WIT binding is needed.
@@ -22,10 +21,7 @@ import re
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-dice"
 
 #: `!dice` alone, or `!dice <spec>` where `<spec>` is validated separately --
 #: this only decides "is this bundle's command even being invoked", same
@@ -76,9 +72,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     command_match = COMMAND_PATTERN.match(text.strip())
     if command_match is None:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     parsed = _parse_spec(command_match.group("spec"))

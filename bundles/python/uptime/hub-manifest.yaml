@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.uptime
 name: Uptime Bundle (Python)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -36,8 +36,6 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the per-community start timestamp (uptime.start)"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-uptime feature flag"
   - id: platform.clock
     justification: "reads the current time to compute elapsed time since first activation"
 routes_to: []

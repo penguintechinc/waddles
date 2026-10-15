@@ -25,7 +25,8 @@ Data scoping: all state is community-scoped via `waddle_sdk.community_kv`
 (one active round per community). No player identity is stored or logged;
 logs carry only community id, op, and counts -- never guess text.
 
-Gated behind the PostHog flag ``waddles.command-scramble``, default OFF.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -35,10 +36,8 @@ import random
 from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-scramble"
 COMMAND = "scramble"
 
 #: Fixed, auditable embedded list: lowercase alphabetic words with >=2 distinct letters.
@@ -97,8 +96,7 @@ def _classify(stripped: str) -> tuple[str, str | None]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!scramble` and its verbs.
 
-    No `kv` access. Returns `None` for non-chat payloads, non-`!scramble` text,
-    and while `waddles.command-scramble` is disabled.
+    No `kv` access. Returns `None` for non-chat payloads, non-`!scramble` text.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -107,9 +105,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.split(maxsplit=1)[0].lower() if stripped else ""
     if head != f"!{COMMAND}":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     action, arg = _classify(stripped)

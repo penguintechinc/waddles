@@ -7,9 +7,8 @@ plain literal and the `kv` host capability scopes every key server-side by
 `(tenant, community, app_id)` (`core/bundle_host_kv/src/scope.rs::KvScope`). The key uses `.`,
 never `:` (the host's reserved namespace separator, gh-631). No actor identity is stored.
 
-Ordering inside `transform()`: cheap command match first, then the PostHog flag
-``waddles.command-donate`` (default OFF), then command-grammar parsing, then the mod gate
-(`set`/`reset` only), then URL validation, then `kv`.
+Ordering inside `transform()`: cheap command match first, then command-grammar parsing, then the mod
+gate (`set`/`reset` only), then URL validation, then `kv`.
 
 Fail loud, never silent:
 
@@ -24,7 +23,7 @@ Fail loud, never silent:
 Logs are PII-free: only op names, reason codes and exception types -- never the URL, the
 message text or the actor.
 
-`kv`, `log`, `relay` and `feature_enabled` are imported at MODULE LOAD on purpose:
+`kv`, `log` and `relay` are imported at MODULE LOAD on purpose:
 componentize-py only wizens a WIT host-import that is imported eagerly, so a capability
 imported only inside a function is absent from `wit_world.imports` at runtime
 (`docs/reference/bundle-host-imports.md`).
@@ -38,11 +37,7 @@ from urllib.parse import SplitResult, urlsplit
 
 from waddle_sdk import kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention (default OFF).
-FLAG_KEY = "waddles.command-donate"
 
 #: The single `kv` key this bundle owns (community-scoped by the host; `.`, never `:`).
 URL_KEY = "donate.url"
@@ -239,9 +234,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head = text.strip().partition(" ")[0]
     if head.lower() != _COMMAND:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     reply = await _build_reply(event, text)

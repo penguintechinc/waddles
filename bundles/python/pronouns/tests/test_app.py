@@ -17,7 +17,6 @@ import pytest
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 from app import (
-    FLAG_KEY,
     KEY_PREFIX,
     MAX_PRONOUNS_LEN,
     DispatchResult,
@@ -180,14 +179,6 @@ def test_non_matching_text_returns_none_without_flag_or_kv(text: str, host: _Hos
 @pytest.mark.parametrize("text", [None, 42, ["!pronouns"]])
 def test_non_string_text_returns_none(text: Any, host: _Host) -> None:
     assert _run(transform(_event(text))) is None
-    assert host.kv.calls == []
-
-
-def test_flag_off_returns_none_and_touches_no_kv(host: _Host) -> None:
-    host.flag_enabled = False
-    assert _run(transform(_event("!pronouns set he/him"))) is None
-    assert host.flag_keys == [FLAG_KEY]
-    assert FLAG_KEY == "waddles.command-pronouns"
     assert host.kv.calls == []
 
 
@@ -531,7 +522,7 @@ def test_logs_never_contain_pronouns_text_actor_or_target(host: _Host) -> None:
 def test_host_imports_are_eager_module_attributes() -> None:
     import app
 
-    for name in ("kv", "log", "relay", "feature_enabled"):
+    for name in ("kv", "log", "relay"):
         assert hasattr(app, name), f"{name} must be imported at module top (componentize-py)"
 
 

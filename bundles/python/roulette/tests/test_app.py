@@ -238,13 +238,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    kv = install_fake_kv_host(monkeypatch)
-    host = _FakeHost(kv)
-    _attach_non_kv_fakes(host, flag_enabled=False)
-    assert _run(transform(_sample_event("!roulette"))) is None
-
-
 def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:
     result = _run(transform(_sample_event("!roulette", is_mod=True, is_broadcaster=False)))
     assert result is not None

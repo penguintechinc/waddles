@@ -4,7 +4,8 @@ name: Shoutout Bundle (Python)
 # 1.0.0: initial kv-only v1 -- `!so <user>` (post), `!so set <template>`, and two
 # default-OFF sub-modules (`auto`, `ai`). See src/app.py's own module docstring.
 # 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
-version: 1.0.3
+# 1.0.4: activation-gated only -- removed the in-bundle waddles.command-shoutout feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.4
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -68,6 +69,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.3"
-  min_version: "1.0.3"
+  tested_with: "1.0.4"
+  min_version: "1.0.4"
   max_version: null

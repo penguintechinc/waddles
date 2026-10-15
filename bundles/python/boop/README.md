@@ -6,7 +6,7 @@ component. Structural twin of `wave`; flavor bank written fresh for this bundle.
 
 | | |
 |---|---|
-| Flag | `waddles.command-boop` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`, no DB, no egress) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -33,14 +33,11 @@ silently dropped. No verbs: the only argument is the free-text target, so the sh
 
 | id | why |
 |---|---|
-| `flags.read` | reads the `waddles.command-boop` PostHog flag to gate the command |
 
 All logic runs in `transform()`; `dispatch()` is a pure relay to the event's own platform.
 
 ## Behavior notes
 
-- **Flag fails closed.** Queried with `default=False`; flag OFF is indistinguishable from an
-  unrecognized command (no reply).
 - **PII-free logs.** Logs carry only platform + reply shape (`solo`/`targeted`/`usage`) --
   never the actor, the target, or any typed token (gh-674). The reply text itself may echo the
   target back into the same public channel; that is the command's purpose.

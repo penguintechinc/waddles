@@ -24,8 +24,8 @@ values, the actor, or raw message text.
 
 Business logic lives in `transform()` (like `count`); `dispatch()` is a pure relay.
 
-Gated behind the PostHog flag ``waddles.command-socials`` (default OFF); cheap command-match
-first, flag check second. `kv`/`log`/`relay`/`feature_flags` are imported at MODULE LOAD on
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs. `kv`/`log`/`relay` are imported at MODULE LOAD on
 purpose -- componentize-py only wizens eagerly imported WIT host-imports (see
 `docs/reference/bundle-host-imports.md`).
 """
@@ -43,11 +43,7 @@ from waddle_sdk.command import (
     ParsedCommand,
     parse_command,
 )
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention.
-FLAG_KEY = "waddles.command-socials"
 
 COMMAND = "!socials"
 SPEC = CommandSpec(name="socials")
@@ -268,8 +264,8 @@ async def _route(parsed: ParsedCommand, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!socials` and build the reply.
 
-    Returns `None` for a non-chat payload, a message that isn't `!socials`, or while the flag is
-    off. A recognized-but-malformed command always gets a usage/error reply, never silence; a `kv`
+    Returns `None` for a non-chat payload, a message that isn't `!socials`. A
+    recognized-but-malformed command always gets a usage/error reply, never silence; a `kv`
     failure logs `socials.kv_failure` loudly and still replies.
     """
     text = event.payload.get("text")
@@ -278,9 +274,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() != COMMAND:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

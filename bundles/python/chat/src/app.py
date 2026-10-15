@@ -37,7 +37,7 @@ capability issues a service-to-service JWT today.
 
 Until a host capability exists for this (e.g. a dedicated WIT import for
 hub-owned read-only lookups, or a service-authenticated call path into
-hub-api), both commands recognize correctly, stay flag-gated, and always
+hub-api), both commands recognize correctly and always
 produce an explicit, honest reply -- never a crash, never a silent drop.
 Tracked: https://github.com/penguintechinc/waddles/issues/678
 
@@ -48,10 +48,8 @@ PII note: every `log.*` call here is scoped to command metadata only,
 never message content or usernames (AUTHORING.md's log-sanitization rule;
 see also `critical-rules.md` PII Tokenization).
 
-Gated behind the PostHog flag ``waddles.command-chat``, default OFF (see
-`bundles/python/count/src/app.py`'s own docstring for the flag-gate
-rationale and ordering: cheapest disqualifying checks first, flag check
-only once a `!`-prefixed, command-matching message is in hand).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 
 **BUILD-ONLY / INERT**: `core/svc_process`'s `bot_process._FEATURE_MODULES`
 still runs the original `community_chat_process` monolith module -- this
@@ -68,9 +66,6 @@ from typing import Any
 from waddle_sdk import log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
 from waddle_sdk.flask_core import PlatformEvent, StageEnvelope
-from waddle_sdk.flask_core.feature_flags import feature_enabled
-
-FLAG_KEY = "waddles.command-chat"
 
 _CHAT_HISTORY_SPEC = CommandSpec(name="chat-history")
 _CHANNELS_SPEC = CommandSpec(name="channels")
@@ -89,8 +84,8 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: reply to `!chat-history`/`!channels`, else `None`.
 
     Returns `None` for any non-chat payload, text with no leading `!`
-    (cheap-skip before the flag check), an unrecognized leading command
-    token, and while `waddles.command-chat` is disabled. Once a command
+    (cheap-skip), an unrecognized leading command
+    token. Once a command
     token matches, parsing failures and the always-current architecture-gap
     reply (module docstring) both still produce a reply -- never a silent
     drop (AUTHORING.md's fail-loud rule).
@@ -108,9 +103,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     elif head == f"!{_CHANNELS_SPEC.name}":
         spec = _CHANNELS_SPEC
     else:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

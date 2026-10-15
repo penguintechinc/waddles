@@ -23,7 +23,8 @@ Data scoping: all state is community-scoped via `waddle_sdk.community_kv`
 (one active round per community). No player identity is stored or logged;
 logs carry only community id, op, and counts -- never the guessed values.
 
-Gated behind the PostHog flag ``waddles.command-guess``, default OFF.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -33,10 +34,8 @@ import random
 from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-guess"
 COMMAND = "guess"
 
 RANGE_MIN = 1
@@ -71,8 +70,7 @@ def _classify(stripped: str) -> tuple[str, str | None]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!guess` and its verbs.
 
-    No `kv` access. Returns `None` for non-chat payloads, non-`!guess` text,
-    and while `waddles.command-guess` is disabled.
+    No `kv` access. Returns `None` for non-chat payloads, non-`!guess` text.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -81,9 +79,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.split(maxsplit=1)[0].lower() if stripped else ""
     if head != f"!{COMMAND}":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     action, arg = _classify(stripped)

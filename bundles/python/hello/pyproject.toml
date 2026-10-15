@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-hello"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!hello` (aliases `!hi`/`!hey`) -> a friendly greeting. Stateless: relay only, no kv/db."
 requires-python = ">=3.13"
 dependencies = []

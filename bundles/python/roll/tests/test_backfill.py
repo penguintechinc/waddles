@@ -19,7 +19,6 @@ import app
 import pytest
 from app import (
     DEFAULT_SIDES,
-    FLAG_KEY,
     MAX_COUNT,
     MAX_SIDES,
     USAGE_TEXT,
@@ -159,39 +158,6 @@ def test_extra_trailing_tokens_do_not_match_the_command_pattern(host: _Host) -> 
     """Documented limitation: `!roll 2d6 extra` is not a recognized invocation (no reply)."""
     assert _run(transform(_event("!roll 2d6 extra"))) is None
     assert host.relay_calls == []
-
-
-def test_flag_is_checked_with_a_fail_closed_default(host: _Host) -> None:
-    _run(transform(_event("!roll")))
-    assert host.flag_calls == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-roll"
-
-
-def test_flag_server_outage_echoing_the_default_keeps_the_command_off(host: _Host) -> None:
-    """A flag outage makes the host echo the supplied default -> `False` -> no reply."""
-    host.flag_value = None
-    assert _run(transform(_event("!roll"))) is None
-    assert host.log_calls == []
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No `wit_world` binding at all -> `feature_enabled` returns its default (`False`)."""
-    monkeypatch.delitem(sys.modules, "wit_world", raising=False)
-    monkeypatch.setitem(sys.modules, "wit_world", None)  # makes `import wit_world` raise
-    assert _run(transform(_event("!roll"))) is None
-
-
-def test_flag_off_consumes_no_randomness_and_logs_nothing(
-    host: _Host, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    host.flag_value = False
-
-    def _boom(*_a: Any) -> int:
-        raise AssertionError("randint must not run while the flag is off")
-
-    monkeypatch.setattr(app.random, "randint", _boom)
-    assert _run(transform(_event("!roll 2d6"))) is None
-    assert host.log_calls == []
 
 
 @pytest.mark.parametrize("payload", [{}, {"text": None}, {"text": 42}, {"text": ["!roll"]}])

@@ -38,17 +38,13 @@ needed).
 
 | Id | Why |
 |---|---|
-| `flags.read` | Reads the `waddles.command-roll` PostHog flag via `feature_enabled` to gate the command. |
 
 No `storage.kv` / `db` (stateless, `data.tables: []`) and no egress (`egress: []`): replies go
 out over the `relay` host import to the event's own origin platform.
 
-## Feature flag
+## Gating
 
-`waddles.command-roll`, **default OFF**. Checked in `transform()` *after* the cheap command match
-and *before* any dice logic. The flag is requested with `default=False`, so a flag-server outage
-(host echoes the default) or a missing `wit_world` keeps the command off -- fail-closed. When off,
-the bundle neither rolls nor logs.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

@@ -196,12 +196,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring(fake_host: _FakeHost) 
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_every_reply(fake_host: _FakeHost) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_sample_event("!trivia start"))) is None
-    assert _run(transform(_sample_event("!trivia answer Paris"))) is None
-
-
 # ---------------------------------------------------------------------------
 # start: poses a question, never overwrites an in-progress round
 # ---------------------------------------------------------------------------

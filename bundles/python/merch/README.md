@@ -6,7 +6,7 @@ community can alias another name with the existing `alias` bundle (one prefix pe
 
 | | |
 |---|---|
-| Flag | `waddles.command-merch` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped (one key: the link) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -50,7 +50,6 @@ The stored value is re-validated on read; a corrupt value fails loud (below).
 | id | why |
 |---|---|
 | `storage.kv` | persists the per-community merch store link |
-| `flags.read` | gates the command behind `waddles.command-merch` |
 
 ## State
 
@@ -71,7 +70,7 @@ No actor identity is stored.
   ERROR and replies "something went wrong"; a corrupt value is never overwritten.
 - **PII-free logs.** Only op names, reason codes and exception types -- never the URL, message
   text or the actor.
-- Eager host imports (`kv`, `log`, `relay`, `feature_enabled`) at module top, required for
+- Eager host imports (`kv`, `log`, `relay`) at module top, required for
   componentize-py wizening (`docs/reference/bundle-host-imports.md`).
 - `transform()` builds the reply; `dispatch()` is a pure relay.
 

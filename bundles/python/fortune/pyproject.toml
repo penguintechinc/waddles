@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-fortune"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!fortune` -> a random SFW fortune-cookie line. Relay only, no kv/db state. Mirrors bundles/python/eightball."
 requires-python = ">=3.13"
 dependencies = []

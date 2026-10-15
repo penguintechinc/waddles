@@ -17,7 +17,6 @@ import pytest
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 from app import (
-    FLAG_KEY,
     KEY_PREFIX,
     MAX_MEMORIES,
     MAX_REPLY_CHARS,
@@ -182,14 +181,6 @@ def _logged(host: _Host) -> str:
 def test_non_matching_payloads_return_none(host: _Host, text: Any) -> None:
     assert _run(transform(_event(text))) is None
     assert host.flag_keys == []
-    assert host.kv.calls == []
-
-
-def test_flag_off_returns_none_without_touching_kv(host: _Host) -> None:
-    host.flag_enabled = False
-    assert _run(transform(_event("!remember hi"))) is None
-    assert host.flag_keys == [FLAG_KEY]
-    assert FLAG_KEY == "waddles.command-memories"
     assert host.kv.calls == []
 
 

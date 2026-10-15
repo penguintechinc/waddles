@@ -95,7 +95,6 @@ letter/digit/underscore.
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists per-community social-interaction counters. |
-| `flags.read` | Gates the commands behind their `waddles.command-social` feature flag. |
 
 No `db` (`data.tables: []`), no egress, and **no moderator-gated verb** (no cooldown, no admin
 config), so there is no mod gate to fail closed.
@@ -131,12 +130,9 @@ public *reply* may echo the typed target (it returns to the channel it came from
 may not. Regression:
 `tests/test_backfill.py::test_no_log_line_or_kv_key_contains_a_typed_target_or_the_raw_actor`.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-social`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap command-name match and before the
-real classification. One flag gates all four commands (`!hug`/`!highfive`/`!pat`/`!social`) --
-they ship and roll back together.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 

@@ -10,6 +10,10 @@ badge-truthiness`) forbids the pattern; this suite proves the BEHAVIOUR on the r
 2. every bundle whose `transform()` forwards badges to `dispatch` forwards a string badge as a
    real `False`, never `True`.
 
+3. app bundles are activation-gated, NOT feature-flag-gated (Global:INSTALLED -> Tenant:ENABLED ->
+   Community:ACTIVATED, DB-tracked): no `feature_enabled` / `FLAG_KEY` in app bundle source, with
+   an explicit, reasoned allowlist for any bundle that still carries a flag guard.
+
 Bundles are loaded straight from `bundles/python/*/src/app.py` under unique module names, with the
 real `waddle_sdk` on `sys.path` and only the WIT `wit_world` import faked. Denominators are
 asserted: a loader that found zero bundles/gates would otherwise pass vacuously.
@@ -65,6 +69,31 @@ def _badge_bundles() -> list[Path]:
 
 
 BADGE_APPS = _badge_bundles()
+
+#: Identifiers whose presence in app bundle code means a feature-flag gate. App bundles must not use
+#: them -- only SYSTEM bundles are flag-gated.
+FLAG_IDENTIFIERS = frozenset({"feature_enabled", "FLAG_KEY", "FEATURE_FLAG_KEY"})
+
+#: App bundles still carrying flag guards, with the reason. Exact-match enforced: an entry that is
+#: no longer flagged fails the suite (stale allowlist), so this can only shrink.
+FLAG_GUARD_ALLOWLIST = {
+    "secret": "not yet converted to activation-only: also gates the hub-api secret-messaging "
+    "endpoint behind waddles.secret-messaging; tracked as follow-up",
+}
+
+
+def _flag_identifiers_used(app_path: Path) -> set[str]:
+    """Flag-gate identifiers a bundle's code (AST, so docstrings/comments don't count) references."""
+    tree = ast.parse(app_path.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in FLAG_IDENTIFIERS:
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in FLAG_IDENTIFIERS:
+            found.add(node.attr)
+        elif isinstance(node, ast.alias) and node.name in FLAG_IDENTIFIERS:
+            found.add(node.name)
+    return found
 
 
 def _gate_functions(app_path: Path) -> list[tuple[str, bool]]:
@@ -133,6 +162,23 @@ def test_denominator_the_scan_found_the_badge_reading_bundles() -> None:
     assert len(BADGE_APPS) >= 30, f"expected >=30 badge-reading bundles, found {len(BADGE_APPS)}"
 
 
+def test_app_bundles_are_flag_free_activation_gated_only() -> None:
+    """No app bundle references `feature_enabled`/`FLAG_KEY` (beyond the exact reasoned allowlist).
+
+    Denominator asserted: a glob that scanned nothing must FAIL, not pass vacuously.
+    """
+    apps = sorted(BUNDLES_DIR.glob("*/src/app.py"))
+    assert len(apps) >= 20, f"expected >=20 app bundles scanned, found {len(apps)}"
+    flagged = {p.parent.parent.name: sorted(ids) for p in apps if (ids := _flag_identifiers_used(p))}
+    unexpected = {n: ids for n, ids in flagged.items() if n not in FLAG_GUARD_ALLOWLIST}
+    assert not unexpected, (
+        f"app bundles must be activation-gated only (no feature flags); flag guards found in "
+        f"{unexpected} (scanned {len(apps)} bundles)"
+    )
+    stale = sorted(set(FLAG_GUARD_ALLOWLIST) - set(flagged))
+    assert not stale, f"FLAG_GUARD_ALLOWLIST entries no longer flagged -- remove them: {stale}"
+
+
 @pytest.mark.parametrize("app_path", BADGE_APPS, ids=_ids(BADGE_APPS))
 def test_every_gate_helper_denies_hostile_badges_and_admits_real_ones(
     app_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -167,13 +213,12 @@ def test_transform_never_launders_a_string_badge_into_true(monkeypatch: pytest.M
     exercised: list[str] = []
     for app_path in BADGE_APPS:
         module = _load(app_path, monkeypatch)
-        if not hasattr(module, "feature_enabled"):
-            continue
+        if hasattr(module, "feature_enabled"):  # allowlisted flag-guarded bundle: switch the guard on
 
-        async def _on(*_a: Any, **_k: Any) -> bool:
-            return True
+            async def _on(*_a: Any, **_k: Any) -> bool:
+                return True
 
-        monkeypatch.setattr(module, "feature_enabled", _on)
+            monkeypatch.setattr(module, "feature_enabled", _on)
         event = _platform_event(
             module, {"text": _command_text(app_path), "channel_id": "1", "is_mod": "false", "is_broadcaster": "false"}
         )
@@ -194,11 +239,6 @@ def test_transform_forwards_a_real_true_unchanged(monkeypatch: pytest.MonkeyPatc
     _fake_wit_world(monkeypatch)
     app_path = BUNDLES_DIR / "quote" / "src" / "app.py"
     module = _load(app_path, monkeypatch)
-
-    async def _on(*_a: Any, **_k: Any) -> bool:
-        return True
-
-    monkeypatch.setattr(module, "feature_enabled", _on)
     event = _platform_event(module, {"text": "!quote add hi", "channel_id": "1", "is_mod": True, "is_broadcaster": False})
     result = asyncio.run(module.transform(event))
     assert result is not None

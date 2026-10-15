@@ -144,11 +144,6 @@ def test_non_chat_payload_ignored(fake_host: _FakeHost) -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_reply(fake_host: _FakeHost) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_event("!guess 5"))) is None
-
-
 def test_start_picks_secret_in_range(fake_host: _FakeHost) -> None:
     for _ in range(30):
         fake_host.store.clear()

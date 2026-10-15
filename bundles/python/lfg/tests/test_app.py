@@ -132,13 +132,6 @@ def test_missing_group_usage_and_nonmatching(host: _Host) -> None:
     assert _run(transform(_event("!lfgx list"))) is None
 
 
-def test_flag_off_and_key_charset(host: _Host) -> None:
-    _say("!lfg create a")
-    assert all(":" not in k for k in host.kv.store)
-    host.flag = False
-    assert _run(transform(_event("!lfg list"))) is None
-
-
 def test_members_stored_as_uuid_not_username(host: _Host) -> None:
     _say("!lfg create a", actor="SecretName")
     raw = host.kv.store[GROUPS_KEY].decode()

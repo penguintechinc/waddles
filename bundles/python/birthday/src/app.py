@@ -16,14 +16,13 @@ tokenization pipeline is pending). The identity is lower-cased so the caller's o
 a typed ``@Name`` mention resolve to the same key. The key uses ``.``, never ``:`` (the host's
 reserved separator, gh-631). The `kv` host scopes every key by `(tenant, community, app_id)`.
 
-Ordering inside `transform()`: cheap command match first, then the PostHog flag
-``waddles.command-birthday`` (default OFF), then grammar, then `kv`. A `kv` failure or a
-corrupt stored value becomes a private `_KvError`, logged at ERROR and answered with an
-explicit reply -- never a silent no-op. A bad date is a `CommandUsageError` answered with its
-own explicit message. Logs are PII-free: only op names, platform and exception types -- never
-the birthday value, the actor, or the ``@target``.
+Ordering inside `transform()`: cheap command match first, then grammar, then `kv`. A `kv` failure or
+a corrupt stored value becomes a private `_KvError`, logged at ERROR and answered with an explicit
+reply -- never a silent no-op. A bad date is a `CommandUsageError` answered with its own explicit
+message. Logs are PII-free: only op names, platform and exception types -- never the birthday value,
+the actor, or the ``@target``.
 
-`kv`, `log`, `relay` and `feature_enabled` are imported at MODULE LOAD on purpose:
+`kv`, `log` and `relay` are imported at MODULE LOAD on purpose:
 componentize-py only wizens a WIT host-import that is imported eagerly
 (`docs/reference/bundle-host-imports.md`).
 """
@@ -37,11 +36,7 @@ from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
 from waddle_sdk.command import VERBS, CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention (default OFF).
-FLAG_KEY = "waddles.command-birthday"
 
 #: Prefix of the per-user `kv` key (community-scoped by the host; `.`, never `:`).
 KEY_PREFIX = "birthday."
@@ -262,9 +257,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head = text.strip().partition(" ")[0]
     if head.lower() != _COMMAND:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

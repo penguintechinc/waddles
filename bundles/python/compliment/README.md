@@ -7,7 +7,7 @@ Built-in lines are original to Waddles (no third-party text).
 
 | | |
 |---|---|
-| Flag | `waddles.command-compliment` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped (`community_id=None` = valid tenant-wide sentinel) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -36,7 +36,6 @@ parser has no positional-argument slot): a first token that is not a verb is the
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-compliment` |
 | `storage.kv` | persists custom compliments and the last-served compliment per community |
 
 ## State

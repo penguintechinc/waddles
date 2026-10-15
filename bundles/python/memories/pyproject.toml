@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-memories"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!remember <text>` / `!memories [@user]` / `!forget <id|all>` -> per-user remembered facts (self-managed, public read, 20-item cap), one hashed kv key per user."
 requires-python = ">=3.13"
 dependencies = []

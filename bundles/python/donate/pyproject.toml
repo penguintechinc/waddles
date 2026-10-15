@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-donate"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!donate` -> show / set (mod-only) / reset (mod-only) the community donation link (kv-backed, strict URL validation)."
 requires-python = ">=3.13"
 dependencies = []

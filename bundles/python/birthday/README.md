@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Flag | `waddles.command-birthday` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped, one hashed key per user |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -43,7 +43,6 @@ replies usage instead of looking up a user called `03-25`.
 | id | why |
 |---|---|
 | `storage.kv` | persists each user's own birthday under a hashed key |
-| `flags.read` | gates the command behind `waddles.command-birthday` |
 
 ## State (kv, community-scoped)
 
@@ -66,7 +65,7 @@ replies usage instead of looking up a user called `03-25`.
   the caller is; reading `@other` still works.
 - **PII-free logs.** Only op names, platform and exception types -- never the birthday value,
   the actor, or the `@target`.
-- Eager host imports (`kv`, `log`, `relay`, `feature_enabled`) at module top, required for
+- Eager host imports (`kv`, `log`, `relay`) at module top, required for
   componentize-py wizening (`docs/reference/bundle-host-imports.md`).
 - `transform()` builds the reply; `dispatch()` is a pure relay.
 

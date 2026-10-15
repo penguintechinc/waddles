@@ -104,16 +104,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring() -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`waddles.command-boop` OFF -> a matching command still produces no reply."""
-    flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: False)
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(flags=flags_mod)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-    assert _run(transform(_sample_event("!boop"))) is None
-
-
 def _sample_envelope(platform: str, text: str, *, channel_id: str | None = "12345") -> StageEnvelope:
     return StageEnvelope(
         tenant="tenant-1",
@@ -190,24 +180,6 @@ def test_logs_never_contain_actor_target_or_extra_tokens(fake_host) -> None:
         blob = f"{message} {fields_json}".lower()
         for sentinel in ("piiactor_alice", "piitarget_bob", "piiextra_tokens"):
             assert sentinel not in blob
-
-
-def test_flag_is_queried_default_off_so_it_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The bundle must ask the host for `waddles.command-boop` with `default_value=False`."""
-    asked: list[tuple[str, bool]] = []
-
-    def _enabled(key: str, default_value: bool) -> bool:
-        asked.append((key, default_value))
-        return default_value
-
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        flags=types.SimpleNamespace(enabled=_enabled)
-    )
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-    assert _run(transform(_sample_event("!boop"))) is None
-    assert asked == [("waddles.command-boop", False)]
 
 
 def test_target_with_leading_at_and_dots_hyphens_is_accepted(fake_host) -> None:

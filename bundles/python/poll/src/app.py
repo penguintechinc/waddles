@@ -75,8 +75,8 @@ chat with a generic retry message, AND re-raised. A failed second step of a two-
 the failure never strands an unreachable poll or a vote that was claimed but never counted. No
 stubs: every declared command path has a real implementation.
 
-Gated behind the PostHog flag ``waddles.command-poll`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate rationale and ordering.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -91,10 +91,7 @@ from typing import Any, NoReturn, TypeVar
 from waddle_sdk import community_kv, db, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-poll"
 
 SPEC = CommandSpec(name="poll")
 
@@ -284,9 +281,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head = text.strip().partition(" ")[0]
     if head.lower() != "!poll":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

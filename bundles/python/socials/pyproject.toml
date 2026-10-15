@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-socials"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!socials` -> per-community social-media links (!socials, !socials set/remove/list), kv-backed. Hand-built (not bundle_compiler-routed) structure, modeled on bundles/python/count."
 requires-python = ">=3.13"
 dependencies = []
