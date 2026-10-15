@@ -120,6 +120,13 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        # waddles.ingest-dynamic-connections env baseline: svc-ingest resolves each event's
+        # guild/channel to a numeric scope via hub-api and stamps schema-v3 envelopes (an
+        # unresolvable source is dropped, never defaulted). Rendered only with the grant above.
+        - name: INGEST_DYNAMIC_CONNECTIONS
+          value: "true"
+        - name: WADDLES_ENVIRONMENT
+          value: {{ .Values.global.environment | default "alpha" | quote }}
         {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid }}
         - name: ENVELOPE_BINDING_ACTIVE_KID

@@ -133,6 +133,12 @@ pub struct IngestMetrics {
     /// running, 0 while it's down/retrying -- labeled by receiver, backs
     /// `crate::http::health::readyz`'s per-receiver readiness report.
     pub consumer_loop_running: prometheus::IntGaugeVec,
+    /// Dataplane scope-resolver outcomes, labeled by platform/outcome
+    /// (`hit`/`resolved`/`not_found`/`ambiguous`/`invalid`/`inconsistent`/
+    /// `error`/`no_source`) -- every non-`hit`/`resolved` outcome means the
+    /// event was DROPPED (never defaulted to a tenant), so a rising
+    /// miss rate is the operator's signal that guilds/channels are unlinked.
+    pub scope_resolutions_total: prometheus::IntCounterVec,
 }
 
 /// Registers this service's ingest-path metrics against `registry`. Must be
@@ -253,7 +259,21 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .register(Box::new(consumer_loop_running.clone()))
         .expect("register svc_ingest_consumer_loop_running");
 
+    let scope_resolutions_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_scope_resolutions_total",
+            "Dataplane scope-resolver outcomes, labeled by platform/outcome \
+             (non-hit/resolved outcomes: the event was dropped, never defaulted)",
+        ),
+        &["platform", "outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(scope_resolutions_total.clone()))
+        .expect("register svc_ingest_scope_resolutions_total");
+
     IngestMetrics {
+        scope_resolutions_total,
         events_published_total,
         publish_errors_total,
         receiver_reconnects_total,
@@ -349,6 +369,14 @@ impl ReceiverHealthMetrics for IngestMetrics {
             code = ?code,
             "receiver connection marked unhealthy (fatal, non-retryable close)"
         );
+    }
+}
+
+impl crate::scope_resolver::ResolverMetrics for IngestMetrics {
+    fn scope_resolution(&self, platform: &str, outcome: &'static str) {
+        self.scope_resolutions_total
+            .with_label_values(&[platform, outcome])
+            .inc();
     }
 }
 

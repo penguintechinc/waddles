@@ -74,6 +74,7 @@ pub mod normalize;
 pub mod outbound;
 pub mod outbound_ops;
 pub mod publish;
+pub mod scope_resolver;
 pub mod telemetry;
 
 use std::net::SocketAddr;
@@ -265,6 +266,10 @@ where
     // regardless of license/flag-server reachability.
     let license_client = license::build_license_client();
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
+        // Schema-v3 producer: resolver is installed BEFORE any receiver can
+        // publish. A flag that is ON but misconfigured fails the process
+        // loudly -- never a silent downgrade to the v2/static path.
+        try_install_scope_resolver(&config, ingest_metrics.clone())?;
         // Twitch IRC (primary e2e path), Discord Gateway (secondary), the
         // Twitch outbound relay drain, and the Twitch EventSub webhook
         // receiver each independently no-op with a logged reason when
@@ -313,6 +318,57 @@ where
         async { metrics_server.await.map_err(anyhow::Error::from) },
     )?;
 
+    Ok(())
+}
+
+/// Installs the dataplane scope resolver when
+/// `waddles.ingest-dynamic-connections` is ON, i.e. its env baseline
+/// `INGEST_DYNAMIC_CONNECTIONS=true` (default OFF; the chart turns it on in
+/// alpha only). Deliberately NOT read through the `penguin_licensing` client:
+/// this service's hardcoded `*.waddles.app` domain bypass ([`license`]) makes
+/// that client evaluate EVERY flag ON, so it could never provide a default-OFF
+/// gate. Flag OFF is a no-op: every event keeps the unchanged v2/static envelope. Flag ON with a
+/// missing machine-JWT bootstrap config, or a plaintext
+/// `http://` hub-api outside alpha is an `Err` -- fail loud, never silently
+/// fall back.
+fn try_install_scope_resolver(
+    config: &config::Config,
+    metrics: Arc<telemetry::IngestMetrics>,
+) -> anyhow::Result<()> {
+    if !config.cli.dynamic_connections {
+        tracing::info!(
+            flag = scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG,
+            "flag is OFF; publishing schema-v2 static-scope envelopes"
+        );
+        return Ok(());
+    }
+    let cli = &config.cli;
+    if cli.service_jwt_token_endpoint.is_empty() {
+        anyhow::bail!(
+            "{} is ON but SERVICE_JWT_TOKEN_ENDPOINT is unset: no machine JWT for the resolver",
+            scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG
+        );
+    }
+    scope_resolver::check_transport(&cli.hub_api_url, &cli.environment)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let jwt = Arc::new(service_auth::MachineJwtClient::new(
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        scope_resolver::RESOLVE_SCOPE_JWT_SCOPE,
+    ));
+    let source = scope_resolver::HubScopeSource::new(&cli.hub_api_url, jwt)?;
+    let resolver = Arc::new(scope_resolver::ScopeResolver::new(
+        source,
+        scope_resolver::ResolverConfig::default(),
+        metrics,
+    ));
+    if !publish::install_scope_resolver(resolver) {
+        anyhow::bail!("scope resolver was already installed");
+    }
+    tracing::info!(
+        flag = scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG,
+        "flag is ON; publishing schema-v3 envelopes with resolver-supplied numeric scope"
+    );
     Ok(())
 }
 
