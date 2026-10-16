@@ -182,7 +182,8 @@ class TestSeederPlatformConnections:
             "CORE_BUNDLES_PLATFORM_CONNECTIONS missing -- seeder won't register the "
             "alpha Discord ingest source"
         )
-        assert "dg-474965105759748096" in connections.get("value", "")
+        assert "474965105759748096" in connections.get("value", "")
+        assert "dg-474965105759748096" not in connections.get("value", "")
         assert "discord" in connections.get("value", "")
 
 

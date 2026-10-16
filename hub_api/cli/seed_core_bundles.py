@@ -736,7 +736,7 @@ def ingest_source_id(platform: str, raw_id: str) -> str:
     and `ingest_sources`/`app_source_bindings` must carry that exact form or the consumer binds
     to a stream nobody writes. Already-prefixed input is returned unchanged (idempotent).
 
-    TODO: svc-ingest's Rust `source_id()` (core/svc_ingest/src/ingest/{discord,twitch}.rs) is
+    NOTE: svc-ingest's Rust `source_id()` (core/svc_ingest/src/ingest/{discord,twitch}.rs) is
     the source of truth; this Python copy must stay in sync (ideally a shared constant later).
     """
     prefix = _INGEST_SOURCE_ID_PREFIX.get(platform.strip().lower())
