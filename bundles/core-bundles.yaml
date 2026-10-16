@@ -785,7 +785,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.ship
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/ship
     manifest_path: ship.manifest.yaml
@@ -794,7 +794,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.iq
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/iq
     manifest_path: iq.manifest.yaml
@@ -837,7 +837,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.lastseen
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/lastseen
     manifest_path: lastseen.manifest.yaml
