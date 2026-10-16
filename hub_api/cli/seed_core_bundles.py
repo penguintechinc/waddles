@@ -724,6 +724,29 @@ _RESOLVE_LEGACY_COMMUNITY_SQL = """
 """
 
 
+_INGEST_SOURCE_ID_PREFIX: dict[str, str] = {"discord": "dg-", "twitch": "tw-"}
+
+
+def ingest_source_id(platform: str, raw_id: str) -> str:
+    """Derive the svc-ingest stream `source_id` for a connection's raw platform id.
+
+    A connection's `source_id` is the RAW platform id (guild id, channel login) -- the form
+    `community_servers.platform_server_id` stores and community resolution matches. svc-ingest
+    publishes under a prefixed form (discord `dg-{guild}`, twitch `tw-{lowercased channel}`),
+    and `ingest_sources`/`app_source_bindings` must carry that exact form or the consumer binds
+    to a stream nobody writes. Already-prefixed input is returned unchanged (idempotent).
+
+    TODO: svc-ingest's Rust `source_id()` (core/svc_ingest/src/ingest/{discord,twitch}.rs) is
+    the source of truth; this Python copy must stay in sync (ideally a shared constant later).
+    """
+    prefix = _INGEST_SOURCE_ID_PREFIX.get(platform.strip().lower())
+    if prefix is None:
+        return raw_id
+    if platform.strip().lower() == "twitch":
+        raw_id = raw_id.lstrip("#").lower()
+    return raw_id if raw_id.startswith(prefix) else f"{prefix}{raw_id}"
+
+
 async def resolve_connection_community(
     install_dal: AsyncDB, *, tenant_id: int, connection: PlatformConnection
 ) -> int | None:
@@ -779,10 +802,11 @@ async def seed_platform_connection(
     registration, `"no_op"` on every re-run after that (byte-identical row already enabled).
     """
     tenant_id = await _resolve_tenant_id(install_dal, connection.tenant_slug)
+    ingest_id = ingest_source_id(connection.platform, connection.source_id)
     existing = await install_dal(
         (install_dal.ingest_sources.tenant_id == tenant_id)
         & (install_dal.ingest_sources.platform == connection.platform)
-        & (install_dal.ingest_sources.source_id == connection.source_id)
+        & (install_dal.ingest_sources.source_id == ingest_id)
     ).select()
     existing_row = existing.first()
     already_present = existing_row is not None and bool(existing_row.enabled)
@@ -792,7 +816,7 @@ async def seed_platform_connection(
         tenant_id=tenant_id,
         community_id=connection.community_id,
         platform=connection.platform,
-        source_id=connection.source_id,
+        source_id=ingest_id,
         label=connection.label,
     )
     outcome = "no_op" if already_present else "created"
@@ -800,14 +824,12 @@ async def seed_platform_connection(
         "core-bundle-seeder: platform connection registered",
         extra={
             "platform": connection.platform,
-            "source_id": connection.source_id,
+            "source_id": ingest_id,
             "tenant": connection.tenant_slug,
             "outcome": outcome,
         },
     )
-    return ConnectionResult(
-        platform=connection.platform, source_id=connection.source_id, outcome=outcome
-    )
+    return ConnectionResult(platform=connection.platform, source_id=ingest_id, outcome=outcome)
 
 
 async def seed_one(

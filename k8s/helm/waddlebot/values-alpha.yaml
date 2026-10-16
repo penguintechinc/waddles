@@ -193,7 +193,7 @@ pipeline:
     # independent of svc-process's DB-driven bundle path.
     platformConnections:
       - platform: "discord"
-        sourceId: "dg-474965105759748096"
+        sourceId: "474965105759748096"
         label: "svc-ingest platform connection"
     # fix/seeder-memory (not yet merged as of this branch's base): 64Mi/128Mi was
     # the real OOMKilled cause in CI's kind install (gh PR #480), overriding the

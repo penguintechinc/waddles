@@ -1841,3 +1841,51 @@ async def test_run_wires_the_reconcile_sweep_end_to_end(
         )
         is None
     )
+
+
+async def test_raw_guild_connection_resolves_via_raw_id_and_binds_at_dg_prefixed_source(
+    install_dal: Any,
+) -> None:
+    """Raw guild id -> community via raw id; ingest source registered at svc-ingest's dg-{id}."""
+    from services.bundle_install_dal import raw_sql_write
+
+    for ddl in (
+        "ALTER TABLE communities ADD COLUMN platform VARCHAR(50)",
+        "ALTER TABLE communities ADD COLUMN platform_server_id VARCHAR(255)",
+        "ALTER TABLE communities ADD COLUMN is_active BOOLEAN DEFAULT 1",
+        "CREATE TABLE IF NOT EXISTS community_servers (id INTEGER PRIMARY KEY, "
+        "community_id INTEGER, platform VARCHAR(50), platform_server_id VARCHAR(255), "
+        "status VARCHAR(50))",
+    ):
+        try:
+            await raw_sql_write(install_dal, ddl)
+        except Exception:  # noqa: BLE001, S110 -- column may already exist in the fixture schema
+            pass
+    guild = "474965105759748096"
+    cid = await _seed_community(install_dal, name="guild-community")
+    await raw_sql_write(
+        install_dal,
+        "INSERT INTO community_servers (community_id, platform, platform_server_id, status) "
+        "VALUES (:c, 'discord', :g, 'approved')",
+        {"c": cid, "g": guild},
+    )
+    conn = seeder.PlatformConnection(
+        tenant_slug=TENANT_SLUG, platform="discord", source_id=guild, label=guild
+    )
+    assert (
+        await seeder.resolve_connection_community(install_dal, tenant_id=1, connection=conn) == cid
+    )
+
+    result = await seeder.seed_platform_connection(install_dal, conn)
+    assert result.source_id == f"dg-{guild}"
+    assert (
+        len(await install_dal(install_dal.ingest_sources.source_id == f"dg-{guild}").select()) == 1
+    )
+    assert len(await install_dal(install_dal.ingest_sources.source_id == guild).select()) == 0
+
+
+def test_ingest_source_id_matches_svc_ingest_conventions() -> None:
+    assert seeder.ingest_source_id("discord", "123") == "dg-123"
+    assert seeder.ingest_source_id("discord", "dg-123") == "dg-123"
+    assert seeder.ingest_source_id("twitch", "#PenguinzPlays") == "tw-penguinzplays"
+    assert seeder.ingest_source_id("slack", "T1") == "T1"
