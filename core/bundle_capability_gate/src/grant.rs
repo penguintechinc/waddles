@@ -121,6 +121,11 @@ impl InMemoryGrantLoader {
     pub fn remove(&self, key: &GrantScopeKey) {
         self.rows.write().expect("lock poisoned").remove(key);
     }
+
+    #[cfg(test)]
+    fn rows_snapshot(&self, key: &GrantScopeKey) -> Option<GrantSet> {
+        self.rows.read().expect("lock poisoned").get(key).cloned()
+    }
 }
 
 impl GrantLoader for InMemoryGrantLoader {
@@ -181,6 +186,12 @@ pub struct GrantCache<L: GrantLoader> {
     /// that attempt -- a repeated miss inside [`NEGATIVE_TTL`] is answered
     /// without hitting the loader again, so denied keys cannot hammer it.
     negative: Mutex<HashMap<GrantScopeKey, Instant>>,
+    /// Per-key invalidation generation. `invalidate` bumps it; `refresh`
+    /// captures it before its load and applies the result only if it is
+    /// unchanged, so an in-flight load can never overwrite a newer
+    /// invalidation (revocation race). Always mutated while holding the
+    /// `memo` write lock, which makes the compare-and-set atomic.
+    generations: Mutex<HashMap<GrantScopeKey, u64>>,
 }
 
 /// How long a lazy-load miss is remembered before the loader is retried.
@@ -192,6 +203,7 @@ impl<L: GrantLoader> GrantCache<L> {
             loader,
             memo: RwLock::new(HashMap::new()),
             negative: Mutex::new(HashMap::new()),
+            generations: Mutex::new(HashMap::new()),
         }
     }
 
@@ -217,9 +229,9 @@ impl<L: GrantLoader> GrantCache<L> {
             }
         };
         let mut negative = self.negative.lock().expect("lock poisoned");
-        if resident {
-            negative.remove(key);
-        } else {
+        // A resident result already cleared any tombstone inside `refresh`'s
+        // compare-and-set; never clear one here (it may be newer).
+        if !resident {
             negative.insert(key.clone(), Instant::now());
         }
     }
@@ -240,19 +252,36 @@ impl<L: GrantLoader> GrantCache<L> {
     /// (spec SS4). A loader answer of `None` (revoked/deactivated) removes
     /// the memo entry, so the very next `current()` call fails closed.
     pub async fn refresh(&self, key: &GrantScopeKey) -> Result<(), GrantLoadError> {
-        match self.loader.load(key).await? {
+        // Capture the generation BEFORE the load; no lock is held across the
+        // await below.
+        let gen_before = self.generation(key);
+        let loaded = self.loader.load(key).await?;
+        let mut memo = self.memo.write().expect("lock poisoned");
+        if self.generation(key) != gen_before {
+            // An `invalidate` (revocation) landed during the load: the
+            // result is stale, so discard it and leave the key invalidated
+            // and tombstoned -- the next lazy load/refresh reads fresh.
+            return Ok(());
+        }
+        match loaded {
             Some(grants) => {
-                self.memo
-                    .write()
-                    .expect("lock poisoned")
-                    .insert(key.clone(), Arc::new(grants));
+                memo.insert(key.clone(), Arc::new(grants));
                 self.negative.lock().expect("lock poisoned").remove(key);
             }
             None => {
-                self.memo.write().expect("lock poisoned").remove(key);
+                memo.remove(key);
             }
         }
         Ok(())
+    }
+
+    fn generation(&self, key: &GrantScopeKey) -> u64 {
+        self.generations
+            .lock()
+            .expect("lock poisoned")
+            .get(key)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Drops a memo entry without re-fetching -- the immediate half of
@@ -262,7 +291,16 @@ impl<L: GrantLoader> GrantCache<L> {
     /// completes; between the two, `current()` fails closed exactly like a
     /// cache miss.
     pub fn invalidate(&self, key: &GrantScopeKey) {
-        self.memo.write().expect("lock poisoned").remove(key);
+        // Hold the memo write lock while bumping the generation so a
+        // concurrent `refresh` compare-and-set cannot interleave.
+        let mut memo = self.memo.write().expect("lock poisoned");
+        memo.remove(key);
+        *self
+            .generations
+            .lock()
+            .expect("lock poisoned")
+            .entry(key.clone())
+            .or_insert(0) += 1;
         // Tombstone: until an explicit `refresh` completes, the lazy-load
         // path must NOT silently reload this key (that would defeat the
         // fail-closed-on-revocation window above).
@@ -461,5 +499,74 @@ mod tests {
         assert_eq!(cache.seed().await.unwrap(), 2);
         assert!(cache.current(&key(1)).is_some());
         assert!(cache.current(&key(2)).is_some());
+    }
+
+    /// Loader that parks inside `load` until released, to model a slow read.
+    struct GatedLoader {
+        inner: InMemoryGrantLoader,
+        started: std::sync::atomic::AtomicBool,
+        release: std::sync::atomic::AtomicBool,
+    }
+    impl GrantLoader for GatedLoader {
+        fn load<'a>(
+            &'a self,
+            key: &'a GrantScopeKey,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<GrantSet>, GrantLoadError>> + Send + 'a>>
+        {
+            use std::sync::atomic::Ordering::SeqCst;
+            // Snapshot at load-start (the stale, pre-revocation view).
+            let snapshot = self.inner.rows_snapshot(key);
+            Box::pin(async move {
+                self.started.store(true, SeqCst);
+                std::future::poll_fn(|cx| {
+                    if self.release.load(SeqCst) {
+                        std::task::Poll::Ready(())
+                    } else {
+                        cx.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+                Ok(snapshot)
+            })
+        }
+    }
+
+    /// Regression (revocation TOCTOU): an `invalidate` during an in-flight
+    /// `refresh` must not be clobbered by the stale load result.
+    #[tokio::test]
+    async fn invalidate_during_inflight_refresh_is_not_clobbered_by_stale_load() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let inner = InMemoryGrantLoader::new();
+        inner.set(
+            key(1),
+            grant_set("chat.send:discord", serde_json::json!({})),
+        );
+        let loader = Arc::new(GatedLoader {
+            inner,
+            started: false.into(),
+            release: false.into(),
+        });
+        let cache = GrantCache::new(loader.clone());
+
+        let k = key(1);
+        let refresh = cache.refresh(&k);
+        let revoke = async {
+            while !loader.started.load(SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            cache.invalidate(&key(1));
+            loader.release.store(true, SeqCst);
+        };
+        let (res, ()) = tokio::join!(refresh, revoke);
+        res.unwrap();
+
+        assert!(
+            cache.current(&key(1)).is_none(),
+            "stale in-flight load must not re-insert a revoked grant"
+        );
+        // Tombstone intact: lazy path does not silently reload inside the window.
+        cache.ensure_loaded(&key(1)).await;
+        assert!(cache.current(&key(1)).is_none());
     }
 }
