@@ -50,6 +50,15 @@ ALLOWLIST: dict[str, str] = {
         "namespace as soon as the namespace exists; it is never a chart "
         "resource."
     ),
+    "waddlebot-bundle-signing": (
+        "Ed25519 bundle-signing Secret created at RUNTIME (not a chart "
+        "template) by the pre-install/pre-upgrade auto-provision-keys hook "
+        "(templates/auto-provisioned-keys-job.yaml, weight -6), so it always "
+        "exists before any post-* hook such as the core-bundle seeder. Name "
+        "is '<fullname>-bundle-signing' for the CI release name 'waddlebot'. "
+        "The seeder's secretKeyRef is deliberately NOT optional: a missing "
+        "key must fail closed."
+    ),
 }
 
 HOOK_ANNOTATION = "helm.sh/hook"
