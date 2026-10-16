@@ -3,7 +3,7 @@ app_id: waddles.core.example.discord
 name: Discord Invite Bundle (Python)
 # 1.0.0: initial release -- per-community Discord invite link (!discord, !discord set/reset).
 # 1.0.1: activation-gated only -- removed the in-bundle waddles.command-discord feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -46,10 +46,14 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the per-community Discord invite link"
+  - id: "chat.send:discord"
+    justification: "discord replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "discord replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null

@@ -3,7 +3,7 @@ app_id: waddles.core.example.fortune
 name: Fortune Cookie Bundle (Python)
 # 1.0.0 retired -- fix/bump-command-bundles-1.0.1, see this bundle's hub-manifest.yaml for why.
 # 1.0.1: activation-gated only -- removed the in-bundle waddles.command-fortune feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin

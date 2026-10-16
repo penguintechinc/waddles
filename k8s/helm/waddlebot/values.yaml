@@ -1585,13 +1585,20 @@ pipeline:
       # whether beta/prod sizing should match alpha's bump, scale down (smaller
       # bundles only), or scale up further (larger worst-case bundles) -- not
       # decided here, left as the pre-existing chart default in the meantime.
+      #
+      # fix/bundle-defaults-signing-grants-percommunity -- the 512Mi default OOMKills on a clean
+      # deploy: the executor EAGER-LOADS (Cranelift-compiles) the ENTIRE active set at startup.
+      # Default raised to the alpha-proven 2560Mi ceiling (request stays modest).
+      # TODO(core/bundle_executor): the real healthy fix is lazy/bounded loading -- compile a
+      # bundle on first invoke and LRU-evict under a memory budget -- so peak RSS no longer
+      # scales with the number of activated bundles. Then this limit can shrink again.
       resources:
         requests:
           cpu: "250m"
-          memory: "128Mi"
+          memory: "512Mi"
         limits:
           cpu: "1000m"
-          memory: "512Mi"
+          memory: "2560Mi"
 
     # fix/svc-action-bundle-executor-alpha-wiring -- a bundle-executor dials exactly ONE
     # stage (see STAGE_HOST_API_ADDR above); bundleExecutor above is alpha's proven

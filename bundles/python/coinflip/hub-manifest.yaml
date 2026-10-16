@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.coinflip
 name: Coinflip Bundle (Python)
-version: 1.0.4
+version: 1.0.5
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -41,4 +41,8 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-community coin-flip tallies and state"
+  - id: "chat.send:discord"
+    justification: "coinflip replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "coinflip replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 routes_to: []

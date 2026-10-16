@@ -232,3 +232,22 @@ async def test_ensure_ingest_source_reenables_a_previously_disabled_row(install_
     )
     assert reenabled.id == row.id
     assert reenabled.enabled
+
+
+async def test_ensure_ingest_source_rehomes_a_tenant_wide_row_to_the_resolved_community(
+    install_dal: Any,
+) -> None:
+    """A NULL-community row is moved onto the real community the seeder resolved.
+
+    Per-community `sync_bindings()` only matches rows whose community_id equals the
+    activation's, so an un-rehomed legacy row would never bind.
+    """
+    kwargs = {"tenant_id": 1, "platform": "discord", "source_id": "g-rehome", "label": "g"}
+    first = await ensure_ingest_source(install_dal, community_id=None, **kwargs)
+    assert first.community_id is None
+    again = await ensure_ingest_source(install_dal, community_id=7, **kwargs)
+    assert again.id == first.id
+    assert again.community_id == 7
+    # A later tenant-wide call (community_id=None) never un-homes it.
+    final = await ensure_ingest_source(install_dal, community_id=None, **kwargs)
+    assert final.community_id == 7

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-pronouns"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!pronouns` -> per-user pronouns (set your own, read your own or another user's, clear), kv-backed under a SHA-256 hashed per-user key; self-only set, not mod-gated."
 requires-python = ">=3.13"
 dependencies = []

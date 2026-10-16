@@ -212,7 +212,7 @@ async def write_bundle_sidecar(
 
     def _put() -> None:
         _client().put_object(
-            Bucket=_bucket(),
+            Bucket=_bundle_bucket(),
             Key=key,
             Body=body,
             ContentType="application/json",
@@ -238,11 +238,11 @@ async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dic
 
     def _get() -> dict[str, Any] | None:
         try:
-            resp = _client().get_object(Bucket=_bucket(), Key=key)
+            resp = _client().get_object(Bucket=_bundle_bucket(), Key=key)
         except _client().exceptions.NoSuchKey:
             logger.debug(
                 "bundle sidecar not found (typed NoSuchKey): bucket=%s key=%s",
-                _bucket(),
+                _bundle_bucket(),
                 key,
             )
             return None
@@ -252,7 +252,7 @@ async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dic
                 logger.debug(
                     "bundle sidecar not found (generic ClientError 404/NoSuchKey): "
                     "bucket=%s key=%s %s",
-                    _bucket(),
+                    _bundle_bucket(),
                     key,
                     describe_exc(exc),
                 )
@@ -263,7 +263,7 @@ async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dic
                 logging.ERROR,
                 "bundle sidecar read failed",
                 exc,
-                bucket=_bucket(),
+                bucket=_bundle_bucket(),
                 key=key,
             )
             raise

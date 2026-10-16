@@ -774,7 +774,7 @@ async def _write_tenant_wide_approval_and_activate(
     version_id: int,
     manifest: BundleManifestV2,
     approval_source: str,
-) -> tuple[int, dict[str, list[str]]]:
+) -> tuple[int, dict[str, list[str]], dict[str, Any]]:
     """TENANT-WIDE sibling of `_write_approval_and_activate()` -- SYSTEM actor only.
 
     Deliberately a SEPARATE function rather than a `community_id: int | None`
@@ -800,6 +800,7 @@ async def _write_tenant_wide_approval_and_activate(
     """
     approvals_table = install_dal.metadata.tables["app_install_approvals"]
     active_table = install_dal.metadata.tables["app_active_versions"]
+    versions_table = install_dal.metadata.tables["app_versions"]
     now = datetime.now(UTC)
     sentinel = app_source_binding_service.TENANT_WIDE_COMMUNITY_SENTINEL
 
@@ -837,6 +838,19 @@ async def _write_tenant_wide_approval_and_activate(
                 .values(superseded_by=new_id)
             )
 
+        # Artifact signing -- same in-transaction contract as
+        # `_write_approval_and_activate()`: a signing failure rolls the whole
+        # tenant-wide activation back, so the seeder can never leave a bundle
+        # activated-but-unsigned (the executor refuses unsigned artifacts).
+        signing_result = await bundle_signing_service.sign_and_record_version(
+            conn,
+            app_versions_table=versions_table,
+            version_id=version_id,
+            app_id=app_id,
+            version=version,
+            approval_id=new_id,
+        )
+
         bound = await app_source_binding_service.sync_bindings(
             conn,
             tenant_id=tenant_id,
@@ -873,7 +887,7 @@ async def _write_tenant_wide_approval_and_activate(
                 )
             )
 
-    return int(new_id), bound
+    return int(new_id), bound, signing_result
 
 
 async def activate_tenant_wide(
@@ -959,7 +973,7 @@ async def activate_tenant_wide(
         install_dal, app_id=app_id, version=version
     )
 
-    new_id, bound = await _write_tenant_wide_approval_and_activate(
+    new_id, bound, signing_result = await _write_tenant_wide_approval_and_activate(
         install_dal,
         app_id=app_id,
         version=version,
@@ -990,6 +1004,10 @@ async def activate_tenant_wide(
             "approval_source": approval_source,
         },
     )
+
+    # SIGN (post-commit sidecar upload to the executor's bundle bucket) -- raised, not
+    # best-effort: see `activate_for_community()`'s own SIGN note.
+    await bundle_signing_service.upload_signed_sidecar(**signing_result)
 
     if bound:
         tenant_slug = await _tenant_slug(install_dal, tenant_id)

@@ -99,6 +99,19 @@ spec:
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
         - name: MODULE_NAME
           value: "core-bundle-seeder"
+        # PR #870 -- the seeder now signs bundles on activation (activate_for_community ->
+        # bundle_signing_service.sign_and_record_version -> PlatformSigner.from_env()), which
+        # fail-closes without this pair. Same secretKeyRef pair as templates/hub-api.yaml.
+        - name: BUNDLE_SIGNING_PRIVATE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
+              key: BUNDLE_SIGNING_PRIVATE_KEY
+        - name: BUNDLE_SIGNING_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
+              key: BUNDLE_SIGNING_KEY_ID
         # regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509) --
         # this Job calls services/bundle_version_service.py::create_version()/
         # process_prebuilt_component() -> storage_service.upload_bundle_component(), the exact

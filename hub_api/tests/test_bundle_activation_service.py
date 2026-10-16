@@ -797,6 +797,53 @@ async def test_activate_tenant_wide_writes_the_sentinel_split(install_dal: Any) 
     assert active.activated_by is None
 
 
+async def test_activate_tenant_wide_signs_and_uploads_the_sidecar(
+    install_dal: Any, bundle_signing_sidecar_upload_mock: Any
+) -> None:
+    """The sentinel path signs the version + uploads the sidecar, like the per-community path.
+
+    Secure default: the seeder must never leave a tenant-wide-activated bundle unsigned (the
+    executor refuses unsigned artifacts).
+    """
+    await _install_and_make_available(install_dal)
+    await activate_tenant_wide(
+        install_dal,
+        tenant_id=1,
+        app_id="waddles.socials.music.default",
+        activated_by=None,
+        valkey_client=AsyncMock(),
+    )
+    version_row = (
+        await install_dal(
+            install_dal.app_versions.app_id == "waddles.socials.music.default"
+        ).select()
+    ).first()
+    assert version_row.artifact_signature
+    bundle_signing_sidecar_upload_mock.assert_awaited_once()
+    assert bundle_signing_sidecar_upload_mock.await_args.args[0] == "waddles.socials.music.default"
+
+
+async def test_activate_tenant_wide_rolls_back_when_signing_key_missing(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No signing key -> fail closed: no tenant-wide activation is left behind unsigned."""
+    monkeypatch.delenv("BUNDLE_SIGNING_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("BUNDLE_SIGNING_KEY_ID", raising=False)
+    await _install_and_make_available(install_dal)
+    with pytest.raises(Exception):  # noqa: B017, PT011 -- any signing failure must abort
+        await activate_tenant_wide(
+            install_dal,
+            tenant_id=1,
+            app_id="waddles.socials.music.default",
+            activated_by=None,
+            valkey_client=AsyncMock(),
+        )
+    active = await install_dal(
+        install_dal.app_active_versions.app_id == "waddles.socials.music.default"
+    ).select()
+    assert active.first() is None
+
+
 async def test_activate_tenant_wide_auto_binds_every_source_of_the_consumed_platform(
     install_dal: Any,
 ) -> None:
