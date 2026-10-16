@@ -1656,11 +1656,12 @@ pipeline:
   # PostHog-gated, default-ENABLED, fail-loud-when-unreachable behavior is
   # unchanged. `false` renders `PII_TOKENIZATION_ENABLED=false` on
   # svc-process-rust and `PII_DETOKENIZATION_ENABLED=false` on
-  # svc-action-rust -- both gates short-circuit to disabled (no hub_client
+  # svc-action-rust and svc-presentation-rust -- both gates short-circuit to disabled (no hub_client
   # connect attempt, no fail-loud exit) and log a WARN naming the override.
-  # SECURITY: this is an explicit, loudly-logged operator escape hatch for
-  # dev/air-gapped deployments, never a silent bypass -- it must never be the
-  # default in a production tenant.
+  # SECURITY: ON by default in EVERY environment (alpha included) -- no
+  # values-*.yaml may set this false. Opt-out is the PostHog kill-switch
+  # `waddles.core.disable-pii-tokenization` only. This key is an explicit,
+  # loudly-logged operator escape hatch, never a silent bypass.
   piiTokenization:
     enabled: true
 
@@ -3166,6 +3167,7 @@ serviceJwt:
     svc-presentation:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-presentation"
       serviceAccount: svc-presentation
+      tenant: system
       allowedScopes:
         - "identity:displayname:read"
     # feature/svc-ingest-connections-scope -- Rust svc-ingest is a data-plane CONSUMER of the
