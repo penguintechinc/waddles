@@ -59,7 +59,8 @@ import os
 import re
 import sys
 import unicodedata
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -77,7 +78,7 @@ from services.bundle_approval_service import (
     deactivate_tenant_wide,
     install_version_globally,
 )
-from services.bundle_install_dal import build_install_dal, raw_sql_write
+from services.bundle_install_dal import build_install_dal, raw_sql_rows, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
 from services.bundle_permission_service import (
     grant_community_permissions,
@@ -686,6 +687,89 @@ async def _resolve_or_publish_version(
     return int(published.app_version_id)
 
 
+@dataclass(slots=True, frozen=True)
+class TenantConnectionScope:
+    """Where one tenant's configured platform connections resolve to (seeder-run-local).
+
+    `community_ids` are the REAL `communities.id`s the tenant's connections resolved to --
+    core bundles are activated at exactly those communities, because svc-ingest (dynamic
+    connections) routes a guild to its real community's `c:<community>` stream. A connection
+    that resolved to nothing sets `needs_tenant_wide`, keeping the tenant-wide sentinel
+    activation as the fallback for it (the pre-existing behavior).
+    """
+
+    community_ids: tuple[int, ...] = ()
+    needs_tenant_wide: bool = True
+
+
+_RESOLVE_VERIFIED_COMMUNITY_SQL = """
+    SELECT DISTINCT c.id AS community_id
+    FROM community_servers cs
+    JOIN communities c ON c.id = cs.community_id
+    WHERE cs.platform = :platform
+      AND cs.platform_server_id = :source_id
+      AND cs.status = 'approved'
+      AND c.tenant_id = :tenant_id
+      AND c.is_active IS NOT FALSE
+"""
+
+_RESOLVE_LEGACY_COMMUNITY_SQL = """
+    SELECT DISTINCT c.id AS community_id
+    FROM communities c
+    WHERE c.platform = :platform
+      AND c.platform_server_id = :source_id
+      AND c.tenant_id = :tenant_id
+      AND c.id <> :sentinel
+      AND c.is_active IS NOT FALSE
+"""
+
+
+async def resolve_connection_community(
+    install_dal: AsyncDB, *, tenant_id: int, connection: PlatformConnection
+) -> int | None:
+    """Resolve a connection's `(platform, source_id)` to its REAL `communities.id`, or `None`.
+
+    Same precedence as `services/dataplane_scope.resolve_scope()` (the resolver svc-ingest
+    itself uses at runtime -- they MUST agree or the seeded binding never matches the routed
+    stream): an APPROVED `community_servers` link first, then the legacy
+    `communities.platform_server_id` self-assertion only when no verified link exists. Scoped
+    to the connection's own tenant (a guild claimed by another tenant never resolves here).
+    Fail-closed on ambiguity: zero OR several candidate communities -> `None`, so the caller
+    falls back to the tenant-wide sentinel rather than guessing a side.
+    """
+    params = {
+        "platform": connection.platform.strip().lower(),
+        "source_id": connection.source_id,
+        "tenant_id": tenant_id,
+    }
+    verified = {
+        int(row.community_id)
+        for row in await raw_sql_rows(install_dal, _RESOLVE_VERIFIED_COMMUNITY_SQL, params)
+    }
+    candidates = verified or {
+        int(row.community_id)
+        for row in await raw_sql_rows(
+            install_dal,
+            _RESOLVE_LEGACY_COMMUNITY_SQL,
+            {**params, "sentinel": TENANT_WIDE_COMMUNITY_SENTINEL},
+        )
+    }
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if candidates:
+        logger.warning(
+            "core-bundle-seeder: connection resolves to several communities; "
+            "falling back to tenant-wide",
+            extra={
+                "platform": connection.platform,
+                "source_id": connection.source_id,
+                "tenant": connection.tenant_slug,
+                "candidate_count": len(candidates),
+            },
+        )
+    return None
+
+
 async def seed_platform_connection(
     install_dal: AsyncDB, connection: PlatformConnection
 ) -> ConnectionResult:
@@ -732,8 +816,15 @@ async def seed_one(
     bundles_dir: Path,
     *,
     valkey_client: Any | None = None,
+    connection_scopes: Mapping[str, TenantConnectionScope] | None = None,
 ) -> list[SeedResult]:
     """Seed one catalog entry: publish (if new) + activate for every resolved target.
+
+    `connection_scopes` (tenant slug -> `TenantConnectionScope`, built by `_run()` from the
+    configured platform connections) turns a catalog TENANT-WIDE target (`community_id: null`)
+    into per-community activation at each REAL community the tenant's connections resolved
+    to -- the scope svc-ingest actually routes to. The tenant-wide sentinel activation is kept
+    only when some connection resolved to no community (or the tenant has none).
 
     HARD GUARD runs first, before any manifest parse or DB write. `valkey_client`, when passed
     (tests only), is forwarded to `process_prebuilt_component()`/`approve_version()` as-is --
@@ -824,6 +915,23 @@ async def seed_one(
             )
 
         if target.community_id is None:
+            scope = (connection_scopes or {}).get(target.tenant_slug)
+            if scope is not None and scope.community_ids:
+                for resolved_cid in scope.community_ids:
+                    results.append(
+                        await _seed_community_activation(
+                            install_dal,
+                            entry=entry,
+                            manifest=manifest,
+                            version_id=version_id,
+                            tenant_id=tenant_id,
+                            tenant_slug=target.tenant_slug,
+                            community_id=resolved_cid,
+                            valkey_client=valkey_client,
+                        )
+                    )
+                if not scope.needs_tenant_wide:
+                    continue
             # TENANT-WIDE activation -- see `ActivationTarget`'s own docstring
             # (regression: seeder skipped activation for community_id null,
             # alpha 2026-10-02). The DB-side sentinel is 0
@@ -882,60 +990,83 @@ async def seed_one(
             )
             continue
 
-        if await _already_active(
-            install_dal,
-            app_id=entry.app_id,
-            tenant_id=tenant_id,
-            community_id=target.community_id,
-            version_id=version_id,
-        ):
-            await _grant_core_bundle_permissions(
+        results.append(
+            await _seed_community_activation(
                 install_dal,
-                tenant_id=tenant_id,
-                community_id=target.community_id,
-                app_id=entry.app_id,
-                version=entry.version,
+                entry=entry,
                 manifest=manifest,
+                version_id=version_id,
+                tenant_id=tenant_id,
+                tenant_slug=target.tenant_slug,
+                community_id=target.community_id,
                 valkey_client=valkey_client,
             )
-            results.append(
-                SeedResult(
-                    entry.app_id,
-                    entry.version,
-                    "no_op",
-                    f"already active for tenant={target.tenant_slug!r} "
-                    f"community_id={target.community_id!r}",
-                )
-            )
-            continue
-
-        await activate_for_community(
-            install_dal,
-            tenant_id=tenant_id,
-            community_id=target.community_id,
-            app_id=entry.app_id,
-            activated_by=None,
-            approval_source=SYSTEM_ACTOR,
-            valkey_client=valkey_client,
         )
+    return results
+
+
+async def _seed_community_activation(
+    install_dal: AsyncDB,
+    *,
+    entry: CatalogEntry,
+    manifest: BundleManifestV2,
+    version_id: int,
+    tenant_id: int,
+    tenant_slug: str,
+    community_id: int,
+    valkey_client: Any | None,
+) -> SeedResult:
+    """Activate (signing + auto-bind via `activate_for_community`) and grant at ONE community.
+
+    Idempotent: an already-active bundle only re-runs the self-healing grant step.
+    """
+    if await _already_active(
+        install_dal,
+        app_id=entry.app_id,
+        tenant_id=tenant_id,
+        community_id=community_id,
+        version_id=version_id,
+    ):
         await _grant_core_bundle_permissions(
             install_dal,
             tenant_id=tenant_id,
-            community_id=target.community_id,
+            community_id=community_id,
             app_id=entry.app_id,
             version=entry.version,
             manifest=manifest,
             valkey_client=valkey_client,
         )
-        results.append(
-            SeedResult(
-                entry.app_id,
-                entry.version,
-                "activated",
-                f"tenant={target.tenant_slug!r} community_id={target.community_id!r}",
-            )
+        return SeedResult(
+            entry.app_id,
+            entry.version,
+            "no_op",
+            f"already active for tenant={tenant_slug!r} community_id={community_id!r}",
         )
-    return results
+
+    await activate_for_community(
+        install_dal,
+        tenant_id=tenant_id,
+        community_id=community_id,
+        app_id=entry.app_id,
+        activated_by=None,
+        approval_source=SYSTEM_ACTOR,
+        valkey_client=valkey_client,
+    )
+    await _grant_core_bundle_permissions(
+        install_dal,
+        tenant_id=tenant_id,
+        community_id=community_id,
+        app_id=entry.app_id,
+        version=entry.version,
+        manifest=manifest,
+        valkey_client=valkey_client,
+    )
+    return SeedResult(
+        entry.app_id,
+        entry.version,
+        "activated",
+        f"tenant={tenant_slug!r} community_id={community_id!r}",
+    )
 
 
 #: `communities.name` of the tenant-wide sentinel row (id `TENANT_WIDE_COMMUNITY_SENTINEL`).
@@ -1226,8 +1357,39 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
         # Platform connections register BEFORE any bundle activates -- auto-bind
         # (app_source_binding_service.sync_bindings()) only grants a bundle's `consumes`
         # rule against an `ingest_sources` row that already exists at approval time.
+        #: tenant slug -> (resolved real community ids, any connection left unresolved)
+        resolved_by_tenant: dict[str, set[int]] = {}
+        unresolved_tenants: set[str] = set()
         for connection in connections:
             try:
+                if connection.community_id is None:
+                    try:
+                        resolved_cid = await resolve_connection_community(
+                            install_dal,
+                            tenant_id=await _resolve_tenant_id(install_dal, connection.tenant_slug),
+                            connection=connection,
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- resolution is best-effort; fall back
+                        # Logged loud (type + message + traceback), never swallowed silently:
+                        # the connection keeps the pre-existing tenant-wide behavior.
+                        logger.warning(
+                            "core-bundle-seeder: community resolution failed "
+                            f"({type(exc).__name__}: {exc}); falling back to tenant-wide",
+                            extra={
+                                "platform": connection.platform,
+                                "source_id": connection.source_id,
+                            },
+                            exc_info=True,
+                        )
+                        resolved_cid = None
+                    if resolved_cid is not None:
+                        connection = replace(connection, community_id=resolved_cid)
+                if connection.community_id is None:
+                    unresolved_tenants.add(connection.tenant_slug)
+                else:
+                    resolved_by_tenant.setdefault(connection.tenant_slug, set()).add(
+                        connection.community_id
+                    )
                 connection_result = await seed_platform_connection(install_dal, connection)
             except Exception as exc:  # noqa: BLE001 -- one connection's failure must not abort the batch
                 logger.error(
@@ -1246,9 +1408,26 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
             )
             seeded += 1
 
+        connection_scopes = {
+            slug: TenantConnectionScope(
+                community_ids=tuple(sorted(cids)),
+                needs_tenant_wide=slug in unresolved_tenants,
+            )
+            for slug, cids in resolved_by_tenant.items()
+        }
+        logger.info(
+            "core-bundle-seeder: connection scopes resolved",
+            extra={
+                "per_community_tenants": len(connection_scopes),
+                "tenant_wide_fallback_tenants": len(unresolved_tenants),
+            },
+        )
+
         for entry in entries:
             try:
-                results = await seed_one(install_dal, entry, bundles_dir)
+                results = await seed_one(
+                    install_dal, entry, bundles_dir, connection_scopes=connection_scopes
+                )
             except CoreBundleSeederError as exc:
                 logger.error(
                     f"core-bundle-seeder: refused ({entry.app_id}@{entry.version}): {exc}",

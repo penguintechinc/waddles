@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-time"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!time` -> current UTC time from the host clock capability. Stateless: relay only, no kv/db."
 requires-python = ">=3.13"
 dependencies = []

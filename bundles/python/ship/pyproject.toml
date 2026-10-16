@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-ship"
-version = "1.0.1"
+version = "1.0.2"
 description = "Ship Compatibility"
 requires-python = ">=3.13"
 dependencies = []

@@ -2,7 +2,7 @@ schema_version: 2
 app_id: waddles.core.example.hug
 name: Hug Example Bundle (Python)
 # 1.0.1: activation-gated only -- removed the in-bundle waddles.command-hug feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin

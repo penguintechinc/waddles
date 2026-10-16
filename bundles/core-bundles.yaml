@@ -62,7 +62,7 @@ bundles:
   # IntegrityError, caught by seed_core_bundles.py::_run()'s generic exception handler --
   # logged with type+message, nonzero exit, never a silent success with stale manifest_json).
   - app_id: waddles.core.example.ping
-    version: "1.0.3"
+    version: "1.0.4"
     language: rust
     source_dir: rust/ping
     manifest_path: ping.manifest.yaml
@@ -71,7 +71,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.pyping
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/pyping
     manifest_path: pyping.manifest.yaml
@@ -92,7 +92,7 @@ bundles:
   # version built from the corrected Dockerfile. Mirrors
   # bundles/rust/ping/hub-manifest.yaml's own 1.0.0/1.0.1 retirement comment.
   - app_id: waddles.core.example.csping
-    version: "1.0.1"
+    version: "1.0.2"
     language: csharp
     source_dir: csharp/csping
     manifest_path: csping.manifest.yaml
@@ -119,7 +119,7 @@ bundles:
   # fresh publish+activate. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
   # retirement (fix/csping-version-bump, #575).
   - app_id: waddles.core.example.eightball
-    version: "1.0.4"
+    version: "1.0.5"
     language: python
     source_dir: python/eightball
     manifest_path: eightball.manifest.yaml
@@ -128,7 +128,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.roll
-    version: "1.0.4"
+    version: "1.0.5"
     language: python
     source_dir: python/roll
     manifest_path: roll.manifest.yaml
@@ -477,7 +477,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.choose
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/choose
     manifest_path: choose.manifest.yaml
@@ -495,7 +495,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.wave
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/wave
     manifest_path: wave.manifest.yaml
@@ -504,7 +504,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.slap
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/slap
     manifest_path: slap.manifest.yaml
@@ -513,7 +513,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.hug
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/hug
     manifest_path: hug.manifest.yaml
@@ -522,7 +522,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.boop
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/boop
     manifest_path: boop.manifest.yaml
@@ -531,7 +531,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.highfive
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/highfive
     manifest_path: highfive.manifest.yaml
@@ -542,7 +542,7 @@ bundles:
   # Facts pack: three stateless, self-contained random-content bundles (no kv, no external
   # API calls), each gated behind its own `waddles.command-<name>` flag (default OFF).
   - app_id: waddles.core.example.catfact
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/catfact
     manifest_path: catfact.manifest.yaml
@@ -551,7 +551,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.dogfact
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/dogfact
     manifest_path: dogfact.manifest.yaml
@@ -560,7 +560,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.advice
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/advice
     manifest_path: advice.manifest.yaml
@@ -641,7 +641,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.dice
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/dice
     manifest_path: dice.manifest.yaml
@@ -668,7 +668,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.fortune
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/fortune
     manifest_path: fortune.manifest.yaml
@@ -686,7 +686,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.echo
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/echo
     manifest_path: echo.manifest.yaml
@@ -695,7 +695,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.waddle
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/waddle
     manifest_path: waddle.manifest.yaml
@@ -704,7 +704,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.hello
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/hello
     manifest_path: hello.manifest.yaml
@@ -713,7 +713,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.bot
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/bot
     manifest_path: bot.manifest.yaml
@@ -722,7 +722,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.time
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/time
     manifest_path: time.manifest.yaml
@@ -776,7 +776,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.roast
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/roast
     manifest_path: roast.manifest.yaml
@@ -785,7 +785,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.ship
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/ship
     manifest_path: ship.manifest.yaml
@@ -794,7 +794,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.iq
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/iq
     manifest_path: iq.manifest.yaml
@@ -803,7 +803,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.mood
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/mood
     manifest_path: mood.manifest.yaml

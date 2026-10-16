@@ -368,6 +368,116 @@ async def test_grant_helper_logs_and_continues_on_an_unexpected_error(
     assert "RuntimeError: boom" in caplog.text
 
 
+async def test_seed_one_with_connection_scope_activates_per_community_not_tenant_wide(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tenant-wide catalog target + a resolved connection scope activates at the REAL community.
+
+    svc-ingest routes a guild to its real community's stream, so the seeder must activate there
+    (signing + auto-bind via `activate_for_community`) -- and must NOT also write the sentinel
+    row when every connection resolved.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)  # community_id=None -> tenant-wide target
+    community_id = await _seed_community(install_dal)
+
+    scopes = {
+        TENANT_SLUG: seeder.TenantConnectionScope(
+            community_ids=(community_id,), needs_tenant_wide=False
+        )
+    }
+    results = await seed_one(
+        install_dal, entry, tmp_path, valkey_client=AsyncMock(), connection_scopes=scopes
+    )
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+    assert f"community_id={community_id}" in results[-1].detail
+
+    rows = await install_dal(install_dal.app_active_versions.app_id == entry.app_id).select()
+    assert {r.community_id for r in rows} == {community_id}
+    version_row = (
+        await install_dal(install_dal.app_versions.app_id == entry.app_id).select()
+    ).first()
+    assert version_row.artifact_signature  # signed on activation
+
+
+async def test_seed_one_with_unresolved_connection_keeps_tenant_wide_fallback(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`needs_tenant_wide=True` (some connection resolved to no community) keeps both scopes."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)
+    community_id = await _seed_community(install_dal)
+
+    scopes = {
+        TENANT_SLUG: seeder.TenantConnectionScope(
+            community_ids=(community_id,), needs_tenant_wide=True
+        )
+    }
+    results = await seed_one(
+        install_dal, entry, tmp_path, valkey_client=AsyncMock(), connection_scopes=scopes
+    )
+    assert [r.outcome for r in results] == ["made_available", "activated", "activated"]
+    rows = await install_dal(install_dal.app_active_versions.app_id == entry.app_id).select()
+    assert {r.community_id for r in rows} == {community_id, seeder.TENANT_WIDE_COMMUNITY_SENTINEL}
+
+
+async def test_resolve_connection_community_prefers_verified_link_and_fails_closed(
+    install_dal: Any,
+) -> None:
+    """Verified link wins; none or ambiguous -> None (tenant-wide fallback)."""
+    from services.bundle_install_dal import raw_sql_write
+
+    for ddl in (
+        "ALTER TABLE communities ADD COLUMN platform VARCHAR(50)",
+        "ALTER TABLE communities ADD COLUMN platform_server_id VARCHAR(255)",
+        "ALTER TABLE communities ADD COLUMN is_active BOOLEAN DEFAULT 1",
+        "CREATE TABLE IF NOT EXISTS community_servers (id INTEGER PRIMARY KEY, "
+        "community_id INTEGER, platform VARCHAR(50), platform_server_id VARCHAR(255), "
+        "status VARCHAR(50))",
+    ):
+        try:
+            await raw_sql_write(install_dal, ddl)
+        except Exception:  # noqa: BLE001, S110 -- column may already exist in the fixture schema
+            pass
+    cid = await _seed_community(install_dal, name="demo")
+    other = await _seed_community(install_dal, name="other")
+    await raw_sql_write(
+        install_dal,
+        "INSERT INTO community_servers (community_id, platform, platform_server_id, status) "
+        "VALUES (:c, 'discord', 'g1', 'approved')",
+        {"c": cid},
+    )
+    conn = seeder.PlatformConnection(
+        tenant_slug=TENANT_SLUG, platform="discord", source_id="g1", label="g1"
+    )
+    assert (
+        await seeder.resolve_connection_community(install_dal, tenant_id=1, connection=conn) == cid
+    )
+
+    unknown = seeder.PlatformConnection(
+        tenant_slug=TENANT_SLUG, platform="discord", source_id="nope", label="nope"
+    )
+    assert (
+        await seeder.resolve_connection_community(install_dal, tenant_id=1, connection=unknown)
+        is None
+    )
+
+    await raw_sql_write(
+        install_dal,
+        "INSERT INTO community_servers (community_id, platform, platform_server_id, status) "
+        "VALUES (:c, 'discord', 'g1', 'approved')",
+        {"c": other},
+    )
+    assert (
+        await seeder.resolve_connection_community(install_dal, tenant_id=1, connection=conn) is None
+    )
+    # wrong tenant never resolves
+    assert (
+        await seeder.resolve_connection_community(install_dal, tenant_id=999, connection=conn)
+        is None
+    )
+
+
 async def test_seed_one_with_no_community_id_rerun_is_a_no_op(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -641,7 +751,8 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     # csping.wasm for that same nominal version, so re-seeding 1.0.0 now 409s as
     # digest_conflict. 1.0.1 is the first version built from the corrected Dockerfile.
     versions_by_app_id = {e.app_id: e.version for e in entries}
-    assert versions_by_app_id["waddles.core.example.csping"] == "1.0.1"
+    # 1.0.1 -> 1.0.2: manifest-only bump declaring `chat.send:<platform>` (least privilege).
+    assert versions_by_app_id["waddles.core.example.csping"] == "1.0.2"
 
 
 def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: Path) -> None:
