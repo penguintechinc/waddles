@@ -17,7 +17,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::scope::GrantScopeKey;
 
@@ -54,6 +55,19 @@ impl GrantSet {
 /// in this trait.
 pub trait GrantSnapshot: Send + Sync {
     fn current(&self, key: &GrantScopeKey) -> Option<Arc<GrantSet>>;
+
+    /// Lazy-load hook, called from the async host-call entry BEFORE the sync
+    /// `authorize()`: a snapshot backed by a loader populates a cold `key`
+    /// here so a valid grant that was never refreshed is not denied as
+    /// `not_granted`. The default is a no-op (fixed-map snapshots have
+    /// nothing to load). Never weakens fail-closed: a key the loader cannot
+    /// produce stays absent and `current()` still returns `None`.
+    fn ensure_loaded<'a>(
+        &'a self,
+        _key: &'a GrantScopeKey,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -74,6 +88,15 @@ pub trait GrantLoader: Send + Sync {
         &'a self,
         key: &'a GrantScopeKey,
     ) -> Pin<Box<dyn Future<Output = Result<Option<GrantSet>, GrantLoadError>> + Send + 'a>>;
+
+    /// Every `(tenant, community, app, version)` currently active, used to
+    /// prime the cache at startup ([`GrantCache::seed`]). The default is
+    /// empty (no seeding; lazy-load still covers cold keys).
+    fn list_active_keys<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<GrantScopeKey>, GrantLoadError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }
 
 /// A settable, in-memory [`GrantLoader`] for tests -- simulates the RO
@@ -154,14 +177,62 @@ impl GrantSnapshot for InMemoryGrantSnapshot {
 pub struct GrantCache<L: GrantLoader> {
     loader: Arc<L>,
     memo: RwLock<HashMap<GrantScopeKey, Arc<GrantSet>>>,
+    /// Keys whose last lazy load found nothing (or failed), with the time of
+    /// that attempt -- a repeated miss inside [`NEGATIVE_TTL`] is answered
+    /// without hitting the loader again, so denied keys cannot hammer it.
+    negative: Mutex<HashMap<GrantScopeKey, Instant>>,
 }
+
+/// How long a lazy-load miss is remembered before the loader is retried.
+const NEGATIVE_TTL: Duration = Duration::from_secs(5);
 
 impl<L: GrantLoader> GrantCache<L> {
     pub fn new(loader: Arc<L>) -> Self {
         Self {
             loader,
             memo: RwLock::new(HashMap::new()),
+            negative: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Loads `key` if it is cold (not resident and not in the negative
+    /// window) -- the lazy-load half of the fix: without it nothing ever put
+    /// a key into the memo, so every non-platform permission was denied.
+    pub async fn ensure_loaded(&self, key: &GrantScopeKey) {
+        if self.memo.read().expect("lock poisoned").contains_key(key) {
+            return;
+        }
+        if let Some(at) = self.negative.lock().expect("lock poisoned").get(key) {
+            if at.elapsed() < NEGATIVE_TTL {
+                return;
+            }
+        }
+        // Concurrent first-use calls for the same key may each load once;
+        // the load is an idempotent read and the result converges.
+        let resident = match self.refresh(key).await {
+            Ok(()) => self.memo.read().expect("lock poisoned").contains_key(key),
+            Err(err) => {
+                tracing::warn!(error = %err, app_id = %key.app_id, "lazy grant load failed");
+                false
+            }
+        };
+        let mut negative = self.negative.lock().expect("lock poisoned");
+        if resident {
+            negative.remove(key);
+        } else {
+            negative.insert(key.clone(), Instant::now());
+        }
+    }
+
+    /// Primes the cache for every active key the loader reports -- run once
+    /// at startup so the first message is not racing the lazy load. Returns
+    /// how many keys were examined.
+    pub async fn seed(&self) -> Result<usize, GrantLoadError> {
+        let keys = self.loader.list_active_keys().await?;
+        for key in &keys {
+            self.ensure_loaded(key).await;
+        }
+        Ok(keys.len())
     }
 
     /// Re-fetches `key` from the loader and updates the sync-readable memo --
@@ -175,6 +246,7 @@ impl<L: GrantLoader> GrantCache<L> {
                     .write()
                     .expect("lock poisoned")
                     .insert(key.clone(), Arc::new(grants));
+                self.negative.lock().expect("lock poisoned").remove(key);
             }
             None => {
                 self.memo.write().expect("lock poisoned").remove(key);
@@ -191,6 +263,13 @@ impl<L: GrantLoader> GrantCache<L> {
     /// cache miss.
     pub fn invalidate(&self, key: &GrantScopeKey) {
         self.memo.write().expect("lock poisoned").remove(key);
+        // Tombstone: until an explicit `refresh` completes, the lazy-load
+        // path must NOT silently reload this key (that would defeat the
+        // fail-closed-on-revocation window above).
+        self.negative
+            .lock()
+            .expect("lock poisoned")
+            .insert(key.clone(), Instant::now());
     }
 
     /// Every key currently resident in the memo -- the poll-fallback path
@@ -211,6 +290,13 @@ impl<L: GrantLoader> GrantCache<L> {
 impl<L: GrantLoader> GrantSnapshot for GrantCache<L> {
     fn current(&self, key: &GrantScopeKey) -> Option<Arc<GrantSet>> {
         self.memo.read().expect("lock poisoned").get(key).cloned()
+    }
+
+    fn ensure_loaded<'a>(
+        &'a self,
+        key: &'a GrantScopeKey,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(GrantCache::ensure_loaded(self, key))
     }
 }
 
@@ -311,5 +397,69 @@ mod tests {
             cache.current(&key(2)).is_none(),
             "a newer, not-yet-consented app_version must not see the old version's grants"
         );
+    }
+
+    /// Regression (cold-cache bug): a key present in the loader but never
+    /// refreshed must load on first use and then read as granted.
+    #[tokio::test]
+    async fn ensure_loaded_populates_a_cold_key_present_in_the_loader() {
+        let loader = Arc::new(InMemoryGrantLoader::new());
+        loader.set(
+            key(1),
+            grant_set("chat.send:discord", serde_json::json!({})),
+        );
+        let cache = GrantCache::new(loader);
+        assert!(cache.current(&key(1)).is_none());
+
+        cache.ensure_loaded(&key(1)).await;
+
+        let set = cache.current(&key(1)).expect("lazy-loaded");
+        assert!(set.get("chat.send:discord").is_some());
+    }
+
+    /// A genuinely-absent grant stays absent (fail-closed), and the miss is
+    /// negative-cached so a repeat does not re-hit the loader.
+    #[tokio::test]
+    async fn ensure_loaded_keeps_an_absent_key_absent_and_negative_caches() {
+        let loader = Arc::new(InMemoryGrantLoader::new());
+        let cache = GrantCache::new(loader.clone());
+
+        cache.ensure_loaded(&key(1)).await;
+        assert!(cache.current(&key(1)).is_none());
+
+        // Grant appears; still inside the negative window -> not re-queried.
+        loader.set(key(1), grant_set("flags.read", serde_json::json!({})));
+        cache.ensure_loaded(&key(1)).await;
+        assert!(cache.current(&key(1)).is_none());
+    }
+
+    struct ListingLoader(InMemoryGrantLoader, Vec<GrantScopeKey>);
+    impl GrantLoader for ListingLoader {
+        fn load<'a>(
+            &'a self,
+            key: &'a GrantScopeKey,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<GrantSet>, GrantLoadError>> + Send + 'a>>
+        {
+            self.0.load(key)
+        }
+        fn list_active_keys<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<GrantScopeKey>, GrantLoadError>> + Send + 'a>>
+        {
+            let keys = self.1.clone();
+            Box::pin(async move { Ok(keys) })
+        }
+    }
+
+    #[tokio::test]
+    async fn seed_primes_every_active_key() {
+        let inner = InMemoryGrantLoader::new();
+        inner.set(key(1), grant_set("flags.read", serde_json::json!({})));
+        inner.set(key(2), grant_set("flags.read", serde_json::json!({})));
+        let cache = GrantCache::new(Arc::new(ListingLoader(inner, vec![key(1), key(2)])));
+
+        assert_eq!(cache.seed().await.unwrap(), 2);
+        assert!(cache.current(&key(1)).is_some());
+        assert!(cache.current(&key(2)).is_some());
     }
 }

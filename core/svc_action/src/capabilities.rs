@@ -2240,6 +2240,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         scope: &InvokeScope,
         call: HostCallBody,
     ) -> Result<serde_json::Value, HostResultError> {
+        // Load this scope's grants on first use (cold-cache fix) before any
+        // arm's sync `authorize()` reads the snapshot.
+        self.gate.ensure_grants_loaded(&scope.gate_scope()).await;
         match call.capability {
             CapabilityKind::Relay => self.handle_relay(scope, &call.args).await,
             CapabilityKind::Clock => self.handle_clock(scope, &call.op),

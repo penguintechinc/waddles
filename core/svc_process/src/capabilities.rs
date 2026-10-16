@@ -2013,6 +2013,9 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// (early `?` returns included) and label its outcome without every arm
     /// touching telemetry; routing and behavior are unchanged.
     async fn dispatch(&self, call: HostCallBody) -> Result<serde_json::Value, HostResultError> {
+        // Load this scope's grants on first use (cold-cache fix) before any
+        // arm's sync `authorize()` reads the snapshot.
+        self.gate.ensure_grants_loaded(&self.gate_scope()).await;
         match call.capability {
             CapabilityKind::Clock => self.handle_clock(&call.op),
             CapabilityKind::Context => self.handle_context(),
