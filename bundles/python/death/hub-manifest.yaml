@@ -3,7 +3,7 @@
 schema_version: 2
 app_id: waddles.core.example.death
 name: Streamer Death Counter Bundle (Python)
-version: 1.0.2
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -35,4 +35,8 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the per-community death counter (a single numeric key, no user data)"
+  - id: "chat.send:discord"
+    justification: "death replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "death replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 routes_to: []

@@ -3,7 +3,7 @@ app_id: waddles.core.example.hangman
 name: Hangman Bundle (Python)
 # 1.0.0: initial release -- per-community hangman word-guessing game (feature/bundle-hangman).
 # 1.0.3: activation-gated only -- removed the in-bundle waddles.command-hangman feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.3
+version: 1.0.4
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -46,10 +46,14 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists in-progress per-community hangman game state"
+  - id: "chat.send:discord"
+    justification: "hangman replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "hangman replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.3"
-  min_version: "1.0.3"
+  tested_with: "1.0.4"
+  min_version: "1.0.4"
   max_version: null

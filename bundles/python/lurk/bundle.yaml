@@ -21,7 +21,7 @@ name: Lurk Toggle Example Bundle (Python)
 # fixed wasm.
 # 1.0.9: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
 # 1.0.10: activation-gated only -- removed the in-bundle waddles.command-lurk feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.10
+version: 1.0.11
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -68,10 +68,14 @@ permissions:
     justification: "persists per-community lurk state"
   - id: flags.read
     justification: "gates the command behind its waddles.command-lurk feature flag"
+  - id: "chat.send:discord"
+    justification: "lurk replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "lurk replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.10"
-  min_version: "1.0.10"
+  tested_with: "1.0.11"
+  min_version: "1.0.11"
   max_version: null

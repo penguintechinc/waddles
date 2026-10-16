@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-birthday"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!birthday` -> per-user birthday (month-day only, no year), kv-backed, self-set."
 requires-python = ">=3.13"
 dependencies = []

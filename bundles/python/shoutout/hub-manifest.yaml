@@ -5,7 +5,7 @@
 schema_version: 2
 app_id: waddles.core.example.shoutout
 name: Shoutout Bundle (Python)
-version: 1.0.4
+version: 1.0.5
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -50,4 +50,8 @@ permissions:
     justification: "persists the per-community shoutout template and auto-shoutout list"
   - id: flags.read
     justification: "reads the tenant license tier (flags.tier) for tier-gated sub-features; not a command gate"
+  - id: "chat.send:discord"
+    justification: "shoutout replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "shoutout replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 routes_to: []
