@@ -1,14 +1,14 @@
 """`!iq [@user]` -> a fun, deterministic "IQ" number per user. Stateless.
 
-No `kv` (no permission is declared). The score is a pure function of the user's UUID (SHA-256 ->
-60..180), so a given user always gets the same number. Purely for fun.
+No `kv` (no permission is declared). The score is a pure function of the user's token id (SHA-256
+-> 60..180), so a given user always gets the same number. Purely for fun.
 
-**Users are referenced by UUID, never by username (PII rule).** Bare `!iq` scores the caller
-(`_actor_uuid`); `!iq <user>` resolves the target via `_resolve_target()` (literal UUID,
-Discord mention, or handle hashed into a UUIDv5 and DISCARDED). Replies show only the UUID's
-first 8 hex chars; typed targets are never echoed, stored or logged.
+**Users are referenced by the pipeline's `{user:<id>}` PII token, never by username.** Bare `!iq`
+scores the caller (the token in `event.actor`); `!iq <user>` takes the `{user:<id>}` token the
+pipeline already substituted for the @mention. Replies EMIT `{user:<id>}` and the egress
+detokenizer renders the display name. No local identity derivation (no uuid5).
 
-Fail-loud: more than one argument -> usage reply; unidentifiable target -> explicit reply.
+Fail-loud: more than one argument -> usage reply; unidentifiable target/actor -> explicit reply.
 
 Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
 decides whether this bundle runs.
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import uuid
 from typing import Any
 
 from waddle_sdk import log, relay
@@ -40,52 +39,33 @@ _FLAVOR: tuple[str, ...] = (
     "galaxy brain -- please share your secrets",
 )
 
-_DISCORD_MENTION_RE = re.compile(r"^<@!?(\d{1,32})>$")
-_HANDLE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-
-_ACTOR_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "https://waddles.penguintech.io/identity")
-
-_BAD_TARGET_MSG = "I couldn't identify that user - mention them (e.g. @name) or give their UUID."
+_USER_TOKEN_RE = re.compile(r"^\{user:([A-Za-z0-9_:.-]+)\}$")
 
 
-def _actor_uuid(event: PlatformEvent) -> str:
-    """Stable pseudonymous UUID for the event's actor (same derivation as `_resolve_target`)."""
-    author_id = event.payload.get("author_id")
-    if event.platform == "discord" and isinstance(author_id, str) and author_id:
-        basis = f"discord:{author_id}"
-    else:
-        basis = f"{event.platform}:name:{(event.actor or 'anonymous').strip().lower()}"
-    return str(uuid.uuid5(_ACTOR_NAMESPACE, basis))
+def _parse_user_token(raw: object) -> str | None:
+    """Extract the bare id from a `{user:<id>}` PII token, or `None` if `raw` isn't one.
 
-
-def _resolve_target(raw: str, platform: str) -> str | None:
-    """Resolve a typed target to a UUID string, or `None` if it isn't a recognisable user.
-
-    The raw text is hashed and dropped here -- callers only ever see the UUID, never the typed
-    username/handle (PII rule). Order: literal UUID, Discord mention, then bare/`@` handle
-    (UUIDv5 of the lower-cased handle, a non-reversible pseudonym until #429 lands).
+    Grammar matches `core/egress_detokenizer`'s `{user:` + token chars (alphanumeric and
+    `-_:.`) + `}`. The pipeline's `pii_tokenize` pass puts this token in `event.actor` and in
+    any @mention; hub-api resolves it, so the bundle never derives its own identity.
     """
-    token = raw.strip()
-    try:
-        return str(uuid.UUID(token))
-    except ValueError:
-        log.debug("iq.target_not_uuid", platform=platform, error="ValueError")
-    mention = _DISCORD_MENTION_RE.match(token)
-    if mention:
-        return str(uuid.uuid5(_ACTOR_NAMESPACE, f"discord:{mention.group(1)}"))
-    handle = token.removeprefix("@")
-    if _HANDLE_RE.match(handle):
-        return str(uuid.uuid5(_ACTOR_NAMESPACE, f"{platform}:name:{handle.lower()}"))
-    return None
+    if not isinstance(raw, str):
+        return None
+    match = _USER_TOKEN_RE.match(raw.strip())
+    return match.group(1) if match else None
 
 
-def _short(user_uuid: str) -> str:
-    """First 8 hex chars of a UUID -- the only user reference ever shown in a reply."""
-    return user_uuid[:8]
+def _user_token(user_id: str) -> str:
+    """Render a bare id as the `{user:<id>}` placeholder the egress detokenizer resolves."""
+    return f"{{user:{user_id}}}"
+
+
+_BAD_TARGET_MSG = "I couldn't identify that user - mention them (e.g. @name)."
+_NO_ACTOR_MSG = "I couldn't identify you, so I can't work out an IQ."
 
 
 def _compute_iq(user_uuid: str) -> int:
-    """Deterministic IQ in `[IQ_MIN, IQ_MAX]` from the user's UUID."""
+    """Deterministic IQ in `[IQ_MIN, IQ_MAX]` from the user's token id."""
     digest = hashlib.sha256(f"iq.{user_uuid}".encode()).hexdigest()
     return IQ_MIN + int(digest[:8], 16) % (IQ_MAX - IQ_MIN + 1)
 
@@ -112,13 +92,13 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     if len(args) > 1:
         reply = _USAGE
     else:
-        target = _resolve_target(args[0], event.platform) if args else _actor_uuid(event)
+        target = _parse_user_token(args[0] if args else event.actor)
         if target is None:
-            log.info("iq.bad_target", platform=event.platform)
-            reply = _BAD_TARGET_MSG
+            log.info("iq.bad_target", platform=event.platform, has_arg=bool(args))
+            reply = _BAD_TARGET_MSG if args else _NO_ACTOR_MSG
         else:
             iq = _compute_iq(target)
-            reply = f"\U0001f9e0 User {_short(target)} has an IQ of {iq} -- {_flavor(iq)}!"
+            reply = f"\U0001f9e0 User {_user_token(target)} has an IQ of {iq} -- {_flavor(iq)}!"
 
     log.info("iq.transform matched")
     return PlatformEvent(

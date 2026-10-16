@@ -127,6 +127,7 @@ def _event(
     channel_id="12345",
     extra: dict | None = None,
     occurred_at: str = "2026-10-05T00:00:00.000Z",
+    actor: str | None = "viewer-1",
 ):
     payload: dict = {"text": text, "channel_id": channel_id}
     if is_mod is not None:
@@ -138,7 +139,7 @@ def _event(
     return PlatformEvent(
         platform=platform,
         event_type="chat.message",
-        actor="viewer-1",
+        actor=actor,
         payload=payload,
         occurred_at=occurred_at,
     )
@@ -210,19 +211,22 @@ def test_non_chat_payload_is_ignored(fake_host) -> None:
 
 import uuid
 
-_NS = uuid.uuid5(uuid.NAMESPACE_URL, "https://waddles.penguintech.io/identity")
-
 
 def _uid(platform: str, pid: str) -> str:
-    return str(uuid.uuid5(_NS, f"{platform}:{pid}"))
+    """Test-side stand-in for the hub-issued token id (bare uuid) of a platform user."""
+    return str(uuid.UUID(int=int(pid)))
+
+
+def _tok(u: str) -> str:
+    return "{user:" + u + "}"
 
 
 def _tw(text: str, uid: str = "555", ts: str = "2026-10-05T00:00:00.000Z", **kw):
-    return _event(text, extra={"user_id": uid, "author_id": uid}, occurred_at=ts, **kw)
+    return _event(text, actor=_tok(_uid("twitch", uid)), occurred_at=ts, **kw)
 
 
 def _dc(text: str, uid: str = "777", ts: str = "2026-10-05T00:00:00.000Z"):
-    return _event(text, platform="discord", extra={"author_id": uid}, occurred_at=ts)
+    return _event(text, platform="discord", actor=_tok(_uid("discord", uid)), occurred_at=ts)
 
 
 def test_chat_message_stamps_activity_silently(fake_host) -> None:
@@ -236,7 +240,6 @@ def test_self_lookup_reports_previous_stamp_then_stamps(fake_host) -> None:
     _run(transform(_tw("hi", ts="2026-10-01T00:00:00.000Z")))
     reply = _reply(_run(transform(_tw("!lastseen", ts="2026-10-09T00:00:00.000Z"))))
     assert reply == "You were last seen 2026-10-01T00:00:00.000Z."
-    # the command itself was stamped afterwards
     reply2 = _reply(_run(transform(_tw("!LASTSEEN", ts="2026-10-09T00:05:00.000Z"))))
     assert "2026-10-09T00:00:00.000Z" in reply2
 
@@ -245,59 +248,45 @@ def test_self_lookup_without_record(fake_host) -> None:
     assert "No activity recorded for you" in _reply(_run(transform(_tw("!lastseen"))))
 
 
-def test_self_lookup_without_identity_is_explicit(fake_host) -> None:
-    reply = _reply(_run(transform(_event("!lastseen"))))
+@pytest.mark.parametrize("actor", ["viewer-1", None, "", "{user:}"])
+def test_non_token_actor_is_graceful(actor, fake_host) -> None:
+    reply = _reply(_run(transform(_event("!lastseen", actor=actor))))
     assert "couldn't identify you" in reply
-    assert fake_host.kv.calls == []  # nothing stamped or read for an unidentifiable user
-
-
-def test_unidentifiable_chatter_is_not_stamped(fake_host) -> None:
-    assert _run(transform(_event("hello"))) is None
+    assert fake_host.kv.calls == []  # nothing stamped or read, no uuid5 fallback
+    assert _run(transform(_event("hello", actor=actor))) is None
     assert fake_host.kv.calls == []
 
 
-@pytest.mark.parametrize("bad_id", ["", "has space", "a" * 80, "bad:colon", 123, None])
-def test_invalid_platform_ids_are_not_used(bad_id, fake_host) -> None:
-    event = _event("hello", extra={"user_id": bad_id})
-    assert _run(transform(event)) is None
-    assert fake_host.kv.calls == []
-
-
-def test_author_id_fallback_when_no_user_id(fake_host) -> None:
+def test_mention_token_lookup_emits_token(fake_host) -> None:
     _run(transform(_dc("hi", uid="42", ts="2026-10-02T00:00:00.000Z")))
-    assert f"lastseen.user.{_uid('discord', '42')}" in fake_host.kv.store
-
-
-def test_discord_mention_lookup(fake_host) -> None:
-    _run(transform(_dc("hi", uid="42", ts="2026-10-02T00:00:00.000Z")))
-    for mention in ("<@42>", "<@!42>"):
-        reply = _reply(_run(transform(_dc(f"!lastseen {mention}", uid="9"))))
-        assert reply == f"User {_uid('discord', '42')[:8]} was last seen 2026-10-02T00:00:00.000Z."
+    target = _tok(_uid("discord", "42"))
+    reply = _reply(_run(transform(_dc(f"!lastseen {target}", uid="9"))))
+    assert reply == f"User {target} was last seen 2026-10-02T00:00:00.000Z."
 
 
 def test_mention_with_no_record(fake_host) -> None:
-    reply = _reply(_run(transform(_dc("!lastseen <@123>"))))
-    assert "No activity recorded for user" in reply
+    reply = _reply(_run(transform(_dc(f"!lastseen {_tok(_uid('discord', '123'))}"))))
+    assert f"No activity recorded for user {_tok(_uid('discord', '123'))}" in reply
 
 
-def test_literal_uuid_lookup(fake_host) -> None:
-    _run(transform(_tw("hi", uid="55", ts="2026-10-03T00:00:00.000Z")))
-    target = _uid("twitch", "55")
-    reply = _reply(_run(transform(_tw(f"!lastseen {target}", uid="56"))))
-    assert "2026-10-03T00:00:00.000Z" in reply
-
-
-@pytest.mark.parametrize("target", ["@somename", "somename", "@Some_Name"])
-def test_free_text_names_are_refused_not_guessed(target: str, fake_host) -> None:
+@pytest.mark.parametrize("target", ["@somename", "somename", "<@42>", str(uuid.UUID(int=7))])
+def test_non_token_targets_are_refused_not_guessed(target: str, fake_host) -> None:
     reply = _reply(_run(transform(_tw(f"!lastseen {target}"))))
-    assert "can't look users up by name" in reply and "#429" in reply
-    # never read a hashed-name key
+    assert reply == app._NO_NAME_LOOKUP
     assert not any(c[0] == "get" for c in fake_host.kv.calls)
 
 
-def test_discord_mention_syntax_is_ignored_on_twitch(fake_host) -> None:
-    reply = _reply(_run(transform(_tw("!lastseen <@42>"))))
-    assert "can't look users up by name" in reply
+def test_handle_style_token_key_satisfies_host_charset(fake_host) -> None:
+    actor = "{user:handle:sha256:0123abcd}"
+    _run(transform(_event("hi", actor=actor)))
+    assert "lastseen.user.handle.sha256.0123abcd" in fake_host.kv.store
+
+
+def test_no_local_uuid5_derivation() -> None:
+    from pathlib import Path
+
+    src = Path(app.__file__).read_text()
+    assert "uuid.uuid5" not in src and "_ACTOR_NAMESPACE" not in src and "_user_uuid" not in src
 
 
 def test_too_many_args_gives_usage(fake_host) -> None:

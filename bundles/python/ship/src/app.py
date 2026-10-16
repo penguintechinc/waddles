@@ -1,13 +1,13 @@
 """`!ship <userA> <userB>` -> a fun compatibility percentage. Stateless, deterministic.
 
 No `kv` (no permission is declared). The percent is a pure function of the two users' UUIDs (SHA-256
-of the sorted UUID pair, so order never matters): the same pair always gets the same answer. A user
+of the sorted id pair, so order never matters): the same pair always gets the same answer. A user
 shipped with themselves gets 100%.
 
-**Users are referenced by UUID, never by username (PII rule).** Each target is resolved by
-`_resolve_target()` (literal UUID, Discord mention, or handle hashed into a UUIDv5 and
-DISCARDED). Replies show only each UUID's first 8 hex chars; typed targets are never echoed,
-stored or logged -- logs carry only the command name / platform.
+**Users are referenced by the pipeline's `{user:<id>}` PII token, never by username.** Each
+target is the token `pii_tokenize` already substituted for the @mention; replies EMIT
+`{user:<id>}` and the egress detokenizer renders names. No local identity derivation (no uuid5);
+logs carry only the command name / platform.
 
 Fail-loud: wrong argument count -> usage reply; an unidentifiable target -> explicit reply.
 
@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import uuid
 from typing import Any
 
 from waddle_sdk import log, relay
@@ -39,38 +38,27 @@ _FLAVOR_TIERS: tuple[tuple[str, ...], ...] = (
 )
 _SELF_FLAVOR = "self-love is important!"
 
-_DISCORD_MENTION_RE = re.compile(r"^<@!?(\d{1,32})>$")
-_HANDLE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-
-_ACTOR_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "https://waddles.penguintech.io/identity")
-
-_BAD_TARGET_MSG = "I couldn't identify that user - mention them (e.g. @name) or give their UUID."
+_USER_TOKEN_RE = re.compile(r"^\{user:([A-Za-z0-9_:.-]+)\}$")
 
 
-def _resolve_target(raw: str, platform: str) -> str | None:
-    """Resolve a typed target to a UUID string, or `None` if it isn't a recognisable user.
+def _parse_user_token(raw: object) -> str | None:
+    """Extract the bare id from a `{user:<id>}` PII token, or `None` if `raw` isn't one.
 
-    The raw text is hashed and dropped here -- callers only ever see the UUID, never the typed
-    username/handle (PII rule). Order: literal UUID, Discord mention, then bare/`@` handle
-    (UUIDv5 of the lower-cased handle, a non-reversible pseudonym until #429 lands).
+    Grammar matches `core/egress_detokenizer`'s `{user:` + token chars (alphanumeric and
+    `-_:.`) + `}`. The pipeline's `pii_tokenize` pass puts this token in `event.actor` and in
+    any @mention; hub-api resolves it, so the bundle never derives its own identity.
     """
-    token = raw.strip()
-    try:
-        return str(uuid.UUID(token))
-    except ValueError:
-        log.debug("ship.target_not_uuid", platform=platform, error="ValueError")
-    mention = _DISCORD_MENTION_RE.match(token)
-    if mention:
-        return str(uuid.uuid5(_ACTOR_NAMESPACE, f"discord:{mention.group(1)}"))
-    handle = token.removeprefix("@")
-    if _HANDLE_RE.match(handle):
-        return str(uuid.uuid5(_ACTOR_NAMESPACE, f"{platform}:name:{handle.lower()}"))
-    return None
+    if not isinstance(raw, str):
+        return None
+    match = _USER_TOKEN_RE.match(raw.strip())
+    return match.group(1) if match else None
 
 
-def _short(user_uuid: str) -> str:
-    """First 8 hex chars of a UUID -- the only user reference ever shown in a reply."""
-    return user_uuid[:8]
+def _user_token(user_id: str) -> str:
+    """Render a bare id as the `{user:<id>}` placeholder the egress detokenizer resolves."""
+    return f"{{user:{user_id}}}"
+
+_BAD_TARGET_MSG = "I couldn't identify that user - mention them (e.g. @name)."
 
 
 def _compute_match(uuid_a: str, uuid_b: str) -> tuple[int, str]:
@@ -102,16 +90,16 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     if len(args) != 2:
         reply = _USAGE
     else:
-        uuid_a = _resolve_target(args[0], event.platform)
-        uuid_b = _resolve_target(args[1], event.platform)
+        uuid_a = _parse_user_token(args[0])
+        uuid_b = _parse_user_token(args[1])
         if uuid_a is None or uuid_b is None:
             log.info("ship.bad_target", platform=event.platform)
             reply = _BAD_TARGET_MSG
         elif uuid_a == uuid_b:
-            reply = f"\U0001f498 {_short(uuid_a)} + {_short(uuid_b)} = 100% -- {_SELF_FLAVOR}"
+            reply = f"\U0001f498 {_user_token(uuid_a)} + {_user_token(uuid_b)} = 100% -- {_SELF_FLAVOR}"
         else:
             percent, flavor = _compute_match(uuid_a, uuid_b)
-            reply = f"\U0001f498 {_short(uuid_a)} + {_short(uuid_b)} = {percent}% -- {flavor}!"
+            reply = f"\U0001f498 {_user_token(uuid_a)} + {_user_token(uuid_b)} = {percent}% -- {flavor}!"
 
     log.info("ship.transform matched")
     return PlatformEvent(

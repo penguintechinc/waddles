@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-lastseen"
-version = "1.0.2"
+version = "1.0.3"
 description = "!lastseen [@mention] -> when a user (by pseudonymous UUID, never free-text username) was last active"
 requires-python = ">=3.13"
 dependencies = []
