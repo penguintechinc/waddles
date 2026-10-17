@@ -48,6 +48,7 @@ export interface GuildPairing {
   discord_guild_id: string;
   direction: GuildPairingDirection;
   sync_enabled: boolean;
+  event_sync_enabled: boolean;
   role_name_prefix: string;
   created_by_user_id: number | null;
   created_at: string | null;

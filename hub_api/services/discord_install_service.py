@@ -64,9 +64,12 @@ _TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 
 #: Discord permission bitfield requested at install time -- the minimal
 #: set Bar Citizen's own role-sync worker needs (manage roles, read/send
-#: messages, manage webhooks), not Administrator. Named constant so a
-#: future permission-set change is a one-line diff.
-DEFAULT_BOT_PERMISSIONS = 268511312
+#: messages, manage webhooks) plus MANAGE_EVENTS (bit 33), which the
+#: calendar event-sync push engine needs to create Discord scheduled
+#: events -- not Administrator. Named constant so a future
+#: permission-set change is a one-line diff.
+MANAGE_EVENTS_PERMISSION = 1 << 33  # 8589934592
+DEFAULT_BOT_PERMISSIONS = 268511312 | MANAGE_EVENTS_PERMISSION
 
 
 class DiscordInstallError(ApiError):

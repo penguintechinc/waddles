@@ -535,6 +535,11 @@ export const adminApi = {
   // Server link requests (community-initiated)
   createServerLinkRequest: (communityId, data) =>
     api.post(`/api/v1/admin/${communityId}/server-link-requests`, data),
+  // Discord scheduled-event sync toggle (community-wide, flag-gated)
+  getEventDiscordSync: (communityId) =>
+    api.get(`/api/v1/communities/${communityId}/calendar/event-sync`),
+  setEventDiscordSync: (communityId, enabled) =>
+    api.put(`/api/v1/communities/${communityId}/calendar/event-sync`, { enabled }),
   // Community OAuth connections (gh-320)
   listCommunityConnections: (communityId) =>
     api.get(`/api/v1/communities/${communityId}/connections`),
