@@ -455,3 +455,78 @@ def test_current_request_host_reads_quart_request_host(monkeypatch: pytest.Monke
     import flask_core.feature_flags as feature_flags_module
 
     assert feature_flags_module._current_request_host() == "waddles.penguintech.cloud"
+
+
+# ---------------------------------------------------------------------------
+# ENV baseline (PostHog -> ENV -> default); licensed flags excepted
+# ---------------------------------------------------------------------------
+ENV_FLAG = "waddles.webui.discord_bot_install_link"
+ENV_VAR = "FLAG_WADDLES_WEBUI_DISCORD_BOT_INSTALL_LINK"
+
+
+def test_env_flag_var_name_derivation() -> None:
+    from flask_core.entitlement import env_flag_var_name
+
+    assert env_flag_var_name(ENV_FLAG) == ENV_VAR
+    assert env_flag_var_name("waddles.core.disable-x") == "FLAG_WADDLES_CORE_DISABLE_X"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["true", "1", "YES", "on"])
+async def test_env_true_when_posthog_unavailable(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    monkeypatch.setenv(ENV_VAR, raw)
+    client, _, _ = make_client(flag_result=None)
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is True
+
+
+@pytest.mark.asyncio
+async def test_env_true_even_when_license_gate_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_VAR, "true")
+    client, _, _ = make_client(flag_result=None, tier=None, tier_raises=RuntimeError("down"))
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is True
+
+
+@pytest.mark.asyncio
+async def test_env_unset_uses_hard_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ENV_VAR, raising=False)
+    client, _, _ = make_client(flag_result=None)
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT, default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_env_garbage_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_VAR, "maybe")
+    client, _, _ = make_client(flag_result=None)
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+
+
+@pytest.mark.asyncio
+async def test_posthog_connected_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_VAR, "true")
+    client, _, _ = make_client(flag_result=False)
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+    monkeypatch.setenv(ENV_VAR, "false")
+    client2, _, _ = make_client(flag_result=True)
+    assert await client2.evaluate(ENV_FLAG, tenant=TENANT) is True
+
+
+@pytest.mark.asyncio
+async def test_licensed_flag_not_env_bypassable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FLAG_WADDLES_COMMUNITY_CUSTOM_DOMAINS", "true")
+    # PostHog down + tier too low: env must not grant.
+    client, _, _ = make_client(
+        flag_result=None, tier="free", tier_requirements={FLAG_KEY: "enterprise"}
+    )
+    assert await client.evaluate(FLAG_KEY, tenant=TENANT) is False
+    # PostHog down + licence gate down: unverifiable -> deny, env ignored.
+    client2, _, _ = make_client(
+        flag_result=None, tier=None, tier_raises=RuntimeError("down"),
+        tier_requirements={FLAG_KEY: "enterprise"},
+    )
+    assert await client2.evaluate(FLAG_KEY, tenant=TENANT, default=True) is False
+    # Entitled tier but PostHog unresolvable: env must not stand in for the flag gate.
+    client3, _, _ = make_client(
+        flag_result=None, tier="enterprise", tier_requirements={FLAG_KEY: "enterprise"}
+    )
+    assert await client3.evaluate(FLAG_KEY, tenant=TENANT) is False

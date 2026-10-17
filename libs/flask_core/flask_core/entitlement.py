@@ -372,6 +372,31 @@ class CommunityTierSource(Protocol):
         ...
 
 
+def env_flag_var_name(flag_key: str) -> str:
+    """Env var for a flag key: `FLAG_` + upper-cased key, `.`/`-` -> `_` (matches the Rust services)."""
+    return "FLAG_" + flag_key.upper().replace(".", "_").replace("-", "_")
+
+
+def env_flag_value(flag_key: str) -> Optional[bool]:
+    """
+    Docker ENV baseline for a FEATURE flag, or None if unset/unrecognised.
+
+    Makes PostHog optional (alpha has no key). Truthy: true/1/on/yes; falsy:
+    false/0/off/no -- same parsing as svc_action/svc_process. Callers must
+    only use this for non-licensed flags; see `EntitlementClient._evaluate`.
+    """
+    raw = os.getenv(env_flag_var_name(flag_key))
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value in ("true", "1", "on", "yes"):
+        return True
+    if value in ("false", "0", "off", "no"):
+        return False
+    logger.debug("entitlement.env_flag_unrecognized", extra={"flag_key": flag_key})
+    return None
+
+
 class PostHogFlagGate:
     """Wraps the published `posthog` SDK -- the only place this module calls it."""
 
@@ -674,6 +699,20 @@ class EntitlementClient:
             )
             self._record_decision(False, "tier_unverifiable", required)
             return False
+
+        # ENV BASELINE (PostHog -> ENV -> default). Only when PostHog could not
+        # define the flag AND the flag is a plain FEATURE flag (free tier, no
+        # licence requirement). Licensed/tiered flags never reach this branch's
+        # result: `licensed` is True for them, so they stay licence-server-only.
+        if flag_result is None and not licensed:
+            env_value = env_flag_value(flag_key)
+            if env_value is not None:
+                logger.info(
+                    "entitlement.env_baseline",
+                    extra={"flag_key": flag_key, "tenant": tenant, "value": env_value},
+                )
+                self._record_decision(env_value, "env_baseline", required)
+                return env_value
 
         if flag_result is None or tier_result is None:
             cached = self._cache.get(cache_key)
