@@ -49,6 +49,7 @@ NetworkPolicy.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from typing import Any, cast
 
@@ -63,6 +64,8 @@ from services import guild_pairing as pairing_svc
 from services.community_common import community_in_tenant, is_valid_service_key
 from services.errors import ApiError, bad_request, not_found, payment_required
 from services.schema import bind_calendar_sync_tables
+
+logger = logging.getLogger(__name__)
 
 event_discord_sync_internal_bp = Blueprint(
     "v1_event_discord_sync_internal", __name__, url_prefix="/api/v1/internal"
@@ -158,6 +161,19 @@ async def put_event_sync(
         for pairing in pairings:
             pairing_svc.update_pairing(_dal(), community_id, pairing.id, event_sync_enabled=enabled)
     except ApiError as exc:
+        # 4xx = handled client error (WARN); 5xx = server failure (ERROR + traceback).
+        level = logging.ERROR if exc.status_code >= 500 else logging.WARNING
+        logger.log(
+            level,
+            "event_sync_toggle_failed community_id=%s op=put status=%s code=%s "
+            "exc_type=%s message=%s",
+            community_id,
+            exc.status_code,
+            exc.code,
+            type(exc).__name__,
+            exc.message,
+            exc_info=exc.status_code >= 500,
+        )
         return _err(exc)
     return _sync_state(community_id)
 
