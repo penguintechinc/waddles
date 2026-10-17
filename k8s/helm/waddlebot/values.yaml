@@ -973,10 +973,13 @@ pipeline:
   # RUNTIME gate; this value controls whether the CronJob is deployed at all.
   roleSync:
     enabled: false
-    # Twitch's own Helix rate limits make a sub-minute cadence pointless (role_sync_service.py's
-    # own module docstring) -- every 15 minutes is the default reconcile cadence, covering both
-    # directions (twitch_to_discord + discord_to_twitch/bidirectional) in one pass.
-    schedule: "*/15 * * * *"
+    # 1-minute cadence (near-real-time, demo-ready; Helix limits make sub-minute pointless).
+    # Covers both directions in one pass; concurrencyPolicy Forbid prevents overlap.
+    schedule: "*/1 * * * *"
+    # Opt-in demote-on-role-remove (Discord -> platform): comma-separated pairing ids.
+    # Empty = grant-only (default). Baseline role = what a demoted member falls back to.
+    demotePairingIds: ""
+    demoteBaselineRole: "community-member"
     backoffLimit: 2
     activeDeadlineSeconds: 600
     resources:
