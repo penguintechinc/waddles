@@ -1,0 +1,6 @@
+# Pinned lint tooling for scripts/lint.sh. The flake8 ratchet count in
+# .checks-baseline is sensitive to these versions - bump together with a re-measure.
+flake8==7.1.1
+pycodestyle==2.12.1
+pyflakes==3.2.0
+mccabe==0.7.0

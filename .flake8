@@ -1,0 +1,5 @@
+# Single source of truth for flake8 (scripts/lint.sh passes no style flags).
+# max-line-length matches ruff's line-length = 100 in every module pyproject.toml.
+[flake8]
+max-line-length = 100
+exclude = .git,__pycache__,venv,.venv,node_modules,.worktrees,.claude/worktrees,vendor
