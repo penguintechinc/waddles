@@ -314,3 +314,40 @@ async def test_default_client_is_used_and_closed(
         )
         assert len(roles) == 2
         assert not injected.is_closed
+
+
+@pytest.mark.parametrize("same_tenant", [True, False], ids=["other-community", "other-tenant"])
+async def test_guild_paired_to_other_community_is_404_and_never_calls_discord(
+    client: Any,
+    auth_headers: Any,
+    bar_citizen_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    same_tenant: bool,
+) -> None:
+    """Regression: a guild_id paired to a DIFFERENT community/tenant is not reachable via ours."""
+    dal, community_id, *_ = bar_citizen_db
+    own_tenant = dal.communities[community_id].tenant_id
+    tenant = (
+        own_tenant
+        if same_tenant
+        else dal.tenants.insert(slug="victim-corp", is_active=True, is_global=False)
+    )
+    victim = dal.communities.insert(name="victim", tenant_id=tenant)
+    victim_guild = "888888888888888888"  # gitleaks:allow - fake snowflake
+    dal.guild_tenant_pairings.insert(
+        community_id=victim,
+        discord_guild_id=victim_guild,
+        direction="bidirectional",
+        sync_enabled=False,
+        role_name_prefix="",
+    )
+    dal.commit()
+    _pair(bar_citizen_db)  # caller's own legit pairing exists too
+    seen = _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=ROLES))
+    resp = await client.get(
+        _url(community_id, f"?guild_id={victim_guild}"),
+        headers=auth_headers(scope="community.guild_pairing:read"),
+    )
+    assert resp.status_code == 404
+    assert (await resp.get_json())["error"]["code"] == "DISCORD_PAIRING_NOT_FOUND"
+    assert seen == []
