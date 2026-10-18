@@ -405,6 +405,63 @@ components:
       - name
       title: AvailabilityDTO
       type: object
+    BatchItem:
+      description: One lookup of a batch request.
+      properties:
+        platform:
+          title: Platform
+          type: string
+        sourceId:
+          title: Sourceid
+          type: string
+      required:
+      - platform
+      - sourceId
+      title: BatchItem
+      type: object
+    BatchResult:
+      description: 'Outcome of one batch item: ``resolved`` carries ids, anything
+        else carries none.'
+      properties:
+        communityId:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: null
+          title: Communityid
+        communityName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Communityname
+        platform:
+          title: Platform
+          type: string
+        sourceId:
+          title: Sourceid
+          type: string
+        status:
+          title: Status
+          type: string
+        tenantId:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: null
+          title: Tenantid
+        tenantSlug:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Tenantslug
+      required:
+      - platform
+      - sourceId
+      - status
+      title: BatchResult
+      type: object
     BundleDTO:
       description: 'Response DTO: one `app_catalog` row.'
       properties:
@@ -1675,6 +1732,29 @@ components:
       - completedAt
       - status
       title: DeletionRequestDTO
+      type: object
+    DiscordRole:
+      description: One Discord role -- `id` is a string snowflake (never a JS-lossy
+        int).
+      properties:
+        color:
+          title: Color
+          type: integer
+        id:
+          title: Id
+          type: string
+        name:
+          title: Name
+          type: string
+        position:
+          title: Position
+          type: integer
+      required:
+      - id
+      - name
+      - color
+      - position
+      title: DiscordRole
       type: object
     DiscordStatsDTO:
       description: Discord stats DTO.
@@ -13813,6 +13893,101 @@ paths:
       responses:
         default:
           description: Undocumented response
+  /api/v1/communities/{community_id}/calendar/event-sync:
+    get:
+      description: ''
+      operationId: get_get_event_sync
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Community-wide event-sync state: how many paired guilds
+                  have it on.'
+                properties:
+                  community_id:
+                    title: Community Id
+                    type: integer
+                  event_sync_enabled:
+                    title: Event Sync Enabled
+                    type: boolean
+                  pairings_enabled:
+                    title: Pairings Enabled
+                    type: integer
+                  pairings_total:
+                    title: Pairings Total
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - community_id
+                - event_sync_enabled
+                - pairings_total
+                - pairings_enabled
+                title: EventSyncStateResponse
+                type: object
+          description: 'Community-wide event-sync state: how many paired guilds have
+            it on.'
+      summary: '`GET /api/v1/communities/<id>/calendar/event-sync` -- current toggle
+        state.'
+    put:
+      description: '
+
+        Admin (tenant-JWT, scope-gated, flag-gated) counterpart of the internal
+
+        service-key route: sets `event_sync_enabled` on every guild pairing under
+
+        the community. 404 if the community has no pairings (nothing to toggle).'
+      operationId: put_put_event_sync
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Community-wide event-sync state: how many paired guilds
+                  have it on.'
+                properties:
+                  community_id:
+                    title: Community Id
+                    type: integer
+                  event_sync_enabled:
+                    title: Event Sync Enabled
+                    type: boolean
+                  pairings_enabled:
+                    title: Pairings Enabled
+                    type: integer
+                  pairings_total:
+                    title: Pairings Total
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - community_id
+                - event_sync_enabled
+                - pairings_total
+                - pairings_enabled
+                title: EventSyncStateResponse
+                type: object
+          description: 'Community-wide event-sync state: how many paired guilds have
+            it on.'
+      summary: '`PUT /api/v1/communities/<id>/calendar/event-sync` body `{"enabled":
+        bool}`.'
   /api/v1/communities/{community_id}/connections:
     get:
       description: ''
@@ -13875,6 +14050,41 @@ paths:
         default:
           description: Undocumented response
       summary: '`POST /api/v1/communities/<id>/connections/<provider>/authorize`.'
+  /api/v1/communities/{community_id}/discord/roles:
+    get:
+      description: ''
+      operationId: get_list_discord_roles
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Discord guild roles response envelope (dropdown source
+                  for role-sync mapping).
+                properties:
+                  roles:
+                    items:
+                      $ref: '#/components/schemas/DiscordRole'
+                    title: Roles
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - roles
+                title: DiscordGuildRolesResponse
+                type: object
+          description: Discord guild roles response envelope (dropdown source for
+            role-sync mapping).
+      summary: '`GET /api/v1/communities/<id>/discord/roles[?guild_id=]` -- the paired
+        guild''s roles.'
   /api/v1/communities/{community_id}/guild-pairings:
     get:
       description: ''
@@ -16048,6 +16258,86 @@ paths:
             response in this API).
       summary: '``POST .../resolve`` -- a fresh access token for one usable binding
         (refresh under lock).'
+  /api/v1/internal/dataplane/resolve-scope:
+    get:
+      description: ''
+      operationId: get_resolve_scope_route
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Resolved scope. ``tenantId``/``communityId`` are the
+                  keys; the names are display-only.
+                properties:
+                  communityId:
+                    title: Communityid
+                    type: integer
+                  communityName:
+                    title: Communityname
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantId:
+                    title: Tenantid
+                    type: integer
+                  tenantSlug:
+                    title: Tenantslug
+                    type: string
+                required:
+                - success
+                - tenantId
+                - communityId
+                - tenantSlug
+                - communityName
+                title: ScopeDTO
+                type: object
+          description: Resolved scope. ``tenantId``/``communityId`` are the keys;
+            the names are display-only.
+      summary: '``GET`` -- one source to its numeric scope; 404 when unlinked, 409
+        when ambiguous.'
+  /api/v1/internal/dataplane/resolve-scope/batch:
+    post:
+      description: ''
+      operationId: post_resolve_scope_batch
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Body of the batch form.
+              properties:
+                items:
+                  items:
+                    $ref: '#/components/schemas/BatchItem'
+                  title: Items
+                  type: array
+              title: BatchRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Batch response, in request order.
+                properties:
+                  results:
+                    items:
+                      $ref: '#/components/schemas/BatchResult'
+                    title: Results
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: BatchResponse
+                type: object
+          description: Batch response, in request order.
+      summary: '``POST`` -- up to 100 lookups; each result carries its own status,
+        order preserved.'
   /api/v1/internal/live:
     get:
       description: ''
