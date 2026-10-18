@@ -97,7 +97,7 @@ pub const PERMISSIONS_BREAKER_BACKOFF: Duration = Duration::from_secs(30);
 const BREAKER_KEY: &str = "discord-rest";
 
 /// Counters for the resolver's cache/breaker (PII-free: outcome labels only,
-/// never a guild/user id). `outcome` is one of `hit`, `miss`, `stale_served`,
+/// never a guild/user id). `outcome` is one of `hit`, `miss`, `stale_served` (non-privileged stale), `stale_elevated_denied`,
 /// `fail_closed`, `breaker_short_circuit`, `breaker_opened`, `breaker_closed`.
 /// No-op default so tests and unwired callers need no impl.
 pub trait PermissionsMetrics: Send + Sync {
@@ -166,9 +166,9 @@ fn is_transient(err: &anyhow::Error) -> bool {
 ///
 /// Resilience (self-DoS cascade fix): resolved permissions are cached per
 /// (guild, user) with stale-while-revalidate semantics -- fresh within
-/// [`PERMISSIONS_CACHE_TTL`]; on a transient Discord failure the last-known
-/// value (up to [`PERMISSIONS_STALE_MAX`] old) is served instead of failing
-/// closed, so a Discord blip never locks out mods/admins. A shared
+/// [`PERMISSIONS_CACHE_TTL`]; on a transient Discord failure a stale entry is
+/// capped to NON-privileged (never elevated -- see `stale_or_closed`), so a
+/// blip never grants revoked mod/admin rights. A shared
 /// `circuit_breaker` stops calls entirely after repeated failures. Only with
 /// NO usable cached value does it fail closed to non-privileged. No request
 /// is made at all for a DM (no `guild_id`) -- see [`run_loop`]'s call site.
@@ -273,26 +273,36 @@ impl RestPermissionsResolver {
         self.cache.lock().map_or(0, |c| c.len())
     }
 
-    /// Serves the last-known-good value if it is within the stale cap,
-    /// otherwise fails closed. `reason` is a static log tag.
+    /// Degraded-path answer (transient failure / open breaker). Stale data
+    /// may preserve ordinary access but must NEVER grant elevated privilege:
+    /// both `is_mod` and `is_broadcaster` are elevated, so a stale entry is
+    /// always capped to the non-privileged subset (`default()`). Elevated
+    /// actions require a LIVE successful lookup or fail closed -- otherwise a
+    /// just-demoted user could ride out (or induce) a Discord outage and keep
+    /// revoked privilege for up to the stale cap.
     fn stale_or_closed(
         &self,
         guild_id: &str,
         cached: Option<(DiscordPermissions, Duration)>,
         reason: &'static str,
     ) -> DiscordPermissions {
+        let capped = DiscordPermissions::default();
         match cached {
             Some((perms, age)) if age < self.cache_cfg.stale_max => {
-                self.metrics.permissions_outcome("stale_served");
+                let elevated_denied = perms.is_mod || perms.is_broadcaster;
+                self.metrics.permissions_outcome(if elevated_denied {
+                    "stale_elevated_denied"
+                } else {
+                    "stale_served"
+                });
                 tracing::warn!(
                     platform = "discord",
                     guild_id,
                     reason,
                     age_s = age.as_secs(),
-                    conditionally_authorized = true,
-                    "serving stale cached discord permissions (conditionally authorized)"
+                    elevated_denied,
+                    "discord permissions unavailable; serving non-privileged only (stale never grants elevated)"
                 );
-                perms
             }
             _ => {
                 self.metrics.permissions_outcome("fail_closed");
@@ -302,8 +312,16 @@ impl RestPermissionsResolver {
                     reason,
                     "no usable cached discord permissions; defaulting to non-privileged (fail closed)"
                 );
-                DiscordPermissions::default()
             }
+        }
+        capped
+    }
+
+    /// Drops a cached entry so a definitive denial (404/403/malformed) can
+    /// never be resurrected by a later outage's stale path.
+    fn cache_evict(&self, guild_id: &str, author_id: &str) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.remove(&(guild_id.to_string(), author_id.to_string()));
         }
     }
 
@@ -408,6 +426,7 @@ impl PermissionsResolver for RestPermissionsResolver {
                 } else {
                     // Definitive per-member answer (e.g. 404: left the
                     // guild) -- stale privilege would be wrong; fail closed.
+                    self.cache_evict(guild_id, author_id);
                     self.metrics.permissions_outcome("fail_closed");
                     DiscordPermissions::default()
                 }
@@ -2160,8 +2179,55 @@ mod tests {
             mock_discord_down(&server, 503).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
             let p = r.resolve("111", "444").await;
-            assert!(p.is_mod, "mod must not be locked out by a Discord blip");
-            assert_eq!(m.count("stale_served"), 1);
+            assert!(
+                !p.is_mod && !p.is_broadcaster,
+                "attack must fail: stale ELEVATED perms are never served during an outage"
+            );
+            assert_eq!(m.count("stale_elevated_denied"), 1);
+            assert_eq!(m.count("stale_served"), 0);
+        }
+
+        #[tokio::test]
+        async fn stale_non_privileged_user_still_served_during_outage() {
+            let server = MockServer::start().await;
+            mock_guild(
+                &server,
+                "111",
+                "999",
+                serde_json::json!([{"id": "r1", "permissions": NONE}]),
+            )
+            .await;
+            mock_member(&server, "111", "444", &["r1"]).await;
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let r = swr_resolver(&server, 1, 100, 5, 100, m.clone());
+            assert!(!r.resolve("111", "444").await.is_mod);
+            mock_discord_down(&server, 503).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let p = r.resolve("111", "444").await;
+            assert!(!p.is_mod && !p.is_broadcaster);
+            assert_eq!(
+                m.count("stale_served"),
+                1,
+                "availability: ordinary user served from stale"
+            );
+            assert_eq!(m.count("stale_elevated_denied"), 0);
+        }
+
+        #[tokio::test]
+        async fn definitive_denial_evicts_cache_so_outage_cannot_resurrect_elevation() {
+            let server = MockServer::start().await;
+            mock_ok_mod(&server).await;
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let r = swr_resolver(&server, 1, 100, 5, 100, m.clone());
+            assert!(r.resolve("111", "444").await.is_mod);
+            mock_discord_down(&server, 404).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(!r.resolve("111", "444").await.is_mod);
+            assert_eq!(r.cache_len(), 0, "definitive denial evicts the entry");
+            mock_discord_down(&server, 503).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(!r.resolve("111", "444").await.is_mod);
+            assert_eq!(m.count("stale_elevated_denied"), 0);
         }
 
         #[tokio::test]
@@ -2189,8 +2255,12 @@ mod tests {
                 .mount(&server)
                 .await;
             tokio::time::sleep(Duration::from_millis(10)).await;
-            assert!(r.resolve("111", "444").await.is_mod);
-            assert_eq!(m.count("stale_served"), 1);
+            let p = r.resolve("111", "444").await;
+            assert!(
+                !p.is_mod && !p.is_broadcaster,
+                "timeout must not serve stale elevated"
+            );
+            assert_eq!(m.count("stale_elevated_denied"), 1);
         }
 
         #[tokio::test]
@@ -2228,12 +2298,13 @@ mod tests {
             mock_discord_down(&server, 503).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
             for _ in 0..3 {
-                assert!(r.resolve("111", "444").await.is_mod); // stale
+                assert!(!r.resolve("111", "444").await.is_mod); // stale: capped
             }
             assert_eq!(m.count("breaker_opened"), 1);
             let calls = server.received_requests().await.unwrap().len();
             for _ in 0..5 {
-                assert!(r.resolve("111", "444").await.is_mod); // short-circuit
+                // breaker open: elevated is denied, never served from stale
+                assert!(!r.resolve("111", "444").await.is_mod);
             }
             assert_eq!(
                 server.received_requests().await.unwrap().len(),
