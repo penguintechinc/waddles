@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FormModalBuilder, type FormField } from '@penguintechinc/react-libs';
-import { TrashIcon } from '@heroicons/react/24/outline';
+import PairingStatusCard from '../../components/roleSync/PairingStatusCard';
+import BindingTable from '../../components/roleSync/BindingTable';
 import { useAuth } from '../../contexts/AuthContext';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
 import {
@@ -12,6 +13,7 @@ import {
   SUBSCRIBER_TIERS,
   type CommunityRole,
   type CreateRoleSyncBindingPayload,
+  type GuildPairing,
   type RoleSyncBinding,
   type RoleSyncScope,
   type SubscriberTier,
@@ -50,48 +52,6 @@ const SYNC_SCOPE_LABELS: Record<RoleSyncScope, string> = {
   moderator: 'Twitch moderator → Discord role',
   community_role: 'Discord role → community role',
 };
-
-function scopeSummary(binding: RoleSyncBinding): string {
-  if (binding.sync_scope === 'subscriber_tier') {
-    return `Tier ${binding.subscriber_tier ?? '?'} subscribers → Discord role ${binding.discord_role_id}`;
-  }
-  if (binding.sync_scope === 'moderator') {
-    return `Twitch moderators → Discord role ${binding.discord_role_id}`;
-  }
-  return `Discord role ${binding.discord_role_id} → ${binding.community_role ?? '?'}`;
-}
-
-function BindingRow({
-  binding,
-  canManage,
-  onDelete,
-}: {
-  binding: RoleSyncBinding;
-  canManage: boolean;
-  onDelete: (binding: RoleSyncBinding) => void;
-}) {
-  return (
-    <li
-      className="flex items-center justify-between rounded border border-slate-700 bg-slate-800 px-4 py-3"
-      data-testid={`binding-row-${binding.id}`}
-    >
-      <div>
-        <p className="font-medium text-slate-100">{scopeSummary(binding)}</p>
-        <p className="text-xs text-slate-500">{SYNC_SCOPE_LABELS[binding.sync_scope]}</p>
-      </div>
-      {canManage && (
-        <button
-          type="button"
-          onClick={() => onDelete(binding)}
-          className="rounded border border-red-500/60 p-1.5 text-red-400 hover:bg-red-500/10 focus:outline-none focus:ring-2 focus:ring-red-500"
-          aria-label={`Delete binding for Discord role ${binding.discord_role_id}`}
-        >
-          <TrashIcon className="h-4 w-4" />
-        </button>
-      )}
-    </li>
-  );
-}
 
 export default function AdminRoleSyncMapping() {
   const pageEnabled = useFeatureFlag('waddles.webui.role_sync_mapping');
@@ -153,6 +113,33 @@ export default function AdminRoleSyncMapping() {
         pairingId: activePairingId,
         error: extractErrorMessage(err, 'unknown error'),
       });
+    },
+  });
+
+  const toggleMutation = useMutation({
+    mutationFn: (enabled: boolean) =>
+      roleSyncApi.updatePairing(communityId, activePairingId as number, { sync_enabled: enabled }),
+    onMutate: async (enabled) => {
+      const key = roleSyncKeys.pairings(communityId);
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<GuildPairing[]>(key);
+      queryClient.setQueryData<GuildPairing[]>(key, (old) =>
+        old?.map((p) => (p.id === activePairingId ? { ...p, sync_enabled: enabled } : p)),
+      );
+      return { previous };
+    },
+    onError: (err, _enabled, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(roleSyncKeys.pairings(communityId), context.previous);
+      }
+      console.error('[RoleSyncMapping] ToggleSyncFailed', {
+        communityId,
+        pairingId: activePairingId,
+        error: extractErrorMessage(err, 'unknown error'),
+      });
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: roleSyncKeys.pairings(communityId) });
     },
   });
 
@@ -309,10 +296,18 @@ export default function AdminRoleSyncMapping() {
         </div>
       )}
 
-      {activePairing && !activePairing.sync_enabled && (
-        <p role="alert" className="mb-4 text-sm text-amber-400">
-          Role sync is currently disabled for this pairing; bindings below will not reconcile
-          until it&apos;s re-enabled.
+      {activePairing && (
+        <PairingStatusCard
+          pairing={activePairing}
+          bindingCount={bindings ? bindings.length : null}
+          canManage={canManage}
+          toggling={toggleMutation.isPending}
+          onToggleSync={(enabled) => toggleMutation.mutate(enabled)}
+        />
+      )}
+      {toggleMutation.isError && (
+        <p role="alert" className="mb-3 text-sm text-red-400">
+          {extractErrorMessage(toggleMutation.error, 'Failed to update role sync. The change was reverted.')}
         </p>
       )}
 
@@ -334,16 +329,9 @@ export default function AdminRoleSyncMapping() {
             <p className="text-slate-400">No role bindings yet for this guild pairing.</p>
           )}
 
-          <ul className="space-y-2" data-testid="binding-list">
-            {bindings?.map((binding) => (
-              <BindingRow
-                key={binding.id}
-                binding={binding}
-                canManage={canManage}
-                onDelete={setDeleteTarget}
-              />
-            ))}
-          </ul>
+          {bindings && bindings.length > 0 && (
+            <BindingTable bindings={bindings} canManage={canManage} onDelete={setDeleteTarget} />
+          )}
         </>
       )}
 
