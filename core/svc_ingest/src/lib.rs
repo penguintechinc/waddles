@@ -558,6 +558,7 @@ fn try_start_discord(
             &active_kid,
             &scope,
             shutdown_rx,
+            metrics.clone(),
         )
         .await;
     });

@@ -746,19 +746,15 @@ async fn run_loop<C, A, M, P>(
     }
 }
 
-/// Connects the real Discord Gateway receiver and a real
-/// `SpineClient`-backed publisher, then runs [`run_loop`] until `shutdown`
-/// resolves. This is the function `crate::lib::try_start_discord` spawns as
-/// its own background task.
-pub async fn run<A: EventAppender, M: SpineMetrics + ReceiverHealthMetrics>(
-    gateway_cfg: GatewayConfig,
-    appender: &A,
-    metrics: &M,
-    keyring: &KeyRing,
-    active_kid: &str,
-    scope: &Scope,
-    shutdown: oneshot::Receiver<()>,
-) {
+/// Builds the single process-wide [`RestPermissionsResolver`] (bounded HTTP
+/// client, SWR cache, circuit breaker, metrics sink) that [`run`] shares
+/// across every message. Returns `None` (logged) if the TLS backend cannot
+/// initialise, in which case discord ingest must not start.
+pub(crate) fn build_production_resolver(
+    bot_token: String,
+    api_base: String,
+    metrics: Arc<dyn PermissionsMetrics>,
+) -> Option<RestPermissionsResolver> {
     let http = match build_permissions_http_client() {
         Ok(c) => c,
         Err(err) => {
@@ -767,14 +763,45 @@ pub async fn run<A: EventAppender, M: SpineMetrics + ReceiverHealthMetrics>(
                 error = %err,
                 "cannot build bounded discord REST client; discord ingest not started"
             );
-            return;
+            return None;
         }
     };
-    let permissions = RestPermissionsResolver::new(
+    Some(RestPermissionsResolver::with_options(
         http,
+        bot_token,
+        api_base,
+        PermissionsCacheConfig::default(),
+        (
+            PERMISSIONS_BREAKER_THRESHOLD,
+            PERMISSIONS_BREAKER_WINDOW,
+            PERMISSIONS_BREAKER_BACKOFF,
+        ),
+        metrics,
+    ))
+}
+
+/// Connects the real Discord Gateway receiver and a real
+/// `SpineClient`-backed publisher, then runs [`run_loop`] until `shutdown`
+/// resolves. This is the function `crate::lib::try_start_discord` spawns as
+/// its own background task.
+#[allow(clippy::too_many_arguments)]
+pub async fn run<A: EventAppender, M: SpineMetrics + ReceiverHealthMetrics>(
+    gateway_cfg: GatewayConfig,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    shutdown: oneshot::Receiver<()>,
+    permissions_metrics: Arc<dyn PermissionsMetrics>,
+) {
+    let Some(permissions) = build_production_resolver(
         gateway_cfg.token.clone(),
         penguin_connector_discord::gateway::DEFAULT_API_BASE.to_string(),
-    );
+        permissions_metrics,
+    ) else {
+        return;
+    };
     let receiver = DiscordGatewayReceiver::new(gateway_cfg);
     let backoff = Backoff::new(Duration::from_secs(30));
     run_loop(
@@ -1868,6 +1895,105 @@ mod tests {
             assert!(err.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
             let perms = resolver.resolve("111", "444").await;
             assert!(!perms.is_broadcaster && !perms.is_mod);
+        }
+
+        /// Reads one `outcome` label of the Discord permissions counter from
+        /// a registry (what a Prometheus scrape would see).
+        fn outcome_count(registry: &prometheus::Registry, outcome: &str) -> u64 {
+            registry
+                .gather()
+                .iter()
+                .filter(|f| f.name().contains("discord_permissions"))
+                .flat_map(|f| f.get_metric().to_vec())
+                .filter(|m| m.label.iter().any(|l| l.value() == outcome))
+                .map(|m| m.counter.value() as u64)
+                .sum()
+        }
+
+        /// Drives the real `run_loop` with the exact resolver production
+        /// builds (`build_production_resolver`) and the real `IngestMetrics`.
+        async fn drive_live_flow(
+            server: &MockServer,
+            authors: &[&str],
+        ) -> (Arc<prometheus::Registry>, Vec<String>) {
+            let registry = Arc::new(prometheus::Registry::new());
+            let metrics = Arc::new(crate::telemetry::register_ingest_metrics(&registry));
+            let resolver =
+                build_production_resolver("test-token".into(), server.uri(), metrics.clone())
+                    .expect("resolver builds");
+            let msgs = authors
+                .iter()
+                .map(|a| {
+                    let mut m = test_msg(Some("111"), "cmd");
+                    m.author_id = (*a).to_string();
+                    m
+                })
+                .collect();
+            let appender = RecordingAppender::default();
+            let (_tx, rx) = oneshot::channel();
+            let _ = tokio::time::timeout(
+                Duration::from_millis(1500),
+                run_loop(
+                    FakeConnector::new(msgs, 0),
+                    &appender,
+                    metrics.as_ref(),
+                    &test_keyring(),
+                    "k1",
+                    &Scope::new("acme", None),
+                    Backoff::new(Duration::from_secs(30)),
+                    rx,
+                    &resolver,
+                ),
+            )
+            .await;
+            let published = appender
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| {
+                    c.1.event
+                        .payload
+                        .get("is_mod")
+                        .map_or("?".into(), |v| v.to_string())
+                })
+                .collect();
+            (registry, published)
+        }
+
+        /// regression: discord self-DoS -- production path must go through
+        /// the SWR cache, so two identical lookups cost one Discord round.
+        #[tokio::test]
+        async fn production_flow_second_identical_lookup_hits_cache() {
+            let server = MockServer::start().await;
+            mock_ok_mod(&server).await;
+            let (registry, published) = drive_live_flow(&server, &["444", "444"]).await;
+            assert_eq!(published, ["true", "true"]);
+            // One guild + one member request for the first lookup only.
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+            assert_eq!(outcome_count(&registry, "hit"), 1);
+            assert_eq!(outcome_count(&registry, "miss"), 1);
+        }
+
+        /// A Discord outage in the live flow opens the breaker; later
+        /// lookups short-circuit instead of hammering Discord, fail closed,
+        /// and the outcomes are emitted as metrics.
+        #[tokio::test]
+        async fn production_flow_outage_opens_breaker_and_stops_calling() {
+            let server = MockServer::start().await;
+            mock_discord_down(&server, 503).await;
+            let authors = ["1", "2", "3", "4", "5", "6", "7", "8"];
+            let (registry, published) = drive_live_flow(&server, &authors).await;
+            assert_eq!(published.len(), 8, "every message still published");
+            assert!(published.iter().all(|p| p == "false"), "fail closed");
+            let calls = server.received_requests().await.unwrap().len();
+            assert!(
+                calls <= PERMISSIONS_BREAKER_THRESHOLD as usize,
+                "calls={calls}"
+            );
+            assert_eq!(outcome_count(&registry, "breaker_opened"), 1);
+            assert_eq!(outcome_count(&registry, "breaker_short_circuit"), 3);
+            assert_eq!(outcome_count(&registry, "fail_closed"), 8);
         }
 
         #[test]
