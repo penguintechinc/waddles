@@ -22,11 +22,8 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.js'],
     coverage: {
       provider: 'v8',
-      include: [
-        'src/components/dashboard/CommunityStatsWidget.jsx',
-        'src/components/dashboard/QuickActionsWidget.jsx',
-        'src/layouts/DashboardLayout.jsx',
-      ],
+      include: ['src/**/*.{js,jsx,ts,tsx}'],
+      exclude: ['src/test/**', 'src/**/*.test.*', 'src/main.jsx'],
       thresholds: {
         statements: 90,
         branches: 90,

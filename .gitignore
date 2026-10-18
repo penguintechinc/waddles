@@ -242,3 +242,5 @@ node_modules/
 # core/bundle_compiler/src/build/ is a Rust SOURCE module, not build output --
 # exempt it from the generic build/ ignore above.
 !core/bundle_compiler/src/build/
+
+coverage/
