@@ -16,6 +16,12 @@ from services.errors import ApiError
 from services.schema import bind_marketplace_vendor_tables
 
 
+@pytest.fixture(autouse=True)
+def _marketplace_key(monkeypatch: Any) -> None:
+    """payment_details is field-encrypted on submit, so a (test-only) key must be present."""
+    monkeypatch.setenv("MARKETPLACE_ENCRYPTION_KEY", "0" * 64)
+
+
 @pytest.fixture
 def dal() -> Any:
     from pydal import DAL
@@ -108,6 +114,32 @@ class TestSubmitVendorModuleValidation:
             "paymentMethod": "paypal",
             "paymentDetails": {"paypal_email": "vendor@example.com"},
         }
+
+    def test_payment_details_stored_encrypted_and_erasable(
+        self, dal: Any, monkeypatch: Any
+    ) -> None:
+        import json
+        import socket
+
+        from services import marketplace_crypto as crypto
+
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *a, **k: [(socket.AF_INET, None, None, None, ("93.184.216.34", 0))],
+        )
+        payload = self._valid_payload()
+        payload["paymentDetails"] = {"paypal_email": "pay@example.com", "bank_account": "123456789"}
+        review.submit_vendor_module(dal, payload)
+        row = dal(dal.vendor_submissions.vendor_email == "vendor@example.com").select().first()
+        stored = row.payment_details
+        assert crypto.is_encrypted_payment_details(stored)
+        assert "pay@example.com" not in json.dumps(stored)
+        assert crypto.decrypt_payment_details(stored) == payload["paymentDetails"]
+        # erasure: nulling the field (or deleting the row) still works on the encrypted value
+        dal(dal.vendor_submissions.id == row.id).update(payment_details=None)
+        erased = dal.vendor_submissions[row.id]
+        assert crypto.decrypt_payment_details(erased.payment_details) == {}
 
     def test_duplicate_active_submission_is_conflict(self, dal: Any, monkeypatch: Any) -> None:
         import socket
