@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: openwhisk
-          image: localhost:32000/openwhisk/standalone:nightly
+          image: localhost:32000/openwhisk/standalone:7ef091c@sha256:9246075173e3bb95468f6357c23bc1709c07bd8654bb49eb363153ae2a19c5c1
           ports:
             - containerPort: 3233
           env:
