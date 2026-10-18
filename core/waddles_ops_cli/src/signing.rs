@@ -158,12 +158,12 @@ impl PlatformSigner {
 }
 
 impl SignedSidecar {
-    /// Compact, sorted-key JSON -- identical bytes to Python's
-    /// `json.dumps(doc, sort_keys=True, separators=(",", ":"))` for the validated ASCII charset.
+    /// Compact, sorted-key, ASCII-escaped JSON -- byte-identical to Python's
+    /// `json.dumps(doc, sort_keys=True, separators=(",", ":"))` (default `ensure_ascii`),
+    /// including for the unvalidated `digest`/`key_id` text.
     pub fn to_canonical_json(&self) -> Result<String, SigningError> {
-        // serde_json without `preserve_order` serializes a Value map sorted by key.
         let value = serde_json::to_value(self).map_err(|e| SigningError::Json(e.to_string()))?;
-        serde_json::to_string(&value).map_err(|e| SigningError::Json(e.to_string()))
+        crate::pyjson::dumps_canonical(&value).map_err(|e| SigningError::Json(e.to_string()))
     }
 }
 

@@ -1,5 +1,14 @@
-//! Operator-tooling library: platform Ed25519 bundle signing (byte-identical to
-//! `hub_api/services/bundle_signing_service.py` and verified by
-//! `core/bundle_executor/src/signing.rs`).
+//! Rust operator tooling superseding `hub_api/cli/{sign_approved_bundles,verify_audit_chain,
+//! suppression}.py`. Security-sensitive: behaviour and bytes must stay identical to the Python
+//! (see `tests/*_parity.rs`, vectors from `scripts/gen_ops_cli_vectors.py`).
 
+pub mod audit_chain;
+pub mod audit_cli;
+pub mod db;
+pub mod pyjson;
+pub mod pystr;
+pub mod sign_backfill;
 pub mod signing;
+pub mod storage;
+pub mod suppression;
+pub mod suppression_cli;
