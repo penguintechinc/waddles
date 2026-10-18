@@ -1,4 +1,4 @@
-.PHONY: codemod-app-bundles-activation-only openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: seed-bc-demo codemod-app-bundles-activation-only openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -165,6 +165,11 @@ seed-mock-data:
 # so marketing screenshots are not empty-state. SEED_ARGS e.g. --docker.
 seed-ui-mock-data:
 	@bash scripts/seed-ui-mock-data.sh $(filter --docker,$(SEED_ARGS))
+
+# Bar Citizen demo pre-link (idempotent upsert; needs DATABASE_URL, see
+# scripts/demo/seed_bc_demo.py header for DEMO_* overrides, docs/demo/ runbook).
+seed-bc-demo:
+	@python3 scripts/demo/seed_bc_demo.py
 
 # Marketing screenshots -> docs/screenshots/ (pinned Playwright, see
 # tests/screenshots). Needs a running hub-webui at BASE_URL and seeded data;
