@@ -368,22 +368,50 @@ class AIChatterConfigRequest:
     min_message_length: int | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class AIChatterConfigDTO:
+    """AIChatter config -- exact field set (unknown keys dropped)."""
+
+    enabled: bool = False
+    max_responses_per_window: int = 10
+    window_seconds: int = 600
+    max_per_user_per_window: int = 2
+    response_probability: float = 0.30
+    min_message_length: int = 10
+
+
+@dataclass(slots=True, frozen=True)
+class AIChatterConfigResponse:
+    """Response body -- AIChatter config envelope."""
+
+    success: bool
+    config: AIChatterConfigDTO
+
+
+def _chatter_dto(config: dict[str, Any]) -> AIChatterConfigDTO:
+    """Project relayed upstream config onto `AIChatterConfigDTO`."""
+    known = {f.name for f in dataclasses.fields(AIChatterConfigDTO)}
+    return AIChatterConfigDTO(**{k: v for k, v in config.items() if k in known})
+
+
 @bot_bp.route("/<int:community_id>/ai-chatter/config", methods=["GET"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope(_AI_CHATTER_READ)  # type: ignore[untyped-decorator]
+@validate_response(AIChatterConfigResponse)
 async def get_ai_chatter_config(community_id: int) -> Any:
     """`api.js` `getAIChatterConfig` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
     if denied:
         return denied
     config = await bot_ai_chatter.get_chatter_config(community_id)
-    return {"success": True, "config": config}
+    return AIChatterConfigResponse(success=True, config=_chatter_dto(config))
 
 
 @bot_bp.route("/<int:community_id>/ai-chatter/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope(_AI_CHATTER_WRITE)  # type: ignore[untyped-decorator]
 @validate_request(AIChatterConfigRequest)
+@validate_response(AIChatterConfigResponse)
 async def update_ai_chatter_config(data: AIChatterConfigRequest, community_id: int) -> Any:
     """`api.js` `updateAIChatterConfig` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
@@ -401,7 +429,7 @@ async def update_ai_chatter_config(data: AIChatterConfigRequest, community_id: i
         config = await bot_ai_chatter.update_chatter_config(community_id, update)
     except bot_ai_chatter.AIChatterValidationError as exc:
         return _error(str(exc), 400, "BAD_REQUEST")
-    return {"success": True, "config": config}
+    return AIChatterConfigResponse(success=True, config=_chatter_dto(config))
 
 
 # ═══════════════════════════════════════════════════════════════════════

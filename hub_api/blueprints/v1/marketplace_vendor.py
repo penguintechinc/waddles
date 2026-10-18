@@ -26,11 +26,13 @@ auto-discovery -- no edit to `routers/v1.py` needed.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
 from flask_core.tenancy import tenant_middleware
 from quart import Blueprint, Response, current_app, jsonify, request
+from quart_schema import validate_response
 
 from services import marketplace_analytics_service as analytics
 from services import marketplace_review_service as review
@@ -43,6 +45,53 @@ vendor_bp = Blueprint("v1_marketplace_vendor", __name__, url_prefix="/api/v1/mar
 vendor_public_bp = Blueprint(
     "v1_marketplace_vendor_public", __name__, url_prefix="/api/v1/marketplace/public/vendor"
 )
+
+
+@dataclass(slots=True, frozen=True)
+class SellerDTO:
+    """Vendor's own seller row (payout/revenue = financial data)."""
+
+    id: int
+    userId: int
+    displayName: str
+    description: str | None
+    websiteUrl: str | None
+    payoutMethod: str | None
+    totalRevenueCents: int
+    totalSubscribers: int
+    isVerified: bool
+    createdAt: str | None
+    updatedAt: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class SellerResponse:
+    """`{success, seller}` envelope for the vendor-profile routes."""
+
+    success: bool
+    seller: SellerDTO | None
+
+
+@dataclass(slots=True, frozen=True)
+class VendorRequestDTO:
+    """Vendor-role request as its requester sees it (no contact PII)."""
+
+    id: int
+    requestId: str | None = None
+    status: str | None = None
+    companyName: str | None = None
+    rejectionReason: str | None = None
+    requestedAt: str | None = None
+    reviewedAt: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class VendorRequestResponse:
+    """`{success, request}` envelope for the vendor-request routes."""
+
+    success: bool
+    request: VendorRequestDTO | None
+    message: str | None = None
 
 
 def _dal() -> Any:
@@ -69,6 +118,7 @@ def _int_query_arg(name: str, default: int) -> int:
 
 @vendor_bp.route("/profile", methods=["GET"])
 @tenant_middleware  # type: ignore[untyped-decorator]
+@validate_response(SellerResponse, 200)
 async def get_vendor_profile() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/profile`."""
     dal = _dal()
@@ -79,6 +129,7 @@ async def get_vendor_profile() -> tuple[dict[str, Any], int]:
 
 @vendor_bp.route("/profile", methods=["POST"])
 @tenant_middleware  # type: ignore[untyped-decorator]
+@validate_response(SellerResponse, 201)
 async def create_vendor_profile() -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/vendor/profile`."""
     dal = _dal()
@@ -93,6 +144,7 @@ async def create_vendor_profile() -> tuple[dict[str, Any], int]:
 
 @vendor_bp.route("/profile", methods=["PUT"])
 @tenant_middleware  # type: ignore[untyped-decorator]
+@validate_response(SellerResponse, 200)
 async def update_vendor_profile() -> tuple[dict[str, Any], int]:
     """`PUT /api/v1/marketplace/vendor/profile`."""
     dal = _dal()
@@ -317,6 +369,7 @@ async def submit_module_for_review(
 
 @vendor_bp.route("/request", methods=["GET"])
 @tenant_middleware  # type: ignore[untyped-decorator]
+@validate_response(VendorRequestResponse, 200)
 async def get_vendor_request() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/request`."""
     dal = _dal()
@@ -327,6 +380,7 @@ async def get_vendor_request() -> tuple[dict[str, Any], int]:
 
 @vendor_bp.route("/request", methods=["POST"])
 @tenant_middleware  # type: ignore[untyped-decorator]
+@validate_response(VendorRequestResponse, 201)
 async def create_vendor_request() -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/vendor/request`."""
     dal = _dal()

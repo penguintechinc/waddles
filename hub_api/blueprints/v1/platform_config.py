@@ -24,7 +24,7 @@ from typing import Any, cast
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.tenancy import tenant_middleware
-from quart import Blueprint, current_app, jsonify, request
+from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import platform_config_service as svc
@@ -231,11 +231,13 @@ async def get_hub_settings() -> HubSettingsResponse:
 @platform_config_bp.route("/settings", methods=["PUT"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("users:admin")  # type: ignore[untyped-decorator]
+@validate_response(HubSettingsResponse)
 async def update_hub_settings() -> tuple[Any, int]:
     """Update hub settings.
 
-    NOT `@validate_request`/`@validate_response` -- Node's `updateHubSettings`
-    accepts an arbitrary flat key/value body (`for (const [key, value] of
+    NOT `@validate_request` (the response IS validated against
+    `HubSettingsResponse`) -- Node's `updateHubSettings` accepts an
+    arbitrary flat key/value body (`for (const [key, value] of
     Object.entries(req.body))`), not a fixed shape; quart-schema's
     dataclass-based `@validate_request` has no "arbitrary extra keys"
     escape hatch the way Node's untyped `req.body` does. Reads the raw
@@ -249,7 +251,7 @@ async def update_hub_settings() -> tuple[Any, int]:
             error_response("Request body must be a JSON object", 400, "BAD_REQUEST"),
         )
     settings = await svc.update_hub_settings(async_dal, dal, updates=updates)
-    return jsonify({"success": True, "data": settings}), 200
+    return HubSettingsResponse(success=True, data=settings), 200
 
 
 BLUEPRINTS: list[Blueprint] = [platform_config_bp]
