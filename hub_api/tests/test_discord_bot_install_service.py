@@ -83,3 +83,20 @@ def test_permissions_bitfield_covers_expected_bits() -> None:
     # unimplemented scaffold, not a shipped feature.
     assert not DISCORD_BOT_INSTALL_PERMISSIONS & (1 << 20)
     assert not DISCORD_BOT_INSTALL_PERMISSIONS & (1 << 21)
+
+
+def test_single_authoritative_mask_exact_bits_across_install_paths() -> None:
+    """Card + tenant install share ONE mask with exactly the audited bits."""
+    from services.discord_install_service import DEFAULT_BOT_PERMISSIONS
+
+    assert DEFAULT_BOT_PERMISSIONS == DISCORD_BOT_INSTALL_PERMISSIONS
+    assert DISCORD_BOT_INSTALL_PERMISSIONS == 1_108_906_961_990
+    required = (1, 2, 6, 10, 11, 13, 14, 16, 28, 29, 33, 40)
+    exact = 0
+    for bit in required:
+        exact |= 1 << bit
+    # Exactly: Manage Roles (28) + Manage Events (33) + messaging set.
+    assert DISCORD_BOT_INSTALL_PERMISSIONS == exact
+    # Administrator, Manage Channels/Guild, voice CONNECT/SPEAK, ...
+    for forbidden in (3, 4, 5, 20, 21, 30, 31):
+        assert not DISCORD_BOT_INSTALL_PERMISSIONS & (1 << forbidden)
