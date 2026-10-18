@@ -47,6 +47,7 @@ REQUIRED_SCHEMA: Mapping[str, tuple[str, ...]] = {
     "community_members": (
         "community_id", "user_id", "platform", "platform_user_id", "role",
         "community_role_id", "claims_cache", "is_active", "left_at", "updated_at",
+        "user_uuid", "user_uuid_unavailable_reason",
     ),
     "guild_tenant_pairings": (
         "id", "community_id", "discord_guild_id", "direction", "sync_enabled",
@@ -203,7 +204,24 @@ def upsert_identity(cur: Any, cfg: DemoConfig) -> int:
 
 
 def upsert_membership(cur: Any, cfg: DemoConfig, hub_user_id: int) -> None:
-    """Upsert the demo member into the community at the baseline role (owner never touched)."""
+    """Upsert the demo member at the baseline role (owner never touched).
+
+    `user_id` is `str(hub_users.id)` -- the exact key role sync matches on; `user_uuid` is
+    derived by the DB trigger from `hub_users.uuid` (never set here). Refuses to re-bind a
+    pre-existing member row that belongs to another hub user or to a pseudonym (NULL
+    `user_id`): overwriting would silently change that person's `user_uuid`.
+    """
+    cur.execute(
+        "SELECT user_id FROM community_members "
+        "WHERE community_id = %s AND platform = %s AND platform_user_id = %s FOR UPDATE",
+        (cfg.community_id, DISCORD, cfg.discord_user_id),
+    )
+    existing = cur.fetchone()
+    if existing is not None and existing[0] != str(hub_user_id):
+        raise SeedError(
+            f"community_id={cfg.community_id}: a member row for this Discord identity already "
+            "exists bound to a different hub user or a pseudonym; refusing to re-bind it"
+        )
     cur.execute(
         "INSERT INTO community_members (community_id, user_id, platform, platform_user_id, "
         "role, community_role_id, is_active) VALUES (%s, %s, %s, %s, %s, "
@@ -221,6 +239,30 @@ def upsert_membership(cur: Any, cfg: DemoConfig, hub_user_id: int) -> None:
     logger.info(
         "seed_bc_demo.membership_ok op=upsert_membership community_id=%s", cfg.community_id
     )
+
+
+def verify_binding(cur: Any, cfg: DemoConfig, hub_user_id: int) -> None:
+    """Prove role sync can resolve the seeded member; fail loud (rolling back) if not.
+
+    Mirrors `role_sync_service`: Discord id -> `hub_user_identities` -> hub user ->
+    active `community_members.user_id = str(hub_user_id)`, and `user_uuid` must be that
+    hub user's own `hub_users.uuid` (not a pseudonym).
+    """
+    cur.execute(
+        "SELECT m.user_uuid, m.user_uuid_unavailable_reason, hu.uuid "
+        "FROM hub_user_identities i "
+        "JOIN hub_users hu ON hu.id = i.hub_user_id "
+        "JOIN community_members m ON m.user_id = i.hub_user_id::text "
+        "WHERE i.platform = %s AND i.platform_user_id = %s AND i.hub_user_id = %s "
+        "AND m.community_id = %s AND m.is_active",
+        (DISCORD, cfg.discord_user_id, hub_user_id, cfg.community_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise SeedError("seeded identity is not resolvable by role sync (no active member join)")
+    if row[1] is not None or row[0] is None or row[0] != row[2]:
+        raise SeedError("seeded member user_uuid is not the hub user's uuid (binding inconsistent)")
+    logger.info("seed_bc_demo.binding_resolvable community_id=%s", cfg.community_id)
 
 
 def upsert_pairing(cur: Any, cfg: DemoConfig) -> int:
@@ -263,6 +305,7 @@ def seed(conn: Any, cfg: DemoConfig) -> SeedResult:
             verify_community(cur, cfg)
             hub_user_id = upsert_identity(cur, cfg)
             upsert_membership(cur, cfg, hub_user_id)
+            verify_binding(cur, cfg, hub_user_id)
             pairing_id = upsert_pairing(cur, cfg)
             bindings = upsert_binding(cur, cfg, pairing_id)
         conn.commit()

@@ -51,7 +51,26 @@ CREATE TABLE community_members (
     role VARCHAR(50) DEFAULT 'member', community_role_id INTEGER REFERENCES community_roles(id),
     claims_cache JSONB, is_active BOOLEAN DEFAULT true, left_at TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    user_uuid UUID, user_uuid_unavailable_reason TEXT,
     UNIQUE(community_id, platform, platform_user_id));
+-- Faithful reduction of 0048 community_members_set_user_uuid: uuid is DERIVED (caller
+-- value discarded); user_id -> hub_users.uuid, dangling -> reason, NULL user_id -> a
+-- distinct pseudonym uuid (resolve_identity_uuid stand-in).
+CREATE FUNCTION cm_set_uuid() RETURNS trigger LANGUAGE plpgsql AS $f$
+BEGIN
+    NEW.user_uuid := NULL; NEW.user_uuid_unavailable_reason := NULL;
+    IF NEW.user_id IS NOT NULL THEN
+        SELECT hu.uuid INTO NEW.user_uuid FROM hub_users hu WHERE hu.id::text = NEW.user_id;
+        IF NEW.user_uuid IS NULL THEN
+            NEW.user_uuid_unavailable_reason := 'dangling_user_id';
+        END IF;
+    ELSE
+        NEW.user_uuid := gen_random_uuid();
+    END IF;
+    RETURN NEW;
+END $f$;
+CREATE TRIGGER trg_cm_uuid BEFORE INSERT OR UPDATE OF user_id, platform, platform_user_id,
+    user_uuid ON community_members FOR EACH ROW EXECUTE FUNCTION cm_set_uuid();
 CREATE TABLE guild_tenant_pairings (
     id BIGSERIAL PRIMARY KEY, community_id INTEGER NOT NULL REFERENCES communities(id),
     discord_guild_id VARCHAR(255) NOT NULL,
@@ -123,6 +142,76 @@ def test_seed_creates_all_links(conn: psycopg2.extensions.connection) -> None:
         cur.execute("SELECT sync_scope, community_role FROM community_role_sync_bindings")
         assert cur.fetchall() == [("community_role", "moderator")]
     assert _count(conn, "hub_user_identities") == 1
+
+
+def test_seeded_identity_resolvable_by_role_sync_path(
+    conn: psycopg2.extensions.connection,
+) -> None:
+    """regression: member.user_id is the HUB USER id (not Discord id / pseudonym uuid)."""
+    cfg = seed_mod.load_config({})
+    result = seed_mod.seed(conn, cfg)
+    with conn.cursor() as cur:
+        # role-sync resolution: discord id -> hub_user_identities -> hub user -> member
+        cur.execute(
+            "SELECT hub_user_id FROM hub_user_identities WHERE platform='discord' "
+            "AND platform_user_id=%s", (cfg.discord_user_id,))
+        hub_id = cur.fetchone()[0]
+        assert hub_id == result.hub_user_id
+        cur.execute(
+            "SELECT user_id, user_uuid, user_uuid_unavailable_reason, platform_user_id "
+            "FROM community_members WHERE community_id=%s AND user_id=%s AND is_active",
+            (cfg.community_id, str(hub_id)))
+        user_id, user_uuid, reason, pid = cur.fetchone()
+        assert user_id != cfg.discord_user_id and user_id == str(hub_id)
+        cur.execute("SELECT uuid FROM hub_users WHERE id=%s", (hub_id,))
+        assert user_uuid == cur.fetchone()[0] and reason is None
+    assert pid == cfg.discord_user_id
+
+
+def test_refuses_to_rebind_pseudonymous_member(conn: psycopg2.extensions.connection) -> None:
+    """regression: a pre-existing pseudonym member (NULL user_id) must not be hijacked."""
+    cfg = seed_mod.load_config({})
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO community_members (community_id, platform, platform_user_id, role) "
+            "VALUES (1, 'discord', %s, 'member')", (cfg.discord_user_id,))
+        cur.execute("SELECT user_uuid FROM community_members")
+        before = cur.fetchone()[0]
+    with pytest.raises(seed_mod.SeedError, match="refusing to re-bind"):
+        seed_mod.seed(conn, cfg)
+    with conn.cursor() as cur:
+        cur.execute("SELECT user_id, user_uuid FROM community_members")
+        assert cur.fetchall() == [(None, before)]
+    assert _count(conn, "hub_users") == 0  # rolled back, no orphan link
+
+
+def test_refuses_to_rebind_member_of_other_hub_user(conn: psycopg2.extensions.connection) -> None:
+    """regression: never re-point another hub user's member row at the demo user."""
+    cfg = seed_mod.load_config({})
+    with conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO hub_users (username) VALUES ('real-user') RETURNING id")
+        other = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO community_members (community_id, user_id, platform, platform_user_id) "
+            "VALUES (1, %s, 'discord', %s)", (str(other), cfg.discord_user_id))
+    with pytest.raises(seed_mod.SeedError, match="refusing to re-bind"):
+        seed_mod.seed(conn, cfg)
+    with conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM community_members")
+        assert cur.fetchall() == [(str(other),)]
+
+
+def test_verify_binding_fails_on_inconsistent_uuid(conn: psycopg2.extensions.connection) -> None:
+    """The post-write check trips if user_uuid is not the hub user's uuid."""
+    cfg = seed_mod.load_config({})
+    result = seed_mod.seed(conn, cfg)
+    with conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE community_members DISABLE TRIGGER trg_cm_uuid")
+        cur.execute("UPDATE community_members SET user_uuid = gen_random_uuid()")
+        cur.execute("ALTER TABLE community_members ENABLE TRIGGER trg_cm_uuid")
+    with conn.cursor() as cur, pytest.raises(seed_mod.SeedError, match="not the hub user's uuid"):
+        seed_mod.verify_binding(cur, cfg, result.hub_user_id)
+    conn.rollback()
 
 
 def test_seed_is_idempotent(conn: psycopg2.extensions.connection) -> None:
