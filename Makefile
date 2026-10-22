@@ -97,6 +97,7 @@ check-bundle-hygiene:
 	@python3 -m pytest scripts/ci/tests/test_bundle_wit_world.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_stage_gate.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -q -p no:cacheprovider
 
 # builtin_handlers -> Rust-path/bundle inventory gate (gh #840 PR4): FAILS if a live Python
 # ingest/process/action handler has no mapping in .ci/builtin-handler-map.yaml, a covered

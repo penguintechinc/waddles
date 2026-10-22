@@ -1,4 +1,4 @@
-"""`!queue` -> a per-community viewer queue (join/leave/position/list/next/clear), kv-only.
+"""`!vqueue` -> a per-community viewer queue (join/leave/position/list/next/clear), kv-only.
 
 Original Waddles content: a viewer queue (line up for a game, a Q&A turn, a race) is a common
 stream-tool idea, but no third-party source, code or text is used here, so no attribution
@@ -7,40 +7,40 @@ convention.
 
 Commands (the front of the queue is position 1):
 
-- `!queue join` / `!queue leave` -- anyone: add / remove the caller. A second `join` while queued
+- `!vqueue join` / `!vqueue leave` -- anyone: add / remove the caller. A second `join` while queued
   and a `leave` while not queued are friendly replies, never silent no-ops (fail loud).
-- bare `!queue` -- anyone: the caller's own position (`#2 of 5`), or how to join.
-- `!queue list [n]` -- anyone: the front `n` entries (default 10, max 15) plus a "+K more" tail.
-- `!queue next` -- moderator/broadcaster: pop the front and announce who is up.
-- `!queue clear` (alias `!queue reset`) -- moderator/broadcaster: empty the queue.
+- bare `!vqueue` -- anyone: the caller's own position (`#2 of 5`), or how to join.
+- `!vqueue list [n]` -- anyone: the front `n` entries (default 10, max 15) plus a "+K more" tail.
+- `!vqueue next` -- moderator/broadcaster: pop the front and announce who is up.
+- `!vqueue clear` (alias `!vqueue reset`) -- moderator/broadcaster: empty the queue.
 
 `join`/`leave`/`next`/`clear` are not in the shared `waddle_sdk.command.VERBS` vocabulary, so they
 are special-cased ahead of the formal `parse_command()` call (the same documented extension
 `raffle`/`music` use); bare, `list` and `reset` go through the real shared grammar, and any other
 grammar-legal verb replies with usage text.
 
-**Command collision -- read before activating.** `bundles/python/music` also answers `!queue`
-(it is that bundle's alias for `!music`, the song-request queue). Activating BOTH in one
-community makes every `!queue ...` line reach both bundles. Activate one per community, or drop
-the `!queue` alias from `music`; renaming this command is a one-line change to `_HEAD`/`SPEC`
-plus the two `command_prefix` filters.
+**Why `!vqueue`, not `!queue`.** `bundles/python/music` already owns `!queue` (its alias for
+`!music`, the song-request queue), and two bundles on one trigger answer every line twice. This
+bundle (a VIEWER queue: join/leave/next) therefore answers `!vqueue`; `music` keeps `!queue`. The
+bundle id, kv keys and log names stay `queue`.
 
-**Identity and PII.** A queue entry must be re-displayable to OTHER viewers (`!queue list`), so it
+**Identity and PII.** A queue entry must be re-displayable to OTHER viewers (`!vqueue list`), so it
 cannot be a one-way hash alone. Following `lastseen`, identity is the pipeline's opaque
 `{user:<id>}` token carried in `event.actor`: the bare id is stored (`u:<id>`) and replies EMIT
 `{user:<id>}` so the host's egress detokenizer renders the display name. Until ingest
 tokenization is universal, `event.actor` may still be a raw platform handle; that case never
-stores or logs the handle -- the entry is `h:<24 hex of SHA-256(community|actor)>`, shown as an
-opaque `viewer-<6 hex>` label (stable per viewer, so `!queue` still tells you your own place). No
-raw handle appears in a key, value, log line or reply. No actor at all -> "couldn't identify
-you", never a guessed entry.
+stores or logs the handle -- the entry is `h:<24 hex of SHA-256(community|platform|actor)>`,
+shown as an opaque `viewer-<6 hex>` label (stable per viewer, so `!vqueue` still tells you your
+own place). Only an actor that is EXACTLY one placeholder is a token (a padded/embedded look-alike
+is hashed like any handle). No raw handle appears in a key, value, log line or reply. No actor
+at all -> "couldn't identify you", never a guessed entry.
 
 **Concurrency.** One community's queue is a single JSON list under `queue.entries`. A
 read-modify-write of it is serialized by a short-TTL lock built from `kv.increment` (atomic,
 `1` only for the first caller -- the one compare-and-swap the host offers). A caller that cannot
 take the lock after three immediate attempts (no sleep exists under WASI) gets "busy, try again"
-instead of a silently lost update; the TTL bounds a crashed holder. Reads (`!queue`,
-`!queue list`) take no lock. Every command costs at most 5 kv operations (host cap: 64).
+instead of a silently lost update; the TTL bounds a crashed holder. Reads (`!vqueue`,
+`!vqueue list`) take no lock. Every command costs at most 5 kv operations (host cap: 64).
 
 **Output safety.** Every reply is bundle-built from validated tokens, hash labels, integers and
 constant text. The single place user-typed text can be echoed is the usage reply to a malformed
@@ -76,8 +76,8 @@ from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import sanitize_user_text
 
-_HEAD = "!queue"
-SPEC = CommandSpec(name="queue")
+_HEAD = "!vqueue"
+SPEC = CommandSpec(name="vqueue")
 
 #: Domain verbs special-cased ahead of the formal grammar parse -- none is in
 #: `waddle_sdk.command.VERBS` (see module docstring).
@@ -87,7 +87,7 @@ _MOD_COMMANDS = frozenset({"next", "clear"})
 #: Entries one community's queue may hold. 100 entries of at most 130 bytes is ~13 KB, far under
 #: the host's 64 KiB `kv` value cap (`core/bundle_host_kv/src/limits.rs::MAX_VALUE_BYTES`).
 MAX_QUEUE = 100
-#: `!queue list` shows this many entries by default / at most (a Twitch line is 500 chars; a
+#: `!vqueue list` shows this many entries by default / at most (a Twitch line is 500 chars; a
 #: resolved display name is up to ~25).
 DEFAULT_LIST = 10
 MAX_LIST = 15
@@ -105,14 +105,14 @@ _QUEUE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 #: The pipeline's `{user:<id>}` placeholder -- grammar mirrors `core/egress_detokenizer`
 #: (alphanumerics plus `-_:.`), bounded so a stored entry stays small.
-_TOKEN_RE = re.compile(r"^\{user:([A-Za-z0-9_:.-]{1,128})\}$")
+_TOKEN_RE = re.compile(r"\{user:([A-Za-z0-9_:.-]{1,128})\}")
 #: A stored entry: `u:<token id>` or `h:<24 hex>`. Anything else in the stored list is corruption.
-_ENTRY_RE = re.compile(r"^(?:u:[A-Za-z0-9_:.-]{1,128}|h:[0-9a-f]{24})$")
-_COUNT_RE = re.compile(r"^[0-9]{1,3}$")
+_ENTRY_RE = re.compile(r"(?:u:[A-Za-z0-9_:.-]{1,128}|h:[0-9a-f]{24})")
+_COUNT_RE = re.compile(r"[0-9]{1,3}")
 
 _USAGE = (
-    "Usage: !queue join | !queue leave | !queue | !queue list [n] | "
-    "!queue next | !queue clear (next/clear: mods only)"
+    "Usage: !vqueue join | !vqueue leave | !vqueue | !vqueue list [n] | "
+    "!vqueue next | !vqueue clear (next/clear: mods only)"
 )
 _NO_IDENTITY_MSG = "I couldn't identify you on this platform, so I can't manage your queue spot."
 _BUSY_MSG = "The queue is busy right now, please try again in a moment."
@@ -139,27 +139,31 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
-def _pseudonym(community: str | None, actor: str) -> str:
-    """24-hex non-reversible id for a raw (untokenized) `actor`, salted per community."""
+def _pseudonym(community: str | None, platform: str, actor: str) -> str:
+    """24-hex non-reversible id for a raw (untokenized) `actor`, per community AND platform.
+
+    The platform is part of the hash: a handle is only unique within its own platform, so a Discord
+    `bob` and a Twitch `bob` in one community are two viewers, never one shared queue entry.
+    """
     scope = community if community is not None else TENANT_WIDE_SENTINEL
-    return hashlib.sha256(f"{scope}|{actor}".encode()).hexdigest()[:24]
+    return hashlib.sha256(f"{scope}|{platform}|{actor}".encode()).hexdigest()[:24]
 
 
-def _entry_for(community: str | None, actor: object) -> str | None:
+def _entry_for(community: str | None, actor: object, *, platform: str) -> str | None:
     """Return the stored entry for `actor`, or `None` if there is no usable identity.
 
-    A well-formed `{user:<id>}` placeholder becomes `u:<id>`; any other non-empty string is a raw
-    platform handle and is hashed (never stored). See module docstring.
+    ONLY an actor that is exactly one host-minted `{user:<id>}` placeholder (no surrounding
+    whitespace or text -- the pipeline never adds any) becomes `u:<id>`; any other non-empty string
+    is a raw platform handle and is hashed (never stored). A raw handle that merely LOOKS like a
+    placeholder (padded, embedded, over-long) is hashed too, so it can never claim another viewer's
+    entry. See module docstring.
     """
-    if not isinstance(actor, str):
+    if not isinstance(actor, str) or not actor.strip():
         return None
-    cleaned = actor.strip()
-    if not cleaned:
-        return None
-    match = _TOKEN_RE.match(cleaned)
+    match = _TOKEN_RE.fullmatch(actor)
     if match:
         return f"u:{match.group(1)}"
-    return f"h:{_pseudonym(community, cleaned)}"
+    return f"h:{_pseudonym(community, platform, actor.strip())}"
 
 
 def _label(entry: str) -> str:
@@ -171,7 +175,7 @@ def _label(entry: str) -> str:
 
 
 def _resolve(rest: str) -> tuple[str, str | None]:
-    """Map the text after `!queue` onto `(command, arg)`; `arg` is `list`'s count or usage text.
+    """Map the text after `!vqueue` onto `(command, arg)`; `arg` is `list`'s count or usage text.
 
     `rest` is already stripped and may be empty. Domain verbs are handled before the formal
     grammar parse (module docstring); everything else is delegated to `parse_command` unchanged.
@@ -181,7 +185,7 @@ def _resolve(rest: str) -> tuple[str, str | None]:
         verb = first.lower()
         if verb in _DOMAIN_VERBS:
             if remainder.strip():
-                return "usage", f"!queue {verb} takes no arguments"
+                return "usage", f"!vqueue {verb} takes no arguments"
             return verb, None
 
     try:
@@ -206,16 +210,16 @@ def _map_parsed(parsed: ParsedCommand) -> tuple[str, str | None]:
         return "list", parsed.args
     if parsed.option == "reset":
         if parsed.args is not None:
-            return "usage", "!queue reset takes no arguments"
+            return "usage", "!vqueue reset takes no arguments"
         return "clear", None
     return "usage", f"unknown option '{parsed.option}'"
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize `!queue` and its grammar.
+    """Implement `process-stage.transform`: recognize `!vqueue` and its grammar.
 
     Cheap-skip first (exact first-token equality -- a `startswith` would wrongly match
-    `!queuex`), grammar resolution last. A recognized-but-malformed command still produces a
+    `!vqueuex`), grammar resolution last. A recognized-but-malformed command still produces a
     reply (`usage`), never a silent drop. No `kv` access here; `dispatch` owns all state I/O.
     """
     text = event.payload.get("text")
@@ -293,7 +297,7 @@ async def _load_entries(community: str | None, *, provider: str, channel_id: str
         await _fail_state("expected a JSON array", provider=provider, channel_id=channel_id)
     entries: list[str] = []
     for item in data:
-        if not isinstance(item, str) or not _ENTRY_RE.match(item):
+        if not isinstance(item, str) or not _ENTRY_RE.fullmatch(item):
             await _fail_state("malformed entry", provider=provider, channel_id=channel_id)
         entries.append(item)
     if len(entries) > MAX_QUEUE:
@@ -314,7 +318,7 @@ async def _save_entries(
 
 
 async def _delete_entries(community: str | None, *, provider: str, channel_id: str) -> None:
-    """Drop the queue blob entirely (`!queue clear`)."""
+    """Drop the queue blob entirely (`!vqueue clear`)."""
     try:
         await community_kv.delete(community, _QUEUE_KEY)
     except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_fail_kv`
@@ -356,7 +360,7 @@ async def _handle_join(
     community: str | None, actor: object, *, provider: str, channel_id: str
 ) -> str:
     """Append the caller to the back of the queue, once."""
-    entry = _entry_for(community, actor)
+    entry = _entry_for(community, actor, platform=provider)
     if entry is None:
         return _NO_IDENTITY_MSG
     label = _label(entry)
@@ -376,7 +380,7 @@ async def _handle_leave(
     community: str | None, actor: object, *, provider: str, channel_id: str
 ) -> str:
     """Remove the caller from wherever they are in the queue."""
-    entry = _entry_for(community, actor)
+    entry = _entry_for(community, actor, platform=provider)
     if entry is None:
         return _NO_IDENTITY_MSG
     label = _label(entry)
@@ -394,7 +398,7 @@ async def _handle_position(
     community: str | None, actor: object, *, provider: str, channel_id: str
 ) -> str:
     """Report the caller's own place in line (pure read)."""
-    entry = _entry_for(community, actor)
+    entry = _entry_for(community, actor, platform=provider)
     if entry is None:
         return _NO_IDENTITY_MSG
     label = _label(entry)
@@ -402,8 +406,8 @@ async def _handle_position(
     if entry in entries:
         return f"{label}, you're #{entries.index(entry) + 1} of {len(entries)} in the queue."
     if not entries:
-        return f"{label}, the queue is empty. Use !queue join to get in line."
-    return f"{label}, you're not in the queue ({len(entries)} waiting). Use !queue join."
+        return f"{label}, the queue is empty. Use !vqueue join to get in line."
+    return f"{label}, you're not in the queue ({len(entries)} waiting). Use !vqueue join."
 
 
 async def _handle_list(
@@ -412,11 +416,11 @@ async def _handle_list(
     """Show the front `n` entries (pure read), `n` defaulting to `DEFAULT_LIST`."""
     shown_count = DEFAULT_LIST
     if count_arg is not None:
-        if not isinstance(count_arg, str) or not _COUNT_RE.match(count_arg):
-            return f"Usage: !queue list [n] (n is 1-{MAX_LIST})"
+        if not isinstance(count_arg, str) or not _COUNT_RE.fullmatch(count_arg):
+            return f"Usage: !vqueue list [n] (n is 1-{MAX_LIST})"
         shown_count = int(count_arg)
         if not 1 <= shown_count <= MAX_LIST:
-            return f"Usage: !queue list [n] (n is 1-{MAX_LIST})"
+            return f"Usage: !vqueue list [n] (n is 1-{MAX_LIST})"
     entries = await _load_entries(community, provider=provider, channel_id=channel_id)
     if not entries:
         return _EMPTY_MSG
@@ -470,7 +474,7 @@ async def _run_command(
 
     if command in _MOD_COMMANDS and _caller_role_signal(payload) is not True:
         log.info("queue.permission_denied", command=command)
-        return f"Only the broadcaster or a moderator can use !queue {command}."
+        return f"Only the broadcaster or a moderator can use !vqueue {command}."
 
     kwargs: dict[str, Any] = {"provider": provider, "channel_id": channel_id}
     if command == "join":

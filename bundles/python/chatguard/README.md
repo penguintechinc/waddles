@@ -112,6 +112,35 @@ stage-next-only; the build script fails on a `stage` row):
 `chat.delete:discord` is `dangerous`; the seeder auto-grants dangerous permissions tenant-wide at
 activation (merge-time product decision, same as the other dangerous-permission bundles).
 
+## What the filters see (security review)
+
+The filters analyse the text as the platform RENDERS it, not as it was typed:
+
+- **No prefix cut-off.** The whole message is analysed up to `MAX_ANALYSIS_CHARS` (4096, above
+  every platform limit: Twitch 500, Discord 2000 / 4000 with Nitro). A longer line cannot occur
+  legitimately, so it is not analysed at all and counts as breaking the first enabled rule (a
+  permitted author skips `links`) -- padding past a cut-off never hides a link, word or caps.
+- **Typed braces are text.** The inbound pipeline escapes every `{ } \` an author types, so only
+  an UNescaped `{user:<token>}` is a host-minted mention (blanked, its display name is not the
+  author's text). The view is built in ONE pass that reads escapes exactly like the egress
+  detokenizer (`waddle_sdk.safe_text._split_live` is the fuzzed oracle in the tests); a typed
+  `{user:evil.com}` is therefore still seen by the link / blacklist / caps / symbol filters.
+- **Blank characters are dropped everywhere**: zero-width/format/combining characters (Unicode
+  `Cf`/`Mn`/`Cc`) plus the Hangul fillers and the Braille blank (categories the platform renders as
+  empty space). They can neither split a word, nor dilute the caps/symbol percentage.
+- **Domains may use any script** (`evil` with a Cyrillic `i`, an all-Cyrillic label): platforms
+  linkify them. A backslash before punctuation (`evil\.com`, Discord renders `evil.com`) is dropped
+  in the link view. A URL is only exempt from the caps/symbol statistics for its first 200
+  characters.
+- **A non-moderator's `!chatguard ...` / `!permit ...` line is still screened** before the command
+  is looked at -- it used to turn into a "denied" reply and skip every filter.
+
+Known gaps (host/platform, not closable in the bundle): the data plane delivers no message-EDIT
+events, so a clean message edited afterwards is never re-screened; the blacklist is NFKD +
+casefold + whole-word, with no confusables table (a Cyrillic `a` still splits `badword`); with the
+`waddles.core.disable-pii-tokenization` kill-switch ON the host neither escapes typed braces nor
+mints placeholders, so a typed `{user:token-shaped-word}` is blanked like a mention.
+
 ## Limits / follow-ups
 
 - Link detection is a spam heuristic (TLD list + obfuscation normalization), not a URL parser;

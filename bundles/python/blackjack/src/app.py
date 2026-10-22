@@ -122,7 +122,7 @@ _SYSTEM_RANDOM = random.SystemRandom()
 
 #: The pipeline delivers `event.actor` as its own host-minted placeholder; anchored so ONLY an actor
 #: that is exactly one `{user:<token>}` is left live (never one embedded in other text).
-_USER_TOKEN_RE = re.compile(r"^\{user:([A-Za-z0-9_:.-]+)\}$")
+_USER_TOKEN_RE = re.compile(r"\{user:([A-Za-z0-9_:.-]+)\}")
 _FALLBACK_ACTOR = "someone"
 _SET_KEYS = frozenset({"minbet", "maxbet", "timeout"})
 
@@ -174,9 +174,8 @@ def _actor_label(actor: object) -> str:
     """
     if not isinstance(actor, str) or not actor.strip():
         return _FALLBACK_ACTOR
-    label = actor.strip()
-    match = _USER_TOKEN_RE.match(label)
-    return sanitize_user_text(label, allow_tokens=(match.group(1),) if match else ())
+    match = _USER_TOKEN_RE.fullmatch(actor)  # the WHOLE, unpadded actor: the pipeline adds none
+    return sanitize_user_text(actor.strip(), allow_tokens=(match.group(1),) if match else ())
 
 
 def _pseudonym(community: str, actor_uuid: str) -> str:
@@ -245,14 +244,18 @@ def _is_natural(cards: list[int]) -> bool:
     return len(cards) == 2 and _total(cards) == 21
 
 
+def _top_return(stake: int) -> int:
+    """The most a hand can ever return for `stake`: the 3:2 natural (stake back + 1.5 x stake)."""
+    return stake + stake * 3 // 2
+
+
 def _reserve(stake: int) -> int:
     """Points the player keeps during a hand so the settlement wager has a stake to debit.
 
     `economy.wager` caps a payout at `MAX_PAYOUT_MULTIPLE` x its stake, so the settlement stake
     must be at least `ceil(largest possible return / 100)` (at least 1).
     """
-    top_return = stake + stake * 3 // 2
-    return max(1, -(-top_return // economy.MAX_PAYOUT_MULTIPLE))
+    return max(1, -(-_top_return(stake) // economy.MAX_PAYOUT_MULTIPLE))
 
 
 def _return_for(player: list[int], dealer: list[int], stake: int) -> tuple[str, int]:
@@ -302,7 +305,11 @@ def _hand_from_bytes(raw: bytes) -> Hand | None:
             and 1 <= hand.stake <= MANIFEST_MAX_BET
             and 1 <= hand.reserve <= economy.MAX_PAYOUT_MULTIPLE
             and hand.phase in _PHASES
-            and hand.due >= 0
+            # A stored payout can never exceed what a hand of this stake can return (a tampered or
+            # corrupt record must not be able to ask the host for more), and only a `due` hand
+            # carries one.
+            and 0 <= hand.due <= _top_return(hand.stake)
+            and (hand.due >= 1) == (hand.phase == PHASE_DUE)
             and 1 <= len(hand.player) <= _MAX_CARDS
             and 1 <= len(hand.dealer) <= _MAX_CARDS
             and all(0 <= c < _DECK_SIZE for c in (*hand.player, *hand.dealer))

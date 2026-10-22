@@ -1,7 +1,7 @@
 [project]
 name = "waddle-bundle-queue"
 version = "1.0.0"
-description = "`!queue` -> a per-community viewer queue (join / leave / position / list / next / clear), kv-only, with a lock-serialized JSON list and PII-free entries. Original Waddles implementation."
+description = "`!vqueue` -> a per-community viewer queue (join / leave / position / list / next / clear), kv-only, with a lock-serialized JSON list and PII-free entries. Original Waddles implementation."
 requires-python = ">=3.13"
 dependencies = []
 

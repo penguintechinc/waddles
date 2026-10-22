@@ -77,7 +77,7 @@ from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
 from waddle_sdk.flask_core.bundle_runtime import get_bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.identity import MAX_MENTION_TOKEN_LEN
-from waddle_sdk.safe_text import sanitize_user_text
+from waddle_sdk.safe_text import guard_leading_command, sanitize_user_text
 
 #: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
 #: `random.*` functions (their Mersenne Twister is seeded at import and componentize-py freezes
@@ -554,7 +554,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         reply = _KV_UNAVAILABLE
     except _StateCorruptError:
         reply = _STATE_CORRUPT
-    return _reply_event(event, reply)
+    # A reply can LEAD with the viewer's label; a raw handle starting `/`, `.` or `!` must never
+    # turn the bot's own line into a chat command.
+    return _reply_event(event, guard_leading_command(reply))
 
 
 class DispatchResult:

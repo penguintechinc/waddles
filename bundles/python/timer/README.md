@@ -19,11 +19,11 @@ concept, but no third-party source, code or text is used, so no attribution appl
 
 | Command | Behavior |
 |---|---|
-| `!timer add <name> <interval-min> <message>` | Registers a timer **bound to this channel**. Name 1-24 of `[a-z0-9_-]` (case-insensitive), interval 5-1440 minutes, message 1-300 chars, at most 10 timers per community. Starts enabled; the first post is one full interval away. |
-| `!timer del <name>` (also `delete` / `remove`) | Deletes a timer. |
-| `!timer list` | Every timer: `name (30m, on): <30-char preview>`; stops at ~420 chars with `(+K more)`. |
+| `!timer add <name> <interval-min> <message>` | Registers a timer **bound to this channel**. Name 1-24 of `[a-z0-9_-]` (case-insensitive), interval 5-1440 minutes, message 1-300 chars, at most 10 timers per channel (40 per community). Names are per channel. Starts enabled; the first post is one full interval away. |
+| `!timer del <name>` (also `delete` / `remove`) | Deletes one of this channel's timers. |
+| `!timer list` | This channel's timers: `name (30m, on): <30-char preview>`; stops at ~420 chars with `(+K more)`. |
 | `!timer enable <name>` / `!timer disable <name>` | Pause / resume. Enabling **restarts the countdown**, so a long-disabled timer does not fire the instant it is switched back on. |
-| `!timer reset` | Deletes ALL timers -- also the recovery path for a corrupted config blob. |
+| `!timer reset` | Deletes all of THIS channel's timers; a corrupted config blob (unreadable, so not splittable per channel) is dropped whole -- the recovery path. |
 
 `del` is normalised to the shared grammar's `delete` verb; everything else goes through the real
 `waddle_sdk.command.parse_command()`. A bare `!timer`, an unknown verb, a missing name or trailing
@@ -42,6 +42,15 @@ bot>    Timers (1): promo (30m, on): Follow us on Discord: disco…
 mod>    !timer disable promo
 bot>    Timer 'promo' disabled.
 ```
+
+### Scope: a moderator badge is valid in one channel
+
+`is_mod` / `is_broadcaster` describe the sender's rights in the chat the line was posted in, but
+the config blob is shared by every channel linked to the community. Every command above therefore
+acts only on timers bound to the invoking channel (platform + channel hash): another channel's
+timer is invisible to `list` and answers `No timer named ...` to `del`/`enable`/`disable`, and
+`reset` leaves it alone (a security-review finding). Caps: 10 timers per channel, 40 per community,
+and the stored blob is kept under 60 000 bytes (host value cap: 64 KiB).
 
 ## How firing works
 
@@ -82,8 +91,8 @@ tenant-wide sentinel `0`, an empty string fails loud). Keys are `.`-separated, n
 | Key | Value | TTL |
 |---|---|---|
 | `timer.cfg` | JSON `{"v":1,"timers":[{n,i,m,e,c,a}]}` -- name, interval, message, enabled, channel hash, anchor ms | none |
-| `timer.last.<name>` | last-fired time (ms) | 30 days; expiry falls back to the anchor |
-| `timer.claim.<name>.<due-ms>` | `kv.increment` claim for one occurrence | 5 min |
+| `timer.last.<scope>.<name>` | last-fired time (ms) | 30 days; expiry falls back to the anchor |
+| `timer.claim.<scope>.<name>.<due-ms>` | `kv.increment` claim for one occurrence | 5 min |
 | `timer.lock` | `kv.increment` mutex for admin edits | 10 s |
 
 Admin edits (`add`/`del`/`enable`/`disable`/`reset`) read-modify-write the single config blob under

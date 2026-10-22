@@ -44,8 +44,16 @@ credits `payout <= 100 x stake`, so settlement is built around that:
   (push), `2 x stake` (win) or `stake + stake * 3 // 2` (natural). Net = `total_return - stake`,
   and the payout counts against the daily mint cap like any other (`DeniedError quota_exceeded`).
   The reserve covers the host's `payout <= 100 x stake` rule for every stake 1..500 (tested).
-- The only thing a player can still dodge is the reserve (<= 2.6% of the stake): spending it away
-  just makes the *winnings* unpayable.
+- The only thing a player can still dodge is the reserve: `max(1, ceil(2.5% of the stake))` points
+  (so 1 point for any stake up to 40, <= 2.6% above) per LOSING hand, by moving it away mid-hand --
+  on a win that just makes the *winnings* unpayable until it is back. This is a bounded discount,
+  never a mint beyond the stake: the proof below is `test_every_hand_nets_exactly_return_minus_
+  stake_and_never_mints_past_the_cap` (stake x outcome grid). It cannot be closed without a host
+  hold/`economy.credit` op or a debt marker carried to the next deal (follow-up); the host's daily
+  per-user payout cap bounds it in the meantime.
+- **A stored hand cannot ask for more than it can return** (security review): `due` must be
+  `0..=stake + 1.5 x stake` and only a `due` hand carries one, so a corrupt/tampered record is
+  treated as no hand instead of being paid.
 - **At-most-once.** The hand record is deleted BEFORE the settling wager: a crash loses a payout
   and can never repeat one. A refusal the host guarantees did not apply (reserve spent, cap,
   daily mint cap, denied) re-stores the hand as `due` (24 h) and `!blackjack` collects it; a

@@ -231,7 +231,6 @@ def test_mod_verbs_fail_closed_before_any_kv_access(
         "x",
         "has-dash",
         "a" * 25,
-        "!kgiveaway",
         "unic" + chr(0xF6) + "de",
         "!",
         "!!win",
@@ -542,7 +541,12 @@ def test_winner_without_a_mention_token_is_a_pseudonym_tag(host: types.SimpleNam
     assert "777" not in reply
 
 
-def test_draw_skips_holes_and_corrupt_entries(host: types.SimpleNamespace) -> None:
+def test_draw_skips_holes_and_corrupt_entries(
+    host: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pick is OS-entropy random: pin it to the first remaining slot so the probe order (hole,
+    # then the two corrupt entries, then the valid one) -- and so the logged corruption -- is fixed.
+    monkeypatch.setattr(app, "_pick_index", lambda size: 0)
     _entered_giveaway(host, ["alice", "bob", "carol", "dave"])
     prefix = f"c.{COMMUNITY}.kwgiveaway.e.1."
     del host.kv.store[prefix + "1"]  # hole (expired / never written)
@@ -911,3 +915,145 @@ def test_the_bundle_is_activation_gated_only() -> None:
     assert "feature_enabled" not in source
     assert "FLAG_KEY" not in source
     assert "flags" not in source.split('"""', 2)[2]
+
+
+# -- security review regressions: token forgery / parser differential / collisions --------------
+
+
+def _live_tokens(text: str) -> list[str]:
+    """Tokens the real egress detokenizer would substitute in `text` (the SDK port)."""
+    from waddle_sdk import safe_text
+
+    return [piece[len("{user:") : -1] for piece, live in safe_text._split_live(text, None) if live]
+
+
+_HOSTILE_ACTORS = [
+    " {user:u-victim}",
+    "{user:u-victim} ",
+    "{user:u-victim}\n",
+    "\t{user:u-victim}",
+    "{user:u-victim}{user:u-other}",
+    "x{user:u-victim}",
+    "{user:u-victim}x",
+    "{user:u-victim",
+    "{user:}",
+    "{user:u victim}",
+    "{user:u-victim\\}",
+    "\\{user:u-victim\\}",
+    "{user:" + chr(0x430) + "}",  # a Cyrillic `a` is not a token character
+    chr(0xFF5B) + "user:u-victim" + chr(0xFF5D),  # fullwidth braces
+    "{user:u-victim}" + chr(0x200B),
+    "{user:" + "a" * 257 + "}",
+]
+
+
+@pytest.mark.parametrize("actor", _HOSTILE_ACTORS)
+def test_a_hostile_actor_is_never_stored_or_announced_as_a_live_token(
+    host: types.SimpleNamespace, actor: str
+) -> None:
+    # regression: the winner label is built as `{user:<token>}`; only an actor that is EXACTLY one
+    # host-minted placeholder may become a token, so no hostile actor can make the bundle announce
+    # (and so ping) someone else.
+    _open(host)
+    ack = _text(_run(_event("!kgiveaway enter", actor=actor, author_id="777")))
+    assert _live_tokens(ack) == []
+    assert json.loads(host.kv.store[_entry_keys(host)[0]])["t"] is None
+    winner = _text(_run(_mod("!kgiveaway draw")))
+    assert _live_tokens(winner) == []
+    assert re.search(r"the winner: entrant [0-9a-f]{8} ", winner)
+
+
+def test_a_genuine_actor_is_the_one_live_token_in_every_reply(host: types.SimpleNamespace) -> None:
+    _open(host, KEYWORD, "{user:u-evil} " + BACKSLASH)
+    ack = _text(_run(_viewer("!kgiveaway enter", "alice")))
+    again = _text(_run(_viewer("!kgiveaway enter", "alice")))
+    status = _text(_run(_viewer("!kgiveaway status")))
+    winner = _text(_run(_mod("!kgiveaway draw")))
+    assert _live_tokens(ack) == _live_tokens(again) == ["u-alice"]
+    assert _live_tokens(status) == []  # the prize is sanitized: nothing in it can be live
+    assert _live_tokens(winner) == ["u-alice"]
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_a_tampered_stored_token_is_either_a_hole_or_exactly_the_one_live_token(
+    host: types.SimpleNamespace, seed: int
+) -> None:
+    """Fuzz the stored entry token: whatever kv holds, the announcement never forges a mention."""
+    import random
+
+    rng = random.Random(seed)  # noqa: S311 -- deterministic fuzz, not a secret
+    atoms = [
+        "{",
+        "}",
+        "\\",
+        "{user:",
+        "user:",
+        "u-x",
+        ":",
+        ".",
+        " ",
+        "\n",
+        "}{",
+        "a" * 60,
+        chr(0x430),
+    ]
+    _entered_giveaway(host, ["alice"])
+    key = f"c.{COMMUNITY}.kwgiveaway.e.1.1"
+    for _ in range(150):
+        token = "".join(rng.choice(atoms) for _ in range(rng.randint(1, 6)))
+        host.kv.store[key] = json.dumps({"t": token, "p": "abcd1234"}).encode()
+        state = _state(host)
+        state["drawn"], state["open"] = [], True
+        host.kv.store[STATE_KEY] = json.dumps(state).encode()
+        reply = _text(_run(_mod("!kgiveaway draw")))
+        live = _live_tokens(reply)
+        if "the winner" in reply:
+            assert live in ([], [token])
+            if live:
+                assert re.fullmatch(r"[A-Za-z0-9_:.-]{1,256}", token)
+            assert reply.count("{user:") <= 1
+        else:
+            assert live == []
+
+
+@pytest.mark.parametrize("keyword", ["!enter", "!raffle", "!giveaway", "!kgiveaway", "!ENTER"])
+def test_open_refuses_another_giveaways_own_command_as_a_keyword(
+    host: types.SimpleNamespace, keyword: str
+) -> None:
+    # `raffle` answers `!raffle`/`!enter` and `giveaway` (PR #853) `!giveaway`/`!enter`: a keyword
+    # equal to one would make typing that command ALSO enter this giveaway.
+    reply = _text(_run(_mod(f"!kgiveaway open {keyword}")))
+    assert reply == app._RESERVED_KEYWORD_MSG
+    assert STATE_KEY not in host.kv.store
+
+
+@pytest.mark.parametrize("keyword", ["enter", "raffle", "!win", "win", "!entry"])
+def test_the_bare_words_and_other_bang_keywords_stay_allowed(
+    host: types.SimpleNamespace, keyword: str
+) -> None:
+    assert "giveaway open!" in _text(_run(_mod(f"!kgiveaway open {keyword}")))
+
+
+def test_this_bundles_own_trigger_does_not_overlap_raffle_or_giveaway(
+    host: types.SimpleNamespace,
+) -> None:
+    _open(host)
+    for line in ("!raffle", "!raffle enter", "!enter", "!giveaway", "!giveaway enter"):
+        assert _run(_viewer(line)) is None, line
+    assert _entry_keys(host) == []
+
+
+@pytest.mark.parametrize(
+    "actor", ["/ban victim", ".timeout victim", "!kgiveaway draw", chr(0x200B) + "/ban x"]
+)
+def test_a_reply_that_would_lead_with_a_command_is_guarded(
+    host: types.SimpleNamespace, actor: str
+) -> None:
+    # regression: an explicit-entry reply LEADS with the entrant's label, and a raw handle that
+    # starts with `/`, `.` or `!` would have run as the bot's own chat command.
+    _open(host)
+    _run(_event("!kgiveaway enter", actor=actor, author_id="9"))
+    again = _text(_run(_event("!kgiveaway enter", actor=actor, author_id="9")))
+    assert again.startswith("\U0001f4ac ")
+    assert not app.guard_leading_command(again).startswith(("/", ".", "!"))
+    assert "already entered" in again

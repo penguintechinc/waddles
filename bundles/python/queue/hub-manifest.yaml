@@ -22,11 +22,11 @@ stages:
       - platform: twitch
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!queue"]
+          command_prefix: ["!vqueue"]
       - platform: discord
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!queue"]
+          command_prefix: ["!vqueue"]
   action:
     entry: "waddle:bundle/action-stage#dispatch"
 egress: []

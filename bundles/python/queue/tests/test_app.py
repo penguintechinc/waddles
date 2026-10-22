@@ -141,7 +141,7 @@ def _join_users(host: _Extras, *tokens: str) -> None:
 # -- transform ----------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("text", ["!queue", "!QUEUE", "  !queue  ", "!Queue"])
+@pytest.mark.parametrize("text", ["!vqueue", "!VQUEUE", "  !vqueue  ", "!Vqueue"])
 def test_bare_queue_is_a_position_check(text: str, host: _Extras) -> None:
     result = _run(transform(_event(text)))
     assert result is not None
@@ -152,13 +152,13 @@ def test_bare_queue_is_a_position_check(text: str, host: _Extras) -> None:
 @pytest.mark.parametrize(
     ("text", "command"),
     [
-        ("!queue join", "join"),
-        ("!queue JOIN", "join"),
-        ("!queue  leave ", "leave"),
-        ("!queue next", "next"),
-        ("!queue clear", "clear"),
-        ("!queue reset", "clear"),
-        ("!queue list", "list"),
+        ("!vqueue join", "join"),
+        ("!vqueue JOIN", "join"),
+        ("!vqueue  leave ", "leave"),
+        ("!vqueue next", "next"),
+        ("!vqueue clear", "clear"),
+        ("!vqueue reset", "clear"),
+        ("!vqueue list", "list"),
     ],
 )
 def test_each_verb_maps_to_its_command(text: str, command: str, host: _Extras) -> None:
@@ -168,13 +168,13 @@ def test_each_verb_maps_to_its_command(text: str, command: str, host: _Extras) -
 
 
 def test_list_forwards_the_count_argument(host: _Extras) -> None:
-    result = _run(transform(_event("!queue list 5")))
+    result = _run(transform(_event("!vqueue list 5")))
     assert result is not None
     assert result.payload["command"] == "list"
     assert result.payload["arg"] == "5"
 
 
-@pytest.mark.parametrize("text", ["!queue join now", "!queue leave please", "!queue next 2"])
+@pytest.mark.parametrize("text", ["!vqueue join now", "!vqueue leave please", "!vqueue next 2"])
 def test_domain_verbs_reject_trailing_arguments_with_usage(text: str, host: _Extras) -> None:
     result = _run(transform(_event(text)))
     assert result is not None
@@ -183,7 +183,8 @@ def test_domain_verbs_reject_trailing_arguments_with_usage(text: str, host: _Ext
 
 
 @pytest.mark.parametrize(
-    "text", ["!queue bogus", "!queue add x", "!queue remove 1", "!queue enable thing", "!queue set"]
+    "text",
+    ["!vqueue bogus", "!vqueue add x", "!vqueue remove 1", "!vqueue enable thing", "!vqueue set"],
 )
 def test_unsupported_grammar_replies_usage_never_drops(text: str, host: _Extras) -> None:
     result = _run(transform(_event(text)))
@@ -192,25 +193,37 @@ def test_unsupported_grammar_replies_usage_never_drops(text: str, host: _Extras)
 
 
 def test_reset_with_arguments_is_usage(host: _Extras) -> None:
-    result = _run(transform(_event("!queue reset now")))
+    result = _run(transform(_event("!vqueue reset now")))
     assert result is not None
     assert result.payload["command"] == "usage"
 
 
 @pytest.mark.parametrize(
-    "text", ["hello", "!queuex", "!queues join", "queue join", "", "!que", "!quote"]
+    "text",
+    [
+        "hello",
+        "!vqueuex",
+        "!vqueues join",
+        "queue join",
+        "",
+        "!que",
+        "!quote",
+        "!queue",
+        "!queue join",
+        "!queue next",
+    ],
 )
 def test_non_matching_text_is_dropped(text: str, host: _Extras) -> None:
     assert _run(transform(_event(text))) is None
 
 
-@pytest.mark.parametrize("text", [None, 7, ["!queue"], {"a": 1}])
+@pytest.mark.parametrize("text", [None, 7, ["!vqueue"], {"a": 1}])
 def test_non_string_text_is_dropped(text: Any, host: _Extras) -> None:
     assert _run(transform(_event(text))) is None
 
 
 def test_transform_forwards_actor_and_channel(host: _Extras) -> None:
-    result = _run(transform(_event("!queue join")))
+    result = _run(transform(_event("!vqueue join")))
     assert result is not None
     assert result.actor == "{user:abc123}"
     assert result.payload["channel_id"] == "12345"
@@ -218,17 +231,17 @@ def test_transform_forwards_actor_and_channel(host: _Extras) -> None:
 
 
 def test_badges_are_forwarded_strictly_and_absence_stays_absent(host: _Extras) -> None:
-    absent = _run(transform(_event("!queue next")))
+    absent = _run(transform(_event("!vqueue next")))
     assert absent is not None
     assert "is_mod" not in absent.payload
     assert "is_broadcaster" not in absent.payload
 
-    strict = _run(transform(_event("!queue next", is_mod="false", is_broadcaster="true")))
+    strict = _run(transform(_event("!vqueue next", is_mod="false", is_broadcaster="true")))
     assert strict is not None
     assert strict.payload["is_mod"] is False
     assert strict.payload["is_broadcaster"] is False
 
-    real = _run(transform(_event("!queue next", is_mod=True, is_broadcaster=False)))
+    real = _run(transform(_event("!vqueue next", is_mod=True, is_broadcaster=False)))
     assert real is not None
     assert real.payload["is_mod"] is True
     assert real.payload["is_broadcaster"] is False
@@ -238,13 +251,13 @@ def test_badges_are_forwarded_strictly_and_absence_stays_absent(host: _Extras) -
 
 
 def test_tokenized_actor_becomes_a_user_entry_and_label() -> None:
-    entry = _entry_for(COMM, "{user:abc123}")
+    entry = _entry_for(COMM, "{user:abc123}", platform="twitch")
     assert entry == "u:abc123"
     assert _label("u:abc123") == "{user:abc123}"
 
 
 def test_raw_actor_is_hashed_and_never_kept() -> None:
-    entry = _entry_for(COMM, "RawStreamerHandle")
+    entry = _entry_for(COMM, "RawStreamerHandle", platform="twitch")
     assert entry is not None
     assert entry.startswith("h:")
     assert "RawStreamerHandle" not in entry
@@ -253,14 +266,14 @@ def test_raw_actor_is_hashed_and_never_kept() -> None:
 
 
 def test_pseudonym_is_per_community_and_deterministic() -> None:
-    assert _pseudonym("a", "x") == _pseudonym("a", "x")
-    assert _pseudonym("a", "x") != _pseudonym("b", "x")
-    assert _pseudonym(None, "x") == _pseudonym("0", "x")
+    assert _pseudonym("a", "twitch", "x") == _pseudonym("a", "twitch", "x")
+    assert _pseudonym("a", "twitch", "x") != _pseudonym("b", "twitch", "x")
+    assert _pseudonym(None, "twitch", "x") == _pseudonym("0", "twitch", "x")
 
 
 @pytest.mark.parametrize("actor", [None, "", "   ", 5, ["{user:a}"]])
 def test_no_usable_actor_has_no_entry(actor: Any) -> None:
-    assert _entry_for(COMM, actor) is None
+    assert _entry_for(COMM, actor, platform="twitch") is None
 
 
 @pytest.mark.parametrize(
@@ -275,7 +288,7 @@ def test_no_usable_actor_has_no_entry(actor: Any) -> None:
     ],
 )
 def test_malformed_placeholders_are_hashed_not_trusted_as_tokens(actor: str) -> None:
-    entry = _entry_for(COMM, actor)
+    entry = _entry_for(COMM, actor, platform="twitch")
     assert entry is not None
     assert entry.startswith("h:")
 
@@ -363,13 +376,15 @@ def test_position_for_a_queued_viewer(host: _Extras) -> None:
 def test_position_when_not_queued_with_others_waiting(host: _Extras) -> None:
     _join_users(host, "aaa")
     _send("position", actor="{user:zzz}")
-    assert host.replies()[-1] == "{user:zzz}, you're not in the queue (1 waiting). Use !queue join."
+    assert (
+        host.replies()[-1] == "{user:zzz}, you're not in the queue (1 waiting). Use !vqueue join."
+    )
 
 
 def test_position_on_an_empty_queue(host: _Extras) -> None:
     _send("position")
     assert host.replies()[-1] == (
-        "{user:abc123}, the queue is empty. Use !queue join to get in line."
+        "{user:abc123}, the queue is empty. Use !vqueue join to get in line."
     )
 
 
@@ -415,7 +430,7 @@ def test_list_on_an_empty_queue(host: _Extras) -> None:
 @pytest.mark.parametrize("arg", ["0", "-1", str(MAX_LIST + 1), "abc", "1.5", "1 2", "٣"])
 def test_list_rejects_a_bad_count(arg: str, host: _Extras) -> None:
     _send("list", arg=arg)
-    assert host.replies()[-1] == f"Usage: !queue list [n] (n is 1-{MAX_LIST})"
+    assert host.replies()[-1] == f"Usage: !vqueue list [n] (n is 1-{MAX_LIST})"
 
 
 def test_list_accepts_the_maximum_count(host: _Extras, fake_kv: FakeKvHost) -> None:
@@ -473,7 +488,7 @@ def test_mod_commands_are_denied_without_a_real_true_badge(
     snapshot = dict(fake_kv.store)
     fake_kv.calls.clear()
     _send(command, **badges)
-    assert host.replies()[-1] == f"Only the broadcaster or a moderator can use !queue {command}."
+    assert host.replies()[-1] == f"Only the broadcaster or a moderator can use !vqueue {command}."
     assert fake_kv.store == snapshot
     assert not fake_kv.calls  # denied BEFORE any kv access, not even the lock
 
@@ -543,7 +558,7 @@ def test_a_raw_handle_viewer_can_still_find_their_place(host: _Extras, fake_kv: 
     _send("join", actor="bob")
     _send("position", actor="bob")
     assert "you're #2 of 2" in host.replies()[-1]
-    entry = _entry_for(COMM, "bob")
+    entry = _entry_for(COMM, "bob", platform="twitch")
     assert entry is not None
     assert _label(entry) in host.replies()[-1]
     _send("list")
@@ -560,7 +575,7 @@ def test_no_log_line_carries_a_token_or_label(host: _Extras) -> None:
 
 
 def test_usage_reply_defangs_a_mass_mention(host: _Extras) -> None:
-    out = _run(transform(_event("!queue @everyone")))
+    out = _run(transform(_event("!vqueue @everyone")))
     assert out is not None
     _send("usage", arg=out.payload["arg"])
     reply = host.replies()[-1]
@@ -570,7 +585,7 @@ def test_usage_reply_defangs_a_mass_mention(host: _Extras) -> None:
 
 
 def test_usage_reply_escapes_a_forged_egress_token(host: _Extras) -> None:
-    out = _run(transform(_event("!queue {user:victim}")))
+    out = _run(transform(_event("!vqueue {user:victim}")))
     assert out is not None
     _send("usage", arg=out.payload["arg"])
     reply = host.replies()[-1]
@@ -579,7 +594,7 @@ def test_usage_reply_escapes_a_forged_egress_token(host: _Extras) -> None:
 
 
 def test_usage_reply_never_starts_with_a_command_character(host: _Extras) -> None:
-    for text in ("!queue /ban x", "!queue .timeout y", "!queue !other"):
+    for text in ("!vqueue /ban x", "!vqueue .timeout y", "!vqueue !other"):
         out = _run(transform(_event(text)))
         assert out is not None
         _send("usage", arg=out.payload["arg"])
@@ -728,3 +743,98 @@ def test_module_exposes_no_feature_flag_guard() -> None:
     source = open(app.__file__, encoding="utf-8").read()
     assert "feature_enabled" not in source
     assert "FLAG_KEY" not in source
+
+
+# -- security review regressions: identity-spoofing / parser-differential ------------------------
+
+
+def test_the_same_handle_on_two_platforms_is_two_different_viewers(
+    host: _Extras, fake_kv: FakeKvHost
+) -> None:
+    # regression: the raw-handle pseudonym hashed `community|handle` only, so a Discord `bob` and a
+    # Twitch `bob` shared one queue entry -- one could evict or impersonate the other.
+    _send("join", actor="bob", platform="twitch")
+    _send("position", actor="bob", platform="discord")
+    assert "you're not in the queue (1 waiting)" in host.replies()[-1]
+    _send("leave", actor="bob", platform="discord")
+    assert "you're not in the queue" in host.replies()[-1]
+    assert len(_stored(fake_kv)) == 1  # the Twitch viewer is still in line
+    _send("join", actor="bob", platform="discord")
+    assert "joined the queue at position 2" in host.replies()[-1]
+    assert len(set(_stored(fake_kv))) == 2
+
+
+def test_the_raw_pseudonym_is_per_platform() -> None:
+    assert _pseudonym(COMM, "twitch", "bob") != _pseudonym(COMM, "discord", "bob")
+    assert _pseudonym(COMM, "twitch", "bob") == _pseudonym(COMM, "twitch", "bob")
+
+
+@pytest.mark.parametrize(
+    "actor",
+    [
+        " {user:abc123}",
+        "{user:abc123} ",
+        "{user:abc123}\n",
+        "\n{user:abc123}",
+        "\t{user:abc123}\t",
+        chr(0xA0) + "{user:abc123}",
+        chr(0x2028) + "{user:abc123}" + chr(0x2028),
+    ],
+)
+def test_a_padded_placeholder_is_a_raw_handle_never_another_viewers_token(actor: str) -> None:
+    # regression: the actor was `.strip()`ped before the anchored match, so a handle that only
+    # LOOKED like a minted placeholder (the pipeline never pads one) resolved to that viewer.
+    entry = _entry_for(COMM, actor, platform="twitch")
+    assert entry is not None and entry.startswith("h:")
+    assert entry != "u:abc123"
+
+
+def test_a_forged_placeholder_handle_cannot_evict_the_real_viewer(
+    host: _Extras, fake_kv: FakeKvHost
+) -> None:
+    _send("join", actor="{user:abc123}")
+    _send("leave", actor="{user:abc123}\n")
+    assert "you're not in the queue" in host.replies()[-1]
+    assert _stored(fake_kv) == ["u:abc123"]
+
+
+@pytest.mark.parametrize(
+    "text", ["!vqueue join @bob", "!vqueue leave {user:abc123}", "!vqueue join {user:x}"]
+)
+def test_a_viewer_can_never_name_another_viewer(
+    text: str, host: _Extras, fake_kv: FakeKvHost
+) -> None:
+    result = _run(transform(_event(text)))
+    assert result is not None and result.payload["command"] == "usage"
+    assert _stored(fake_kv) == []
+
+
+def test_anchored_validators_reject_a_trailing_newline(host: _Extras, fake_kv: FakeKvHost) -> None:
+    # regression: `re.match` + `$` accepts "u:abc\n"; every validator is `fullmatch` now.
+    assert _ENTRY_RE.fullmatch("u:abc\n") is None
+    assert _ENTRY_RE.fullmatch("h:" + "a" * 24 + "\n") is None
+    assert app._COUNT_RE.fullmatch("5\n") is None
+    blob = json.dumps(["u:abc\n"]).encode()
+    fake_kv.store[_scoped(_QUEUE_KEY)] = blob
+    with pytest.raises(RuntimeError, match="queue corrupt state"):
+        _send("position")
+    result = _run(transform(_event("!vqueue list 5\n")))  # the transform strips the line itself
+    assert result is not None and result.payload["arg"] == "5"
+    _send("list", arg="5\n")
+    assert "Usage: !vqueue list [n]" in host.replies()[-1]
+
+
+def test_the_renamed_trigger_is_the_only_one_this_bundle_answers(host: _Extras) -> None:
+    # `!queue` belongs to `music` (its alias) -- answering it too would double every reply.
+    for text in ("!queue", "!queue join", "!queue next", "!QUEUE list"):
+        assert _run(transform(_event(text))) is None, text
+    for text in ("!vqueue", "!VQUEUE join"):
+        assert _run(transform(_event(text))) is not None, text
+
+
+def test_a_padded_raw_handle_is_the_same_viewer_as_the_bare_one() -> None:
+    # A raw handle is trimmed before it is hashed, so incidental padding never forks one viewer
+    # into two entries -- only a PLACEHOLDER-shaped actor is refused the token treatment.
+    assert _entry_for(COMM, "  bob\n", platform="twitch") == _entry_for(
+        COMM, "bob", platform="twitch"
+    )

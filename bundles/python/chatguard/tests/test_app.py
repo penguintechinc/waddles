@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import itertools
 import json
+import random
 import time
 import types
 from collections.abc import Iterator
@@ -1208,3 +1209,275 @@ def test_logs_only_carry_the_documented_fields(host: _Host) -> None:
     for _, message, fields in host.log_calls:
         assert message.startswith("chatguard"), message
         assert set(json.loads(fields)) <= allowed, (message, fields)
+
+
+# -- security review regressions: the filter must see what the platform renders -----------------
+
+HANGUL_FILLER = chr(0x3164)
+CYRILLIC_I = chr(0x456)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        r"\{user:evil.com\}",
+        r"look \{user: free nitro evil.com \} ok",
+        r"\\\{user:evil.com\}",  # a typed backslash + a typed placeholder
+        r"\{user:https://evil.com/x\}",
+        r"a \{user:tok-1\} b evil.com",
+    ],
+)
+def test_a_typed_placeholder_cannot_hide_a_link(text: str) -> None:
+    # regression: the view un-escaped braces BEFORE stripping placeholders, so a literal
+    # `{user:...}` the author TYPED (the host escapes it to `\{user:...\}`) was blanked out.
+    assert app.has_link(text), text
+
+
+@pytest.mark.parametrize("text", [r"\{user:badword\}", r"x \{user: bad word badword \} y"])
+def test_a_typed_placeholder_cannot_hide_a_blacklisted_word(text: str) -> None:
+    assert app.blacklist_hit(text, ("badword",)), text
+
+
+def test_a_host_minted_placeholder_is_blanked_but_the_words_around_it_are_not() -> None:
+    assert not app.has_link("{user:abc.com} hi")
+    assert app.has_link("{user:tok-1} evil.com")
+    assert app.blacklist_hit("{user:tok-1} badword", ("badword",))
+    assert not app.blacklist_hit("{user:badword} hello", ("badword",))
+    assert app.blacklist_hit(r"\\{user:tok-1} badword", ("badword",))  # escaped backslash + mention
+
+
+def test_a_typed_placeholder_still_counts_for_caps_and_symbols() -> None:
+    assert app.caps_violation(r"\{user:" + "A" * 40 + r"\}", GuardConfig())
+    assert app.symbols_violation(r"\{user:" + "!" * 40 + r"\}", GuardConfig())
+    assert not app.caps_violation("{user:" + "A" * 40 + "} hello there", GuardConfig())
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_the_view_agrees_with_the_egress_detokenizer_grammar(seed: int) -> None:
+    """A fuzzed differential against the SDK's port of `egress_detokenizer::detokenize`."""
+    from waddle_sdk import safe_text
+
+    rng = random.Random(seed)  # noqa: S311 -- deterministic fuzz, not a secret
+    atoms = ["{", "}", "\\", "{user:", "user:", "tok-1", "a.b", "x", " ", "}}", "\\\\", ":", "ZZ"]
+    for _ in range(400):
+        text = "".join(rng.choice(atoms) for _ in range(rng.randint(1, 14)))
+        expected = []
+        for piece, live in safe_text._split_live(text, None):
+            if live:
+                expected.append(" ")
+                continue
+            out, i = [], 0
+            while i < len(piece):
+                if piece[i] == "\\" and i + 1 < len(piece) and piece[i + 1] in "{}\\":
+                    out.append(piece[i + 1])
+                    i += 2
+                else:
+                    out.append(piece[i])
+                    i += 1
+            expected.append("".join(out))
+        assert app._plain_view(text) == "".join(expected), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "evil" + HANGUL_FILLER + ".com",
+        "ev" + HANGUL_FILLER * 3 + "il.com",
+        "eV" + CYRILLIC_I + "l.com",
+        "".join(map(chr, (0x43F, 0x440, 0x438, 0x43C, 0x435, 0x440))) + ".com",  # a Cyrillic label
+        r"evil\.com",
+    ],
+)
+def test_unicode_and_markdown_tricks_do_not_hide_a_link(text: str) -> None:
+    assert app.has_link(text), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "".join(map(chr, (0x43F, 0x440, 0x438, 0x432, 0x435, 0x442))) + ", how are you",
+        "version 2.0",
+        "caf" + chr(0xE9) + ".Thanks",
+    ],
+)
+def test_the_wider_domain_labels_do_not_flag_ordinary_text(text: str) -> None:
+    assert not app.has_link(text), text
+
+
+def test_blank_filler_characters_cannot_split_a_blacklisted_word() -> None:
+    assert app.blacklist_hit("bad" + HANGUL_FILLER + "word", ("badword",))
+    assert app.blacklist_hit("b" + chr(0x2800) + "adword", ("badword",))
+    assert app.blacklist_hit("bad" + chr(0xFFA0) + chr(0x115F) + "word", ("badword",))
+
+
+def test_blank_filler_characters_cannot_dilute_the_caps_or_symbol_share() -> None:
+    cfg = GuardConfig()
+    assert app.caps_violation("SHOUTING LOUDLY" + HANGUL_FILLER * 80, cfg)
+    assert app.symbols_violation("!" * 12 + HANGUL_FILLER * 80, cfg)
+    assert app.symbols_violation("!" * 12 + chr(0x2800) * 80, cfg)
+    letters, total = app.caps_stats("AB" + HANGUL_FILLER * 5)
+    assert (letters, total) == (2, 2)
+
+
+def test_a_long_fake_url_does_not_hide_caps_or_symbols() -> None:
+    cfg = GuardConfig()
+    # regression: `https://` + `\S+` was exempt from the statistics without any bound.
+    assert app.caps_violation("https://" + "A" * 1900, cfg)
+    assert app.symbols_violation("https://" + "!" * 1900, cfg)
+    assert not app.caps_violation("https://EXAMPLE.COM/PATH?ID=ABC thanks for the invite", cfg)
+
+
+def test_a_link_past_the_old_2000_character_cut_off_is_still_flagged(host: _Host) -> None:
+    # regression: only `text[:2000]` was analysed, so padding pushed the link out of view
+    # (Discord Nitro users can send 4000 characters).
+    configure(host, enabled=frozenset({"links"}))
+    out = say(host, "x" * 2500 + " visit evil.com")
+    assert out is not None and out.payload["rule"] == "links"
+
+
+@pytest.mark.parametrize(
+    ("rule", "tail"),
+    [("blacklist", " badword"), ("caps", " " + "SHOUTING" * 70), ("symbols", " " + "!" * 300)],
+)
+def test_content_past_the_old_cut_off_is_still_analysed(host: _Host, rule: str, tail: str) -> None:
+    configure(
+        host, enabled=frozenset({rule}), words=("badword",), caps_percent=15, symbols_percent=5
+    )
+    filler = "lowercase words keep the share down " * 60  # 2160 characters: past the old cut-off
+    assert len(filler) > 2000
+    out = say(host, filler + tail)
+    assert out is not None and out.payload["rule"] == rule
+
+
+def test_a_message_over_the_ceiling_is_a_violation_of_the_first_enabled_rule(host: _Host) -> None:
+    configure(host, enabled=frozenset({"links", "caps"}))
+    huge = "ok " * (app.MAX_ANALYSIS_CHARS // 3 + 1)
+    assert len(huge) > app.MAX_ANALYSIS_CHARS
+    out = say(host, huge)
+    assert out is not None and out.payload["rule"] == "links"
+    assert "ok ok" not in json.dumps(out.payload)
+
+
+def test_the_ceiling_is_exact_and_clean_text_at_it_still_passes(host: _Host) -> None:
+    configure(host, enabled=frozenset({"links", "caps"}))
+    at_limit = ("ok " * app.MAX_ANALYSIS_CHARS)[: app.MAX_ANALYSIS_CHARS - 1] + "k"
+    assert len(at_limit) == app.MAX_ANALYSIS_CHARS
+    assert say(host, at_limit) is None
+    over = at_limit + "k"
+    out = say(host, over)
+    assert out is not None
+
+
+def test_an_over_long_message_from_a_permitted_author_skips_the_links_rule(host: _Host) -> None:
+    configure(host, enabled=frozenset({"links", "caps"}))
+    host.kv.store[permit_key(ACTOR)] = str(host.now_ms + 60_000).encode()
+    out = say(host, "ok " * app.MAX_ANALYSIS_CHARS)
+    assert out is not None and out.payload["rule"] == "caps"
+
+
+def test_an_over_long_message_is_not_a_blacklist_violation_when_no_word_is_listed(
+    host: _Host,
+) -> None:
+    configure(host, enabled=frozenset({"blacklist"}))
+    assert say(host, "ok " * app.MAX_ANALYSIS_CHARS) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "!permit visit evil.com",
+        "!chatguard visit evil.com",
+        "!chatguard enable caps and then evil.com",
+        "!PERMIT evil.com",
+        "!permit " + "x" * 10 + " badword",
+    ],
+)
+def test_prefixing_a_message_with_a_command_does_not_skip_the_filters(
+    host: _Host, text: str
+) -> None:
+    # regression: a non-moderator's `!permit ...` line became a "denied" reply and was never
+    # screened, so any message could dodge every rule by starting with the command word.
+    configure(host, enabled=frozenset({"links", "blacklist"}), words=("badword",))
+    out = say(host, text)
+    assert out is not None and out.payload["command"] == "violation", text
+    assert out.payload["rule"] in {"links", "blacklist"}
+    assert "evil" not in json.dumps(out.payload)
+
+
+def test_a_clean_command_line_from_a_non_moderator_is_still_denied_not_flagged(
+    host: _Host,
+) -> None:
+    configure(host)
+    assert reply(host, "!permit {user:tok-target}") == app._DENIED_MSG
+    assert reply(host, "!chatguard") == app._USAGE
+
+
+def test_a_moderators_command_lines_are_never_screened(host: _Host) -> None:
+    configure(host)
+    assert mod(host, "!chatguard add blacklist evil.com") == "added -- blacklist now has 1 words"
+    assert mod(host, "!chatguard list").startswith("chatguard rules on:")
+
+
+def test_a_command_line_without_a_channel_still_fails_loud(host: _Host) -> None:
+    configure(host)
+    with pytest.raises(ValueError, match="channel_id"):
+        say(host, "!permit evil.com", drop=("channel_id",))
+
+
+def test_a_trailing_newline_cannot_pass_the_anchored_validators() -> None:
+    # regression: `re.match` with a `$` anchor accepts "123\n"; every validator is `fullmatch` now.
+    assert app._SNOWFLAKE_RE.fullmatch("123\n") is None
+    assert app._mention("tok-1\n") == "that user"
+    assert app._actor_label("{user:tok-1}") == "{user:tok-1}"  # exactly one placeholder: live
+    for padded in ("{user:tok-1}\n", " {user:tok-1}", "x {user:tok-1}", "{user:tok-1}{user:b}"):
+        label = app._actor_label(padded)
+        assert "\\{user:tok-1" in label, padded  # escaped (inert), never a live placeholder
+    assert app._PSEUDONYM_RE.fullmatch("a" * 64 + "\n") is None
+
+
+@pytest.mark.parametrize("bad", ["123456789012345678\n", "123456789012345678 "])
+def test_a_message_id_with_a_trailing_newline_is_never_sent_to_the_host(
+    host: _Host, bad: str
+) -> None:
+    with pytest.raises(RuntimeError, match="could not delete"):
+        send(host, violation("caps", message_id=bad))
+    assert host.pushes("chat.delete") == []
+
+
+_AT_CEILING = {
+    "dotted": "a." * (app.MAX_ANALYSIS_CHARS // 2),
+    "max-labels": (("a" * 62 + ".") * 70)[: app.MAX_ANALYSIS_CHARS],
+    "obfuscation": ("[.](.){.}" * 500)[: app.MAX_ANALYSIS_CHARS],
+    "placeholder-prefix": ("{user:" * 700)[: app.MAX_ANALYSIS_CHARS],
+    "backslashes": "\\" * app.MAX_ANALYSIS_CHARS,
+    "nfkd-expansion": chr(0xFDFA) * app.MAX_ANALYSIS_CHARS,
+    "fake-url": "https://" + "A" * (app.MAX_ANALYSIS_CHARS - 8),
+    "fillers": HANGUL_FILLER * app.MAX_ANALYSIS_CHARS,
+}
+
+
+@pytest.mark.parametrize("text", list(_AT_CEILING.values()), ids=list(_AT_CEILING))
+def test_adversarial_input_at_the_ceiling_cannot_stall_the_filters(text: str) -> None:
+    """The longest line the filters analyse in full still finishes well inside the budget."""
+    assert len(text) <= app.MAX_ANALYSIS_CHARS
+    cfg = GuardConfig(words=tuple(f"word{i}" for i in range(app.MAX_WORDS)))
+    app._plain_view.cache_clear()
+    started = time.perf_counter()
+    app.has_link(text)
+    app.caps_violation(text, cfg)
+    app.symbols_violation(text, cfg)
+    app.blacklist_hit(text, cfg.words)
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize("actor", [None, "", "   ", 5])
+def test_a_missing_actor_is_labelled_neutrally(actor: Any) -> None:
+    assert app._actor_label(actor) == "someone"
+
+
+def test_a_corrupt_kv_integer_is_logged_and_treated_as_absent(host: _Host) -> None:
+    assert app._int_or_none(b"12") == 12
+    assert app._int_or_none(None) is None
+    assert app._int_or_none(b"\xff") is None
+    assert app._int_or_none(b"twelve") is None
+    assert "chatguard.kv_value_corrupt" in host.logged()

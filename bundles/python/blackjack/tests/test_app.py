@@ -1463,3 +1463,173 @@ def test_a_due_hand_that_vanishes_before_a_collect_is_just_usage(
 )
 def test_amount_buckets(amount: int, bucket: str) -> None:
     assert app._amount_bucket(amount) == bucket
+
+
+# -- security review regressions: economy integrity ---------------------------------------------
+
+_GRID_STAKES = sorted(
+    {*range(1, 61), 99, 100, 101, 119, 120, 121, 199, 200, 201, 250, 333, 399, 400, 401, 499, 500}
+)
+_P_WIN = ("10", "9"), ("10", "7")  # 19 v 17
+_P_LOSE = ("10", "8"), ("10", "9")  # 18 v 19
+_P_PUSH = ("10", "8"), ("9", "9")  # 18 v 18
+_P_DEALER_BUST = ("10", "9"), ("10", "6")  # dealer draws a 9 -> 25
+
+
+def _grid_cards(outcome: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """`(player, dealer, extra draws)` ranks scripting one outcome of a settled hand."""
+    return {
+        "win": (*_P_WIN, ()),
+        "lose": (*_P_LOSE, ()),
+        "push": (*_P_PUSH, ()),
+        "dealer_bust": (*_P_DEALER_BUST, ("9",)),
+        "bust": (("10", "6"), ("5", "5"), ("10",)),
+        "natural": (("A", "K"), ("9", "7"), ()),
+        "natural_push": (("A", "K"), ("A", "Q"), ()),
+        "dealer_natural": (("10", "9"), ("A", "K"), ()),
+    }[outcome]
+
+
+def _expected_return(outcome: str, stake: int) -> int:
+    return {
+        "win": 2 * stake,
+        "dealer_bust": 2 * stake,
+        "push": stake,
+        "natural_push": stake,
+        "natural": stake + stake * 3 // 2,
+        "lose": 0,
+        "bust": 0,
+        "dealer_natural": 0,
+    }[outcome]
+
+
+def _play_out(host: _Host, mp: pytest.MonkeyPatch, stake: int, outcome: str) -> None:
+    player, dealer, draws = _grid_cards(outcome)
+    cards = [card(player[0]), card(player[1]), card(dealer[0], 1), card(dealer[1])]
+    cards += [card(rank, 2) for rank in draws]
+    _deck(mp, *cards)
+    assert say(host, f"!blackjack {stake}") is not None
+    if outcome == "bust":
+        assert say(host, "!hit") is not None
+    elif outcome not in ("natural", "natural_push", "dealer_natural"):
+        assert say(host, "!stand") is not None
+
+
+_OUTCOMES = (
+    "win",
+    "lose",
+    "push",
+    "dealer_bust",
+    "bust",
+    "natural",
+    "natural_push",
+    "dealer_natural",
+)
+
+
+def _set_max_bet(host: _Host, value: int) -> None:
+    host.kv.store[community_kv._scoped_key(COMMUNITY, app._cfg_key("maxbet"))] = str(value).encode()
+
+
+@pytest.mark.parametrize("outcome", _OUTCOMES)
+@pytest.mark.parametrize("stake", _GRID_STAKES)
+def test_every_hand_nets_exactly_return_minus_stake_and_never_mints_past_the_cap(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, stake: int, outcome: str
+) -> None:
+    """Proof over stake x outcome: money is conserved, nothing is paid twice, the cap holds.
+
+    Whatever the stake (the integer rounding of the 3:2 natural and of the reserve is the risky
+    part), the player ends with exactly `start - stake + total_return`; the wagers' debits sum to
+    the stake (escrow + settlement) and their credits to the return; no single payout is above
+    100 x its own stake (the host's mint bound); nothing is paid after the hand is settled.
+    """
+    host.eco.balances[ACTOR] = 100_000
+    _set_max_bet(host, 500)
+    start = balance(host)
+    _play_out(host, monkeypatch, stake, outcome)
+    total_return = _expected_return(outcome, stake)
+
+    assert balance(host) == start - stake + total_return
+    debits = sum(call[1] for call in host.wager_calls)
+    credits = sum(call[2] for call in host.wager_calls)
+    assert debits == stake
+    assert credits == total_return
+    for _user, wager_stake, payout in host.wager_calls:
+        assert wager_stake >= 1
+        assert payout <= wager_stake * app.economy.MAX_PAYOUT_MULTIPLE
+    assert total_return <= app._top_return(stake) <= 2.5 * stake
+    assert stored_hand(host) is None  # settled: nothing left to collect or replay
+
+    calls = len(host.wager_calls)
+    say(host, "!stand")
+    say(host, "!hit")
+    say(host, "!blackjack")
+    assert len(host.wager_calls) == calls  # no further money moves, whatever the player sends
+    assert balance(host) == start - stake + total_return
+
+
+@pytest.mark.parametrize("stake", _GRID_STAKES)
+def test_the_return_never_exceeds_what_the_settlement_stake_may_pay(stake: int) -> None:
+    reserve = app._reserve(stake)
+    assert 1 <= reserve <= stake
+    assert app._top_return(stake) <= reserve * app.economy.MAX_PAYOUT_MULTIPLE
+    for ret in (2 * stake, stake, stake + stake * 3 // 2, 0):
+        assert ret <= app._top_return(stake)
+
+
+def _stored(host: _Host, **overrides: Any) -> bytes:
+    hand = app.Hand(
+        stake=50,
+        reserve=app._reserve(50),
+        player=[card("10"), card("9")],
+        dealer=[card("10", 1), card("7")],
+        phase=app.PHASE_DUE,
+        expires_ms=0,
+        due=100,
+    )
+    for key, value in overrides.items():
+        setattr(hand, key, value)
+    return hand.to_bytes()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"due": app._top_return(50) + 1},  # more than any hand of this stake can return
+        {"due": 10**9},
+        {"due": 0},  # a `due` hand with nothing due
+        {"phase": app.PHASE_PLAYING, "due": 100},  # only a settled-but-unpaid hand carries a payout
+        {"phase": app.PHASE_DEALING, "due": 1},
+        {"stake": 501},
+        {"reserve": 0},
+        {"due": -1},
+    ],
+)
+def test_a_stored_hand_asking_for_more_than_it_can_return_is_corrupt_not_payable(
+    host: _Host, overrides: dict[str, Any]
+) -> None:
+    # regression: only `due >= 0` was validated, so a corrupt/tampered record could have asked the
+    # host for any payout up to `reserve x 100`.
+    host.kv.store[hand_key()] = _stored(host, **overrides)
+    before = balance(host)
+    assert say(host, "!blackjack") == app._USAGE  # treated as no hand
+    assert host.wager_calls == []
+    assert balance(host) == before
+    assert "blackjack.hand_corrupt" in host.logged()
+
+
+def test_a_legitimate_due_hand_is_still_collected_in_full(host: _Host) -> None:
+    host.kv.store[hand_key()] = _stored(host, due=app._top_return(50))
+    before = balance(host)
+    reply = say(host, "!blackjack")
+    assert reply is not None and "Balance" in reply
+    assert balance(host) == before - app._reserve(50) + app._top_return(50)
+    assert stored_hand(host) is None
+
+
+@pytest.mark.parametrize(
+    "padded", [" {user:tok-1}", "{user:tok-1} ", "x{user:tok-1}", "{user:tok-1}\n"]
+)
+def test_a_padded_actor_is_never_left_live(padded: str) -> None:
+    assert app._actor_label("{user:tok-1}") == "{user:tok-1}"
+    assert "\\{user:tok-1" in app._actor_label(padded)

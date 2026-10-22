@@ -1,16 +1,16 @@
 # queue (Python)
 
-`!queue` -- a per-community **viewer queue**: viewers `join`/`leave` a line, anyone can see their
+`!vqueue` -- a per-community **viewer queue**: viewers `join`/`leave` a line, anyone can see their
 place or the front of the line, and a moderator advances or clears it. First-party
 (`provider: builtin`, `app_id: waddles.core.example.queue`, `author: PenguinTech/waddles`,
 Apache-2.0), **original Waddles content** -- the viewer-queue idea is a common stream-tool concept,
 but no third-party source, code or text is used, so no attribution applies. kv-only
 (`storage.kv`); no `db`, no egress.
 
-> **Command collision with `music`.** `bundles/python/music` already answers `!queue` (its alias
-> for `!music`, the song-request queue). Activating **both** bundles in one community makes every
-> `!queue ...` line reach both. Activate one per community, drop `music`'s `!queue` alias, or
-> rename this command (`_HEAD`/`SPEC` in `src/app.py` plus the two `command_prefix` filters).
+> **The trigger is `!vqueue`, not `!queue`.** `bundles/python/music` already answers `!queue` (its
+> alias for `!music`, the song-request queue); two bundles on one trigger would both reply to every
+> line, so this viewer queue was renamed. `music` keeps `!queue`; the bundle id (`queue`), kv keys
+> and log names are unchanged.
 
 ## Commands
 
@@ -18,34 +18,34 @@ The front of the queue is position 1.
 
 | Command | Who | Behavior |
 |---|---|---|
-| `!queue join` | anyone | Adds the caller to the back. A second `join` while queued replies with the existing position and changes nothing. |
-| `!queue leave` | anyone | Removes the caller. Not queued -> a friendly "you're not in the queue", nothing changes. |
-| `!queue` | anyone | The caller's own place: `#2 of 5`, or how to join. Pure read. |
-| `!queue list [n]` | anyone | The front `n` entries (default 10, max 15) and a `(+K more)` tail. Pure read. |
-| `!queue next` | **mod / broadcaster** | Pops the front and announces who is up and how many still wait. Empty -> "The queue is empty." |
-| `!queue clear` (alias `reset`) | **mod / broadcaster** | Empties the queue and says how many were removed. |
+| `!vqueue join` | anyone | Adds the caller to the back. A second `join` while queued replies with the existing position and changes nothing. |
+| `!vqueue leave` | anyone | Removes the caller. Not queued -> a friendly "you're not in the queue", nothing changes. |
+| `!vqueue` | anyone | The caller's own place: `#2 of 5`, or how to join. Pure read. |
+| `!vqueue list [n]` | anyone | The front `n` entries (default 10, max 15) and a `(+K more)` tail. Pure read. |
+| `!vqueue next` | **mod / broadcaster** | Pops the front and announces who is up and how many still wait. Empty -> "The queue is empty." |
+| `!vqueue clear` (alias `reset`) | **mod / broadcaster** | Empties the queue and says how many were removed. |
 
 `join`/`leave`/`next`/`clear` are not in the shared `waddle_sdk.command.VERBS` vocabulary, so they
 are special-cased ahead of `parse_command()` (same documented extension as `raffle`/`music`); bare,
 `list` and `reset` go through the real grammar. Any other verb, a malformed `list` count, or
 trailing arguments on a domain verb replies with usage text -- never silently dropped. Matching is
-case-insensitive and whitespace-tolerant; the exact first token must be `!queue` (`!queuex` is not).
+case-insensitive and whitespace-tolerant; the exact first token must be `!vqueue` (`!vqueuex` is not).
 
 ```text
-alice> !queue join
+alice> !vqueue join
 bot>   alice joined the queue at position 1.
-bob>   !queue join
+bob>   !vqueue join
 bot>   bob joined the queue at position 2.
-bob>   !queue join
+bob>   !vqueue join
 bot>   bob, you're already in the queue at position 2.
-bob>   !queue
+bob>   !vqueue
 bot>   bob, you're #2 of 2 in the queue.
-viewer> !queue list
+viewer> !vqueue list
 bot>   Queue (2): 1. alice 2. bob
-mod>   !queue next
+mod>   !vqueue next
 bot>   Next up: alice. 1 still waiting.
-viewer> !queue next
-bot>   Only the broadcaster or a moderator can use !queue next.
+viewer> !vqueue next
+bot>   Only the broadcaster or a moderator can use !vqueue next.
 ```
 
 (Names above are what the host's egress detokenizer renders for the `{user:<id>}` placeholders the
@@ -61,8 +61,13 @@ name. Until ingest tokenization is universal `event.actor` may still be a raw pl
 | `event.actor` | Stored entry | Shown as |
 |---|---|---|
 | `{user:<id>}` (well-formed, id <= 128 chars) | `u:<id>` | the host-rendered display name |
-| any other non-empty string (raw handle) | `h:<24 hex of SHA-256(community|actor)>` | `viewer-<6 hex>` (stable per viewer, so `!queue` still finds your place) |
+| any other non-empty string (raw handle) | `h:<24 hex of SHA-256(community|platform|actor)>` | `viewer-<6 hex>` (stable per viewer, so `!vqueue` still finds your place) |
 | missing / blank | nothing | "I couldn't identify you ..." -- never a guessed entry |
+
+Only an actor that is **exactly** one placeholder is a token: a handle that merely looks like one
+(padded with whitespace, embedded in text, over-long) is hashed like any raw handle, so it can never
+claim another viewer's entry. The raw-handle hash includes the **platform**, so a Discord `bob` and a
+Twitch `bob` in one community are two viewers (security review).
 
 No raw handle ever reaches a kv key, a kv value, a log line or a reply (regression:
 `test_a_raw_handle_never_reaches_kv_logs_or_replies`). Logs carry only `command`, counts and
@@ -122,7 +127,7 @@ Activation-gated only (installed -> enabled -> activated), **not** feature-flag 
 
 ## Platforms
 
-`consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!queue"]`; replies go
+`consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!vqueue"]`; replies go
 back to the event's own origin platform + channel.
 
 ## Not built (documented extension points)

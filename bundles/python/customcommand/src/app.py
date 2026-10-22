@@ -145,6 +145,7 @@ RESERVED_NAMES: frozenset[str] = frozenset(
     uwu vibecheck vote vso waddle wave weather wheel winner
     wordcount wouldyourather wyr yomama
     blackjack chatguard hit hypetrain level lottery stand
+    kgiveaway permit vqueue
     """.split()
 )
 

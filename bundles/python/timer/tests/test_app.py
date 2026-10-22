@@ -29,6 +29,7 @@ from app import (
     MAX_INTERVAL_MIN,
     MAX_MESSAGE_LEN,
     MAX_TIMERS,
+    MAX_TIMERS_TOTAL,
     MIN_INTERVAL_MIN,
     Timer,
     _caller_role_signal,
@@ -168,6 +169,16 @@ def _timer(name: str = "promo", **overrides: Any) -> Timer:
     }
     base.update(overrides)
     return Timer(**base)
+
+
+def _last_key(name: str, *, channel: str = CHANNEL, platform: str = "twitch") -> str:
+    """The scoped kv key of one channel's last-fired marker (`timer.last.<scope>.<name>`)."""
+    return _scoped(f"timer.last.{_scope_of(platform, channel)}.{name}")
+
+
+def _claim_key(name: str, due_at: int, *, channel: str = CHANNEL) -> str:
+    """The scoped kv key of one channel's firing claim (`timer.claim.<scope>.<name>.<due>`)."""
+    return _scoped(f"timer.claim.{_scope_of('twitch', channel)}.{name}.{due_at}")
 
 
 def _errors(host: _Host) -> list[tuple[int, str, str]]:
@@ -466,7 +477,9 @@ def test_add_enforces_the_timer_cap(host: _Host) -> None:
     for i in range(MAX_TIMERS):
         _add(f"t{i}", 30, f"message {i}")
     _add("one-too-many", 30, "nope")
-    assert host.last_reply() == f"Too many timers ({MAX_TIMERS} max) -- delete one first."
+    assert (
+        host.last_reply() == f"Too many timers ({MAX_TIMERS} per channel max) -- delete one first."
+    )
     assert len(_timers(host)) == MAX_TIMERS
 
 
@@ -475,11 +488,11 @@ def test_add_enforces_the_timer_cap(host: _Host) -> None:
 
 def test_delete_removes_the_timer_and_its_last_fired_marker(host: _Host) -> None:
     _seed(host, [_timer("a"), _timer("b")])
-    host.kv.store[_scoped("timer.last.a")] = b"123"
+    host.kv.store[_last_key("a")] = b"123"
     _admin("delete", "A")
     assert host.last_reply() == "Timer 'a' deleted."
     assert [t.name for t in _timers(host)] == ["b"]
-    assert _scoped("timer.last.a") not in host.kv.store
+    assert _last_key("a") not in host.kv.store
 
 
 def test_delete_unknown_and_unusable_names(host: _Host) -> None:
@@ -498,7 +511,7 @@ def test_a_failed_last_marker_cleanup_is_logged_not_fatal(
     real_delete = host.kv.delete
 
     def flaky_delete(key: str) -> None:
-        if key.endswith("timer.last.a"):
+        if "timer.last." in key and key.endswith(".a"):
             raise RuntimeError("boom")
         real_delete(key)
 
@@ -599,13 +612,19 @@ def test_list_always_shows_at_least_the_first_timer(host: _Host) -> None:
     assert "only (30m, on)" in host.last_reply()
 
 
-def test_reset_deletes_everything_and_never_reads_the_blob(host: _Host) -> None:
-    host.kv.store[_scoped(_CFG_KEY)] = b"\xff corrupt"
-    host.kv.calls.clear()
+def test_reset_deletes_this_channels_timers_and_their_markers(host: _Host) -> None:
+    _seed(host, [_timer("a"), _timer("b")])
+    host.kv.store[_last_key("a")] = b"123"
     _admin("reset")
-    assert host.last_reply() == "All timers deleted."
+    assert host.last_reply() == "All timers for this channel deleted."
+    assert _scoped(_CFG_KEY) not in host.kv.store  # nothing is left, so the blob goes too
+    assert _last_key("a") not in host.kv.store
+
+
+def test_reset_with_nothing_stored_is_a_clean_no_op(host: _Host) -> None:
+    _admin("reset")
+    assert host.last_reply() == "All timers for this channel deleted."
     assert _scoped(_CFG_KEY) not in host.kv.store
-    assert ("get", (_scoped(_CFG_KEY),)) not in host.kv.calls
 
 
 # -- tick: firing -------------------------------------------------------------------------------
@@ -633,7 +652,7 @@ def test_tick_at_the_interval_posts_the_message_to_this_channel(host: _Host) -> 
     assert result.transport == "twitch"
     assert host.relay_calls[-1][0] == "twitch"
     assert json.loads(host.relay_calls[-1][1]) == {"channel": CHANNEL, "text": "follow the socials"}
-    assert host.kv.store[_scoped("timer.last.promo")] == str(host.now).encode()
+    assert host.kv.store[_last_key("promo")] == str(host.now).encode()
 
 
 def test_a_timer_is_not_due_again_until_a_full_interval_after_it_fired(host: _Host) -> None:
@@ -657,7 +676,7 @@ def test_a_long_silence_posts_once_not_once_per_missed_interval(host: _Host) -> 
 
 def test_due_time_is_the_later_of_anchor_and_last_fired(host: _Host) -> None:
     _seed(host, [_timer(anchor_ms=T0)])
-    host.kv.store[_scoped("timer.last.promo")] = str(T0 + 100 * MIN).encode()
+    host.kv.store[_last_key("promo")] = str(T0 + 100 * MIN).encode()
     host.advance(minutes=120)  # past anchor+30 but before last+30
     assert _tick().detail == "tick:idle"
     host.advance(minutes=10)  # now T0+130m == last+30m
@@ -720,17 +739,17 @@ def test_losing_the_claim_means_someone_else_posted_so_this_line_does_not(host: 
     _seed(host, [_timer()])
     host.advance(minutes=30)
     due_at = T0 + 30 * MIN
-    host.kv.store[_scoped(f"timer.claim.promo.{due_at}")] = b"1"  # a concurrent winner
+    host.kv.store[_claim_key("promo", due_at)] = b"1"  # a concurrent winner
     assert _tick().detail == "tick:idle"
     assert not host.relay_calls
-    assert _scoped("timer.last.promo") not in host.kv.store  # the loser writes nothing
+    assert _last_key("promo") not in host.kv.store  # the loser writes nothing
     assert [c for c in host.log_calls if c[0] == 3]  # logged at DEBUG
 
 
 def test_a_lost_claim_falls_through_to_the_next_due_timer(host: _Host) -> None:
     _seed(host, [_timer("a", message="a msg"), _timer("b", message="b msg")])
     host.advance(minutes=30)
-    host.kv.store[_scoped(f"timer.claim.a.{T0 + 30 * MIN}")] = b"1"
+    host.kv.store[_claim_key("a", T0 + 30 * MIN)] = b"1"
     _tick()
     assert host.replies() == ["b msg"]
 
@@ -738,7 +757,7 @@ def test_a_lost_claim_falls_through_to_the_next_due_timer(host: _Host) -> None:
 def test_two_racing_lines_with_stale_state_post_exactly_once(
     host: _Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def stale_last(_community: str | None, _name: str) -> int | None:
+    async def stale_last(_community: str | None, _scope: str, _name: str) -> int | None:
         return None  # both racers read the state from before either wrote
 
     _seed(host, [_timer()])
@@ -891,7 +910,7 @@ def test_a_stored_message_that_sanitizes_to_nothing_is_not_posted(host: _Host) -
 
 def test_a_corrupt_last_fired_value_falls_back_to_the_anchor_and_is_logged(host: _Host) -> None:
     _seed(host, [_timer()])
-    host.kv.store[_scoped("timer.last.promo")] = b"not-a-number"
+    host.kv.store[_last_key("promo")] = b"not-a-number"
     host.advance(minutes=30)
     assert _tick().detail == "tick:fired"
     assert [c for c in _errors(host) if "last_corrupt" in c[1]]
@@ -899,7 +918,7 @@ def test_a_corrupt_last_fired_value_falls_back_to_the_anchor_and_is_logged(host:
 
 def test_a_negative_last_fired_value_is_ignored(host: _Host) -> None:
     _seed(host, [_timer()])
-    host.kv.store[_scoped("timer.last.promo")] = b"-5"
+    host.kv.store[_last_key("promo")] = b"-5"
     host.advance(minutes=30)
     assert _tick().detail == "tick:fired"
 
@@ -994,6 +1013,7 @@ def test_reset_delete_error_replies_and_raises(
         real_delete(key)
 
     monkeypatch.setattr(sys.modules["wit_world"].imports.kv, "delete", flaky)
+    _seed(host, [_timer()])
     with pytest.raises(RuntimeError, match="timer kv delete failed: RuntimeError"):
         _admin("reset")
     assert host.last_reply() == "Timers are temporarily unavailable, try again shortly."
@@ -1122,8 +1142,11 @@ def test_config_validation_rejects_duplicates_and_overflow() -> None:
     with pytest.raises(app._ConfigError, match="duplicate"):
         _parse_config(_blob(_good(), _good()))
     with pytest.raises(app._ConfigError, match="cap"):
-        _parse_config(_blob(*[_good(n=f"t{i}") for i in range(MAX_TIMERS + 1)]))
-    assert len(_parse_config(_blob(*[_good(n=f"t{i}") for i in range(MAX_TIMERS)]))) == MAX_TIMERS
+        _parse_config(_blob(*[_good(n=f"t{i}") for i in range(MAX_TIMERS_TOTAL + 1)]))
+    full = _blob(*[_good(n=f"t{i}") for i in range(MAX_TIMERS_TOTAL)])
+    assert len(_parse_config(full)) == MAX_TIMERS_TOTAL
+    # the same name is legal in two DIFFERENT channels, a duplicate only within one
+    assert len(_parse_config(_blob(_good(), _good(c="fedcba9876543210")))) == 2
 
 
 # -- envelope / usage ---------------------------------------------------------------------------
@@ -1193,3 +1216,153 @@ def test_module_exposes_no_feature_flag_guard() -> None:
     source = open(app.__file__, encoding="utf-8").read()
     assert "feature_enabled" not in source
     assert "FLAG_KEY" not in source
+
+
+# -- security review regressions: a moderator badge is valid in ONE channel ---------------------
+
+OTHER = "channel-b"
+
+
+def _other(command: str, arg: str | None = None, **kwargs: Any) -> Any:
+    """An admin command from a moderator of a DIFFERENT channel of the same community."""
+    return _admin(command, arg, channel_id=OTHER, **kwargs)
+
+
+def test_a_moderator_of_another_channel_cannot_see_change_or_delete_these_timers(
+    host: _Host,
+) -> None:
+    # regression: `del`/`enable`/`disable`/`reset`/`list` addressed the community-wide blob, so a
+    # moderator (a badge earned in channel B) could manage channel A's timers by name.
+    _seed(host, [_timer("promo"), _timer("quiet", enabled=False)])
+    host.kv.store[_last_key("promo")] = b"123"
+    snapshot = dict(host.kv.store)
+
+    _other("list")
+    assert host.last_reply().startswith("No timers set")
+    assert "promo" not in host.last_reply()
+    for command, arg, expected in (
+        ("delete", "promo", "No timer named 'promo'."),
+        ("disable", "promo", "No timer named 'promo'."),
+        ("enable", "quiet", "No timer named 'quiet'."),
+    ):
+        _other(command, arg)
+        assert host.last_reply() == expected
+    _other("reset")
+    assert host.kv.store == snapshot  # not one byte of channel A's state moved
+    assert [t.name for t in _timers(host)] == ["promo", "quiet"]
+
+
+def test_a_foreign_timer_name_is_not_revealed_by_add(host: _Host) -> None:
+    _seed(host, [_timer("promo")])
+    _other("add", "promo 30 mine")
+    assert "added" in host.last_reply()
+    assert sorted((t.scope == _scope_of("twitch", OTHER), t.name) for t in _timers(host)) == [
+        (False, "promo"),
+        (True, "promo"),
+    ]
+
+
+def test_the_same_name_in_two_channels_is_two_independent_timers(host: _Host) -> None:
+    _add("promo", 30, "channel A text")
+    _other("add", "promo 30 channel B text")
+    host.advance(minutes=30)
+    assert _tick().detail == "tick:fired"
+    assert json.loads(host.relay_calls[-1][1]) == {"channel": CHANNEL, "text": "channel A text"}
+    assert _tick(channel_id=OTHER).detail == "tick:fired"
+    assert json.loads(host.relay_calls[-1][1]) == {"channel": OTHER, "text": "channel B text"}
+    # one channel's markers/claims never satisfy the other's
+    assert _last_key("promo") in host.kv.store
+    assert _last_key("promo", channel=OTHER) in host.kv.store
+    _admin("delete", "promo")
+    assert _last_key("promo") not in host.kv.store
+    assert _last_key("promo", channel=OTHER) in host.kv.store
+    assert [t.message for t in _timers(host)] == ["channel B text"]
+
+
+def test_a_platform_is_part_of_the_scope(host: _Host) -> None:
+    _add("promo", 30, "twitch text")
+    _admin("list", platform="discord")
+    assert host.last_reply().startswith("No timers set")
+    _admin("delete", "promo", platform="discord")
+    assert host.last_reply() == "No timer named 'promo'."
+    assert [t.name for t in _timers(host)] == ["promo"]
+
+
+def test_reset_only_removes_this_channels_timers(host: _Host) -> None:
+    _seed(host, [_timer("a"), _timer("b", scope=_scope_of("twitch", OTHER))])
+    host.kv.store[_last_key("a")] = b"1"
+    host.kv.store[_last_key("b", channel=OTHER)] = b"2"
+    _admin("reset")
+    assert host.last_reply() == "All timers for this channel deleted."
+    assert [t.name for t in _timers(host)] == ["b"]
+    assert _last_key("a") not in host.kv.store
+    assert _last_key("b", channel=OTHER) in host.kv.store
+
+
+def test_reset_on_a_corrupt_blob_drops_it_whole_and_says_so_in_the_log(host: _Host) -> None:
+    host.kv.store[_scoped(_CFG_KEY)] = b"garbage"
+    _other("reset")  # nothing can be scoped in an unreadable blob: it is the documented recovery
+    assert _scoped(_CFG_KEY) not in host.kv.store
+    assert any("reset_dropped_corrupt_config" in c[1] for c in host.log_calls)
+
+
+def test_the_cap_is_per_channel_so_one_channel_cannot_fill_the_others_quota(host: _Host) -> None:
+    for i in range(MAX_TIMERS):
+        _add(f"t{i}", 30, f"message {i}")
+    _add("overflow", 30, "nope")
+    assert "per channel max" in host.last_reply()
+    _other("add", "mine 30 still room here")
+    assert "Timer 'mine' added" in host.last_reply()
+    assert len(_timers(host)) == MAX_TIMERS + 1
+
+
+def test_the_community_wide_ceiling_bounds_the_blob(host: _Host) -> None:
+    seeded = [
+        _timer(f"t{i}", scope=_scope_of("twitch", f"chan-{i // MAX_TIMERS}"))
+        for i in range(MAX_TIMERS_TOTAL)
+    ]
+    _seed(host, seeded)
+    _other("add", "extra 30 one too many")
+    assert host.last_reply() == f"This community has reached its timer limit ({MAX_TIMERS_TOTAL})."
+    assert len(_timers(host)) == MAX_TIMERS_TOTAL
+
+
+def test_the_blob_never_outgrows_the_host_value_cap(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add("a", 30, "x" * 10)
+    monkeypatch.setattr(app, "MAX_CONFIG_BYTES", len(host.kv.store[_scoped(_CFG_KEY)]) + 20)
+    _add("b", 30, "y" * 100)
+    assert host.last_reply() == "This community's timer storage is full -- delete a timer first."
+    assert [t.name for t in _timers(host)] == ["a"]
+
+
+def test_worst_case_timers_still_fit_the_host_value_cap() -> None:
+    """40 timers of 300 astral characters each (the JSON worst case) stay under 64 KiB."""
+    worst = [
+        _timer(f"t{i}", message=chr(0x1F600) * 300, scope=_scope_of("twitch", f"c{i}"))
+        for i in range(MAX_TIMERS_TOTAL)
+    ]
+    raw = app._dump_config(worst)
+    assert len(raw) <= 64 * 1024
+    assert _parse_config(raw) == worst
+
+
+def test_anchored_validators_reject_a_trailing_newline() -> None:
+    # regression: `re.match` + `$` accepted "promo\n" (a kv key with a newline in it).
+    assert app._NAME_RE.fullmatch("promo\n") is None
+    assert app._SCOPE_RE.fullmatch("0123456789abcdef\n") is None
+    assert app._INTERVAL_RE.fullmatch("30\n") is None
+    with pytest.raises(app._ConfigError):
+        _parse_config(_blob(_good(n="promo\n")))
+    with pytest.raises(app._ConfigError):
+        _parse_config(_blob(_good(c="0123456789abcdef\n")))
+
+
+def test_reset_read_error_replies_and_raises(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed(host, [_timer()])
+    _set_kv_raises(monkeypatch, op="get")
+    with pytest.raises(RuntimeError, match="timer kv get failed"):
+        _admin("reset")
+    assert host.last_reply() == "Timers are temporarily unavailable, try again shortly."
+    assert _timers(host)  # nothing was deleted

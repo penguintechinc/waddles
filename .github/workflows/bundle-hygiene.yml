@@ -124,3 +124,10 @@ jobs:
       # user must be on the reasoned flavor-text allowlist. Asserts its own denominators.
       - name: Game bundles draw outcomes from SystemRandom, never the frozen module-level RNG
         run: python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -v -p no:cacheprovider
+
+      # Two bundles on one `command_prefix` both reply to every line (and double any effect). Every
+      # trigger is unique across bundle.yaml manifests (pre-existing pairs are an exact, shrink-only
+      # allowlist), and each bundle that consumes every chat line declares the heads it answers.
+      # Asserts its own denominators (>=100 bundles and triggers).
+      - name: No two bundles answer the same command trigger
+        run: python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -v -p no:cacheprovider

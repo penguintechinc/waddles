@@ -853,3 +853,110 @@ def test_the_bundle_is_activation_gated_only() -> None:
     assert "feature_enabled" not in source
     assert "FLAG_KEY" not in source
     assert "flags" not in source.split('"""', 2)[2]
+
+
+# -- security review regressions: token forgery / parser differential / lead guard ---------------
+
+
+def _live_tokens(text: str) -> list[str]:
+    """Tokens the real egress detokenizer would substitute in `text` (the SDK port)."""
+    from waddle_sdk import safe_text
+
+    return [piece[len("{user:") : -1] for piece, live in safe_text._split_live(text, None) if live]
+
+
+_HOSTILE_ACTORS = [
+    " {user:u-victim}",
+    "{user:u-victim}\n",
+    "{user:u-victim}{user:u-other}",
+    "x{user:u-victim}",
+    "{user:u-victim",
+    "{user:}",
+    "{user:u victim}",
+    "\\{user:u-victim\\}",
+    "{user:" + chr(0x430) + "}",
+    chr(0xFF5B) + "user:u-victim" + chr(0xFF5D),
+    "{user:" + "a" * 257 + "}",
+]
+
+
+@pytest.mark.parametrize("actor", _HOSTILE_ACTORS)
+def test_a_hostile_actor_is_never_stored_or_announced_as_a_live_token(
+    host: types.SimpleNamespace, actor: str
+) -> None:
+    # regression: the winner label is built as `{user:<token>}`; only an actor that is EXACTLY one
+    # host-minted placeholder may become a token, so nobody can win AS (and ping) someone else.
+    _modsay("!bingo start")
+    _set_calls(host, NUMBERS)
+    claim = _text(_run(_event("!bingo bingo", actor=actor, author_id="777")))
+    assert "BINGO!" in claim
+    assert _live_tokens(claim) == []
+    assert json.loads(host.kv.store[WINNER_KEY])["t"] is None
+    status = _say("!bingo status", "bob")
+    assert _live_tokens(status) == []
+    assert re.search(r"was won by entrant [0-9a-f]{8} after 75 calls", status)
+
+
+def test_a_genuine_winner_is_the_one_live_token_in_every_reply(host: types.SimpleNamespace) -> None:
+    _modsay("!bingo start")
+    _set_calls(host, NUMBERS)
+    card = _say("!bingo", "alice")
+    claim = _say("!bingo bingo", "alice")
+    status = _say("!bingo status", "bob")
+    assert _live_tokens(card) == ["u-alice"]
+    assert _live_tokens(claim) == ["u-alice"]
+    assert _live_tokens(status) == ["u-alice"]
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_a_tampered_winner_token_is_either_ignored_or_exactly_the_one_live_token(
+    host: types.SimpleNamespace, seed: int
+) -> None:
+    """Fuzz the stored winner token: whatever kv holds, status never forges a mention."""
+    import random
+
+    rng = random.Random(seed)  # noqa: S311 -- deterministic fuzz, not a secret
+    atoms = [
+        "{",
+        "}",
+        "\\",
+        "{user:",
+        "user:",
+        "u-x",
+        ":",
+        ".",
+        " ",
+        "\n",
+        "}{",
+        "a" * 60,
+        chr(0x430),
+    ]
+    _modsay("!bingo start")
+    for _ in range(150):
+        token = "".join(rng.choice(atoms) for _ in range(rng.randint(1, 6)))
+        host.kv.store[WINNER_KEY] = json.dumps({"t": token, "p": "abcd1234"}).encode()
+        reply = _say("!bingo status", "bob")
+        live = _live_tokens(reply)
+        if "was won by" in reply:
+            assert live in ([], [token])
+            if live:
+                assert re.fullmatch(r"[A-Za-z0-9_:.-]{1,256}", token)
+            assert reply.count("{user:") <= 1
+        else:
+            assert live == []
+
+
+@pytest.mark.parametrize(
+    "actor", ["/ban victim", ".timeout victim", "!bingo call", chr(0x200B) + "/ban x"]
+)
+def test_a_reply_that_would_lead_with_a_command_is_guarded(
+    host: types.SimpleNamespace, actor: str
+) -> None:
+    # regression: the card / claim replies LEAD with the viewer's label, and a raw handle that
+    # starts with `/`, `.` or `!` would have run as the bot's own chat command.
+    _modsay("!bingo start")
+    card = _text(_run(_event("!bingo", actor=actor, author_id="9")))
+    claim = _text(_run(_event("!bingo bingo", actor=actor, author_id="9")))
+    for reply in (card, claim):
+        assert reply.startswith("\U0001f4ac "), reply
+    assert "your card" in card and "not yet" in claim

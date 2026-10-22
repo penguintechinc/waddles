@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.example.queue
 name: Viewer Queue Bundle (Python)
-# 1.0.0: initial kv-only viewer queue -- !queue join/leave/(position)/list/next/clear. See
+# 1.0.0: initial kv-only viewer queue -- !vqueue (not !queue: music owns it) join/leave/(position)/list/next/clear. See
 # src/app.py's module docstring (feature/bundles-queue-timer).
 version: 1.0.0
 feature: waddles.core.example
@@ -21,11 +21,11 @@ stages:
       - platform: twitch
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!queue"]
+          command_prefix: ["!vqueue"]
       - platform: discord
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!queue"]
+          command_prefix: ["!vqueue"]
     produces: []
     config: {}
     spec:

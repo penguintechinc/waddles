@@ -9,12 +9,21 @@ Commands (all moderator/broadcaster only):
 
 - `!timer add <name> <interval-min> <message>` -- register a timer bound to THIS channel. The
   name is 1-24 of `[a-z0-9_-]` (case-insensitive), the interval 5-1440 minutes, the message
-  1-300 characters; at most 10 timers per community.
+  1-300 characters; at most 10 timers per channel (40 per community).
 - `!timer del <name>` (also `delete` / `remove`) -- delete a timer.
-- `!timer list` -- show every timer: name, interval, on/off and a message preview.
+- `!timer list` -- show this channel's timers: name, interval, on/off and a message preview.
 - `!timer enable <name>` / `!timer disable <name>` -- pause or resume. Enabling restarts the
   countdown, so a long-disabled timer does not fire the instant it is switched back on.
-- `!timer reset` -- delete ALL timers (also the recovery path for a corrupted config blob).
+- `!timer reset` -- delete all of THIS channel's timers (also the recovery path for a corrupted
+  config blob, which is dropped whole because it cannot be split per channel).
+
+**A moderator badge is valid in ONE channel, so every command is scoped to it.** A mod's
+`is_mod` comes from the chat the message was sent in, but the config blob is shared by every
+channel linked to the community. `add`/`del`/`enable`/`disable`/`list`/`reset` therefore only see
+and change timers whose `scope` (the channel hash below) is the invoking channel's: another
+channel's timer answers "No timer named ..." exactly like a missing one. Names are unique per
+channel, and the `last-fired` / `claim` keys carry the scope too, so two channels may each own a
+`hydrate` timer without touching one another's markers.
 
 `del`/`delete`/`remove` all reach the shared `waddle_sdk.command` grammar's `delete`/`remove`
 verb (`del` is normalised to `delete` before parsing); `add`/`list`/`enable`/`disable`/`reset`
@@ -89,7 +98,12 @@ from waddle_sdk.safe_text import leads_with_command, sanitize_user_text
 _HEAD = "!timer"
 SPEC = CommandSpec(name="timer")
 
+#: Timers one CHANNEL may hold (the scope a mod's badge is valid in).
 MAX_TIMERS = 10
+#: Timers across every channel of one community -- bounds the single config blob.
+MAX_TIMERS_TOTAL = 40
+#: Hard ceiling on the serialized config blob (the host's kv value cap is 64 KiB).
+MAX_CONFIG_BYTES = 60_000
 MIN_INTERVAL_MIN = 5
 MAX_INTERVAL_MIN = 1440
 MAX_MESSAGE_LEN = 300
@@ -103,6 +117,8 @@ _CFG_KEY = "timer.cfg"
 _LOCK_KEY = "timer.lock"
 _LAST_PREFIX = "timer.last."
 _CLAIM_PREFIX = "timer.claim."
+#: `last` / `claim` keys are per CHANNEL scope as well as per name: two channels may each own a
+#: timer called `hydrate` and neither can touch the other's markers.
 _LOCK_TTL_SECONDS = 10
 _LOCK_ATTEMPTS = 3
 #: A claim only has to outlive the few milliseconds between winning it and recording the
@@ -111,9 +127,9 @@ _CLAIM_TTL_SECONDS = 300
 #: Last-fired times expire after 30 days (the host cap); an expired one falls back to the anchor.
 _LAST_TTL_SECONDS = 30 * 24 * 60 * 60
 
-_NAME_RE = re.compile(r"^[a-z0-9_-]{1,24}$")
-_INTERVAL_RE = re.compile(r"^[0-9]{1,4}$")
-_SCOPE_RE = re.compile(r"^[0-9a-f]{16}$")
+_NAME_RE = re.compile(r"[a-z0-9_-]{1,24}")
+_INTERVAL_RE = re.compile(r"[0-9]{1,4}")
+_SCOPE_RE = re.compile(r"[0-9a-f]{16}")
 
 _USAGE = (
     "Usage: !timer add <name> <interval-min> <message> | !timer del <name> | !timer list | "
@@ -295,7 +311,7 @@ def _timer_from_json(raw: object) -> Timer:
         raise _ConfigError("timer entry is not an object")
     name, interval, message = raw.get("n"), raw.get("i"), raw.get("m")
     enabled, scope, anchor = raw.get("e"), raw.get("c"), raw.get("a")
-    if not (isinstance(name, str) and _NAME_RE.match(name)):
+    if not (isinstance(name, str) and _NAME_RE.fullmatch(name)):
         raise _ConfigError("bad timer name")
     if not (isinstance(interval, int) and not isinstance(interval, bool)):
         raise _ConfigError("interval is not an integer")
@@ -305,7 +321,7 @@ def _timer_from_json(raw: object) -> Timer:
         raise _ConfigError("bad message")
     if not isinstance(enabled, bool):
         raise _ConfigError("enabled is not a boolean")
-    if not (isinstance(scope, str) and _SCOPE_RE.match(scope)):
+    if not (isinstance(scope, str) and _SCOPE_RE.fullmatch(scope)):
         raise _ConfigError("bad channel scope")
     if not (isinstance(anchor, int) and not isinstance(anchor, bool) and anchor >= 0):
         raise _ConfigError("bad anchor time")
@@ -321,12 +337,12 @@ def _parse_config(raw: bytes) -> list[Timer]:
     if not isinstance(data, dict) or data.get("v") != 1:
         raise _ConfigError("unsupported config version")
     items = data.get("timers")
-    if not isinstance(items, list) or len(items) > MAX_TIMERS:
+    if not isinstance(items, list) or len(items) > MAX_TIMERS_TOTAL:
         raise _ConfigError("timers is not a list within the cap")
     timers: list[Timer] = []
     for item in items:
         timer = _timer_from_json(item)
-        if any(t.name == timer.name for t in timers):
+        if any(t.name == timer.name and t.scope == timer.scope for t in timers):
             raise _ConfigError("duplicate timer name")
         timers.append(timer)
     return timers
@@ -334,7 +350,11 @@ def _parse_config(raw: bytes) -> list[Timer]:
 
 def _dump_config(timers: list[Timer]) -> bytes:
     """Serialize the config blob (`v`ersioned so a future schema can be told apart)."""
-    return json.dumps({"v": 1, "timers": [_timer_to_json(t) for t in timers]}).encode("utf-8")
+    return json.dumps(
+        {"v": 1, "timers": [_timer_to_json(t) for t in timers]},
+        ensure_ascii=False,  # raw UTF-8 is at most 4 bytes per char; JSON escapes cost 6-12
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 async def _kv_error(exc: Exception, *, op: str, reply: _Reply | None) -> NoReturn:
@@ -416,9 +436,9 @@ def _validate_new_timer(arg: object) -> tuple[str, int, str] | str:
     if len(parts) < 3:
         return _ADD_USAGE
     raw_name, raw_interval, message = parts[0].lower(), parts[1], parts[2].strip()
-    if not _NAME_RE.match(raw_name):
+    if not _NAME_RE.fullmatch(raw_name):
         return "Timer names are 1-24 characters of a-z, 0-9, _ and -."
-    if not _INTERVAL_RE.match(raw_interval):
+    if not _INTERVAL_RE.fullmatch(raw_interval):
         return _ADD_USAGE
     interval = int(raw_interval)
     if not MIN_INTERVAL_MIN <= interval <= MAX_INTERVAL_MIN:
@@ -432,71 +452,76 @@ def _validate_new_timer(arg: object) -> tuple[str, int, str] | str:
     return raw_name, interval, message
 
 
-async def _handle_add(
-    community: str | None, arg: object, *, provider: str, channel_id: str, reply: _Reply
-) -> str:
-    """Validate and store a new timer bound to this channel, anchored at now."""
+async def _handle_add(community: str | None, arg: object, *, scope: str, reply: _Reply) -> str:
+    """Validate and store a new timer bound to THIS channel (`scope`), anchored at now."""
     validated = _validate_new_timer(arg)
     if isinstance(validated, str):
         return validated
     name, interval, message = validated
     async with _config_lock(community, reply=reply):
         timers = await _load_config(community, reply=reply)
-        if any(t.name == name for t in timers):
+        mine = [t for t in timers if t.scope == scope]
+        if any(t.name == name for t in mine):
             return f"A timer named '{name}' already exists -- !timer del {name} first."
-        if len(timers) >= MAX_TIMERS:
-            return f"Too many timers ({MAX_TIMERS} max) -- delete one first."
+        if len(mine) >= MAX_TIMERS:
+            return f"Too many timers ({MAX_TIMERS} per channel max) -- delete one first."
+        if len(timers) >= MAX_TIMERS_TOTAL:
+            return f"This community has reached its timer limit ({MAX_TIMERS_TOTAL})."
         timers.append(
             Timer(
                 name=name,
                 interval_min=interval,
                 message=message,
                 enabled=True,
-                scope=_scope_of(provider, channel_id),
+                scope=scope,
                 anchor_ms=clock.now_millis(),
             )
         )
+        if len(_dump_config(timers)) > MAX_CONFIG_BYTES:
+            return "This community's timer storage is full -- delete a timer first."
         await _save_config(community, timers, reply=reply)
-    log.info("timer.added", count=len(timers))
+    log.info("timer.added", count=len(mine) + 1)
     return (
         f"Timer '{name}' added: posts here every {interval} min once chat is active "
         f"(it needs a chat line to post, so a silent channel stays silent)."
     )
 
 
-async def _forget_last(community: str | None, name: str) -> None:
+async def _forget_last(community: str | None, scope: str, name: str) -> None:
     """Best-effort removal of a deleted timer's last-fired marker (it expires on its own)."""
     try:
-        await community_kv.delete(community, _LAST_PREFIX + name)
+        await community_kv.delete(community, _last_key(scope, name))
     except Exception as exc:  # noqa: BLE001 -- logged, never silent; the TTL expires the key
         log.error("timer.last_cleanup_failed", error=type(getattr(exc, "value", exc)).__name__)
 
 
-async def _handle_delete(community: str | None, arg: object, *, reply: _Reply) -> str:
-    """Delete one timer by name."""
+async def _handle_delete(community: str | None, arg: object, *, scope: str, reply: _Reply) -> str:
+    """Delete one of THIS channel's timers by name (another channel's timer is invisible here)."""
     name = arg.strip().lower() if isinstance(arg, str) else ""
-    if not _NAME_RE.match(name):
+    if not _NAME_RE.fullmatch(name):
         return "Usage: !timer del <name>"
     async with _config_lock(community, reply=reply):
         timers = await _load_config(community, reply=reply)
-        remaining = [t for t in timers if t.name != name]
+        remaining = [t for t in timers if not (t.scope == scope and t.name == name)]
         if len(remaining) == len(timers):
             return f"No timer named '{name}'."
         await _save_config(community, remaining, reply=reply)
-    await _forget_last(community, name)
+    await _forget_last(community, scope, name)
     log.info("timer.deleted", count=len(remaining))
     return f"Timer '{name}' deleted."
 
 
-async def _handle_toggle(community: str | None, arg: object, *, enable: bool, reply: _Reply) -> str:
-    """Enable (restarting its countdown) or disable one timer by name."""
+async def _handle_toggle(
+    community: str | None, arg: object, *, enable: bool, scope: str, reply: _Reply
+) -> str:
+    """Enable (restarting its countdown) or disable one of THIS channel's timers by name."""
     verb = "enable" if enable else "disable"
     name = arg.strip().lower() if isinstance(arg, str) else ""
-    if not _NAME_RE.match(name):
+    if not _NAME_RE.fullmatch(name):
         return f"Usage: !timer {verb} <name>"
     async with _config_lock(community, reply=reply):
         timers = await _load_config(community, reply=reply)
-        target = next((t for t in timers if t.name == name), None)
+        target = next((t for t in timers if t.scope == scope and t.name == name), None)
         if target is None:
             return f"No timer named '{name}'."
         if target.enabled is enable:
@@ -504,16 +529,14 @@ async def _handle_toggle(community: str | None, arg: object, *, enable: bool, re
         changed = replace(
             target, enabled=enable, anchor_ms=clock.now_millis() if enable else target.anchor_ms
         )
-        await _save_config(
-            community, [changed if t.name == name else t for t in timers], reply=reply
-        )
+        await _save_config(community, [changed if t is target else t for t in timers], reply=reply)
     log.info("timer.toggled", enabled=enable)
     return f"Timer '{name}' {verb}d."
 
 
-async def _handle_list(community: str | None, *, reply: _Reply) -> str:
-    """Summarize every timer (name, interval, state, sanitized message preview)."""
-    timers = await _load_config(community, reply=reply)
+async def _handle_list(community: str | None, *, scope: str, reply: _Reply) -> str:
+    """Summarize THIS channel's timers (name, interval, state, sanitized message preview)."""
+    timers = [t for t in await _load_config(community, reply=reply) if t.scope == scope]
     if not timers:
         return "No timers set. Add one with !timer add <name> <interval-min> <message>."
     header = f"Timers ({len(timers)}): "
@@ -533,21 +556,52 @@ async def _handle_list(community: str | None, *, reply: _Reply) -> str:
     return header + " | ".join(parts)
 
 
-async def _handle_reset(community: str | None, *, reply: _Reply) -> str:
-    """Delete every timer. Works on a corrupt blob (it never reads it)."""
+async def _handle_reset(community: str | None, *, scope: str, reply: _Reply) -> str:
+    """Delete THIS channel's timers; a corrupt blob (unreadable, so unscopable) is dropped whole.
+
+    The blob is the one shared record of every channel in the community: a valid one only loses
+    the invoking channel's entries. A corrupt one cannot be told apart per channel, so `reset`
+    stays the documented recovery and removes it entirely (logged at WARN).
+    """
     async with _config_lock(community, reply=reply):
         try:
-            await community_kv.delete(community, _CFG_KEY)
+            raw = await community_kv.get(community, _CFG_KEY)
         except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_kv_error`
-            await _kv_error(exc, op="delete", reply=reply)
-    log.info("timer.reset")
-    return "All timers deleted."
+            await _kv_error(exc, op="get", reply=reply)
+        gone: list[Timer] = []
+        keep: list[Timer] = []
+        corrupt = False
+        if raw is not None:
+            try:
+                timers = _parse_config(raw)
+            except _ConfigError as exc:
+                corrupt = True
+                log.warn("timer.reset_dropped_corrupt_config", reason=str(exc))
+            else:
+                gone = [t for t in timers if t.scope == scope]
+                keep = [t for t in timers if t.scope != scope]
+        if corrupt or (raw is not None and not keep):
+            try:
+                await community_kv.delete(community, _CFG_KEY)
+            except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_kv_error`
+                await _kv_error(exc, op="delete", reply=reply)
+        elif raw is not None:
+            await _save_config(community, keep, reply=reply)
+    for timer in gone:
+        await _forget_last(community, timer.scope, timer.name)
+    log.info("timer.reset", removed=len(gone), corrupt=corrupt)
+    return "All timers for this channel deleted."
 
 
-async def _read_last(community: str | None, name: str) -> int | None:
+def _last_key(scope: str, name: str) -> str:
+    """The last-fired marker key of one channel's timer."""
+    return f"{_LAST_PREFIX}{scope}.{name}"
+
+
+async def _read_last(community: str | None, scope: str, name: str) -> int | None:
     """Last-fired time of `name` in ms, or `None` if unset/expired/corrupt (anchor is used)."""
     try:
-        raw = await community_kv.get(community, _LAST_PREFIX + name)
+        raw = await community_kv.get(community, _last_key(scope, name))
     except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_kv_error`
         await _kv_error(exc, op="get_last", reply=None)
     if raw is None:
@@ -560,11 +614,11 @@ async def _read_last(community: str | None, name: str) -> int | None:
     return value if value >= 0 else None
 
 
-async def _claim(community: str | None, name: str, due_at: int) -> bool:
+async def _claim(community: str | None, scope: str, name: str, due_at: int) -> bool:
     """Win the right to post `name` for the occurrence due at `due_at` (`True` for one caller)."""
     try:
         count = await community_kv.increment(
-            community, f"{_CLAIM_PREFIX}{name}.{due_at}", 1, _CLAIM_TTL_SECONDS
+            community, f"{_CLAIM_PREFIX}{scope}.{name}.{due_at}", 1, _CLAIM_TTL_SECONDS
         )
     except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_kv_error`
         await _kv_error(exc, op="claim", reply=None)
@@ -587,18 +641,18 @@ async def _handle_tick(community: str | None, *, provider: str, channel_id: str)
     now = clock.now_millis()
     due: list[tuple[int, Timer]] = []
     for timer in mine:
-        last = await _read_last(community, timer.name)
+        last = await _read_last(community, scope, timer.name)
         due_at = max(timer.anchor_ms, last or 0) + timer.interval_min * 60_000
         if now >= due_at:
             due.append((due_at, timer))
     due.sort(key=lambda pair: (pair[0], pair[1].name))
 
     for due_at, timer in due:
-        if not await _claim(community, timer.name, due_at):
+        if not await _claim(community, scope, timer.name, due_at):
             continue
         try:
             await community_kv.set(
-                community, _LAST_PREFIX + timer.name, str(now).encode(), _LAST_TTL_SECONDS
+                community, _last_key(scope, timer.name), str(now).encode(), _LAST_TTL_SECONDS
             )
         except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_kv_error`
             await _kv_error(exc, op="set_last", reply=None)
@@ -621,25 +675,28 @@ async def _run_admin(
     provider: str,
     channel_id: str,
 ) -> str:
-    """Run one mod-gated admin command and return its chat reply."""
+    """Run one mod-gated admin command and return its chat reply.
+
+    A moderator badge is valid in the channel it was earned in, so every command here is scoped
+    to that channel's timers: it can neither see, change nor delete another channel's.
+    """
     if _caller_role_signal(payload) is not True:
         log.info("timer.permission_denied", command=command)
         return _PERMISSION_DENIED_MSG
     reply = (provider, channel_id, _UNAVAILABLE_MSG)
+    scope = _scope_of(provider, channel_id)
     arg = payload.get("arg")
     if command == "add":
-        return await _handle_add(
-            community, arg, provider=provider, channel_id=channel_id, reply=reply
-        )
+        return await _handle_add(community, arg, scope=scope, reply=reply)
     if command == "delete":
-        return await _handle_delete(community, arg, reply=reply)
+        return await _handle_delete(community, arg, scope=scope, reply=reply)
     if command == "enable":
-        return await _handle_toggle(community, arg, enable=True, reply=reply)
+        return await _handle_toggle(community, arg, enable=True, scope=scope, reply=reply)
     if command == "disable":
-        return await _handle_toggle(community, arg, enable=False, reply=reply)
+        return await _handle_toggle(community, arg, enable=False, scope=scope, reply=reply)
     if command == "list":
-        return await _handle_list(community, reply=reply)
-    return await _handle_reset(community, reply=reply)
+        return await _handle_list(community, scope=scope, reply=reply)
+    return await _handle_reset(community, scope=scope, reply=reply)
 
 
 async def dispatch(

@@ -87,13 +87,24 @@ WARN_MAX_SECONDS = 3600
 MAX_WORDS = 50
 MIN_WORD_LEN = 2
 MAX_WORD_LEN = 40
-#: Longest prefix of a message the filters look at (platform limits are far below it).
-MAX_ANALYSIS_CHARS = 2000
+#: Longest message the filters analyse IN FULL. No platform delivers more (Twitch 500, Discord 2000,
+#: 4000 with Nitro, 4096 for an embed), so a longer line is not analysed at all and is treated as
+#: breaking the first enabled rule -- the filters never look at a PREFIX and wave the tail through
+#: (padding a message past a cut-off would hide a link / word / caps behind it).
+MAX_ANALYSIS_CHARS = 4096
 
 _CONFIG_KEY = "chatguard.config"
 _CONFIG_VERSION = 1
 _ANON_PSEUDONYM = "anon"
 _DROPPED_CATEGORIES = frozenset({"Mn", "Cf", "Cc"})
+#: Characters a platform renders as BLANK but that are letters/symbols to Unicode (so the category
+#: test above misses them): Hangul choseong/jungseong/halfwidth fillers and the Braille blank.
+#: Left in, they dilute the caps / symbol percentage or split a blacklisted word.
+_INVISIBLE_FILLERS = frozenset(map(chr, (0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800)))
+#: Longest run a URL is exempted from the caps / symbol analysis for. A URL is `\S+`, so an
+#: unbounded exemption would let `https://` + 1900 characters of caps/punctuation vanish from the
+#: statistics; past this length the rest of the "URL" is counted like any other text.
+_URL_EXEMPT_MAX = 200
 
 #: `set <key> <n>` keys -> (GuardConfig field, minimum, maximum).
 _SETTINGS: dict[str, tuple[str, int, int]] = {
@@ -137,17 +148,23 @@ _FALLBACK_ACTOR = "someone"
 _SNOWFLAKE_RE = re.compile(r"^[0-9]{1,20}$")
 _PSEUDONYM_RE = re.compile(r"^[0-9a-f]{64}$")
 
-_PLACEHOLDER_RE = re.compile(r"\{user:[^{}\\]*\}")
-_ESCAPED_RE = re.compile(r"\\([{}\\])")
+#: Mirrors `core/egress_detokenizer/src/lib.rs`: a placeholder is `{user:` + 1..=256 token chars
+#: (ASCII alphanumerics and `-_:.`) + `}`, and a backslash escapes exactly `{`, `}` and itself.
+_PLACEHOLDER_OPEN = "{user:"
+_TOKEN_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:.")
+_ESCAPABLE = frozenset("{}\\")
 _URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
+_URL_EXEMPT_RE = re.compile(rf"(?i)\b(?:https?://|www\.)\S{{1,{_URL_EXEMPT_MAX}}}")
 _CUSTOM_EMOTE_RE = re.compile(r"<a?:\w{2,32}:\d{15,25}>")
 _TLDS = (
     "com net org io gg tv me co uk de fr ru ly be xyz info app dev gl cc us ca au nl pl es jp br "
     "tk ml ga cf gq top site online store shop club live link fun win vip cloud pw ws sx ai biz "
     "cn eu gift click icu"
 ).split()
+#: A label is any-script letters/digits (`[^\W_]`), so an internationalised name such as
+#: `evil` with a Cyrillic `i` -- which every platform linkifies -- is still a domain.
 _BARE_DOMAIN_RE = re.compile(
-    r"(?<![@\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:"
+    r"(?<![@\w.-])(?:[^\W_](?:[\w-]{0,61}[^\W_])?\.)+(?:"
     + "|".join(sorted(_TLDS, key=len, reverse=True))
     + r")(?![\w-])",
     re.IGNORECASE,
@@ -159,6 +176,9 @@ _SPOKEN_DOT_RE = re.compile(
     re.IGNORECASE,
 )
 _DOT_LOOKALIKES = str.maketrans({"。": ".", "｡": "."})
+#: Discord renders `evil\.com` as `evil.com` (a backslash escapes any ASCII punctuation), so the
+#: link view drops a backslash that precedes punctuation.
+_MARKDOWN_ESCAPE_RE = re.compile(r"\\(?=[!-/:-@\[-`{-~])")
 
 
 @dataclass(slots=True, frozen=True)
@@ -235,14 +255,13 @@ def _actor_label(actor: object) -> str:
     """
     if not isinstance(actor, str) or not actor.strip():
         return _FALLBACK_ACTOR
-    label = actor.strip()
-    match = _USER_TOKEN_RE.match(label)
-    return sanitize_user_text(label, allow_tokens=(match.group(1),) if match else ())
+    match = _USER_TOKEN_RE.fullmatch(actor)  # the WHOLE, unpadded actor: the pipeline adds none
+    return sanitize_user_text(actor.strip(), allow_tokens=(match.group(1),) if match else ())
 
 
 def _mention(token: str) -> str:
     """The live `{user:<token>}` placeholder for a host-minted token, else a neutral label."""
-    if not _TOKEN_RE.match(token):
+    if not _TOKEN_RE.fullmatch(token):
         return "that user"
     return sanitize_user_text("{user:" + token + "}", allow_tokens=(token,))
 
@@ -279,22 +298,65 @@ def _int_or_none(raw: bytes | None) -> int | None:
         return None
 
 
+def _is_invisible(ch: str) -> bool:
+    """True for a character the platform renders as nothing or as a blank filler."""
+    return ch in _INVISIBLE_FILLERS or unicodedata.category(ch) in _DROPPED_CATEGORIES
+
+
 def _fold(text: str) -> str:
-    """Canonical comparison form: NFKD, marks/format/control chars dropped, casefolded, 1 space."""
+    """Canonical comparison form: NFKD, invisible chars dropped, casefolded, one space."""
     decomposed = unicodedata.normalize("NFKD", text)
     kept = "".join(
-        " " if ch.isspace() else ch
-        for ch in decomposed
-        if ch.isspace() or unicodedata.category(ch) not in _DROPPED_CATEGORIES
+        " " if ch.isspace() else ch for ch in decomposed if ch.isspace() or not _is_invisible(ch)
     )
     return " ".join(kept.casefold().split())
 
 
+def _placeholder_end(text: str, start: int) -> int | None:
+    """Index just past the live `{user:<token>}` at `start`, or `None` if there is none there."""
+    first = start + len(_PLACEHOLDER_OPEN)
+    cursor = first
+    limit = min(len(text), first + identity.MAX_MENTION_TOKEN_LEN)
+    while cursor < limit and text[cursor] in _TOKEN_CHARS:
+        cursor += 1
+    if cursor == first or cursor >= len(text) or text[cursor] != "}":
+        return None
+    return cursor + 1
+
+
+@lru_cache(maxsize=8)
+def _plain_view(text: str) -> str:
+    r"""The message as the platform renders it, with the host's own mention placeholders blanked.
+
+    One left-to-right pass that reads the text exactly as the egress detokenizer does: a
+    backslash escapes `{`, `}` and itself (the inbound pipeline escapes EVERY brace a user
+    typed), and only an UNescaped `{user:<token>}` is a placeholder -- those are the host-minted
+    mentions and become a space (their display name is not the author's text). Order matters: a
+    typed `{user:evil.com}` arrives as `\{user:evil.com\}`, so un-escaping it first and
+    stripping placeholders second would hide the author's own words from every filter.
+    """
+    out: list[str] = []
+    cursor, size = 0, len(text)
+    while cursor < size:
+        char = text[cursor]
+        if char == "\\" and cursor + 1 < size and text[cursor + 1] in _ESCAPABLE:
+            out.append(text[cursor + 1])
+            cursor += 2
+            continue
+        if char == "{" and text.startswith(_PLACEHOLDER_OPEN, cursor):
+            end = _placeholder_end(text, cursor)
+            if end is not None:
+                out.append(" ")
+                cursor = end
+                continue
+        out.append(char)
+        cursor += 1
+    return "".join(out)
+
+
 def _strip_markup(text: str) -> str:
-    """Drop live `{user:..}` placeholders, un-escape braces, and cut URLs (analysis view)."""
-    text = _PLACEHOLDER_RE.sub(" ", text)
-    text = _ESCAPED_RE.sub(lambda m: m.group(1), text)
-    return _URL_RE.sub(" ", text)
+    """Rendered text minus mentions, and minus URLs up to `_URL_EXEMPT_MAX` chars each."""
+    return _URL_EXEMPT_RE.sub(" ", _plain_view(text))
 
 
 def _valid_ipv4(candidate: str) -> bool:
@@ -309,8 +371,7 @@ def has_link(text: str) -> bool:
     full stops and `[.]` / `(dot)` / ` dot com` spellings read as a dot, so the obvious evasions
     do not hide a link. It is a spam heuristic, not a URL parser.
     """
-    view = _PLACEHOLDER_RE.sub(" ", _ESCAPED_RE.sub(lambda m: m.group(1), text))
-    folded = _fold(view).translate(_DOT_LOOKALIKES)
+    folded = _MARKDOWN_ESCAPE_RE.sub("", _fold(_plain_view(text))).translate(_DOT_LOOKALIKES)
     folded = _DOT_OBFUSCATION_RE.sub(".", folded)
     folded = _SPOKEN_DOT_RE.sub(".", folded)
     if _URL_RE.search(folded) or _BARE_DOMAIN_RE.search(folded):
@@ -325,7 +386,7 @@ def _letters_view(text: str) -> str:
 
 def caps_stats(text: str) -> tuple[int, int]:
     """`(uppercase letters, all letters)` in `text`, ignoring mentions, URLs and custom emotes."""
-    letters = [ch for ch in _letters_view(text) if ch.isalpha()]
+    letters = [ch for ch in _letters_view(text) if ch.isalpha() and not _is_invisible(ch)]
     return sum(1 for ch in letters if ch.isupper()), len(letters)
 
 
@@ -333,11 +394,7 @@ def symbol_stats(text: str) -> tuple[int, int]:
     """`(symbol units, visible units)`: punctuation/symbols/emoji; a custom emote counts one."""
     stripped = _strip_markup(text)
     stripped, emotes = _CUSTOM_EMOTE_RE.subn(" ", stripped)
-    visible = [
-        ch
-        for ch in stripped
-        if not ch.isspace() and unicodedata.category(ch) not in _DROPPED_CATEGORIES
-    ]
+    visible = [ch for ch in stripped if not ch.isspace() and not _is_invisible(ch)]
     symbols = sum(1 for ch in visible if unicodedata.category(ch)[0] in "PS")
     return symbols + emotes, len(visible) + emotes
 
@@ -365,8 +422,7 @@ def blacklist_hit(text: str, words: tuple[str, ...]) -> bool:
     """Whether any blacklisted word/phrase occurs in `text` (folded, whole-word, multi-word ok)."""
     if not words:
         return False
-    folded = _fold(_PLACEHOLDER_RE.sub(" ", _ESCAPED_RE.sub(lambda m: m.group(1), text)))
-    return _blacklist_re(words).search(folded) is not None
+    return _blacklist_re(words).search(_fold(_plain_view(text))) is not None
 
 
 def normalize_word(raw: str) -> str | None:
@@ -436,18 +492,18 @@ async def _first_violation(
     text: str, cfg: GuardConfig, community: str | None, offender: _Offender
 ) -> str | None:
     """The first enabled rule the message breaks, in `RULES` order, else None."""
-    analysed = text[:MAX_ANALYSIS_CHARS]
+    too_long = len(text) > MAX_ANALYSIS_CHARS
     for rule in RULES:
         if rule not in cfg.enabled:
             continue
         if rule == "blacklist":
-            hit = blacklist_hit(analysed, cfg.words)
+            hit = bool(cfg.words) and (too_long or blacklist_hit(text, cfg.words))
         elif rule == "links":
-            hit = has_link(analysed) and not await _link_permitted(community, offender)
+            hit = (too_long or has_link(text)) and not await _link_permitted(community, offender)
         elif rule == "caps":
-            hit = caps_violation(analysed, cfg)
+            hit = too_long or caps_violation(text, cfg)
         else:
-            hit = symbols_violation(analysed, cfg)
+            hit = too_long or symbols_violation(text, cfg)
         if hit:
             return rule
     return None
@@ -636,12 +692,26 @@ async def _run_command(
     return _USAGE
 
 
+async def _screen(event: PlatformEvent, text: str, community: str | None) -> PlatformEvent | None:
+    """`_guard_line`, with a kv/backend failure logged and re-raised (never a silent pass)."""
+    try:
+        return await _guard_line(event, text, community)
+    except ValueError:
+        raise
+    except Exception as exc:
+        log.error("chatguard.kv_error", op="guard", error=type(getattr(exc, "value", exc)).__name__)
+        raise RuntimeError("chatguard state backend failed") from exc
+
+
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: handle commands, and screen ordinary chat lines.
 
     Returns a reply event for `!chatguard`/`!permit`, a `violation` event (rule + message id +
     pseudonym, never the text) for a line that breaks an enabled rule, and `None` for everything
     else (including every message from a moderator/broadcaster and any unconfigured community).
+    A non-moderator's `!chatguard ...` / `!permit ...` line is still a chat line the author
+    posted, so it is screened BEFORE the command is looked at: otherwise prefixing any message
+    with `!permit` would turn it into a "permission denied" reply and skip every filter.
 
     Raises:
         ValueError: A reply/violation had no `channel_id` to answer in.
@@ -660,6 +730,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         channel_id = event.payload.get("channel_id")
         if not channel_id:
             raise ValueError("chatguard reply requires a channel_id from the inbound chat.message")
+        flagged = await _screen(event, stripped, community)
+        if flagged is not None:
+            return flagged
         try:
             reply = await _run_command(head, stripped, event, community)
         except CommandUsageError as exc:
@@ -670,13 +743,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
             )
             reply = _UNAVAILABLE_MSG
         return _event_like(event, {"command": "reply", "text": reply, "channel_id": channel_id})
-    try:
-        return await _guard_line(event, stripped, community)
-    except ValueError:
-        raise
-    except Exception as exc:
-        log.error("chatguard.kv_error", op="guard", error=type(getattr(exc, "value", exc)).__name__)
-        raise RuntimeError("chatguard state backend failed") from exc
+    return await _screen(event, stripped, community)
 
 
 class DispatchResult:
@@ -708,7 +775,7 @@ async def _delete_message(
         log.info("chatguard.enforce_unsupported", op="delete", platform=provider, rule=rule)
         return None
     message_id = payload.get("message_id")
-    if not isinstance(message_id, str) or not _SNOWFLAKE_RE.match(message_id):
+    if not isinstance(message_id, str) or not _SNOWFLAKE_RE.fullmatch(message_id):
         log.error("chatguard.no_message_id", rule=rule, community_id=community)
         return False
     try:
@@ -738,7 +805,7 @@ async def _warn_allowed(community: str | None, payload: dict[str, Any]) -> bool:
     warn_s = payload.get("warn_s")
     seconds = warn_s if isinstance(warn_s, int) and 0 <= warn_s <= WARN_MAX_SECONDS else 0
     ps = payload.get("ps")
-    pseudonym = ps if isinstance(ps, str) and _PSEUDONYM_RE.match(ps) else _ANON_PSEUDONYM
+    pseudonym = ps if isinstance(ps, str) and _PSEUDONYM_RE.fullmatch(ps) else _ANON_PSEUDONYM
     if seconds == 0:
         return True
     return await community_kv.increment(community, _warn_key(pseudonym), 1, seconds) == 1

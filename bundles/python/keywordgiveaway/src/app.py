@@ -14,8 +14,9 @@ Commands (the mod verbs fail closed: only a real `is_mod is True` / `is_broadcas
 passes, absent/stringly badges deny before any kv access):
 
 - `!kgiveaway open <keyword> [prize...]` (mod) -- starts a NEW giveaway. `<keyword>` is 2-24 of
-  `[a-z0-9_]`, optionally with a leading `!` (so `!win` works), matched case-insensitively. Refused
-  while a previous giveaway is still open.
+  `[a-z0-9_]`, optionally with a leading `!` (so `!win` works), matched case-insensitively. Not a
+  sibling giveaway's own command (`!enter`, `!raffle`, `!giveaway`, `!kgiveaway`). Refused while a
+  previous giveaway is still open.
 - `!kgiveaway enter` (anyone) -- explicit entry; always answers (entered / already entered /
   closed / none open / full).
 - `<keyword>` typed as the WHOLE chat line (anyone) -- the ambient entry path. It answers
@@ -89,7 +90,7 @@ from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
 from waddle_sdk.flask_core.bundle_runtime import get_bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.identity import MAX_MENTION_TOKEN_LEN
-from waddle_sdk.safe_text import sanitize_user_text
+from waddle_sdk.safe_text import guard_leading_command, sanitize_user_text
 
 #: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
 #: `random.*` functions (their Mersenne Twister is seeded at import and componentize-py freezes
@@ -120,6 +121,11 @@ _TAG_RE = re.compile(r"^[0-9a-f]{8}$")
 _RID_KEY = "kwgiveaway.rid"
 _STATE_KEY = "kwgiveaway.state"
 
+#: Entry-point commands of the sibling giveaway bundles (`giveaway`, `raffle`) and this one. A
+#: keyword equal to one would make typing that command ALSO enter this giveaway, so `open` refuses
+#: them. Any other bundle's command is the moderator's own choice (see README "Choosing a keyword").
+_RESERVED_KEYWORDS = frozenset({"!enter", "!raffle", "!giveaway", "!kgiveaway"})
+
 _MOD_VERBS = frozenset({"open", "close", "draw", "reroll"})
 _USER_VERBS = frozenset({"enter", "status"})
 
@@ -130,6 +136,9 @@ _USAGE = (
 _OPEN_USAGE = (
     "Usage: !kgiveaway open <keyword> [prize] -- keyword is 2-24 letters/digits/_ "
     "(optionally starting with !)"
+)
+_RESERVED_KEYWORD_MSG = (
+    "that keyword is another giveaway's own command -- pick a different one (e.g. win or !win)"
 )
 _DENIED = "only moderators/broadcasters can do that"
 _NOT_OPEN = "no giveaway is open right now -- ask a mod to !kgiveaway open"
@@ -384,8 +393,10 @@ async def _handle_open(community: str, args: str) -> str:
     keyword, _, prize_raw = args.partition(" ")
     keyword = keyword.lower()
     prize = " ".join(prize_raw.split())
-    if _KEYWORD_RE.fullmatch(keyword) is None or keyword == _HEAD:
+    if _KEYWORD_RE.fullmatch(keyword) is None:
         return _OPEN_USAGE
+    if keyword in _RESERVED_KEYWORDS:
+        return _RESERVED_KEYWORD_MSG
     if len(prize) > MAX_PRIZE_LEN:
         return f"the prize text is too long ({MAX_PRIZE_LEN} characters max)"
     try:
@@ -604,7 +615,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         reply = _KV_UNAVAILABLE if isinstance(exc, _KvFailureError) else _STATE_CORRUPT
     if reply is None:
         return None
-    return _reply_event(event, reply)
+    # A reply can LEAD with the entrant's label; a raw handle starting `/`, `.` or `!` must never
+    # turn the bot's own line into a chat command.
+    return _reply_event(event, guard_leading_command(reply))
 
 
 class DispatchResult:

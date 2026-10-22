@@ -28,7 +28,7 @@ answering each other's commands (`giveaway` and `raffle` already share `!enter`)
 
 | Command | Who | Behavior |
 |---|---|---|
-| `!kgiveaway open <keyword> [prize]` | mod/broadcaster | Starts a NEW giveaway. Keyword: 2-24 of `a-z 0-9 _`, optional leading `!`, case-insensitive. Prize: free text up to 80 chars. Refused while one is open. |
+| `!kgiveaway open <keyword> [prize]` | mod/broadcaster | Starts a NEW giveaway. Keyword: 2-24 of `a-z 0-9 _`, optional leading `!`, case-insensitive, never `!enter` / `!raffle` / `!giveaway` / `!kgiveaway`. Prize: free text up to 80 chars. Refused while one is open. |
 | `<keyword>` (the whole chat line) | anyone | Enters, **silently** -- no reply on success or on a duplicate (a big chat would flood the bot's outbound rate limit). |
 | `!kgiveaway enter` | anyone | Explicit entry; always answers: entered (`entry #N`) / already entered / none open / closed / full (2000). |
 | `!kgiveaway close` | mod/broadcaster | Stops entries, keeps them for the draw. |
@@ -67,9 +67,10 @@ No `db`, no `http`/egress, no `flags.read` (activation is the only gate), no AI.
   through that placeholder, which the egress detokenizer resolves to a display name. The token is
   re-validated against the grammar when read back, so a tampered kv value can never inject a
   second placeholder. An entrant whose actor was a raw name is announced as `entrant <8 hex>`.
-- **Randomness.** No `random` module (componentize-py freezes it at build time):
-  `sha256(now_millis, round, draw number, pool, probe) mod pool`. A community giveaway, not a
-  security decision.
+- **Randomness.** `random.SystemRandom().randrange(pool)` (OS entropy). Never the module-level
+  `random` functions (componentize-py freezes their import-time state into the build) and never a
+  hash of public inputs such as the clock, which a moderator choosing the moment to draw could
+  steer.
 
 ## State
 
@@ -94,6 +95,21 @@ fails loud.
   `waddle_sdk.safe_text.sanitize_user_text` on every echo (`@everyone`, `<@id>`, forged
   `{user:..}` placeholders, control characters). The invoker's label keeps its own host
   placeholder live via `allow_tokens` and sanitizes any raw name.
+- **A token is only ever the host-minted one (security review).** The winner label is built as
+  `{user:<token>}`, so the token must be exactly what the pipeline minted: it is taken from
+  `event.actor` only when the WHOLE actor is one placeholder (`fullmatch`, ASCII token grammar,
+  <= 256 chars -- a padded, embedded, doubled, escaped or look-alike actor is not one), stored
+  as such, and validated again against the same grammar when read back. Tests check this against
+  the SDK's port of the egress detokenizer (`safe_text._split_live`): in every reply the live
+  placeholders are exactly the expected token, never more. A raw actor is sanitized and announced
+  as `entrant <8 hex>`.
+- **No reply can lead with a chat command.** Replies that begin with the entrant's label pass
+  through `guard_leading_command`, so a raw handle starting `/`, `.` or `!` is prefixed with a
+  speech-bubble instead of running as the bot's own command.
+- **Choosing a keyword.** `open` refuses the sibling giveaway bundles' own commands (`!enter`,
+  `!raffle`, `!giveaway`, `!kgiveaway`): typing one would enter this giveaway AND the other bundle.
+  Any other bundle's command used as a keyword is the moderator's choice (a bare word such as `win`
+  cannot collide with anything).
 - **Fail loud.** A `kv` error is logged (`op` + exception class only) and answered in chat on the
   command path; on the keyword path it raises (a swallowed error would drop entries silently).
   A corrupt state record is answered/raised the same way and a mod's `open` is the recovery.

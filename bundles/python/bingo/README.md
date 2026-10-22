@@ -78,10 +78,20 @@ claim wins; `!bingo end` always works to unstick a round (also when the winner r
 - **Echoed text is sanitized.** The only user-derived text echoed is the claimant's label: the
   host placeholder kept live via `allow_tokens`, else `waddle_sdk.safe_text.sanitize_user_text`
   output (raw names, forged `{user:..}`, `@everyone`, control characters).
+- **A token is only ever the host-minted one (security review).** The winner label is built as
+  `{user:<token>}`, so the token comes from `event.actor` only when the WHOLE actor is one
+  placeholder (`fullmatch`, ASCII token grammar, <= 256 chars; padded, embedded, doubled, escaped
+  or look-alike actors are raw names) and is validated again when read back. Tests check this
+  against the SDK's port of the egress detokenizer: in every reply the live placeholders are exactly
+  the expected token.
+- **No reply can lead with a chat command.** Replies that begin with the viewer's label pass
+  through `guard_leading_command` (a raw handle starting `/`, `.` or `!` gets a speech-bubble
+  prefix instead of running as the bot's own command).
 - **Fail loud.** `kv` errors and corrupt records are logged (`op` + exception class) and answered
   in chat; never a silent default. A mod's `start` recovers a corrupt round record.
-- **No randomness module.** componentize-py freezes module-level RNG state at build time; the seed
-  is `sha256(now_millis, round, community)`. A chat game, not a security decision.
+- **Randomness.** The round seed is 128 bits from `random.SystemRandom()` (OS entropy), never the
+  module-level `random` functions (componentize-py freezes their state at build time) nor a hash
+  of public inputs such as the start time (which would let a viewer reconstruct the call order).
 
 ## Not built
 
