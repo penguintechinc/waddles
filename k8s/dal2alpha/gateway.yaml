@@ -10,9 +10,52 @@ metadata:
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
 ---
-# Bare-metal alpha has no LoadBalancer, so the Gateway Service is NodePort. NOTE: Cilium does not
-# reliably honor a pinned nodePort via this config; leave it dynamic and read it from
-# `kubectl -n gateway-system get svc` (cilium-gateway-shared) to point the NAT at it.
+# Cilium LB IPAM + L2 announcements are the MetalLB-equivalent on bare metal (no MetalLB needed).
+# The Gateway Service (gateway-system/cilium-gateway-shared) gets the fixed LAN VIP 192.168.8.60,
+# announced via ARP on eth0 by whichever node holds the L2 lease (HA across both nodes). The NAT
+# forwards public:443 -> 192.168.8.60:443. Prereqs (Cilium agent config) are in APPLY.md step 0.
+#
+# VIP pool: ONE address, bound ONLY to the gateway Service. serviceSelector matches Cilium's
+# built-in virtual labels io.kubernetes.service.{namespace,name} (no dependency on labels Cilium
+# may or may not propagate onto the generated Service). The Gateway also requests .60 explicitly
+# via spec.addresses below, so the Service ends up with external IP .60 deterministically.
+# Keep .60 OUTSIDE the router DHCP range / not used by any other LAN host.
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: dal2alpha-gateway-vip
+spec:
+  blocks:
+    - cidr: 192.168.8.60/32
+  serviceSelector:
+    matchLabels:
+      io.kubernetes.service.namespace: gateway-system
+      io.kubernetes.service.name: cilium-gateway-shared
+---
+# Announce the gateway's LoadBalancer IP on the LAN (ARP) from eth0 on every node; exactly one node
+# (lease holder) answers at a time, another takes over if it goes down. NOTE: L2 announcement is
+# incompatible with externalTrafficPolicy: Local (traffic drops on nodes without local backends)
+# -- the GatewayClassConfig below keeps Cluster. CiliumL2AnnouncementPolicy is still
+# cilium.io/v2alpha1 in Cilium 1.20.1 (no v2 yet), unlike the LB IPAM pool above.
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: dal2alpha-gateway-l2
+spec:
+  # Both dal2-alpha nodes (.41/.51, linux/amd64) are eligible announcers.
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/os: linux
+  serviceSelector:
+    matchLabels:
+      io.kubernetes.service.namespace: gateway-system
+      io.kubernetes.service.name: cilium-gateway-shared
+  loadBalancerIPs: true
+  interfaces:
+    - ^eth0$
+---
+# Gateway Service type LoadBalancer (VIP from the pool above). Do NOT set loadBalancerClass: LB IPAM
+# and the L2 announcer only act on Services with a nil class (or their own io.cilium/* class).
 apiVersion: cilium.io/v2alpha1
 kind: CiliumGatewayClassConfig
 metadata:
@@ -20,7 +63,8 @@ metadata:
   namespace: gateway-system
 spec:
   service:
-    type: NodePort
+    type: LoadBalancer
+    externalTrafficPolicy: Cluster
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
@@ -41,6 +85,12 @@ metadata:
   namespace: gateway-system
 spec:
   gatewayClassName: cilium-shared
+  # Static VIP request. Cilium 1.20.1 translates this onto the Service as the lb-ipam IP annotation
+  # (the deprecated spec.infrastructure.annotations route is NOT used). If .60 cannot be assigned
+  # (pool missing/selector mismatch) the Gateway reports Programmed=False reason AddressNotUsable.
+  addresses:
+    - type: IPAddress
+      value: 192.168.8.60
   listeners:
     # Listener name MUST be `https` (HTTPRoute sectionName). 443 only: port 80 is not reachable
     # (443-only NAT), so no HTTP->HTTPS redirect listener.
