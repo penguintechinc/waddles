@@ -742,7 +742,7 @@ class _Game:
             tail = "nobody backed it -- every stake is refundable with !predict claim."
         else:
             tail = f"{final.pool} points go to the winners -- collect with !predict claim."
-        return f"✅ Prediction #{view.number} resolved: {_safe(rnd.outcomes[index])}! {tail}"
+        return f"\u2705 Prediction #{view.number} resolved: {_safe(rnd.outcomes[index])}! {tail}"
 
     def _already_finished(self, view: _View, rnd: _Round, final: _Final) -> str:
         """The idempotent reply for resolving/cancelling a round that already has a result."""

@@ -28,7 +28,7 @@ from waddle_sdk.flask_core.stream_pipeline import PlatformEvent
 import app
 from app import MAX_STAKE_PER_ROUND, OPEN_SECONDS, SETTLE_SECONDS, dispatch, transform
 
-ZWSP = "​"
+ZWSP = "\u200b"
 OPEN = '!prediction open "Will it rain?" yes no'
 
 
