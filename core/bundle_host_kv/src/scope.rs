@@ -100,7 +100,7 @@ impl KvScope {
     /// guest key is appended to, and the exact prefix every quota/count/
     /// rate-limit key below also roots itself under (never something a
     /// guest key could partially overlap with, since every one of these
-    /// adds its own reserved sub-segment: `:data:`, `:count`, `:opr:`).
+    /// adds its own reserved sub-segment: `:data:`, `:live`, `:count`, `:opr:`).
     fn app_prefix(&self) -> String {
         format!(
             "bundlekv:{}:{}:{}",
@@ -114,21 +114,35 @@ impl KvScope {
     /// `bundlekv:{tenant}:{community}:{app_id}:data:{key}`. The literal
     /// `:data:` segment (rather than appending `guest_key` directly after
     /// `app_prefix()`) means a guest key of e.g. `"count"` can never
-    /// collide with this scope's own [`Self::count_key`] regardless of
+    /// collide with this scope's own [`Self::live_key`] regardless of
     /// what a future reserved suffix might be named.
     pub fn data_key(&self, guest_key: &str) -> String {
         format!("{}:data:{}", self.app_prefix(), guest_key)
     }
 
-    /// The live-key counter this app/community's quota is enforced
-    /// against (task quota: "max key count per app per community").
-    pub fn count_key(&self) -> String {
+    /// The live index this app/community's quota is enforced against (task
+    /// quota: "max key count per app per community"): a Valkey sorted set
+    /// of the app's data keys scored by absolute expiry, trimmed of lapsed
+    /// members on every quota-checked write -- see `crate::backend`'s
+    /// module doc. A distinct key from [`Self::legacy_count_key`], so a
+    /// deployment upgrading from the counter never hits a `WRONGTYPE`.
+    pub fn live_key(&self) -> String {
+        format!("{}:live", self.app_prefix())
+    }
+
+    /// The pre-live-index `INCR`/`DECR` counter this crate used to enforce
+    /// the quota with. Never read or written by the quota path any more; it
+    /// is only named here so the upgrade reconciliation
+    /// (`crate::backend::KvBackend::reconcile_count_if_missing`) can delete
+    /// the orphan -- and with it the phantom counts TTL expiry leaked into
+    /// it. Safe to drop once every deployment has reconciled.
+    pub fn legacy_count_key(&self) -> String {
         format!("{}:count", self.app_prefix())
     }
 
     /// The `SCAN MATCH` pattern covering every live data key for this app
     /// -- used only by `crate::backend`'s self-heal reconciliation
-    /// (`count_key` missing, e.g. evicted under `allkeys-*` memory
+    /// (`live_key` missing, e.g. evicted under `allkeys-*` memory
     /// pressure -- `crate::policy`'s doc) to recompute the true live-key
     /// count. Never used on the per-op hot path.
     pub fn data_scan_pattern(&self) -> String {
@@ -139,7 +153,7 @@ impl KvScope {
     /// [`Self::data_scan_pattern`]'s `SCAN` -- one reconciliation in
     /// flight per app at a time; a caller that fails to acquire it must
     /// fail closed (deny the write), never proceed against a
-    /// known-possibly-stale `count_key`.
+    /// known-possibly-stale `live_key`.
     pub fn reconcile_lock_key(&self) -> String {
         format!("{}:reconcile-lock", self.app_prefix())
     }
@@ -197,13 +211,27 @@ mod tests {
     }
 
     #[test]
-    fn count_and_rate_keys_cannot_collide_with_any_valid_data_key() {
+    fn live_count_and_rate_keys_cannot_collide_with_any_valid_data_key() {
         let scope = KvScope::new("acme", None, "waddles.bot.a");
-        // Even a guest key literally named "count" or "opr:1" (the latter
-        // is rejected by validate_guest_key for containing ':', proving
-        // the point twice over) lands under `:data:`, never bare.
-        assert_ne!(scope.data_key("count"), scope.count_key());
+        // Even a guest key literally named "live", "count" or "opr:1" (the
+        // latter is rejected by validate_guest_key for containing ':',
+        // proving the point twice over) lands under `:data:`, never bare.
+        assert_ne!(scope.data_key("live"), scope.live_key());
+        assert_ne!(scope.data_key("count"), scope.legacy_count_key());
         assert_ne!(scope.data_key("opr"), scope.rate_key(1));
+    }
+
+    #[test]
+    fn live_index_and_legacy_counter_are_distinct_keys() {
+        // A deployment upgrading from the counter must never share a key
+        // (and therefore a Valkey type) with the new sorted-set index.
+        let scope = KvScope::new("acme", Some("main".to_string()), "waddles.bot.a");
+        assert_eq!(scope.live_key(), "bundlekv:acme:main:waddles.bot.a:live");
+        assert_eq!(
+            scope.legacy_count_key(),
+            "bundlekv:acme:main:waddles.bot.a:count"
+        );
+        assert_ne!(scope.live_key(), scope.legacy_count_key());
     }
 
     #[test]

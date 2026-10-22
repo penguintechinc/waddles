@@ -73,10 +73,10 @@ pub enum KvError {
     /// [`MAX_OPS_PER_INVOKE`] was exceeded by this invocation.
     #[error("rate limited: {0}")]
     RateLimited(String),
-    /// [`backend::ReconcileOutcome::Locked`]: `count_key` was missing and
+    /// [`backend::ReconcileOutcome::Locked`]: the live index was missing and
     /// another caller already holds the reconciliation lock -- fail
     /// closed rather than guess a count (low-severity fix, PR #425
-    /// security review: `count_key` eviction self-heal).
+    /// security review: live-index eviction self-heal).
     #[error("quota reconciliation in progress: {0}")]
     Reconciling(String),
     /// Valkey itself failed (network, protocol, script error).
@@ -233,10 +233,11 @@ impl<B: KvBackend> KvHost<B> {
         }
     }
 
-    /// Self-heal, low-severity fix (PR #425 security review): if
-    /// `count_key` is missing (e.g. evicted under an `allkeys-*`
-    /// `maxmemory-policy`, `crate::policy`'s doc), reconciles it against a
-    /// bounded `SCAN` before the caller's quota-checked write proceeds.
+    /// Self-heal, low-severity fix (PR #425 security review): if the live
+    /// index is missing (e.g. evicted under an `allkeys-*`
+    /// `maxmemory-policy`, `crate::policy`'s doc, or not yet built after an
+    /// upgrade from the old counter), rebuilds it from a bounded `SCAN`
+    /// before the caller's quota-checked write proceeds.
     /// Fails closed (denies the write) if another caller already holds
     /// the reconciliation lock, rather than racing a second `SCAN` or
     /// guessing a count.
@@ -244,9 +245,10 @@ impl<B: KvBackend> KvHost<B> {
         match self
             .backend
             .reconcile_count_if_missing(
-                &scope.count_key(),
+                &scope.live_key(),
                 &scope.data_scan_pattern(),
                 &scope.reconcile_lock_key(),
+                &scope.legacy_count_key(),
                 limits::RECONCILE_LOCK_TTL_MS,
                 limits::RECONCILE_SCAN_LIMIT,
             )
@@ -260,7 +262,7 @@ impl<B: KvBackend> KvHost<B> {
                     community = scope.community.as_deref().unwrap_or(""),
                     app_id = %scope.app_id,
                     reconciled_count = count,
-                    "bundle kv: count_key was missing (evicted?), reconciled via SCAN"
+                    "bundle kv: live key index was missing (evicted or pre-upgrade), reconciled via SCAN"
                 );
                 Ok(())
             }
@@ -356,7 +358,7 @@ impl<B: KvBackend> KvHost<B> {
             .backend
             .set_with_quota(
                 &scope.data_key(key),
-                &scope.count_key(),
+                &scope.live_key(),
                 value,
                 ttl,
                 limits::MAX_KEYS_PER_APP,
@@ -387,7 +389,7 @@ impl<B: KvBackend> KvHost<B> {
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
         self.backend
-            .delete(&scope.data_key(key), &scope.count_key())
+            .delete(&scope.data_key(key), &scope.live_key())
             .await
             .map(|_existed| ())
             .map_err(KvError::Backend)
@@ -430,7 +432,7 @@ impl<B: KvBackend> KvHost<B> {
             .backend
             .increment_with_quota(
                 &scope.data_key(key),
-                &scope.count_key(),
+                &scope.live_key(),
                 delta,
                 ttl,
                 limits::MAX_KEYS_PER_APP,
@@ -668,7 +670,7 @@ mod tests {
     async fn set_beyond_the_key_count_quota_is_rejected() {
         let backend = FakeBackend::new();
         let scope = scope_a();
-        backend.seed_count(&scope.count_key(), MAX_KEYS_PER_APP);
+        backend.seed_count(&scope.live_key(), MAX_KEYS_PER_APP);
         let host = host_for(backend, &["waddles.bot.a"]);
         let err = host
             .set(&scope, 1, "one-too-many", b"x", 0)
@@ -681,23 +683,22 @@ mod tests {
     async fn overwriting_an_existing_key_is_exempt_from_the_key_count_quota() {
         let backend = FakeBackend::new();
         let scope = scope_a();
-        // Simulates "this key was created before the app's count was
-        // (separately) seeded at its ceiling" -- the key already exists,
-        // independent of the counter.
-        backend.seed_existing(&scope.data_key("existing"), b"v1");
-        backend.seed_count(&scope.count_key(), MAX_KEYS_PER_APP);
         let host = host_for(backend, &["waddles.bot.a"]);
+        host.set(&scope, 1, "existing", b"v1", 0).await.unwrap();
+        // Fill the app's index to its ceiling (the existing key counts
+        // toward it): the quota is now full.
+        host.backend.seed_count(&scope.live_key(), MAX_KEYS_PER_APP);
 
-        // Overwriting the already-existing key succeeds despite the quota
+        // Overwriting the already-live key succeeds despite the quota
         // being full: it never allocates a new slot.
-        host.set(&scope, 1, "existing", b"v2", 0).await.unwrap();
+        host.set(&scope, 2, "existing", b"v2", 0).await.unwrap();
         assert_eq!(
-            host.get(&scope, 2, "existing").await.unwrap(),
+            host.get(&scope, 3, "existing").await.unwrap(),
             Some(b"v2".to_vec())
         );
 
         // A genuinely new key is still rejected under a full quota:
-        let err = host.set(&scope, 3, "brand-new", b"x", 0).await.unwrap_err();
+        let err = host.set(&scope, 4, "brand-new", b"x", 0).await.unwrap_err();
         assert_eq!(err.code(), "quota_exceeded");
     }
 
@@ -733,58 +734,350 @@ mod tests {
         host.get(&scope, 2, "k").await.unwrap();
     }
 
-    // -- Self-heal: count_key eviction reconciliation --
+    // -- TTL expiry frees quota (regression: TTL keys leaked their slot) --
+
+    const TTL_SECONDS: u32 = 60;
+    const PAST_TTL: Duration = Duration::from_secs(61);
+
+    /// Writes `count` keys named `{prefix}{i}` with `ttl_seconds`, each under
+    /// its own `call_id` so the per-invocation rate limit never interferes.
+    async fn fill(
+        host: &KvHost<FakeBackend>,
+        scope: &KvScope,
+        prefix: &str,
+        count: u64,
+        ttl_seconds: u32,
+    ) {
+        for i in 0..count {
+            host.set(scope, i, &format!("{prefix}{i}"), b"v", ttl_seconds)
+                .await
+                .unwrap();
+        }
+    }
 
     #[tokio::test]
-    async fn set_reconciles_a_missing_count_key_before_admitting_a_new_key() {
+    async fn ttl_keys_that_lapse_stop_counting_against_the_quota() {
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        fill(&host, &scope, "cooldown.", MAX_KEYS_PER_APP, TTL_SECONDS).await;
+        assert_eq!(host.backend.live_count(&scope.live_key()), MAX_KEYS_PER_APP);
+
+        // At the ceiling a new key is rejected -- the quota bounds LIVE keys.
+        let err = host.set(&scope, 1, "new", b"x", 0).await.unwrap_err();
+        assert_eq!(err.code(), "quota_exceeded");
+
+        // Every key lapses: the app is back to zero live keys and a new
+        // write is admitted. Before the fix the leaked counter stayed at the
+        // ceiling forever and this was rejected.
+        host.backend.advance(PAST_TTL);
+        assert_eq!(host.backend.live_count(&scope.live_key()), 0);
+        host.set(&scope, 2, "new", b"x", 0).await.unwrap();
+        assert_eq!(host.backend.live_count(&scope.live_key()), 1);
+        assert_eq!(host.get(&scope, 3, "cooldown.0").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn the_app_can_cycle_far_more_ttl_keys_than_the_lifetime_ceiling() {
+        // 3 full generations of ceiling-sized TTL keys -- 30k lifetime keys
+        // through a 10k quota -- only works if lapsed keys free their slots.
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        for generation in 0..3u64 {
+            fill(
+                &host,
+                &scope,
+                &format!("gen{generation}."),
+                MAX_KEYS_PER_APP,
+                TTL_SECONDS,
+            )
+            .await;
+            host.backend.advance(PAST_TTL);
+        }
+        assert_eq!(host.backend.live_count(&scope.live_key()), 0);
+    }
+
+    #[tokio::test]
+    async fn only_lapsed_keys_free_slots_permanent_keys_keep_theirs() {
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        let permanent = 4_000;
+        fill(&host, &scope, "perm.", permanent, 0).await;
+        fill(
+            &host,
+            &scope,
+            "ttl.",
+            MAX_KEYS_PER_APP - permanent,
+            TTL_SECONDS,
+        )
+        .await;
+        let err = host.set(&scope, 1, "over", b"x", 0).await.unwrap_err();
+        assert_eq!(err.code(), "quota_exceeded");
+
+        host.backend.advance(PAST_TTL);
+        assert_eq!(host.backend.live_count(&scope.live_key()), permanent);
+
+        // Exactly the freed slots are available again, and no more.
+        for i in 0..(MAX_KEYS_PER_APP - permanent) {
+            host.set(&scope, i, &format!("again.{i}"), b"x", 0)
+                .await
+                .unwrap();
+        }
+        let err = host.set(&scope, 1, "over", b"x", 0).await.unwrap_err();
+        assert_eq!(err.code(), "quota_exceeded");
+        assert_eq!(host.backend.live_count(&scope.live_key()), MAX_KEYS_PER_APP);
+    }
+
+    #[tokio::test]
+    async fn live_count_is_exact_across_set_expire_overwrite_and_delete() {
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        let live = scope.live_key();
+        let count = || host.backend.live_count(&live);
+
+        host.set(&scope, 1, "short", b"v", 10).await.unwrap();
+        host.set(&scope, 2, "perm", b"v", 0).await.unwrap();
+        host.set(&scope, 3, "long", b"v", 100).await.unwrap();
+        assert_eq!(count(), 3);
+
+        host.backend.advance(Duration::from_secs(11));
+        assert_eq!(count(), 2, "the 10s key lapsed");
+
+        // Re-creating a lapsed key counts once -- the phantom of its first
+        // life is not carried over and not double-counted.
+        host.set(&scope, 4, "short", b"v2", 10).await.unwrap();
+        assert_eq!(count(), 3);
+
+        host.delete(&scope, 5, "perm").await.unwrap();
+        assert_eq!(count(), 2);
+        // Deleting what is already gone (or already lapsed) changes nothing
+        // and can never push the count below the true live set.
+        host.delete(&scope, 6, "perm").await.unwrap();
+        host.delete(&scope, 7, "never-existed").await.unwrap();
+        assert_eq!(count(), 2);
+
+        host.backend.advance(Duration::from_secs(200));
+        assert_eq!(count(), 0, "every remaining key lapsed");
+        host.delete(&scope, 8, "long").await.unwrap();
+        host.delete(&scope, 9, "short").await.unwrap();
+        assert_eq!(count(), 0);
+
+        // And the app is fully usable again afterwards.
+        host.set(&scope, 10, "fresh", b"v", 0).await.unwrap();
+        assert_eq!(count(), 1);
+    }
+
+    #[tokio::test]
+    async fn overwriting_a_ttl_key_refreshes_its_lifetime_without_double_counting() {
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        let live = scope.live_key();
+
+        host.set(&scope, 1, "k", b"v1", 10).await.unwrap();
+        host.backend.advance(Duration::from_secs(6));
+        host.set(&scope, 2, "k", b"v2", 10).await.unwrap();
+        assert_eq!(host.backend.live_count(&live), 1);
+
+        // 12s after the first write: the original TTL would have lapsed,
+        // the refreshed one has not.
+        host.backend.advance(Duration::from_secs(6));
+        assert_eq!(
+            host.get(&scope, 3, "k").await.unwrap(),
+            Some(b"v2".to_vec())
+        );
+        assert_eq!(host.backend.live_count(&live), 1);
+
+        host.backend.advance(Duration::from_secs(5));
+        assert_eq!(host.get(&scope, 4, "k").await.unwrap(), None);
+        assert_eq!(host.backend.live_count(&live), 0);
+    }
+
+    #[tokio::test]
+    async fn overwriting_with_ttl_zero_makes_the_key_permanent() {
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        host.set(&scope, 1, "k", b"v1", 10).await.unwrap();
+        host.set(&scope, 2, "k", b"v2", 0).await.unwrap();
+
+        host.backend.advance(Duration::from_secs(3_600));
+        assert_eq!(
+            host.get(&scope, 3, "k").await.unwrap(),
+            Some(b"v2".to_vec())
+        );
+        assert_eq!(host.backend.live_count(&scope.live_key()), 1);
+    }
+
+    #[tokio::test]
+    async fn increment_ttl_keys_free_their_slot_and_restart_from_zero() {
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        let live = scope.live_key();
+
+        assert_eq!(host.increment(&scope, 1, "hits", 5, 5).await.unwrap(), 5);
+        assert_eq!(host.increment(&scope, 2, "hits", 2, 5).await.unwrap(), 7);
+        assert_eq!(host.backend.live_count(&live), 1);
+
+        host.backend.advance(Duration::from_secs(6));
+        assert_eq!(host.backend.live_count(&live), 0);
+        assert_eq!(host.increment(&scope, 3, "hits", 1, 5).await.unwrap(), 1);
+        assert_eq!(host.backend.live_count(&live), 1);
+
+        // `ttl == 0` clears the TTL on an existing key, applied on every call.
+        host.increment(&scope, 4, "hits", 1, 0).await.unwrap();
+        host.backend.advance(Duration::from_secs(3_600));
+        assert_eq!(host.backend.live_count(&live), 1);
+        assert_eq!(host.increment(&scope, 5, "hits", 1, 0).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_failed_increment_leaves_the_live_index_untouched() {
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        host.set(&scope, 1, "text", b"not-a-number", 0)
+            .await
+            .unwrap();
+        let before = host.backend.live_count(&scope.live_key());
+
+        let err = host.increment(&scope, 2, "text", 1, 30).await.unwrap_err();
+        assert_eq!(err.code(), "backend");
+        assert_eq!(host.backend.live_count(&scope.live_key()), before);
+    }
+
+    #[tokio::test]
+    async fn an_emptied_index_is_not_mistaken_for_an_evicted_one() {
+        // Every key lapsed => the index is empty but must still exist (the
+        // sentinel's job on real Valkey), so the next write does not
+        // trigger a keyspace `SCAN` reconciliation.
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        host.set(&scope, 1, "cooldown", b"v", 5).await.unwrap();
+        host.backend.advance(Duration::from_secs(6));
+        host.set(&scope, 2, "cooldown", b"v", 5).await.unwrap();
+        host.backend.advance(Duration::from_secs(6));
+        assert!(host.backend.index_exists(&scope.live_key()));
+        assert_eq!(host.backend.live_count(&scope.live_key()), 0);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_last_key_does_not_make_the_index_look_evicted() {
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        host.set(&scope, 1, "only", b"v", 0).await.unwrap();
+        host.delete(&scope, 2, "only").await.unwrap();
+        assert!(host.backend.index_exists(&scope.live_key()));
+        assert_eq!(host.backend.live_count(&scope.live_key()), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_new_keys_never_exceed_the_live_quota() {
         let backend = FakeBackend::new();
         let scope = scope_a();
-        // A brand-new app: count_key has never existed at all.
-        backend.seed_existing(&scope.data_key("pre-existing"), b"v");
+        let headroom = 25u64;
+        backend.seed_count(&scope.live_key(), MAX_KEYS_PER_APP - headroom);
+        let host = Arc::new(host_for(backend, &["waddles.bot.a"]));
+
+        let mut tasks = Vec::new();
+        for i in 0..200u64 {
+            let host = Arc::clone(&host);
+            let scope = scope.clone();
+            tasks.push(tokio::spawn(async move {
+                let ttl = if i % 2 == 0 { 0 } else { TTL_SECONDS };
+                host.set(&scope, i, &format!("racer.{i}"), b"v", ttl).await
+            }));
+        }
+        let mut admitted = 0u64;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(()) => admitted += 1,
+                Err(e) => assert_eq!(e.code(), "quota_exceeded"),
+            }
+        }
+        assert_eq!(admitted, headroom);
+        assert_eq!(host.backend.live_count(&scope.live_key()), MAX_KEYS_PER_APP);
+    }
+
+    // -- Self-heal: live-index eviction / upgrade reconciliation --
+
+    #[tokio::test]
+    async fn set_reconciles_a_missing_live_index_before_admitting_a_new_key() {
+        let backend = FakeBackend::new();
+        let scope = scope_a();
+        // A brand-new app: the live index has never existed at all.
+        backend.seed_unindexed(&scope.data_key("pre-existing"), b"v", None);
         let host = host_for(backend, &["waddles.bot.a"]);
 
-        // A brand-new key still succeeds -- reconciliation seeds count to
-        // the true live count (1), well under quota.
+        // A brand-new key still succeeds -- reconciliation rebuilds the
+        // index from the true live keys (1), well under quota.
         host.set(&scope, 1, "brand-new", b"x", 0).await.unwrap();
         assert_eq!(
             host.get(&scope, 2, "brand-new").await.unwrap(),
             Some(b"x".to_vec())
         );
+        assert_eq!(host.backend.live_count(&scope.live_key()), 2);
     }
 
     #[tokio::test]
-    async fn reconcile_recomputes_a_genuinely_evicted_counter_to_the_true_live_count() {
+    async fn reconcile_rebuilds_an_evicted_index_to_the_true_live_keys() {
         // Direct backend-level test (bypassing KvHost/quota, which can't
         // itself distinguish a reconciled count of 0 vs. 2 without
         // artificially hitting a 10,000-key quota) -- proves
-        // `evict_count` (simulating a live counter actually lost to
-        // Valkey eviction, not merely "never existed") is recomputed to
-        // the *true* live-key count, not reset to 0.
+        // `evict_count` (simulating a live index actually lost to Valkey
+        // eviction, not merely "never existed") is rebuilt to the *true*
+        // live-key set, not reset to 0.
         let backend = FakeBackend::new();
         let scope = scope_a();
-        backend.seed_existing(&scope.data_key("existing-1"), b"v1");
-        backend.seed_existing(&scope.data_key("existing-2"), b"v2");
-        backend.seed_count(&scope.count_key(), 2);
-        backend.evict_count(&scope.count_key());
+        backend.seed_unindexed(&scope.data_key("existing-1"), b"v1", None);
+        backend.seed_unindexed(&scope.data_key("existing-2"), b"v2", None);
+        backend.seed_count(&scope.live_key(), 2);
+        backend.evict_count(&scope.live_key());
 
         let outcome = backend
             .reconcile_count_if_missing(
-                &scope.count_key(),
+                &scope.live_key(),
                 &scope.data_scan_pattern(),
                 &scope.reconcile_lock_key(),
+                &scope.legacy_count_key(),
                 limits::RECONCILE_LOCK_TTL_MS,
                 limits::RECONCILE_SCAN_LIMIT,
             )
             .await
             .unwrap();
         assert_eq!(outcome, ReconcileOutcome::Reconciled(2));
+        assert_eq!(backend.live_count(&scope.live_key()), 2);
     }
 
     #[tokio::test]
-    async fn increment_reconciles_an_evicted_count_key_the_same_way() {
+    async fn reconcile_scores_ttl_keys_by_remaining_lifetime_and_skips_lapsed_ones() {
+        let backend = FakeBackend::new();
+        let scope = scope_a();
+        backend.seed_unindexed(&scope.data_key("perm"), b"v", None);
+        backend.seed_unindexed(&scope.data_key("ttl"), b"v", Some(30_000));
+        backend.seed_unindexed(&scope.data_key("gone"), b"v", Some(1_000));
+        backend.advance(Duration::from_secs(2)); // "gone" lapsed before the rebuild
+
+        let outcome = backend
+            .reconcile_count_if_missing(
+                &scope.live_key(),
+                &scope.data_scan_pattern(),
+                &scope.reconcile_lock_key(),
+                &scope.legacy_count_key(),
+                limits::RECONCILE_LOCK_TTL_MS,
+                limits::RECONCILE_SCAN_LIMIT,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, ReconcileOutcome::Reconciled(2));
+
+        // The rebuilt "ttl" member keeps its own expiry, so it lapses on
+        // schedule instead of being pinned forever by the rebuild.
+        backend.advance(Duration::from_secs(29));
+        assert_eq!(backend.live_count(&scope.live_key()), 1);
+    }
+
+    #[tokio::test]
+    async fn increment_reconciles_a_missing_live_index_the_same_way() {
         let host = host(&["waddles.bot.a"]);
         let scope = scope_a();
-        // No prior seeding at all -- count_key has never existed, the
+        // No prior seeding at all -- the live index has never existed, the
         // "brand-new app" shape of the same reconciliation path.
         let v = host.increment(&scope, 1, "hits", 1, 0).await.unwrap();
         assert_eq!(v, 1);
@@ -802,15 +1095,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_healthy_count_key_never_triggers_reconciliation() {
-        // A count_key already at the quota ceiling: if reconciliation ran
-        // anyway, it would recompute from a `SCAN` of the (empty) data
+    async fn a_healthy_live_index_never_triggers_reconciliation() {
+        // A live index already at the quota ceiling: if reconciliation ran
+        // anyway, it would rebuild from a `SCAN` of the (empty) data
         // keyspace and wrongly reset the count to 0, admitting a key that
         // must actually be rejected -- proves `AlreadyPresent` short-
-        // circuits before any `SCAN` when the counter is healthy.
+        // circuits before any `SCAN` when the index is healthy.
         let backend = FakeBackend::new();
         let scope = scope_a();
-        backend.seed_count(&scope.count_key(), MAX_KEYS_PER_APP);
+        backend.seed_count(&scope.live_key(), MAX_KEYS_PER_APP);
         let host = host_for(backend, &["waddles.bot.a"]);
         let err = host
             .set(&scope, 1, "one-too-many", b"x", 0)
