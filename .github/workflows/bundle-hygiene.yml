@@ -24,6 +24,10 @@ name: Bundle Hygiene
 #                         its reply through `waddle_sdk.safe_text.guard_leading_command`
 #                         (or be a reasoned fixed-prefix exception); proved on the real
 #                         modules with hostile completions.
+#   6. wit-world       -- every `bundles/python/<name>` is registered in the seeder catalog
+#                         (bundles/core-bundles.yaml) and built on the WIT world its permissions
+#                         need: `economy`/`ai`/`identity`/`reputation` host imports exist only in
+#                         `stage-next`, so such a bundle built on `stage` ships with no import.
 #
 # ci-gate.yml aggregates every check-run on the head SHA, so each failure here
 # is fatal to the merge queue with no ci-gate edit. No `paths:` filter on
@@ -97,3 +101,10 @@ jobs:
       # denominators (>=8 bundles, one sample each) so a new unguarded AI bundle FAILS here.
       - name: AI completions can never lead a reply with a chat command (every ai.generate bundle)
         run: python3 -m pytest scripts/ci/tests/test_ai_output_lead_gate.py -v -p no:cacheprovider
+
+      # Every Python bundle has a seeder-catalog row (else nothing builds/activates it), each row's
+      # version/app_id match its hub-manifest, and a row whose manifest declares an economy/AI/
+      # identity/reputation permission says `wit_world: stage-next` (the build script fails the
+      # same case). Asserts its own denominators (>=100 rows and bundle dirs scanned).
+      - name: Every bundle is registered and built on the WIT world its permissions need
+        run: python3 -m pytest scripts/ci/tests/test_bundle_wit_world.py -v -p no:cacheprovider

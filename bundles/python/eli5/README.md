@@ -42,7 +42,7 @@
 - **PII-free logs.** Only command, platform, and input/output lengths -- never the thing, actor,
   or AI output (gh-674).
 - Full e2e needs a live Ollama; unit tests use `waddle_sdk.testing.install_fake_ai_host`.
-- Not in `bundles/core-bundles.yaml` yet (catalog registration is a separate change).
+- Registered in `bundles/core-bundles.yaml` (`1.0.0`, `wit_world: stage-next`): the core-bundle seeder installs, makes available and activates it; `bundles/build_python_bundles.py` builds it against `world stage-next`.
 
 ## Output safety
 

@@ -19,6 +19,12 @@
 # hand-edited Dockerfile stanza. Populated for every entry (not just python) for schema
 # consistency, even though only python bundles are consumed by the generic loop today.
 #
+# `wit_world` (optional, `stage` | `stage-next`, default `stage`) is the WIT world
+# bundles/build_python_bundles.py builds a python entry against; the seeder ignores it. Set
+# `stage-next` for a bundle whose hub-manifest.yaml declares `economy.*`, `ai.generate`,
+# `identity.resolve`, `reputation.*`, `overlay.*` or `streaming.*` -- those host imports exist
+# only in that world, and the build FAILS on a row that needs it but resolves to `stage`.
+#
 # `activation_targets` is the default target list; CORE_BUNDLES_TENANT_SLUGS (env, comma
 # separated) overrides it for every bundle in this file with a tenant-wide activation per
 # listed slug, for a deployment that needs a different tenant list than the one below.
@@ -923,6 +929,368 @@ bundles:
     source_dir: python/birthday
     manifest_path: birthday.manifest.yaml
     artifact_path: birthday.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  # Hardened command-bundle batch (feature/bundle-batch-integration): 37 first-party Python
+  # bundles, all 1.0.0 (never published before, so no version-retirement history). Same shape
+  # as every row above -- tenant-wide activation; the seeder installs -> makes available ->
+  # activates each one and pre-grants exactly the permissions its hub-manifest.yaml declares.
+  # Activation is the ONLY gate (no flag). `bundles/python/chat` is deliberately NOT here: it is
+  # an older BUILD-ONLY/INERT port (its bundle.yaml says cut-over is a later change).
+  #
+  # `wit_world` (optional, default `stage`; read only by bundles/build_python_bundles.py, ignored
+  # by the seeder like `source_dir`) selects the WIT world componentize-py builds against. The 12
+  # rows below that say `stage-next` use host capabilities that exist ONLY in that world: the
+  # economy bundles (steal, defuse, jackpot, top -> economy.* / identity.resolve) and the AI bundles
+  # (ask, define, eli5, rephrase, sentiment, summarize, tldr, translate -> ai.generate). A build of
+  # one of them against `stage` would have no such host import. build_python_bundles.py FAILS if a
+  # row's manifest declares a stage-next-only permission while the row resolves to `stage`.
+  #
+  # 25 bundles on the default `stage` world:
+  - app_id: waddles.core.example.affirmation
+    version: "1.0.0"
+    language: python
+    source_dir: python/affirmation
+    manifest_path: affirmation.manifest.yaml
+    artifact_path: affirmation.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.clap
+    version: "1.0.0"
+    language: python
+    source_dir: python/clap
+    manifest_path: clap.manifest.yaml
+    artifact_path: clap.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.commands
+    version: "1.0.0"
+    language: python
+    source_dir: python/commands
+    manifest_path: commands.manifest.yaml
+    artifact_path: commands.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.dance
+    version: "1.0.0"
+    language: python
+    source_dir: python/dance
+    manifest_path: dance.manifest.yaml
+    artifact_path: dance.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.emojify
+    version: "1.0.0"
+    language: python
+    source_dir: python/emojify
+    manifest_path: emojify.manifest.yaml
+    artifact_path: emojify.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.fact
+    version: "1.0.0"
+    language: python
+    source_dir: python/fact
+    manifest_path: fact.manifest.yaml
+    artifact_path: fact.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.horoscope
+    version: "1.0.0"
+    language: python
+    source_dir: python/horoscope
+    manifest_path: horoscope.manifest.yaml
+    artifact_path: horoscope.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.insult
+    version: "1.0.0"
+    language: python
+    source_dir: python/insult
+    manifest_path: insult.manifest.yaml
+    artifact_path: insult.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.kiss
+    version: "1.0.0"
+    language: python
+    source_dir: python/kiss
+    manifest_path: kiss.manifest.yaml
+    artifact_path: kiss.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.mock
+    version: "1.0.0"
+    language: python
+    source_dir: python/mock
+    manifest_path: mock.manifest.yaml
+    artifact_path: mock.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.motivate
+    version: "1.0.0"
+    language: python
+    source_dir: python/motivate
+    manifest_path: motivate.manifest.yaml
+    artifact_path: motivate.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.numberfact
+    version: "1.0.0"
+    language: python
+    source_dir: python/numberfact
+    manifest_path: numberfact.manifest.yaml
+    artifact_path: numberfact.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.pat
+    version: "1.0.0"
+    language: python
+    source_dir: python/pat
+    manifest_path: pat.manifest.yaml
+    artifact_path: pat.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.pickup
+    version: "1.0.0"
+    language: python
+    source_dir: python/pickup
+    manifest_path: pickup.manifest.yaml
+    artifact_path: pickup.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.poke
+    version: "1.0.0"
+    language: python
+    source_dir: python/poke
+    manifest_path: poke.manifest.yaml
+    artifact_path: poke.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.rate
+    version: "1.0.0"
+    language: python
+    source_dir: python/rate
+    manifest_path: rate.manifest.yaml
+    artifact_path: rate.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.reverse
+    version: "1.0.0"
+    language: python
+    source_dir: python/reverse
+    manifest_path: reverse.manifest.yaml
+    artifact_path: reverse.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.riddle
+    version: "1.0.0"
+    language: python
+    source_dir: python/riddle
+    manifest_path: riddle.manifest.yaml
+    artifact_path: riddle.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.say
+    version: "1.0.0"
+    language: python
+    source_dir: python/say
+    manifest_path: say.manifest.yaml
+    artifact_path: say.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.truthordare
+    version: "1.0.0"
+    language: python
+    source_dir: python/truthordare
+    manifest_path: truthordare.manifest.yaml
+    artifact_path: truthordare.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.uwu
+    version: "1.0.0"
+    language: python
+    source_dir: python/uwu
+    manifest_path: uwu.manifest.yaml
+    artifact_path: uwu.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.vibecheck
+    version: "1.0.0"
+    language: python
+    source_dir: python/vibecheck
+    manifest_path: vibecheck.manifest.yaml
+    artifact_path: vibecheck.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.wordcount
+    version: "1.0.0"
+    language: python
+    source_dir: python/wordcount
+    manifest_path: wordcount.manifest.yaml
+    artifact_path: wordcount.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.wouldyourather
+    version: "1.0.0"
+    language: python
+    source_dir: python/wouldyourather
+    manifest_path: wouldyourather.manifest.yaml
+    artifact_path: wouldyourather.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.yomama
+    version: "1.0.0"
+    language: python
+    source_dir: python/yomama
+    manifest_path: yomama.manifest.yaml
+    artifact_path: yomama.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  # 12 bundles on `stage-next` (economy + AI):
+  - app_id: waddles.core.example.ask
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/ask
+    manifest_path: ask.manifest.yaml
+    artifact_path: ask.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.define
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/define
+    manifest_path: define.manifest.yaml
+    artifact_path: define.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.defuse
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/defuse
+    manifest_path: defuse.manifest.yaml
+    artifact_path: defuse.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.eli5
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/eli5
+    manifest_path: eli5.manifest.yaml
+    artifact_path: eli5.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.jackpot
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/jackpot
+    manifest_path: jackpot.manifest.yaml
+    artifact_path: jackpot.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.rephrase
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/rephrase
+    manifest_path: rephrase.manifest.yaml
+    artifact_path: rephrase.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.sentiment
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/sentiment
+    manifest_path: sentiment.manifest.yaml
+    artifact_path: sentiment.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.steal
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/steal
+    manifest_path: steal.manifest.yaml
+    artifact_path: steal.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.summarize
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/summarize
+    manifest_path: summarize.manifest.yaml
+    artifact_path: summarize.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.tldr
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/tldr
+    manifest_path: tldr.manifest.yaml
+    artifact_path: tldr.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.top
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/top
+    manifest_path: top.manifest.yaml
+    artifact_path: top.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.translate
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/translate
+    manifest_path: translate.manifest.yaml
+    artifact_path: translate.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null

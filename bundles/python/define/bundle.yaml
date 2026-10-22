@@ -37,7 +37,7 @@ egress: []
 data:
   tables: []
 limits:
-  timeout_ms: 15000
+  timeout_ms: 10000
   memory_mb: 64
   egress_rps: 10
 permissions:

@@ -100,4 +100,8 @@ Stateless flavor-text replies.
 
 ## Source
 
-Bundle source: `bundles/python/<name>/`. Catalog: `bundles/core-bundles.yaml`.
+Bundle source: `bundles/python/<name>/`. Catalog: `bundles/core-bundles.yaml` (the seeder's input -- every bundle needs a row; `scripts/ci/tests/test_bundle_wit_world.py` fails on a missing one).
+
+**WIT world.** `bundles/build_python_bundles.py` builds each row against `world stage` unless the row says `wit_world: stage-next`. Economy (`economy.*`, `identity.resolve`) and AI (`ai.generate`) bundles need `stage-next` -- those host imports do not exist in `stage` -- and the build fails if a manifest declares one of them while the row resolves to `stage`.
+
+**Declared bounds.** `economy.wager` / `economy.transfer` must declare `params.max_bet` / `params.max_amount` (integer, 1..=1000), and `limits.timeout_ms` must be at most 10000, or the seeder's manifest parser refuses the bundle. The seeder carries the economy bounds into the bundle's grant, so the declared value is the enforced per-call ceiling.

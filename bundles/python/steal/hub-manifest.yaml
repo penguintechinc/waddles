@@ -47,8 +47,12 @@ permissions:
     justification: "steal reads balances / max-bet via the economy host import"
   - id: "economy.wager"
     justification: "steal settles stakes and payouts atomically via economy.wager"
+    params:
+      max_bet: 10
   - id: "economy.transfer"
     justification: "steal pays the failed-steal penalty from the actor to the victim via economy.transfer"
+    params:
+      max_amount: 10
   - id: "identity.resolve"
     justification: "steal resolves the invoking actor and the @mention target to community user uuids (uuid-only, no names)"
   - id: "chat.send:discord"

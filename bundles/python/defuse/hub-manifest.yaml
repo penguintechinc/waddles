@@ -47,6 +47,8 @@ permissions:
     justification: "defuse reads balances / max-bet via the economy host import"
   - id: "economy.wager"
     justification: "defuse settles stakes and payouts atomically via economy.wager"
+    params:
+      max_bet: 500
   - id: "identity.resolve"
     justification: "defuse resolves the invoking actor to community user uuids (uuid-only, no names)"
   - id: "chat.send:discord"

@@ -7,7 +7,7 @@ Static fun number facts; no external API. First-party (`provider: builtin`, `app
 | Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`, no DB, no egress, no external API) |
-| Catalog | NOT yet registered in `bundles/core-bundles.yaml` (follow-up) |
+| Catalog | Registered in `bundles/core-bundles.yaml` (`1.0.0`, default `stage` world) |
 
 ## Commands
 

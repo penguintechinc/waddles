@@ -12,7 +12,7 @@ Idea inspired by [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBo
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`, no DB, no egress) |
 | Data source | `waddle_sdk.economy.leaderboard(limit)` (host `economy.read`) |
-| Catalog | NOT yet registered in `bundles/core-bundles.yaml` (follow-up); needs the `stage-next` world (economy import) |
+| Catalog | Registered in `bundles/core-bundles.yaml` (`1.0.0`) with `wit_world: stage-next` (economy import) |
 
 ## Commands
 
