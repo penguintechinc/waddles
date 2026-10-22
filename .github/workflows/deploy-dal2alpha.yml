@@ -15,6 +15,9 @@ name: Deploy dal2-alpha
 # Builds use the in-cluster rootless buildkitd via the buildx `remote` driver
 # (no docker.sock on the runner). Deploy uses the runner pod's ServiceAccount.
 #
+# NOTE: k8s/helm/waddlebot/values-dal2alpha.yaml is the single canonical overlay, owned by
+# branch chore/values-dal2alpha (must merge to release BEFORE/with this workflow; no copy here).
+#
 # Alpha is FULLY self-hosted (build AND deploy on the dal2 runner) so it costs
 # zero GitHub-hosted Actions minutes. Beta/prod will use a separate HYBRID
 # workflow later (GitHub-hosted build + self-hosted deploy) -- not built here.
