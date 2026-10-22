@@ -125,6 +125,7 @@ function DashboardHome() {
       {/* Search Input */}
       <div className="mb-6">
         <input
+          aria-label="Search your communities or discover new ones"
           type="text"
           placeholder="Search your communities or discover new ones..."
           value={searchTerm}

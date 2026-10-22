@@ -197,16 +197,17 @@ export default function AdminCommunityPremium() {
 
             {/* Seat Count Input */}
             <div className="mt-5">
-              <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+              <label htmlFor="admin-community-premium-input" className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
                 <UserGroupIcon className="w-4 h-4" />
                 Seat count
               </label>
               <input
+                id="admin-community-premium-input"
                 type="number"
                 min="1"
                 value={seatCount}
                 onChange={(e) => setSeatCount(Math.max(1, parseInt(e.target.value) || 1))}
-                className="w-32 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-yellow-500"
+                className="w-32 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
               <p className="text-gray-500 text-xs mt-1">
                 First {pricing.baseSeatLimit} seats included in base price

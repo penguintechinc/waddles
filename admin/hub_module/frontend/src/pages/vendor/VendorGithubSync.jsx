@@ -61,6 +61,7 @@ function Toast({ toasts, onDismiss }) {
           )}
           <span>{t.message}</span>
           <button
+            aria-label="Dismiss notification"
             onClick={() => onDismiss(t.id)}
             className="ml-2 opacity-60 hover:opacity-100 transition-opacity"
           >
@@ -151,6 +152,7 @@ function TagInput({ tags, onChange }) {
         >
           <span>{tag}</span>
           <button
+            aria-label={`Remove label ${tag}`}
             type="button"
             onClick={() => removeTag(tag)}
             className="opacity-60 hover:opacity-100"
@@ -160,12 +162,13 @@ function TagInput({ tags, onChange }) {
         </span>
       ))}
       <input
+        aria-label="Add label"
         type="text"
         value={input}
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={addTag}
         placeholder={tags.length === 0 ? 'Type label and press Enter…' : ''}
-        className="bg-transparent text-white text-sm placeholder-navy-500 outline-none min-w-24 flex-1"
+        className="bg-transparent text-white text-sm placeholder-navy-500 min-w-24 flex-1"
       />
     </div>
   );
@@ -214,6 +217,7 @@ function ConnectionModal({ open, editTarget, onClose, onSaved, showToast }) {
             {editTarget ? 'Edit Connection' : 'Connect Repository'}
           </h2>
           <button
+            aria-label="Close"
             onClick={onClose}
             className="text-navy-400 hover:text-white transition-colors"
           >
@@ -225,29 +229,31 @@ function ConnectionModal({ open, editTarget, onClose, onSaved, showToast }) {
           {/* Repo Owner + Name */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-1.5">
+              <label htmlFor="vendor-github-sync-input" className="block text-sm font-medium text-navy-300 mb-1.5">
                 Repo Owner <span className="text-red-400">*</span>
               </label>
               <input
+                id="vendor-github-sync-input"
                 type="text"
                 value={form.repoOwner}
                 onChange={(e) => setField('repoOwner', e.target.value)}
                 required
                 placeholder="owner"
-                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400 text-sm"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400 text-sm"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-1.5">
+              <label htmlFor="vendor-github-sync-input-2" className="block text-sm font-medium text-navy-300 mb-1.5">
                 Repo Name <span className="text-red-400">*</span>
               </label>
               <input
+                id="vendor-github-sync-input-2"
                 type="text"
                 value={form.repoName}
                 onChange={(e) => setField('repoName', e.target.value)}
                 required
                 placeholder="repository"
-                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400 text-sm"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400 text-sm"
               />
             </div>
           </div>
@@ -274,28 +280,30 @@ function ConnectionModal({ open, editTarget, onClose, onSaved, showToast }) {
 
           {/* Token */}
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-1.5">
+            <label htmlFor="vendor-github-sync-input-3" className="block text-sm font-medium text-navy-300 mb-1.5">
               {form.authType === 'github_app' ? 'Installation Token' : 'Personal Access Token'}{' '}
               {!editTarget && <span className="text-red-400">*</span>}
               {editTarget && <span className="text-navy-500 font-normal">(leave blank to keep existing)</span>}
             </label>
             <input
+              id="vendor-github-sync-input-3"
               type="password"
               value={form.token}
               onChange={(e) => setField('token', e.target.value)}
               required={!editTarget}
               placeholder={editTarget ? '••••••••' : 'ghp_...'}
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400 text-sm"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400 text-sm"
             />
           </div>
 
           {/* Sync Mode */}
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-1.5">Sync Mode</label>
+            <label htmlFor="vendor-github-sync-sync-mode" className="block text-sm font-medium text-navy-300 mb-1.5">Sync Mode</label>
             <select
+              id="vendor-github-sync-sync-mode"
               value={form.syncMode}
               onChange={(e) => setField('syncMode', e.target.value)}
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:outline-none focus:border-gold-400 text-sm"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:border-gold-400 text-sm"
             >
               {SYNC_MODES.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>

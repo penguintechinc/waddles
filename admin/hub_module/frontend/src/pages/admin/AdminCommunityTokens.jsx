@@ -271,15 +271,16 @@ export default function AdminCommunityTokens() {
 
             <form onSubmit={handleCreate} className="space-y-5">
               <div>
-                <label className="block text-sm text-navy-400 mb-1.5">
+                <label htmlFor="admin-community-tokens-input" className="block text-sm text-navy-400 mb-1.5">
                   Token Name <span className="text-red-400">*</span>
                 </label>
                 <input
+                  id="admin-community-tokens-input"
                   type="text"
                   value={createName}
                   onChange={(e) => setCreateName(e.target.value)}
                   placeholder="e.g. Event bot, Welcome service"
-                  className="w-full bg-navy-800 border border-navy-700 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 text-sm focus:outline-none focus:border-gold-400"
+                  className="w-full bg-navy-800 border border-navy-700 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 text-sm focus:border-gold-400"
                 />
               </div>
 

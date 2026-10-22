@@ -212,35 +212,37 @@ function AdminLiveStreams() {
             <h2 className="text-lg font-semibold text-white mb-4">Stream Key</h2>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Ingest URL</label>
+                <label htmlFor="admin-live-streams-ingest-url" className="block text-sm text-gray-400 mb-1">Ingest URL</label>
                 <div className="flex gap-2">
                   <input
+                    id="admin-live-streams-ingest-url"
                     type="text"
                     value={config.ingest_url || ''}
                     readOnly
                     className="input flex-1 bg-gray-800"
                   />
-                  <button onClick={() => copyToClipboard(config.ingest_url)} className="btn btn-secondary">
+                  <button aria-label="Copy ingest URL" onClick={() => copyToClipboard(config.ingest_url)} className="btn btn-secondary">
                     <ClipboardIcon className="h-5 w-5" />
                   </button>
                 </div>
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Stream Key</label>
+                <label htmlFor="admin-live-streams-stream-key" className="block text-sm text-gray-400 mb-1">Stream Key</label>
                 <div className="flex gap-2">
                   <input
+                    id="admin-live-streams-stream-key"
                     type={showKey ? 'text' : 'password'}
                     value={config.stream_key || ''}
                     readOnly
                     className="input flex-1 bg-gray-800"
                   />
-                  <button onClick={() => setShowKey(!showKey)} className="btn btn-secondary">
+                  <button aria-label={showKey ? 'Hide stream key' : 'Show stream key'} onClick={() => setShowKey(!showKey)} className="btn btn-secondary">
                     <EyeIcon className="h-5 w-5" />
                   </button>
-                  <button onClick={() => copyToClipboard(config.stream_key)} className="btn btn-secondary">
+                  <button aria-label="Copy stream key" onClick={() => copyToClipboard(config.stream_key)} className="btn btn-secondary">
                     <ClipboardIcon className="h-5 w-5" />
                   </button>
-                  <button onClick={regenerateKey} className="btn btn-warning">
+                  <button aria-label="Regenerate stream key" onClick={regenerateKey} className="btn btn-warning">
                     <ArrowPathIcon className="h-5 w-5" />
                   </button>
                 </div>
@@ -287,6 +289,7 @@ function AdminLiveStreams() {
                         <StopIcon className="h-4 w-4" />
                       </button>
                       <button
+                        aria-label={`Delete ${dest.platform} destination`}
                         onClick={() => removeDestination(dest.id)}
                         className="btn btn-sm btn-danger"
                       >

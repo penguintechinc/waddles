@@ -358,6 +358,7 @@ export default function AdminCalendarTicketing() {
           <div className="relative">
             <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-gray-400" />
             <input
+              aria-label="Search by name, username, or email"
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -367,6 +368,7 @@ export default function AdminCalendarTicketing() {
           </div>
         </div>
         <select
+          aria-label="Filter by statuses"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
           className="px-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-white"
@@ -379,6 +381,7 @@ export default function AdminCalendarTicketing() {
           <option value="refunded">Refunded</option>
         </select>
         <select
+          aria-label="Filter by check-in status"
           value={checkedInFilter}
           onChange={(e) => setCheckedInFilter(e.target.value)}
           className="px-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-white"
@@ -494,6 +497,7 @@ export default function AdminCalendarTicketing() {
             </div>
             <div className="flex items-center gap-2">
               <button
+                aria-label="Previous page"
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page === 1}
                 className="p-2 text-gray-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
@@ -504,6 +508,7 @@ export default function AdminCalendarTicketing() {
                 Page {page} of {totalPages}
               </span>
               <button
+                aria-label="Next page"
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page === totalPages}
                 className="p-2 text-gray-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"

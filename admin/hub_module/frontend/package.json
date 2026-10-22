@@ -20,11 +20,14 @@
     "lucide-react": "0.468.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
+    "react-error-boundary": "6.1.6",
     "react-router-dom": "7.18.2",
     "reactflow": "11.11.4",
     "socket.io-client": "4.8.3"
   },
   "devDependencies": {
+    "@babel/parser": "7.29.9",
+    "@babel/traverse": "7.29.8",
     "@eslint/js": "9.39.2",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "16.3.2",
@@ -35,6 +38,7 @@
     "@vitejs/plugin-react": "4.7.0",
     "@vitest/coverage-v8": "4.1.11",
     "autoprefixer": "10.4.23",
+    "axe-core": "4.14.0",
     "eslint": "9.39.2",
     "eslint-plugin-react": "7.37.5",
     "eslint-plugin-react-hooks": "5.2.0",

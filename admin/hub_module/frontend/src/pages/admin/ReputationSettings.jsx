@@ -283,11 +283,12 @@ function ReputationSettings() {
           <div className="space-y-4">
             {/* Starting Score */}
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="reputation-settings-starting-score-for-new-members" className="block text-sm font-medium text-navy-300 mb-2">
                 Starting Score for New Members
               </label>
               <div className="flex items-center gap-4">
                 <input
+                  id="reputation-settings-starting-score-for-new-members"
                   type="range"
                   min="300"
                   max="850"
@@ -332,11 +333,12 @@ function ReputationSettings() {
             {/* Auto-Ban Threshold */}
             {config.auto_ban_enabled && (
               <div className="ml-9">
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="reputation-settings-auto-ban-threshold" className="block text-sm font-medium text-navy-300 mb-2">
                   Auto-Ban Threshold
                 </label>
                 <div className="flex items-center gap-4">
                   <input
+                    id="reputation-settings-auto-ban-threshold"
                     type="range"
                     min="300"
                     max="580"
@@ -372,6 +374,7 @@ function ReputationSettings() {
                   <span className="font-medium text-sky-100">{weight.label}</span>
                 </div>
                 <input
+                  aria-label={weight.label}
                   type="number"
                   step="0.01"
                   value={config[weight.key] ?? 0}
@@ -401,6 +404,7 @@ function ReputationSettings() {
                   <span className="font-medium text-red-300">{weight.label}</span>
                 </div>
                 <input
+                  aria-label={weight.label}
                   type="number"
                   step="0.5"
                   value={config[weight.key] ?? 0}
@@ -538,7 +542,7 @@ function ReputationSettings() {
           <div className="bg-navy-900 rounded-xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xl font-bold text-sky-100">At-Risk Users</h3>
-              <button
+              <button aria-label="Close at-risk users"
                 onClick={() => setShowAtRisk(false)}
                 className="text-navy-400 hover:text-sky-100"
               >

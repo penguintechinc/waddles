@@ -346,6 +346,7 @@ function AdminStreamOverlays() {
                     </div>
                     <div className="mt-4 flex items-center space-x-2">
                       <input
+                        aria-label="Browser source URL"
                         type="text"
                         readOnly
                         value={source.url}

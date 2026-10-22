@@ -298,6 +298,7 @@ function AdminLayout() {
               <span className="text-sm text-sky-100">{user?.username}</span>
             </div>
             <button
+              aria-label="Log out"
               onClick={logout}
               className="p-2 text-navy-400 hover:text-sky-300 rounded-lg hover:bg-navy-800"
             >

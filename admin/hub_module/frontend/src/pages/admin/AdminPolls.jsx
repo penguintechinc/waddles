@@ -197,6 +197,7 @@ function AdminPolls() {
             polls.map((poll) => (
               <div
                 key={poll.id}
+                data-click-delegate
                 className={`card p-4 cursor-pointer hover:ring-2 hover:ring-sky-500 transition ${
                   selectedPoll?.id === poll.id ? 'ring-2 ring-sky-500' : ''
                 }`}
@@ -204,7 +205,7 @@ function AdminPolls() {
               >
                 <div className="flex justify-between items-start">
                   <div>
-                    <h3 className="text-white font-medium">{poll.title}</h3>
+                    <h3 className="text-white font-medium"><button type="button" className="text-left hover:underline focus-visible:underline">{poll.title}</button></h3>
                     {poll.description && (
                       <p className="text-gray-400 text-sm mt-1 line-clamp-2">{poll.description}</p>
                     )}
@@ -222,6 +223,7 @@ function AdminPolls() {
                     </div>
                   </div>
                   <button
+                    aria-label={`Delete poll ${poll.title}`}
                     onClick={(e) => { e.stopPropagation(); deletePoll(poll.id); }}
                     className="btn btn-sm btn-danger"
                   >

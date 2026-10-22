@@ -227,11 +227,12 @@ export default function AdminCalendarScanner() {
         {scannerMode === 'manual' ? (
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label htmlFor="admin-calendar-scanner-ticket-code-64-characters" className="block text-sm font-medium text-gray-300 mb-2">
                 Ticket Code (64 characters)
               </label>
               <div className="flex gap-3">
                 <input
+                  id="admin-calendar-scanner-ticket-code-64-characters"
                   ref={inputRef}
                   type="text"
                   value={manualCode}

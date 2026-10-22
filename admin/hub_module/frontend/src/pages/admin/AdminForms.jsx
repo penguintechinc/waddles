@@ -268,6 +268,7 @@ function AdminForms() {
             forms.map((form) => (
               <div
                 key={form.id}
+                data-click-delegate
                 className={`card p-4 cursor-pointer hover:ring-2 hover:ring-sky-500 transition ${
                   selectedForm?.id === form.id ? 'ring-2 ring-sky-500' : ''
                 }`}
@@ -275,7 +276,7 @@ function AdminForms() {
               >
                 <div className="flex justify-between items-start">
                   <div>
-                    <h3 className="text-white font-medium">{form.title}</h3>
+                    <h3 className="text-white font-medium"><button type="button" className="text-left hover:underline focus-visible:underline">{form.title}</button></h3>
                     {form.description && (
                       <p className="text-gray-400 text-sm mt-1 line-clamp-2">{form.description}</p>
                     )}
@@ -289,6 +290,7 @@ function AdminForms() {
                     </div>
                   </div>
                   <button
+                    aria-label={`Delete form ${form.title}`}
                     onClick={(e) => { e.stopPropagation(); deleteForm(form.id); }}
                     className="btn btn-sm btn-danger"
                   >

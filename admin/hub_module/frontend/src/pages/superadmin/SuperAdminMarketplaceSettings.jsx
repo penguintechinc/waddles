@@ -127,11 +127,12 @@ export default function SuperAdminMarketplaceSettings() {
 
           {/* Platform Fee */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
+            <label htmlFor="super-admin-marketplace-settings-platform-fee" className="block text-sm font-medium text-gray-300 mb-1">
               Platform Fee (%)
             </label>
             <div className="flex items-center gap-2">
               <input
+                id="super-admin-marketplace-settings-platform-fee"
                 type="number"
                 name="platform_fee_percent"
                 value={settings.platform_fee_percent}
@@ -139,7 +140,7 @@ export default function SuperAdminMarketplaceSettings() {
                 min="0"
                 max="100"
                 step="0.1"
-                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-yellow-500"
+                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
               <span className="text-gray-400">%</span>
             </div>
@@ -154,13 +155,14 @@ export default function SuperAdminMarketplaceSettings() {
             <div className="flex items-center gap-2">
               <span className="text-gray-400">$</span>
               <input
+                aria-label="Community premium base price (USD per month)"
                 type="number"
                 name="community_premium_base_price_dollars"
                 value={settings.community_premium_base_price_dollars}
                 onChange={handleChange}
                 min="0"
                 step="0.01"
-                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-yellow-500"
+                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
             </div>
             <p className="text-gray-500 text-xs mt-1">Monthly base subscription price for community premium</p>
@@ -168,33 +170,35 @@ export default function SuperAdminMarketplaceSettings() {
 
           {/* Base Seat Limit */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
+            <label htmlFor="super-admin-marketplace-settings-community-premium-base-seat-limit" className="block text-sm font-medium text-gray-300 mb-1">
               Community Premium Base Seat Limit
             </label>
             <input
+              id="super-admin-marketplace-settings-community-premium-base-seat-limit"
               type="number"
               name="community_premium_base_seat_limit"
               value={settings.community_premium_base_seat_limit}
               onChange={handleChange}
               min="0"
-              className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-yellow-500"
+              className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
             />
             <p className="text-gray-500 text-xs mt-1">Number of seats included in the base price</p>
           </div>
 
           {/* Overage Price per Seat */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
+            <label htmlFor="super-admin-marketplace-settings-community-premium-overage-price-per-seat" className="block text-sm font-medium text-gray-300 mb-1">
               Community Premium Overage Price per Seat (cents)
             </label>
             <div className="flex items-center gap-2">
               <input
+                id="super-admin-marketplace-settings-community-premium-overage-price-per-seat"
                 type="number"
                 name="community_premium_overage_price_cents"
                 value={settings.community_premium_overage_price_cents}
                 onChange={handleChange}
                 min="0"
-                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-yellow-500"
+                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
               <span className="text-gray-400">¢ / seat</span>
             </div>
@@ -209,13 +213,14 @@ export default function SuperAdminMarketplaceSettings() {
             <div className="flex items-center gap-2">
               <span className="text-gray-400">$</span>
               <input
+                aria-label="Payout threshold (USD)"
                 type="number"
                 name="payout_threshold_dollars"
                 value={settings.payout_threshold_dollars}
                 onChange={handleChange}
                 min="0"
                 step="0.01"
-                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-yellow-500"
+                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
             </div>
             <p className="text-gray-500 text-xs mt-1">Minimum balance before vendor payout is triggered</p>
@@ -223,17 +228,18 @@ export default function SuperAdminMarketplaceSettings() {
 
           {/* Minimum Price */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
+            <label htmlFor="super-admin-marketplace-settings-minimum-module-price-cents" className="block text-sm font-medium text-gray-300 mb-1">
               Minimum Module Price (cents)
             </label>
             <div className="flex items-center gap-2">
               <input
+                id="super-admin-marketplace-settings-minimum-module-price-cents"
                 type="number"
                 name="minimum_price_cents"
                 value={settings.minimum_price_cents}
                 onChange={handleChange}
                 min="0"
-                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-yellow-500"
+                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
               <span className="text-gray-400">¢</span>
             </div>

@@ -39,7 +39,7 @@ function CreateRoomModal({ onClose, onSubmit }) {
             value={roomName}
             onChange={(e) => setRoomName(e.target.value)}
             placeholder="e.g. hangout-1"
-            className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 focus:outline-none focus:border-gold-500 mb-4"
+            className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 focus:border-gold-500 mb-4"
             maxLength={64}
             autoFocus
           />

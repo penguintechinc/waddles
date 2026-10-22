@@ -251,6 +251,7 @@ function SuperAdminUsers() {
         <div className="flex items-center space-x-2 bg-navy-900 rounded px-3 py-2 border border-navy-700">
           <MagnifyingGlassIcon className="w-5 h-5 text-navy-400" />
           <input
+            aria-label="Search by email or username"
             type="text"
             placeholder="Search by email or username..."
             value={searchTerm}
@@ -258,14 +259,15 @@ function SuperAdminUsers() {
               setSearchTerm(e.target.value);
               setPage(1);
             }}
-            className="bg-transparent outline-none text-sky-100 flex-1"
+            className="bg-transparent text-sky-100 flex-1"
           />
         </div>
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">Role</label>
+            <label htmlFor="super-admin-users-role" className="block text-sm font-medium text-navy-300 mb-2">Role</label>
             <select
+              id="super-admin-users-role"
               value={roleFilter}
               onChange={(e) => {
                 setRoleFilter(e.target.value);
@@ -281,8 +283,9 @@ function SuperAdminUsers() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">Status</label>
+            <label htmlFor="super-admin-users-status" className="block text-sm font-medium text-navy-300 mb-2">Status</label>
             <select
+              id="super-admin-users-status"
               value={activeFilter}
               onChange={(e) => {
                 setActiveFilter(e.target.value);

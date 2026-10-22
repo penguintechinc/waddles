@@ -225,13 +225,14 @@ export default function PersonalAccessToken() {
 
             <form onSubmit={handleCreate} className="space-y-5">
               <div>
-                <label className="block text-sm text-navy-400 mb-1.5">Token Name <span className="text-red-400">*</span></label>
+                <label htmlFor="personal-access-token-input" className="block text-sm text-navy-400 mb-1.5">Token Name <span className="text-red-400">*</span></label>
                 <input
+                  id="personal-access-token-input"
                   type="text"
                   value={createName}
                   onChange={(e) => setCreateName(e.target.value)}
                   placeholder="e.g. My deploy script"
-                  className="w-full bg-navy-800 border border-navy-700 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 text-sm focus:outline-none focus:border-gold-400"
+                  className="w-full bg-navy-800 border border-navy-700 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 text-sm focus:border-gold-400"
                 />
               </div>
 

@@ -66,6 +66,7 @@ export default function ChatInput({ onSendMessage, disabled }) {
           {/* Text input */}
           <div className="flex-1 relative">
             <textarea
+              aria-label="Type a message... (Enter to send, Shift+Enter for newline)"
               ref={textareaRef}
               value={message}
               onChange={handleChange}

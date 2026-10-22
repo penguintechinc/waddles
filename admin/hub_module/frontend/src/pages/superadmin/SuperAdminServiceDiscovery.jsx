@@ -610,20 +610,22 @@ export default function SuperAdminServiceDiscovery() {
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-navy-400" />
           <input
+            aria-label="Search services"
             type="text"
             placeholder="Search services..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 bg-navy-800 border border-navy-700 rounded-xl text-white placeholder-navy-400 focus:outline-none focus:border-sky-500"
+            className="w-full pl-10 pr-4 py-2.5 bg-navy-800 border border-navy-700 rounded-xl text-white placeholder-navy-400 focus:border-sky-500"
           />
         </div>
 
         <div className="flex items-center space-x-2">
           <Filter className="w-5 h-5 text-navy-400" />
           <select
+            aria-label="Filter by status"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-4 py-2.5 bg-navy-800 border border-navy-700 rounded-xl text-white focus:outline-none focus:border-sky-500"
+            className="px-4 py-2.5 bg-navy-800 border border-navy-700 rounded-xl text-white focus:border-sky-500"
           >
             <option value="all">All Status</option>
             <option value="healthy">Healthy</option>

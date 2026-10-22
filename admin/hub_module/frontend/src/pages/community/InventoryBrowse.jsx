@@ -97,11 +97,12 @@ function InventoryBrowse() {
       <div className="relative">
         <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-navy-400" />
         <input
+          aria-label="Search items"
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search items..."
-          className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg pl-10 pr-4 py-2 placeholder-navy-500 focus:outline-none focus:border-gold-500"
+          className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg pl-10 pr-4 py-2 placeholder-navy-500 focus:border-gold-500"
         />
       </div>
 
@@ -157,38 +158,41 @@ function InventoryBrowse() {
             <h2 className="text-lg font-semibold text-sky-100 mb-4">Claim: {selectedItem.name}</h2>
             <form onSubmit={handleClaim} className="space-y-4">
               <div>
-                <label className="block text-sm text-navy-400 mb-1">Quantity</label>
+                <label htmlFor="inventory-browse-quantity" className="block text-sm text-navy-400 mb-1">Quantity</label>
                 <input
+                  id="inventory-browse-quantity"
                   type="number"
                   min={1}
                   max={selectedItem.available_quantity}
                   value={claimQty}
                   onChange={(e) => setClaimQty(Number(e.target.value))}
-                  className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gold-500"
+                  className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 focus:border-gold-500"
                   required
                 />
               </div>
               <div>
-                <label className="block text-sm text-navy-400 mb-1">
+                <label htmlFor="inventory-browse-due-date-optional" className="block text-sm text-navy-400 mb-1">
                   Due Date <span className="text-navy-500">(optional)</span>
                 </label>
                 <input
+                  id="inventory-browse-due-date-optional"
                   type="date"
                   value={claimDueDate}
                   onChange={(e) => setClaimDueDate(e.target.value)}
-                  className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gold-500"
+                  className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 focus:border-gold-500"
                 />
               </div>
               <div>
-                <label className="block text-sm text-navy-400 mb-1">
+                <label htmlFor="inventory-browse-notes-optional" className="block text-sm text-navy-400 mb-1">
                   Notes <span className="text-navy-500">(optional)</span>
                 </label>
                 <textarea
+                  id="inventory-browse-notes-optional"
                   value={claimNotes}
                   onChange={(e) => setClaimNotes(e.target.value)}
                   rows={3}
                   placeholder="Any notes about this claim..."
-                  className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 placeholder-navy-500 focus:outline-none focus:border-gold-500 resize-none"
+                  className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 placeholder-navy-500 focus:border-gold-500 resize-none"
                 />
               </div>
               {claimError && <div className="text-red-400 text-sm">{claimError}</div>}

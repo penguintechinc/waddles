@@ -350,6 +350,7 @@ export default function AdminCalendarAttendance() {
             </div>
             <div className="flex items-center gap-2">
               <button
+                aria-label="Previous page"
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page === 1}
                 className="p-2 text-gray-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
@@ -360,6 +361,7 @@ export default function AdminCalendarAttendance() {
                 Page {page} of {totalPages}
               </span>
               <button
+                aria-label="Next page"
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 disabled={page === totalPages}
                 className="p-2 text-gray-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"

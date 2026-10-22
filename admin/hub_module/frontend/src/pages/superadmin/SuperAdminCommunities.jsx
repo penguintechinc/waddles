@@ -95,6 +95,7 @@ function SuperAdminCommunities() {
       <div className="card p-4 mb-6">
         <form onSubmit={handleSearch} className="flex flex-wrap gap-4">
           <input
+            aria-label="Search communities"
             type="text"
             placeholder="Search communities..."
             value={search}
@@ -102,6 +103,7 @@ function SuperAdminCommunities() {
             className="input flex-1 min-w-[200px]"
           />
           <select
+            aria-label="Filter by platforms"
             value={platform}
             onChange={(e) => { setPlatform(e.target.value); setPage(1); }}
             className="input w-40"
@@ -116,6 +118,7 @@ function SuperAdminCommunities() {
               ))}
           </select>
           <select
+            aria-label="Filter by status"
             value={isActive}
             onChange={(e) => { setIsActive(e.target.value); setPage(1); }}
             className="input w-32"
@@ -310,8 +313,9 @@ function EditCommunityModal({ community, onClose, onSave }) {
         <form onSubmit={handleSubmit}>
           <div className="p-6 space-y-4">
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">Display Name</label>
+              <label htmlFor="super-admin-communities-display-name" className="block text-sm font-medium text-sky-200 mb-1">Display Name</label>
               <input
+                id="super-admin-communities-display-name"
                 type="text"
                 value={form.displayName}
                 onChange={(e) => setForm({ ...form, displayName: e.target.value })}
@@ -319,8 +323,9 @@ function EditCommunityModal({ community, onClose, onSave }) {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">Description</label>
+              <label htmlFor="super-admin-communities-description" className="block text-sm font-medium text-sky-200 mb-1">Description</label>
               <textarea
+                id="super-admin-communities-description"
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
                 className="input w-full"
@@ -357,8 +362,9 @@ function EditCommunityModal({ community, onClose, onSave }) {
               </label>
             </div>
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">Seat Limit</label>
+              <label htmlFor="super-admin-communities-seat-limit" className="block text-sm font-medium text-sky-200 mb-1">Seat Limit</label>
               <input
+                id="super-admin-communities-seat-limit"
                 type="number"
                 value={form.seatLimit}
                 onChange={(e) => setForm({ ...form, seatLimit: e.target.value })}
@@ -413,8 +419,9 @@ function ReassignOwnerModal({ community, onClose, onReassign }) {
               Current owner: {community.ownerName || 'Unassigned'}
             </div>
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">New Owner Name *</label>
+              <label htmlFor="super-admin-communities-new-owner-name" className="block text-sm font-medium text-sky-200 mb-1">New Owner Name *</label>
               <input
+                id="super-admin-communities-new-owner-name"
                 type="text"
                 value={newOwnerName}
                 onChange={(e) => setNewOwnerName(e.target.value)}
@@ -424,8 +431,9 @@ function ReassignOwnerModal({ community, onClose, onReassign }) {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">New Owner ID (optional)</label>
+              <label htmlFor="super-admin-communities-new-owner-id-optional" className="block text-sm font-medium text-sky-200 mb-1">New Owner ID (optional)</label>
               <input
+                id="super-admin-communities-new-owner-id-optional"
                 type="text"
                 value={newOwnerId}
                 onChange={(e) => setNewOwnerId(e.target.value)}
@@ -479,6 +487,7 @@ function DeleteCommunityModal({ community, onClose, onDelete }) {
               <strong className="text-red-400">{community.name}</strong>
             </p>
             <input
+              aria-label="Type community name to confirm"
               type="text"
               value={confirmName}
               onChange={(e) => setConfirmName(e.target.value)}

@@ -69,7 +69,7 @@ function Toast({ toasts, onDismiss }) {
             <XCircleIcon className="w-5 h-5 text-red-400 flex-shrink-0" />
           )}
           <span>{t.message}</span>
-          <button onClick={() => onDismiss(t.id)} className="ml-2 opacity-60 hover:opacity-100">
+          <button aria-label="Dismiss notification" onClick={() => onDismiss(t.id)} className="ml-2 opacity-60 hover:opacity-100">
             <XMarkIcon className="w-4 h-4" />
           </button>
         </div>
@@ -196,7 +196,7 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
           <h2 className="text-lg font-bold text-white">
             {editTarget ? 'Edit Knowledge Source' : 'Add Knowledge Source'}
           </h2>
-          <button onClick={onClose} className="text-navy-400 hover:text-white transition-colors">
+          <button aria-label="Close" onClick={onClose} className="text-navy-400 hover:text-white transition-colors">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -204,26 +204,28 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
         <form onSubmit={handleSubmit} className="p-6 space-y-5">
           {/* Source Name */}
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-1.5">
+            <label htmlFor="admin-aiknowledge-input" className="block text-sm font-medium text-navy-300 mb-1.5">
               Source Name <span className="text-red-400">*</span>
             </label>
             <input
+              id="admin-aiknowledge-input"
               type="text"
               value={form.name}
               onChange={(e) => setField('name', e.target.value)}
               required
               placeholder="e.g. Bot Documentation"
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400 text-sm"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400 text-sm"
             />
           </div>
 
           {/* Source Type */}
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-1.5">Source Type</label>
+            <label htmlFor="admin-aiknowledge-source-type" className="block text-sm font-medium text-navy-300 mb-1.5">Source Type</label>
             <select
+              id="admin-aiknowledge-source-type"
               value={form.sourceType}
               onChange={(e) => setField('sourceType', e.target.value)}
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:outline-none focus:border-gold-400 text-sm"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:border-gold-400 text-sm"
             >
               {SOURCE_TYPES.map((s) => (
                 <option key={s.value} value={s.value}>{s.label}</option>
@@ -234,16 +236,17 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
           {/* URL / Repo */}
           {!isManual && (
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-1.5">
+              <label htmlFor="admin-aiknowledge-input-2" className="block text-sm font-medium text-navy-300 mb-1.5">
                 {urlLabel} <span className="text-red-400">*</span>
               </label>
               <input
+                id="admin-aiknowledge-input-2"
                 type={isManual ? 'text' : 'url'}
                 value={form.url}
                 onChange={(e) => setField('url', e.target.value)}
                 required
                 placeholder={urlPlaceholder}
-                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400 text-sm"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400 text-sm"
               />
             </div>
           )}
@@ -251,13 +254,14 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
           {/* Branch (github types only) */}
           {isGithub && (
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-1.5">Branch</label>
+              <label htmlFor="admin-aiknowledge-branch" className="block text-sm font-medium text-navy-300 mb-1.5">Branch</label>
               <input
+                id="admin-aiknowledge-branch"
                 type="text"
                 value={form.branch}
                 onChange={(e) => setField('branch', e.target.value)}
                 placeholder="main"
-                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400 text-sm"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400 text-sm"
               />
             </div>
           )}
@@ -265,13 +269,14 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
           {/* Docs Path (github_repo_markdown only) */}
           {isGithubRepoMd && (
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-1.5">Docs Path</label>
+              <label htmlFor="admin-aiknowledge-docs-path" className="block text-sm font-medium text-navy-300 mb-1.5">Docs Path</label>
               <input
+                id="admin-aiknowledge-docs-path"
                 type="text"
                 value={form.docsPath}
                 onChange={(e) => setField('docsPath', e.target.value)}
                 placeholder="docs/"
-                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400 text-sm"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400 text-sm"
               />
               <p className="text-xs text-navy-500 mt-1">Relative path within the repo to scan for Markdown files</p>
             </div>
@@ -279,11 +284,12 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
 
           {/* Refresh Interval */}
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-1.5">Refresh Interval</label>
+            <label htmlFor="admin-aiknowledge-refresh-interval" className="block text-sm font-medium text-navy-300 mb-1.5">Refresh Interval</label>
             <select
+              id="admin-aiknowledge-refresh-interval"
               value={form.refreshInterval}
               onChange={(e) => setField('refreshInterval', e.target.value)}
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:outline-none focus:border-gold-400 text-sm"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:border-gold-400 text-sm"
             >
               {REFRESH_INTERVALS.map((r) => (
                 <option key={r.value} value={r.value}>{r.label}</option>
@@ -294,16 +300,17 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
           {/* Token (optional, for private repos) */}
           {!isManual && (
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-1.5">
+              <label htmlFor="admin-aiknowledge-access-token-optional-required-for-priva" className="block text-sm font-medium text-navy-300 mb-1.5">
                 Access Token{' '}
                 <span className="text-navy-500 font-normal">(optional — required for private repos)</span>
               </label>
               <input
+                id="admin-aiknowledge-access-token-optional-required-for-priva"
                 type="password"
                 value={form.token}
                 onChange={(e) => setField('token', e.target.value)}
                 placeholder={editTarget ? '••••••••' : 'ghp_... or leave blank for public'}
-                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400 text-sm"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400 text-sm"
               />
             </div>
           )}
@@ -616,6 +623,7 @@ function AdminAIKnowledge() {
                 </span>
               </div>
               <input
+                aria-label="Confidence threshold"
                 type="range"
                 min="0.5"
                 max="1.0"

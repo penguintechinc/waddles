@@ -130,6 +130,7 @@ export default function BroadcastStatusModal({
             Broadcast Status
           </h2>
           <button
+            aria-label="Close"
             onClick={onClose}
             className="p-1 hover:bg-navy-700 rounded-lg transition-colors"
           >

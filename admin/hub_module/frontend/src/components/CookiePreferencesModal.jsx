@@ -126,6 +126,7 @@ export default function CookiePreferencesModal() {
         <div className="flex items-center justify-between p-6 border-b border-gray-200 sticky top-0 bg-white">
           <h2 className="text-2xl font-bold text-gray-900">Cookie Preferences</h2>
           <button
+            aria-label="Close"
             onClick={() => setShowPreferences(false)}
             className="p-1 hover:bg-gray-100 rounded-lg transition-colors"
           >

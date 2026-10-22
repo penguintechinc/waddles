@@ -259,7 +259,7 @@ function AdminModules() {
             <ExclamationTriangleIcon className="w-5 h-5 text-red-400" />
             <span className="text-red-400">{error}</span>
           </div>
-          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
+          <button aria-label="Close" onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -275,7 +275,7 @@ function AdminModules() {
             <CheckIcon className="w-5 h-5" />
             <span>{message.text}</span>
           </div>
-          <button onClick={() => setMessage(null)} className="hover:opacity-75">
+          <button aria-label="Close" onClick={() => setMessage(null)} className="hover:opacity-75">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -428,17 +428,19 @@ function AdminModules() {
             <div className="flex-1 relative">
               <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 text-navy-400 w-5 h-5" />
               <input
+                aria-label="Search modules"
                 type="text"
                 placeholder="Search modules..."
                 value={search}
                 onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-                className="w-full pl-10 pr-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500"
+                className="w-full pl-10 pr-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500"
               />
             </div>
             <select
+              aria-label="Filter by category"
               value={category}
               onChange={(e) => { setCategory(e.target.value); setPage(1); }}
-              className="px-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500"
+              className="px-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500"
             >
               {categories.map((cat) => (
                 <option key={cat.value} value={cat.value}>{cat.label}</option>
@@ -620,6 +622,7 @@ function AdminModules() {
                 Configure: {configModal.displayName || configModal.name}
               </h3>
               <button
+                aria-label="Close"
                 onClick={closeConfigModal}
                 className="text-navy-400 hover:text-sky-100"
               >
@@ -638,9 +641,10 @@ function AdminModules() {
             )}
 
             <textarea
+              aria-label="Module configuration (JSON)"
               value={configText}
               onChange={(e) => setConfigText(e.target.value)}
-              className="flex-1 w-full bg-navy-900 border border-navy-700 rounded-lg p-4 font-mono text-sm text-sky-100 focus:outline-none focus:border-gold-500 min-h-[300px] resize-none"
+              className="flex-1 w-full bg-navy-900 border border-navy-700 rounded-lg p-4 font-mono text-sm text-sky-100 focus:border-gold-500 min-h-[300px] resize-none"
               placeholder="{}"
             />
 

@@ -87,17 +87,17 @@ function AdminServerManagerConfig() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">Allowed Commands</label>
-          <input type="text" value={config.allowedCommands} onChange={(e) => setConfig({ ...config, allowedCommands: e.target.value })}
+          <label htmlFor="admin-server-manager-config-allowed-commands" className="block text-sm font-medium text-sky-100 mb-2">Allowed Commands</label>
+          <input id="admin-server-manager-config-allowed-commands" type="text" value={config.allowedCommands} onChange={(e) => setConfig({ ...config, allowedCommands: e.target.value })}
             placeholder="status, restart, stop, backup"
-            className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500" />
+            className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500" />
           <p className="text-xs text-navy-400 mt-1">Comma-separated list of allowed RCON commands</p>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">RCON Timeout (seconds)</label>
-          <input type="number" value={config.rconTimeout} onChange={(e) => setConfig({ ...config, rconTimeout: parseInt(e.target.value) || 5 })} min={5} max={60}
-            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500" />
+          <label htmlFor="admin-server-manager-config-rcon-timeout-seconds" className="block text-sm font-medium text-sky-100 mb-2">RCON Timeout (seconds)</label>
+          <input id="admin-server-manager-config-rcon-timeout-seconds" type="number" value={config.rconTimeout} onChange={(e) => setConfig({ ...config, rconTimeout: parseInt(e.target.value) || 5 })} min={5} max={60}
+            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500" />
           <p className="text-xs text-navy-400 mt-1">Timeout for RCON connections (5-60 seconds)</p>
         </div>
       </div>

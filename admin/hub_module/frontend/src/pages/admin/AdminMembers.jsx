@@ -71,6 +71,7 @@ function AdminMembers() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-sky-100">Members</h1>
         <input
+          aria-label="Search members"
           type="search"
           placeholder="Search members..."
           value={search}

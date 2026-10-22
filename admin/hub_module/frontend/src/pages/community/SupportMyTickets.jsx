@@ -103,12 +103,13 @@ function SupportMyTickets() {
                 <>
                   <tr
                     key={ticket.id}
+                    data-click-delegate
                     onClick={() => handleSelectTicket(ticket.id)}
                     className={`border-b border-navy-800 hover:bg-navy-800/50 cursor-pointer transition-colors ${
                       selectedTicket === ticket.id ? 'bg-navy-800/70' : ''
                     }`}
                   >
-                    <td className="px-4 py-3 text-sm text-gold-400 font-mono">{ticket.ticket_number}</td>
+                    <td className="px-4 py-3 text-sm text-gold-400 font-mono"><button type="button" aria-expanded={selectedTicket === ticket.id} className="font-mono text-gold-400 hover:underline focus-visible:underline">{ticket.ticket_number}</button></td>
                     <td className="px-4 py-3 text-sm text-sky-100">{ticket.subject}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-block px-2 py-1 text-xs rounded border ${STATUS_COLORS[ticket.status] || STATUS_COLORS.open}`}>
@@ -165,6 +166,7 @@ function SupportMyTickets() {
                         {/* Add Comment */}
                         <form onSubmit={handleAddComment} className="flex gap-2">
                           <input
+                            aria-label="Add a comment"
                             type="text"
                             value={commentText}
                             onChange={(e) => setCommentText(e.target.value)}

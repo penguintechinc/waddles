@@ -184,6 +184,7 @@ function AdminCommunityCalls() {
               {rooms.map((room) => (
                 <div
                   key={room.room_id}
+                  data-click-delegate
                   className={`p-4 bg-gray-800 rounded-lg cursor-pointer hover:bg-gray-700 transition ${
                     selectedRoom?.room_name === room.room_name ? 'ring-2 ring-sky-500' : ''
                   }`}
@@ -191,7 +192,7 @@ function AdminCommunityCalls() {
                 >
                   <div className="flex justify-between items-start">
                     <div>
-                      <h3 className="text-white font-medium">{room.room_name}</h3>
+                      <h3 className="text-white font-medium"><button type="button" className="text-left hover:underline focus-visible:underline">{room.room_name}</button></h3>
                       <p className="text-gray-400 text-sm flex items-center gap-2 mt-1">
                         <UserGroupIcon className="h-4 w-4" />
                         {room.participants || 0} participants
@@ -202,12 +203,14 @@ function AdminCommunityCalls() {
                         <LockClosedIcon className="h-5 w-5 text-yellow-500" />
                       )}
                       <button
+                        aria-label={room.is_locked ? `Unlock room ${room.room_name}` : `Lock room ${room.room_name}`}
                         onClick={(e) => { e.stopPropagation(); toggleLock(room.room_name, room.is_locked); }}
                         className="btn btn-sm btn-secondary"
                       >
                         {room.is_locked ? <LockOpenIcon className="h-4 w-4" /> : <LockClosedIcon className="h-4 w-4" />}
                       </button>
                       <button
+                        aria-label={`Delete room ${room.room_name}`}
                         onClick={(e) => { e.stopPropagation(); deleteRoom(room.room_name); }}
                         className="btn btn-sm btn-danger"
                       >

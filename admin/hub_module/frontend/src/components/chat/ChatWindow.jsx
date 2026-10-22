@@ -78,6 +78,7 @@ export default function ChatWindow({ messages, typingUsers, loading }) {
       {/* Scroll to bottom button */}
       {!autoScroll && messages.length > 0 && (
         <button
+          aria-label="Scroll to latest message"
           onClick={scrollToBottom}
           className="absolute bottom-4 right-4 bg-blue-600 hover:bg-blue-700 text-white
                      rounded-full p-3 shadow-lg transition-all transform hover:scale-110"

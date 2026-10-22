@@ -303,11 +303,12 @@ function AdminRconServers() {
   // ── Server selector helper ──
   const ServerSelector = ({ value, onChange, label = 'Server' }) => (
     <div className="flex items-center gap-3">
-      <label className="text-sm text-navy-400">{label}:</label>
+      <label htmlFor="admin-rcon-servers-select" className="text-sm text-navy-400">{label}:</label>
       <select
+        id="admin-rcon-servers-select"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-gold-500"
+        className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-1.5 text-sm focus:border-gold-500"
       >
         {servers.map((s) => (
           <option key={s.id} value={s.id}>{s.display_name || s.game_name}</option>
@@ -422,10 +423,10 @@ function AdminRconServers() {
                         </td>
                         <td className="px-4 py-3 text-right">
                           <div className="flex items-center justify-end gap-1">
-                            <button onClick={() => openEditModal(srv)} className="p-1.5 text-navy-400 hover:text-sky-300 rounded-lg hover:bg-navy-700">
+                            <button aria-label={`Edit ${srv.display_name || srv.game_name}`} onClick={() => openEditModal(srv)} className="p-1.5 text-navy-400 hover:text-sky-300 rounded-lg hover:bg-navy-700">
                               <PencilIcon className="w-4 h-4" />
                             </button>
-                            <button onClick={() => handleDelete(srv)} className="p-1.5 text-navy-400 hover:text-red-400 rounded-lg hover:bg-navy-700">
+                            <button aria-label={`Delete ${srv.display_name || srv.game_name}`} onClick={() => handleDelete(srv)} className="p-1.5 text-navy-400 hover:text-red-400 rounded-lg hover:bg-navy-700">
                               <TrashIcon className="w-4 h-4" />
                             </button>
                           </div>
@@ -464,14 +465,16 @@ function AdminRconServers() {
             <form onSubmit={handleCommand} className="border-t border-navy-700 flex">
               <span className="px-3 py-2.5 text-gold-400 font-mono text-sm">{'>'}</span>
               <input
+                aria-label="Enter RCON command"
                 type="text"
                 value={commandInput}
                 onChange={(e) => setCommandInput(e.target.value)}
                 placeholder="Enter RCON command..."
                 disabled={commandLoading || !selectedServerId}
-                className="flex-1 bg-transparent text-sky-100 font-mono text-sm px-0 py-2.5 focus:outline-none placeholder-navy-600"
+                className="flex-1 bg-transparent text-sky-100 font-mono text-sm px-0 py-2.5 placeholder-navy-600"
               />
               <button
+                aria-label="Start"
                 type="submit"
                 disabled={commandLoading || !commandInput.trim()}
                 className="px-4 py-2.5 text-gold-400 hover:text-gold-300 disabled:text-navy-600"
@@ -566,15 +569,16 @@ function AdminRconServers() {
                   <span className="text-sm text-navy-300">Only allow community members to play (whitelist sync)</span>
                 </label>
                 <div>
-                  <label className="text-xs text-navy-400 block mb-1">Min Reputation to Join (300–850)</label>
+                  <label htmlFor="admin-rcon-servers-min-reputation-to-join-300-850" className="text-xs text-navy-400 block mb-1">Min Reputation to Join (300–850)</label>
                   <input
+                    id="admin-rcon-servers-min-reputation-to-join-300-850"
                     type="number"
                     min={300}
                     max={850}
                     value={policy?.min_reputation_to_join || ''}
                     onChange={(e) => updatePolicy('min_reputation_to_join', e.target.value ? parseInt(e.target.value) : null)}
                     placeholder="None"
-                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-gold-500"
+                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-1.5 text-sm focus:border-gold-500"
                   />
                 </div>
               </div>
@@ -592,8 +596,9 @@ function AdminRconServers() {
                   <span className="text-sm text-navy-300">Auto-kick players below reputation threshold</span>
                 </label>
                 <div>
-                  <label className="text-xs text-navy-400 block mb-1">Kick Threshold: {policy?.auto_kick_threshold || 450}</label>
+                  <label htmlFor="admin-rcon-servers-input" className="text-xs text-navy-400 block mb-1">Kick Threshold: {policy?.auto_kick_threshold || 450}</label>
                   <input
+                    id="admin-rcon-servers-input"
                     type="range"
                     min={300}
                     max={850}
@@ -620,8 +625,9 @@ function AdminRconServers() {
                   <span className="text-sm text-navy-300">Auto-ban players below reputation threshold</span>
                 </label>
                 <div>
-                  <label className="text-xs text-navy-400 block mb-1">Ban Threshold: {policy?.auto_ban_threshold || 350}</label>
+                  <label htmlFor="admin-rcon-servers-input-2" className="text-xs text-navy-400 block mb-1">Ban Threshold: {policy?.auto_ban_threshold || 350}</label>
                   <input
+                    id="admin-rcon-servers-input-2"
                     type="range"
                     min={300}
                     max={850}
@@ -631,11 +637,12 @@ function AdminRconServers() {
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-navy-400 block mb-1">Ban Duration</label>
+                  <label htmlFor="admin-rcon-servers-ban-duration" className="text-xs text-navy-400 block mb-1">Ban Duration</label>
                   <select
+                    id="admin-rcon-servers-ban-duration"
                     value={policy?.auto_ban_duration_hours ?? ''}
                     onChange={(e) => updatePolicy('auto_ban_duration_hours', e.target.value ? parseInt(e.target.value) : null)}
-                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-gold-500"
+                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-1.5 text-sm focus:border-gold-500"
                   >
                     <option value="">Permanent</option>
                     <option value="1">1 hour</option>
@@ -650,11 +657,12 @@ function AdminRconServers() {
               <div className="bg-navy-900 border border-navy-700 rounded-xl p-5 space-y-4">
                 <h3 className="text-sm font-semibold text-sky-100">Settings</h3>
                 <div>
-                  <label className="text-xs text-navy-400 block mb-1">Sync Interval</label>
+                  <label htmlFor="admin-rcon-servers-sync-interval" className="text-xs text-navy-400 block mb-1">Sync Interval</label>
                   <select
+                    id="admin-rcon-servers-sync-interval"
                     value={policy?.sync_interval_minutes || 5}
                     onChange={(e) => updatePolicy('sync_interval_minutes', parseInt(e.target.value))}
-                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-gold-500"
+                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-1.5 text-sm focus:border-gold-500"
                   >
                     <option value="1">Every 1 minute</option>
                     <option value="5">Every 5 minutes</option>
@@ -757,7 +765,7 @@ function AdminRconServers() {
               <h2 className="text-lg font-bold text-sky-100">
                 {editingServer ? 'Edit Server' : 'Add Server'}
               </h2>
-              <button onClick={() => setShowServerModal(false)} className="text-navy-400 hover:text-sky-300">
+              <button aria-label="Close" onClick={() => setShowServerModal(false)} className="text-navy-400 hover:text-sky-300">
                 <XMarkIcon className="w-5 h-5" />
               </button>
             </div>
@@ -771,23 +779,25 @@ function AdminRconServers() {
               )}
 
               <div>
-                <label className="text-xs text-navy-400 block mb-1">Display Name *</label>
+                <label htmlFor="admin-rcon-servers-display-name" className="text-xs text-navy-400 block mb-1">Display Name *</label>
                 <input
+                  id="admin-rcon-servers-display-name"
                   type="text"
                   value={serverForm.display_name}
                   onChange={(e) => setServerForm((p) => ({ ...p, display_name: e.target.value }))}
                   placeholder="My Rust Server"
-                  className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-gold-500"
+                  className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:border-gold-500"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs text-navy-400 block mb-1">Server Type</label>
+                  <label htmlFor="admin-rcon-servers-server-type" className="text-xs text-navy-400 block mb-1">Server Type</label>
                   <select
+                    id="admin-rcon-servers-server-type"
                     value={serverForm.server_type}
                     onChange={(e) => setServerForm((p) => ({ ...p, server_type: e.target.value }))}
-                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-gold-500"
+                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:border-gold-500"
                   >
                     {SERVER_TYPES.map((t) => (
                       <option key={t.value} value={t.value}>{t.label}</option>
@@ -795,11 +805,12 @@ function AdminRconServers() {
                   </select>
                 </div>
                 <div>
-                  <label className="text-xs text-navy-400 block mb-1">Game Type</label>
+                  <label htmlFor="admin-rcon-servers-game-type" className="text-xs text-navy-400 block mb-1">Game Type</label>
                   <select
+                    id="admin-rcon-servers-game-type"
                     value={serverForm.game_type}
                     onChange={(e) => setServerForm((p) => ({ ...p, game_type: e.target.value }))}
-                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-gold-500"
+                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:border-gold-500"
                   >
                     {GAME_TYPES.map((g) => (
                       <option key={g} value={g}>{g.replace('_', ' ')}</option>
@@ -809,49 +820,53 @@ function AdminRconServers() {
               </div>
 
               <div>
-                <label className="text-xs text-navy-400 block mb-1">Host *</label>
+                <label htmlFor="admin-rcon-servers-host" className="text-xs text-navy-400 block mb-1">Host *</label>
                 <input
+                  id="admin-rcon-servers-host"
                   type="text"
                   value={serverForm.host}
                   onChange={(e) => setServerForm((p) => ({ ...p, host: e.target.value }))}
                   placeholder="play.example.com"
-                  className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-gold-500"
+                  className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:border-gold-500"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs text-navy-400 block mb-1">Game Port</label>
+                  <label htmlFor="admin-rcon-servers-game-port" className="text-xs text-navy-400 block mb-1">Game Port</label>
                   <input
+                    id="admin-rcon-servers-game-port"
                     type="number"
                     value={serverForm.game_port}
                     onChange={(e) => setServerForm((p) => ({ ...p, game_port: e.target.value }))}
                     placeholder="27015"
-                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-gold-500"
+                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:border-gold-500"
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-navy-400 block mb-1">RCON/Query Port</label>
+                  <label htmlFor="admin-rcon-servers-rcon-query-port" className="text-xs text-navy-400 block mb-1">RCON/Query Port</label>
                   <input
+                    id="admin-rcon-servers-rcon-query-port"
                     type="number"
                     value={serverForm.rcon_port}
                     onChange={(e) => setServerForm((p) => ({ ...p, rcon_port: e.target.value }))}
                     placeholder="27015"
-                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-gold-500"
+                    className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:border-gold-500"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="text-xs text-navy-400 block mb-1">
+                <label htmlFor="admin-rcon-servers-input-3" className="text-xs text-navy-400 block mb-1">
                   {editingServer ? 'Password (leave blank to keep)' : 'Password / Secret'}
                 </label>
                 <input
+                  id="admin-rcon-servers-input-3"
                   type="password"
                   value={serverForm.password}
                   onChange={(e) => setServerForm((p) => ({ ...p, password: e.target.value }))}
                   placeholder="••••••••"
-                  className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-gold-500"
+                  className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:border-gold-500"
                 />
               </div>
 
