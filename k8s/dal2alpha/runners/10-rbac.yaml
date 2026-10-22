@@ -18,6 +18,10 @@ rules:
   - apiGroups: [""]
     resources: [services, serviceaccounts, configmaps, secrets, persistentvolumeclaims, pods, pods/log, events]
     verbs: [get, list, watch, create, update, patch, delete]
+  # deploy-dal2alpha.yml smoke step: `kubectl exec deploy/<rel>-hub-api-v3`.
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
   - apiGroups: [apps]
     resources: [deployments, statefulsets, daemonsets, replicasets]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -62,32 +66,41 @@ roleRef:
   kind: Role
   name: waddlebot-helm-deployer
 ---
-# Cluster-scoped: only what the chart's cluster-scoped objects need, by name where possible.
+# Cluster-scoped: the minimum the waddlebot chart's cluster-scoped objects need (namespaceCreate=false,
+# supplyChain.verifyImages.enabled=false in alpha). Cilium cluster policies / LB pool / L2 policy /
+# GatewayClass / shared Gateway are NOT chart-managed (applied once by hand from k8s/dal2alpha/*.yaml),
+# so the runner holds NO grant on them.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: waddlebot-helm-deployer-cluster
 rules:
-  # Chart's namespace.yaml (namespaceCreate) + preflight reads.
-  - apiGroups: [""]
-    resources: [namespaces]
-    verbs: [get, list]
-  # Chart ClusterRole `*-hub-api-tokenreview` grants tokenreviews:create; to create it
-  # the deployer must itself hold that permission (escalation prevention).
+  # Chart ClusterRole/ClusterRoleBinding `waddlebot-hub-api-tokenreview` (service-jwt-rbac.yaml).
+  # Existing objects: name-pinned verbs only. No `bind`/`escalate`; Kubernetes escalation prevention
+  # additionally blocks granting anything the runner does not already hold cluster-wide (only tokenreviews:create).
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles, clusterrolebindings]
+    resourceNames: [waddlebot-hub-api-tokenreview]
+    verbs: [get, update, patch, delete]
+  # RESIDUAL RISK (cannot be tightened): `create` ignores resourceNames in RBAC, and Helm needs create on
+  # first install. Runner can create arbitrary-named ClusterRoles/Bindings, but only ones whose permissions
+  # it already holds cluster-wide (tokenreviews:create) - low impact. Drop this rule after first install
+  # if the objects are pre-created, or move them out of the chart.
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles, clusterrolebindings]
+    verbs: [create]
+  # Escalation prevention: to create the chart's tokenreview ClusterRole the deployer must hold this itself.
   - apiGroups: [authentication.k8s.io]
     resources: [tokenreviews]
     verbs: [create]
-  - apiGroups: [rbac.authorization.k8s.io]
-    resources: [clusterroles, clusterrolebindings]
-    verbs: [get, list, watch, create, update, patch, delete]
-  # CRD existence checks (Cilium/cert-manager/Kyverno) during render/apply.
-  - apiGroups: [apiextensions.k8s.io]
-    resources: [customresourcedefinitions]
-    verbs: [get, list]
-  # Kyverno ClusterPolicy shipped by supply-chain template (waddles-verify-image-signatures).
-  - apiGroups: [kyverno.io]
-    resources: [clusterpolicies]
-    verbs: [get, list, watch, create, update, patch, delete]
+  # Namespace is pre-created by hand; read-only, only the deploy target.
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [waddlebot]
+    verbs: [get]
+  # Dropped (not rendered by chart with alpha values): kyverno.io clusterpolicies CRUD (re-add ONLY if
+  # supplyChain.verifyImages.enabled), apiextensions CRD reads (Helm Capabilities uses discovery, not CRD get),
+  # blanket clusterroles/clusterrolebindings `*`-style CRUD, namespaces list.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

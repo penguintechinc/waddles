@@ -19,8 +19,8 @@ template:
       seccompProfile: {type: RuntimeDefault}
     containers:
       - name: runner
-        # Pin by digest before activation: replace tag with @sha256:<digest> (SETUP.md step).
-        image: ghcr.io/actions/actions-runner:2.328.0
+        # Digest-pinned (resolved 2026-10-22).
+        image: ghcr.io/actions/actions-runner:2.328.0@sha256:db0dcae6d28559e54277755a33aba7d0665f255b3bd2a66cdc5e132712f155e0
         command: ["/home/runner/run.sh"]
         securityContext:
           allowPrivilegeEscalation: false

@@ -8,6 +8,7 @@ metadata:
   name: buildkit
   labels:
     pod-security.kubernetes.io/enforce: privileged   # required for Unconfined seccomp only
+    pod-security.kubernetes.io/audit: baseline
     pod-security.kubernetes.io/warn: baseline
 ---
 apiVersion: apps/v1
@@ -37,14 +38,14 @@ spec:
         seccompProfile: {type: Unconfined}
       containers:
         - name: buildkitd
-          # Pin to digest before activation (SETUP.md).
-          image: moby/buildkit:v0.23.2-rootless
+          # Digest-pinned (resolved 2026-10-22, multi-arch index).
+          image: moby/buildkit:v0.23.2-rootless@sha256:cab936745de5d673465948f1e93ff4d6e372bbe33f218afd3314eba45a6f85a9
           args:
             - --addr=unix:///run/user/1000/buildkit/buildkitd.sock
             - --addr=tcp://0.0.0.0:1234
             - --oci-worker-no-process-sandbox
             - --oci-worker-gc=true
-            - --oci-worker-gckeepstorage=80000   # MB cap on cache (~80GB)
+            - --oci-worker-gckeepstorage=40000   # MB cap on cache (~40GB): bounds DiskPressure on 2-node/100Gi cluster
           ports: [{containerPort: 1234, name: grpc}]
           readinessProbe:
             exec: {command: [buildctl, debug, workers]}
@@ -58,13 +59,13 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
           resources:
-            requests: {cpu: "2", memory: 4Gi, ephemeral-storage: 20Gi}
-            limits: {cpu: "6", memory: 12Gi, ephemeral-storage: 100Gi}
+            requests: {cpu: "2", memory: 4Gi, ephemeral-storage: 10Gi}
+            limits: {cpu: "6", memory: 12Gi, ephemeral-storage: 60Gi}
           volumeMounts:
             - {name: cache, mountPath: /home/user/.local/share/buildkit}
       volumes:
         - name: cache
-          emptyDir: {sizeLimit: 90Gi}
+          emptyDir: {sizeLimit: 50Gi}
 ---
 apiVersion: v1
 kind: Service
