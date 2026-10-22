@@ -70,6 +70,7 @@ def _kind(text: str) -> str | None:
     try:
         parsed = parse_command(text, SPEC)
     except CommandUsageError:
+        log.debug("truthordare.usage", reason="malformed_invocation")
         return "usage"
     if parsed.option is not None:
         return "usage"

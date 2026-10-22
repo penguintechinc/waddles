@@ -61,6 +61,7 @@ def _matches(text: str) -> bool | None:
             try:
                 parsed = parse_command(text, spec)
             except CommandUsageError:
+                log.debug("wouldyourather.usage", reason="malformed_invocation")
                 return False
             return parsed.option is None and parsed.sub_module is None
     return None

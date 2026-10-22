@@ -16,8 +16,6 @@ from app import (
     CATALOG,
     MAX_REPLY_LEN,
     dispatch,
-    enabled_triggers,
-    flag_key,
     format_reply,
     transform,
 )
@@ -31,8 +29,7 @@ def _run(coro: Any) -> Any:
 
 class _Host:
     def __init__(self) -> None:
-        self.off: set[str] = set()
-        self.asked: list[tuple[str, bool]] = []
+        self.flag_reads: list[str] = []
         self.relay: list[tuple[str, str]] = []
         self.logs: list[Any] = []
 
@@ -42,8 +39,9 @@ def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
     h = _Host()
 
     def enabled(key: str, default: bool) -> bool:
-        h.asked.append((key, default))
-        return False if key in h.off else default
+        # Activation-gated only: ANY flag read is a regression (a test below asserts none).
+        h.flag_reads.append(key)
+        return default
 
     world = types.ModuleType("wit_world")
     world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
@@ -74,26 +72,27 @@ def _full(host: _Host, text: str) -> str | None:
 
 
 def test_catalog_is_unique_and_well_formed() -> None:
-    suffixes = [s for s, _ in CATALOG]
-    triggers = [t for _, t in CATALOG]
-    assert len(suffixes) == len(set(suffixes)) and len(triggers) == len(set(triggers))
-    assert all(t.startswith("!") for t in triggers)
-    assert ("say", "!say") in CATALOG and ("commands", "!commands") in CATALOG
+    assert len(CATALOG) == len(set(CATALOG))
+    assert all(isinstance(t, str) and t.startswith("!") for t in CATALOG)
+    assert "!say" in CATALOG and "!commands" in CATALOG
 
 
-def test_unset_flags_count_as_enabled_and_every_flag_checked(host: _Host) -> None:
-    got = _run(enabled_triggers())
-    assert got == [t for _, t in CATALOG]
-    assert len(host.asked) == len(CATALOG)  # denominator: every catalog entry was evaluated
-    assert all(default is True for _, default in host.asked)
-    assert (flag_key("fish"), True) in host.asked
+def test_catalog_is_listed_in_full_and_no_flag_is_ever_read(host: _Host) -> None:
+    """Regression: the vestigial per-command kill-switch is gone -- no flag read, full catalog."""
+    reply = _full(host, "!commands")
+    assert reply is not None
+    assert host.flag_reads == []
+    # Denominator: every trigger is either shown (in catalog order) or counted in "(+N more)".
+    body, _, more = reply.removeprefix("Commands: ").partition(" (+")
+    shown = body.split(", ")
+    assert shown == list(CATALOG[: len(shown)])
+    hidden = int(more.removesuffix(" more)")) if more else 0
+    assert len(shown) + hidden == len(CATALOG)
 
 
-def test_explicitly_off_flag_hides_command(host: _Host) -> None:
-    host.off = {flag_key("fish"), flag_key("roast")}
-    got = _run(enabled_triggers())
-    assert "!fish" not in got and "!roast" not in got and "!echo" in got
-    assert len(got) == len(CATALOG) - 2
+def test_no_flags_dependency_in_source() -> None:
+    src = (_DIR / "src" / "app.py").read_text(encoding="utf-8")
+    assert "feature_enabled" not in src and "waddles.command-" not in src
 
 
 def test_format_reply_basic_and_empty() -> None:
@@ -114,11 +113,6 @@ def test_full_catalog_reply_fits_in_chat_line(host: _Host) -> None:
     assert (
         reply is not None and reply.startswith("Commands: !about") and len(reply) <= MAX_REPLY_LEN
     )
-
-
-def test_dispatch_reflects_flag_state(host: _Host) -> None:
-    host.off = {flag_key(s) for s, _ in CATALOG}
-    assert _full(host, "!commands") == "No commands are currently enabled."
 
 
 @pytest.mark.parametrize("text", ["!commands now", "!commands set x", "!commands enable"])
@@ -152,6 +146,7 @@ def test_logs_pii_free(host: _Host) -> None:
 def test_manifests_perms_and_no_attribution() -> None:
     for name in ("bundle.yaml", "hub-manifest.yaml"):
         body = (_DIR / name).read_text()
-        for pid in ("flags.read", '"chat.send:discord"', '"chat.send:twitch"'):
+        for pid in ('"chat.send:discord"', '"chat.send:twitch"'):
             assert f"id: {pid}" in body
+        assert "flags.read" not in body  # least privilege: no flag is read any more
         assert "storage.kv" not in body and "Psychoboy" not in body

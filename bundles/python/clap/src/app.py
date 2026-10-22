@@ -26,7 +26,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from waddle_sdk import identity, log, relay
-from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
+from waddle_sdk.command import CommandSpec, CommandUsageError
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import sanitize_user_text
 
@@ -79,11 +79,10 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
 
     head, _, rest = text.strip().partition(" ")
-    try:
-        # The command head is validated by the shared parser; the free-text remainder is taken
-        # verbatim (a leading word like "add" must transform, not be read as a verb).
-        parse_command(head, SPEC)
-    except CommandUsageError:
+    # Only the command head is matched (same case-insensitive `!<name>` comparison the shared
+    # `parse_command` applies); the free-text remainder is taken verbatim -- a leading word like
+    # "add" must transform, not be read as a verb. Not our command => not for this bundle.
+    if head.lower() != f"!{SPEC.name}".lower():
         return None
 
     args = rest.strip() or None

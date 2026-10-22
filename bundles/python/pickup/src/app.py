@@ -64,6 +64,7 @@ def _target_token(rest: str) -> str | None | bool:
     try:
         token = identity.validate_token(tokens[0])
     except identity.InvalidIdentityArgError:
+        log.debug("pickup.target_rejected", reason="invalid_token")
         return False
     if rest != f"{{user:{token}}}":
         return False

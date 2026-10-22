@@ -14,7 +14,7 @@ import random
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
+from waddle_sdk.command import CommandSpec
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 SPEC = CommandSpec(name="horoscope")
@@ -67,10 +67,6 @@ def build_reply(rest: str) -> str:
         return _USAGE
     sign = _BY_KEY.get(key)
     if sign is None:
-        try:
-            parse_command(f"!{SPEC.name} {rest}", SPEC)
-        except CommandUsageError:
-            pass
         return _USAGE
     name, trait = sign
     return f"{_PREFIX}{name} ({trait}) -- {_rng.choice(LINES)} (just for fun!)"

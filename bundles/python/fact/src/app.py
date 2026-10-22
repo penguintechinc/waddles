@@ -14,7 +14,7 @@ import random
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
+from waddle_sdk.command import CommandSpec
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 SPEC = CommandSpec(name="fact")
@@ -48,14 +48,8 @@ _rng: random.Random = random.Random()
 
 
 def _is_bare(rest: str) -> bool:
-    """True if `rest` is empty (and nothing the shared grammar would treat as a verb/argument)."""
-    if not rest:
-        return True
-    try:  # a verb parses cleanly but this command takes no verb/argument -- usage either way
-        parse_command(f"!{SPEC.name} {rest}", SPEC)
-    except CommandUsageError:
-        pass
-    return False
+    """True only if `rest` is empty (the command takes no verb or argument; any text is usage)."""
+    return not rest
 
 
 def build_reply(rest: str) -> str:

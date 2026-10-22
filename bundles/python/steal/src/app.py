@@ -509,6 +509,7 @@ async def _handle_set_cooldown(arg: str | None, *, community: str) -> str:
     try:
         seconds = int(parts[1])
     except ValueError:
+        log.debug("steal.set_cooldown.rejected", reason="not_a_whole_number")
         return f"'{sanitize_user_text(parts[1])}' isn't a whole number of seconds"
     if not MIN_COOLDOWN_SECONDS <= seconds <= MAX_COOLDOWN_SECONDS:
         return f"cooldown must be between {MIN_COOLDOWN_SECONDS} and {MAX_COOLDOWN_SECONDS} seconds"

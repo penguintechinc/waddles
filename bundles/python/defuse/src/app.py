@@ -330,6 +330,7 @@ async def _handle_set_odds(arg: str | None, *, community: str) -> str:
     try:
         percent = int(parts[1])
     except ValueError:
+        log.debug("defuse.set_odds.rejected", reason="not_a_whole_number")
         return f"'{sanitize_user_text(parts[1])}' isn't a whole number"
     if not MIN_ODDS_PERCENT <= percent <= MAX_ODDS_PERCENT:
         return f"odds must be between {MIN_ODDS_PERCENT} and {MAX_ODDS_PERCENT} percent"

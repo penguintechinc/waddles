@@ -2,20 +2,18 @@
 
 Enumeration approach (researched, see README "Limitation"): the bundle WIT world
 (`wit/waddle-bundle/stage.wit`) exposes NO capability to enumerate a community's activated
-bundles/commands -- only `%flags.enabled(key, default)` (one key at a time), `kv`, `db` (own
-tables), `identity` etc. So this bundle ships a CURATED CATALOG of known command triggers
-(`CATALOG`, one `(flag_suffix, trigger)` per first-party command bundle) and filters it through
-each command's `waddles.command-<name>` flag as a per-command KILL-SWITCH: a flag explicitly
-turned OFF hides the command; an unset flag counts as enabled (`default=True`), because
-command bundles are activation-gated, not flag-gated. The host cannot tell this bundle whether a
-bundle is actually *activated* for the community, so the list is "commands this deployment ships
-and has not switched off", not a guarantee each one is activated.
+bundles/commands -- only `kv`, `db` (own tables), `identity` etc. So this bundle ships a CURATED
+CATALOG of known command triggers (`CATALOG`, one trigger per first-party command bundle) and
+lists it as-is. There is NO feature-flag filtering: command bundles are activation-gated only
+(Installed -> Enabled -> Activated), and the host routes a command event solely to bundles
+activated for that community. The host cannot tell this bundle which bundles are activated, so
+the list is "commands this deployment ships", not a guarantee each one is activated here.
 
 Reply is capped to `MAX_REPLY_LEN` characters with a "+N more" suffix. Grammar via
 `waddle_sdk.command.parse_command`; `!commands` takes no arguments (anything else -> usage).
 
 PII-free logs: only platform + command count; never the actor or message text. Activation-gated
-only -- no feature flag on `!commands` itself.
+only -- no feature flag on `!commands` itself, and none read on behalf of other commands.
 """
 
 from __future__ import annotations
@@ -24,114 +22,98 @@ from typing import Any
 
 from waddle_sdk import log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 SPEC = CommandSpec(name="commands")
 
-#: `(flag_suffix, trigger)` -- flag key is `waddles.command-<flag_suffix>`. One entry per
-#: first-party command bundle's primary trigger (from each bundle's `command_prefix`).
-CATALOG: tuple[tuple[str, str], ...] = (
-    ("about", "!about"),
-    ("advice", "!advice"),
-    ("announce", "!announce"),
-    ("birthday", "!birthday"),
-    ("bookmark", "!bookmark"),
-    ("boop", "!boop"),
-    ("catfact", "!catfact"),
-    ("chat", "!chat-history"),
-    ("choose", "!choose"),
-    ("coinflip", "!coinflip"),
-    ("command", "!command"),
-    ("commands", "!commands"),
-    ("compliment", "!compliment"),
-    ("count", "!count"),
-    ("countdown", "!countdown"),
-    ("cringe", "!cringe"),
-    ("dadjoke", "!dadjoke"),
-    ("death", "!death"),
-    ("dice", "!dice"),
-    ("discord", "!discord"),
-    ("dogfact", "!dogfact"),
-    ("donate", "!donate"),
-    ("duel", "!duel"),
-    ("echo", "!echo"),
-    ("eightball", "!8ball"),
-    ("event", "!event"),
-    ("first", "!first"),
-    ("fish", "!fish"),
-    ("fortune", "!fortune"),
-    ("gamble", "!gamble"),
-    ("guess", "!guess"),
-    ("hangman", "!hangman"),
-    ("heist", "!heist"),
-    ("hello", "!hello"),
-    ("highfive", "!highfive"),
-    ("hug", "!hug"),
-    ("hype", "!hype"),
-    ("inventory", "!inventory"),
-    ("iq", "!iq"),
-    ("joke", "!joke"),
-    ("label", "!label"),
-    ("lastseen", "!lastseen"),
-    ("lfg", "!lfg"),
-    ("love", "!love"),
-    ("loyalty", "!points"),
-    ("lurk", "!lurk"),
-    ("memories", "!memories"),
-    ("merch", "!merch"),
-    ("mood", "!mood"),
-    ("music", "!sr"),
-    ("poll", "!poll"),
-    ("pronouns", "!pronouns"),
-    ("quote", "!quote"),
-    ("raffle", "!raffle"),
-    ("rank", "!rank"),
-    ("remind", "!remind"),
-    ("rip", "!rip"),
-    ("roast", "!roast"),
-    ("roll", "!roll"),
-    ("roulette", "!roulette"),
-    ("rps", "!rps"),
-    ("rules", "!rules"),
-    ("say", "!say"),
-    ("scramble", "!scramble"),
-    ("secret", "!secret"),
-    ("ship", "!ship"),
-    ("shoutout", "!so"),
-    ("slap", "!slap"),
-    ("slots", "!slots"),
-    ("socials", "!socials"),
-    ("ticket", "!ticket"),
-    ("time", "!time"),
-    ("trivia", "!trivia"),
-    ("uptime", "!uptime"),
-    ("vote", "!vote"),
-    ("waddle", "!waddle"),
-    ("wave", "!wave"),
-    ("weather", "!weather"),
-    ("wheel", "!wheel"),
-    ("winner", "!winner"),
+#: One primary trigger per first-party command bundle (from each bundle's `command_prefix`).
+CATALOG: tuple[str, ...] = (
+    "!about",
+    "!advice",
+    "!announce",
+    "!birthday",
+    "!bookmark",
+    "!boop",
+    "!catfact",
+    "!chat-history",
+    "!choose",
+    "!coinflip",
+    "!command",
+    "!commands",
+    "!compliment",
+    "!count",
+    "!countdown",
+    "!cringe",
+    "!dadjoke",
+    "!death",
+    "!dice",
+    "!discord",
+    "!dogfact",
+    "!donate",
+    "!duel",
+    "!echo",
+    "!8ball",
+    "!event",
+    "!first",
+    "!fish",
+    "!fortune",
+    "!gamble",
+    "!guess",
+    "!hangman",
+    "!heist",
+    "!hello",
+    "!highfive",
+    "!hug",
+    "!hype",
+    "!inventory",
+    "!iq",
+    "!joke",
+    "!label",
+    "!lastseen",
+    "!lfg",
+    "!love",
+    "!points",
+    "!lurk",
+    "!memories",
+    "!merch",
+    "!mood",
+    "!sr",
+    "!poll",
+    "!pronouns",
+    "!quote",
+    "!raffle",
+    "!rank",
+    "!remind",
+    "!rip",
+    "!roast",
+    "!roll",
+    "!roulette",
+    "!rps",
+    "!rules",
+    "!say",
+    "!scramble",
+    "!secret",
+    "!ship",
+    "!so",
+    "!slap",
+    "!slots",
+    "!socials",
+    "!ticket",
+    "!time",
+    "!trivia",
+    "!uptime",
+    "!vote",
+    "!waddle",
+    "!wave",
+    "!weather",
+    "!wheel",
+    "!winner",
 )
 
 MAX_REPLY_LEN = 400
 _PREFIX = "Commands: "
 _EMPTY = "No commands are currently enabled."
 _USAGE = "Usage: !commands"
-
-
-def flag_key(flag_suffix: str) -> str:
-    """PostHog flag key for one command, `waddles.command-<name>`."""
-    return f"waddles.command-{flag_suffix}"
-
-
-async def enabled_triggers() -> list[str]:
-    """Catalog triggers whose per-command flag is not explicitly OFF (unset -> enabled)."""
-    out: list[str] = []
-    for suffix, trigger in CATALOG:
-        if await feature_enabled(flag_key(suffix), default=True):
-            out.append(trigger)
-    return out
 
 
 def format_reply(triggers: list[str], max_len: int = MAX_REPLY_LEN) -> str:
@@ -191,7 +173,7 @@ class DispatchResult:
 async def dispatch(
     envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
 ) -> DispatchResult:
-    """Implement `action-stage.dispatch`: enumerate enabled commands and relay the list.
+    """Implement `action-stage.dispatch`: relay the curated command catalog (no flag filtering).
 
     Raises:
         ValueError: The payload has no `channel_id`, or an unrecognized `action`.
@@ -208,7 +190,7 @@ async def dispatch(
     if action == "usage":
         reply = _USAGE
     else:
-        triggers = await enabled_triggers()
+        triggers = list(CATALOG)
         reply = format_reply(triggers)
         log.info("commands.dispatch listed", platform=provider, count=len(triggers))
     await relay.push(provider, {"channel": channel_id, "text": reply})

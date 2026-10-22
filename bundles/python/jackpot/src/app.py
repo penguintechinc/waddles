@@ -308,6 +308,7 @@ async def _play(
         if stake > cap:
             raise CommandUsageError(f"{username}, the max stake right now is {cap} points.")
     except identity.NotLinkedError:
+        log.info("jackpot.denied", op="precheck", error="NotLinkedError")
         return f"{username}, link your account before playing the jackpot."
     except (identity.IdentityError, economy.DeniedError, economy.NotAMemberError) as exc:
         log.info("jackpot.denied", op="precheck", error=type(exc).__name__)
@@ -331,8 +332,10 @@ async def _lose(actor_uuid: str, stake: int, *, pot: _Pot, username: str) -> str
     try:
         await _wager(actor_uuid, stake, 0)
     except economy.InsufficientFundsError as exc:
+        log.info("jackpot.denied", op="wager", error=type(exc).__name__)
         return f"{username}, you only have {exc.balance} points."
     except economy.OverCapError as exc:
+        log.info("jackpot.denied", op="wager", error=type(exc).__name__)
         return f"{username}, the max stake right now is {exc.cap} points."
     except economy.EconomyError as exc:
         await _economy_fail(exc, "wager", pot)

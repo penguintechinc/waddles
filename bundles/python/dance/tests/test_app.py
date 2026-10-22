@@ -156,3 +156,37 @@ def test_runs_on_activation_alone_when_flag_backend_says_off(monkeypatch) -> Non
     out = _run(transform(_event("!dance")))
     assert out is not None
     assert h.flag_keys == []
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "!dance",
+        "!DANCE",
+        "!Dance",
+        "!dances",
+        "!dance!",
+        "dance",
+        "!",
+        "!!dance",
+        "!dance\u200b",
+        "!ask",
+        "",
+    ],
+)
+def test_head_match_agrees_with_shared_parser(host, head: str) -> None:
+    """The explicit head comparison must accept exactly what `parse_command` accepts.
+
+    regression: the head used to be matched via `try: parse_command(head) / except: return None`
+    (flagged as a silent fallback); the explicit comparison replaces it and this pins the two.
+    """
+    from app import _SPEC
+    from waddle_sdk.command import CommandUsageError, parse_command
+
+    try:
+        parse_command(head, _SPEC)
+        parser_accepts = True
+    except CommandUsageError:
+        parser_accepts = False
+    out = _run(transform(_event(f"{head} hello".strip())))
+    assert (out is not None) == parser_accepts

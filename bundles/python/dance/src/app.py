@@ -3,7 +3,7 @@
 Stateless relay: no `kv`, no db, no egress. `transform()` holds all logic; `dispatch()` is a pure
 relay of the text `transform()` built.
 
-Command grammar: `waddle_sdk.command.parse_command` + `CommandSpec` validate the command head (a
+Command grammar: `waddle_sdk.command.CommandSpec` names the command head (a
 bare `!dance` is the action). The optional argument is a single @mention -- the host replaces it with
 a `{user:<token>}` placeholder, which `waddle_sdk.identity.mention_tokens` extracts.
 
@@ -25,7 +25,7 @@ import re
 from typing import Any
 
 from waddle_sdk import identity, log, relay
-from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
+from waddle_sdk.command import CommandSpec
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 COMMAND = "dance"
@@ -95,9 +95,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     stripped = text.strip()
     head, _, rest = stripped.partition(" ")
-    try:
-        parse_command(head, _SPEC)
-    except CommandUsageError:
+    # Same case-insensitive `!<name>` head comparison the shared `parse_command` applies; a head
+    # that is not this command is simply not for this bundle (non-matching payload => `None`).
+    if head.lower() != f"!{_SPEC.name}".lower():
         return None
 
     reply_text, shape = _build_reply(_actor_ref(event.actor), rest.strip())

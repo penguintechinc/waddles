@@ -51,6 +51,7 @@ def _mention(rest: str) -> str | None:
     try:
         token = validate_token(tokens[0])
     except InvalidIdentityArgError:
+        log.debug("vibecheck.target_rejected", reason="invalid_token")
         return None
     return token if rest == "{user:" + tokens[0] + "}" else None
 
