@@ -499,30 +499,24 @@ reputation:
     requests: { cpu: "50m", memory: "96Mi" }
     limits: { cpu: "300m", memory: "256Mi" }
 
-# Real ingress (ingress-nginx, matches base networkPolicy.ingressNamespace) + cert-manager TLS.
-# hub-webui (Express) proxies /api/* to hub-api itself, so one route to the webui suffices.
-# ASSUMPTION: dal2-alpha runs ingress-nginx + a cert-manager ClusterIssuer "letsencrypt-prod".
+# Ingress via Gateway API: Waddles does NOT own a gateway. It attaches an HTTPRoute to the
+# cluster-wide Cilium Gateway `shared` (ns gateway-system, class cilium-shared). TLS terminates
+# at that Gateway's 443 listener (cloudflare-origin-wildcard); Cloudflare is the public edge, so
+# no cert is referenced here. hub-webui proxies /api/* to hub-api itself -> one route suffices.
+# nginx Ingress is OFF; the Gateway owns the NodePort (Waddles Services stay ClusterIP).
 ingress:
+  enabled: false
+httproute:
   enabled: true
-  className: "nginx"
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-  hosts:
-    - host: waddlebot.dal2a.penguintech.cloud
-      paths:
-        - path: /
-          pathType: Prefix
-          service: hub-webui-v3
-          port: 8080
-  tls:
-    - secretName: waddlebot-dal2a-tls
-      hosts:
-        - waddlebot.dal2a.penguintech.cloud
+  gatewayName: shared
+  gatewayNamespace: gateway-system
+  hostnames:
+    - waddlebot.dal2a.penguintech.cloud
+  rules:
+    - path: /
+      service: "waddlebot-hub-webui-v3"
+      port: 8080
+      timeoutSeconds: 3600
 
 # Operator-provisioned Secret (never rendered/overwritten by this chart).
 platformCredentials:
@@ -544,12 +538,12 @@ egressPolicy:
   workloadEgress:
     enabled: true
   # Verified from live cluster: kubeadm clusterCIDR 10.244.0.0/16 (per-node /24), service 10.96.0.0/12.
-  # Node InternalIPs (10.244.0.146, 10.244.1.167) sit inside 10.244.0.0/16, so nodeCidr is scoped to
-  # that same range instead of the former over-broad 10.0.0.0/8.
+  # nodeCidr feeds the SSRF/internal-range deny backstop -- kept broad (10.0.0.0/8, the base/alpha
+  # value) on purpose; narrowing it to the pod CIDR weakened the backstop (security review).
   clusterCidrs:
     podCidr: "10.244.0.0/16"
     serviceCidr: "10.96.0.0/12"
-    nodeCidr: "10.244.0.0/16"
+    nodeCidr: "10.0.0.0/8"
 
 # spire.enabled defaults to false at the chart level (values.yaml) pending
 # https://github.com/penguintechinc/waddles/issues/437 (SPIRE server/agent
