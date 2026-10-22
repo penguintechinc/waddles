@@ -17,8 +17,21 @@ host (bounded by `max_bet`, balance and the daily mint cap); this bundle never h
 Fail-loud: bad/zero stake, insufficient funds, over-cap and unlinked accounts each reply a clear
 message (`CommandUsageError`) and move nothing.
 
-State (kv, community-scoped, `.`-separated -- never `:`): cooldown/stat keys use
-`sha256(community + ":" + actor_uuid)` pseudonyms; no handle ever reaches a key or log. Logs carry
+Cooldown: `kv.increment` is the only compare-and-swap, so the per-actor cooldown is an `increment`
+on a TTL'd key -- exactly one concurrent play sees `1` and wins the window (a check-then-set let a
+burst of concurrent plays all pass). The host re-applies the TTL on every call, so a refused attempt
+restarts the window (the reply says so). Funds/cap are pre-checked first so a plain refusal never
+burns the cooldown.
+
+Replay safety (at-most-once): the pipeline is at-least-once. The inbound `message_id` (forwarded by
+`transform`) is recorded via `waddle_sdk.event_dedupe` AFTER the cooldown and BEFORE the roll, the
+wager and the stat counters, and a redelivery is skipped silently -- no re-roll, no second wager,
+no double-counted plays/wins, no reply. A crash after the claim loses one play, never repeats it; a
+payload with no `message_id` fails loud.
+
+State (kv, community-scoped, `.`-separated -- never `:`): cooldown/stat/dedupe keys use
+`sha256(community + ":" + actor_uuid)` pseudonyms (the dedupe ring holds truncated hashes of the
+platform message id, never the id); no handle ever reaches a key or log. Logs carry
 `op`/`outcome`/bucket fields only. Activation-gated only -- no feature flag: the platform's
 installed -> enabled -> activated check decides whether this bundle runs.
 
@@ -35,7 +48,7 @@ import random
 import re
 from typing import Any
 
-from waddle_sdk import clock, community_kv, economy, identity, log, relay
+from waddle_sdk import community_kv, economy, event_dedupe, identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import sanitize_user_text
@@ -50,6 +63,7 @@ MAX_ODDS_PERCENT = 95
 DEFAULT_COOLDOWN_SECONDS = 10
 
 _ODDS_CONFIG_KEY = "defuse.config.odds"
+_DEDUPE_NAMESPACE = "defuse"
 _USAGE = (
     "Usage: !defuse [amount|all] | !defuse list | !defuse set odds <1-95> (set is admin/mod only)"
 )
@@ -83,9 +97,9 @@ def _pseudonym(community: str, actor_uuid: str) -> str:
     return hashlib.sha256(f"{community}:{actor_uuid}".encode()).hexdigest()
 
 
-def _last_key(pseudonym: str) -> str:
-    """Per-(community, actor) last-play timestamp key (cooldown gate)."""
-    return f"defuse.last.{pseudonym}"
+def _cooldown_key(pseudonym: str) -> str:
+    """Per-(community, actor) cooldown claim key (an atomic counter with the cooldown as TTL)."""
+    return f"defuse.cd.{pseudonym}"
 
 
 def _plays_key(pseudonym: str) -> str:
@@ -141,6 +155,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
 
     payload: dict[str, Any] = {"channel_id": event.payload.get("channel_id")}
+    message_id = event.payload.get("message_id")
+    if isinstance(message_id, str):  # replay-dedupe key; `dispatch` refuses a play without it
+        payload["message_id"] = message_id
     word = stripped.partition(" ")[2].strip().lower()
     if word == "all" or (word.isascii() and word.isdigit()):
         payload["command"] = "play"
@@ -226,23 +243,51 @@ async def _stake_for(arg: str | None, actor: str) -> int:
     return stake
 
 
-async def _handle_play(arg: str | None, *, community: str, username: str) -> str:
-    """Validate, cooldown-gate, roll and settle one game via a single `economy.wager`."""
+async def _precheck(actor: str, stake: int, username: str) -> None:
+    """Refuse an unaffordable or over-cap stake BEFORE the cooldown is claimed (reads only)."""
+    held = await economy.balance(actor)
+    if stake > held:
+        raise CommandUsageError(f"{username}, you only have {held} points.")
+    cap = await economy.max_bet(actor)
+    if stake > cap:
+        raise CommandUsageError(f"max bet is {cap} points.")
+
+
+async def _handle_play(
+    arg: str | None,
+    *,
+    community: str,
+    username: str,
+    payload: dict[str, Any],
+    platform: str,
+) -> str | None:
+    """Replay-guard, validate, cooldown-claim, roll and settle one game via `economy.wager`.
+
+    Returns `None` for a redelivered event (already claimed): nothing is mutated or sent.
+    """
     actor = await _actor()
+    pseudonym = _pseudonym(community, actor)
+    event_id = event_dedupe.event_id_from_payload(payload, platform=platform)
+    if await event_dedupe.already_seen(
+        community, namespace=_DEDUPE_NAMESPACE, subject=pseudonym, event_id=event_id
+    ):
+        log.info("defuse.redelivery_skipped", op="seen")
+        return None
     try:
         stake = await _stake_for(arg, actor)
-        pseudonym = _pseudonym(community, actor)
-        now_ms = clock.now_millis()
-        last = _int_or_none(await community_kv.get(community, _last_key(pseudonym)))
-        if last is not None:
-            remaining = DEFAULT_COOLDOWN_SECONDS - (now_ms - last) / 1000
-            if remaining > 0:
-                return f"\U0001f4a3 easy, {username}! try again in {max(1, round(remaining))}s."
+        await _precheck(actor, stake, username)
+        claims = await community_kv.increment(
+            community, _cooldown_key(pseudonym), 1, DEFAULT_COOLDOWN_SECONDS
+        )
+        if claims != 1:
+            return f"\U0001f4a3 easy, {username}! try again in {DEFAULT_COOLDOWN_SECONDS}s."
+        if not await event_dedupe.claim(
+            community, namespace=_DEDUPE_NAMESPACE, subject=pseudonym, event_id=event_id
+        ):
+            log.info("defuse.redelivery_skipped", op="claim")
+            return None
         won = _roll(await _get_odds(community))
         new_balance = await economy.wager(actor, stake, stake * PAYOUT_MULTIPLE if won else 0)
-        await community_kv.set(
-            community, _last_key(pseudonym), str(now_ms).encode(), DEFAULT_COOLDOWN_SECONDS
-        )
         await community_kv.increment(community, _plays_key(pseudonym), 1, 0)
         wire = random.choice(_WIRES)  # noqa: S311 - flavor only
         log.info(
@@ -293,9 +338,9 @@ async def _handle_set_odds(arg: str | None, *, community: str) -> str:
 
 
 async def _reply_for(
-    command: str, payload: dict[str, Any], *, community: str, username: str
-) -> str:
-    """Compute the chat reply for one recognized command."""
+    command: str, payload: dict[str, Any], *, community: str, username: str, platform: str
+) -> str | None:
+    """Compute the chat reply for one recognized command (`None` = a skipped redelivery)."""
     arg = payload.get("arg")
     arg_text = arg if isinstance(arg, str) else None
     if command == "usage":
@@ -307,7 +352,9 @@ async def _reply_for(
         return await _handle_set_odds(arg_text, community=community)
     if command == "list":
         return await _handle_list(community=community)
-    return await _handle_play(arg_text, community=community, username=username)
+    return await _handle_play(
+        arg_text, community=community, username=username, payload=payload, platform=platform
+    )
 
 
 async def dispatch(
@@ -334,14 +381,23 @@ async def dispatch(
 
     username = _actor_label(envelope.event.actor)
     try:
-        reply = await _reply_for(command, payload, community=community, username=username)
+        reply = await _reply_for(
+            command, payload, community=community, username=username, platform=provider
+        )
     except CommandUsageError as exc:
         reply = str(exc)
+    except event_dedupe.EventIdError as exc:
+        log.error("defuse.missing_event_id", command=command)
+        await relay.push(provider, {"channel": channel_id, "text": "defusing is unavailable."})
+        raise RuntimeError("defuse requires the inbound message_id to be replay-safe") from exc
     except Exception as exc:
         log.error("defuse.kv_error", error=type(getattr(exc, "value", exc)).__name__)
         await relay.push(provider, {"channel": channel_id, "text": "defusing is unavailable."})
         raise RuntimeError("defuse state backend failed") from exc
 
+    if reply is None:
+        log.info("defuse.dispatch skipped duplicate", platform=provider, command=command)
+        return DispatchResult(transport=provider, detail="duplicate")
     await relay.push(provider, {"channel": channel_id, "text": reply})
     log.info("defuse.dispatch relayed", platform=provider, command=command)
     return DispatchResult(transport=provider, detail=command)

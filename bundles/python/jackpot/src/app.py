@@ -29,8 +29,17 @@ Commands:
   (host dedupes by event), after which it fails loud WITHOUT restoring the claim (never
   risk a double payout).
 
-PII-free: kv keys/logs carry only `jackpot.pot` and `jackpot.cd.<pseudonym>` where the pseudonym is
-SHA-256(community|resolved-uuid); logs carry `op`/`outcome`/`amount_bucket`/error-case only.
+Replay safety (at-most-once): the pipeline is at-least-once, and a redelivered loss would credit
+the pot a second time (the host dedupes the `wager` per event, the kv pot credit is ours). The
+inbound `message_id` (forwarded by `transform`) is recorded via `waddle_sdk.event_dedupe` AFTER the
+atomic per-actor cooldown and BEFORE any money or pot mutation; a redelivery is skipped silently
+(no wager, no pot credit, no reply). A crash between the claim and the pot credit therefore loses
+one stake into the void (never a double credit); a payload with no `message_id` fails loud.
+
+PII-free: kv keys/logs carry only `jackpot.pot`, `jackpot.cd.<pseudonym>` and
+`dedupe.jackpot.<pseudonym>` where the pseudonym is SHA-256(community|resolved-uuid) (the dedupe
+ring stores truncated hashes of the platform message id, never the id); logs carry
+`op`/`outcome`/`amount_bucket`/error-case only.
 Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
 decides whether this bundle runs.
 
@@ -47,7 +56,7 @@ import random
 import re
 from typing import Any, NoReturn
 
-from waddle_sdk import community_kv, economy, identity, log, relay
+from waddle_sdk import community_kv, economy, event_dedupe, identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import sanitize_user_text
@@ -60,6 +69,7 @@ MIN_STAKE = 1
 COOLDOWN_SECONDS = 10
 
 _POT_KEY = "jackpot.pot"
+_DEDUPE_NAMESPACE = "jackpot"
 _USAGE = "Usage: !jackpot <stake> (win the whole pot, else your stake joins it) | !jackpot"
 _KNOWN_COMMANDS = frozenset({"play", "status", "usage"})
 
@@ -122,6 +132,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
 
     tail = stripped.partition(" ")[2].strip()
     payload: dict[str, Any] = {"channel_id": event.payload.get("channel_id")}
+    message_id = event.payload.get("message_id")
+    if isinstance(message_id, str):  # replay-dedupe key; `dispatch` refuses a play without it
+        payload["message_id"] = message_id
     if tail.isascii() and tail.isdigit():
         payload["command"] = "play"
         payload["arg"] = tail
@@ -173,6 +186,31 @@ class _Pot:
             {"channel": self._channel_id, "text": "the jackpot is temporarily unavailable."},
         )
         raise RuntimeError(f"jackpot {op} failed: {case_name}") from exc
+
+    async def event_id(self, payload: dict[str, Any], platform: str) -> str:
+        """Return the replay-stable event id, or fail loud (log, reply, raise) if there is none."""
+        try:
+            return event_dedupe.event_id_from_payload(payload, platform=platform)
+        except event_dedupe.EventIdError as exc:
+            await self.fail(exc, "event_id")
+
+    async def seen(self, pseudonym: str, event_id: str) -> bool:
+        """Read-only: True if this actor already claimed this event (a redelivery)."""
+        try:
+            return await event_dedupe.already_seen(
+                self._community, namespace=_DEDUPE_NAMESPACE, subject=pseudonym, event_id=event_id
+            )
+        except Exception as exc:  # noqa: BLE001 - classified in `fail`
+            await self.fail(exc, "dedupe")
+
+    async def claim_event(self, pseudonym: str, event_id: str) -> bool:
+        """Record the event BEFORE any mutation; False means a duplicate that must be skipped."""
+        try:
+            return await event_dedupe.claim(
+                self._community, namespace=_DEDUPE_NAMESPACE, subject=pseudonym, event_id=event_id
+            )
+        except Exception as exc:  # noqa: BLE001 - classified in `fail`
+            await self.fail(exc, "dedupe")
 
     async def accrued(self) -> int:
         """Return the accrued pot above `BASE_POT` (never negative; corrupt -> fail loud)."""
@@ -242,11 +280,27 @@ async def _wager(actor_uuid: str, stake: int, payout: int) -> int:
         return await economy.wager(actor_uuid, stake, payout)
 
 
-async def _play(arg: str | None, *, pot: _Pot, community: str, username: str) -> str:
-    """Validate, stake, roll, and settle one jackpot entry; returns the chat reply."""
+async def _play(
+    arg: str | None,
+    *,
+    pot: _Pot,
+    community: str,
+    username: str,
+    payload: dict[str, Any],
+    platform: str,
+) -> str | None:
+    """Validate, stake, roll, and settle one jackpot entry; returns the chat reply.
+
+    Returns `None` for a redelivered event (already claimed): nothing is mutated or sent.
+    """
     stake = _parse_stake(arg)
     try:
         actor_uuid = await identity.resolve_actor()
+        event_id = await pot.event_id(payload, platform)
+        pseudonym = _pseudonym(community, actor_uuid)
+        if await pot.seen(pseudonym, event_id):
+            log.info("jackpot.redelivery_skipped", op="seen")
+            return None
         held = await economy.balance(actor_uuid)
         if stake > held:
             raise CommandUsageError(f"{username}, you only have {held} points.")
@@ -261,8 +315,11 @@ async def _play(arg: str | None, *, pot: _Pot, community: str, username: str) ->
     except economy.EconomyError as exc:
         await _economy_fail(exc, "precheck", pot)
 
-    if not await pot.cooldown_claim(_pseudonym(community, actor_uuid)):
+    if not await pot.cooldown_claim(pseudonym):
         return f"slow down, {username}! try again in a few seconds."
+    if not await pot.claim_event(pseudonym, event_id):
+        log.info("jackpot.redelivery_skipped", op="claim")
+        return None
 
     if not _roll_win():
         return await _lose(actor_uuid, stake, pot=pot, username=username)
@@ -356,6 +413,7 @@ async def dispatch(
     pot = _Pot(community, provider, channel_id)
     arg = payload.get("arg")
     arg_text = arg if isinstance(arg, str) else None
+    reply: str | None
 
     if command == "usage":
         reply = _USAGE
@@ -363,10 +421,20 @@ async def dispatch(
         reply = await _status(pot=pot)
     else:
         try:
-            reply = await _play(arg_text, pot=pot, community=community, username=username)
+            reply = await _play(
+                arg_text,
+                pot=pot,
+                community=community,
+                username=username,
+                payload=payload,
+                platform=provider,
+            )
         except CommandUsageError as exc:
             reply = str(exc)
 
+    if reply is None:
+        log.info("jackpot.dispatch skipped duplicate", platform=provider, command=command)
+        return DispatchResult(transport=provider, detail="duplicate")
     await relay.push(provider, {"channel": channel_id, "text": reply})
     log.info("jackpot.dispatch relayed", platform=provider, command=command)
     return DispatchResult(transport=provider, detail=command)

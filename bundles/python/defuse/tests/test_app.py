@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import types
 from typing import Any
@@ -25,6 +26,14 @@ ACTOR = "11111111-1111-4111-8111-111111111111"
 COMMUNITY = "comm-1"
 
 
+_MSG_IDS = itertools.count(1)
+
+
+def _next_msg_id() -> str:
+    """A fresh platform message id per delivery, like the real pipeline."""
+    return f"msg-{next(_MSG_IDS)}"
+
+
 def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
@@ -35,6 +44,11 @@ class _Host:
         self.relay_calls: list[tuple[str, Any]] = []
         self.log_calls: list[tuple[Any, str, str]] = []
         self.now_ms = 1_700_000_000_000
+
+    def expire(self, marker: str) -> None:
+        """Simulate the kv TTL lapsing for every key containing `marker` (the fake ignores TTL)."""
+        for key in [k for k in self.kv.store if marker in k]:
+            del self.kv.store[key]
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> _Host:
@@ -93,7 +107,12 @@ def _envelope(command: str, **payload: Any) -> StageEnvelope:
             platform="twitch",
             event_type="chat.message",
             actor="viewer-1",
-            payload={"command": command, "channel_id": "12345", **payload},
+            payload={
+                "command": command,
+                "channel_id": "12345",
+                "message_id": _next_msg_id(),
+                **payload,
+            },
             occurred_at="2026-10-05T00:00:00.000Z",
         ),
         ts="2026-10-05T00:00:00.000Z",
@@ -219,7 +238,7 @@ def test_cooldown_blocks_then_expires(host: _Host, monkeypatch: pytest.MonkeyPat
     _play(host, monkeypatch, win=False, arg="5")
     assert "easy" in _play(host, monkeypatch, win=False, arg="5")
     assert host.eco.balances[ACTOR] == 495
-    host.now_ms += 11_000
+    host.expire(".defuse.cd.")  # the kv TTL lapsing is the host's job; the fake does not model it
     assert "BOOM" in _play(host, monkeypatch, win=False, arg="5")
 
 
@@ -336,7 +355,12 @@ def _envelope_as(actor: str | None, command: str, **payload: Any) -> StageEnvelo
             platform="twitch",
             event_type="chat.message",
             actor=actor,
-            payload={"command": command, "channel_id": "12345", **payload},
+            payload={
+                "command": command,
+                "channel_id": "12345",
+                "message_id": _next_msg_id(),
+                **payload,
+            },
             occurred_at="2026-10-05T00:00:00.000Z",
         ),
         ts="2026-10-05T00:00:00.000Z",
@@ -391,3 +415,258 @@ def test_runs_on_activation_alone_when_flag_backend_says_off(
     """Activation-gated only: an OFF `waddles.command-defuse` flag must not drop the command."""
     _install(monkeypatch, flag=False)
     assert _run(transform(_event("!defuse"))) is not None
+
+
+# hardening: economy integrity (replay safety, atomic cooldown)
+def _wagers(host: _Host) -> int:
+    return sum(1 for kind, _user, _delta in host.eco.ledger if kind == "wager")
+
+
+def _go(
+    host: _Host,
+    mp: pytest.MonkeyPatch,
+    *,
+    win: bool,
+    arg: str | None = "5",
+    msg_id: str | None = None,
+) -> str | None:
+    """One play delivery; returns the reply, or None when nothing was sent (a skipped dup)."""
+    mp.setattr(app, "_roll", lambda percent: win)
+    extra: dict[str, Any] = {"message_id": msg_id} if msg_id else {}
+    if arg is not None:
+        extra["arg"] = arg
+    before = len(host.relay_calls)
+    _run(dispatch(_envelope("play", **extra), {}, http_client=None))
+    return _reply(host) if len(host.relay_calls) > before else None
+
+
+def _stat(host: _Host, name: str) -> int:
+    pseud = app._pseudonym(COMMUNITY, ACTOR)
+    return int(host.kv.store.get(_scoped_key(COMMUNITY, f"defuse.{name}.{pseud}"), b"0"))
+
+
+def _yielding_kv_all(mp: pytest.MonkeyPatch) -> None:
+    """Make every kv facade call a suspension point so concurrent dispatches really interleave."""
+    real_get, real_set, real_inc = (
+        app.community_kv.get,
+        app.community_kv.set,
+        app.community_kv.increment,
+    )
+
+    async def get(c: str | None, k: str) -> bytes | None:
+        await asyncio.sleep(0)
+        return await real_get(c, k)
+
+    async def set_(c: str | None, k: str, v: bytes, ttl: int = 0) -> None:
+        await asyncio.sleep(0)
+        await real_set(c, k, v, ttl)
+
+    async def inc(c: str | None, k: str, d: int, ttl: int = 0) -> int:
+        await asyncio.sleep(0)
+        return await real_inc(c, k, d, ttl)
+
+    mp.setattr(app.community_kv, "get", get)
+    mp.setattr(app.community_kv, "set", set_)
+    mp.setattr(app.community_kv, "increment", inc)
+
+
+def test_transform_forwards_the_platform_message_id(host: _Host) -> None:
+    out = _run(transform(_event("!defuse 5", message_id="m-9")))
+    assert out is not None and out.payload["message_id"] == "m-9"
+
+
+@pytest.mark.parametrize("bad", [None, 7, ["m"]])
+def test_transform_does_not_forward_a_non_string_message_id(host: _Host, bad: Any) -> None:
+    out = _run(transform(_event("!defuse 5", message_id=bad)))
+    assert out is not None and "message_id" not in out.payload
+
+
+def test_cooldown_is_one_atomic_increment_never_check_then_set(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _go(host, monkeypatch, win=False)
+    cd = [c for c in host.kv.calls if ".defuse.cd." in c[1][0]]
+    assert [c[0] for c in cd] == ["increment"], "the cooldown claim must be a single increment"
+    assert cd[0][1][1:] == (1, app.DEFAULT_COOLDOWN_SECONDS)
+    assert not any(".defuse.last." in c[1][0] for c in host.kv.calls)
+
+
+@pytest.mark.parametrize("win", [False, True])
+@pytest.mark.parametrize("racers", [2, 8])
+def test_concurrent_plays_by_one_actor_exactly_one_wagers(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, win: bool, racers: int
+) -> None:
+    """regression: check-then-set let every concurrent play pass the cooldown."""
+    _yielding_kv_all(monkeypatch)
+    monkeypatch.setattr(app, "_roll", lambda percent: win)
+
+    async def race() -> None:
+        await asyncio.gather(
+            *(dispatch(_envelope("play", arg="5"), {}, http_client=None) for _ in range(racers))
+        )
+
+    _run(race())
+    replies = [json.loads(m)["text"] for _p, m in host.relay_calls]
+    assert sum("easy" in r for r in replies) == racers - 1, replies
+    assert _wagers(host) == 1 and _stat(host, "plays") == 1
+
+
+def test_a_refused_attempt_restarts_the_window_and_says_so(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _go(host, monkeypatch, win=False)
+    reply = _go(host, monkeypatch, win=False)
+    assert f"try again in {app.DEFAULT_COOLDOWN_SECONDS}s" in (reply or "")
+    incs = [c for c in host.kv.calls if c[0] == "increment" and ".defuse.cd." in c[1][0]]
+    assert [c[1][2] for c in incs] == [app.DEFAULT_COOLDOWN_SECONDS] * 2
+
+
+@pytest.mark.parametrize("arg", ["50", "9999"])
+def test_a_refused_stake_does_not_burn_the_cooldown_or_the_event(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, arg: str
+) -> None:
+    host.eco.balances[ACTOR] = 20
+    host.eco.max_bet_cap = 20
+    assert _go(host, monkeypatch, win=True, arg=arg, msg_id="poor-1") is not None
+    assert not any(".defuse.cd." in k or ".dedupe.defuse." in k for k in host.kv.store)
+    assert "DEFUSED" in (_go(host, monkeypatch, win=True, arg="5", msg_id="poor-2") or "")
+
+
+@pytest.mark.parametrize("win", [False, True])
+def test_redelivery_after_the_cooldown_changes_nothing(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, win: bool
+) -> None:
+    """regression: a redelivered play re-rolled, re-wagered and double-counted plays/wins."""
+    assert _go(host, monkeypatch, win=win, msg_id="dup-1") is not None
+    host.expire(".defuse.cd.")
+    snap = (dict(host.eco.balances), list(host.eco.ledger), dict(host.kv.store))
+    for _ in range(3):
+        assert _go(host, monkeypatch, win=win, msg_id="dup-1") is None
+    assert (dict(host.eco.balances), list(host.eco.ledger), dict(host.kv.store)) == snap
+    assert _stat(host, "plays") == 1 and _stat(host, "wins") == (1 if win else 0)
+
+
+def test_a_redelivery_that_would_roll_the_other_way_is_still_skipped(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _go(host, monkeypatch, win=False, msg_id="flip-1")
+    host.expire(".defuse.cd.")
+    snap = (dict(host.eco.balances), list(host.eco.ledger))
+    assert _go(host, monkeypatch, win=True, msg_id="flip-1") is None
+    assert (dict(host.eco.balances), list(host.eco.ledger)) == snap
+
+
+def test_a_redelivery_inside_the_cooldown_is_silent_and_does_not_rearm_it(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _go(host, monkeypatch, win=True, msg_id="dup-2")
+    assert _go(host, monkeypatch, win=True, msg_id="dup-2") is None
+    assert len([c for c in host.kv.calls if c[0] == "increment" and ".defuse.cd." in c[1][0]]) == 1
+    assert _wagers(host) == 1
+
+
+def test_distinct_messages_each_play(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    for i in range(5):
+        host.expire(".defuse.cd.")
+        assert _go(host, monkeypatch, win=False, msg_id=f"d-{i}") is not None
+    assert _wagers(host) == 5 and _stat(host, "plays") == 5
+
+
+def test_redelivery_is_recognised_after_other_plays_in_between(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _go(host, monkeypatch, win=False, msg_id="old-1")
+    for i in range(10):
+        host.expire(".defuse.cd.")
+        _go(host, monkeypatch, win=False, msg_id=f"between-{i}")
+    snap = (dict(host.eco.balances), _wagers(host))
+    host.expire(".defuse.cd.")
+    assert _go(host, monkeypatch, win=False, msg_id="old-1") is None
+    assert (dict(host.eco.balances), _wagers(host)) == snap
+
+
+@pytest.mark.parametrize("copies", [2, 6])
+def test_concurrent_duplicate_deliveries_play_exactly_once(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, copies: int
+) -> None:
+    _yielding_kv_all(monkeypatch)
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+
+    async def race() -> None:
+        await asyncio.gather(
+            *(
+                dispatch(_envelope("play", arg="5", message_id="race-1"), {}, http_client=None)
+                for _ in range(copies)
+            )
+        )
+
+    _run(race())
+    assert _wagers(host) == 1 and _stat(host, "plays") == 1 and _stat(host, "wins") == 1
+
+
+def test_the_claim_is_recorded_before_the_mutation(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At-most-once: an ambiguous host failure is never retried into a second play."""
+    import wit_world
+
+    def down(user: str, stake: int, payout: int) -> int:
+        raise RuntimeError("storage down")  # classified as BackendError (may have committed)
+
+    real = wit_world.imports.economy.wager
+    wit_world.imports.economy.wager = down
+    assert "temporarily unavailable" in (_go(host, monkeypatch, win=True, msg_id="crash-1") or "")
+    wit_world.imports.economy.wager = real
+    host.expire(".defuse.cd.")
+    assert _go(host, monkeypatch, win=True, msg_id="crash-1") is None
+    assert host.eco.ledger == [] and _stat(host, "plays") == 0
+
+
+@pytest.mark.parametrize("missing", [None, "", "  ", 12345])
+def test_a_play_without_a_message_id_fails_loud_and_moves_nothing(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, missing: Any
+) -> None:
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    env = _envelope("play", arg="5")
+    if missing is None:
+        env.event.payload.pop("message_id")
+    else:
+        env.event.payload["message_id"] = missing
+    with pytest.raises(RuntimeError, match="message_id"):
+        _run(dispatch(env, {}, http_client=None))
+    assert "unavailable" in _reply(host)
+    assert host.eco.ledger == [] and not host.kv.store
+    assert any("defuse.missing_event_id" in m for _l, m, _f in host.log_calls)
+
+
+def test_list_usage_and_config_need_no_message_id(host: _Host) -> None:
+    cases = (
+        ("list", {}),
+        ("usage", {}),
+        ("config_set_odds", {"arg": "odds 50", "is_mod": True}),
+    )
+    for command, extra in cases:
+        env = _envelope(command, **extra)
+        env.event.payload.pop("message_id")
+        _run(dispatch(env, {}, http_client=None))
+    assert len(host.relay_calls) == 3
+
+
+def test_dedupe_state_is_one_pii_free_key_per_actor(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for i in range(6):
+        host.expire(".defuse.cd.")
+        _go(host, monkeypatch, win=False, msg_id=f"private-platform-id-{i}")
+    assert len([k for k in host.kv.store if ".dedupe.defuse." in k]) == 1
+    blob = " ".join(host.kv.store) + " ".join(v.decode() for v in host.kv.store.values())
+    assert "private-platform-id" not in blob
+    assert "private-platform-id" not in " ".join(f"{m} {f}" for _l, m, f in host.log_calls)
+
+
+def test_corrupt_dedupe_ring_fails_closed(host: _Host) -> None:
+    pseud = app._pseudonym(COMMUNITY, ACTOR)
+    host.kv.store[_scoped_key(COMMUNITY, f"dedupe.defuse.{pseud}")] = b"garbage"
+    with pytest.raises(RuntimeError, match="backend failed"):
+        _run(dispatch(_envelope("play", arg="5"), {}, http_client=None))
+    assert host.eco.ledger == []

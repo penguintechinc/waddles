@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import sys
 import types
@@ -21,6 +22,14 @@ from app import BASE_POT, COOLDOWN_SECONDS, dispatch, transform
 COMM = "comm-1"
 ACTOR_UUID = "11111111-1111-4111-8111-111111111111"
 POT_KEY = _scoped_key(COMM, "jackpot.pot")
+
+
+_MSG_IDS = itertools.count(1)
+
+
+def _next_msg_id() -> str:
+    """A fresh platform message id per delivery, like the real pipeline."""
+    return f"msg-{next(_MSG_IDS)}"
 
 
 def _run(coro: Any) -> Any:
@@ -77,8 +86,12 @@ def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
     return _Host(monkeypatch)
 
 
-def _env(command: str, arg: str | None = None) -> StageEnvelope:
-    payload: dict[str, Any] = {"command": command, "channel_id": "123"}
+def _env(command: str, arg: str | None = None, msg_id: str | None = None) -> StageEnvelope:
+    payload: dict[str, Any] = {
+        "command": command,
+        "channel_id": "123",
+        "message_id": msg_id or _next_msg_id(),
+    }
     if arg is not None:
         payload["arg"] = arg
     return StageEnvelope(
@@ -91,8 +104,8 @@ def _env(command: str, arg: str | None = None) -> StageEnvelope:
     )
 
 
-def _say(host: _Host, command: str, arg: str | None = None) -> str:
-    _run(dispatch(_env(command, arg), {}, http_client=None))
+def _say(host: _Host, command: str, arg: str | None = None, msg_id: str | None = None) -> str:
+    _run(dispatch(_env(command, arg, msg_id), {}, http_client=None))
     return host.relayed[-1]
 
 
@@ -371,7 +384,11 @@ ZWSP = "\u200b"
 
 
 def _say_as(host: _Host, actor: str | None, arg: str | None = None) -> str:
-    payload: dict[str, Any] = {"command": "play", "channel_id": "123"}
+    payload: dict[str, Any] = {
+        "command": "play",
+        "channel_id": "123",
+        "message_id": _next_msg_id(),
+    }
     if arg is not None:
         payload["arg"] = arg
     env = StageEnvelope(
@@ -428,3 +445,234 @@ def test_runs_on_activation_alone_when_flag_backend_says_off(host: _Host) -> Non
     host.flag = False
     out = _run(transform(PlatformEvent("twitch", "chat.message", "v", {"text": "!jackpot 5"}, "t")))
     assert out is not None
+
+
+# hardening: replay safety (at-most-once on pipeline redelivery)
+def _wagers(host: _Host) -> int:
+    return sum(1 for kind, _user, _delta in host.eco.ledger if kind == "wager")
+
+
+def test_transform_forwards_the_platform_message_id(host: _Host) -> None:
+    out = _run(
+        transform(
+            PlatformEvent(
+                "twitch", "chat.message", "v", {"text": "!jackpot 5", "message_id": "m-9"}, "t"
+            )
+        )
+    )
+    assert out is not None and out.payload["message_id"] == "m-9"
+
+
+@pytest.mark.parametrize("bad", [None, 123, ["m"], {"id": "m"}])
+def test_transform_does_not_forward_a_non_string_message_id(host: _Host, bad: Any) -> None:
+    ev = PlatformEvent(
+        "twitch", "chat.message", "v", {"text": "!jackpot 5", "message_id": bad}, "t"
+    )
+    out = _run(transform(ev))
+    assert out is not None and "message_id" not in out.payload
+
+
+def test_redelivered_loss_credits_the_pot_once(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: a redelivered losing play double-credited the pot (a mint on the next win)."""
+    _force(monkeypatch, False)
+    assert "join the pot" in _say(host, "play", "50", msg_id="dup-1")
+    assert (host.pot, host.bal(), _wagers(host)) == (50, 950, 1)
+    sent = len(host.relayed)
+    for _ in range(3):
+        host.expire_cooldown()  # the redelivery arrives after the cooldown window
+        _say_dup = _env("play", "50", msg_id="dup-1")
+        _run(dispatch(_say_dup, {}, http_client=None))
+    assert (host.pot, host.bal(), _wagers(host)) == (50, 950, 1)
+    assert len(host.relayed) == sent, "a redelivery must not send a second reply"
+
+
+def test_redelivery_inside_the_cooldown_window_changes_nothing(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, False)
+    _say(host, "play", "50", msg_id="dup-2")
+    sent = len(host.relayed)
+    cooldown_incs = sum(
+        1 for c in host.kv.calls if c[0] == "increment" and ".jackpot.cd." in c[1][0]
+    )
+    _run(dispatch(_env("play", "50", msg_id="dup-2"), {}, http_client=None))
+    assert (host.pot, host.bal(), _wagers(host)) == (50, 950, 1)
+    assert len(host.relayed) == sent
+    assert cooldown_incs == sum(
+        1 for c in host.kv.calls if c[0] == "increment" and ".jackpot.cd." in c[1][0]
+    ), "a skipped redelivery must not touch (and so re-arm) the actor's cooldown"
+
+
+def test_redelivered_win_does_not_pay_twice(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    host.kv.store[POT_KEY] = b"300"
+    _force(monkeypatch, True)
+    assert "JACKPOT" in _say(host, "play", "10", msg_id="win-1")
+    after_win = (host.pot, host.bal(), _wagers(host))
+    assert after_win == (0, 1000 + BASE_POT + 300, 1)
+    host.expire_cooldown()
+    _run(dispatch(_env("play", "10", msg_id="win-1"), {}, http_client=None))
+    assert (host.pot, host.bal(), _wagers(host)) == after_win
+
+
+def test_redelivery_that_would_roll_differently_is_still_skipped(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-roll on redelivery must never get a second outcome for the same message."""
+    host.kv.store[POT_KEY] = b"300"
+    _force(monkeypatch, False)
+    _say(host, "play", "10", msg_id="flip-1")
+    snapshot = (host.pot, host.bal(), _wagers(host))
+    host.expire_cooldown()
+    _force(monkeypatch, True)  # the redelivered roll would have won the whole pot
+    _run(dispatch(_env("play", "10", msg_id="flip-1"), {}, http_client=None))
+    assert (host.pot, host.bal(), _wagers(host)) == snapshot
+
+
+def test_distinct_messages_from_one_actor_each_process(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, False)
+    for i in range(5):
+        host.expire_cooldown()
+        _say(host, "play", "10", msg_id=f"distinct-{i}")
+    assert (host.pot, host.bal(), _wagers(host)) == (50, 950, 5)
+
+
+def test_redelivery_is_recognised_after_other_plays_in_between(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, False)
+    _say(host, "play", "10", msg_id="old-1")
+    for i in range(10):
+        host.expire_cooldown()
+        _say(host, "play", "10", msg_id=f"between-{i}")
+    snapshot = (host.pot, host.bal(), _wagers(host))
+    host.expire_cooldown()
+    _run(dispatch(_env("play", "10", msg_id="old-1"), {}, http_client=None))
+    assert (host.pot, host.bal(), _wagers(host)) == snapshot
+
+
+def test_the_claim_is_recorded_before_the_mutation(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At-most-once: a crash mid-settlement is never replayed into a second pot credit."""
+    _force(monkeypatch, False)
+
+    def down(user: str, stake: int, payout: int) -> int:
+        raise RuntimeError("storage down")  # ambiguous BackendError, twice -> fail loud
+
+    real = sys.modules["wit_world"].imports.economy.wager  # type: ignore[attr-defined]
+    sys.modules["wit_world"].imports.economy.wager = down  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="jackpot wager failed"):
+        _say(host, "play", "10", msg_id="crash-1")
+    sys.modules["wit_world"].imports.economy.wager = real  # type: ignore[attr-defined]
+    host.expire_cooldown()
+    sent = len(host.relayed)
+    _run(dispatch(_env("play", "10", msg_id="crash-1"), {}, http_client=None))
+    assert (host.pot, host.bal(), _wagers(host)) == (0, 1000, 0)
+    assert len(host.relayed) == sent
+
+
+@pytest.mark.parametrize("missing", [None, "", "   ", 12345])
+def test_a_play_without_a_message_id_fails_loud_and_moves_nothing(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, missing: Any
+) -> None:
+    _force(monkeypatch, False)
+    env = _env("play", "10")
+    if missing is None:
+        env.event.payload.pop("message_id")
+    else:
+        env.event.payload["message_id"] = missing
+    with pytest.raises(RuntimeError, match="jackpot event_id failed: EventIdError"):
+        _run(dispatch(env, {}, http_client=None))
+    assert "temporarily unavailable" in host.relayed[-1]
+    assert (host.pot, host.bal(), _wagers(host)) == (0, 1000, 0)
+    assert not host.kv.store, "nothing may be written without a replay-stable id"
+    assert any("jackpot.error" in m and "EventIdError" in fj for m, fj in host.logs)
+
+
+def test_status_and_usage_need_no_message_id(host: _Host) -> None:
+    for command in ("status", "usage"):
+        env = _env(command)
+        env.event.payload.pop("message_id")
+        _run(dispatch(env, {}, http_client=None))
+    assert len(host.relayed) == 2
+
+
+def _yielding_kv_all(mp: pytest.MonkeyPatch) -> None:
+    """Make every kv facade call a suspension point so concurrent dispatches really interleave."""
+    real_get, real_set, real_inc = community_kv.get, community_kv.set, community_kv.increment
+
+    async def get(c: str | None, k: str) -> bytes | None:
+        await asyncio.sleep(0)
+        return await real_get(c, k)
+
+    async def set_(c: str | None, k: str, v: bytes, ttl: int = 0) -> None:
+        await asyncio.sleep(0)
+        await real_set(c, k, v, ttl)
+
+    async def inc(c: str | None, k: str, d: int, ttl: int = 0) -> int:
+        await asyncio.sleep(0)
+        return await real_inc(c, k, d, ttl)
+
+    mp.setattr(app.community_kv, "get", get)
+    mp.setattr(app.community_kv, "set", set_)
+    mp.setattr(app.community_kv, "increment", inc)
+
+
+@pytest.mark.parametrize("copies", [2, 6])
+def test_concurrent_duplicate_deliveries_process_exactly_once(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, copies: int
+) -> None:
+    """Two consumers holding the same stream entry at once must not both reach the wager."""
+    _force(monkeypatch, False)
+    _yielding_kv_all(monkeypatch)
+
+    async def go() -> None:
+        await asyncio.gather(
+            *(
+                dispatch(_env("play", "50", msg_id="race-1"), {}, http_client=None)
+                for _ in range(copies)
+            )
+        )
+
+    _run(go())
+    assert (host.pot, host.bal(), _wagers(host)) == (50, 950, 1)
+
+
+def test_dedupe_kv_failure_is_loud(host: _Host) -> None:
+    real = host.kv.get
+
+    def get(key: str) -> bytes | None:
+        if ".dedupe.jackpot." in key:
+            raise RuntimeError("down")
+        return real(key)
+
+    sys.modules["wit_world"].imports.kv.get = get  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="jackpot dedupe failed"):
+        _say(host, "play", "5")
+    assert (host.pot, host.bal(), _wagers(host)) == (0, 1000, 0)
+
+
+def test_corrupt_dedupe_ring_fails_closed(host: _Host) -> None:
+    pseud = hashlib.sha256(f"{COMM}|{ACTOR_UUID}".encode()).hexdigest()
+    host.kv.store[_scoped_key(COMM, f"dedupe.jackpot.{pseud}")] = b"not-a-ring"
+    with pytest.raises(RuntimeError, match="jackpot dedupe failed: DedupeStateError"):
+        _say(host, "play", "5")
+    assert (host.pot, host.bal(), _wagers(host)) == (0, 1000, 0)
+
+
+def test_dedupe_state_is_one_pii_free_key_per_actor(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, False)
+    for i in range(6):
+        host.expire_cooldown()
+        _say(host, "play", "5", msg_id=f"private-platform-id-{i}")
+    ring_keys = [k for k in host.kv.store if ".dedupe.jackpot." in k]
+    assert len(ring_keys) == 1, "the kv host charges a quota unit per key; events must not add keys"
+    blob = " ".join(host.kv.store) + " ".join(v.decode() for v in host.kv.store.values())
+    assert "private-platform-id" not in blob
+    assert "private-platform-id" not in " ".join(m + fj for m, fj in host.logs)

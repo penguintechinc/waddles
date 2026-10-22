@@ -25,6 +25,16 @@ Activation-gated only -- no feature flag (installed -> enabled -> activated).
   - refused/over-cap win: claim restored / excess returned. An ambiguous `BackendError` retries the
     identical call once, then fails loud *without* restoring (never risks a double payout).
 
+## Replay safety (at-most-once)
+
+The pipeline is at-least-once. The host dedupes the `wager` per event, but the pot credit is ours:
+a redelivered loss used to credit the pot a second time, and a pot credited twice pays out money
+that was debited once. `transform` forwards the platform `message_id`; `dispatch` records it
+(`waddle_sdk.event_dedupe`, one ring key per actor) after the atomic cooldown and **before any
+wager or pot mutation**, and skips a redelivery silently (no wager, no credit, no reply). A crash
+after the claim loses one stake into the void (never a double credit); a payload with no
+`message_id` fails loud and moves nothing. The ring remembers the last 16 events per actor.
+
 ## Permissions (V2)
 
 | id | why |
@@ -38,7 +48,8 @@ Uses `economy`/`identity` (`world stage-next` imports) -- build against that wor
 
 ## PII
 
-kv keys: `jackpot.pot`, `jackpot.cd.<sha256(community|uuid)>` only (`.`-joined, never `:`). Logs carry
+kv keys: `jackpot.pot`, `jackpot.cd.<sha256(community|uuid)>`, `dedupe.jackpot.<sha256(community|uuid)>`
+(truncated hashes of the platform message id, never the id) only (`.`-joined, never `:`). Logs carry
 `op`/`outcome`/`amount_bucket`/error-case only -- no names, uuids or message text.
 
 ## Output safety
@@ -48,4 +59,5 @@ kv keys: `jackpot.pot`, `jackpot.cd.<sha256(community|uuid)>` only (`.`-joined, 
 ## Tests
 
 `python3 -m pytest bundles/python/jackpot/tests` -- accumulation, win-resets-pot, concurrent
-increments/claims (kv facade yields between read and write), cooldown, over-cap, backend-error paths.
+increments/claims (kv facade yields between read and write), cooldown, over-cap, backend-error paths,
+redelivery (loss / win / flipped re-roll / inside the cooldown / concurrent copies / missing id).

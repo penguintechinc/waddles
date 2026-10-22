@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import types
 from typing import Any
@@ -26,6 +27,14 @@ TARGET = "22222222-2222-4222-8222-222222222222"
 COMMUNITY = "comm-1"
 
 
+_MSG_IDS = itertools.count(1)
+
+
+def _next_msg_id() -> str:
+    """A fresh platform message id per delivery, like the real pipeline."""
+    return f"msg-{next(_MSG_IDS)}"
+
+
 def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
@@ -36,6 +45,11 @@ class _Host:
         self.relay_calls: list[tuple[str, Any]] = []
         self.log_calls: list[tuple[Any, str, str]] = []
         self.now_ms = 1_700_000_000_000
+
+    def expire(self, marker: str) -> None:
+        """Simulate the kv TTL lapsing for every key containing `marker` (the fake ignores TTL)."""
+        for key in [k for k in self.kv.store if marker in k]:
+            del self.kv.store[key]
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> _Host:
@@ -95,7 +109,12 @@ def _envelope(command: str, **payload: Any) -> StageEnvelope:
             platform="twitch",
             event_type="chat.message",
             actor="viewer-1",
-            payload={"command": command, "channel_id": "12345", **payload},
+            payload={
+                "command": command,
+                "channel_id": "12345",
+                "message_id": _next_msg_id(),
+                **payload,
+            },
             occurred_at="2026-10-05T00:00:00.000Z",
         ),
         ts="2026-10-05T00:00:00.000Z",
@@ -245,6 +264,7 @@ def test_cooldown_blocks_second_steal_then_expires(
     assert "lay low" in _steal(host, monkeypatch, win=False)
     assert host.eco.balances == before
     host.now_ms += 61_000
+    host.expire(".steal.cd.")  # the kv TTL lapsing is the host's job; the fake does not model it
     assert "caught" in _steal(host, monkeypatch, win=False)
 
 
@@ -357,7 +377,12 @@ def _envelope_as(actor: str | None, command: str, **payload: Any) -> StageEnvelo
             platform="twitch",
             event_type="chat.message",
             actor=actor,
-            payload={"command": command, "channel_id": "12345", **payload},
+            payload={
+                "command": command,
+                "channel_id": "12345",
+                "message_id": _next_msg_id(),
+                **payload,
+            },
             occurred_at="2026-10-05T00:00:00.000Z",
         ),
         ts="2026-10-05T00:00:00.000Z",
@@ -416,3 +441,573 @@ def test_runs_on_activation_alone_when_flag_backend_says_off(
     """Activation-gated only: an OFF `waddles.command-steal` flag must not drop the command."""
     _install(monkeypatch, flag=False)
     assert _run(transform(_event("!steal list"))) is not None
+
+
+# hardening: economy integrity (replay safety, atomic cooldown, anti-collusion caps)
+T2 = "33333333-3333-4333-8333-333333333333"
+T3 = "44444444-4444-4444-8444-444444444444"
+T4 = "55555555-5555-4555-8555-555555555555"
+COOLDOWN_CFG_KEY = _scoped_key(COMMUNITY, "steal.config.cooldown")
+
+
+def _world(host: _Host) -> None:
+    """Four members (ACTOR/TARGET/T2/T3), each holding enough to be worth 100 loot."""
+    members = {ACTOR, TARGET, T2, T3, T4}
+    host.eco.members, host.ident.members = set(members), set(members)
+    host.eco.balances = {ACTOR: 500, TARGET: 300, T2: 300, T3: 300, T4: 300}
+    host.eco.max_amount_cap = 10_000
+    for name, user in (("victim", TARGET), ("ally", ACTOR), ("t2", T2), ("t3", T3), ("t4", T4)):
+        host.ident.add_mention(name, user)
+
+
+def _no_cooldown(host: _Host) -> None:
+    host.kv.store[COOLDOWN_CFG_KEY] = b"0"
+
+
+def _as(host: _Host, user: str) -> None:
+    host.eco.actor = user
+    host.ident.actor = user
+
+
+def _go(
+    host: _Host,
+    mp: pytest.MonkeyPatch,
+    mention: str,
+    *,
+    win: bool,
+    actor: str | None = None,
+    msg_id: str | None = None,
+) -> str | None:
+    """One steal delivery; returns the reply, or None when nothing was sent (a skipped dup)."""
+    if actor is not None:
+        _as(host, actor)
+    mp.setattr(app, "_roll", lambda percent: win)
+    mp.setattr(app.random, "randint", lambda a, b: b)  # worst case for the house: max loot
+    extra: dict[str, Any] = {"message_id": msg_id} if msg_id else {}
+    before = len(host.relay_calls)
+    _run(dispatch(_envelope("steal", tokens=[mention], **extra), {}, http_client=None))
+    return _reply(host) if len(host.relay_calls) > before else None
+
+
+def _minted(host: _Host) -> int:
+    """Total points the economy minted: wager payouts net of stakes (transfers conserve)."""
+    return sum(delta for kind, _user, delta in host.eco.ledger if kind == "wager")
+
+
+def _kv_int(host: _Host, key: str) -> int:
+    return int(host.kv.store.get(_scoped_key(COMMUNITY, key), b"0"))
+
+
+def _pair_value(host: _Host, user_a: str, user_b: str, window: int | None = None) -> int:
+    pair, _low = app._pair_id(COMMUNITY, user_a, user_b)
+    w = host.now_ms // (app.WINDOW_SECONDS * 1000) if window is None else window
+    return _kv_int(host, f"steal.pair.{w}.{pair}")
+
+
+def _budget_value(host: _Host, user: str) -> int:
+    w = host.now_ms // (app.WINDOW_SECONDS * 1000)
+    return _kv_int(host, f"steal.budget.{w}.{app._pseudonym(COMMUNITY, user)}")
+
+
+def _yielding_kv_all(mp: pytest.MonkeyPatch) -> None:
+    """Make every kv facade call a suspension point so concurrent dispatches really interleave."""
+    real_get, real_set, real_inc = (
+        app.community_kv.get,
+        app.community_kv.set,
+        app.community_kv.increment,
+    )
+
+    async def get(c: str | None, k: str) -> bytes | None:
+        await asyncio.sleep(0)
+        return await real_get(c, k)
+
+    async def set_(c: str | None, k: str, v: bytes, ttl: int = 0) -> None:
+        await asyncio.sleep(0)
+        await real_set(c, k, v, ttl)
+
+    async def inc(c: str | None, k: str, d: int, ttl: int = 0) -> int:
+        await asyncio.sleep(0)
+        return await real_inc(c, k, d, ttl)
+
+    mp.setattr(app.community_kv, "get", get)
+    mp.setattr(app.community_kv, "set", set_)
+    mp.setattr(app.community_kv, "increment", inc)
+
+
+def test_transform_forwards_the_platform_message_id(host: _Host) -> None:
+    out = _run(transform(_event("!steal {user:victim}", message_id="m-9")))
+    assert out is not None and out.payload["message_id"] == "m-9"
+
+
+@pytest.mark.parametrize("bad", [None, 7, ["m"]])
+def test_transform_does_not_forward_a_non_string_message_id(host: _Host, bad: Any) -> None:
+    out = _run(transform(_event("!steal {user:victim}", message_id=bad)))
+    assert out is not None and "message_id" not in out.payload
+
+
+# -- atomic cooldown (CAS) -----------------------------------------------------
+
+
+def test_cooldown_is_one_atomic_increment_never_check_then_set(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _steal(host, monkeypatch, win=False)
+    cd = [c for c in host.kv.calls if ".steal.cd." in c[1][0]]
+    assert [c[0] for c in cd] == ["increment"], "the cooldown claim must be a single increment"
+    assert cd[0][1][1:] == (1, app.DEFAULT_COOLDOWN_SECONDS)
+    assert not any(".steal.last." in c[1][0] for c in host.kv.calls), "no timestamp read/set race"
+
+
+@pytest.mark.parametrize("win", [False, True])
+@pytest.mark.parametrize("racers", [2, 8])
+def test_concurrent_steals_by_one_actor_exactly_one_wins(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, win: bool, racers: int
+) -> None:
+    """regression: check-then-set let every concurrent steal pass the cooldown (cap bypass)."""
+    _world(host)
+    _yielding_kv_all(monkeypatch)
+    monkeypatch.setattr(app, "_roll", lambda percent: win)
+
+    async def race() -> None:
+        await asyncio.gather(
+            *(
+                dispatch(_envelope("steal", tokens=["victim"]), {}, http_client=None)
+                for _ in range(racers)
+            )
+        )
+
+    _run(race())
+    replies = [json.loads(m)["text"] for _p, m in host.relay_calls]
+    assert sum("lay low" in r for r in replies) == racers - 1, replies
+    assert len(host.eco.ledger) == (1 if win else 2), host.eco.ledger  # one wager | one transfer
+    assert (_minted(host) > 0) is win
+
+
+def test_a_refused_attempt_restarts_the_window_and_says_so(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _steal(host, monkeypatch, win=False)
+    reply = _steal(host, monkeypatch, win=False)
+    assert f"try again in {app.DEFAULT_COOLDOWN_SECONDS}s" in reply
+    incs = [c for c in host.kv.calls if c[0] == "increment" and ".steal.cd." in c[1][0]]
+    assert [c[1][2] for c in incs] == [app.DEFAULT_COOLDOWN_SECONDS] * 2  # TTL re-applied
+
+
+def test_cooldown_zero_never_touches_the_claim_key(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_cooldown(host)
+    _steal(host, monkeypatch, win=False)
+    assert not any(".steal.cd." in c[1][0] for c in host.kv.calls)
+
+
+def test_cooldown_is_per_actor(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _world(host)
+    assert "caught" in (_go(host, monkeypatch, "victim", win=False) or "")
+    assert "lay low" in (_go(host, monkeypatch, "victim", win=False) or "")
+    assert "caught" in (_go(host, monkeypatch, "ally", win=False, actor=TARGET) or "")
+
+
+# -- replay safety -------------------------------------------------------------
+
+
+def _snapshot(host: _Host) -> tuple[Any, ...]:
+    return (dict(host.eco.balances), list(host.eco.ledger), dict(host.kv.store.items()))
+
+
+@pytest.mark.parametrize("win", [False, True])
+def test_redelivery_after_the_cooldown_changes_nothing(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, win: bool
+) -> None:
+    """regression: a redelivered steal re-rolled and re-settled (a second mint / second penalty)."""
+    _world(host)
+    assert _go(host, monkeypatch, "victim", win=win, msg_id="dup-1") is not None
+    host.expire(".steal.cd.")
+    snap = _snapshot(host)
+    for _ in range(3):
+        assert _go(host, monkeypatch, "victim", win=win, msg_id="dup-1") is None
+    assert _snapshot(host) == snap, "no money, stat, cap or cooldown state may change"
+
+
+def test_a_redelivery_that_would_roll_the_other_way_is_still_skipped(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host keys wager and transfer separately, so a flipped re-roll could apply BOTH."""
+    _world(host)
+    _go(host, monkeypatch, "victim", win=False, msg_id="flip-1")  # caught: penalty transferred
+    host.expire(".steal.cd.")
+    snap = _snapshot(host)
+    assert _go(host, monkeypatch, "victim", win=True, msg_id="flip-1") is None
+    assert _snapshot(host) == snap
+    assert _minted(host) == 0
+
+
+def test_a_redelivery_inside_the_cooldown_is_silent_and_does_not_rearm_it(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _go(host, monkeypatch, "victim", win=True, msg_id="dup-2")
+    snap = _snapshot(host)
+    assert _go(host, monkeypatch, "victim", win=True, msg_id="dup-2") is None
+    assert _snapshot(host) == snap
+    assert len([c for c in host.kv.calls if c[0] == "increment" and ".steal.cd." in c[1][0]]) == 1
+
+
+def test_distinct_messages_each_settle(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _world(host)
+    _no_cooldown(host)
+    for i in range(4):
+        assert "caught" in (_go(host, monkeypatch, "victim", win=False, msg_id=f"d-{i}") or "")
+    assert host.eco.balances[ACTOR] == 500 - 4 * STAKE
+    assert _kv_int(host, f"steal.attempts.{app._pseudonym(COMMUNITY, ACTOR)}") == 4
+
+
+@pytest.mark.parametrize("win", [False, True])
+@pytest.mark.parametrize("copies", [2, 6])
+def test_concurrent_duplicate_deliveries_settle_exactly_once(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, win: bool, copies: int
+) -> None:
+    """Two consumers holding the same stream entry at once: the cooldown CAS lets one through."""
+    _world(host)
+    _yielding_kv_all(monkeypatch)
+    monkeypatch.setattr(app, "_roll", lambda percent: win)
+
+    async def race() -> None:
+        await asyncio.gather(
+            *(
+                dispatch(
+                    _envelope("steal", tokens=["victim"], message_id="race-1"), {}, http_client=None
+                )
+                for _ in range(copies)
+            )
+        )
+
+    _run(race())
+    assert len(host.eco.ledger) == (1 if win else 2), host.eco.ledger  # one wager | one transfer
+    assert _kv_int(host, f"steal.attempts.{app._pseudonym(COMMUNITY, ACTOR)}") == 1
+
+
+def test_the_claim_is_recorded_before_the_mutation(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At-most-once: an ambiguous host failure is never retried into a second settlement."""
+    _world(host)
+
+    def down(user: str, stake: int, payout: int) -> int:
+        raise RuntimeError("storage down")  # classified as BackendError (may have committed)
+
+    import wit_world
+
+    real = wit_world.imports.economy.wager
+    wit_world.imports.economy.wager = down
+    _go(host, monkeypatch, "victim", win=True, msg_id="crash-1")
+    wit_world.imports.economy.wager = real
+    host.expire(".steal.cd.")
+    sent = len(host.relay_calls)
+    assert _go(host, monkeypatch, "victim", win=True, msg_id="crash-1") is None
+    assert len(host.relay_calls) == sent and host.eco.ledger == []
+
+
+@pytest.mark.parametrize("missing", [None, "", "  ", 12345])
+def test_a_steal_without_a_message_id_fails_loud_and_moves_nothing(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, missing: Any
+) -> None:
+    _world(host)
+    env = _envelope("steal", tokens=["victim"])
+    if missing is None:
+        env.event.payload.pop("message_id")
+    else:
+        env.event.payload["message_id"] = missing
+    with pytest.raises(RuntimeError, match="message_id"):
+        _run(dispatch(env, {}, http_client=None))
+    assert "unavailable" in _reply(host)
+    assert host.eco.ledger == [] and not host.kv.store
+    assert any("steal.missing_event_id" in m for _l, m, _f in host.log_calls)
+
+
+def test_list_usage_and_config_need_no_message_id(host: _Host) -> None:
+    for command, extra in (
+        ("list", {}),
+        ("usage", {}),
+        ("config_set_cooldown", {"arg": "cooldown 5", "is_mod": True}),
+    ):
+        env = _envelope(command, **extra)
+        env.event.payload.pop("message_id")
+        _run(dispatch(env, {}, http_client=None))
+    assert len(host.relay_calls) == 3
+
+
+def test_dedupe_state_is_one_pii_free_key_per_actor(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    for i in range(6):
+        _go(host, monkeypatch, "victim", win=False, msg_id=f"private-platform-id-{i}")
+    assert len([k for k in host.kv.store if ".dedupe.steal." in k]) == 1
+    blob = " ".join(host.kv.store) + " ".join(v.decode() for v in host.kv.store.values())
+    assert "private-platform-id" not in blob
+    assert "private-platform-id" not in " ".join(f"{m} {f}" for _l, m, f in host.log_calls)
+
+
+def test_corrupt_dedupe_ring_fails_closed(host: _Host) -> None:
+    _world(host)
+    pseud = app._pseudonym(COMMUNITY, ACTOR)
+    host.kv.store[_scoped_key(COMMUNITY, f"dedupe.steal.{pseud}")] = b"garbage"
+    with pytest.raises(RuntimeError, match="backend failed"):
+        _run(dispatch(_envelope("steal", tokens=["victim"]), {}, http_client=None))
+    assert host.eco.ledger == []
+
+
+# -- anti-collusion: pair cap, reciprocal block, per-actor budget ---------------
+
+
+def test_pair_cap_bounds_what_one_actor_can_mint_from_one_target(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    monkeypatch.setattr(app, "PAIR_WINDOW_CAP", 150)
+    replies = [_go(host, monkeypatch, "victim", win=True) for _ in range(4)]
+    assert "stole 100 points" in (replies[0] or "")
+    assert "stole 50 points" in (replies[1] or "")  # clamped to what the pair cap has left
+    assert all(r is not None and "all you can" in r for r in replies[2:])
+    assert _minted(host) == 150
+    assert host.eco.balances[ACTOR] == 650
+    assert _pair_value(host, ACTOR, TARGET) == 150
+
+
+def test_a_refused_steal_moves_no_money_and_burns_no_budget(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    monkeypatch.setattr(app, "PAIR_WINDOW_CAP", 100)
+    _go(host, monkeypatch, "victim", win=True)
+    before = (dict(host.eco.balances), list(host.eco.ledger), _budget_value(host, ACTOR))
+    assert "all you can" in (_go(host, monkeypatch, "victim", win=True) or "")
+    assert (dict(host.eco.balances), list(host.eco.ledger), _budget_value(host, ACTOR)) == before
+
+
+def test_losses_and_unused_reservation_never_consume_a_cap(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    for _ in range(5):
+        assert "caught" in (_go(host, monkeypatch, "victim", win=False) or "")
+    assert _pair_value(host, ACTOR, TARGET) == 0 and _budget_value(host, ACTOR) == 0
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    monkeypatch.setattr(app.random, "randint", lambda a, b: 40)  # wins 40 of a reserved 100
+    _run(dispatch(_envelope("steal", tokens=["victim"]), {}, http_client=None))
+    assert _pair_value(host, ACTOR, TARGET) == 40 and _budget_value(host, ACTOR) == 40
+
+
+def test_the_reciprocal_steal_is_blocked_this_window_and_the_next(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    assert "stole" in (_go(host, monkeypatch, "victim", win=True, actor=ACTOR) or "")
+    snap = (dict(host.eco.balances), list(host.eco.ledger))
+    for _ in range(2):
+        assert "steal back" in (_go(host, monkeypatch, "ally", win=True, actor=TARGET) or "")
+    assert (dict(host.eco.balances), list(host.eco.ledger)) == snap
+    host.now_ms += app.WINDOW_SECONDS * 1000  # next bucket: the previous one still counts
+    assert "steal back" in (_go(host, monkeypatch, "ally", win=True, actor=TARGET) or "")
+    host.now_ms += app.WINDOW_SECONDS * 1000  # two buckets on: the old win has aged out
+    assert "stole" in (_go(host, monkeypatch, "ally", win=True, actor=TARGET) or "")
+
+
+def test_a_caught_steal_mints_nothing_so_it_does_not_block_the_reverse(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    assert "caught" in (_go(host, monkeypatch, "victim", win=False, actor=ACTOR) or "")
+    assert "stole" in (_go(host, monkeypatch, "ally", win=True, actor=TARGET) or "")
+
+
+def test_the_reverse_block_is_per_pair_not_global(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    _go(host, monkeypatch, "victim", win=True, actor=ACTOR)
+    assert "stole" in (_go(host, monkeypatch, "t2", win=True, actor=TARGET) or "")
+    assert "stole" in (_go(host, monkeypatch, "victim", win=True, actor=T2) or "")
+
+
+def test_simultaneous_opposite_steals_cannot_both_pass(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two directions share ONE counter, so the second increment always sees the first."""
+    import contextvars
+
+    import wit_world
+
+    _world(host)
+    _no_cooldown(host)
+    _yielding_kv_all(monkeypatch)
+    current: contextvars.ContextVar[str] = contextvars.ContextVar("actor")
+    wit_world.imports.identity.resolve_actor = lambda: current.get()
+    monkeypatch.setattr(type(host.eco), "_bind", lambda self, payer: None)
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    monkeypatch.setattr(app.random, "randint", lambda a, b: b)
+
+    async def side(user: str, mention: str) -> None:
+        current.set(user)
+        await dispatch(_envelope("steal", tokens=[mention]), {}, http_client=None)
+
+    async def race() -> None:
+        await asyncio.gather(side(ACTOR, "victim"), side(TARGET, "ally"))
+
+    _run(race())
+    replies = [json.loads(m)["text"] for _p, m in host.relay_calls]
+    assert sum("stole 100 points" in r for r in replies) == 1, replies
+    assert _minted(host) <= app.LOOT_CAP
+
+
+def test_the_actor_budget_spans_targets_and_clamps_the_last_grant(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    monkeypatch.setattr(app, "ACTOR_WINDOW_BUDGET", 250)
+    replies = [_go(host, monkeypatch, m, win=True) for m in ("victim", "t2", "t3", "t4")]
+    assert "stole 100" in (replies[0] or "") and "stole 100" in (replies[1] or "")
+    assert "stole 50 points" in (replies[2] or "")  # only 50 of the 250 budget was left
+    assert "steal limit" in (replies[3] or "")
+    assert _minted(host) == 250 and _budget_value(host, ACTOR) == 250
+    assert _pair_value(host, ACTOR, T3) == 50, "the pair's surplus over the budget was returned"
+
+
+def test_caps_reset_in_the_next_window(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _world(host)
+    _no_cooldown(host)
+    monkeypatch.setattr(app, "PAIR_WINDOW_CAP", 100)
+    _go(host, monkeypatch, "victim", win=True)
+    assert "all you can" in (_go(host, monkeypatch, "victim", win=True) or "")
+    host.now_ms += app.WINDOW_SECONDS * 1000
+    assert "stole" in (_go(host, monkeypatch, "victim", win=True) or "")
+
+
+@pytest.mark.parametrize("racers", [3, 10])
+def test_concurrent_steals_cannot_overshoot_the_pair_cap(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, racers: int
+) -> None:
+    """Caps are reserved atomically BEFORE the roll, so a burst cannot all read 'room left'."""
+    _world(host)
+    _no_cooldown(host)
+    _yielding_kv_all(monkeypatch)
+    monkeypatch.setattr(app, "PAIR_WINDOW_CAP", 150)
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    monkeypatch.setattr(app.random, "randint", lambda a, b: b)
+
+    async def race() -> None:
+        await asyncio.gather(
+            *(
+                dispatch(_envelope("steal", tokens=["victim"]), {}, http_client=None)
+                for _ in range(racers)
+            )
+        )
+
+    _run(race())
+    assert 0 < _minted(host) <= 150, _minted(host)
+
+
+def test_concurrent_steals_cannot_overshoot_the_actor_budget_across_targets(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    _yielding_kv_all(monkeypatch)
+    monkeypatch.setattr(app, "ACTOR_WINDOW_BUDGET", 220)
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    monkeypatch.setattr(app.random, "randint", lambda a, b: b)
+
+    async def race() -> None:
+        await asyncio.gather(
+            *(
+                dispatch(_envelope("steal", tokens=[m]), {}, http_client=None)
+                for m in ("victim", "t2", "t3", "victim", "t2", "t3")
+            )
+        )
+
+    _run(race())
+    assert 0 < _minted(host) <= 220, _minted(host)
+
+
+def test_two_colluding_accounts_cannot_net_mint_beyond_one_pair_cap_per_window(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Worst case for the house: every roll wins at max loot, both accounts farm each other."""
+    _world(host)
+    _no_cooldown(host)
+    windows = 3
+    for w in range(windows):
+        minted_before = _minted(host)
+        for _ in range(12):
+            _go(host, monkeypatch, "victim", win=True, actor=ACTOR)
+            _go(host, monkeypatch, "ally", win=True, actor=TARGET)
+        assert _minted(host) - minted_before <= app.PAIR_WINDOW_CAP, (w, _minted(host))
+        host.now_ms += app.WINDOW_SECONDS * 1000
+    assert _minted(host) <= windows * app.PAIR_WINDOW_CAP
+
+
+def test_a_host_refusal_gives_the_whole_reservation_back(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    host.eco.payout_multiple = 1  # payout cap == stake: any loot is an OverCap refusal
+    assert "exceeds the economy cap" in (_go(host, monkeypatch, "victim", win=True) or "")
+    assert host.eco.ledger == []
+    assert _pair_value(host, ACTOR, TARGET) == 0 and _budget_value(host, ACTOR) == 0
+
+
+def test_an_ambiguous_backend_error_keeps_the_reservation(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wager that may have committed must never hand its cap back (a refund could re-mint)."""
+    import wit_world
+
+    _world(host)
+    _no_cooldown(host)
+
+    def down(user: str, stake: int, payout: int) -> int:
+        raise RuntimeError("storage down")
+
+    wit_world.imports.economy.wager = down
+    assert "temporarily unavailable" in (_go(host, monkeypatch, "victim", win=True) or "")
+    assert _pair_value(host, ACTOR, TARGET) == app.LOOT_CAP
+    assert _budget_value(host, ACTOR) == app.LOOT_CAP
+
+
+@pytest.mark.parametrize("bad", [b"not-a-number", b"-5", str(1 << 31).encode()])
+def test_corrupt_cap_counters_fail_closed(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, bad: bytes
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    w = host.now_ms // (app.WINDOW_SECONDS * 1000)
+    pair, _low = app._pair_id(COMMUNITY, ACTOR, TARGET)
+    host.kv.store[_scoped_key(COMMUNITY, f"steal.pair.{w - 1}.{pair}")] = bad
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    with pytest.raises(RuntimeError, match="backend failed"):
+        _run(dispatch(_envelope("steal", tokens=["victim"]), {}, http_client=None))
+    assert host.eco.ledger == []
+
+
+def test_cap_keys_are_pii_free_and_colon_free(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _world(host)
+    _no_cooldown(host)
+    _go(host, monkeypatch, "victim", win=True, msg_id="platform-private-id")
+    for key in host.kv.store:
+        body = key.removeprefix("c.")
+        assert ":" not in body
+        for raw in (ACTOR, TARGET, "viewer-1", "victim", "platform-private-id"):
+            assert raw not in key
+    blob = " ".join(f"{m} {f}" for _l, m, f in host.log_calls)
+    for raw in (ACTOR, TARGET, "viewer-1", "platform-private-id"):
+        assert raw not in blob

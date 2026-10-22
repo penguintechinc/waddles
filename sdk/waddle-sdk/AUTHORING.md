@@ -181,6 +181,19 @@ check, and vice versa (`critical-rules.md` Feature Flags & License Tiers).
   invocations could race (see `bundles/python/poll`, `loyalty`, `inventory`), and compensate a
   failed second step of a two-step write before raising. Host limits to design within: 64 `kv`
   and 64 `db` ops per invocation, 8 KiB per text column, 10,000 `kv` keys per community.
+- **A bundle that moves money must be replay-safe (`waddle_sdk.event_dedupe`).** The pipeline is
+  at-least-once. The host makes `economy.wager`/`transfer` idempotent per event, but your own `kv`
+  side effects (a pot credit, a counter, a cap) are not -- a redelivered event double-credits them.
+  `transform` must forward `event.payload["message_id"]` (the platform's own id: chatter-proof and
+  identical on every redelivery; the WIT `context.message-id` is empty today and is NOT used);
+  `dispatch` then derives `event_id_from_payload(payload, platform=...)` (raises `EventIdError` when
+  absent -- fail loud, move nothing), skips silently if `already_seen(...)`, and calls
+  `claim(...)` AFTER its atomic `increment` cooldown and BEFORE the first mutation (at-most-once: a
+  crash loses one play, it can never repeat one). Why a ring and not a key per event: the `kv` host
+  charges a quota unit for every key it creates and never repays a key that lapses by TTL, so a
+  marker per event would exhaust the 10,000-key quota; `event_dedupe` keeps the last 16 events per
+  actor in ONE key. The ring is read-modify-write, so reach it through the cooldown CAS (see
+  `bundles/python/jackpot`, `steal`, `defuse`).
 
 ## 5. Echoing User Text: `waddle_sdk.safe_text`
 
