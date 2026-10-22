@@ -45,7 +45,7 @@ spec:
             - --addr=tcp://0.0.0.0:1234
             - --oci-worker-no-process-sandbox
             - --oci-worker-gc=true
-            - --oci-worker-gckeepstorage=40000   # MB cap on cache (~40GB): bounds DiskPressure on 2-node/100Gi cluster
+            - --oci-worker-gc-keepstorage=2000,2000,40000   # MB "Reserved,Free,Maximum": 40GB max cache; bounds DiskPressure on 2-node/100Gi cluster
           ports: [{containerPort: 1234, name: grpc}]
           readinessProbe:
             exec: {command: [buildctl, debug, workers]}
