@@ -2678,6 +2678,9 @@ config:
   spectrumOrgSyncEnabled: false
   # ENV baseline for flag waddles.calendar.event_discord_sync (default OFF; PostHog overrides when connected)
   eventDiscordSyncEnabled: false
+  # ENV baseline for flag waddles.bar_citizen.role_sync -> FLAG_WADDLES_BAR_CITIZEN_ROLE_SYNC (default OFF;
+  # PostHog overrides when connected). Also needs pipeline.roleSync.enabled for the reconcile CronJob.
+  barCitizenRoleSyncEnabled: false
   spectrumOrgPollIntervalS: 300
   # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
   spectrumRosterMaxDepartureRatio: 0.5
