@@ -248,7 +248,6 @@ impl<B: KvBackend> KvHost<B> {
                 &scope.live_key(),
                 &scope.data_scan_pattern(),
                 &scope.reconcile_lock_key(),
-                &scope.legacy_count_key(),
                 limits::RECONCILE_LOCK_TTL_MS,
                 limits::RECONCILE_SCAN_LIMIT,
             )
@@ -359,6 +358,7 @@ impl<B: KvBackend> KvHost<B> {
             .set_with_quota(
                 &scope.data_key(key),
                 &scope.live_key(),
+                &scope.legacy_count_key(),
                 value,
                 ttl,
                 limits::MAX_KEYS_PER_APP,
@@ -389,7 +389,11 @@ impl<B: KvBackend> KvHost<B> {
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
         self.backend
-            .delete(&scope.data_key(key), &scope.live_key())
+            .delete(
+                &scope.data_key(key),
+                &scope.live_key(),
+                &scope.legacy_count_key(),
+            )
             .await
             .map(|_existed| ())
             .map_err(KvError::Backend)
@@ -433,6 +437,7 @@ impl<B: KvBackend> KvHost<B> {
             .increment_with_quota(
                 &scope.data_key(key),
                 &scope.live_key(),
+                &scope.legacy_count_key(),
                 delta,
                 ttl,
                 limits::MAX_KEYS_PER_APP,
@@ -1035,7 +1040,6 @@ mod tests {
                 &scope.live_key(),
                 &scope.data_scan_pattern(),
                 &scope.reconcile_lock_key(),
-                &scope.legacy_count_key(),
                 limits::RECONCILE_LOCK_TTL_MS,
                 limits::RECONCILE_SCAN_LIMIT,
             )
@@ -1059,7 +1063,6 @@ mod tests {
                 &scope.live_key(),
                 &scope.data_scan_pattern(),
                 &scope.reconcile_lock_key(),
-                &scope.legacy_count_key(),
                 limits::RECONCILE_LOCK_TTL_MS,
                 limits::RECONCILE_SCAN_LIMIT,
             )

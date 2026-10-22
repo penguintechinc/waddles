@@ -13,7 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bundle_host_kv::backend::LIVE_INDEX_SENTINEL;
-use bundle_host_kv::{CapabilitySnapshot, KvHost, KvScope, MAX_KEYS_PER_APP, MAX_VALUE_BYTES};
+use bundle_host_kv::{
+    CapabilitySnapshot, KvBackend, KvHost, KvScope, QuotaOutcome, ReconcileOutcome,
+    MAX_KEYS_PER_APP, MAX_VALUE_BYTES,
+};
 use redis::aio::MultiplexedConnection;
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -621,11 +624,14 @@ async fn an_emptied_index_is_not_rebuilt_by_a_keyspace_scan_in_real_valkey() {
 
 /// Upgrade path. A deployment coming from the old `INCR`/`DECR` counter has
 /// a counter pinned at the ceiling by phantom (lapsed) TTL keys, a few real
-/// data keys, and no live index. The first write must succeed (the phantoms
-/// are repaid), rebuild the index from the real keys with their remaining
-/// TTLs, and remove the orphaned legacy counter.
+/// data keys, and no live index. The first write must succeed (the new code
+/// enforces against the index it rebuilds, so the phantoms cannot block it),
+/// rebuild the index from the real keys with their remaining TTLs, and leave
+/// the legacy counter in place -- pods still running the old code are
+/// enforcing against it (deleting it was a mixed-version fail-open) -- while
+/// writing the new key through so that counter stays an upper bound.
 #[tokio::test]
-async fn first_write_after_upgrade_repays_the_legacy_counters_phantom_keys() {
+async fn first_write_after_upgrade_is_not_blocked_by_phantoms_and_keeps_the_legacy_counter() {
     let (_container, url) = start().await;
     let scope = scope("acme", Some("main"), "waddles.bot.a");
     let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
@@ -651,12 +657,11 @@ async fn first_write_after_upgrade_repays_the_legacy_counters_phantom_keys() {
         .await
         .expect("phantom counts must not block the first write after upgrade");
 
-    let legacy_exists: i64 = redis::cmd("EXISTS")
-        .arg(scope.legacy_count_key())
-        .query_async(&mut probe)
-        .await
-        .unwrap();
-    assert_eq!(legacy_exists, 0, "the orphaned legacy counter is removed");
+    assert_eq!(
+        legacy_counter(&mut probe, &scope).await,
+        Some(MAX_KEYS_PER_APP as i64 + 1),
+        "the legacy counter survives the upgrade and includes the new key"
+    );
     assert_eq!(live_keys_now(&mut probe, &scope).await, 3);
     assert_eq!(
         index_score(&mut probe, &scope, "perm").await,
@@ -667,4 +672,486 @@ async fn first_write_after_upgrade_repays_the_legacy_counters_phantom_keys() {
         ttl_score > before && ttl_score <= before + 61_000.0,
         "the rebuilt member keeps its remaining ~60s TTL, got {ttl_score}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Mixed-version rollout: pre-index ("legacy") pods and this code, one Valkey.
+// ---------------------------------------------------------------------------
+
+/// The legacy counter's raw value, `None` if the key does not exist.
+async fn legacy_counter(conn: &mut MultiplexedConnection, scope: &KvScope) -> Option<i64> {
+    let raw: Option<String> = redis::cmd("GET")
+        .arg(scope.legacy_count_key())
+        .query_async(conn)
+        .await
+        .unwrap();
+    raw.map(|v| v.parse().expect("legacy counter is an integer"))
+}
+
+/// Plants a raw value at the legacy counter key (what a pre-index pod, or
+/// debris from one, leaves behind).
+async fn plant_counter(conn: &mut MultiplexedConnection, scope: &KvScope, value: &str) {
+    redis::AsyncCommands::set::<_, _, ()>(conn, scope.legacy_count_key(), value)
+        .await
+        .unwrap();
+}
+
+/// Ground truth for the quota: data keys that actually exist right now,
+/// independent of the live index and of the legacy counter.
+async fn true_live_keys(conn: &mut MultiplexedConnection, scope: &KvScope) -> i64 {
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(scope.data_scan_pattern())
+        .query_async(conn)
+        .await
+        .unwrap();
+    let mut live = 0;
+    for key in keys {
+        let pttl: i64 = redis::cmd("PTTL")
+            .arg(&key)
+            .query_async(conn)
+            .await
+            .unwrap();
+        if pttl != -2 {
+            live += 1;
+        }
+    }
+    live
+}
+
+/// Asserts the coexistence invariant: whenever the legacy counter exists it
+/// is never below the true live-key count (it may only over-count lapsed TTL
+/// keys), so a pre-index pod can never be more permissive than the truth.
+async fn assert_legacy_counter_never_undercounts(
+    conn: &mut MultiplexedConnection,
+    scope: &KvScope,
+    ctx: &str,
+) {
+    if let Some(counter) = legacy_counter(conn, scope).await {
+        let truth = true_live_keys(conn, scope).await;
+        assert!(
+            counter >= truth,
+            "{ctx}: legacy counter {counter} fell below the true live-key count {truth}"
+        );
+    }
+}
+
+/// Ceiling both versions enforce in the mixed-version tests -- small enough
+/// to reach, passed explicitly (both versions take `max_keys` per call).
+const MIXED_MAX: u64 = 30;
+
+/// A pod running the PRE-INDEX code, reproduced from its exact Lua (commit
+/// `881ac8dd`, `core/bundle_host_kv/src/backend.rs` before the live-index
+/// fix) so the mixed-version tests exercise the real legacy scripts, not a
+/// paraphrase. The legacy host made two round trips per write -- reconcile,
+/// then the quota script -- which [`LegacyPod::reconcile`] and
+/// [`LegacyPod::set_script`] keep separate so tests can interleave a new pod
+/// between them (the reported race).
+mod legacy_pod {
+    use super::*;
+
+    const SET_WITH_QUOTA: &str = r#"
+local existed = redis.call('EXISTS', KEYS[1])
+if existed == 0 then
+  local count = tonumber(redis.call('GET', KEYS[2]) or '0')
+  if count >= tonumber(ARGV[3]) then
+    return 1
+  end
+  redis.call('INCR', KEYS[2])
+end
+if tonumber(ARGV[2]) > 0 then
+  redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+else
+  redis.call('SET', KEYS[1], ARGV[1])
+end
+return 0
+"#;
+
+    const DELETE: &str = r#"
+local deleted = redis.call('DEL', KEYS[1])
+if deleted == 1 and redis.call('EXISTS', KEYS[2]) == 1 then
+  redis.call('DECR', KEYS[2])
+end
+return deleted
+"#;
+
+    const RECONCILE: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return {0, 0}
+end
+local lock_ok = redis.call('SET', KEYS[2], '1', 'NX', 'PX', ARGV[2])
+if not lock_ok then
+  return {2, 0}
+end
+local cursor = '0'
+local count = 0
+local limit = tonumber(ARGV[3])
+repeat
+  local res = redis.call('SCAN', cursor, 'MATCH', ARGV[1], 'COUNT', 1000)
+  cursor = res[1]
+  count = count + #res[2]
+  if count >= limit then
+    count = limit
+    break
+  end
+until cursor == '0'
+redis.call('SET', KEYS[1], count)
+redis.call('DEL', KEYS[2])
+return {1, count}
+"#;
+
+    #[derive(Clone)]
+    pub struct LegacyPod {
+        conn: MultiplexedConnection,
+    }
+
+    impl LegacyPod {
+        pub fn new(conn: MultiplexedConnection) -> Self {
+            Self { conn }
+        }
+
+        /// The legacy `ensure_count_reconciled` round trip: rebuilds a missing
+        /// counter from a `SCAN`, a no-op while it exists.
+        pub async fn reconcile(&self, scope: &KvScope) {
+            let mut conn = self.conn.clone();
+            let _: (i64, u64) = redis::Script::new(RECONCILE)
+                .key(scope.legacy_count_key())
+                .key(scope.reconcile_lock_key())
+                .arg(scope.data_scan_pattern())
+                .arg(5_000u64)
+                .arg(MIXED_MAX * 2)
+                .invoke_async(&mut conn)
+                .await
+                .unwrap();
+        }
+
+        /// The legacy quota script alone; `true` if the write was admitted.
+        pub async fn set_script(&self, scope: &KvScope, key: &str, ttl: u32) -> bool {
+            let mut conn = self.conn.clone();
+            let rejected: i64 = redis::Script::new(SET_WITH_QUOTA)
+                .key(scope.data_key(key))
+                .key(scope.legacy_count_key())
+                .arg(b"v".as_slice())
+                .arg(ttl)
+                .arg(MIXED_MAX)
+                .invoke_async(&mut conn)
+                .await
+                .unwrap();
+            rejected == 0
+        }
+
+        /// A full legacy write: reconcile, then the quota script.
+        pub async fn set(&self, scope: &KvScope, key: &str, ttl: u32) -> bool {
+            self.reconcile(scope).await;
+            self.set_script(scope, key, ttl).await
+        }
+
+        pub async fn delete(&self, scope: &KvScope, key: &str) {
+            let mut conn = self.conn.clone();
+            let _: i64 = redis::Script::new(DELETE)
+                .key(scope.data_key(key))
+                .key(scope.legacy_count_key())
+                .invoke_async(&mut conn)
+                .await
+                .unwrap();
+        }
+    }
+}
+use legacy_pod::LegacyPod;
+
+/// A write from a pod running THIS code, through the real `KvBackend`
+/// scripts at the mixed-version ceiling (reconcile-if-missing, then the quota
+/// script -- the two calls `KvHost::set` makes). `true` if admitted.
+async fn new_pod_set(conn: &MultiplexedConnection, scope: &KvScope, key: &str, ttl: u32) -> bool {
+    match conn
+        .reconcile_count_if_missing(
+            &scope.live_key(),
+            &scope.data_scan_pattern(),
+            &scope.reconcile_lock_key(),
+            5_000,
+            MIXED_MAX * 2,
+        )
+        .await
+        .unwrap()
+    {
+        ReconcileOutcome::AlreadyPresent | ReconcileOutcome::Reconciled(_) => {}
+        ReconcileOutcome::Locked => return false, // fail closed, like `KvHost`
+    }
+    matches!(
+        conn.set_with_quota(
+            &scope.data_key(key),
+            &scope.live_key(),
+            &scope.legacy_count_key(),
+            b"v",
+            ttl,
+            MIXED_MAX,
+        )
+        .await
+        .unwrap(),
+        QuotaOutcome::Admitted(())
+    )
+}
+
+async fn new_pod_delete(conn: &MultiplexedConnection, scope: &KvScope, key: &str) {
+    conn.delete(
+        &scope.data_key(key),
+        &scope.live_key(),
+        &scope.legacy_count_key(),
+    )
+    .await
+    .unwrap();
+}
+
+/// The reported bypass, replayed against the real legacy and new Lua: a
+/// legacy pod passes its reconcile check (counter exists), a new pod then
+/// does its first write/reconcile and fills the app, and the legacy pod's
+/// quota script runs. When the new code deleted the counter in that gap the
+/// legacy script read `0`, recreated it from there, and admitted writes past
+/// the ceiling for the rest of the rollout.
+#[tokio::test]
+async fn mixed_rollout_a_legacy_pod_cannot_recreate_the_counter_from_zero_mid_request() {
+    let (_container, url) = start().await;
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+    let legacy = LegacyPod::new(connect(&url).await);
+    let new_pod = connect(&url).await;
+    let mut probe = connect(&url).await;
+
+    for i in 0..4 {
+        assert!(legacy.set(&scope, &format!("pre.{i}"), 0).await);
+    }
+    assert_eq!(legacy_counter(&mut probe, &scope).await, Some(4));
+
+    legacy.reconcile(&scope).await; // legacy pod: counter present, proceeds
+    for i in 0..(MIXED_MAX - 4) {
+        // the new pod's first write builds `:live` (reconcile) and fills the
+        // app to the ceiling inside the gap
+        assert!(new_pod_set(&new_pod, &scope, &format!("new.{i}"), 0).await);
+    }
+    assert_eq!(true_live_keys(&mut probe, &scope).await, MIXED_MAX as i64);
+    assert!(
+        legacy_counter(&mut probe, &scope).await.is_some(),
+        "the new pod must never delete the legacy counter"
+    );
+
+    assert!(
+        !legacy.set_script(&scope, "one-too-many", 0).await,
+        "the legacy pod must see the new pod's keys and reject"
+    );
+    assert_eq!(true_live_keys(&mut probe, &scope).await, MIXED_MAX as i64);
+    assert_legacy_counter_never_undercounts(&mut probe, &scope, "after the gap write").await;
+}
+
+/// Both directions of visibility the legacy counter needs: keys a new pod
+/// creates are counted by it (a legacy pod rejects at the ceiling), and keys
+/// a new pod deletes free legacy slots exactly once (double-delete and
+/// delete-of-nothing never double-`DECR`).
+#[tokio::test]
+async fn mixed_rollout_legacy_pod_tracks_new_pod_creates_and_deletes() {
+    let (_container, url) = start().await;
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+    let legacy = LegacyPod::new(connect(&url).await);
+    let new_pod = connect(&url).await;
+    let mut probe = connect(&url).await;
+
+    assert!(legacy.set(&scope, "pre", 0).await);
+    for i in 0..(MIXED_MAX - 1) {
+        assert!(new_pod_set(&new_pod, &scope, &format!("new.{i}"), 0).await);
+    }
+    assert!(
+        !legacy.set(&scope, "blocked", 0).await,
+        "app is full: the legacy pod rejects"
+    );
+
+    new_pod_delete(&new_pod, &scope, "new.0").await;
+    new_pod_delete(&new_pod, &scope, "new.0").await;
+    new_pod_delete(&new_pod, &scope, "never-existed").await;
+    assert!(
+        legacy.set(&scope, "fits-now", 0).await,
+        "the freed slot is usable"
+    );
+    assert!(!legacy.set(&scope, "blocked-again", 0).await);
+    assert_legacy_counter_never_undercounts(&mut probe, &scope, "after deletes").await;
+}
+
+/// A new pod never fabricates the counter (a guessed value is exactly the
+/// under-count to avoid); a legacy pod that arrives later rebuilds it from a
+/// keyspace `SCAN`, which already includes the new pod's keys.
+#[tokio::test]
+async fn mixed_rollout_an_absent_legacy_counter_is_never_created_by_a_new_pod() {
+    let (_container, url) = start().await;
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+    let legacy = LegacyPod::new(connect(&url).await);
+    let new_pod = connect(&url).await;
+    let mut probe = connect(&url).await;
+
+    for i in 0..3 {
+        assert!(new_pod_set(&new_pod, &scope, &format!("k.{i}"), 0).await);
+    }
+    new_pod_delete(&new_pod, &scope, "k.0").await;
+    assert_eq!(legacy_counter(&mut probe, &scope).await, None);
+
+    assert!(legacy.set(&scope, "legacy.0", 0).await);
+    assert_eq!(legacy_counter(&mut probe, &scope).await, Some(3));
+}
+
+/// Concurrent legacy and new writers/deleters (permanent and TTL keys,
+/// overlapping key pool, repeated rounds with TTL lapse between them) on one
+/// app: after every round the legacy counter is still at or above the true
+/// live-key count -- over-count only, never a bypass -- and it never
+/// disappears mid-rollout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mixed_rollout_concurrent_legacy_and_new_pods_never_undercount() {
+    let (_container, url) = start().await;
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+    let legacy = LegacyPod::new(connect(&url).await);
+    let new_pod = connect(&url).await;
+    let mut probe = connect(&url).await;
+
+    // Pre-rollout state: a legacy deployment with a populated counter.
+    for i in 0..6 {
+        let ttl = if i % 2 == 0 { 0 } else { 2 };
+        assert!(legacy.set(&scope, &format!("pre.{i}"), ttl).await);
+    }
+    assert!(legacy_counter(&mut probe, &scope).await.is_some());
+
+    for round in 0..8u32 {
+        let mut tasks = JoinSet::new();
+        for i in 0..24u32 {
+            let key = format!("k.{}", (i * 7 + round * 13) % 40);
+            let ttl = if (i + round) % 3 == 0 { 2 } else { 0 };
+            let (legacy, new_pod, scope) = (legacy.clone(), new_pod.clone(), scope.clone());
+            match i % 4 {
+                0 | 1 => {
+                    tasks.spawn(async move {
+                        legacy.set(&scope, &key, ttl).await;
+                    });
+                }
+                2 => {
+                    tasks.spawn(async move {
+                        new_pod_set(&new_pod, &scope, &key, ttl).await;
+                    });
+                }
+                _ => {
+                    tasks.spawn(async move {
+                        if (i + round) % 2 == 0 {
+                            new_pod_delete(&new_pod, &scope, &key).await;
+                        } else {
+                            legacy.delete(&scope, &key).await;
+                        }
+                    });
+                }
+            }
+        }
+        while let Some(joined) = tasks.join_next().await {
+            joined.expect("worker task joined");
+        }
+        assert!(
+            legacy_counter(&mut probe, &scope).await.is_some(),
+            "round {round}: the legacy counter disappeared mid-rollout"
+        );
+        assert_legacy_counter_never_undercounts(&mut probe, &scope, &format!("round {round}"))
+            .await;
+        if round % 2 == 1 {
+            // Let the TTL keys lapse: the counter keeps counting them
+            // (stricter), the truth drops -- the safe direction.
+            tokio::time::sleep(Duration::from_millis(2_200)).await;
+            assert_legacy_counter_never_undercounts(
+                &mut probe,
+                &scope,
+                &format!("round {round} after lapse"),
+            )
+            .await;
+        }
+    }
+}
+
+/// The write-through is exact for every transition, never creates or breaks
+/// anything, and can never fail a write: overwrites do not `INCR`, a delete
+/// of nothing does not `DECR`, a failing `INCRBY` leaves the counter alone,
+/// a garbage/foreign-typed counter is ignored (the write still succeeds), and
+/// a counter at zero is never taken negative.
+#[tokio::test]
+async fn legacy_counter_write_through_is_exact_and_can_never_fail_a_write() {
+    let (_container, url) = start().await;
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
+    let mut probe = connect(&url).await;
+
+    plant_counter(&mut probe, &scope, "5").await;
+    host.set(&scope, 1, "a", b"v", 0).await.unwrap();
+    assert_eq!(legacy_counter(&mut probe, &scope).await, Some(6), "new key");
+    host.set(&scope, 2, "a", b"v2", 0).await.unwrap();
+    assert_eq!(
+        legacy_counter(&mut probe, &scope).await,
+        Some(6),
+        "overwrite"
+    );
+    host.increment(&scope, 3, "hits", 1, 0).await.unwrap();
+    assert_eq!(
+        legacy_counter(&mut probe, &scope).await,
+        Some(7),
+        "new counter key"
+    );
+    host.increment(&scope, 4, "hits", 1, 0).await.unwrap();
+    assert_eq!(
+        legacy_counter(&mut probe, &scope).await,
+        Some(7),
+        "existing counter key"
+    );
+    host.delete(&scope, 5, "a").await.unwrap();
+    assert_eq!(legacy_counter(&mut probe, &scope).await, Some(6), "delete");
+    host.delete(&scope, 6, "a").await.unwrap();
+    host.delete(&scope, 7, "never-existed").await.unwrap();
+    assert_eq!(
+        legacy_counter(&mut probe, &scope).await,
+        Some(6),
+        "no double DECR"
+    );
+
+    // A failing INCRBY (non-integer value) leaves the legacy counter alone.
+    redis::AsyncCommands::set::<_, _, ()>(&mut probe, scope.data_key("text"), "abc")
+        .await
+        .unwrap();
+    assert_eq!(
+        host.increment(&scope, 8, "text", 1, 30)
+            .await
+            .unwrap_err()
+            .code(),
+        "backend"
+    );
+    assert_eq!(legacy_counter(&mut probe, &scope).await, Some(6));
+
+    // Never taken negative: a zero counter with a live key stays at zero.
+    plant_counter(&mut probe, &scope, "0").await;
+    host.delete(&scope, 9, "hits").await.unwrap();
+    assert_eq!(legacy_counter(&mut probe, &scope).await, Some(0));
+
+    // Debris can never fail a write: a non-numeric counter, and one of the
+    // wrong type entirely, are ignored by the write-through.
+    plant_counter(&mut probe, &scope, "not-a-number").await;
+    host.set(&scope, 10, "b", b"v", 0).await.unwrap();
+    host.delete(&scope, 11, "b").await.unwrap();
+    redis::cmd("DEL")
+        .arg(scope.legacy_count_key())
+        .query_async::<()>(&mut probe)
+        .await
+        .unwrap();
+    redis::cmd("RPUSH")
+        .arg(scope.legacy_count_key())
+        .arg("x")
+        .query_async::<()>(&mut probe)
+        .await
+        .unwrap();
+    host.set(&scope, 12, "c", b"v", 0).await.unwrap();
+    host.increment(&scope, 13, "d", 1, 0).await.unwrap();
+    host.delete(&scope, 14, "c").await.unwrap();
+
+    // An absent counter is never created.
+    redis::cmd("DEL")
+        .arg(scope.legacy_count_key())
+        .query_async::<()>(&mut probe)
+        .await
+        .unwrap();
+    host.set(&scope, 15, "e", b"v", 0).await.unwrap();
+    host.delete(&scope, 16, "e").await.unwrap();
+    assert_eq!(legacy_counter(&mut probe, &scope).await, None);
 }

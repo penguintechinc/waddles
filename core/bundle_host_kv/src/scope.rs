@@ -131,11 +131,13 @@ impl KvScope {
     }
 
     /// The pre-live-index `INCR`/`DECR` counter this crate used to enforce
-    /// the quota with. Never read or written by the quota path any more; it
-    /// is only named here so the upgrade reconciliation
-    /// (`crate::backend::KvBackend::reconcile_count_if_missing`) can delete
-    /// the orphan -- and with it the phantom counts TTL expiry leaked into
-    /// it. Safe to drop once every deployment has reconciled.
+    /// the quota with. Pods still running the old code keep enforcing
+    /// against it during a rolling upgrade (or after a rollback), so this
+    /// code never deletes it and never reads it for admission: it only
+    /// writes it through (`INCR`/`DECR`, while it exists) so those pods' view
+    /// stays an upper bound of the true live-key count. Removing it is a
+    /// separate, later phase -- see `crate::backend`'s module doc
+    /// ("Rolling-upgrade coexistence").
     pub fn legacy_count_key(&self) -> String {
         format!("{}:count", self.app_prefix())
     }
