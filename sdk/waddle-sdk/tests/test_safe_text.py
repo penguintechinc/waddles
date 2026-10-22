@@ -449,3 +449,293 @@ def test_randomized_escape_is_exact_inverse_of_the_host_unescape_for_backslash_f
         if "\\" in text:
             continue
         assert _render(escape_egress_tokens(text), {}) == text, text
+
+
+# ---------------------------------------------------------------------------------------------
+# Review findings: the host strips `\t`/`\n` AFTER the detokenizer; allow-list exactness
+# (the broader proof is tests/test_safe_text_differential.py)
+# ---------------------------------------------------------------------------------------------
+
+
+def _twitch_final(sanitized: str) -> str:
+    """The Twitch send path: detokenize (nothing live here), then strip EVERY control char."""
+    rendered = _render(sanitized, {})
+    return "".join(c for c in rendered if not (ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "@\tbob", "@\t\tbob", "@\n\tbob", "@\t\neveryone", "@\there", "@ev\teryone",
+        "<@\t123456789012345678>", "<@\t!123>", "<@!\t123>", "<@&\n987>", "<\t@123>",
+        "<#\t123>", "<#\n123>", "<\n#123>", "<\t#\t123>", "<!\there>", "<!\nchannel>",
+        "<\t!here>", "<\n!\nhere>", "hi@\teveryone", "x \t@\tbob",
+    ],
+)  # fmt: skip
+def test_tab_and_newline_gaps_cannot_hide_a_mention_from_the_twitch_strip(raw: str) -> None:
+    r"""`sanitize_irc_component` strips `\t` and `\n` after the detokenizer, closing the gap."""
+    precondition = _twitch_final(raw)  # what the host would send for the UNsanitized text
+    assert _PLATFORM_PARSES_A_MENTION.search(precondition), precondition
+    clean = sanitize_user_text(raw)
+    assert not _PLATFORM_PARSES_A_MENTION.search(_twitch_final(clean)), clean  # Twitch
+    assert not _PLATFORM_PARSES_A_MENTION.search(_render(clean, {})), clean  # Discord keeps them
+
+
+def test_tab_and_newline_gaps_defang_at_the_sigil_and_stay_readable() -> None:
+    """The space lands right after the sigil; removing it gives back the input exactly."""
+    assert sanitize_user_text("@\tbob") == f"@{ZW}\tbob"
+    assert sanitize_user_text("<!\there>") == f"<!{ZW}\there>"
+    assert sanitize_user_text("<\t!here>") == f"<\t!{ZW}here>"
+    assert sanitize_user_text("<#\n123>") == f"<#{ZW}\n123>"
+    assert sanitize_user_text("tab\tseparated\tcolumns\nand lines") == (
+        "tab\tseparated\tcolumns\nand lines"
+    )
+    assert sanitize_user_text("a @\n b") == "a @\n b"  # `@` then whitespace is no mention
+
+
+def test_defang_mentions_alone_sees_through_tab_and_newline() -> None:
+    """The public `defang_mentions` (no stripping step) closes the same gap."""
+    assert defang_mentions("@\tbob") == f"@{ZW}\tbob"
+    assert defang_mentions("<!\r\nhere>") == f"<!{ZW}\r\nhere>"
+    assert defang_mentions("email me \t@\tbob") == f"email me \t@{ZW}\tbob"
+    assert defang_mentions("user\t@\thost") == "user\t@\thost"  # strips to `user@host`: email
+
+
+# -- allow-list: exact whole-token matching only -------------------------------------------------
+
+_T = "tok-1"
+_LIVE_T = f"{{user:{_T}}}"
+
+
+def _live_tokens(clean: str) -> list[str]:
+    return [t for t in re.findall(r"(?<!\\)\{user:([A-Za-z0-9_:.-]+)\}", clean)]
+
+
+@pytest.mark.parametrize(
+    ("hostile", "expected_live"),
+    [
+        # placeholder fragments never combine: the stripped control char, split tokens, partials
+        ("{user:tok\x00-1}", 0),
+        ("{user:tok-1\x00}", 0),
+        ("{\x00user:tok-1}", 0),
+        ("{user:\x1btok-1}", 0),
+        ("{us\x00er:tok-1}", 0),
+        ("{user:tok\n-1}", 0),
+        ("{user:tok\t-1}", 0),
+        ("{user:tok-1\x00}{user:tok-1}", 1),
+        # partial / extended tokens are different tokens
+        ("{user:tok-}", 0),
+        ("{user:tok-12}", 0),
+        ("{user:ttok-1}", 0),
+        ("{user:tok-1.}", 0),
+        ("{user:tok-1:}", 0),
+        ("{user:TOK-1}", 0),
+        ("{user:tok-1 }", 0),
+        ("{user:tok-1", 0),
+        ("user:tok-1}", 0),
+        # nested / adjacent braces
+        ("{user:{user:tok-1}}", 1),
+        ("{{user:tok-1}}", 1),
+        ("{user:tok-1}}", 1),
+        ("{{{user:tok-1}}}", 1),
+        ("{user:{user:{user:tok-1}}}", 1),
+        ("{user:tok-1}{user:tok-1}", 2),
+        ("{user:tok-1}{user:evil}{user:tok-1}", 2),
+        ("{user:tok-1{user:tok-1}", 1),
+        ("{user:evil{user:tok-1}evil}", 1),
+        # escape confusion: an escaped brace is never live; an escaped backslash does not escape
+        (r"\{user:tok-1}", 0),
+        (r"\{user:tok-1\}", 0),
+        (r"\\{user:tok-1}", 1),
+        (r"\\\{user:tok-1}", 0),
+        (r"\\\\{user:tok-1}", 1),
+        (r"{user:tok-1\}", 0),
+        (r"{user:tok-1}\}", 1),
+        (r"{user:\tok-1}", 0),
+        (r"\{user:tok-1}{user:tok-1}", 1),
+        ("\\\x00{user:tok-1}", 1),  # a control char breaks the pair: live in the text as given
+        ("\\\x00\\{user:tok-1}", 0),
+    ],
+)
+def test_allow_list_keeps_exactly_the_whole_placeholders_the_detokenizer_finds(
+    hostile: str, expected_live: int
+) -> None:
+    """Live output = allow-listed whole placeholders live in the INPUT, nothing assembled."""
+    precondition = [o for o in _live_occurrences(hostile) if o == _T]
+    assert len(precondition) == expected_live, hostile  # the table matches the detokenizer
+    clean = sanitize_user_text(hostile, allow_tokens=[_T])
+    assert _live_occurrences(clean) == [_T] * expected_live, (hostile, clean)
+    assert sanitize_user_text(clean, allow_tokens=[_T]) == clean
+    assert set(_extract_tokens(clean)) <= {_T}
+
+
+def _live_occurrences(text: str) -> list[str]:
+    """Every placeholder token the oracle (detokenizer port) resolves in ``text``, in order."""
+    found: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] in "{}\\":
+            i += 2
+        elif text.startswith("{user:", i):
+            j = i + 6
+            while j < len(text) and text[j] in _ORACLE_TOKEN_CHARS:
+                j += 1
+            if j < len(text) and text[j] == "}" and j > i + 6:
+                found.append(text[i + 6 : j])
+                i = j + 1
+            else:
+                i += 1
+        else:
+            i += 1
+    return found
+
+
+def test_allow_list_control_char_splice_cannot_forge_a_live_token() -> None:
+    """Controls were once stripped BEFORE the allow-list scan, re-forming a split token.
+
+    `{user:tok<NUL>-1}` became a live `{user:tok-1}` out of text that never contained one.
+    """
+    for forged in ("{user:tok\x00-1}", "{user:tok-\x1b1}", "{\x00user:\x00tok-1\x00}"):
+        clean = sanitize_user_text(forged, allow_tokens=[_T])
+        assert _extract_tokens(clean) == [], clean
+        assert _render(clean, {_T: "Alice"}) == forged.replace("\x00", "").replace("\x1b", "")
+
+
+def test_allow_list_text_around_a_live_placeholder_never_joins_it() -> None:
+    """Attacker characters glued to an allowed placeholder stay separate text."""
+    text = f"{{user:evil}}{_LIVE_T}{{user:evil}} {{user:{_VICTIM}}}{_LIVE_T}"
+    clean = sanitize_user_text(text, allow_tokens=[_T])
+    assert _extract_tokens(clean) == [_T]
+    assert _render(clean, {_T: "Alice", _VICTIM: "VictimDisplayName"}) == (
+        f"{{user:evil}}Alice{{user:evil}} {{user:{_VICTIM}}}Alice"
+    )
+
+
+def test_allow_tokens_bare_string_is_rejected_not_split_into_characters() -> None:
+    """`allow_tokens="tok-1"` would allow-list the one-character tokens t, o, k, -, 1."""
+    for bad in ("tok-1", b"tok-1", bytearray(b"tok-1")):
+        with pytest.raises(TypeError, match="not a bare"):
+            sanitize_user_text("{user:t}{user:1}", allow_tokens=bad)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="not a bare"):
+            escape_egress_tokens("{user:t}", allow_tokens=bad)  # type: ignore[arg-type]
+
+
+def test_allow_tokens_that_can_never_be_a_token_are_inert() -> None:
+    """Empty / non-token entries never match anything (and never raise): fail-closed."""
+    text = "{user:} {user:a b} {user:é} {user:tok-1}"
+    for inert in ([], [""], ["a b"], ["é"], ["{user:tok-1}"], ["tok-1}"], ["{"], ["\\"]):
+        clean = sanitize_user_text(text, allow_tokens=inert)
+        assert _extract_tokens(clean) == [], (inert, clean)
+    assert _extract_tokens(sanitize_user_text(text, allow_tokens=["tok-1", "é", ""])) == ["tok-1"]
+
+
+def test_allow_list_with_several_tokens_keeps_each_placeholder_where_it_was() -> None:
+    """Two different live placeholders keep their own identity and order (not swapped)."""
+    text = "{user:a-1} and {user:b-2}, not {user:c-3}, then {user:a-1} again"
+    clean = sanitize_user_text(text, allow_tokens=["a-1", "b-2"])
+    assert clean == "{user:a-1} and {user:b-2}, not \\{user:c-3\\}, then {user:a-1} again"
+    assert _render(clean, {"a-1": "Ann", "b-2": "Bo", "c-3": "Cy"}) == (
+        "Ann and Bo, not {user:c-3}, then Ann again"
+    )
+
+
+def test_allow_tokens_accepts_any_iterable_of_strings() -> None:
+    """A generator, tuple, set, dict (its keys) and frozenset all work, consumed once."""
+    text = f"hi {_LIVE_T}"
+    for allow in ((t for t in [_T]), (_T,), {_T}, {_T: 1}, frozenset([_T])):
+        assert _extract_tokens(sanitize_user_text(text, allow_tokens=allow)) == [_T]
+
+
+# -- a live placeholder resolves to a name the mentioned user controls --------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (f"<!{_LIVE_T}>", f"<!{ZW}{_LIVE_T}{ZW}>"),  # `<!` + name `here` = Slack broadcast
+        (f"<#{_LIVE_T}>", f"<#{ZW}{_LIVE_T}{ZW}>"),  # `<#` + digits = channel link
+        (f"<{_LIVE_T}>", f"<{ZW}{_LIVE_T}{ZW}>"),  # `<` + name `#123>`
+        (f"<@{_LIVE_T}>", f"<@{ZW}{_LIVE_T}{ZW}>"),
+        (f"<@!{_LIVE_T}>", f"<@{ZW}!{_LIVE_T}{ZW}>"),
+        (f"hi@{_LIVE_T}", f"hi@{ZW}{_LIVE_T}"),  # email-shaped `@` + name `everyone`
+        (f"hi@eve{_LIVE_T}", f"hi@{ZW}eve{_LIVE_T}"),  # `@eve` + name `ryone`
+        (f"hi@e{_LIVE_T}ne", f"hi@{ZW}e{_LIVE_T}{ZW}ne"),
+        (f"@\t{_LIVE_T}", f"@{ZW}\t{_LIVE_T}"),
+        (f"{_LIVE_T}@bob", f"{_LIVE_T}@{ZW}bob"),  # name ending in `<`/`@` + `@bob`
+        (f"{_LIVE_T}bob", f"{_LIVE_T}{ZW}bob"),  # name ending in `@` + `bob`
+        (f"{_LIVE_T}#123>", f"{_LIVE_T}{ZW}#123>"),  # name ending in `<` + `#123>`
+        (f"{_LIVE_T}>", f"{_LIVE_T}{ZW}>"),
+        (f"{_LIVE_T}!here>", f"{_LIVE_T}{ZW}!here>"),
+        (f"{_LIVE_T}{_LIVE_T}", f"{_LIVE_T}{ZW}{_LIVE_T}"),
+        # the host strips `\n`/`\t` from the final text, joining what is on either side
+        (f"{_LIVE_T}\n{_LIVE_T}", f"{_LIVE_T}{ZW}\n{_LIVE_T}"),
+        (f"{_LIVE_T}\tbob", f"{_LIVE_T}{ZW}\tbob"),
+        (f"@{_LIVE_T}", f"@{ZW}{_LIVE_T}"),
+    ],
+)
+def test_text_adjacent_to_a_live_placeholder_cannot_complete_a_mention(
+    text: str, expected: str
+) -> None:
+    """The sanitizer cannot see the display name, so the boundary around it is broken."""
+    assert sanitize_user_text(text, allow_tokens=[_T]) == expected
+
+
+@pytest.mark.parametrize("name", ["everyone", "veryone", "here", "<", "#123>", "123", "@", "<@"])
+@pytest.mark.parametrize(
+    "shape", ["<!{P}>", "<#{P}>", "<{P}", "hi@{P}", "hi@e{P}", "{P}bob", "@{P}"]
+)
+def test_no_mention_forms_across_a_resolved_display_name(shape: str, name: str) -> None:
+    """Resolve the allowed placeholder to a hostile name: no ping the author's text helped form."""
+    clean = sanitize_user_text(shape.replace("{P}", _LIVE_T), allow_tokens=[_T])
+    rendered = _render(clean, {_T: name})
+    for final in (rendered, _twitch_final_text(rendered)):
+        for match in _PLATFORM_PARSES_A_MENTION.finditer(final):
+            assert match.group(0) in name, (shape, name, final)
+
+
+def _twitch_final_text(rendered: str) -> str:
+    return "".join(c for c in rendered if not (ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"hello {_LIVE_T}",
+        f"hello {_LIVE_T}, welcome!",
+        f"{_LIVE_T}: hi",
+        f"{_LIVE_T}'s turn",
+        f"({_LIVE_T}) said {_LIVE_T}.",
+        f"{_LIVE_T}\n- {_LIVE_T} \t {_LIVE_T}",
+        f"thanks {_LIVE_T}!",
+        f"@ {_LIVE_T}",
+    ],
+)
+def test_ordinary_text_around_an_allowed_mention_is_byte_identical(text: str) -> None:
+    """Normal replies (space, punctuation, newline next to a mention) are not touched."""
+    assert sanitize_user_text(text, allow_tokens=[_T]) == text
+
+
+def test_defang_mentions_treats_a_raw_placeholder_as_an_opaque_name() -> None:
+    """The public helper knows `{user:..}`, ignores escaped ones, and drops NUL (its marker)."""
+    assert defang_mentions(f"<!{_LIVE_T}>") == f"<!{ZW}{_LIVE_T}{ZW}>"
+    assert defang_mentions(r"<!\{user:tok-1\}>") == r"<!\{user:tok-1\}>"
+    assert defang_mentions(" \x00@\x00bob") == f" @{ZW}bob"
+    assert defang_mentions(defang_mentions(f"hi@e{_LIVE_T} <#{_LIVE_T}>")) == defang_mentions(
+        f"hi@e{_LIVE_T} <#{_LIVE_T}>"
+    )
+
+
+def test_urls_still_only_defang_mass_mentions_but_placeholders_in_them_are_guarded() -> None:
+    """A link keeps working; an `@` next to a live placeholder inside one is defanged."""
+    assert sanitize_user_text("https://medium.com/@bob/x") == "https://medium.com/@bob/x"
+    assert sanitize_user_text(f"https://x.io/@{_LIVE_T}", allow_tokens=[_T]) == (
+        f"https://x.io/@{ZW}{_LIVE_T}"
+    )
+
+
+def test_a_lost_or_forged_live_marker_fails_loudly_never_silently() -> None:
+    """The internal marker count must match the live placeholders it stands for (unreachable)."""
+    assert safe_text._restore_live("a\x00b", ["{user:x}"]) == "a{user:x}b"
+    for masked in ("ab", "\x00\x00"):
+        with pytest.raises(RuntimeError, match="lost or forged"):
+            safe_text._restore_live(masked, ["{user:x}"])

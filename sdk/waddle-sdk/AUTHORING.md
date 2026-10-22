@@ -210,12 +210,18 @@ reply = f"{sanitize_user_text(username)} says: {sanitize_user_text(rest)}"
   escapes those too (the reader sees the literal placeholder). To keep them resolving to names,
   pass the tokens the host minted for this message — and only those:
   `sanitize_user_text(text, allow_tokens=identity.mention_tokens(event.payload["text"]))`. Never
-  derive `allow_tokens` from LLM, HTTP or stored text.
+  derive `allow_tokens` from LLM, HTTP or stored text. Matching is exact and whole-token: only a
+  complete, unescaped `{user:<token>}` already present in the text stays live (nothing is rebuilt
+  from fragments, nested braces or control-split text). `allow_tokens` takes a list/set/tuple —
+  a bare `str` raises `TypeError` (its characters would become one-character tokens).
 - **Idempotent and cheap** — wrapping twice is harmless; ordinary text, URLs (`@name` inside a link
   is left alone) and `user@host` come back byte-identical. Braces and backslashes are escaped
   (`\{`, `\}`, `\\`) and the egress pass removes that escaping again, so the reader still sees
   exactly what was typed; every other change is an invisible zero-width space after a mention
-  sigil. A non-`str` raises `TypeError` — handle a missing payload field before sanitizing.
+  sigil (and, only next to an allow-listed mention, between it and a following word/`#`/`>`:
+  the resolved display name is user-controlled and could otherwise complete a ping). Newlines and
+  tabs are seen through — the host strips them from the final Twitch text, so `@<TAB>name` is a
+  mention. A non-`str` raises `TypeError` — handle a missing payload field before sanitizing.
 - **Bundles that must call it** (sweep list, `bundles/python/<name>`):
   - echo-family — `echo`, `choose`, `vote`, `wheel`, `count`, `dailycounter`, `alias`, `quote`,
     `birthday`, `remind`, `countdown`, `poll`, `event`, `ticket`, `lfg`, `music`, `weather`
@@ -240,8 +246,12 @@ reply = f"{sanitize_user_text(username)} says: {sanitize_user_text(rest)}"
     literally); `boop`/`hug`/`slap`/`wave`/`highfive` only interpolate a
     `[A-Za-z0-9_.-]{1,32}`-validated target (wrapping is optional hardening)
 
-See `tests/test_safe_text.py`: its oracle is a port of the detokenizer grammar, and a mutation of
-any rule (brace escaping, lone-backslash pairing, control stripping, each mention rule) fails it.
+See `tests/test_safe_text.py` and `tests/test_safe_text_differential.py`: the oracle is a port of
+the detokenizer grammar, pinned to the real Rust by a digest both sides must reproduce
+(`core/egress_detokenizer/tests/fixtures/sanitizer_parity.txt`; `cargo test -p egress_detokenizer`
+runs the Rust half), and a mutation of any rule (brace escaping, lone-backslash pairing, control
+stripping, allow-list scan, each mention rule) fails it. Change the detokenizer grammar and the
+pin fails until the oracle and the pin are regenerated together.
 
 ## 6. Worked Examples
 
