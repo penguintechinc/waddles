@@ -199,6 +199,17 @@ global:
   # Deployment tier (alpha/beta/production) — used by services for environment-specific behavior
   deploymentTier: "production"
 
+# Per-family image-tag override for the `hub-api` image family -- pins hub-api independently
+# of global.imageTag (every other workload keeps reading global.imageTag). Empty (default)
+# falls back to global.imageTag, so unset = unchanged behavior for every environment.
+# Applies ONLY to workloads pulling the `hub-api` image repository: the hub-api Deployment
+# + role-sync / event-sync-reconcile / odoo-sync / bundle-signing-reconciler CronJobs + the
+# bundle-signing-backfill hook Job. The SEPARATE images (core-bundle-seeder, waddlebot-migrations,
+# svc-*, bundle-executor, hub-webui, ...) are NOT affected -- they stay on global.imageTag.
+# (Distinct from `pipeline.hubApi`, which holds hub-api's port/replicas/resources.)
+hubApi:
+  imageTag: ""
+
 # Namespace configuration
 namespace: waddlebot
 namespaceCreate: true  # Create namespace if it doesn't exist

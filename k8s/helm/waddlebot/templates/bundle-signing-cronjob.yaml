@@ -39,7 +39,7 @@ spec:
               type: RuntimeDefault
           containers:
           - name: bundle-signing-reconciler
-            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
             imagePullPolicy: {{ .Values.global.imagePullPolicy }}
             command: ["python3", "-m", "cli.reconcile_signed_sidecars"]
             securityContext:

@@ -56,6 +56,15 @@ global:
   initialAdmin:
     email: "admin@waddlebot.dal2a.penguintech.cloud"
 
+# Monday-demo: pin ONLY the hub-api image family (hub-api Deployment + role-sync / event-sync /
+# odoo-sync / bundle-signing CronJobs) to the sync-worker DAL fix, rebuilt as
+# ghcr.io/penguintechinc/waddles/hub-api:demo-881ac8dd-syncfix
+# (sha256:0b018eb209f49de03b68088b7576cb51d4a6cbeb8c37aa53547a5da050629954). Every other workload
+# (svc-*-rust, core-bundle-seeder, waddlebot-migrations, ...) stays on global.imageTag above --
+# those images only exist at demo-881ac8dd. Replace with a digest pin for production.
+hubApi:
+  imageTag: "demo-881ac8dd-syncfix"
+
 # fix/helm-platform-credentials -- the Discord bot token / Twitch IRC OAuth
 # token placeholders that used to live here are REMOVED, not just blanked:
 # this is exactly the field (`oauth.discord.botToken`) whose
@@ -153,6 +162,11 @@ pipeline:
     enabled: true
     schedule: "*/1 * * * *"
     demoteBaselineRole: "member"
+  # Monday-demo: Discord event-sync reconcile CronJob ON (was base-default false, so it was NOT
+  # deployed). The hub-api image pinned by hubApi.imageTag above carries the sync-worker DAL fix.
+  # Still double-gated by the waddles.calendar.event_discord_sync PostHog flag (default OFF).
+  eventSync:
+    enabled: true
   # fix/alpha-clean-deploy -- the legacy Python svc-ingest/svc-process/svc-action
   # Deployments crash-loop in this cluster (`No module named 'waddle'` loading
   # ping's WASM entrypoint) and are no longer the live path here: the Rust data
