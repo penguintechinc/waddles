@@ -1,0 +1,107 @@
+# Rootless BuildKit for alpha-only in-cluster image builds (runner connects via BUILDKIT_HOST).
+# No privileged container, no docker.sock. Rootless buildkit needs seccomp/apparmor Unconfined
+# (kernel userns + mount syscalls), which PSA baseline/restricted forbid, so this lives in its own
+# namespace labeled PSA `privileged` - the CONTAINER is still non-root, no added caps.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buildkit
+  labels:
+    pod-security.kubernetes.io/enforce: privileged   # required for Unconfined seccomp only
+    pod-security.kubernetes.io/warn: baseline
+---
+apiVersion: apps/v1
+kind: StatefulSet   # STATEFUL EXCEPTION (approved-by-design): layer cache; loss only costs rebuild time
+metadata:
+  name: buildkitd
+  namespace: buildkit
+spec:
+  replicas: 1
+  serviceName: buildkitd
+  selector:
+    matchLabels: {app: buildkitd}
+  template:
+    metadata:
+      labels: {app: buildkitd}
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: Unconfined}
+      containers:
+        - name: buildkitd
+          # Pin to digest before activation (SETUP.md).
+          image: moby/buildkit:v0.23.2-rootless
+          args:
+            - --addr=unix:///run/user/1000/buildkit/buildkitd.sock
+            - --addr=tcp://0.0.0.0:1234
+            - --oci-worker-no-process-sandbox
+            - --oci-worker-gc=true
+            - --oci-worker-gckeepstorage=80000   # MB cap on cache (~80GB)
+          ports: [{containerPort: 1234, name: grpc}]
+          readinessProbe:
+            exec: {command: [buildctl, debug, workers]}
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          livenessProbe:
+            exec: {command: [buildctl, debug, workers]}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: "2", memory: 4Gi, ephemeral-storage: 20Gi}
+            limits: {cpu: "6", memory: 12Gi, ephemeral-storage: 100Gi}
+          volumeMounts:
+            - {name: cache, mountPath: /home/user/.local/share/buildkit}
+      volumes:
+        - name: cache
+          emptyDir: {sizeLimit: 90Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd
+  namespace: buildkit
+spec:
+  type: ClusterIP
+  selector: {app: buildkitd}
+  ports: [{name: grpc, port: 1234, targetPort: 1234}]
+---
+# Default-deny; only runner namespace may reach buildkitd (unauthenticated gRPC = build access).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: buildkitd-access
+  namespace: buildkit
+spec:
+  endpointSelector: {matchLabels: {app: buildkitd}}
+  ingress:
+    - fromEndpoints:
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: github-runners}
+      toPorts: [{ports: [{port: "1234", protocol: TCP}]}]
+  egress:
+    - toEndpoints:
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: kube-system, k8s-app: kube-dns}
+      toPorts: [{ports: [{port: "53", protocol: ANY}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toFQDNs:
+        - matchPattern: "*.docker.io"
+        - matchPattern: "*.ghcr.io"
+        - matchName: ghcr.io
+        - matchPattern: "*.pkg.github.com"
+        - matchName: crates.io
+        - matchPattern: "*.crates.io"
+        - matchName: pypi.org
+        - matchName: files.pythonhosted.org
+        - matchName: registry.npmjs.org
+        - matchName: index.crates.io
+        - matchName: static.crates.io
+      toPorts: [{ports: [{port: "443", protocol: TCP}]}]

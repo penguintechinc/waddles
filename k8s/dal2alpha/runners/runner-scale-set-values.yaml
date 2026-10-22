@@ -4,7 +4,8 @@ githubConfigUrl: https://github.com/penguintechinc/waddles
 githubConfigSecret: arc-github-app   # k8s Secret created by the user (see SETUP.md) - never inline
 minRunners: 0
 maxRunners: 2
-# Deploy-only: no containerMode (no dind, no privileged). Builds run on GitHub-hosted runners.
+# Alpha is FULL self-hosted (build + deploy). No containerMode (no dind/privileged); builds go to the
+# rootless buildkitd in ns `buildkit` via BUILDKIT_HOST. Beta/prod use GitHub-hosted build runners.
 template:
   spec:
     serviceAccountName: dal2-alpha-runner
@@ -25,8 +26,10 @@ template:
           allowPrivilegeEscalation: false
           capabilities: {drop: [ALL]}
         resources:
-          requests: {cpu: 500m, memory: 512Mi}
-          limits: {cpu: "1", memory: 1Gi}
+          requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 10Gi}
+          limits: {cpu: "2", memory: 4Gi, ephemeral-storage: 30Gi}
+        env:
+          - {name: BUILDKIT_HOST, value: "tcp://buildkitd.buildkit.svc:1234"}
         volumeMounts:
           - {name: work, mountPath: /home/runner/_work}
     volumes:
