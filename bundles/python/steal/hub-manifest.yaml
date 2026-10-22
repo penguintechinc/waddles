@@ -43,8 +43,6 @@ limits:
 permissions:
   - id: "storage.kv"
     justification: "persists per-community steal cooldowns, stats and cooldown config"
-  - id: "flags.read"
-    justification: "reads the waddles.command-steal feature flag after the command matches"
   - id: "economy.read"
     justification: "steal reads balances / max-bet via the economy host import"
   - id: "economy.wager"

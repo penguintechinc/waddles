@@ -67,7 +67,6 @@ def test_no_target_is_a_solo_reply(host) -> None:
     out = _run(transform(_event("!poke")))
     assert out is not None
     assert out.payload["text"] in _expected(_SOLO, actor=ACTOR)
-    assert host.flag_keys == ["waddles.command-poke"]
 
 
 def test_target_mention_is_resolved_by_token(host) -> None:
@@ -125,12 +124,6 @@ def test_non_string_text_is_dropped(host) -> None:
     assert _run(transform(ev)) is None
 
 
-def test_flag_off_drops_after_command_match(monkeypatch) -> None:
-    h = _install_host(monkeypatch, flag=False)
-    assert _run(transform(_event("!poke"))) is None
-    assert h.flag_keys == ["waddles.command-poke"]
-
-
 def test_logs_are_pii_free(host) -> None:
     _run(transform(_event("!poke " + TARGET)))
     blob = repr(host.log_calls)
@@ -154,3 +147,12 @@ def test_dispatch_requires_channel_id(host) -> None:
 
 def _envelope(ev):
     return types.SimpleNamespace(event=ev, community=1)
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(monkeypatch) -> None:
+    """Activation-gated only: an OFF `waddles.command-poke` flag must not drop the command."""
+    h = _install_host(monkeypatch, flag=False)
+    out = _run(transform(_event("!poke")))
+    assert out is not None
+    assert h.flag_keys == []

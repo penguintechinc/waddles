@@ -4,8 +4,8 @@ Static, SFW, stateless: no kv/db, no AI, no external API. Relay only. Never logs
 or any mention token (logs carry only the platform); a mention is echoed back only as the host's
 opaque `{user:<token>}` placeholder, which the egress detokenizer renders -- never a raw handle.
 
-Gated behind the PostHog flag `waddles.command-horoscope` (default OFF), checked after the command
-text matches so an unrelated event never pays for a host round trip.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -15,11 +15,9 @@ from typing import Any
 
 from waddle_sdk import log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 SPEC = CommandSpec(name="horoscope")
-FLAG_KEY = "waddles.command-horoscope"
 LINES: tuple[str, ...] = (
     "Today, a small kindness comes back around.",
     "Snacks will taste better than expected.",
@@ -79,9 +77,9 @@ def build_reply(rest: str) -> str:
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: match `!horoscope`, check the flag, build the reply.
+    """Implement `process-stage.transform`: match `!horoscope`, build the reply.
 
-    Returns `None` for non-matching payloads or while the flag is off. A malformed invocation
+    Returns `None` for non-matching payloads. A malformed invocation
     gets the usage reply -- never silently dropped, and the malformed text is not echoed.
     """
     text = event.payload.get("text")
@@ -89,8 +87,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != f"!{SPEC.name}":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     reply = build_reply(rest.strip())

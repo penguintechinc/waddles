@@ -7,20 +7,29 @@ PII-free logs: only platform, op, input length and resolved reply shape (plus co
 `dispatch`) are logged -- never the message text, `event.actor`, or any typed argument. The reply
 itself carries caller-typed text back to the same public channel it came from.
 
-Gated by the `waddles.command-clap` feature flag (default OFF), checked after the command matches
-so an unrelated event never pays for a host round trip.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
+
+Output safety: the echoed text is user-typed, so the transformed reply goes through
+`waddle_sdk.safe_text.sanitize_user_text` LAST (after the transform), neutralizing forged
+`{user:<token>}` placeholders and `@everyone`/`@here`/`<@id>` mass-mention markup. The
+leading `/ . !` refusal runs on the sanitized text, so a stripped control character cannot
+unmask a command lead.
+A mention the user typed still resolves: the transform keeps `{user:<token>}` verbatim, so
+the tokens the host minted for this message (`identity.mention_tokens` of the raw delivered
+text) are passed as `allow_tokens` -- never anything derived from the transformed text.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
-from waddle_sdk import log, relay
+from waddle_sdk import identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
-FLAG_KEY = "waddles.command-clap"
 SPEC = CommandSpec(name="clap")
 
 MAX_INPUT_LEN = 200
@@ -41,7 +50,9 @@ def apply_transform(text: str) -> str:
     return f" {_CLAP} ".join(words) + f" {_CLAP}"
 
 
-def _build_reply(args: str | None) -> tuple[str, str]:
+def _build_reply(
+    args: str | None, *, allow_tokens: Sequence[str] = ()
+) -> tuple[str, str]:
     """Validate `args` and return `(reply_text, shape)`; `shape` is the PII-free log label.
 
     Raises:
@@ -51,7 +62,7 @@ def _build_reply(args: str | None) -> tuple[str, str]:
         raise CommandUsageError(_USAGE)
     if len(args) > MAX_INPUT_LEN:
         return _TOO_LONG, "too_long"
-    reply = apply_transform(args)
+    reply = sanitize_user_text(apply_transform(args), allow_tokens=allow_tokens)
     if reply.startswith(_UNSAFE_LEAD):
         return _UNSAFE_MSG, "unsafe"
     return reply, "clap"
@@ -60,7 +71,7 @@ def _build_reply(args: str | None) -> tuple[str, str]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!clap` and build the transformed reply.
 
-    Returns `None` (event dropped) for a non-matching payload or while the flag is off -- never
+    Returns `None` (event dropped) for a non-matching payload -- never
     raises over an event this bundle was never meant to react to.
     """
     text = event.payload.get("text")
@@ -75,12 +86,11 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     except CommandUsageError:
         return None
 
-    if not await feature_enabled(FLAG_KEY, default=False):
-        return None
-
     args = rest.strip() or None
     try:
-        reply_text, shape = _build_reply(args)
+        reply_text, shape = _build_reply(
+            args, allow_tokens=identity.mention_tokens(text)
+        )
     except CommandUsageError as exc:
         reply_text, shape = str(exc), "usage"
     # Length + shape only -- NEVER the text itself (PII-free logs).

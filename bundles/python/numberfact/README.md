@@ -4,7 +4,7 @@ Static fun number facts; no external API. First-party (`provider: builtin`, `app
 
 | | |
 |---|---|
-| Gating | Feature flag `waddles.command-numberfact` (default OFF, checked after the command matches) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`, no DB, no egress, no external API) |
 | Catalog | NOT yet registered in `bundles/core-bundles.yaml` (follow-up) |
@@ -20,7 +20,6 @@ Static fun number facts; no external API. First-party (`provider: builtin`, `app
 
 | id | why |
 |---|---|
-| `flags.read` | feature-flag gate |
 | `chat.send:discord` / `chat.send:twitch` | reply on the origin platform via `relay.push` |
 
 ## Behavior notes

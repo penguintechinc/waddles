@@ -34,3 +34,7 @@ Logs carry only platform + outcome shape. The announced text and the actor are n
 ## Files
 
 `bundle.yaml`, `hub-manifest.yaml`, `src/app.py`, `src/_entry_wiring.py`, `tests/`.
+
+## Output safety
+
+The announcement is caller-typed, so it passes through `waddle_sdk.safe_text.sanitize_user_text` last: forged placeholders are escaped and `@everyone`/`@here`/`<@id>` are defanged even for a moderator; mentions the moderator typed still resolve.

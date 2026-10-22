@@ -7,3 +7,7 @@
 - Activation-gated, no feature flag. Perms: `ai.generate`, `chat.send:{discord,twitch}`.
 - Input capped at 400 chars; host rejects PII. Logs are PII-free (platform, op, sentiment label, input length only).
 - Tests use a mocked AI host; full e2e needs Ollama: `python3 -m pytest` in this dir.
+
+## Output safety
+
+The model-supplied emoji is untrusted text (label and confidence are validated), so it passes through `waddle_sdk.safe_text.sanitize_user_text` last, before it enters the reply: a forged `{user:<token>}` placeholder is escaped and `@everyone`/`@here`/`<@id>` markup is defanged. No `allow_tokens` -- nothing in model output is a host-minted mention.

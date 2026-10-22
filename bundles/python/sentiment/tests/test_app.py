@@ -213,3 +213,36 @@ def test_dispatch_requires_channel_id(host: MockHost) -> None:
     ev.payload["channel_id"] = None
     with pytest.raises(ValueError, match="channel_id"):
         _run(dispatch(_envelope(ev), {}, http_client=None))
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+FORGED = "ok {user:victim-9} @everyone <@123> @here"
+NEUTRALIZED = (
+    "ok \\{user:victim-9\\} @" + ZWSP + "everyone <@" + ZWSP + "123> @" + ZWSP + "here"
+)
+
+
+def test_model_supplied_emoji_cannot_carry_a_mention(host: MockHost) -> None:
+    """The emoji only has to be short/printable/not-all-ASCII, so `@here` + emoji passes parsing."""
+    host.ai.reply = json.dumps(
+        {"sentiment": "positive", "confidence": 0.9, "emoji": "@here\U0001f642"}
+    )
+    out = _run(transform(_event("!sentiment I love this stream")))
+    assert out is not None
+    assert out.payload["command"] == "sentiment"
+    assert (
+        out.payload["text"]
+        == "@" + ZWSP + "here\U0001f642 Sentiment: positive (90% confident)"
+    )
+
+
+def test_model_emoji_discord_mention_is_defanged(host: MockHost) -> None:
+    host.ai.reply = json.dumps(
+        {"sentiment": "negative", "confidence": 0.5, "emoji": "<@1>\U0001f620"}
+    )
+    out = _run(transform(_event("!sentiment ugh")))
+    assert out is not None
+    assert out.payload["text"].startswith(
+        "<@" + ZWSP + "1>\U0001f620 Sentiment: negative"
+    )

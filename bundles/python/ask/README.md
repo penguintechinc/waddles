@@ -19,6 +19,10 @@ reopened. `REFUSE` -> polite canned reply. Completion is collapsed to one line (
   personal info" reply. Any AI failure -> chat reply AND `dispatch()` raises.
 - Logs: platform, op, reason, lengths only -- never question, answer or actor.
 
+## Output safety
+
+The model completion is untrusted text, so it passes through `waddle_sdk.safe_text.sanitize_user_text` last, before it enters the reply: a forged `{user:<token>}` placeholder is escaped and `@everyone`/`@here`/`<@id>` markup is defanged. No `allow_tokens` -- nothing in model output is a host-minted mention.
+
 ## Testing
 
 `python3 -m pytest bundles/python/ask` -- MOCKED AI host. Full e2e (real model) needs Ollama; not done.

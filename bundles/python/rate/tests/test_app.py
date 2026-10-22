@@ -66,12 +66,6 @@ def test_non_matching_is_ignored_without_flag_lookup(host, text):
     assert host.flag_keys == []
 
 
-def test_flag_off_drops_after_match_default_false(host):
-    host.flag = False
-    assert _text("!rate") is None
-    assert host.flag_keys == [("waddles.command-rate", False)]
-
-
 def test_non_text_payload_ignored(host):
     ev = PlatformEvent(platform="twitch", event_type="x", actor=None, payload={}, occurred_at="")
     assert _run(transform(ev)) is None
@@ -137,3 +131,29 @@ def test_long_input_capped_and_mentions_defused(host):
 
 def test_flavor_covers_every_score():
     assert len(app.FLAVOR) == 11
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+
+
+def test_rated_text_neutralizes_mass_and_raw_mentions(host):
+    text = _text("!rate @everyone <@123>")
+    assert text.startswith("I rate @" + ZWSP + "everyone <@" + ZWSP + "123> ")
+
+
+def test_host_minted_mention_is_kept_live(host):
+    assert _text("!rate {user:tok-1} stream").startswith("I rate {user:tok-1} stream ")
+
+
+def test_typed_placeholder_stays_escaped(host):
+    assert _text("!rate \\{user:victim-9\\}").startswith("I rate \\{user:victim-9\\} ")
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
+    """Activation-gated only: an OFF `waddles.command-rate` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(_event("!rate pizza")))
+    assert out is not None
+    assert host.flag_keys == []

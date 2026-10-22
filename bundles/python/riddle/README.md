@@ -4,7 +4,7 @@ Static-list riddles; answers revealed by number so no state is stored. First-par
 
 | | |
 |---|---|
-| Gating | Feature flag `waddles.command-riddle` (default OFF, checked after the command matches) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`, no DB, no egress, no external API) |
 | Catalog | NOT yet registered in `bundles/core-bundles.yaml` (follow-up) |
@@ -20,7 +20,6 @@ Static-list riddles; answers revealed by number so no state is stored. First-par
 
 | id | why |
 |---|---|
-| `flags.read` | feature-flag gate |
 | `chat.send:discord` / `chat.send:twitch` | reply on the origin platform via `relay.push` |
 
 ## Behavior notes

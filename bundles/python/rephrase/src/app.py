@@ -16,6 +16,11 @@ PII-free logs: only platform, op/command, and input/output LENGTHS are logged --
 text, the rewrite, `event.actor`, or an exception message. The host additionally REJECTS prompts
 carrying emails/phones/@handles/tokens (`contains_pii`), surfaced as a "remove personal info"
 reply.
+
+Output safety: the model completion is untrusted text (a prompt-injected input can make it
+emit `{user:<token>}` placeholders or `@everyone`), so it goes through
+`waddle_sdk.safe_text.sanitize_user_text` LAST, immediately before it enters the reply. No
+`allow_tokens`: nothing in model output is ever a host-minted mention.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from typing import Any, NoReturn
 from waddle_sdk import ai, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
 SPEC = CommandSpec(name="rephrase")
 
@@ -146,7 +152,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
                 command, reply = "error", _ERROR_MESSAGES["filtered"]
                 log.error("rephrase.empty_completion", platform=event.platform)
             else:
-                reply = f"✍️ {cleaned}"
+                reply = f"✍️ {sanitize_user_text(cleaned)}"
                 log.info(
                     "rephrase.transform matched",
                     platform=event.platform,

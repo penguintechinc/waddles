@@ -34,8 +34,6 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - id: flags.read
-    justification: "gates the command behind the waddles.command-affirmation feature flag (default OFF)"
   - id: "chat.send:discord"
     justification: "affirmation replies to the invoking channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"

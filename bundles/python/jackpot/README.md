@@ -10,7 +10,7 @@ permission) -- ideas/design only, no code copied** (same convention as `fish`/`h
 | `!jackpot` | Show the current pot and the odds. |
 
 Invalid stake / insufficient funds / over the host max-bet reply with the reason and move nothing.
-Gated by feature flag `waddles.command-jackpot` (default OFF, checked after the command matches).
+Activation-gated only -- no feature flag (installed -> enabled -> activated).
 
 ## Money and the pot (read this)
 
@@ -29,7 +29,6 @@ Gated by feature flag `waddles.command-jackpot` (default OFF, checked after the 
 
 | id | why |
 |---|---|
-| `flags.read` | feature flag gate |
 | `storage.kv` | pot + cooldown counters |
 | `economy.read` / `economy.wager` (`max_bet: 500`) | balance check; atomic stake debit + payout |
 | `identity.resolve` | actor uuid required by the economy import |
@@ -41,6 +40,10 @@ Uses `economy`/`identity` (`world stage-next` imports) -- build against that wor
 
 kv keys: `jackpot.pot`, `jackpot.cd.<sha256(community|uuid)>` only (`.`-joined, never `:`). Logs carry
 `op`/`outcome`/`amount_bucket`/error-case only -- no names, uuids or message text.
+
+## Output safety
+
+`event.actor` is interpolated into replies. The host-minted `{user:<token>}` actor stays live (egress renders the display name); any other value, and every typed echo, goes through `waddle_sdk.safe_text.sanitize_user_text`.
 
 ## Tests
 

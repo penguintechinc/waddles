@@ -8,8 +8,8 @@ rate limits `ai.generate` to 10 calls/60 s, so one call per command).
 The model is called through `waddle_sdk.ai.generate` (the `ai.generate` permission, `stage-next`
 world, **process stage only** -- so the call happens in `transform()`, and `dispatch()` is a pure
 relay). The model is HOST-controlled (`gemma4:e2b` for `json=False`, as used here); a bundle can't
-name or override it. Feature-flagged `waddles.command-translate` (default OFF), checked after the
-command matches.
+name or override it. Activation-gated only -- no feature flag: the platform's installed -> enabled
+-> activated check decides whether this bundle runs.
 
 Fail loud: every `waddle_sdk.ai` refusal (`contains_pii`, `rate_limited`, `not_granted`,
 unavailable model, ...) becomes a clear chat reply AND a raise in `dispatch()` -- never a canned or
@@ -19,6 +19,10 @@ PII-free logs: only platform, op, target language, and input/output LENGTHS are 
 the typed text, the translation, `event.actor`, or an exception message. The host additionally
 REJECTS prompts carrying emails/phones/@handles/tokens (`contains_pii`); that is surfaced to the
 caller as a "remove personal info" reply.
+
+Output safety: the model completion and the typed language token echoed in the usage reply are
+untrusted, so both go through `waddle_sdk.safe_text.sanitize_user_text` LAST (no `allow_tokens`:
+model output is never a host-minted mention; `lang` is `_LANG_RE`-validated and emitted as-is).
 """
 
 from __future__ import annotations
@@ -28,11 +32,10 @@ from typing import Any, NoReturn
 
 from waddle_sdk import ai, log, relay
 from waddle_sdk.command import VERBS, CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
 SPEC = CommandSpec(name="translate")
-FLAG_KEY = "waddles.command-translate"
 
 #: Chat-sized bounds: the input fits comfortably under the host's ~2000-token prompt bound, and
 #: the reply under Twitch's 500-char message limit once prefixed.
@@ -110,7 +113,9 @@ def _parse(rest: str) -> tuple[str, str]:
         parse_command(f"!{SPEC.name} {rest}", SPEC)  # may raise its own usage error
         raise CommandUsageError(_USAGE)
     if not _LANG_RE.match(tok1):
-        raise CommandUsageError(f"'{tok1[:32]}' is not a valid language. {_USAGE}")
+        raise CommandUsageError(
+            f"'{sanitize_user_text(tok1[:32])}' is not a valid language. {_USAGE}"
+        )
     text = tail.strip()
     if not text:
         raise CommandUsageError(f"Nothing to translate. {_USAGE}")
@@ -122,7 +127,7 @@ def _parse(rest: str) -> tuple[str, str]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: match `!translate`, call the AI host, build the reply.
 
-    Returns `None` for a non-matching payload or while the flag is off. Every other outcome
+    Returns `None` for a non-matching payload. Every other outcome
     (usage, success, AI refusal) is forwarded with a `command` of `usage`/`translate`/`error` --
     never silently dropped.
     """
@@ -131,8 +136,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != f"!{SPEC.name}":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     channel_id = event.payload.get("channel_id")
@@ -174,7 +177,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
                     lang=lang,
                 )
             else:
-                reply = f"[{lang}] {cleaned}"
+                reply = f"[{lang}] {sanitize_user_text(cleaned)}"
                 log.info(
                     "translate.transform matched",
                     platform=event.platform,

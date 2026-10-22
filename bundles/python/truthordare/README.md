@@ -5,7 +5,7 @@
 are always available (no `SubModuleGate`, since the bundle is stateless). Malformed input gets a
 usage reply and is never echoed.
 
-- Feature flag: `waddles.command-truthordare` (default OFF), checked after the command matches.
-- Permissions: `flags.read`, `chat.send:discord`, `chat.send:twitch`.
+- Activation-gated only (installed -> enabled -> activated); no feature flag.
+- Permissions: `chat.send:discord`, `chat.send:twitch`.
 - Logging is PII-free: only the platform name is logged.
 - Tests: `cd bundles/python/truthordare && python3 -m pytest -q`.

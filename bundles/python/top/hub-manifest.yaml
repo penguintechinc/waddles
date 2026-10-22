@@ -42,8 +42,6 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - id: flags.read
-    justification: "gates the command behind waddles.command-top"
   - id: economy.read
     justification: "reads the community economy leaderboard (economy.leaderboard) -- read-only, no wager/transfer"
   - id: "chat.send:discord"

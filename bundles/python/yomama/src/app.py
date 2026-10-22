@@ -14,8 +14,8 @@ Grammar: `waddle_sdk.command.parse_command` validates the bare shape (`!yomama`)
 positional @mention is the same documented grammar extension `compliment`/`lastseen` use
 (`parse_command`'s bare case takes no argument), detected with `identity.mention_tokens`.
 
-Gated by the `waddles.command-yomama` feature flag (default OFF), checked only AFTER the command
-matched, so non-command chatter costs nothing. Fail-loud: bad usage always gets a reply.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs. Fail-loud: bad usage always gets a reply.
 """
 
 from __future__ import annotations
@@ -26,12 +26,10 @@ from typing import Any
 
 from waddle_sdk import identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 SPEC = CommandSpec(name="yomama")
 COMMAND = "!yomama"
-FLAG_KEY = "waddles.command-yomama"
 
 _USAGE = "Usage: !yomama [@user]"
 _BAD_TARGET_MSG = "I couldn't identify that user - mention them (e.g. @name)."
@@ -98,16 +96,13 @@ def _reply_for(text: str, actor: object) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!yomama` and build the reply.
 
-    Exact first-token match (so `!yomamas` never matches) is the cheap precondition; the feature
-    flag (default OFF) is consulted only after a match.
+    Exact first-token match (so `!yomamas` never matches) is the cheap precondition.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
         return None
     head = text.strip().partition(" ")[0]
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     reply = _reply_for(text, event.actor)

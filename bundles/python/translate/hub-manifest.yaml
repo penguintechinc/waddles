@@ -34,8 +34,6 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - id: flags.read
-    justification: "reads the default-OFF waddles.command-translate feature flag after the command matches"
   - id: ai.generate
     justification: "translates the caller's short text via the host-controlled self-hosted model (ai.generate, plain text, json=false); the host guards PII and bounds the prompt"
   - id: "chat.send:discord"

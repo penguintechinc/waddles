@@ -8,7 +8,7 @@ Idea inspired by [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBo
 
 | | |
 |---|---|
-| Gating | Activation + PostHog flag `waddles.command-top` (default OFF), checked after the command matches |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`, no DB, no egress) |
 | Data source | `waddle_sdk.economy.leaderboard(limit)` (host `economy.read`) |
@@ -34,7 +34,6 @@ so only the balance board exists. Add one when a watchtime read capability lands
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-top` |
 | `economy.read` | `economy.leaderboard` only -- no wager/transfer |
 | `chat.send:discord` / `chat.send:twitch` | reply via `relay.push` |
 

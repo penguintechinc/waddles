@@ -18,6 +18,10 @@ PII-free logs: only platform, op/command, the sentiment LABEL, and input LENGTH 
 text, the model output, `event.actor`, or an exception message. The host additionally REJECTS prompts
 carrying emails/phones/@handles/tokens (`contains_pii`), surfaced as a "remove personal info"
 reply.
+
+Output safety: `label` is checked against the closed `LABELS` set and the confidence is a
+number, but the model-supplied `emoji` only has to be short, printable and not-all-ASCII
+(`@here🙂` passes), so it goes through `waddle_sdk.safe_text.sanitize_user_text` LAST.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from typing import Any, NoReturn
 from waddle_sdk import ai, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
 SPEC = CommandSpec(name="sentiment")
 
@@ -196,7 +201,10 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
                     output_len=len(raw),
                 )
             else:
-                reply = f"{emoji} Sentiment: {label} ({round(conf * 100)}% confident)"
+                reply = (
+                    f"{sanitize_user_text(emoji)} Sentiment: {label} "
+                    f"({round(conf * 100)}% confident)"
+                )
                 log.info(
                     "sentiment.transform matched",
                     platform=event.platform,

@@ -1,7 +1,8 @@
 """`!riddle` -> a random riddle; `!riddle answer <n>` -> riddle n's answer. Static + stateless.
 
 Each riddle is shown with its number so the answer can be revealed later without any stored
-state. Gated by `waddles.command-riddle` (default OFF) after the command matches. PII-free
+state. Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated
+check decides whether this bundle runs. PII-free
 logging: only platform/op are logged, never the actor or the user's text.
 """
 
@@ -11,11 +12,9 @@ import random
 
 from waddle_sdk import log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 SPEC = CommandSpec(name="riddle")
-FLAG_KEY = "waddles.command-riddle"
 
 #: (riddle, answer) pairs -- original/classic, SFW. Riddle numbers are 1-based list positions.
 RIDDLES: tuple[tuple[str, str], ...] = (
@@ -70,8 +69,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     stripped = text.strip()
     if stripped.partition(" ")[0].lower() != "!riddle":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     args: str | None

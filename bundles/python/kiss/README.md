@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Gating | Activation + PostHog flag `waddles.command-kiss` (default OFF, checked after the command matches) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`, no DB, no egress) |
 
@@ -25,7 +25,6 @@ extracts.
 
 | id | why |
 |---|---|
-| `flags.read` | feature flag gate |
 | `chat.send:discord` | relay reply on Discord |
 | `chat.send:twitch` | relay reply on Twitch |
 

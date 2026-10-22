@@ -17,8 +17,9 @@ message text; the text itself is never stored or logged. A message by a non-toke
 neither counted nor attributed (fail closed on identity, logged by platform only).
 
 Grammar: `parse_command` validates the bare `!wordcount`; the single positional @mention is the
-same documented extension `lastseen` uses. Gated by `waddles.command-wordcount` (default OFF);
-flag-off means no counting and no kv traffic at all. Cost: one flag check per message, plus
+same documented extension `lastseen` uses. Activation-gated only -- no feature flag: the platform's
+installed -> enabled -> activated check decides whether this bundle runs. Cost: one flag check per
+message, plus
 2 `kv.increment` per counted message (and 2 `kv.get` per report), well under the host op limit.
 """
 
@@ -30,12 +31,10 @@ from typing import Any
 
 from waddle_sdk import identity, kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 SPEC = CommandSpec(name="wordcount")
 COMMAND = "!wordcount"
-FLAG_KEY = "waddles.command-wordcount"
 
 MSGS_PREFIX = "wordcount.msgs."
 WORDS_PREFIX = "wordcount.words."
@@ -135,14 +134,12 @@ async def _answer(rest: str, actor: str | None) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: count the message, answer `!wordcount`.
 
-    Returns `None` for non-chat payloads, when the flag is OFF, and for every non-command
+    Returns `None` for non-chat payloads, and for every non-command
     message (which is still counted as a side effect). A kv failure on the command path is
     answered explicitly; on the passive path it is logged at ERROR (no reply possible).
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     actor = _parse_user_token(event.actor)

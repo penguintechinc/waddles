@@ -43,3 +43,7 @@
   or AI output (gh-674).
 - Full e2e needs a live Ollama; unit tests use `waddle_sdk.testing.install_fake_ai_host`.
 - Not in `bundles/core-bundles.yaml` yet (catalog registration is a separate change).
+
+## Output safety
+
+The model completion is untrusted text, so it passes through `waddle_sdk.safe_text.sanitize_user_text` last, before it enters the reply: a forged `{user:<token>}` placeholder is escaped and `@everyone`/`@here`/`<@id>` markup is defanged. No `allow_tokens` -- nothing in model output is a host-minted mention.

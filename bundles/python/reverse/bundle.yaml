@@ -34,7 +34,7 @@ stages:
     spec:
       required_config: []
 egress: []
-# No kv/db state -- stateless (flags.read + relay only).
+# No kv/db state -- stateless (relay only).
 data:
   tables: []
 limits:

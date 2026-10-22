@@ -41,8 +41,6 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - id: flags.read
-    justification: "gates the command behind the waddles.command-jackpot feature flag"
   - id: storage.kv
     justification: "persists the community's accumulated pot and per-actor cooldown counters (pseudonymous keys)"
   - id: economy.read

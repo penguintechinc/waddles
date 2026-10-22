@@ -15,6 +15,11 @@ or empty result. Missing/overlong text is a usage reply (`CommandUsageError`).
 PII-free logs: only platform, op and input/output LENGTHS are logged -- never the typed text, the
 AI output, `event.actor`, or an exception message. The host additionally REJECTS prompts carrying
 emails/phones/@handles/tokens (`contains_pii`); that is surfaced as a "remove personal info" reply.
+
+Output safety: the model completion is untrusted text (a prompt-injected input can make it
+emit `{user:<token>}` placeholders or `@everyone`), so it goes through
+`waddle_sdk.safe_text.sanitize_user_text` LAST, immediately before it enters the reply. No
+`allow_tokens`: nothing in model output is ever a host-minted mention.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from typing import Any, NoReturn
 from waddle_sdk import ai, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
 SPEC = CommandSpec(name="summarize")
 
@@ -144,7 +150,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
                 command, reply = "error", _ERROR_MESSAGES["filtered"]
                 log.error("summarize.empty_completion", platform=event.platform)
             else:
-                reply = cleaned
+                reply = sanitize_user_text(cleaned)
                 log.info(
                     "summarize.transform matched",
                     platform=event.platform,

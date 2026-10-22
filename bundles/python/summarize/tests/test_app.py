@@ -193,3 +193,27 @@ def test_logs_are_pii_free(host: MockHost) -> None:
         assert needle not in logged
     for _l, _m, fields in host.logs:
         assert "actor" not in json.loads(fields)
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+FORGED = "ok {user:victim-9} @everyone <@123> @here"
+NEUTRALIZED = (
+    "ok \\{user:victim-9\\} @" + ZWSP + "everyone <@" + ZWSP + "123> @" + ZWSP + "here"
+)
+
+
+def test_model_output_cannot_forge_mentions(host: MockHost) -> None:
+    """LLM01: a prompt-injected completion must not carry a live placeholder or mass mention."""
+    host.ai.reply = FORGED
+    out = _run(transform(_event("!summarize some long text here")))
+    assert out is not None
+    assert out.payload["text"] == NEUTRALIZED
+
+
+def test_typed_mention_does_not_whitelist_model_output(host: MockHost) -> None:
+    """A mention the user typed must not make the model's echo of it live (no allow_tokens)."""
+    host.ai.reply = "hi {user:tok-1}"
+    out = _run(transform(_event("!summarize some long text here {user:tok-1}")))
+    assert out is not None
+    assert out.payload["text"] == "hi \\{user:tok-1\\}"

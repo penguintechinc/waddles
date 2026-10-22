@@ -182,3 +182,26 @@ def test_logs_are_pii_free(host) -> None:
             "piioutput_secret",
         ):
             assert secret not in blob
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+FORGED = "ok {user:victim-9} @everyone <@123> @here"
+NEUTRALIZED = (
+    "ok \\{user:victim-9\\} @" + ZWSP + "everyone <@" + ZWSP + "123> @" + ZWSP + "here"
+)
+
+
+def test_model_output_cannot_forge_mentions(host) -> None:
+    """LLM01: a prompt-injected completion must not carry a live placeholder or mass mention."""
+    host.ai.reply = FORGED
+    out = _run(transform(_event("!define word")))
+    assert out is not None
+    assert out.payload["text"] == NEUTRALIZED
+
+
+def test_typed_mention_does_not_whitelist_model_output(host) -> None:
+    host.ai.reply = "hi {user:tok-1}"
+    out = _run(transform(_event("!define word {user:tok-1}")))
+    assert out is not None
+    assert out.payload["text"] == "hi \\{user:tok-1\\}"

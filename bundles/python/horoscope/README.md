@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Gating | PostHog flag `waddles.command-horoscope` (default OFF), checked after the command matches |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none |
 
@@ -18,7 +18,6 @@ dropped, never echoed).
 
 | id | why |
 |---|---|
-| `flags.read` | feature-flag gate |
 | `chat.send:discord` / `chat.send:twitch` | relay the reply |
 
 ## PII

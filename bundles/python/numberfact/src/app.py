@@ -2,8 +2,9 @@
 
 Curated facts exist for a set of notable numbers; any other integer gets a deterministic fact
 computed from its own properties (parity, primality, perfect square, ...). Bare `!numberfact`
-picks a random curated number. Gated by `waddles.command-numberfact` (default OFF) after the
-command matches. PII-free logging: only platform/op are logged, never the actor or the text.
+picks a random curated number. Activation-gated only -- no feature flag: the platform's installed ->
+enabled -> activated check decides whether this bundle runs. PII-free logging: only platform/op are
+logged, never the actor or the text.
 """
 
 from __future__ import annotations
@@ -13,11 +14,9 @@ import random
 
 from waddle_sdk import log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 SPEC = CommandSpec(name="numberfact")
-FLAG_KEY = "waddles.command-numberfact"
 MAX_ABS = 10**12
 USAGE = "Usage: !numberfact [n]"
 
@@ -95,8 +94,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     stripped = text.strip()
     if stripped.partition(" ")[0].lower() != "!numberfact":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     arg: str | None

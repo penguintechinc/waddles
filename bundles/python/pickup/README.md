@@ -6,6 +6,6 @@ the placeholder and the egress detokenizer renders the name. The bundle never se
 logs a raw handle, and needs no `identity.*` permission (it does not resolve the token). A raw
 `@name` argument yields a usage reply and is not echoed.
 
-- Feature flag: `waddles.command-pickup` (default OFF), checked after the command matches.
-- Permissions: `flags.read`, `chat.send:discord`, `chat.send:twitch`.
+- Activation-gated only (installed -> enabled -> activated); no feature flag.
+- Permissions: `chat.send:discord`, `chat.send:twitch`.
 - Tests: `cd bundles/python/pickup && python3 -m pytest -q`.

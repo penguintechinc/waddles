@@ -66,12 +66,6 @@ def test_non_matching_is_ignored_without_flag_lookup(host, text):
     assert host.flag_keys == []
 
 
-def test_flag_off_drops_after_match_default_false(host):
-    host.flag = False
-    assert _text("!riddle") is None
-    assert host.flag_keys == [("waddles.command-riddle", False)]
-
-
 def test_non_text_payload_ignored(host):
     ev = PlatformEvent(platform="twitch", event_type="x", actor=None, payload={}, occurred_at="")
     assert _run(transform(ev)) is None
@@ -135,3 +129,12 @@ def test_unknown_subcommand_gets_usage(host, arg):
 
 def test_riddles_nonempty_and_unique():
     assert len(app.RIDDLES) == len({r for r, _ in app.RIDDLES}) >= 10
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
+    """Activation-gated only: an OFF `waddles.command-riddle` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(_event("!riddle")))
+    assert out is not None
+    assert host.flag_keys == []

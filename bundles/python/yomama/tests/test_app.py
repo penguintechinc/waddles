@@ -96,12 +96,6 @@ def test_non_string_text_ignored(host: _Host) -> None:
     assert _run(transform(ev)) is None
 
 
-def test_flag_off_returns_none_and_queries_expected_key(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!yomama"))) is None
-    assert host.flag_calls == ["waddles.command-yomama"]
-
-
 def test_bare_addresses_caller_token(
     host: _Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -177,3 +171,12 @@ def test_stateless_no_kv_and_pool_clean(host: _Host) -> None:
     assert len(set(bundle._POOL)) == len(bundle._POOL)
     banned = ("slur",)
     assert not any(b in p.lower() for p in bundle._POOL for b in banned)
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
+    """Activation-gated only: an OFF `waddles.command-yomama` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(_event("!yomama")))
+    assert out is not None
+    assert host.flag_calls == []

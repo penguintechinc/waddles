@@ -6,10 +6,10 @@ Counts how many messages and words each user has sent (per community) and report
 
 | | |
 |---|---|
-| Gating | Activation + `waddles.command-wordcount` feature flag (default OFF; OFF = no counting, no kv traffic) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv.increment` counters `wordcount.msgs.<pseudonym>` / `wordcount.words.<pseudonym>` |
-| Permissions | `storage.kv`, `flags.read`, `chat.send:discord`, `chat.send:twitch` |
+| Permissions | `storage.kv`, `chat.send:discord`, `chat.send:twitch` |
 
 | Command | Behavior |
 |---|---|

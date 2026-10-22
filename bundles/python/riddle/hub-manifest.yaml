@@ -36,6 +36,4 @@ permissions:
     justification: "replies to the invoking command on its origin platform via the relay host import (relay.push -> chat.send:discord); no other capability is used"
   - id: "chat.send:twitch"
     justification: "replies to the invoking command on its origin platform via the relay host import (relay.push -> chat.send:twitch); no other capability is used"
-  - id: flags.read
-    justification: "gates the command behind the waddles.command-riddle feature flag (default OFF)"
 routes_to: []

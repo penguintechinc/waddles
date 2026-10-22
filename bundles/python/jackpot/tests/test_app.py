@@ -231,15 +231,6 @@ def test_transform_matches(host: _Host, text: str, command: str, arg: str | None
     assert out.payload.get("arg") == arg
 
 
-def test_transform_ignores_nonmatch_and_flag_off(host: _Host) -> None:
-    ev = PlatformEvent("twitch", "chat.message", "v", {"text": "hello"}, "t")
-    assert _run(transform(ev)) is None
-    host.flag = False
-    ev = PlatformEvent("twitch", "chat.message", "v", {"text": "!jackpot 5"}, "t")
-    assert _run(transform(ev)) is None
-    assert _run(transform(PlatformEvent("t", "chat.message", "v", {"text": 5}, "t"))) is None
-
-
 def test_pii_free_keys_and_logs(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
     _force(monkeypatch, False)
     _say(host, "play", "40")
@@ -373,3 +364,67 @@ def test_cooldown_kv_failure_is_loud(host: _Host) -> None:
     with pytest.raises(RuntimeError, match="jackpot cooldown failed"):
         _say(host, "play", "5")
     assert host.bal() == 1000
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+
+
+def _say_as(host: _Host, actor: str | None, arg: str | None = None) -> str:
+    payload: dict[str, Any] = {"command": "play", "channel_id": "123"}
+    if arg is not None:
+        payload["arg"] = arg
+    env = StageEnvelope(
+        tenant="t",
+        community=COMM,
+        app_id="waddles.core.example.jackpot",
+        stage="action",
+        event=PlatformEvent("twitch", "chat.message", actor, payload, "2026-10-21T00:00:00Z"),
+        ts="2026-10-21T00:00:00Z",
+    )
+    _run(dispatch(env, {}, http_client=None))
+    return host.relayed[-1]
+
+
+def test_minted_actor_token_stays_live_in_the_reply(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pipeline's own `{user:<token>}` actor must still resolve to a display name."""
+    _force(monkeypatch, False)
+    assert _say_as(host, "{user:tok-actor}", "50").startswith(
+        "\U0001f3b0 {user:tok-actor} missed -- 50 points"
+    )
+
+
+@pytest.mark.parametrize(
+    ("actor", "label"),
+    [
+        ("evil@everyone", "evil@" + ZWSP + "everyone"),
+        ("{user:handle:victim} <@123>", "\\{user:handle:victim\\} <@" + ZWSP + "123>"),
+        ("{user:tok-1} @here", "\\{user:tok-1\\} @" + ZWSP + "here"),
+    ],
+)
+def test_raw_actor_cannot_forge_mentions(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, actor: str, label: str
+) -> None:
+    _force(monkeypatch, False)
+    assert _say_as(host, actor, "50").startswith("\U0001f3b0 " + label + " missed -- 50 points")
+
+
+def test_missing_actor_falls_back_to_someone(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, False)
+    assert _say_as(host, None, "50").startswith("\U0001f3b0 someone missed -- 50 points")
+
+
+def test_transform_ignores_nonmatch_and_non_string(host: _Host) -> None:
+    ev = PlatformEvent("twitch", "chat.message", "v", {"text": "hello"}, "t")
+    assert _run(transform(ev)) is None
+    assert _run(transform(PlatformEvent("t", "chat.message", "v", {"text": 5}, "t"))) is None
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host: _Host) -> None:
+    """Activation-gated only: an OFF `waddles.command-jackpot` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(PlatformEvent("twitch", "chat.message", "v", {"text": "!jackpot 5"}, "t")))
+    assert out is not None

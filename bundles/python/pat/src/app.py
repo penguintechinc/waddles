@@ -12,7 +12,8 @@ a `{user:<token>}` placeholder, which `waddle_sdk.identity.mention_tokens` extra
 detokenizer renders display names. This bundle never resolves, stores, or logs a raw handle; log
 lines carry only platform + reply shape (`solo`/`targeted`/`usage`).
 
-Feature-flagged: `waddles.command-pat` (default OFF), checked after the command matches. No role
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs. No role
 badges are consulted -- the command is open to everyone, so there is no mod/broadcaster signal to
 read (any future badge check must be a strict `is True`).
 """
@@ -25,11 +26,9 @@ from typing import Any
 
 from waddle_sdk import identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 COMMAND = "pat"
-FLAG_KEY = "waddles.command-pat"
 _SPEC = CommandSpec(name=COMMAND)
 
 _USAGE = "Usage: !pat [@user]"
@@ -88,7 +87,7 @@ def _build_reply(actor: str, rest: str) -> tuple[str, str]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: `!pat [@user]` -> a flavor-text reply.
 
-    Returns `None` for a non-matching payload or when the feature flag is off. A recognized but
+    Returns `None` for a non-matching payload. A recognized but
     malformed invocation gets a usage reply.
     """
     text = event.payload.get("text")
@@ -99,8 +98,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     try:
         parse_command(head, _SPEC)
     except CommandUsageError:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     reply_text, shape = _build_reply(_actor_ref(event.actor), rest.strip())

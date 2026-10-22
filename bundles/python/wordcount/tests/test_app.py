@@ -146,15 +146,6 @@ def test_extra_args_usage(host: _Host) -> None:
     assert _say("!wordcount a b") == bundle._USAGE
 
 
-def test_flag_off_no_count_no_kv(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_ev("!wordcount"))) is None
-    assert _run(transform(_ev("hello"))) is None
-    assert host.kv.store == {}
-    assert host.kv.calls == []
-    assert set(host.flag_calls) == {"waddles.command-wordcount"}
-
-
 def test_non_token_actor_not_counted_and_self_report_explicit(host: _Host) -> None:
     assert _run(transform(_ev("hello", actor="rawname"))) is None
     assert host.kv.store == {}
@@ -237,3 +228,12 @@ def test_dispatch_relays_and_rejects_bad_payload(host: _Host) -> None:
                     http_client=None,
                 )
             )
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
+    """Activation-gated only: an OFF `waddles.command-wordcount` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(_ev("!wordcount")))
+    assert out is not None
+    assert host.flag_calls == []

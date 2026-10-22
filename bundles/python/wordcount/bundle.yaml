@@ -46,8 +46,6 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-user message and word counters keyed by a SHA-256 pseudonym of the hub-issued user token (no PII in keys)"
-  - id: flags.read
-    justification: "reads the waddles.command-wordcount feature flag (default OFF) via the flags host import; no other flag is read"
   - id: "chat.send:discord"
     justification: "replies to !wordcount on its origin platform via the relay host import (relay.push -> chat.send:discord); no other capability is used"
   - id: "chat.send:twitch"

@@ -24,7 +24,7 @@ the loot *bound*; the failure penalty is a real `transfer` actor -> victim.
 
 ## Permissions (V2)
 
-`storage.kv`, `flags.read`, `economy.read`, `economy.wager`, `economy.transfer`,
+`storage.kv`, `economy.read`, `economy.wager`, `economy.transfer`,
 `identity.resolve`, `chat.send:discord`, `chat.send:twitch`.
 
 ## State and privacy
@@ -34,4 +34,8 @@ kv keys (`steal.last.<p>`, `steal.attempts.<p>`, `steal.wins.<p>`, `steal.config
 
 ## Gating
 
-Feature flag `waddles.command-steal` (default OFF), checked after the command matches.
+Activation-gated only -- no feature flag (installed -> enabled -> activated).
+
+## Output safety
+
+`event.actor` is interpolated into replies. The host-minted `{user:<token>}` actor stays live (egress renders the display name); any other value, and every typed echo, goes through `waddle_sdk.safe_text.sanitize_user_text`.

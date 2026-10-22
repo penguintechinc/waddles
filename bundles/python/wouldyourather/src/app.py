@@ -1,11 +1,11 @@
 """`!wyr` (alias `!wouldyourather`) -> a random SFW "Would you rather X or Y?" prompt.
 
 Stateless static-list relay fun, modeled on `bundles/python/eightball`: no kv/db, no host
-capability beyond `flags` (feature gate) and `relay`. The reply never depends on or echoes
+capability beyond `relay`. The reply never depends on or echoes
 user input, and the `event.actor` is never logged -- logs carry only the platform name.
 
-Gated by the `waddles.command-wouldyourather` feature flag (default OFF), checked only after
-the command text matched so an unrelated event never pays for a host round trip.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -15,10 +15,8 @@ from typing import Any
 
 from waddle_sdk import log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-wouldyourather"
 SPEC = CommandSpec(name="wyr")
 #: Alias spelling of the command; both resolve to the same behavior.
 ALIAS_SPEC = CommandSpec(name="wouldyourather")
@@ -71,7 +69,7 @@ def _matches(text: str) -> bool | None:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: `!wyr` -> a random would-you-rather prompt.
 
-    Returns `None` for a non-matching payload or while the feature flag is off. A recognized
+    Returns `None` for a non-matching payload. A recognized
     but malformed invocation (`!wyr foo`) gets a usage reply, never silence.
     """
     text = event.payload.get("text")
@@ -79,8 +77,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     matched = _matches(text)
     if matched is None:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     if matched:

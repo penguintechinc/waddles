@@ -81,12 +81,6 @@ def _log_text(h: _Host) -> str:
     return " ".join(f"{m} {f}" for _, m, f in h.log_calls).lower()
 
 
-def test_flag_off_drops_after_match_and_uses_default_off_key(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!wyr"))) is None
-    assert host.flag_keys == ["waddles.command-wouldyourather"]
-
-
 def test_non_matching_never_touches_flag(host: _Host) -> None:
     for text in ("hello", "", "!wyrx", "!wyr2"):
         assert _run(transform(_event(text))) is None
@@ -155,3 +149,12 @@ def test_all_prompts_are_wellformed_and_sfw() -> None:
 @pytest.mark.parametrize("text", ["!wyr foo", "!wyr add x", "!wouldyourather enable"])
 def test_malformed_gets_usage_not_echo(text: str, host: _Host) -> None:
     assert _say(text) == USAGE
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
+    """Activation-gated only: an OFF `waddles.command-wouldyourather` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(_event("!wyr")))
+    assert out is not None
+    assert host.flag_keys == []

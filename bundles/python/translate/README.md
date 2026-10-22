@@ -18,7 +18,6 @@ calls / 60 s).
 | World | `stage-next` (bundle must be built against it) |
 | Model | Host-controlled, NOT nameable by a bundle: `json=False` -> `gemma4:e2b` (`WADDLEAI_MODEL`), `json=True` -> `gemma4:e4b` (`BUNDLE_AI_JSON_MODEL`). Translate uses plain text -> e2b |
 | Host flag | `waddles.bundle-ai-capability` (default OFF; see `docs/reference/bundle-host-imports.md`, issue #858) |
-| Bundle flag | `waddles.command-translate` (default OFF), checked after the command matches |
 | Guards | Host REJECTS prompts with PII/secrets (`contains_pii`) -- this bundle tells the caller; completion is untrusted, collapsed to one bounded line |
 | Test double | `waddle_sdk.testing.install_fake_ai_host` (see `tests/conftest.py::host`) |
 
@@ -27,9 +26,13 @@ calls / 60 s).
 - Missing/invalid language or text -> usage reply. Text over 400 chars -> refused before any AI call.
 - Any AI refusal/failure (PII, rate limit, not granted, model unreachable, empty completion) ->
   a clear chat reply AND `dispatch()` raises -- never a silent or canned translation.
-- Permissions: `flags.read`, `ai.generate`, `chat.send:discord`, `chat.send:twitch`. No kv (no cache).
+- Permissions: `ai.generate`, `chat.send:discord`, `chat.send:twitch`. No kv (no cache).
 - Logs are PII-free: platform, language code, input/output lengths and exception type only -- never
   the typed text, the translation, or the actor.
+
+## Output safety
+
+The model completion is untrusted text, so it passes through `waddle_sdk.safe_text.sanitize_user_text` last, before it enters the reply: a forged `{user:<token>}` placeholder is escaped and `@everyone`/`@here`/`<@id>` markup is defanged. No `allow_tokens` -- nothing in model output is a host-minted mention.
 
 ## Testing
 

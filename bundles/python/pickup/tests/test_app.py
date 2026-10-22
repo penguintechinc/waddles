@@ -81,12 +81,6 @@ def _log_text(h: _Host) -> str:
     return " ".join(f"{m} {f}" for _, m, f in h.log_calls).lower()
 
 
-def test_flag_off_drops_after_match_and_uses_default_off_key(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!pickup"))) is None
-    assert host.flag_keys == ["waddles.command-pickup"]
-
-
 def test_non_matching_never_touches_flag(host: _Host) -> None:
     for text in ("hello", "", "!pickupx", "!pickup2"):
         assert _run(transform(_event(text))) is None
@@ -173,3 +167,12 @@ def test_lines_are_sfw_unique_and_never_retrigger_commands() -> None:
     for line in LINES:
         assert not any(w in line.lower() for w in BANNED)
         assert not line.startswith("!") and "!pickup" not in line.lower()
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
+    """Activation-gated only: an OFF `waddles.command-pickup` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(_event("!pickup")))
+    assert out is not None
+    assert host.flag_keys == []

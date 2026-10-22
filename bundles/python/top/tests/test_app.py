@@ -136,11 +136,6 @@ def test_non_string_text_ignored(host: Host) -> None:
     assert _run(transform(ev)) is None
 
 
-def test_flag_off_drops_after_match(host: Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!top"))) is None
-
-
 def test_dispatch_renders_ranked_tokens(host: Host) -> None:
     res = _run(
         dispatch(
@@ -244,3 +239,11 @@ def test_logs_are_pii_free(host: Host) -> None:
 def test_render_empty_and_limit_constants() -> None:
     assert render([]) == "nobody has a balance yet."
     assert DEFAULT_LIMIT <= MAX_LIMIT <= economy.MAX_LEADERBOARD_LIMIT
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
+    """Activation-gated only: an OFF `waddles.command-top` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(_event("!top")))
+    assert out is not None

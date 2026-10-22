@@ -224,13 +224,20 @@ reply = f"{sanitize_user_text(username)} says: {sanitize_user_text(rest)}"
   - links — `bookmark`, `socials`, `discord`, `donate`, `merch`
   - caller/target name — `first`, `raffle`, `heist`, `gamble`, `fish`, `coinflip`, `slots`,
     `roulette`, `rps`, `duel`, `love`, `social`, `greeter`, `inventory`, `loyalty`, `rank`
-  - in flight (same rule when they land) — `translate`, `say`, `commands`, `ask`, `rephrase`,
-    `sentiment`, `summarize`, `tldr`, `define`, `eli5`, `rate`, `riddle`, `numberfact`, `reverse`,
-    `uwu`, `mock`, `clap`, `emojify`, `giveaway`, `faq`
+  - batch bundles, wrapped — `translate`, `say`, `ask`, `rephrase`, `sentiment`, `summarize`,
+    `tldr`, `define`, `eli5` (model output / typed text), `rate`, `reverse`, `uwu`, `mock`,
+    `clap`, `emojify` (typed text, sanitized AFTER the transform), `steal`, `defuse`, `jackpot`
+    (`event.actor` label: the host-minted `{user:<token>}` is allow-listed, anything else is
+    sanitized). Still to wrap when they land — `giveaway`, `faq`
   - not needed (no untrusted text reaches the reply) — `advice`, `bot`, `catfact`, `chat`,
     `cringe`, `death`, `dice`, `dogfact`, `eightball`, `fortune`, `guess`, `hangman`, `hello`,
     `hype`, `iq`, `label`, `lastseen`, `mood`, `pyping`, `rip`, `roast`, `roll`, `scramble`, `secret`,
-    `ship`, `time`, `uptime`, `waddle`, `winner`; `boop`/`hug`/`slap`/`wave`/`highfive` only interpolate a
+    `ship`, `time`, `uptime`, `waddle`, `winner`; batch bundles that emit only static text, a
+    validated number/sign, or a bundle-built `{user:<token>}` for an exactly-matched single mention
+    — `affirmation`, `fact`, `horoscope`, `riddle`, `numberfact`, `truthordare`, `wouldyourather`,
+    `commands`, `top`, `wordcount`, `kiss`, `pat`, `poke`, `dance`, `pickup`, `motivate`,
+    `vibecheck`, `insult`, `yomama` (wrapping their `{user:<token>}` would print the placeholder
+    literally); `boop`/`hug`/`slap`/`wave`/`highfive` only interpolate a
     `[A-Za-z0-9_.-]{1,32}`-validated target (wrapping is optional hardening)
 
 See `tests/test_safe_text.py`: its oracle is a port of the detokenizer grammar, and a mutation of

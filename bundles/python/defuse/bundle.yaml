@@ -48,8 +48,6 @@ limits:
 permissions:
   - id: "storage.kv"
     justification: "persists per-community defuse cooldowns, stats and odds config"
-  - id: "flags.read"
-    justification: "reads the waddles.command-defuse feature flag after the command matches"
   - id: "economy.read"
     justification: "defuse reads balances / max-bet via the economy host import"
   - id: "economy.wager"

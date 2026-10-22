@@ -16,7 +16,8 @@ never sees, stores or logs a name. Logs carry op/platform/count/exception type o
 (not granted/unavailable/backend) is logged by type and answered with a generic reply, then
 re-raised -- never swallowed into an empty board.
 
-Gated by `waddles.command-top` (default OFF), checked only after the command matched.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -26,11 +27,9 @@ from typing import Any
 
 from waddle_sdk import economy, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 SPEC = CommandSpec(name="top")
-FLAG_KEY = "waddles.command-top"
 DEFAULT_LIMIT = 5
 MAX_LIMIT = 10
 
@@ -84,11 +83,9 @@ def _is_top(text: str) -> bool:
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize `!top [N]`, gate on the flag, parse N."""
+    """Implement `process-stage.transform`: recognize `!top [N]`, parse N."""
     text = event.payload.get("text")
     if not isinstance(text, str) or not _is_top(text):
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     payload: dict[str, Any] = {"channel_id": event.payload.get("channel_id")}

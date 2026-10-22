@@ -22,6 +22,10 @@ AI bundle modelled on `translate` (stateless, no kv). **Activation-gated only --
 - Permissions: `ai.generate`, `chat.send:discord`, `chat.send:twitch` (no flags.read, no kv).
 - Logs PII-free: platform, op, input/output lengths, exception type only.
 
+## Output safety
+
+The model completion is untrusted text, so it passes through `waddle_sdk.safe_text.sanitize_user_text` last, before it enters the reply: a forged `{user:<token>}` placeholder is escaped and `@everyone`/`@here`/`<@id>` markup is defanged. No `allow_tokens` -- nothing in model output is a host-minted mention.
+
 ## Testing
 
 `python3 -m pytest bundles/python/summarize` -- MOCKED AI host. **Full e2e (real model, latency) needs Ollama; not yet done.**

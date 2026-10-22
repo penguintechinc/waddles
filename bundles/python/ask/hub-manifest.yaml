@@ -35,7 +35,7 @@ limits:
   egress_rps: 10
 permissions:
   - id: ai.generate
-    justification: "Dangerous: answers the caller's short question via the host-controlled self-hosted model (ai.generate, plain text, json=false). The question is untrusted: it is delimited inside a fixed SFW/concise/refuse-unsafe prompt, the host rejects PII prompts and rate-limits calls, one call per command, reply length bounded"
+    justification: "Dangerous: answers the caller's short question via the host-controlled self-hosted model (ai.generate, plain text, json=false). The question is untrusted, delimited in a fixed SFW prompt; the host rejects PII and rate-limits calls; one call per command; reply bounded, sanitized"
   - id: "chat.send:discord"
     justification: "replies with the answer (or an error) to the invoking channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"

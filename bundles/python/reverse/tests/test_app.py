@@ -108,7 +108,6 @@ def test_command_replies_with_transformed_text(
     assert result is not None
     assert result.payload["text"] == expected
     assert result.payload["channel_id"] == "12345"
-    assert fake_host.flag_keys == ["waddles.command-reverse"]
 
 
 def test_leading_verb_word_is_text_not_a_verb(fake_host: _Host) -> None:
@@ -135,11 +134,6 @@ def test_refuses_reply_starting_with_chat_command_lead(
     text = "ban" + lead  # reverse flips the lead onto the end
     result = _run(transform(_sample_event(f"!reverse {text}")))
     assert result.payload["text"] == _UNSAFE_MSG
-
-
-def test_flag_off_drops_the_command(fake_host: _Host) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_sample_event("!reverse hello"))) is None
 
 
 @pytest.mark.parametrize(
@@ -189,3 +183,44 @@ def test_logs_never_contain_text_or_actor(fake_host: _Host) -> None:
         assert "sensitive" not in blob.lower()
         assert "viewer-1" not in blob
         assert "actor" not in json.loads(fields_json)
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+
+
+def test_raw_platform_mention_is_defanged(fake_host: _Host) -> None:
+    """`>321@<` reverses into a raw Discord mention; the sanitizer runs after the reversal."""
+    out = _run(transform(_sample_event("!reverse >321@<")))
+    assert out is not None
+    assert out.payload["text"] == "<@" + ZWSP + "123>"
+
+
+def test_stripped_control_char_cannot_unmask_a_command_lead(fake_host: _Host) -> None:
+    """Raw `\x00/x` passes a leading-`/` check, but the host strips NUL afterwards; the refusal
+    must therefore be decided on the sanitized text."""
+    out = _run(transform(_sample_event("!reverse x/\x00")))
+    assert out is not None
+    assert out.payload["text"] == _UNSAFE_MSG
+
+
+def test_reversal_cannot_assemble_a_mass_mention(fake_host: _Host) -> None:
+    """The transform runs BEFORE the sanitizer: `enoyreve@` reverses into a live `@everyone`."""
+    out = _run(transform(_sample_event("!reverse enoyreve@")))
+    assert out is not None
+    assert out.payload["text"] == "@" + ZWSP + "everyone"
+
+
+def test_reversal_cannot_assemble_a_placeholder(fake_host: _Host) -> None:
+    out = _run(transform(_sample_event("!reverse }9-mitciv:resu{")))
+    assert out is not None
+    assert out.payload["text"] == "\\{user:victim-9\\}"
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(fake_host: _Host) -> None:
+    """Activation-gated only: an OFF `waddles.command-reverse` flag must not drop the command."""
+    fake_host.flag_enabled = False
+    out = _run(transform(_sample_event("!reverse hello")))
+    assert out is not None
+    assert fake_host.flag_keys == []

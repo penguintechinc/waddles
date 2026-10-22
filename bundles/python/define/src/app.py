@@ -16,6 +16,11 @@ actor, or the AI output.
 
 Grammar: `waddle_sdk.command.parse_command` validates the bare `!define` form; a free-text argument
 is not a shared-grammar verb, so the text after the command token is taken as the term.
+
+Output safety: the model completion is untrusted text (a prompt-injected input can make it
+emit `{user:<token>}` placeholders or `@everyone`), so it goes through
+`waddle_sdk.safe_text.sanitize_user_text` LAST, immediately before it enters the reply. No
+`allow_tokens`: nothing in model output is ever a host-minted mention.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from typing import Any
 from waddle_sdk import ai, log, relay
 from waddle_sdk.command import CommandSpec, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
 SPEC = CommandSpec(name="define")
 
@@ -102,12 +108,13 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
             log.error("define.transform ai_error", error_type=type(exc).__name__)
             raise
         else:
-            reply = " ".join(completion.split())[:MAX_REPLY_CHARS]
+            answer = " ".join(completion.split())[:MAX_REPLY_CHARS]
+            reply = sanitize_user_text(answer)
             log.info(
                 "define.transform answered",
                 platform=event.platform,
                 input_len=len(user_input),
-                output_len=len(reply),
+                output_len=len(answer),
             )
 
     return PlatformEvent(

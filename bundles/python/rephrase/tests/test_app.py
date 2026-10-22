@@ -176,3 +176,27 @@ def test_dispatch_requires_channel_id(host: MockHost) -> None:
     ev.payload["channel_id"] = None
     with pytest.raises(ValueError, match="channel_id"):
         _run(dispatch(_envelope(ev), {}, http_client=None))
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+FORGED = "ok {user:victim-9} @everyone <@123> @here"
+NEUTRALIZED = (
+    "ok \\{user:victim-9\\} @" + ZWSP + "everyone <@" + ZWSP + "123> @" + ZWSP + "here"
+)
+
+
+def test_model_output_cannot_forge_mentions(host: MockHost) -> None:
+    """LLM01: a prompt-injected completion must not carry a live placeholder or mass mention."""
+    host.ai.reply = FORGED
+    out = _run(transform(_event("!rephrase hello there")))
+    assert out is not None
+    assert out.payload["text"] == "✍️ " + NEUTRALIZED
+
+
+def test_typed_mention_does_not_whitelist_model_output(host: MockHost) -> None:
+    """A mention the user typed must not make the model's echo of it live (no allow_tokens)."""
+    host.ai.reply = "hi {user:tok-1}"
+    out = _run(transform(_event("!rephrase hello there {user:tok-1}")))
+    assert out is not None
+    assert out.payload["text"] == "✍️ " + "hi \\{user:tok-1\\}"

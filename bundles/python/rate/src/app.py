@@ -1,22 +1,28 @@
 """`!rate <thing>` -> "I rate <thing> X/10", deterministic per input, relayed to the origin platform.
 
 Stateless (no kv/db/egress), SFW. The score is derived from a SHA-256 of the normalized input, so
-the same thing always gets the same rating. Gated by `waddles.command-rate` (default OFF) after the
-command matches. PII-free logging: only the platform/op are logged, never the actor or the text.
-The reply echoes the input into chat (not into logs); `@` is defused so a rating can't mass-ping.
+the same thing always gets the same rating. Activation-gated only -- no feature flag: the platform's
+installed -> enabled -> activated check decides whether this bundle runs. PII-free logging: only the
+platform/op are logged, never the actor or the text.
+The reply echoes the input into chat (not into logs); forged placeholders and mass mentions are neutralized (see Output safety).
+
+Output safety: the rated `thing` is user-typed, so it goes through
+`waddle_sdk.safe_text.sanitize_user_text` LAST. A mention the user typed still resolves (the
+host-minted tokens of this message are passed as `allow_tokens`); a forged `{user:<token>}`
+or `@everyone` is neutralized.
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 
-from waddle_sdk import log, relay
+from waddle_sdk import identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
 SPEC = CommandSpec(name="rate")
-FLAG_KEY = "waddles.command-rate"
 MAX_THING_LEN = 100
 USAGE = "Usage: !rate <thing>"
 
@@ -43,18 +49,22 @@ def score_for(thing: str) -> int:
     return digest[0] % 11
 
 
-def _sanitize(thing: str) -> str:
-    """Collapse whitespace, cap length, and defuse `@` mentions in the echoed input."""
+def _sanitize(thing: str, allow_tokens: Sequence[str] = ()) -> str:
+    """Collapse whitespace, cap length, then neutralize the echoed input (LAST).
+
+    `allow_tokens` are the host-minted mention tokens of the delivered message, so a
+    mention the user typed (`!rate @bob`) still resolves to a display name.
+    """
     cleaned = " ".join(thing.split())[:MAX_THING_LEN]
-    return cleaned.replace("@", "@\u200b")
+    return sanitize_user_text(cleaned, allow_tokens=allow_tokens)
 
 
-def _build_reply(thing: str | None) -> str:
+def _build_reply(thing: str | None, allow_tokens: Sequence[str] = ()) -> str:
     """Build the chat reply for the (possibly absent) thing being rated."""
     if thing is None:
         return USAGE
     score = score_for(thing)
-    return f"I rate {_sanitize(thing)} {score}/10 -- {FLAVOR[score]}"
+    return f"I rate {_sanitize(thing, allow_tokens)} {score}/10 -- {FLAVOR[score]}"
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
@@ -67,8 +77,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     stripped = text.strip()
     if stripped.partition(" ")[0].lower() != "!rate":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     thing: str | None
@@ -84,7 +92,10 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         platform=event.platform,
         event_type=event.event_type,
         actor=event.actor,
-        payload={"text": _build_reply(thing), "channel_id": event.payload.get("channel_id")},
+        payload={
+            "text": _build_reply(thing, identity.mention_tokens(text)),
+            "channel_id": event.payload.get("channel_id"),
+        },
         occurred_at=event.occurred_at,
     )
 

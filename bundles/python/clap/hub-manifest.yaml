@@ -34,8 +34,6 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - id: flags.read
-    justification: "reads the waddles.command-clap feature flag (default OFF) after the command matches; no other flag/tier data is used"
   - id: "chat.send:discord"
     justification: "replies to the invoking command on its origin platform via the relay host import (relay.push -> chat.send:discord); no other capability is used"
   - id: "chat.send:twitch"

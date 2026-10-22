@@ -18,14 +18,21 @@ chat command (or trigger another bot) as itself. Length is capped.
 PII-free logs: only platform, outcome shape and the community-less op are logged -- NEVER the
 announced text, `event.actor`, or any caller-typed value. Activation-gated only -- no feature
 flag: the platform's installed -> enabled -> activated check decides whether this bundle runs.
+
+Output safety: the announcement is caller-typed, so it goes through
+`waddle_sdk.safe_text.sanitize_user_text` LAST, in `dispatch`. A mention the moderator typed
+still resolves (the host-minted tokens of the delivered text are `allow_tokens`); a forged
+`{user:<token>}` and `@everyone`/`@here` are neutralized even for a moderator. The `/ . !`
+refusal runs on the sanitized text, so a stripped control character cannot unmask a lead.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from waddle_sdk import log, relay
+from waddle_sdk import identity, log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
 _COMMAND = "!say"
 
@@ -119,10 +126,12 @@ async def dispatch(
         reply, detail = _USAGE, "usage"
     elif len(text) > MAX_SAY_LEN:
         reply, detail = _TOO_LONG, "too_long"
-    elif text.startswith(_UNSAFE_LEAD):
-        reply, detail = _UNSAFE_MSG, "unsafe"
     else:
-        reply, detail = text, "announce"
+        safe = sanitize_user_text(text, allow_tokens=identity.mention_tokens(text))
+        if safe.startswith(_UNSAFE_LEAD):
+            reply, detail = _UNSAFE_MSG, "unsafe"
+        else:
+            reply, detail = safe, "announce"
 
     await relay.push(provider, {"channel": channel_id, "text": reply})
     log.info("say.dispatch relayed", platform=provider, shape=detail)

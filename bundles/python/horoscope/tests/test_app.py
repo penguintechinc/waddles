@@ -80,11 +80,6 @@ def test_non_matching_returns_none(host: _Host) -> None:
     assert _run(transform(ev)) is None
 
 
-def test_flag_off_returns_none(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!horoscope"))) is None
-
-
 @pytest.mark.parametrize("platform", ["twitch", "discord"])
 def test_command_case_insensitive_and_platform(host: _Host, platform: str) -> None:
     out = _run(transform(_event("!HOROSCOPE", platform)))
@@ -147,3 +142,11 @@ def test_logs_are_pii_free(host: _Host) -> None:
 
 def test_no_kv_import() -> None:
     assert "community_kv" not in Path(app.__file__).read_text()
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
+    """Activation-gated only: an OFF `waddles.command-horoscope` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(_event("!horoscope aries")))
+    assert out is not None

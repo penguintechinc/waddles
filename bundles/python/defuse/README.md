@@ -17,7 +17,7 @@ and unlinked accounts reply a clear message and move nothing.
 
 ## Permissions (V2)
 
-`storage.kv`, `flags.read`, `economy.read`, `economy.wager`, `identity.resolve`,
+`storage.kv`, `economy.read`, `economy.wager`, `identity.resolve`,
 `chat.send:discord`, `chat.send:twitch`.
 
 ## State and privacy
@@ -27,4 +27,8 @@ separators (never `:`) with `p = sha256(community:actor_uuid)`. No usernames in 
 
 ## Gating
 
-Feature flag `waddles.command-defuse` (default OFF), checked after the command matches.
+Activation-gated only -- no feature flag (installed -> enabled -> activated).
+
+## Output safety
+
+`event.actor` is interpolated into replies. The host-minted `{user:<token>}` actor stays live (egress renders the display name); any other value, and every typed echo, goes through `waddle_sdk.safe_text.sanitize_user_text`.

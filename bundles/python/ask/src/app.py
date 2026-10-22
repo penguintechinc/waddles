@@ -15,6 +15,11 @@ untrusted too: collapsed to one bounded line.
 
 Fail loud: every `waddle_sdk.ai` refusal becomes a chat reply AND a raise in `dispatch()`.
 PII-free logs: platform, op, reason and LENGTHS only -- never the question, answer or actor.
+
+Output safety: the model completion is untrusted text (a prompt-injected input can make it
+emit `{user:<token>}` placeholders or `@everyone`), so it goes through
+`waddle_sdk.safe_text.sanitize_user_text` LAST, immediately before it enters the reply. No
+`allow_tokens`: nothing in model output is ever a host-minted mention.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from typing import Any, NoReturn
 from waddle_sdk import ai, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
 SPEC = CommandSpec(name="ask")
 
@@ -160,7 +166,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
                     "ask.refused", platform=event.platform, input_len=len(question)
                 )
             else:
-                reply = cleaned
+                reply = sanitize_user_text(cleaned)
                 log.info(
                     "ask.transform matched",
                     platform=event.platform,

@@ -29,23 +29,29 @@ State (kv, community-scoped, `.`-separated keys -- never `:`): cooldown/stat key
 `sha256(community + ":" + actor_uuid)` pseudonyms (`_pseudonym`). The actor handle appears only
 in the visible chat reply, never in a key or log. Logs carry `op`/`outcome`/bucket fields only.
 
-Feature flag `waddles.command-steal` (default OFF) is checked after the command matches.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
+
+Output safety: `event.actor` is interpolated into most replies. The host-minted
+`{user:<token>}` actor stays live (egress renders the display name); any other value is
+untrusted and goes through `waddle_sdk.safe_text.sanitize_user_text` (see `_actor_label`),
+as does every other typed echo.
 """
 
 from __future__ import annotations
 
 import hashlib
 import random
+import re
 from typing import Any
 
 from waddle_sdk import clock, community_kv, economy, identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
 SPEC = CommandSpec(name="steal")
 
-FLAG_KEY = "waddles.command-steal"
 SUCCESS_PERCENT = 40
 STAKE = 10
 LOOT_CAP = 100
@@ -57,6 +63,26 @@ _COOLDOWN_CONFIG_KEY = "steal.config.cooldown"
 _USAGE = "Usage: !steal @user | !steal list | !steal set cooldown <seconds> (set is admin/mod only)"
 _PERMISSION_DENIED_MSG = "only moderators/broadcasters can configure !steal"
 _KNOWN_COMMANDS = frozenset({"steal", "list", "config_set_cooldown", "usage"})
+
+
+#: The pipeline delivers `event.actor` as its own host-minted placeholder; anchored so ONLY an actor
+#: that is exactly one `{user:<token>}` is left live (never one embedded in other text).
+_USER_TOKEN_RE = re.compile(r"^\{user:([A-Za-z0-9_:.-]+)\}$")
+_FALLBACK_ACTOR = "someone"
+
+
+def _actor_label(actor: object) -> str:
+    """Return a reply-safe label for `event.actor`.
+
+    The host-minted `{user:<token>}` stays live so egress renders the display name. Anything else
+    (a raw handle when tokenization is off, a missing actor) is untrusted text and goes through
+    `sanitize_user_text` in full, so a platform display name can never forge a mention.
+    """
+    if not isinstance(actor, str) or not actor.strip():
+        return _FALLBACK_ACTOR
+    label = actor.strip()
+    match = _USER_TOKEN_RE.match(label)
+    return sanitize_user_text(label, allow_tokens=(match.group(1),) if match else ())
 
 
 def _pseudonym(community: str, actor_uuid: str) -> str:
@@ -113,15 +139,12 @@ def _resolve_command(parsed: ParsedCommand | None) -> str:
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize `!steal`, then gate on the feature flag."""
+    """Implement `process-stage.transform`: recognize `!steal`."""
     text = event.payload.get("text")
     if not isinstance(text, str):
         return None
     stripped = text.strip()
     if stripped.partition(" ")[0].lower() != "!steal":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
-        log.debug("steal.flag_off")
         return None
 
     payload: dict[str, Any] = {"channel_id": event.payload.get("channel_id")}
@@ -275,7 +298,7 @@ async def _handle_set_cooldown(arg: str | None, *, community: str) -> str:
     try:
         seconds = int(parts[1])
     except ValueError:
-        return f"'{parts[1]}' isn't a whole number of seconds"
+        return f"'{sanitize_user_text(parts[1])}' isn't a whole number of seconds"
     if not MIN_COOLDOWN_SECONDS <= seconds <= MAX_COOLDOWN_SECONDS:
         return f"cooldown must be between {MIN_COOLDOWN_SECONDS} and {MAX_COOLDOWN_SECONDS} seconds"
     await community_kv.set(community, _COOLDOWN_CONFIG_KEY, str(seconds).encode(), 0)
@@ -328,7 +351,7 @@ async def dispatch(
         log.error("steal.missing_community", command=command)
         raise ValueError("steal requires a community context and cannot operate tenant-wide")
 
-    username = envelope.event.actor or "someone"
+    username = _actor_label(envelope.event.actor)
     try:
         reply = await _reply_for(command, payload, community=community, username=username)
     except CommandUsageError as exc:

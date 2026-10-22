@@ -81,12 +81,6 @@ def _log_text(h: _Host) -> str:
     return " ".join(f"{m} {f}" for _, m, f in h.log_calls).lower()
 
 
-def test_flag_off_drops_after_match_and_uses_default_off_key(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!truthordare"))) is None
-    assert host.flag_keys == ["waddles.command-truthordare"]
-
-
 def test_non_matching_never_touches_flag(host: _Host) -> None:
     for text in ("hello", "", "!truthordarex", "!truthordare2"):
         assert _run(transform(_event(text))) is None
@@ -170,3 +164,12 @@ def test_prompt_lists_are_sfw_and_unique() -> None:
     assert len(set(TRUTHS)) == len(TRUTHS) and len(set(DARES)) == len(DARES)
     for p in (*TRUTHS, *DARES):
         assert not any(w in p.lower() for w in BANNED)
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
+    """Activation-gated only: an OFF `waddles.command-truthordare` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(_event("!truthordare")))
+    assert out is not None
+    assert host.flag_keys == []

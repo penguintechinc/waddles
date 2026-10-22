@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 import pytest
-from app import FLAG_KEY, MAX_REPLY_LEN, MAX_TEXT_LEN, build_prompt, dispatch, transform
+from app import MAX_REPLY_LEN, MAX_TEXT_LEN, build_prompt, dispatch, transform
 from conftest import MockHost
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
@@ -158,28 +158,6 @@ def test_unavailable_model_fails_loud(
     assert "secret-internal-detail" not in out.payload["text"] + host.log_text()
 
 
-def test_flag_off_and_non_matching_are_ignored(host: MockHost) -> None:
-    host.flag_enabled = False
-    assert _run(transform(_event("!translate es hi"))) is None
-    host.flag_enabled = True
-    assert _run(transform(_event("!translator es hi"))) is None
-    assert _run(transform(_event("hello"))) is None
-    assert host.ai.calls == []
-
-
-def test_flag_key_and_default_off(
-    host: MockHost, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen: list[tuple[str, bool]] = []
-    import wit_world
-
-    wit_world.imports.flags.enabled = lambda key, default: (
-        seen.append((key, default)) or False
-    )
-    assert _run(transform(_event("!translate es hi"))) is None
-    assert seen == [(FLAG_KEY, False)] and FLAG_KEY == "waddles.command-translate"
-
-
 @pytest.mark.parametrize("platform", ["twitch", "discord"])
 def test_dispatch_relays_to_origin_platform(platform: str, host: MockHost) -> None:
     out = _run(transform(_event("!translate es hello", platform)))
@@ -222,3 +200,55 @@ def test_logs_are_pii_free(host: MockHost) -> None:
     for _l, _m, fields in host.logs:
         assert "actor" not in json.loads(fields)
     assert "lang=" in logged or "lang" in logged and "input_len" in logged
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+FORGED = "ok {user:victim-9} @everyone <@123> @here"
+NEUTRALIZED = (
+    "ok \\{user:victim-9\\} @" + ZWSP + "everyone <@" + ZWSP + "123> @" + ZWSP + "here"
+)
+
+
+def test_model_output_cannot_forge_mentions(host: MockHost) -> None:
+    """LLM01: a prompt-injected completion must not carry a live placeholder or mass mention."""
+    host.ai.reply = FORGED
+    out = _run(transform(_event("!translate es hello")))
+    assert out is not None
+    assert out.payload["text"] == "[es] " + NEUTRALIZED
+
+
+def test_typed_mention_does_not_whitelist_model_output(host: MockHost) -> None:
+    """A mention the user typed must not make the model's echo of it live (no allow_tokens)."""
+    host.ai.reply = "hi {user:tok-1}"
+    out = _run(transform(_event("!translate es hello {user:tok-1}")))
+    assert out is not None
+    assert out.payload["text"] == "[es] " + "hi \\{user:tok-1\\}"
+
+
+def test_usage_echo_of_typed_language_is_neutralized(host: MockHost) -> None:
+    out = _run(transform(_event("!translate @everyone hello")))
+    assert out is not None
+    assert out.payload["command"] == "usage"
+    assert out.payload["text"].startswith(
+        "'@" + ZWSP + "everyone' is not a valid language."
+    )
+    forged = _run(transform(_event("!translate {user:victim-9} hello")))
+    assert forged is not None
+    assert forged.payload["text"].startswith(
+        "'\\{user:victim-9\\}' is not a valid language."
+    )
+
+
+def test_non_matching_events_are_ignored(host: MockHost) -> None:
+    assert _run(transform(_event("!translator es hi"))) is None
+    assert _run(transform(_event("hello"))) is None
+    assert host.ai.calls == []
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host: MockHost) -> None:
+    """Activation-gated only: an OFF `waddles.command-translate` flag must not drop the command."""
+    host.flag_enabled = False
+    out = _run(transform(_event("!translate")))
+    assert out is not None

@@ -150,11 +150,6 @@ def test_transform_ignores_non_string_text(host: _Host) -> None:
     assert _run(transform(ev)) is None
 
 
-def test_flag_off_drops_after_match(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, flag=False)
-    assert _run(transform(_event("!steal {user:victim}"))) is None
-
-
 def test_badges_strict_is_true(host: _Host) -> None:
     out = _run(transform(_event("!steal list", is_mod="false", is_broadcaster=1)))
     assert out is not None
@@ -346,3 +341,78 @@ def test_keys_and_logs_pii_free(host: _Host, monkeypatch: pytest.MonkeyPatch) ->
     assert "viewer-1" not in blob
     assert ACTOR not in blob
     assert TARGET not in blob
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+
+
+def _envelope_as(actor: str | None, command: str, **payload: Any) -> StageEnvelope:
+    return StageEnvelope(
+        tenant="t",
+        community=COMMUNITY,
+        app_id="waddles.core.example.steal",
+        stage="action",
+        event=PlatformEvent(
+            platform="twitch",
+            event_type="chat.message",
+            actor=actor,
+            payload={"command": command, "channel_id": "12345", **payload},
+            occurred_at="2026-10-05T00:00:00.000Z",
+        ),
+        ts="2026-10-05T00:00:00.000Z",
+    )
+
+
+def _win_reply_as(host: _Host, monkeypatch: pytest.MonkeyPatch, actor: str | None) -> str:
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    _run(dispatch(_envelope_as(actor, "steal", tokens=["victim"]), {}, http_client=None))
+    return _reply(host)
+
+
+def test_minted_actor_token_stays_live_in_the_reply(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pipeline's own `{user:<token>}` actor must still resolve to a display name."""
+    assert _win_reply_as(host, monkeypatch, "{user:tok-actor}").startswith(
+        "\U0001f9b9 {user:tok-actor} stole "
+    )
+
+
+@pytest.mark.parametrize(
+    ("actor", "label"),
+    [
+        ("evil@everyone", "evil@" + ZWSP + "everyone"),
+        ("{user:handle:victim} <@123>", "\\{user:handle:victim\\} <@" + ZWSP + "123>"),
+        ("{user:tok-1} @here", "\\{user:tok-1\\} @" + ZWSP + "here"),
+    ],
+)
+def test_raw_actor_cannot_forge_mentions(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, actor: str, label: str
+) -> None:
+    """A raw handle (tokenization off) or an actor with text around a placeholder is untrusted."""
+    assert _win_reply_as(host, monkeypatch, actor).startswith("\U0001f9b9 " + label + " stole ")
+
+
+def test_missing_actor_falls_back_to_someone(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _win_reply_as(host, monkeypatch, None).startswith("\U0001f9b9 someone stole ")
+
+
+def test_config_echo_of_typed_value_is_neutralized(host: _Host) -> None:
+    _run(
+        dispatch(
+            _envelope("config_set_cooldown", arg="cooldown @everyone", is_mod=True),
+            {},
+            http_client=None,
+        )
+    )
+    assert _reply(host) == "'@" + ZWSP + "everyone' isn't a whole number of seconds"
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Activation-gated only: an OFF `waddles.command-steal` flag must not drop the command."""
+    _install(monkeypatch, flag=False)
+    assert _run(transform(_event("!steal list"))) is not None

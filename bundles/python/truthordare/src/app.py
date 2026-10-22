@@ -6,8 +6,9 @@ picks truth or dare at random; `!truthordare truth` / `!truthordare dare` choose
 `waddle_sdk.command.parse_command` does the grammar. They are NOT enable/disable-gated
 (`SubModuleGate` needs kv; this bundle is deliberately stateless) -- both are always available.
 
-The reply never echoes user input and `event.actor` is never logged. Gated by the
-`waddles.command-truthordare` feature flag (default OFF), checked after the command matched.
+The reply never echoes user input and `event.actor` is never logged. Activation-gated only -- no
+feature flag: the platform's installed -> enabled ->
+activated check decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -17,10 +18,8 @@ from typing import Any
 
 from waddle_sdk import log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-truthordare"
 SPEC = CommandSpec(name="truthordare", sub_modules=frozenset({"truth", "dare"}))
 
 #: Static, original, family-friendly truth prompts.
@@ -80,15 +79,13 @@ def _kind(text: str) -> str | None:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: `!truthordare [truth|dare]` -> a random prompt.
 
-    Returns `None` for a non-matching payload or while the feature flag is off; a recognized
+    Returns `None` for a non-matching payload; a recognized
     but malformed invocation gets a usage reply (the bad input is not echoed).
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
         return None
     if text.strip().partition(" ")[0].lower() != f"!{SPEC.name}":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     kind = _kind(text)

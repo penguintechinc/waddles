@@ -111,7 +111,6 @@ def test_command_replies_with_transformed_text(
     assert result is not None
     assert result.payload["text"] == expected
     assert result.payload["channel_id"] == "12345"
-    assert fake_host.flag_keys == ["waddles.command-uwu"]
 
 
 def test_leading_verb_word_is_text_not_a_verb(fake_host: _Host) -> None:
@@ -138,11 +137,6 @@ def test_refuses_reply_starting_with_chat_command_lead(
     text = lead + "ban"
     result = _run(transform(_sample_event(f"!uwu {text}")))
     assert result.payload["text"] == _UNSAFE_MSG
-
-
-def test_flag_off_drops_the_command(fake_host: _Host) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_sample_event("!uwu hello"))) is None
 
 
 @pytest.mark.parametrize("text", ["!uwuing", "uwu", "", "hello world", "x !uwu"])
@@ -190,3 +184,30 @@ def test_logs_never_contain_text_or_actor(fake_host: _Host) -> None:
         assert "sensitive" not in blob.lower()
         assert "viewer-1" not in blob
         assert "actor" not in json.loads(fields_json)
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+
+
+def test_raw_platform_mention_is_defanged(fake_host: _Host) -> None:
+    out = _run(transform(_sample_event("!uwu <@123> hi")))
+    assert out is not None
+    assert out.payload["text"].startswith("<@" + ZWSP + "123>")
+
+
+def test_stripped_control_char_cannot_unmask_a_command_lead(fake_host: _Host) -> None:
+    """Raw `\x00/x` passes a leading-`/` check, but the host strips NUL afterwards; the refusal
+    must therefore be decided on the sanitized text."""
+    out = _run(transform(_sample_event("!uwu \x00/x")))
+    assert out is not None
+    assert out.payload["text"] == _UNSAFE_MSG
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(fake_host: _Host) -> None:
+    """Activation-gated only: an OFF `waddles.command-uwu` flag must not drop the command."""
+    fake_host.flag_enabled = False
+    out = _run(transform(_sample_event("!uwu hello")))
+    assert out is not None
+    assert fake_host.flag_keys == []

@@ -7,8 +7,14 @@ PII-free logs: only platform, op, input length and resolved reply shape (plus co
 `dispatch`) are logged -- never the message text, `event.actor`, or any typed argument. The reply
 itself carries caller-typed text back to the same public channel it came from.
 
-Gated by the `waddles.command-uwu` feature flag (default OFF), checked after the command matches
-so an unrelated event never pays for a host round trip.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
+
+Output safety: the echoed text is user-typed, so the transformed reply goes through
+`waddle_sdk.safe_text.sanitize_user_text` LAST (after the transform), neutralizing forged
+`{user:<token>}` placeholders and `@everyone`/`@here`/`<@id>` mass-mention markup. The
+leading `/ . !` refusal runs on the sanitized text, so a stripped control character cannot
+unmask a command lead.
 """
 
 from __future__ import annotations
@@ -18,10 +24,9 @@ from typing import Any
 
 from waddle_sdk import log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
-FLAG_KEY = "waddles.command-uwu"
 SPEC = CommandSpec(name="uwu")
 
 MAX_INPUT_LEN = 200
@@ -67,7 +72,7 @@ def _build_reply(args: str | None) -> tuple[str, str]:
         raise CommandUsageError(_USAGE)
     if len(args) > MAX_INPUT_LEN:
         return _TOO_LONG, "too_long"
-    reply = apply_transform(args)
+    reply = sanitize_user_text(apply_transform(args))
     if reply.startswith(_UNSAFE_LEAD):
         return _UNSAFE_MSG, "unsafe"
     return reply, "uwu"
@@ -76,7 +81,7 @@ def _build_reply(args: str | None) -> tuple[str, str]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!uwu` and build the transformed reply.
 
-    Returns `None` (event dropped) for a non-matching payload or while the flag is off -- never
+    Returns `None` (event dropped) for a non-matching payload -- never
     raises over an event this bundle was never meant to react to.
     """
     text = event.payload.get("text")
@@ -89,9 +94,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         # verbatim (a leading word like "add" must transform, not be read as a verb).
         parse_command(head, SPEC)
     except CommandUsageError:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     args = rest.strip() or None

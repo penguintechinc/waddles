@@ -31,23 +31,29 @@ Commands:
 
 PII-free: kv keys/logs carry only `jackpot.pot` and `jackpot.cd.<pseudonym>` where the pseudonym is
 SHA-256(community|resolved-uuid); logs carry `op`/`outcome`/`amount_bucket`/error-case only.
-Gated by feature flag `waddles.command-jackpot` (default OFF), checked after the command matches.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
+
+Output safety: `event.actor` is interpolated into most replies. The host-minted
+`{user:<token>}` actor stays live (egress renders the display name); any other value is
+untrusted and goes through `waddle_sdk.safe_text.sanitize_user_text` (see `_actor_label`),
+as does every other typed echo.
 """
 
 from __future__ import annotations
 
 import hashlib
 import random
+import re
 from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, economy, identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import sanitize_user_text
 
 SPEC = CommandSpec(name="jackpot")
 
-FLAG_KEY = "waddles.command-jackpot"
 BASE_POT = 100
 WIN_PERCENT = 10
 MIN_STAKE = 1
@@ -56,6 +62,26 @@ COOLDOWN_SECONDS = 10
 _POT_KEY = "jackpot.pot"
 _USAGE = "Usage: !jackpot <stake> (win the whole pot, else your stake joins it) | !jackpot"
 _KNOWN_COMMANDS = frozenset({"play", "status", "usage"})
+
+
+#: The pipeline delivers `event.actor` as its own host-minted placeholder; anchored so ONLY an actor
+#: that is exactly one `{user:<token>}` is left live (never one embedded in other text).
+_USER_TOKEN_RE = re.compile(r"^\{user:([A-Za-z0-9_:.-]+)\}$")
+_FALLBACK_ACTOR = "someone"
+
+
+def _actor_label(actor: object) -> str:
+    """Return a reply-safe label for `event.actor`.
+
+    The host-minted `{user:<token>}` stays live so egress renders the display name. Anything else
+    (a raw handle when tokenization is off, a missing actor) is untrusted text and goes through
+    `sanitize_user_text` in full, so a platform display name can never forge a mention.
+    """
+    if not isinstance(actor, str) or not actor.strip():
+        return _FALLBACK_ACTOR
+    label = actor.strip()
+    match = _USER_TOKEN_RE.match(label)
+    return sanitize_user_text(label, allow_tokens=(match.group(1),) if match else ())
 
 
 def _cooldown_key(pseudonym: str) -> str:
@@ -82,9 +108,9 @@ def _roll_win() -> bool:
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize `!jackpot [stake]`, then flag-gate.
+    """Implement `process-stage.transform`: recognize `!jackpot [stake]`.
 
-    Cheap command match first, then the feature flag (default OFF -> drop), then grammar.
+    Cheap command match first, then grammar.
     A recognized-but-malformed `!jackpot ...` replies `usage`, never a silent drop.
     """
     text = event.payload.get("text")
@@ -92,8 +118,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     stripped = text.strip()
     if stripped.partition(" ")[0].lower() != "!jackpot":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     tail = stripped.partition(" ")[2].strip()
@@ -328,7 +352,7 @@ async def dispatch(
         log.error("jackpot.missing_community", command=command)
         raise ValueError("jackpot requires a community context and cannot operate tenant-wide")
 
-    username = envelope.event.actor or "someone"
+    username = _actor_label(envelope.event.actor)
     pot = _Pot(community, provider, channel_id)
     arg = payload.get("arg")
     arg_text = arg if isinstance(arg, str) else None

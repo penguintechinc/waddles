@@ -66,12 +66,6 @@ def test_non_matching_is_ignored_without_flag_lookup(host, text):
     assert host.flag_keys == []
 
 
-def test_flag_off_drops_after_match_default_false(host):
-    host.flag = False
-    assert _text("!numberfact") is None
-    assert host.flag_keys == [("waddles.command-numberfact", False)]
-
-
 def test_non_text_payload_ignored(host):
     ev = PlatformEvent(platform="twitch", event_type="x", actor=None, payload={}, occurred_at="")
     assert _run(transform(ev)) is None
@@ -137,3 +131,12 @@ def test_huge_number_rejected(host):
 
 def test_prime_helper_edges():
     assert [app._is_prime(i) for i in (0, 1, 2, 3, 4, 9, 11)] == [False, False, True, True, False, False, True]
+
+
+# hardening: activation-only
+def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
+    """Activation-gated only: an OFF `waddles.command-numberfact` flag must not drop the command."""
+    host.flag = False
+    out = _run(transform(_event("!numberfact 7")))
+    assert out is not None
+    assert host.flag_keys == []

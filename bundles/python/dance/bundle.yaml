@@ -34,7 +34,7 @@ stages:
     spec:
       required_config: []
 egress: []
-# No kv/db state -- stateless relay; minimal permissions (flags.read + chat.send).
+# No kv/db state -- stateless relay; minimal permissions (chat.send only).
 data:
   tables: []
 limits:
@@ -42,8 +42,6 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - id: "flags.read"
-    justification: "gates the command behind the waddles.command-dance feature flag"
   - id: "chat.send:discord"
     justification: "replies to the invoking command on its origin platform via the relay host import (relay.push -> chat.send:discord); no other capability is used"
   - id: "chat.send:twitch"

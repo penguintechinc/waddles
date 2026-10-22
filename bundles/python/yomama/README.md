@@ -5,10 +5,10 @@ First-party (`provider: builtin`, `app_id: waddles.core.example.yomama`), statel
 
 | | |
 |---|---|
-| Gating | Activation + `waddles.command-yomama` feature flag (default OFF, checked after the command matches) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`) |
-| Permissions | `flags.read`, `chat.send:discord`, `chat.send:twitch` |
+| Permissions | `chat.send:discord`, `chat.send:twitch` |
 
 | Command | Behavior |
 |---|---|

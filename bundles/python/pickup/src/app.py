@@ -8,7 +8,8 @@ call `identity.resolve_*`, so it needs no identity permission). A non-placeholde
 (e.g. a raw `@name` typed where no mention was resolved) gets the usage reply and is NOT echoed.
 `event.actor` is never logged.
 
-Gated by the `waddles.command-pickup` feature flag (default OFF), checked after the match.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -18,10 +19,8 @@ from typing import Any
 
 from waddle_sdk import identity, log, relay
 from waddle_sdk.command import CommandSpec
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-pickup"
 SPEC = CommandSpec(name="pickup")
 
 #: Static, original, family-friendly pickup lines (all cheesy puns, none crude).
@@ -74,7 +73,7 @@ def _target_token(rest: str) -> str | None | bool:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: `!pickup [@user]` -> a random pickup line.
 
-    Returns `None` for a non-matching payload or while the feature flag is off; a recognized
+    Returns `None` for a non-matching payload; a recognized
     but malformed invocation gets a usage reply (the bad input is not echoed).
     """
     text = event.payload.get("text")
@@ -82,8 +81,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != f"!{SPEC.name}":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     target = _target_token(rest.strip())

@@ -35,7 +35,7 @@ limits:
   egress_rps: 10
 permissions:
   - id: ai.generate
-    justification: "DANGEROUS capability, minimal use: one ai.generate call per command to classify the mood of the caller's short text, returning small structured JSON {sentiment, confidence, emoji} (json=true, gemma e4b); the host picks the model, rejects PII and bounds the prompt; input is capped at 400 chars; the completion is treated as untrusted text"
+    justification: "DANGEROUS, minimal use: one ai.generate call per command to classify the caller's short text as small JSON {sentiment, confidence, emoji} (json=true); the host picks the model, rejects PII and bounds the prompt; input capped at 400 chars; the completion is validated and sanitized"
   - id: "chat.send:discord"
     justification: "replies with the result (or an error) to the invoking channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"

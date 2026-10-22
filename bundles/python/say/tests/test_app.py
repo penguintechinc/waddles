@@ -162,3 +162,23 @@ def test_manifest_permissions_least_privilege() -> None:
         assert 'id: "chat.send:discord"' in body
         assert 'id: "chat.send:twitch"' in body
         assert "storage.kv" not in body
+
+
+# hardening: output sanitizer / activation-only
+ZWSP = "\u200b"
+
+
+def test_announcement_neutralizes_mass_and_raw_mentions(host: _FakeHost) -> None:
+    out = _run_through(host, "!say hello @everyone and <@123>", is_mod=True)
+    assert out == "hello @" + ZWSP + "everyone and <@" + ZWSP + "123>"
+
+
+def test_minted_mention_stays_live_but_typed_placeholder_stays_escaped(host: _FakeHost) -> None:
+    """A host-minted `{user:tok-1}` stays live; a typed (host-escaped) placeholder never does."""
+    out = _run_through(host, "!say welcome {user:tok-1} \\{user:victim-9\\}", is_mod=True)
+    assert out == "welcome {user:tok-1} \\{user:victim-9\\}"
+
+
+def test_stripped_control_char_cannot_unmask_a_command_lead(host: _FakeHost) -> None:
+    """A raw leading NUL passes a `/` check, but the host strips it afterwards."""
+    assert _run_through(host, "!say \x00/me waves", is_mod=True) == _UNSAFE_MSG
