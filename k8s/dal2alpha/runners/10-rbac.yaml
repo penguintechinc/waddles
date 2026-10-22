@@ -1,0 +1,103 @@
+# Least-privilege RBAC for the runner pod to `helm upgrade --install waddlebot`.
+# Helm 3 stores release state as Secrets in the release namespace; the chart
+# renders the kinds listed below (see k8s/helm/waddlebot/templates).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dal2-alpha-runner
+  namespace: github-runners
+automountServiceAccountToken: true
+---
+# Namespaced: manage only the kinds the waddlebot chart renders, only in `waddlebot`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: waddlebot-helm-deployer
+  namespace: waddlebot
+rules:
+  - apiGroups: [""]
+    resources: [services, serviceaccounts, configmaps, secrets, persistentvolumeclaims, pods, pods/log, events]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets, replicasets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [httproutes]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [cilium.io]
+    resources: [ciliumnetworkpolicies, tracingpoliciesnamespaced]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Chart ships Role/RoleBinding; RBAC escalation check requires holding what it grants.
+  # Pod/secret/configmap perms above cover the chart's namespaced Roles. `bind`/`escalate` NOT granted.
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: waddlebot-helm-deployer
+  namespace: waddlebot
+subjects:
+  - kind: ServiceAccount
+    name: dal2-alpha-runner
+    namespace: github-runners
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: waddlebot-helm-deployer
+---
+# Cluster-scoped: only what the chart's cluster-scoped objects need, by name where possible.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: waddlebot-helm-deployer-cluster
+rules:
+  # Chart's namespace.yaml (namespaceCreate) + preflight reads.
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list]
+  # Chart ClusterRole `*-hub-api-tokenreview` grants tokenreviews:create; to create it
+  # the deployer must itself hold that permission (escalation prevention).
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles, clusterrolebindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # CRD existence checks (Cilium/cert-manager/Kyverno) during render/apply.
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [get, list]
+  # Kyverno ClusterPolicy shipped by supply-chain template (waddles-verify-image-signatures).
+  - apiGroups: [kyverno.io]
+    resources: [clusterpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: waddlebot-helm-deployer-cluster
+subjects:
+  - kind: ServiceAccount
+    name: dal2-alpha-runner
+    namespace: github-runners
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: waddlebot-helm-deployer-cluster
