@@ -13,7 +13,7 @@ function firstString(...candidates: unknown[]): string | undefined {
 
 /**
  * Extracts a user-presentable message from anything a query/mutation can throw.
- * Handles Axios errors carrying hub-api's `{ error }` / `{ message }` body, plain
+ * Handles Axios errors carrying hub-api's `{ error }` / `{ error: { message } }` / `{ message }` body, plain
  * `Error`s and strings; never returns raw objects or stack traces.
  */
 export function getErrorMessage(error: unknown, fallback = 'Something went wrong. Please try again.'): string {
@@ -24,7 +24,10 @@ export function getErrorMessage(error: unknown, fallback = 'Something went wrong
   if (isRecord(response)) {
     const data = response['data'];
     if (isRecord(data)) {
-      const fromBody = firstString(data['error'], data['message'], data['detail']);
+      // hub-api's `error_response()` envelope nests the text: `{ success: false, error: { code, message } }`.
+      const envelope = data['error'];
+      const nested = isRecord(envelope) ? envelope['message'] : undefined;
+      const fromBody = firstString(data['error'], nested, data['message'], data['detail']);
       if (fromBody) return fromBody;
     }
     if (response['status'] === 403) return 'You do not have permission to do that.';
