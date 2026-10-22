@@ -17,6 +17,14 @@
 //! channel belongs to; a non-member, a channel with no guild, or a failed
 //! membership lookup is refused (fail closed) before any DM channel is opened.
 //!
+//! **Mention guard.** Every `POST .../messages` body carries the host-level
+//! `allowed_mentions` backstop from [`discord_mentions`] (`{"parse":
+//! ["users"]}`: `@everyone` / `@here` / role mentions never notify, a plain
+//! user mention still does). The two send sites build their bodies with
+//! [`discord_mentions::message_body`], and [`DiscordRestClient::execute`]
+//! re-stamps the guard on any message-create `POST` regardless of caller, so
+//! a future send path cannot forget it.
+//!
 //! **Token handling.** The token is a [`Secret`] (redacted `Debug`), is only
 //! ever placed in the `Authorization` header, and never appears in a log
 //! line or an error string.
@@ -169,7 +177,7 @@ impl DiscordRestClient {
                 Method::POST,
                 format!("/channels/{channel_id}/messages"),
                 format!("POST /channels/{channel_id}/messages"),
-                Some(serde_json::json!({ "content": text })),
+                Some(discord_mentions::message_body(text)),
             )
             .await?;
         ensure_success(&resp, false)
@@ -231,7 +239,7 @@ impl DiscordRestClient {
                 Method::POST,
                 format!("/channels/{dm_channel_id}/messages"),
                 format!("POST /channels/{dm_channel_id}/messages"),
-                Some(serde_json::json!({ "content": text })),
+                Some(discord_mentions::message_body(text)),
             )
             .await?;
         ensure_success(&sent, true)
@@ -352,15 +360,17 @@ impl DiscordRestClient {
     }
 
     /// Sends one request honoring the per-route bucket and bounded `429`
-    /// retry; returns the first non-429 response.
+    /// retry; returns the first non-429 response. A message-create `POST`
+    /// always leaves with the mass-mention guard (see [`guard_message_create`]).
     async fn execute(
         &self,
         op: &'static str,
         method: Method,
         path: String,
         route: String,
-        body: Option<serde_json::Value>,
+        mut body: Option<serde_json::Value>,
     ) -> Result<Resp, DiscordRestError> {
+        guard_message_create(&method, &path, &mut body);
         let url = format!("{}{path}", self.api_base);
         let mut attempts = 0u32;
         loop {
@@ -463,6 +473,19 @@ impl DiscordRestClient {
     }
 }
 
+/// Choke-point backstop: stamps the [`discord_mentions`] guard onto the body
+/// of every message-create request (`POST /channels/{id}/messages`),
+/// overwriting any caller-supplied `allowed_mentions`. Idempotent with the
+/// sites' own [`discord_mentions::message_body`]; it exists so a new send
+/// path that builds its own JSON still cannot ping `@everyone` / roles.
+fn guard_message_create(method: &Method, path: &str, body: &mut Option<serde_json::Value>) {
+    if *method == Method::POST && path.ends_with("/messages") {
+        if let Some(b) = body.as_mut() {
+            discord_mentions::guard_body(b);
+        }
+    }
+}
+
 /// A buffered response (status + body).
 struct Resp {
     status: u16,
@@ -542,6 +565,19 @@ mod tests {
 
     const TOKEN: &str = "tok-secret-123";
 
+    /// wiremock matcher: the request body is JSON whose `allowed_mentions`
+    /// can not mass-mention ([`discord_mentions::is_guarded`]). An unguarded
+    /// request matches no mock and 404s, failing the send loudly.
+    struct GuardedBody;
+
+    impl wiremock::Match for GuardedBody {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            serde_json::from_slice::<serde_json::Value>(&request.body)
+                .map(|b| discord_mentions::is_guarded(&b))
+                .unwrap_or(false)
+        }
+    }
+
     fn client(server: &MockServer) -> DiscordRestClient {
         DiscordRestClient::new(Secret::new(TOKEN), server.uri())
             .unwrap()
@@ -563,12 +599,124 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/channels/111/messages"))
             .and(header("Authorization", format!("Bot {TOKEN}").as_str()))
-            .and(body_json(serde_json::json!({"content": "hi"})))
+            .and(body_json(serde_json::json!({
+                "content": "hi",
+                "allowed_mentions": {"parse": ["users"]},
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"1"})))
             .expect(1)
             .mount(&server)
             .await;
         client(&server).send_message("111", "hi").await.unwrap();
+    }
+
+    /// regression: no Discord REST body set `allowed_mentions`, so a bundle
+    /// (or forged content) could ping `@everyone`. A mass-mention payload
+    /// must reach Discord verbatim *with* the guard that makes it inert.
+    #[tokio::test]
+    async fn send_message_mass_mention_payload_carries_the_guard() {
+        for text in ["@everyone wake up", "@here", "<@&123456789012345678> ping"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/channels/111/messages"))
+                .and(body_json(serde_json::json!({
+                    "content": text,
+                    "allowed_mentions": {"parse": ["users"]},
+                })))
+                .and(GuardedBody)
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"1"})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            client(&server).send_message("111", text).await.unwrap();
+        }
+    }
+
+    /// The DM message body (second `POST`, to the opened DM channel) carries
+    /// the same guard; the open-DM `POST` has no content so is left alone.
+    #[tokio::test]
+    async fn send_dm_mass_mention_payload_carries_the_guard() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/users/@me/channels"))
+            .and(body_json(serde_json::json!({"recipient_id": "777"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"999"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/channels/999/messages"))
+            .and(GuardedBody)
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"5"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        client(&server)
+            .send_dm("777", "@everyone psst")
+            .await
+            .unwrap();
+    }
+
+    /// The `execute` choke point re-stamps the guard on a message-create
+    /// body a caller built by hand -- permissive caller values never survive.
+    #[tokio::test]
+    async fn execute_overwrites_a_permissive_message_create_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/channels/111/messages"))
+            .and(body_json(serde_json::json!({
+                "content": "@everyone",
+                "allowed_mentions": {"parse": ["users"]},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let resp = client(&server)
+            .execute(
+                "chat.send",
+                Method::POST,
+                "/channels/111/messages".to_string(),
+                "POST /channels/111/messages".to_string(),
+                Some(serde_json::json!({
+                    "content": "@everyone",
+                    "allowed_mentions": {"parse": ["everyone", "roles", "users"]},
+                })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+    }
+
+    #[test]
+    fn guard_message_create_only_touches_message_create_posts() {
+        let permissive = || {
+            Some(serde_json::json!({
+                "content": "x",
+                "allowed_mentions": {"parse": ["everyone"]},
+            }))
+        };
+        let mut create = permissive();
+        guard_message_create(&Method::POST, "/channels/1/messages", &mut create);
+        assert!(discord_mentions::is_guarded(create.as_ref().unwrap()));
+
+        // Non-create routes are never rewritten.
+        for (m, p) in [
+            (Method::DELETE, "/channels/1/messages/2"),
+            (Method::GET, "/channels/1/messages"),
+            (Method::POST, "/users/@me/channels"),
+        ] {
+            let mut other = permissive();
+            guard_message_create(&m, p, &mut other);
+            assert_eq!(other, permissive(), "{m} {p} must be left untouched");
+        }
+
+        // A body-less request stays body-less (nothing to stamp).
+        let mut none = None;
+        guard_message_create(&Method::POST, "/channels/1/messages", &mut none);
+        assert!(none.is_none());
     }
 
     #[tokio::test]
@@ -618,7 +766,10 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/channels/999/messages"))
-            .and(body_json(serde_json::json!({"content": "psst"})))
+            .and(body_json(serde_json::json!({
+                "content": "psst",
+                "allowed_mentions": {"parse": ["users"]},
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"5"})))
             .expect(1)
             .mount(&server)

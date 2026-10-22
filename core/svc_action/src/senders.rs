@@ -165,7 +165,12 @@ pub fn discord_webhook_url_from_config(config_json: &str) -> Option<String> {
 /// `crate::egress`'s module doc). `webhook_url` **must** come from
 /// [`discord_webhook_url_from_config`] (this bundle's own trusted
 /// activation config), never a caller-invented or bundle-runtime-supplied
-/// literal -- see that function's doc for why. It must also already be on
+/// literal -- see that function's doc for why. The body this builds always
+/// carries the `discord_mentions` mass-mention guard (`{"parse": ["users"]}`),
+/// so it can never ping `@everyone`/`@here`/roles whatever `content` says. (A
+/// bundle that hand-builds its own webhook body through the generic `http`
+/// capability does not go through this helper -- see `discord_mentions`'s
+/// "Scope" section.) The webhook URL must also already be on
 /// the bundle's manifest `egress` allowlist (e.g. `{host: "discord.com",
 /// methods: ["POST"]}`); the bundle constructs and issues this call itself
 /// via the wire protocol -- this function documents the expected shape,
@@ -181,7 +186,10 @@ pub fn discord_webhook_url_from_config(config_json: &str) -> Option<String> {
 /// DLQ/log pipeline.
 pub fn discord_webhook_args(webhook_url: &str, content: &str) -> serde_json::Value {
     use base64::Engine;
-    let body = serde_json::json!({"content": content}).to_string();
+    // Same host-level mass-mention backstop as the bot-token relay send
+    // (`discord_mentions`): a webhook execute body never allows
+    // @everyone/@here/role pings, whatever `content` says.
+    let body = discord_mentions::message_body(content).to_string();
     let body_base64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
     serde_json::json!({
         "method": "POST",
@@ -274,6 +282,28 @@ mod tests {
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body_b64).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(parsed["content"], "hello");
+        assert_eq!(
+            parsed["allowed_mentions"],
+            serde_json::json!({"parse": ["users"]})
+        );
+    }
+
+    /// regression: a webhook execute body must carry the mass-mention guard
+    /// too -- an `@everyone` payload serializes (base64'd on the wire) with
+    /// `allowed_mentions` that disables everyone/roles pings.
+    #[test]
+    fn discord_webhook_args_mass_mention_payload_carries_the_guard() {
+        for content in ["@everyone", "@here hi", "<@&123456789012345678>"] {
+            let args = discord_webhook_args("https://discord.com/api/webhooks/1/abc", content);
+            let decoded = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                args["body_base64"].as_str().unwrap(),
+            )
+            .unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+            assert_eq!(parsed["content"], content);
+            assert!(discord_mentions::is_guarded(&parsed), "{parsed}");
+        }
     }
 
     /// regression: a Discord webhook's bearer token is a URL *path* segment,

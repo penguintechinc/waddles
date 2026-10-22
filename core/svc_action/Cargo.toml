@@ -169,6 +169,11 @@ bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 # dependency on `hub_client`. Same-repo path dependency, same rationale as
 # `bundle-active-set` above.
 egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
+# Discord `allowed_mentions` mass-mention backstop (`src/capabilities.rs`'s Discord
+# relay body, `src/senders.rs`'s webhook body) -- one definition shared with
+# `core/svc_ingest`'s bot-token REST sender so no Discord send path can forget
+# it. Same-repo path dependency, same rationale as `bundle-active-set` above.
+discord-mentions = { path = "../discord_mentions", version = "=0.1.0" }
 # `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames` client,
 # needed directly (not just transitively via `egress_detokenizer`) so
 # `crate::lib`'s startup wiring can construct the real

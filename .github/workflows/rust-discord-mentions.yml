@@ -1,0 +1,36 @@
+name: Rust discord-mentions (lint + test)
+
+# core/discord_mentions is the single definition of the Discord
+# `allowed_mentions` mass-mention backstop shared by svc-action and svc-ingest.
+# Their own workflows exercise it only through their send paths; this gates the
+# shared crate itself with fmt + clippy + cargo-deny + a >=90% coverage gate.
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/discord_mentions/**'
+      - '.github/workflows/rust-discord-mentions.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/discord_mentions/**'
+      # Self-test: a change to this workflow must prove it still gates.
+      - '.github/workflows/rust-discord-mentions.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: discord-mentions
+      working_directory: core/discord_mentions

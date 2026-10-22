@@ -5,12 +5,14 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/svc_ingest/**'
+      - 'core/discord_mentions/**'
       - '.github/workflows/rust-svc-ingest.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
       - 'core/svc_ingest/**'
+      - 'core/discord_mentions/**'
   workflow_dispatch:
 
 permissions:

@@ -8,7 +8,8 @@
 #
 # Build (context = `core/`, the parent of this directory, because this crate
 # path-depends on the sibling `service_auth` crate for its dataplane scope-resolver
-# machine-JWT client -- same layout as core/svc_process/Dockerfile.rust):
+# machine-JWT client (and `discord_mentions` for the Discord `allowed_mentions`
+# mass-mention guard on every message send) -- same layout as core/svc_process/Dockerfile.rust):
 #   docker build -f svc_ingest/Dockerfile.rust -t localhost:32000/waddlebot/svc-ingest-rust:alpha-<epoch> core/
 # ("svc-ingest-rust", not "svc-ingest" -- fix/helm-alpha-self-provisioning gives the Rust
 # build its own repository so it never collides with the Python Deployment's tag while
@@ -26,6 +27,7 @@ WORKDIR /build
 COPY svc_ingest/Cargo.toml svc_ingest/Cargo.lock ./svc_ingest/
 COPY svc_ingest/src ./svc_ingest/src
 COPY service_auth ./service_auth
+COPY discord_mentions ./discord_mentions
 WORKDIR /build/svc_ingest
 RUN cargo build --release --locked
 

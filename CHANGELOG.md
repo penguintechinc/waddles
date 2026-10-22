@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `flask_core.StageEnvelope` + the bundle SDK `StageEnvelope` carry the ids. See `docs/reference/bundle-host-imports.md`.
 
 ### Security
+- Discord mass-mention backstop: every Discord create-message REST body the Rust data plane emits (svc-action relay `chat.send` +
+  webhook-body helper, svc-ingest `chat.send`/`dm.send`) now carries `allowed_mentions: {"parse": ["users"]}` from one shared helper
+  (`core/discord_mentions`), so no bundle -- or content a bundle echoes -- can ping `@everyone`/`@here`/a role; plain user mentions
+  still notify. svc-ingest additionally re-stamps the guard at its `execute` choke point so a new send path cannot forget it.
+  Role/everyone pings are not a default; any future need must be a separately-named, reviewed opt-in.
 - GDPR Art. 17 erasure now covers every user-keyed table, not ~16 of ~121 (GRC audit HIGH): a declarative erasure registry
   (`hub_api/services/erasure_registry.py`, run by `erasure_executor.py` inside the single erasure transaction) deletes the
   subject's rows in 75 further tables, scrubs their PII on rows kept for others, and records a reasoned decision for every

@@ -1,0 +1,18 @@
+[package]
+name = "discord-mentions"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Single source of truth for the Discord `allowed_mentions` mass-mention backstop stamped onto every Discord create-message REST body the data plane emits (svc_action's relay/webhook senders, svc_ingest's bot-token REST sender). A path dependency within this repo -- NOT a penguin-libs crate: it encodes this platform's mention policy, so every Discord send path shares one definition and a new path cannot forget the guard. See src/lib.rs module doc."
+
+[lib]
+name = "discord_mentions"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
+# Dependency Pinning. Same serde_json pin as core/svc_action + core/svc_ingest
+# so the three crates resolve one version.
+[dependencies]
+serde_json = "=1.0.151"

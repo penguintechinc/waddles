@@ -1643,7 +1643,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         // trusted egress path onto an internal address.
         let pinned_addr = resolve_discord_address().await?;
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
-        let body = serde_json::json!({ "content": text })
+        // Host-level mass-mention backstop: `{"parse": ["users"]}` on every
+        // Discord create-message body, so no bundle's text (or content a
+        // bundle echoes) can ping @everyone/@here/roles -- see
+        // `discord_mentions`'s module doc for the policy and its rationale.
+        let body = discord_mentions::message_body(text)
             .to_string()
             .into_bytes();
         let outbound_bytes = body.len() as u64;
@@ -4204,6 +4208,57 @@ mod tests {
         let body = req.body.as_ref().expect("body present");
         let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(parsed["content"], "pong");
+        // Host-level mass-mention backstop is on every send body.
+        assert_eq!(
+            parsed["allowed_mentions"],
+            serde_json::json!({"parse": ["users"]})
+        );
+    }
+
+    /// regression: no Discord REST body set `allowed_mentions`, so a bundle
+    /// (or forged content it echoes) could ping `@everyone`/`@here`/a role.
+    /// The text is sent verbatim, *with* the guard that makes it inert -- and
+    /// a bundle-supplied `allowed_mentions` in `message_json` is never read,
+    /// so a bundle cannot widen the policy for itself.
+    #[tokio::test]
+    async fn relay_send_discord_mass_mention_payload_carries_the_guard() {
+        for text in ["@everyone wake up", "@here", "<@&123456789012345678> ping"] {
+            let transport = Arc::new(FakeDiscordTransport::default());
+            let caps = caps(FakeRelayQueue::default()).with_discord(
+                transport.clone(),
+                crate::config::Secret::new("test-bot-token"),
+            );
+            let message_json = serde_json::json!({
+                "text": text,
+                "allowed_mentions": {"parse": ["everyone", "roles", "users"]},
+            })
+            .to_string();
+
+            caps.handle(
+                &discord_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "discord", "message_json": message_json}),
+                ),
+            )
+            .await
+            .expect("discord relay send succeeds");
+
+            let requests = transport.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            let parsed: serde_json::Value =
+                serde_json::from_slice(requests[0].body.as_ref().expect("body present")).unwrap();
+            assert_eq!(parsed["content"], text);
+            assert!(
+                discord_mentions::is_guarded(&parsed),
+                "send body must not allow everyone/roles: {parsed}"
+            );
+            assert_eq!(
+                parsed["allowed_mentions"],
+                serde_json::json!({"parse": ["users"]})
+            );
+        }
     }
 
     /// PII boundary hard invariant, Discord sink: a resolved display name
@@ -4243,6 +4298,9 @@ mod tests {
         let content = parsed["content"].as_str().unwrap();
         assert_eq!(content, "hi \\@everyone");
         assert!(!content.contains("abc-1"));
+        // Belt and braces: even a resolved name that slipped its escaping
+        // could not ping -- the body carries the mass-mention guard.
+        assert!(discord_mentions::is_guarded(&parsed));
     }
 
     /// A bundle-supplied `channel` in `message_json` is silently ignored for
