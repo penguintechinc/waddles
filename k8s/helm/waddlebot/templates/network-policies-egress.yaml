@@ -63,6 +63,19 @@ spec:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
               protocol: TCP
+            {{- /*
+              Valkey dual-listener TLS port. The Rust data-plane pods connect over
+              rediss://<svc>:<tls.port> (VALKEY_URL_TLS) because
+              penguin_spine::SpineConfig::validate() fail-closes on plaintext; without
+              this port every spine connect times out (svc-ingest "valkey startup probe
+              failed (tcp): connect failed: timed out"). Gated on the same helper the
+              Valkey Deployment + client pods use, so it exists only when the TLS listener
+              does. Read from infrastructure.redis.tls.port (single source of truth).
+            */}}
+            {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+            - port: {{ .Values.infrastructure.redis.tls.port | quote }}
+              protocol: TCP
+            {{- end }}
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/instance: {{ .Release.Name }}
