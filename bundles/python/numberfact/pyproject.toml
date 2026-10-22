@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-numberfact"
+version = "1.0.0"
+description = "`!numberfact [n]` -> a fun fact about a number from a static canned list. Stateless, no external API."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
