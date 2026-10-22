@@ -1,7 +1,7 @@
 # Rootless BuildKit for alpha-only in-cluster image builds (runner connects via BUILDKIT_HOST).
 # No privileged container, no docker.sock. Rootless buildkit needs seccomp/apparmor Unconfined
 # (kernel userns + mount syscalls), which PSA baseline/restricted forbid, so this lives in its own
-# namespace labeled PSA `privileged` - the CONTAINER is still non-root, no added caps.
+# namespace labeled PSA `privileged` - the CONTAINER is still non-root, caps dropped ALL, no privilege escalation.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -55,16 +55,21 @@ spec:
             exec: {command: [buildctl, debug, workers]}
             initialDelaySeconds: 15
             periodSeconds: 30
+          # ACCEPTED TRADE-OFF: --oci-worker-no-process-sandbox means build RUN steps are NOT
+          # PID-isolated from buildkitd (they can see/signal it). This runner MUST therefore only build
+          # trusted first-party code (non-fork, protected-branch workflows) - see SETUP.md. Access is
+          # gated by the buildkitd-access CiliumNetworkPolicy (gRPC only from ns github-runners).
+          # procMount: Unmasked intentionally OMITTED - it is only needed for the default process
+          # sandbox (nested /proc mount); with no-process-sandbox the default masked /proc suffices.
           securityContext:
             runAsNonRoot: true
-            runAsUser: 1000   # rootless buildkit requires: non-root uid; user namespace is built via newuidmap, never real root
-            runAsGroup: 1000  # rootless buildkit requires: matching non-root gid for the subgid map
-            allowPrivilegeEscalation: true  # rootless buildkit requires: setuid newuidmap/newgidmap must gain privilege to write uid_map/gid_map
-            seccompProfile: {type: Unconfined}  # rootless buildkit requires: RuntimeDefault blocks userns/mount syscalls rootlesskit + newuidmap use
+            runAsUser: 1000   # rootless buildkit requires: non-root uid; single-uid map (no subuid range, so no newuidmap/caps)
+            runAsGroup: 1000  # rootless buildkit requires: matching non-root gid
+            allowPrivilegeEscalation: false  # rootless buildkit requires: nothing - single-uid userns is allowed unprivileged, no setuid helper used
+            seccompProfile: {type: Unconfined}  # rootless buildkit requires: RuntimeDefault blocks userns/mount syscalls rootlesskit uses
             appArmorProfile: {type: Unconfined}  # rootless buildkit requires: default AppArmor denies userns creation + mounts (k8s 1.30+ field)
             capabilities:
-              drop: [ALL]
-              add: [SETUID, SETGID]  # rootless buildkit requires: newuidmap/newgidmap need CAP_SETUID/CAP_SETGID (no NET_ADMIN/SYS_ADMIN/privileged)
+              drop: [ALL]  # no caps added: SETUID/SETGID were only needed for newuidmap, avoided via no-process-sandbox single-uid map
           resources:
             requests: {cpu: "2", memory: 4Gi, ephemeral-storage: 10Gi}
             limits: {cpu: "6", memory: 12Gi, ephemeral-storage: 60Gi}
