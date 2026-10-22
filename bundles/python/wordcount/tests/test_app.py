@@ -15,11 +15,12 @@ import types
 import uuid
 from typing import Any
 
-import app as bundle
 import pytest
-from app import dispatch, transform
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.testing import FakeKvHost, install_fake_kv_host
+
+import app as bundle
+from app import dispatch, transform
 
 
 def _run(coro: Any) -> Any:
