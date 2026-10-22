@@ -112,27 +112,28 @@ _NAME_FIRST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
 _VERB_ALIASES = {"edit": "set", "del": "delete"}
 
 #: Every command an existing bundle answers to (bundle directory names plus their
-#: `command_prefix` filters, including the not-yet-merged batch bundles) and this bundle's own
+#: `command_prefix` filters, including bundles still on unmerged feature branches) and this bundle's own
 #: words. A custom command named like one of them would reply on top of the real command.
 RESERVED_NAMES: frozenset[str] = frozenset(
     """
-    8ball about advice affirmation alias announce ask birthday bookmark
-    boop bot catfact cc channels chat chat-history choose clap
-    coinflip command commands compliment count countdown counter cringe csping
-    customcommand dadjoke dailycounter dance death define defuse dice discord
-    dogfact donate duel echo eightball eli5 emojify enter event
-    example fact first fish flip forget fortune gamble greeter
-    guess hangman heist hello help hey hi highfive horoscope
-    hug hype insult inv inventory iq jackpot joke kiss
-    label lastseen lfg love loyalty lurk memories merch mock
-    mood motivate music numberfact pat pickup ping points poke
-    poll pronouns pyping queue quote raffle rank rate remember
-    remind rephrase reverse riddle rip roast roll roulette rps
-    rsvp rules say scramble secret sentiment ship shoutout slap
-    slots so social socials songrequest sr steal summarize superpenguin-roll
-    ticket time tldr top translate trivia truthordare unlurk uptime
-    uwu vibecheck vote waddle wave weather wheel winner wordcount
-    wouldyourather wyr yomama
+    8ball about advice affirmation aiso alias announce ask bingo
+    birthday bookmark boop bot catfact cc channels chat chat-history
+    choose clap coinflip command commands compliment count countdown counter
+    cringe csping customcommand dadjoke dailycounter dance death define defuse
+    dice discord dogfact donate duel echo eightball eli5 emojify
+    enter event example fact faq first fish flip forget
+    fortune gamble giveaway greeter guess hangman heist hello help
+    hey hi highfive horoscope hug hype insult inv inventory
+    iq jackpot joke keywordgiveaway kiss label lastseen lfg love
+    loyalty lurk memories merch mock mood motivate music numberfact
+    pat pickup ping points poke poll predict prediction pronouns
+    pyping queue quote quotes raffle rank rate remember remind
+    rephrase reverse riddle rip roast roll roulette rps rsvp
+    rules say scramble secret sentiment ship shoutout slap slots
+    so social socials songrequest sr steal summarize superpenguin-roll ticket
+    time timer tldr top translate trivia truthordare unlurk uptime
+    uwu vibecheck vote vso waddle wave weather wheel winner
+    wordcount wouldyourather wyr yomama
     """.split()
 )
 
