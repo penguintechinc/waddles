@@ -2665,6 +2665,8 @@ config:
   spectrumOrgCommunities: ""
   # ENV baseline for flag waddles.spectrum-org-sync (default OFF; PostHog overrides when connected)
   spectrumOrgSyncEnabled: false
+  # ENV baseline for flag waddles.calendar.event_discord_sync (default OFF; PostHog overrides when connected)
+  eventDiscordSyncEnabled: false
   spectrumOrgPollIntervalS: 300
   # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
   spectrumRosterMaxDepartureRatio: 0.5
