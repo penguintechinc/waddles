@@ -1294,3 +1294,132 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # Second dozen of the hardened command-bundle batch (feature/bundle-batch-integration): 12
+  # more first-party Python bundles, all 1.0.0 (registered for the first time -- never
+  # published before, so no version-retirement history and no version bump needed). Same shape
+  # and activation semantics as the 37 above: tenant-wide activation, the seeder installs ->
+  # makes available -> activates each one and pre-grants exactly the permissions its
+  # hub-manifest.yaml declares (V2 structured form; `economy.wager` carries its declared
+  # `params.max_bet`). Permissions live in each bundle's hub-manifest.yaml, not on these rows.
+  # `wit_world` follows what each manifest's permissions require
+  # (build_python_bundles.py::required_wit_world, gated by
+  # scripts/ci/tests/test_bundle_wit_world.py): chatguard (identity.resolve) and
+  # prediction/lottery/blackjack (economy.* + identity.resolve) need `stage-next`; the other
+  # 8 declare only storage.kv + chat.send and stay on the default `stage` world. `queue`'s
+  # chat trigger is `!vqueue` (renamed to dodge the music `!queue` collision); its bundle
+  # directory and app_id are unchanged.
+  #
+  # 8 bundles on the default `stage` world:
+  - app_id: waddles.core.example.customcommand
+    version: "1.0.0"
+    language: python
+    source_dir: python/customcommand
+    manifest_path: customcommand.manifest.yaml
+    artifact_path: customcommand.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.counter
+    version: "1.0.0"
+    language: python
+    source_dir: python/counter
+    manifest_path: counter.manifest.yaml
+    artifact_path: counter.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.queue
+    version: "1.0.0"
+    language: python
+    source_dir: python/queue
+    manifest_path: queue.manifest.yaml
+    artifact_path: queue.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.timer
+    version: "1.0.0"
+    language: python
+    source_dir: python/timer
+    manifest_path: timer.manifest.yaml
+    artifact_path: timer.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.level
+    version: "1.0.0"
+    language: python
+    source_dir: python/level
+    manifest_path: level.manifest.yaml
+    artifact_path: level.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.hypetrain
+    version: "1.0.0"
+    language: python
+    source_dir: python/hypetrain
+    manifest_path: hypetrain.manifest.yaml
+    artifact_path: hypetrain.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.keywordgiveaway
+    version: "1.0.0"
+    language: python
+    source_dir: python/keywordgiveaway
+    manifest_path: keywordgiveaway.manifest.yaml
+    artifact_path: keywordgiveaway.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.bingo
+    version: "1.0.0"
+    language: python
+    source_dir: python/bingo
+    manifest_path: bingo.manifest.yaml
+    artifact_path: bingo.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  # 4 bundles on `stage-next` (economy + identity.resolve host capabilities):
+  - app_id: waddles.core.example.prediction
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/prediction
+    manifest_path: prediction.manifest.yaml
+    artifact_path: prediction.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.lottery
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/lottery
+    manifest_path: lottery.manifest.yaml
+    artifact_path: lottery.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.blackjack
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/blackjack
+    manifest_path: blackjack.manifest.yaml
+    artifact_path: blackjack.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.chatguard
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/chatguard
+    manifest_path: chatguard.manifest.yaml
+    artifact_path: chatguard.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
