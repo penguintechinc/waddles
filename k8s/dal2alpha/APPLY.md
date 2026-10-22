@@ -15,6 +15,18 @@ cilium status --context dal2alpha                  # 2/2
 kubectl --context dal2alpha apply -f k8s/dal2alpha/gateway.yaml
 kubectl --context dal2alpha -n gateway-system get gateway shared svc   # NodePort is dynamic
 ```
+This also applies `CiliumClusterwideNetworkPolicy shared-gateway-cloudflare-only`: the gateway
+accepts :443 ONLY from Cloudflare IP ranges. Verify post-apply that Cloudflare-proxied requests
+still pass and a direct hit to the origin IP is dropped (adversarial review required first).
+- **Refresh Cloudflare ranges** (they change): diff https://www.cloudflare.com/ips-v4 and /ips-v6
+  against the CIDRs in gateway.yaml, update, re-apply. Do this at least quarterly.
+- **Follow-up (stronger): Cloudflare Authenticated Origin Pulls** -- enable AOP in the CF zone and
+  make the 443 listener require Cloudflare's client cert (Gateway `tls.frontend` client-cert
+  validation with the CF origin-pull CA). Needs CF-side enablement; the IP allowlist is the
+  interim self-contained control.
+- **Route attachment gate**: Gateway only accepts HTTPRoutes from namespaces labeled
+  `gateway-access=shared-dal2a`. Any new app namespace must be labeled by the platform admin.
+
 Gateway stays not-Programmed until step 4 creates the TLS secret.
 
 ## 2. Clear failed cert-manager startup check
@@ -28,6 +40,7 @@ kubectl --context dal2alpha -n cert-manager rollout status deploy/cert-manager-w
 kubectl --context dal2alpha apply -f k8s/dal2alpha/internal-ca.yaml
 kubectl --context dal2alpha -n cert-manager wait certificate/waddlebot-internal-ca --for=condition=Ready --timeout=120s
 kubectl --context dal2alpha get clusterissuer waddlebot-internal-ca
+# CA carries critical nameConstraints (waddlebot.svc.cluster.local, penguintech.io URIs only)
 ```
 
 ## 4. Cloudflare Origin wildcard TLS secret (key/cert from files, never CLI literals)
@@ -41,6 +54,8 @@ kubectl --context dal2alpha -n gateway-system get gateway shared   # Programmed=
 Prereq secrets in ns waddlebot: `ghcr-pull`, `waddlebot-platform-credentials`.
 ```bash
 kubectl --context dal2alpha create ns waddlebot --dry-run=client -o yaml | kubectl --context dal2alpha apply -f -
+# REQUIRED: without this label the shared Gateway rejects the waddlebot HTTPRoute
+kubectl --context dal2alpha label ns waddlebot gateway-access=shared-dal2a --overwrite
 ~/.local/bin/helm3 --kube-context dal2alpha upgrade --install waddlebot k8s/helm/waddlebot \
   -n waddlebot -f k8s/helm/waddlebot/values-dal2alpha.yaml
 ```

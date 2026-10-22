@@ -52,6 +52,60 @@ spec:
         certificateRefs:
           - kind: Secret
             name: cloudflare-origin-wildcard
+      # FINDING 3: only namespaces labeled `gateway-access: shared-dal2a` (set by the platform
+      # admin, never by app teams) may attach HTTPRoutes -- blocks hostname/route hijack from
+      # arbitrary namespaces. Label the waddlebot ns (see APPLY.md). Hostname scoping per app is
+      # enforced by ownership of the label; add per-listener `hostname:` listeners if apps need
+      # hard hostname isolation.
       allowedRoutes:
         namespaces:
-          from: All
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: shared-dal2a
+---
+# FINDING 2: origin authentication (edge-bypass). Cilium Gateway traffic is enforced on the
+# `reserved:ingress` identity (envoy); allow world->gateway ONLY from Cloudflare ranges so
+# direct-to-origin hits from non-Cloudflare IPs are dropped. Ranges from
+# https://www.cloudflare.com/ips-v4 and /ips-v6 (fetched 2026-10-21) -- THEY CHANGE; refresh
+# periodically (APPLY.md). Stronger follow-up: Cloudflare Authenticated Origin Pulls (mTLS client
+# cert on the 443 listener) needs CF-side enablement -- see APPLY.md.
+# Intra-cluster/node health traffic is intentionally not allowed here; add explicit entities
+# (cluster/health) if east-west access to the gateway is later required.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: shared-gateway-cloudflare-only
+spec:
+  description: Restrict shared gateway (envoy ingress) to Cloudflare edge IPs only
+  endpointSelector:
+    matchLabels:
+      reserved:ingress: ""
+  ingress:
+    - fromCIDR:
+        - 173.245.48.0/20
+        - 103.21.244.0/22
+        - 103.22.200.0/22
+        - 103.31.4.0/22
+        - 141.101.64.0/18
+        - 108.162.192.0/18
+        - 190.93.240.0/20
+        - 188.114.96.0/20
+        - 197.234.240.0/22
+        - 198.41.128.0/17
+        - 162.158.0.0/15
+        - 104.16.0.0/13
+        - 104.24.0.0/14
+        - 172.64.0.0/13
+        - 131.0.72.0/22
+        - 2400:cb00::/32
+        - 2606:4700::/32
+        - 2803:f800::/32
+        - 2405:b500::/32
+        - 2405:8100::/32
+        - 2a06:98c0::/29
+        - 2c0f:f248::/32
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
