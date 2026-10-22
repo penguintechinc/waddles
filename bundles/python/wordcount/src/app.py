@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any, cast
+from typing import Any
 
 from waddle_sdk import identity, kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
@@ -82,7 +82,7 @@ def _word_count(text: str) -> int:
 async def _incr(key: str, delta: int) -> int:
     """`kv.increment` (no TTL), reclassifying a host `Err` into `_KvFailure`."""
     try:
-        return cast(int, await kv.increment(key, delta, ttl_seconds=0))
+        return await kv.increment(key, delta, ttl_seconds=0)
     except Exception as exc:
         raise _KvFailure(f"kv.increment failed: {getattr(exc, 'value', exc)}") from exc
 
@@ -96,7 +96,7 @@ async def _read(key: str) -> int:
     if raw is None:
         return 0
     try:
-        return int(cast(bytes, raw).decode("utf-8"))
+        return int(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise _KvFailure("corrupt wordcount value") from exc
 
