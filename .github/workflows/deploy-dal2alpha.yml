@@ -1,5 +1,17 @@
 name: Deploy dal2-alpha
 
+# TRUSTED-CODE-ONLY (security constraint): this self-hosted runner must only ever
+# build/deploy trusted first-party code (non-fork, protected branch). The in-cluster
+# BuildKit runs with --oci-worker-no-process-sandbox, so build steps are NOT
+# PID-isolated; untrusted (fork/PR) code must never build here.
+#  - Triggers are push to release/v3.0.X only (forks cannot push to this repo) plus
+#    workflow_dispatch (maintainer/write-access only). There is deliberately NO
+#    pull_request / pull_request_target trigger -- never add one.
+#  - Job-level guards below also pin execution to this repo AND the protected
+#    release branch, so a dispatch from a feature branch is refused.
+# REQUIRED SETUP (repo settings, done by a human): GitHub Environment `dal2-alpha`
+# must have deployment protection (required reviewers) as the GitHub-side gate.
+
 # Merge-to-release -> build alpha images -> deploy to the dal2-alpha cluster,
 # surfaced as the GitHub Environment/Deployment `dal2-alpha`.
 #
@@ -43,6 +55,7 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.service }}
+    if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X'
     runs-on: dal2-alpha
     permissions:
       contents: read
@@ -119,6 +132,7 @@ jobs:
   deploy:
     name: Deploy to dal2-alpha
     needs: build
+    if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X'
     runs-on: dal2-alpha
     # Creates/updates the GitHub Environment + Deployment; job failure = failure status.
     environment:
