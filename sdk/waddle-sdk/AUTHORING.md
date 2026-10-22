@@ -182,7 +182,61 @@ check, and vice versa (`critical-rules.md` Feature Flags & License Tiers).
   failed second step of a two-step write before raising. Host limits to design within: 64 `kv`
   and 64 `db` ops per invocation, 8 KiB per text column, 10,000 `kv` keys per community.
 
-## 5. Worked Examples
+## 5. Echoing User Text: `waddle_sdk.safe_text`
+
+Any text a bundle puts into a reply that did not come from the bundle's own source is
+**untrusted** — a chatter's argument, the caller's `event.actor` name, a value read back out of
+`kv`/`db` (a mod-set blurb, a stored quote), an HTTP/LLM response. The host's egress pass acts on
+two kinds of markup inside it, so unsanitized text is an injection vector:
+
+| Markup in untrusted text | What the host does | Effect |
+|---|---|---|
+| `{user:<token>}` | `core/egress_detokenizer` resolves it to a display name | forge a mention of any user, probe which tokens exist |
+| `@everyone` `@here` `<@id>` `<@&role>` `<#channel>` `<!here>` `@name` | the platform turns it into a ping (the Discord send path sets no `allowed_mentions`) | mass-ping / harass |
+
+```python
+from waddle_sdk.safe_text import sanitize_user_text
+
+reply = f"{sanitize_user_text(username)} says: {sanitize_user_text(rest)}"
+```
+
+- **Wrap every untrusted interpolation, LAST** — after translate/reverse/case-mangling/LLM
+  post-processing, immediately before it enters the reply string. A later transform can rebuild
+  markup the sanitizer removed.
+- **Never wrap bundle-emitted text.** A `{user:<token>}` placeholder the bundle builds itself for a
+  legitimate mention is trusted; build it separately and concatenate it with already-sanitized text.
+- **Keeping the user's own mentions.** The host replaces a mention the user typed (`@bob`,
+  `<@123>`) with a minted `{user:<token>}` before the bundle sees it; the default sanitizer
+  escapes those too (the reader sees the literal placeholder). To keep them resolving to names,
+  pass the tokens the host minted for this message — and only those:
+  `sanitize_user_text(text, allow_tokens=identity.mention_tokens(event.payload["text"]))`. Never
+  derive `allow_tokens` from LLM, HTTP or stored text.
+- **Idempotent and cheap** — wrapping twice is harmless; ordinary text, URLs (`@name` inside a link
+  is left alone) and `user@host` come back byte-identical. Braces and backslashes are escaped
+  (`\{`, `\}`, `\\`) and the egress pass removes that escaping again, so the reader still sees
+  exactly what was typed; every other change is an invisible zero-width space after a mention
+  sigil. A non-`str` raises `TypeError` — handle a missing payload field before sanitizing.
+- **Bundles that must call it** (sweep list, `bundles/python/<name>`):
+  - echo-family — `echo`, `choose`, `vote`, `wheel`, `count`, `dailycounter`, `alias`, `quote`,
+    `birthday`, `remind`, `countdown`, `poll`, `event`, `ticket`, `lfg`, `music`, `weather`
+  - stored-text readers — `about`, `rules`, `announce`, `memories`, `pronouns`, `command`, `lurk`,
+    `shoutout`, `joke`, `dadjoke`, `compliment`, `trivia`
+  - links — `bookmark`, `socials`, `discord`, `donate`, `merch`
+  - caller/target name — `first`, `raffle`, `heist`, `gamble`, `fish`, `coinflip`, `slots`,
+    `roulette`, `rps`, `duel`, `love`, `social`, `greeter`, `inventory`, `loyalty`, `rank`
+  - in flight (same rule when they land) — `translate`, `say`, `commands`, `ask`, `rephrase`,
+    `sentiment`, `summarize`, `tldr`, `define`, `eli5`, `rate`, `riddle`, `numberfact`, `reverse`,
+    `uwu`, `mock`, `clap`, `emojify`, `giveaway`, `faq`
+  - not needed (no untrusted text reaches the reply) — `advice`, `bot`, `catfact`, `chat`,
+    `cringe`, `death`, `dice`, `dogfact`, `eightball`, `fortune`, `guess`, `hangman`, `hello`,
+    `hype`, `iq`, `label`, `lastseen`, `mood`, `pyping`, `rip`, `roast`, `roll`, `scramble`, `secret`,
+    `ship`, `time`, `uptime`, `waddle`, `winner`; `boop`/`hug`/`slap`/`wave`/`highfive` only interpolate a
+    `[A-Za-z0-9_.-]{1,32}`-validated target (wrapping is optional hardening)
+
+See `tests/test_safe_text.py`: its oracle is a port of the detokenizer grammar, and a mutation of
+any rule (brace escaping, lone-backslash pairing, control stripping, each mention rule) fails it.
+
+## 6. Worked Examples
 
 | Command | Grammar exercised |
 |---|---|
