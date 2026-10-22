@@ -23,14 +23,14 @@ Scale sets are targeted by **scale-set name only**: the workflow must use `runs-
    helm install dal2-alpha oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
      --version 0.13.0 -n github-runners -f k8s/dal2alpha/runners/runner-scale-set-values.yaml
    ```
-   Before install, pin the runner image to a `@sha256:` digest in `runner-scale-set-values.yaml`.
+   Controller, runner and buildkit images are already digest-pinned (2026-10-22); re-resolve digests when bumping versions.
 4. **Confirm**: `kubectl -n github-runners get pods` (listener pod Running); repo Settings > Actions > Runners shows scale set `dal2-alpha` (runners spawn on demand, minRunners 0).
 
 ## Build capability (alpha only - rootless BuildKit)
 - `20-buildkit.yaml`: `buildkitd` (moby/buildkit rootless, UID 1000) in ns `buildkit`; runner reaches it via `BUILDKIT_HOST=tcp://buildkitd.buildkit.svc:1234`. Workflows install `buildctl`/`docker buildx` with the `remote` driver (`docker buildx create --driver remote $BUILDKIT_HOST`); no docker daemon/socket.
 - Security: not privileged, caps dropped, non-root, no SA token. Residual: rootless BuildKit requires seccomp+AppArmor `Unconfined`, which PSA baseline/restricted reject, so ns `buildkit` is PSA `privileged` (isolated; runners ns stays `restricted`). CiliumNetworkPolicy limits ingress to ns `github-runners` only and egress to DNS + registries/package indexes. gRPC is unauthenticated: anything in github-runners can build - keep that ns single-purpose. Add mTLS if it ever shares a cluster tier with untrusted workloads.
 - Push to ghcr: workflow does `docker/login`-style auth with `GITHUB_TOKEN` (`packages: write`) or a registry PAT stored as a GitHub secret; creds are sent by the client to buildkit per build, never stored in the cluster.
-- Sizing: buildkitd 2-6 CPU / 4-12Gi RAM / up to 100Gi ephemeral (cache GC cap ~80GB); runner 1-2 CPU / 2-4Gi / 30Gi. Cache is emptyDir (lost on pod move; use registry cache `--cache-to type=registry` for durability). Two amd64 nodes: confirm free disk before enabling (kubelet DiskPressure risk). Pin the buildkit image digest before apply.
+- Sizing: buildkitd 2-6 CPU / 4-12Gi RAM / 60Gi ephemeral limit (emptyDir 50Gi, cache GC cap ~40GB); runner 1-2 CPU / 2-4Gi / 30Gi. Cache is emptyDir (lost on pod move; use registry cache `--cache-to type=registry` for durability). Two amd64 nodes: confirm free disk before enabling (kubelet DiskPressure risk).
 - Alpha-specific: beta/prod use GitHub-hosted build runners (hybrid).
 
 ## Deploy job notes
@@ -38,5 +38,5 @@ Runner image has no helm/kubectl: the deploy job must install helm v3.17.3 (helm
 
 ## RBAC granted (least privilege)
 - Role `waddlebot-helm-deployer` in ns `waddlebot` only: CRUD on the kinds the waddlebot chart renders (core, apps, batch, autoscaling, policy, ingress/HTTPRoute, CiliumNetworkPolicy/TracingPolicyNamespaced, Certificate, Role/RoleBinding). Includes Secrets (Helm release storage + chart secrets). No `escalate`/`bind`.
-- ClusterRole `waddlebot-helm-deployer-cluster`: get/list namespaces + CRDs; CRUD ClusterRole/ClusterRoleBinding (chart creates the hub-api tokenreview pair); `tokenreviews:create` (required to avoid escalation block); CRUD Kyverno ClusterPolicy. NOTE: ClusterRole/Binding CRUD is cluster-wide (RBAC cannot scope creates by name) - this is the widest grant; tighten with `resourceNames` for update/delete once names are stable, or remove if chart no longer ships cluster RBAC.
+- ClusterRole `waddlebot-helm-deployer-cluster`: get/update/patch/delete on ClusterRole+ClusterRoleBinding `waddlebot-hub-api-tokenreview` ONLY (resourceNames); `create` on clusterroles/clusterrolebindings (RBAC cannot name-scope create; residual - escalation prevention limits it to perms the runner holds, i.e. tokenreviews:create); `tokenreviews:create`; get namespace `waddlebot`. No Kyverno (re-add only if supplyChain.verifyImages.enabled), no CRD, no `bind`/`escalate`. Cilium cluster policies / LB pool / L2 / GatewayClass / shared Gateway are not chart-managed: apply by hand from `k8s/dal2alpha/*.yaml`.
 - Namespace creation is NOT granted: create `waddlebot` once by hand (set `namespaceCreate: false` in alpha overrides, or pre-create).
