@@ -1,0 +1,375 @@
+"""Host-native tests: fake `wit_world` (kv/flags/relay/log + SDK economy/identity fakes)."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import sys
+import types
+from typing import Any
+
+import pytest
+from waddle_sdk import community_kv
+from waddle_sdk.community_kv import _scoped_key
+from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.testing import FakeEconomyHost, FakeIdentityHost, FakeKvHost
+
+import app
+from app import BASE_POT, COOLDOWN_SECONDS, dispatch, transform
+
+COMM = "comm-1"
+ACTOR_UUID = "11111111-1111-4111-8111-111111111111"
+POT_KEY = _scoped_key(COMM, "jackpot.pot")
+
+
+def _run(coro: Any) -> Any:
+    return asyncio.run(coro)
+
+
+class _Host:
+    def __init__(self, mp: pytest.MonkeyPatch) -> None:
+        self.kv = FakeKvHost()
+        self.eco = FakeEconomyHost(members={ACTOR_UUID}, balances={ACTOR_UUID: 1000})
+        self.eco.actor = ACTOR_UUID
+        self.ident = FakeIdentityHost(members={ACTOR_UUID}, actor=ACTOR_UUID)
+        self.flag = True
+        self.relayed: list[str] = []
+        self.logs: list[tuple[str, str]] = []
+        kv, ns = self.kv, types.SimpleNamespace
+        mod = types.ModuleType("wit_world")
+        mod.imports = ns(  # type: ignore[attr-defined]
+            flags=ns(enabled=lambda key, default_value: self.flag),
+            kv=ns(get=kv.get, set=kv.set, delete=kv.delete, increment=kv.increment),
+            economy=ns(
+                balance=self.eco.balance,
+                wager=self.eco.wager,
+                transfer=self.eco.transfer,
+                max_bet=self.eco.max_bet,
+                leaderboard=self.eco.leaderboard,
+            ),
+            identity=ns(
+                resolve_actor=self.ident.resolve_actor, resolve_mention=self.ident.resolve_mention
+            ),
+            relay=ns(push=lambda provider, msg: self.relayed.append(json.loads(msg)["text"])),
+            log=ns(
+                Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3},
+                write=lambda lvl, msg, fj: self.logs.append((msg, fj)),
+            ),
+        )
+        mp.setitem(sys.modules, "wit_world", mod)
+
+    @property
+    def pot(self) -> int:
+        return int(self.kv.store.get(POT_KEY, b"0"))
+
+    def bal(self) -> int:
+        return self.eco.balances[ACTOR_UUID]
+
+    def expire_cooldown(self) -> None:
+        for k in [k for k in self.kv.store if ".jackpot.cd." in k or k.startswith("c.")]:
+            if "jackpot.cd." in k:
+                del self.kv.store[k]
+
+
+@pytest.fixture
+def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
+    return _Host(monkeypatch)
+
+
+def _env(command: str, arg: str | None = None) -> StageEnvelope:
+    payload: dict[str, Any] = {"command": command, "channel_id": "123"}
+    if arg is not None:
+        payload["arg"] = arg
+    return StageEnvelope(
+        tenant="t",
+        community=COMM,
+        app_id="waddles.core.example.jackpot",
+        stage="action",
+        event=PlatformEvent("twitch", "chat.message", "viewer-1", payload, "2026-10-21T00:00:00Z"),
+        ts="2026-10-21T00:00:00Z",
+    )
+
+
+def _say(host: _Host, command: str, arg: str | None = None) -> str:
+    _run(dispatch(_env(command, arg), {}, http_client=None))
+    return host.relayed[-1]
+
+
+def _force(mp: pytest.MonkeyPatch, win: bool) -> None:
+    mp.setattr(app, "_roll_win", lambda: win)
+
+
+def test_status_shows_base_pot(host: _Host) -> None:
+    assert f"{BASE_POT} points" in _say(host, "status")
+
+
+def test_loss_accumulates_pot_and_debits(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, False)
+    assert f"{BASE_POT + 50}" in _say(host, "play", "50")
+    assert (host.pot, host.bal()) == (50, 950)
+    host.expire_cooldown()
+    assert f"{BASE_POT + 80}" in _say(host, "play", "30")
+    assert (host.pot, host.bal()) == (80, 920)
+    assert f"{BASE_POT + 80} points" in _say(host, "status")
+
+
+def test_win_pays_whole_pot_and_resets(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, False)
+    _say(host, "play", "50")
+    host.expire_cooldown()
+    _force(monkeypatch, True)
+    reply = _say(host, "play", "10")
+    assert "JACKPOT" in reply and f"wins {BASE_POT + 50} points" in reply
+    assert host.pot == 0  # reset to base
+    assert host.bal() == 950 + BASE_POT + 50  # stake returned + whole pot
+    assert f"{BASE_POT} points" in _say(host, "status")
+
+
+def test_win_on_empty_pot_pays_base(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, True)
+    _say(host, "play", "20")
+    assert host.bal() == 1000 + BASE_POT and host.pot == 0
+
+
+@pytest.mark.parametrize("arg", ["0", "abc", None, "-5", "1.5"])
+def test_invalid_stake_replies_usage_and_moves_nothing(host: _Host, arg: str | None) -> None:
+    reply = _say(host, "play", arg)
+    assert "Usage" in reply or "at least" in reply
+    assert (host.pot, host.bal()) == (0, 1000)
+
+
+def test_insufficient_funds_fails_loud(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, True)
+    assert "only have 1000" in _say(host, "play", "5000")
+    assert (host.pot, host.bal()) == (0, 1000)
+
+
+def test_over_max_bet_replies_cap(host: _Host) -> None:
+    host.eco.balances[ACTOR_UUID] = 5000
+    host.eco.max_bet_cap = 100
+    assert "max stake right now is 100" in _say(host, "play", "500")
+    assert host.bal() == 5000
+
+
+def test_cooldown_blocks_then_allows(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, False)
+    _say(host, "play", "5")
+    assert "slow down" in _say(host, "play", "5")
+    assert (host.pot, host.bal()) == (5, 995)
+    cd = [c for c in host.kv.calls if c[0] == "increment" and ".jackpot.cd." in c[1][0]]
+    assert cd and cd[0][1][2] == COOLDOWN_SECONDS
+    host.expire_cooldown()
+    assert "slow down" not in _say(host, "play", "5")
+
+
+def test_failed_precheck_does_not_burn_cooldown(host: _Host) -> None:
+    _say(host, "play", "999999")
+    assert not any(".jackpot.cd." in k for k in host.kv.store)
+
+
+def test_unlinked_actor_is_told_to_link(host: _Host) -> None:
+    host.ident.actor = None
+    assert "link your account" in _say(host, "play", "5")
+
+
+def test_actor_mismatch_fails_loud_and_moves_nothing(host: _Host) -> None:
+    host.eco.actor = "someone-else"  # anomalous: host-resolved actor != payer
+    with pytest.raises(RuntimeError, match="jackpot wager failed"):
+        _say(host, "play", "5")
+    assert "temporarily unavailable" in host.relayed[-1]
+    assert (host.pot, host.bal()) == (0, 1000)
+
+
+def test_win_overcap_pays_cap_and_returns_excess(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, False)
+    host.kv.store[POT_KEY] = b"1000"
+    _force(monkeypatch, True)
+    host.eco.payout_multiple = 10  # stake 20 -> payout cap 200
+    _say(host, "play", "20")
+    assert host.bal() == 1000 - 20 + 200
+    assert host.pot == 920  # excess over the host payout cap returns to the pot
+
+
+def test_wager_refusal_on_win_restores_pot(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    host.kv.store[POT_KEY] = b"300"
+    _force(monkeypatch, True)
+    host.eco.payout_multiple = 0  # cap < stake -> over-cap refusal that cannot be paid
+    reply = _say(host, "play", "10")
+    assert "max stake" in reply
+    assert host.pot == 300 and host.bal() == 1000
+
+
+def test_kv_failure_is_loud(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_a: Any) -> Any:
+        raise RuntimeError("down")
+
+    sys.modules["wit_world"].imports.kv.get = boom  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="jackpot get failed"):
+        _say(host, "status")
+    assert "temporarily unavailable" in host.relayed[-1]
+
+
+def test_no_community_and_bad_command_raise(host: _Host) -> None:
+    env = _env("status")
+    env.community = None  # type: ignore[misc]
+    with pytest.raises(ValueError, match="community"):
+        _run(dispatch(env, {}, http_client=None))
+    with pytest.raises(ValueError, match="unrecognized"):
+        _run(dispatch(_env("bogus"), {}, http_client=None))
+
+
+@pytest.mark.parametrize(
+    ("text", "command", "arg"),
+    [("!jackpot 25", "play", "25"), ("!jackpot", "status", None), ("!jackpot nope", "usage", None)],
+)
+def test_transform_matches(host: _Host, text: str, command: str, arg: str | None) -> None:
+    out = _run(transform(PlatformEvent("twitch", "chat.message", "v", {"text": text}, "t")))
+    assert out is not None and out.payload["command"] == command
+    assert out.payload.get("arg") == arg
+
+
+def test_transform_ignores_nonmatch_and_flag_off(host: _Host) -> None:
+    ev = PlatformEvent("twitch", "chat.message", "v", {"text": "hello"}, "t")
+    assert _run(transform(ev)) is None
+    host.flag = False
+    ev = PlatformEvent("twitch", "chat.message", "v", {"text": "!jackpot 5"}, "t")
+    assert _run(transform(ev)) is None
+    assert _run(transform(PlatformEvent("t", "chat.message", "v", {"text": 5}, "t"))) is None
+
+
+def test_pii_free_keys_and_logs(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, False)
+    _say(host, "play", "40")
+    pseud = hashlib.sha256(f"{COMM}|{ACTOR_UUID}".encode()).hexdigest()
+    keys = list(host.kv.store)
+    assert any(pseud in k for k in keys)
+    blob = " ".join(k for k in keys) + " ".join(m + fj for m, fj in host.logs)
+    for raw in ("viewer-1", ACTOR_UUID):
+        assert raw not in blob
+    assert all(":" not in k.removeprefix("c.") for k in keys)
+
+
+# --- pot CAS correctness under interleaving (kv facade yields between read and write) -----------
+
+
+def _yielding_kv(mp: pytest.MonkeyPatch) -> None:
+    real_get, real_inc = community_kv.get, community_kv.increment
+
+    async def get(c: str | None, k: str) -> bytes | None:
+        value = await real_get(c, k)
+        await asyncio.sleep(0)
+        return value
+
+    async def inc(c: str | None, k: str, d: int, ttl: int) -> int:
+        await asyncio.sleep(0)
+        return await real_inc(c, k, d, ttl)
+
+    mp.setattr(app.community_kv, "get", get)
+    mp.setattr(app.community_kv, "increment", inc)
+
+
+def _pot_obj() -> app._Pot:
+    return app._Pot(COMM, "twitch", "123")
+
+
+def test_concurrent_increments_lose_nothing(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    _yielding_kv(monkeypatch)
+
+    async def go() -> None:
+        pot = _pot_obj()
+        await asyncio.gather(*(pot.add(7) for _ in range(100)))
+
+    _run(go())
+    assert host.pot == 700
+
+
+def test_concurrent_claims_pay_pot_exactly_once(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.kv.store[POT_KEY] = b"500"
+    _yielding_kv(monkeypatch)
+
+    async def go() -> list[int]:
+        pot = _pot_obj()
+        return list(await asyncio.gather(*(pot.claim_all() for _ in range(8))))
+
+    claims = _run(go())
+    assert sum(claims) == 500, claims  # no double payout, nothing lost
+    assert sorted(claims, reverse=True)[0] == 500
+    assert host.pot == 0  # floor restored after the negative dips
+
+
+def test_claims_racing_contributions_conserve_money(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.kv.store[POT_KEY] = b"200"
+    _yielding_kv(monkeypatch)
+
+    async def go() -> int:
+        pot = _pot_obj()
+        res = await asyncio.gather(
+            pot.claim_all(), pot.claim_all(), *(pot.add(10) for _ in range(20))
+        )
+        return sum(r for r in res[:2])
+
+    taken = _run(go())
+    assert taken + host.pot == 200 + 20 * 10
+
+
+def test_missing_channel_id_raises(host: _Host) -> None:
+    env = _env("status")
+    env.event.payload.pop("channel_id")
+    with pytest.raises(ValueError, match="channel_id"):
+        _run(dispatch(env, {}, http_client=None))
+
+
+def test_ambiguous_wager_backend_error_retries_identical_call(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, False)
+    real = host.eco.wager
+    calls: list[tuple[str, int, int]] = []
+
+    def flaky(user: str, stake: int, payout: int) -> int:
+        calls.append((user, stake, payout))
+        if len(calls) == 1:
+            raise RuntimeError("storage down")  # classified as BackendError by the facade
+        return real(user, stake, payout)
+
+    sys.modules["wit_world"].imports.economy.wager = flaky  # type: ignore[attr-defined]
+    assert "join the pot" in _say(host, "play", "10")
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert host.pot == 10
+
+
+def test_win_backend_error_twice_fails_loud_without_restoring(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.kv.store[POT_KEY] = b"300"
+    _force(monkeypatch, True)
+
+    def down(user: str, stake: int, payout: int) -> int:
+        raise RuntimeError("storage down")
+
+    sys.modules["wit_world"].imports.economy.wager = down  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="jackpot wager failed"):
+        _say(host, "play", "10")
+    assert host.pot == 0  # ambiguous commit: never risk a double payout
+    assert host.bal() == 1000
+
+
+def test_cooldown_kv_failure_is_loud(host: _Host) -> None:
+    real = host.kv.increment
+
+    def inc(key: str, delta: int, ttl: int) -> int:
+        if "jackpot.cd." in key:
+            raise RuntimeError("down")
+        return real(key, delta, ttl)
+
+    sys.modules["wit_world"].imports.kv.increment = inc  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="jackpot cooldown failed"):
+        _say(host, "play", "5")
+    assert host.bal() == 1000
