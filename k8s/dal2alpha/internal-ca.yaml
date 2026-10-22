@@ -24,7 +24,21 @@ spec:
     critical: true
     permitted:
       dnsDomains:
-        - waddlebot.svc.cluster.local     # matches this domain and all subdomains
+        - waddlebot.svc.cluster.local     # `*.waddlebot.svc.cluster.local` wildcard + any <svc>.waddlebot.svc.cluster.local FQDN
+        # Bare single-label SANs the chart's cert-manager Certificates request (release `waddlebot`
+        # => fullname `waddlebot`). RFC5280 dNSName constraint "x" permits x and *.x only, so each
+        # bare name must be listed exactly; NOT covered by the FQDN suffix above.
+        # grpc-tls-certificate.yaml:
+        - waddlebot-core-data
+        - waddlebot-core-identity
+        - waddlebot-interactive-productivity
+        - waddlebot-action-serverless
+        # host-api-tls-certificate.yaml (hostApiTlsDesiredDnsNames):
+        - waddlebot-svc-process-rust
+        - waddlebot-svc-action-rust
+        - waddlebot-bundle-executor
+        # NOT permitted (deliberately): `<svc>.waddlebot` / `<svc>.waddlebot.svc` short forms -- only the
+        # self-generated hub-api/valkey certs (own CA, not this one) use them.
       uriDomains:
         - penguintech.io                  # SPIFFE: spiffe://penguintech.io/<env>/<service>
     # No IP SANs permitted (an empty permitted list is not expressible) -- deny all via excluded.
