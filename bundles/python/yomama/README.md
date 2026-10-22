@@ -1,0 +1,21 @@
+# yomama (Python)
+
+`!yomama [@user]` -- a classic 'yo mama' joke, from a built-in static list of original, SFW, light-hearted lines.
+First-party (`provider: builtin`, `app_id: waddles.core.example.yomama`), stateless, WASI component.
+
+| | |
+|---|---|
+| Gating | Activation + `waddles.command-yomama` feature flag (default OFF, checked after the command matches) |
+| Platforms | Twitch, Discord (`chat.message`) |
+| State | none (no `kv`) |
+| Permissions | `flags.read`, `chat.send:discord`, `chat.send:twitch` |
+
+| Command | Behavior |
+|---|---|
+| `!yomama` | Addresses the caller. |
+| `!yomama @user` | Addresses the mentioned user. |
+| anything else | Usage / "mention them" reply -- never silently dropped. |
+
+PII-free: the caller and the @mention arrive as `{user:<token>}` placeholders and are echoed
+back as-is for the egress detokenizer; raw handles are rejected, never echoed, stored or logged.
+Tests: `python3 -m pytest bundles/python/yomama/tests`.
