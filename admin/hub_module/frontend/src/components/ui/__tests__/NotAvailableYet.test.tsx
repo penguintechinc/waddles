@@ -56,6 +56,15 @@ describe('ServedFeature', () => {
     expect(screen.getByTestId('not-available-yet')).toBeInTheDocument();
   });
 
+  it('applies fallbackClassName to the placeholder only', () => {
+    render(
+      <ServedFeature feature="mirror-groups" fallbackClassName="py-3">
+        <p>real page</p>
+      </ServedFeature>,
+    );
+    expect(screen.getByTestId('not-available-yet-body')).toHaveClass('py-3');
+  });
+
   it('renders children once the feature is no longer registered as unserved', () => {
     render(
       <ServedFeature feature="feature-the-server-now-has">

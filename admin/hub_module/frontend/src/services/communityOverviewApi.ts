@@ -17,8 +17,11 @@ import {
 
 export interface LiveStream {
   entityId: string;
+  platform: string;
   channelName: string;
   title: string;
+  game: string;
+  thumbnailUrl: string;
   viewerCount: number;
 }
 
@@ -36,8 +39,11 @@ function parseStream(raw: unknown): LiveStream {
   const row = expectRecord(raw, 'streams[]');
   return {
     entityId: readString(row, 'entityId', 'streams[]'),
+    platform: readOptString(row, 'platform') ?? '',
     channelName: readOptString(row, 'channelName') ?? 'Unknown channel',
     title: readOptString(row, 'title') ?? '',
+    game: readOptString(row, 'game') ?? '',
+    thumbnailUrl: readOptString(row, 'thumbnailUrl') ?? '',
     viewerCount: readOptNumber(row, 'viewerCount') ?? 0,
   };
 }

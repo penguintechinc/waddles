@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import { isRecord, type WireRecord } from '../lib/wire';
 
@@ -22,22 +23,29 @@ function readUsername(raw: WireRecord): string | null {
   return typeof username === 'string' && username !== '' ? username : null;
 }
 
+/** Calls the context's `refreshUser` if it is a function; a no-op otherwise. */
+async function callRefresh(refresh: unknown): Promise<void> {
+  if (typeof refresh === 'function') await Promise.resolve(Reflect.apply(refresh, undefined, []));
+}
+
 /** Narrows an unknown context value into an `AuthView`. Exported for tests. */
 export function toAuthView(raw: unknown): AuthView {
   const record: WireRecord = isRecord(raw) ? raw : {};
-  const refresh: unknown = record['refreshUser'];
   return {
     username: readUsername(record),
     isAuthenticated: record['isAuthenticated'] === true,
     isSuperAdmin: record['isSuperAdmin'] === true,
-    refreshUser: async () => {
-      if (typeof refresh === 'function') await Promise.resolve(Reflect.apply(refresh, undefined, []));
-    },
+    refreshUser: () => callRefresh(record['refreshUser']),
   };
 }
 
-/** `useAuth()` narrowed to the handful of fields the typed pages need. */
+/**
+ * `useAuth()` narrowed to the handful of fields the typed pages need. `refreshUser` keeps a
+ * stable identity for as long as the context's own function does, so it is safe in effect deps.
+ */
 export function useAuthView(): AuthView {
   const raw: unknown = useAuth();
-  return toAuthView(raw);
+  const underlying: unknown = isRecord(raw) ? raw['refreshUser'] : undefined;
+  const refreshUser = useCallback(() => callRefresh(underlying), [underlying]);
+  return { ...toAuthView(raw), refreshUser };
 }

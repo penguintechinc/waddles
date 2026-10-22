@@ -18,7 +18,21 @@ import { routeSurvey } from './lib/routes.mjs';
 import { FRONTEND_ROOT as ROOT, backendRoutes, buildIsServed, norm, walk } from './lib/backend-routes.mjs';
 
 const SRC = join(ROOT, 'src');
-const REGISTRY_FILE = /unservedFeatures\.ts$/;
+const REGISTRY_FILE = /unservedFeatures\.(ts|json)$/;
+const REGISTRY = JSON.parse(readFileSync(join(SRC, 'lib/unservedFeatures.json'), 'utf8'));
+
+/** `{ "METHOD norm-path" }` for every endpoint of the given registered features. */
+function gatedEndpointSet(keys) {
+  const set = new Set();
+  for (const key of keys) {
+    for (const endpoint of REGISTRY[key]?.endpoints ?? []) {
+      const [method, path] = endpoint.split(' ');
+      set.add(`${method} ${norm(path)}`);
+    }
+  }
+  return set;
+}
+
 const list = process.argv.includes('--list');
 const byPage = process.argv.includes('--pages');
 const full = process.argv.includes('--full');
@@ -91,7 +105,22 @@ function pageCoverage(isServed) {
       used.set(`${m[1].toUpperCase()} ${norm(m[2])}`, { method: m[1].toUpperCase(), path: norm(m[2]), raw: m[2] });
     }
     const unserved = [...used.values()].filter((w) => !isServed(w));
-    rows.push({ path: r.path, file: relative(ROOT, r.file), gate: r.gate, endpoints: used.size, unserved: unserved.length, sample: unserved.slice(0, full ? unserved.length : 2).map((w) => `${w.method} ${w.raw}`) });
+    // Gated when the route wraps the page in <ServedFeature>, or when the page itself names a
+    // registered feature (e.g. `isFeatureServed('reputation-config')`).
+    const keys = Object.keys(REGISTRY).filter((key) => r.gate === key || src.includes(`'${key}'`));
+    const gatedSet = gatedEndpointSet(keys);
+    // A route-level <ServedFeature> shields the whole page (none of its calls run), whatever
+    // feature key it names; a page-level gate shields only that feature's endpoints.
+    const broken = r.gate ? [] : unserved.filter((w) => !gatedSet.has(`${w.method} ${w.path}`));
+    rows.push({
+      path: r.path,
+      file: relative(ROOT, r.file),
+      gate: keys[0] ?? null,
+      endpoints: used.size,
+      unserved: unserved.length,
+      broken: broken.length,
+      sample: broken.slice(0, full ? broken.length : 2).map((w) => `${w.method} ${w.raw}`),
+    });
   }
   return rows;
 }
@@ -131,12 +160,11 @@ if (list) {
 }
 if (byPage) {
   const rows = pageCoverage(isServed);
-  const withGaps = rows.filter((r) => r.unserved > 0);
-  const gated = withGaps.filter((r) => r.gate && r.unserved === r.endpoints);
-  const broken = withGaps.filter((r) => !gated.includes(r));
-  console.log(`\n# Pages calling endpoints hub-api does not serve (${broken.length} of ${rows.length} routed pages examined)`);
-  for (const r of broken.sort((a, b) => b.unserved - a.unserved)) {
-    console.log(`${String(r.unserved).padStart(2)}/${String(r.endpoints).padEnd(2)} ${r.path.padEnd(58)} ${r.sample.join(' | ')}`);
+  const broken = rows.filter((r) => r.broken > 0);
+  const gated = rows.filter((r) => r.broken === 0 && r.unserved > 0);
+  console.log(`\n# Pages calling endpoints hub-api does not serve and nothing gates (${broken.length} of ${rows.length} routed pages examined)`);
+  for (const r of broken.sort((a, b) => b.broken - a.broken)) {
+    console.log(`${String(r.broken).padStart(2)}/${String(r.endpoints).padEnd(2)} ${r.path.padEnd(58)} ${r.sample.join(' | ')}`);
   }
   console.log(`\n# Pages gated behind a visible "not available yet" state (${gated.length}; no dead calls are made)`);
   for (const r of gated.sort((a, b) => a.path.localeCompare(b.path))) {

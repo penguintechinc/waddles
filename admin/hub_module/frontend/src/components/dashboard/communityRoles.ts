@@ -26,3 +26,16 @@ export function roleTone(role: string): BadgeTone {
       return 'gray';
   }
 }
+
+/**
+ * Roster role filters. hub-api matches `role` exactly, so each filter is ONE role; the legacy
+ * "Owners & Admins" comma list would silently match nobody.
+ */
+export const COMMUNITY_ROLE_FILTERS: readonly { value: string; label: string }[] = [
+  { value: '', label: 'All Members' },
+  { value: 'community-owner', label: 'Owners' },
+  { value: 'community-admin', label: 'Admins' },
+  { value: 'moderator', label: 'Moderators' },
+  { value: 'vip', label: 'VIPs' },
+  { value: 'member', label: 'Members' },
+];

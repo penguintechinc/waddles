@@ -54,6 +54,8 @@ export function NotAvailableYet({ feature, description, className }: NotAvailabl
 export interface ServedFeatureProps {
   /** Key in `UNSERVED_FEATURES`. */
   feature: string;
+  /** Classes for the placeholder only (children are never wrapped). */
+  fallbackClassName?: string;
   children: ReactNode;
 }
 
@@ -61,6 +63,10 @@ export interface ServedFeatureProps {
  * Renders `children` when hub-api serves `feature`, otherwise `NotAvailableYet`.
  * Removing the feature from `UNSERVED_FEATURES` is all it takes to switch the page on.
  */
-export function ServedFeature({ feature, children }: ServedFeatureProps) {
-  return isFeatureServed(feature) ? <>{children}</> : <NotAvailableYet feature={feature} />;
+export function ServedFeature({ feature, fallbackClassName, children }: ServedFeatureProps) {
+  return isFeatureServed(feature) ? (
+    <>{children}</>
+  ) : (
+    <NotAvailableYet feature={feature} {...(fallbackClassName ? { className: fallbackClassName } : {})} />
+  );
 }
