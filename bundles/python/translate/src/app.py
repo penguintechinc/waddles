@@ -23,6 +23,9 @@ caller as a "remove personal info" reply.
 Output safety: the model completion and the typed language token echoed in the usage reply are
 untrusted, so both go through `waddle_sdk.safe_text.sanitize_user_text` LAST (no `allow_tokens`:
 model output is never a host-minted mention; `lang` is `_LANG_RE`-validated and emitted as-is).
+The reply always starts with the fixed `[<lang>] ` prefix, so a completion like `/ban x` can never
+lead it (a chat-command lead guard is unnecessary here; pinned by
+`test_model_completion_can_never_lead_the_reply`).
 """
 
 from __future__ import annotations

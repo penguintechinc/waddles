@@ -58,7 +58,7 @@ def apply_transform(text: str) -> str:
     out = _NY_RE.sub(
         lambda m: f"{m.group(1)}{'Y' if m.group(1) == 'N' else 'y'}{m.group(2)}", out
     )
-    out = out.translate(str.maketrans({"r": "w", "l": "w", "R": "W", "L": "W"}))
+    out = out.translate(str.maketrans("rlRL", "wwWW"))
     return out + _FLOURISHES[sum(ord(c) for c in text) % len(_FLOURISHES)]
 
 

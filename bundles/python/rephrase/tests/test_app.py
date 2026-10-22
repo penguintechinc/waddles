@@ -200,3 +200,27 @@ def test_typed_mention_does_not_whitelist_model_output(host: MockHost) -> None:
     out = _run(transform(_event("!rephrase hello there {user:tok-1}")))
     assert out is not None
     assert out.payload["text"] == "✍️ " + "hi \\{user:tok-1\\}"
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "/ban victim",
+        ".timeout victim 600",
+        "!gamble 1000",
+        " /ban victim",
+        "\x00/ban victim",
+        "\u200b/ban victim",
+    ],
+)
+def test_model_completion_can_never_lead_the_reply(
+    completion: str, host: MockHost
+) -> None:
+    """LLM01: the fixed `[pencil]` prefix means a completion of `/ban x` never leads the reply."""
+    host.ai.reply = completion
+    out = _run(transform(_event("!rephrase give me that now")))
+    assert out is not None and out.payload["command"] == "rephrase"
+    text = out.payload["text"]
+    assert text.startswith("\u270d\ufe0f ")
+    assert not text.startswith(("/", ".", "!"))
+    assert ("victim" in text) or ("gamble" in text)  # the answer text itself is kept

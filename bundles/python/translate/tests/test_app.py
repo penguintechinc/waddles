@@ -252,3 +252,27 @@ def test_runs_on_activation_alone_when_flag_backend_says_off(host: MockHost) -> 
     host.flag_enabled = False
     out = _run(transform(_event("!translate")))
     assert out is not None
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "/ban victim",
+        ".timeout victim 600",
+        "!gamble 1000",
+        " /ban victim",
+        "\x00/ban victim",
+        "\u200b/ban victim",
+    ],
+)
+def test_model_completion_can_never_lead_the_reply(
+    completion: str, host: MockHost
+) -> None:
+    """LLM01: the fixed `[lang]` prefix means a completion of `/ban x` never leads the reply."""
+    host.ai.reply = completion
+    out = _run(transform(_event("!translate spanish good morning")))
+    assert out is not None and out.payload["command"] == "translate"
+    text = out.payload["text"]
+    assert text.startswith("[spanish] ")
+    assert not text.startswith(("/", ".", "!"))
+    assert ("victim" in text) or ("gamble" in text)  # the answer text itself is kept

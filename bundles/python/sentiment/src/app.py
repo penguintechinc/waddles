@@ -22,12 +22,16 @@ reply.
 Output safety: `label` is checked against the closed `LABELS` set and the confidence is a
 number, but the model-supplied `emoji` only has to be short, printable and not-all-ASCII
 (`@here🙂` passes), so it goes through `waddle_sdk.safe_text.sanitize_user_text` LAST.
+The same emoji LEADS the reply, and `/ban é` also passes (non-ASCII, printable, <= 8 chars),
+so a reply that would START with a command lead (`/`, `.`, `!` -- Twitch/IRC run `/`/`.` as the
+bot's own commands and `!` re-triggers other bots) gets a visible `_SAFE_LEAD` prefix.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any, NoReturn
 
 from waddle_sdk import ai, log, relay
@@ -67,6 +71,20 @@ _ERROR_MESSAGES: dict[str, str] = {
     "malformed": "The AI returned an unreadable analysis, please try again.",
 }
 _GENERIC_ERROR = "Sentiment failed due to an internal error, please try again later."
+
+
+#: Twitch/IRC treat a leading `/` or `.` as a chat command and `!` re-triggers other bots; the
+#: model completion is attacker-influenced, so a reply may never START with one of these.
+_UNSAFE_LEAD = ("/", ".", "!")
+_SAFE_LEAD = "\U0001f4ac "
+
+
+def _leads_with_command(reply: str) -> bool:
+    """True if `reply`'s first visible character is a chat-command lead (`/`, `.`, `!`)."""
+    visible = "".join(
+        ch for ch in reply if unicodedata.category(ch) not in ("Cc", "Cf")
+    )
+    return visible.lstrip().startswith(_UNSAFE_LEAD)
 
 
 def build_prompt(text: str) -> str:
@@ -205,6 +223,11 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
                     f"{sanitize_user_text(emoji)} Sentiment: {label} "
                     f"({round(conf * 100)}% confident)"
                 )
+                if _leads_with_command(reply):
+                    reply = _SAFE_LEAD + reply
+                    log.info(
+                        "sentiment.command_lead_neutralized", platform=event.platform
+                    )
                 log.info(
                     "sentiment.transform matched",
                     platform=event.platform,

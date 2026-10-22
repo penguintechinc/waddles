@@ -65,7 +65,7 @@ DARES: tuple[str, ...] = (
 USAGE = "Usage: !truthordare [truth|dare]"
 
 
-def _kind(text: str) -> str | None:
+def _kind(text: str) -> str:
     """Return `truth`/`dare`/`random` for a valid invocation, `usage` if malformed."""
     try:
         parsed = parse_command(text, SPEC)

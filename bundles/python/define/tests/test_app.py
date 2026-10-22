@@ -205,3 +205,37 @@ def test_typed_mention_does_not_whitelist_model_output(host) -> None:
     out = _run(transform(_event("!define word {user:tok-1}")))
     assert out is not None
     assert out.payload["text"] == "hi \\{user:tok-1\\}"
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "/ban victim",
+        ".timeout victim 600",
+        "!gamble 1000",
+        " /ban victim",
+        "\x00/ban victim",  # control char stripped by the sanitizer, then `/` leads
+        "\u200b/ban victim",  # invisible lead the host does not strip
+        "\u2060.timeout victim 600",
+    ],
+)
+def test_model_completion_can_never_start_with_a_chat_command(
+    completion: str, host
+) -> None:
+    """LLM01: a model reply of `/ban x` must never reach chat as a runnable Twitch/IRC command."""
+    host.ai.reply = completion
+    out = _run(transform(_event("!define a thing")))
+    assert out is not None
+    text = out.payload["text"]
+    visible = "".join(
+        c for c in text if c.isprintable() and c not in "\u200b\u2060"
+    ).lstrip()
+    assert not visible.startswith(("/", ".", "!"))
+    assert text.startswith("\U0001f4ac ")
+    assert ("victim" in text) or ("gamble" in text)  # the answer text itself is kept
+
+
+def test_benign_completions_are_not_prefixed(host) -> None:
+    host.ai.reply = "Because of Rayleigh scattering."
+    out = _run(transform(_event("!define why is the sky blue")))
+    assert out is not None and out.payload["text"] == "Because of Rayleigh scattering."

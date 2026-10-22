@@ -20,7 +20,9 @@ reply.
 Output safety: the model completion is untrusted text (a prompt-injected input can make it
 emit `{user:<token>}` placeholders or `@everyone`), so it goes through
 `waddle_sdk.safe_text.sanitize_user_text` LAST, immediately before it enters the reply. No
-`allow_tokens`: nothing in model output is ever a host-minted mention.
+`allow_tokens`: nothing in model output is ever a host-minted mention. The reply always starts with
+the fixed `✍️ ` prefix, so a completion like `/ban x` can never lead it (a chat-command lead
+guard is unnecessary here; pinned by `test_model_completion_can_never_lead_the_reply`).
 """
 
 from __future__ import annotations

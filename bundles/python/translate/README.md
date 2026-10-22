@@ -34,6 +34,8 @@ calls / 60 s).
 
 The model completion is untrusted text, so it passes through `waddle_sdk.safe_text.sanitize_user_text` last, before it enters the reply: a forged `{user:<token>}` placeholder is escaped and `@everyone`/`@here`/`<@id>` markup is defanged. No `allow_tokens` -- nothing in model output is a host-minted mention.
 
+Every reply starts with the fixed `[<lang>] ` prefix (`<lang>` is regex-validated), so a completion such as `/ban x` can never lead the message (pinned by a test).
+
 ## Testing
 
 `python3 -m pytest bundles/python/translate` -- runs against a MOCKED AI host. **Full end-to-end

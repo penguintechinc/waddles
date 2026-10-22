@@ -246,3 +246,33 @@ def test_model_emoji_discord_mention_is_defanged(host: MockHost) -> None:
     assert out.payload["text"].startswith(
         "<@" + ZWSP + "1>\U0001f620 Sentiment: negative"
     )
+
+
+@pytest.mark.parametrize(
+    "emoji", ["/ban \u00e9", ".ban \u00e9", "!ban \u00e9", "/ban \U0001f642"]
+)
+def test_model_emoji_can_never_make_the_reply_start_with_a_chat_command(
+    emoji: str, host: MockHost
+) -> None:
+    """LLM01: `/ban é` is printable, non-ASCII and <= 8 chars, so it passes the emoji check."""
+    host.ai.reply = json.dumps(
+        {"sentiment": "positive", "confidence": 0.9, "emoji": emoji}
+    )
+    out = _run(transform(_event("!sentiment I love this stream")))
+    assert out is not None and out.payload["command"] == "sentiment"
+    text = out.payload["text"]
+    assert text.startswith("\U0001f4ac ")
+    assert not text.lstrip().startswith(("/", ".", "!"))
+    assert emoji in text and text.endswith("Sentiment: positive (90% confident)")
+
+
+@pytest.mark.parametrize("emoji", ["/ban foo", ".ban foo", "!ban foo"])
+def test_ascii_command_emoji_falls_back_to_the_label_emoji(
+    emoji: str, host: MockHost
+) -> None:
+    host.ai.reply = json.dumps(
+        {"sentiment": "positive", "confidence": 0.9, "emoji": emoji}
+    )
+    out = _run(transform(_event("!sentiment I love this stream")))
+    assert out is not None
+    assert out.payload["text"] == "\U0001f604 Sentiment: positive (90% confident)"

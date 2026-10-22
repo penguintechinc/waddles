@@ -19,11 +19,14 @@ emails/phones/@handles/tokens (`contains_pii`); that is surfaced as a "remove pe
 Output safety: the model completion is untrusted text (a prompt-injected input can make it
 emit `{user:<token>}` placeholders or `@everyone`), so it goes through
 `waddle_sdk.safe_text.sanitize_user_text` LAST, immediately before it enters the reply. No
-`allow_tokens`: nothing in model output is ever a host-minted mention.
+`allow_tokens`: nothing in model output is ever a host-minted mention. A reply that would START
+with a command lead (`/`, `.`, `!` -- Twitch/IRC run `/`/`.` as the bot's own commands and `!`
+re-triggers other bots) gets a visible `_SAFE_LEAD` prefix so it can never be parsed as one.
 """
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Any, NoReturn
 
 from waddle_sdk import ai, log, relay
@@ -53,6 +56,20 @@ _ERROR_MESSAGES: dict[str, str] = {
     "filtered": "The model couldn't produce a result for that text.",
 }
 _GENERIC_ERROR = "Summarizing failed due to an internal error, please try again later."
+
+
+#: Twitch/IRC treat a leading `/` or `.` as a chat command and `!` re-triggers other bots; the
+#: model completion is attacker-influenced, so a reply may never START with one of these.
+_UNSAFE_LEAD = ("/", ".", "!")
+_SAFE_LEAD = "\U0001f4ac "
+
+
+def _leads_with_command(reply: str) -> bool:
+    """True if `reply`'s first visible character is a chat-command lead (`/`, `.`, `!`)."""
+    visible = "".join(
+        ch for ch in reply if unicodedata.category(ch) not in ("Cc", "Cf")
+    )
+    return visible.lstrip().startswith(_UNSAFE_LEAD)
 
 
 def build_prompt(text: str) -> str:
@@ -151,6 +168,11 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
                 log.error("summarize.empty_completion", platform=event.platform)
             else:
                 reply = sanitize_user_text(cleaned)
+                if _leads_with_command(reply):
+                    reply = _SAFE_LEAD + reply
+                    log.info(
+                        "summarize.command_lead_neutralized", platform=event.platform
+                    )
                 log.info(
                     "summarize.transform matched",
                     platform=event.platform,

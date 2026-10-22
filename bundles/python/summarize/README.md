@@ -26,6 +26,11 @@ AI bundle modelled on `translate` (stateless, no kv). **Activation-gated only --
 
 The model completion is untrusted text, so it passes through `waddle_sdk.safe_text.sanitize_user_text` last, before it enters the reply: a forged `{user:<token>}` placeholder is escaped and `@everyone`/`@here`/`<@id>` markup is defanged. No `allow_tokens` -- nothing in model output is a host-minted mention.
 
+A reply that would start with a chat-command lead (`/`, `.`, `!` -- Twitch/IRC run `/` and `.`
+as the bot's own commands; `!` re-triggers other bots) is prefixed with a visible speech-balloon
+so a prompt-injected `/ban x` completion can never be relayed as a command. The lead check
+ignores control and invisible characters (they are stripped or invisible on the wire).
+
 ## Testing
 
 `python3 -m pytest bundles/python/summarize` -- MOCKED AI host. **Full e2e (real model, latency) needs Ollama; not yet done.**
