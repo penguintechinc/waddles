@@ -34,14 +34,29 @@ text into that form -- every ``{``, ``}`` and ``\`` ends up inside a backslash p
 re-escaping pairs the host already escaped on the way in, which keeps it idempotent and means
 ``event.payload["text"]`` (already host-escaped) is not double-escaped.
 
+**How ``allow_tokens`` stays exact.** A placeholder is kept live only when it is, *in the text
+exactly as given* and parsed with the detokenizer's own left-to-right escape handling, a whole
+``{user:<token>}`` whose token is in the allow-list. The allowed spans are cut out BEFORE
+anything else touches the text; everything between them is control-stripped and escaped on its
+own, so no attacker character -- adjacent, nested, split by a control character, or glued on by
+the stripping pass -- can complete, extend or forge a placeholder. A live placeholder resolves
+to a display name the *mentioned user* controls, so the mention rules treat it as an opaque
+wildcard: a sigil or half-written mention next to it (``<!{user:t}>``, ``me@e{user:t}``) is
+defanged, and a word/``#``/``>`` right after it is separated by a zero-width space, because the
+resolved name could otherwise complete a ping across the boundary.
+
 **How mention markup is neutralized.** A zero-width space (U+200B) is inserted right after the
 ``@`` / ``<@`` / ``<#`` / ``<!`` that would make the platform parse a mention -- the same
 technique ``discord.py``'s ``escape_mentions`` and ``discord.js``'s ``cleanContent`` use. The
 text still reads identically; the platform no longer recognizes a mention. Inside a URL-shaped
 span only ``@everyone`` / ``@here`` are defanged, so ``https://medium.com/@name`` keeps working.
-Control characters (other than newline and tab) are stripped first because the Twitch send path
-strips them AFTER the bundle runs, which would otherwise let ``@<NUL>name`` collapse back into a
-live ``@name``.
+Control characters (other than newline and tab) are stripped first, and newline and tab are
+*seen through*: the host's send paths (``capabilities.rs::sanitize_irc_component``, its Python
+twin in ``waddle_transports``) strip EVERY control character -- ``\n`` and ``\t`` included --
+AFTER the detokenizer, so ``@<TAB>name`` / ``<!<NL>here>`` / ``@ev<TAB>eryone`` collapse into a
+live mention on Twitch. Mention detection therefore runs on the text as written AND on the text as
+the host will leave it (``\t\r\n`` removed), and the space goes in at the sigil in the written
+text, which breaks both views.
 
 Deliberately dependency-free (no ``wit_world`` / kv imports): pure text in, text out.
 """
@@ -49,6 +64,7 @@ Deliberately dependency-free (no ``wit_world`` / kv imports): pure text in, text
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections.abc import Iterable
 
 __all__ = [
@@ -77,45 +93,59 @@ _ESCAPABLE = frozenset("{}\\")
 
 _SPECIAL_RE = re.compile(r"[{}\\]")
 
+#: The only characters that can start something the detokenizer acts on: an escape pair or a
+#: placeholder. ``}`` never starts anything, so the allow-list scan skips it.
+_OPENER_RE = re.compile(r"[{\\]")
+
 #: Cc controls except ``\n`` and ``\t``: C0 (U+0000-U+001F), DEL, C1 (U+0080-U+009F).
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
-# Newlines are tolerated between an ``@`` and the name it introduces: the Twitch send path strips
-# them after the bundle runs, which would otherwise rejoin ``@\nname`` into a live ``@name``.
-_NL = r"[\r\n]*"
+#: Characters the host strips from the FINAL text after the detokenizer (every Cc control on
+#: the Twitch send path, ``\n`` and ``\t`` included). :func:`strip_control_chars` already removes
+#: the rest, so after it only these can sit between two characters the platform will see joined.
+_HOST_STRIPPED = "\t\r\n"
+_HOST_STRIPPED_RE = re.compile(r"[\t\r\n]")
 
-#: ``@everyone`` / ``@here`` in any case and anywhere (Discord matches the substring, so
-#: ``hi@everyone`` is live too), possibly split from the name by newlines Twitch strips later.
-_MASS_MENTION = rf"(?i:@(?={_NL}(?:everyone|here)))"
+#: Internal stand-in for ONE live (allow-listed) placeholder while mentions are defanged. NUL is
+#: safe as a marker because :func:`strip_control_chars` removes every NUL from untrusted text
+#: before a marker is ever placed (and :func:`defang_mentions` drops NULs from its input), so
+#: attacker text can neither forge nor swallow a marker. The marker stands for an opaque display
+#: name the mentioned user controls: it is treated as the start of a name (``\w``-like) for
+#: what precedes it and as a possible name tail for what follows it.
+_LIVE = "\x00"
 
 #: A URL-shaped span. Inside one, only the mass mentions are defanged: ``https://medium.com/@name``
 #: and ``https://host/@user/page`` are links, and a zero-width space would break them.
-_URL = r"(?i:\b[a-z][a-z0-9+.-]{1,15}://[^\s<>]+)"
+_URL_RE = re.compile(r"(?i:\b[a-z][a-z0-9+.-]{1,15}://[^\s<>]+)")
 
-#: One alternation. Every branch's lookahead/lookbehind fails on a second pass because the
-#: inserted space is not a word character -- which is what makes the whole pass idempotent.
-_DEFANG_RE = re.compile(
-    # 0. A URL span: handled whole (see ``_defang_match``) so rule 2 cannot corrupt a link.
-    rf"(?P<url>{_URL})"
-    # 1. Mass mentions anywhere.
-    rf"|{_MASS_MENTION}"
-    # 2. A mention at a word boundary: Twitch ``@name``, Discord/Slack ``<@id>`` ``<@!id>``
-    #    ``<@&role>`` (the ``@`` follows ``<``, a non-word char), or ``@`` + a placeholder.
-    #    ``user@host`` (email-shaped, ``@`` preceded by a word char) is left alone.
-    rf"|(?<!\w)@(?={_NL}[\w!&{{])"
-    # 3. Discord channel mention ``<#id>`` and Slack broadcast ``<!here>`` / ``<!channel>`` /
-    #    ``<!subteam^id>``: the space goes after the sigil.
-    r"|(?<=<[#!])(?=\w)"
+#: ``@everyone`` / ``@here`` in any case and anywhere (Discord matches the substring, so
+#: ``hi@everyone`` is live too) -- plus ``@`` followed by name characters and then a live
+#: placeholder (``hi@eve{user:t}`` plus a display name ``ryone`` is ``hi@everyone``). Applies
+#: everywhere, URL spans included.
+_MASS_MENTION_RE = re.compile(r"@(?=(?i:everyone|here)|[\w\x00]*\x00)")
+
+#: Mention rules that do NOT apply strictly inside a URL span. Each match's end is where the
+#: zero-width space goes. Every lookahead fails on a second pass because the inserted space is
+#: neither a word character nor a marker -- which is what makes the whole pass idempotent.
+_SIGIL_RULES: tuple[re.Pattern[str], ...] = (
+    # A mention at a word boundary: Twitch ``@name``, Discord/Slack ``<@id>`` ``<@!id>``
+    # ``<@&role>`` (the ``@`` follows ``<``, a non-word char), or ``@`` + a placeholder.
+    # ``user@host`` (email-shaped, ``@`` preceded by a word char) is left alone -- but an
+    # ``@`` right after a live placeholder is NOT: the display name may end in a non-word
+    # character, which leaves a bare ``@name`` behind it.
+    re.compile(r"(?<!\w)@(?=[\w!&{\x00])"),
+    # Discord channel mention ``<#id>`` and Slack broadcast ``<!here>`` / ``<!channel>`` /
+    # ``<!subteam^id>``: the space goes after the sigil, also when a live placeholder follows
+    # it (``<!{user:t}>`` + a display name ``here`` is ``<!here>``) or when ``<`` alone is
+    # followed by one (the display name could open with ``#`` / ``!``).
+    re.compile(r"(?<=<[#!])(?=[\w\x00])|(?<=<)(?=\x00)"),
+    # What follows a live placeholder can finish a mention the display name started
+    # (``<#`` + ``123>``, ``@`` + ``bob``): break the join before a word character, ``#``, ``>``,
+    # another placeholder, or ``!`` / ``&`` + word character or placeholder (``<@`` + ``&`` +
+    # ``123>`` across two names). Plain punctuation and spaces after a name (the normal case)
+    # are left byte-identical.
+    re.compile(r"(?<=\x00)(?=[\w#>\x00]|[!&][\w\x00])"),
 )
-_MASS_MENTION_RE = re.compile(_MASS_MENTION)
-
-
-def _defang_match(match: re.Match[str]) -> str:
-    """Return the replacement for one ``_DEFANG_RE`` match: the match plus a zero-width space."""
-    url = match.group("url")
-    if url is not None:
-        return _MASS_MENTION_RE.sub(lambda m: m.group(0) + ZERO_WIDTH_SPACE, url)
-    return match.group(0) + ZERO_WIDTH_SPACE
 
 
 def _require_str(value: object, what: str) -> None:
@@ -134,11 +164,34 @@ def strip_control_chars(text: str) -> str:
     return _CONTROL_RE.sub("", text)
 
 
-def _placeholder_end(text: str, start: int, allowed: frozenset[str]) -> int:
-    """Return the index just past an allow-listed ``{user:<token>}`` at ``start``, else ``-1``.
+def _coerce_allowed(allow_tokens: Iterable[str]) -> frozenset[str]:
+    """Validate ``allow_tokens`` and return the tokens that can ever match a placeholder.
+
+    A bare ``str`` / ``bytes`` is rejected: iterating it yields single characters, which would
+    silently allow-list ``{user:a}``-style one-character tokens instead of the intended token.
+    Entries that are not valid tokens (empty, or holding a character outside
+    ``[A-Za-z0-9_:.-]``) can never equal the token of a well-formed placeholder, so they are
+    dropped -- fail-closed, nothing about them can become live.
+    """
+    if isinstance(allow_tokens, str | bytes | bytearray):
+        raise TypeError(
+            "allow_tokens must be an iterable of token strings, not a bare "
+            f"{type(allow_tokens).__name__} (wrap a single token in a list)"
+        )
+    valid: set[str] = set()
+    for token in allow_tokens:
+        _require_str(token, "allow_tokens entry")
+        if token and all(ch in _TOKEN_CHARS for ch in token):
+            valid.add(token)
+    return frozenset(valid)
+
+
+def _placeholder_end(text: str, start: int, allowed: frozenset[str] | None) -> int:
+    """Return the index just past a live ``{user:<token>}`` at ``start``, else ``-1``.
 
     Matches exactly what ``egress_detokenizer::detokenize`` would substitute: the literal prefix,
-    a non-empty run of token characters, then ``}``.
+    a non-empty run of token characters, then ``}``. ``allowed`` restricts it to those exact
+    whole tokens (``None`` accepts every well-formed one).
     """
     if not text.startswith(_PLACEHOLDER_OPEN, start):
         return -1
@@ -149,37 +202,49 @@ def _placeholder_end(text: str, start: int, allowed: frozenset[str]) -> int:
         j += 1
     if j == body_start or j >= n or text[j] != "}":
         return -1
-    return j + 1 if text[body_start:j] in allowed else -1
+    if allowed is not None and text[body_start:j] not in allowed:
+        return -1
+    return j + 1
 
 
-def escape_egress_tokens(text: str, *, allow_tokens: Iterable[str] = ()) -> str:
-    r"""Make ``text`` inert to the egress detokenizer (``{user:<token>}`` can no longer fire).
+def _split_live(text: str, allowed: frozenset[str] | None) -> list[tuple[str, bool]]:
+    r"""Cut ``text`` into ``(piece, is_live)`` runs: whole live placeholders vs everything else.
 
-    Canonicalizes ``text`` so every ``{``, ``}`` and ``\`` sits inside a backslash pair
-    (``\{``, ``\}``, ``\\``) -- the escape form the detokenizer never treats as a placeholder
-    and un-escapes at the final send, so the reader still sees the original characters. Pairs
-    already in that form (e.g. ``event.payload["text"]``, which the host escaped on the way in)
-    are kept as-is, so the function is idempotent and never double-escapes.
-
-    Args:
-        text: Untrusted text destined for a chat reply.
-        allow_tokens: Tokens whose ``{user:<token>}`` placeholder is kept LIVE (so it still
-            resolves to a display name) -- ONLY for tokens the bundle has positively identified
-            as host-minted mentions of the triggering message, e.g.
-            ``identity.mention_tokens(event.payload["text"])`` applied to the text exactly as
-            the host delivered it. Never feed it tokens derived from LLM/HTTP/kv text.
-
-    Returns:
-        The escaped text.
-
-    Raises:
-        TypeError: ``text`` is not a ``str``, or ``allow_tokens`` holds a non-``str``.
+    Scans left to right with the detokenizer's own escape handling (a backslash followed by
+    ``{``, ``}`` or ``\`` consumes both), so a placeholder behind an escape pair is never live.
+    The plain pieces are returned raw -- unstripped, unescaped -- and joined they give ``text``
+    back. An empty ``allowed`` (nothing can be live) returns one plain piece.
     """
-    _require_str(text, "text")
-    allowed = frozenset(allow_tokens)
-    for token in allowed:
-        _require_str(token, "allow_tokens entry")
+    if allowed is not None and not allowed:
+        return [(text, False)]
+    pieces: list[tuple[str, bool]] = []
+    plain_start = 0
+    i = 0
+    n = len(text)
+    while True:
+        match = _OPENER_RE.search(text, i)
+        if match is None:
+            break
+        j = match.start()
+        if text[j] == "\\":
+            # A well-formed escape pair is consumed whole; a lone backslash consumes itself.
+            i = j + 2 if j + 1 < n and text[j + 1] in _ESCAPABLE else j + 1
+            continue
+        end = _placeholder_end(text, j, allowed)
+        if end == -1:
+            i = j + 1
+            continue
+        if j > plain_start:
+            pieces.append((text[plain_start:j], False))
+        pieces.append((text[j:end], True))
+        plain_start = i = end
+    if plain_start < n:
+        pieces.append((text[plain_start:], False))
+    return pieces
 
+
+def _escape_plain(text: str) -> str:
+    r"""Canonicalize ``text`` so every ``{``, ``}`` and ``\`` sits inside a backslash pair."""
     out: list[str] = []
     i = 0
     n = len(text)
@@ -199,16 +264,106 @@ def escape_egress_tokens(text: str, *, allow_tokens: Iterable[str] = ()) -> str:
                 out.append("\\\\")  # a lone backslash: pair it so it can't swallow what follows
                 i = j + 1
         elif ch == "{":
-            end = _placeholder_end(text, j, allowed) if allowed else -1
-            if end == -1:
-                out.append("\\{")
-                i = j + 1
-            else:
-                out.append(text[j:end])  # allow-listed host-minted mention: stays live
-                i = end
+            out.append("\\{")
+            i = j + 1
         else:  # "}"
             out.append("\\}")
             i = j + 1
+    return "".join(out)
+
+
+def escape_egress_tokens(text: str, *, allow_tokens: Iterable[str] = ()) -> str:
+    r"""Make ``text`` inert to the egress detokenizer (``{user:<token>}`` can no longer fire).
+
+    Canonicalizes ``text`` so every ``{``, ``}`` and ``\`` sits inside a backslash pair
+    (``\{``, ``\}``, ``\\``) -- the escape form the detokenizer never treats as a placeholder
+    and un-escapes at the final send, so the reader still sees the original characters. Pairs
+    already in that form (e.g. ``event.payload["text"]``, which the host escaped on the way in)
+    are kept as-is, so the function is idempotent and never double-escapes.
+
+    Args:
+        text: Untrusted text destined for a chat reply.
+        allow_tokens: Tokens whose ``{user:<token>}`` placeholder is kept LIVE (so it still
+            resolves to a display name) -- ONLY for tokens the bundle has positively identified
+            as host-minted mentions of the triggering message, e.g.
+            ``identity.mention_tokens(event.payload["text"])`` applied to the text exactly as
+            the host delivered it. Never feed it tokens derived from LLM/HTTP/kv text. Matching
+            is exact and whole-token only: the text must already hold a complete, unescaped
+            ``{user:<token>}`` for it to stay live; nothing is ever assembled from fragments.
+
+    Returns:
+        The escaped text.
+
+    Raises:
+        TypeError: ``text`` is not a ``str``, ``allow_tokens`` is a bare ``str``/``bytes`` (its
+            characters would become one-character tokens), or holds a non-``str``.
+    """
+    _require_str(text, "text")
+    allowed = _coerce_allowed(allow_tokens)
+    return "".join(
+        piece if is_live else _escape_plain(piece) for piece, is_live in _split_live(text, allowed)
+    )
+
+
+def _host_stripped_view(text: str) -> tuple[str, list[int]]:
+    r"""Return ``text`` without ``\t\r\n`` and, per remaining char, its index in ``text``."""
+    kept = [k for k, ch in enumerate(text) if ch not in _HOST_STRIPPED]
+    return "".join(text[k] for k in kept), kept
+
+
+def _insertion_points(view: str) -> set[int]:
+    """Return the indexes in ``view`` before which a zero-width space must go."""
+    spans = [(m.start(), m.end()) for m in _URL_RE.finditer(view)]
+    starts = [start for start, _ in spans]
+    points = {m.end() for m in _MASS_MENTION_RE.finditer(view)}
+    for rule in _SIGIL_RULES:
+        for match in rule.finditer(view):
+            point = match.end()
+            k = bisect_right(starts, point) - 1
+            if k >= 0 and spans[k][0] < point < spans[k][1]:
+                continue  # strictly inside a URL span: only the mass mentions apply there
+            points.add(point)
+    return points
+
+
+def _defang_masked(text: str) -> str:
+    r"""Defang mention markup in ``text``, where each ``_LIVE`` char is one live placeholder.
+
+    Detection runs on the text as written (Discord keeps ``\n`` / ``\t``) AND on the text with
+    ``\t\r\n`` removed (the Twitch path strips them after the detokenizer), each insertion
+    landing right after the sigil in the written text -- which separates the sigil from the
+    name in both views.
+    """
+    if _LIVE not in text and "@" not in text and "<" not in text:
+        return text  # fast path: no mention sigil can be present
+    points = _insertion_points(text)
+    if _HOST_STRIPPED_RE.search(text):
+        view, kept = _host_stripped_view(text)
+        # A view point is always preceded by a sigil or marker, so ``p >= 1``.
+        points.update(kept[p - 1] + 1 for p in _insertion_points(view))
+    if not points:
+        return text
+    out: list[str] = []
+    prev = 0
+    for point in sorted(points):
+        out.append(text[prev:point])
+        out.append(ZERO_WIDTH_SPACE)
+        prev = point
+    out.append(text[prev:])
+    return "".join(out)
+
+
+def _restore_live(masked: str, live: list[str]) -> str:
+    """Put the live placeholders back, in order, where ``_defang_masked`` kept their markers."""
+    if not live:
+        return masked
+    pieces = masked.split(_LIVE)
+    if len(pieces) != len(live) + 1:
+        raise RuntimeError("live-placeholder markers were lost or forged")  # unreachable
+    out = [pieces[0]]
+    for placeholder, piece in zip(live, pieces[1:], strict=True):
+        out.append(placeholder)
+        out.append(piece)
     return "".join(out)
 
 
@@ -217,28 +372,51 @@ def defang_mentions(text: str) -> str:
 
     Covers ``@everyone`` / ``@here`` (any case, even mid-word), Twitch-style ``@name`` and
     ``@role`` at a word boundary, Discord ``<@id>`` / ``<@!id>`` / ``<@&role>`` / ``<#channel>``
-    and Slack ``<@U..>`` / ``<!here>`` / ``<!channel>``. Email-shaped ``user@host`` is left
-    untouched. Idempotent. Expects control characters already stripped
-    (:func:`strip_control_chars`) -- :func:`sanitize_user_text` does both in order.
+    and Slack ``<@U..>`` / ``<!here>`` / ``<!channel>``, including when the sigil and the name
+    are separated by a newline or tab the host strips later. Email-shaped ``user@host`` is left
+    untouched. A well-formed ``{user:<token>}`` in ``text`` is treated as a live placeholder
+    resolving to an arbitrary display name. Idempotent. Expects control characters already
+    stripped (:func:`strip_control_chars`) -- :func:`sanitize_user_text` does both in order; any
+    NUL is dropped here because it is this module's internal placeholder marker.
     """
     _require_str(text, "text")
-    if "@" not in text and "<" not in text:
-        return text  # fast path: no mention sigil can be present
-    return _DEFANG_RE.sub(_defang_match, text)
+    if "@" not in text and "<" not in text and "{" not in text:
+        return text  # fast path: no mention sigil and no placeholder can be present
+    text = text.replace(_LIVE, "")
+    masked: list[str] = []
+    live: list[str] = []
+    for piece, is_live in _split_live(text, None):
+        if is_live:
+            masked.append(_LIVE)
+            live.append(piece)
+        else:
+            masked.append(piece)
+    return _restore_live(_defang_masked("".join(masked)), live)
 
 
 def sanitize_user_text(text: str, *, allow_tokens: Iterable[str] = ()) -> str:
     """Neutralize untrusted user-derived ``text`` for use inside a chat reply.
 
-    Strips control characters, escapes egress-token syntax (:func:`escape_egress_tokens`) and
-    defangs mass-mention / mention markup (:func:`defang_mentions`). Ordinary text is returned
+    Cuts out the allow-listed whole placeholders, strips control characters and escapes
+    egress-token syntax in everything else (:func:`escape_egress_tokens`), then defangs
+    mass-mention / mention markup (:func:`defang_mentions`). Ordinary text is returned
     unchanged; the result is idempotent (``f(f(x)) == f(x)``) and unicode-safe. Call it last,
     on user-supplied text only -- never on a ``{user:<token>}`` placeholder the bundle emits
     itself. See the module docstring for the full contract and the ``allow_tokens`` caveat.
 
     Raises:
         TypeError: ``text`` is not a ``str`` (a ``None`` payload field must be handled by the
-            caller, never silently coerced into the reply).
+            caller, never silently coerced into the reply), or ``allow_tokens`` is a bare
+            ``str``/``bytes`` or holds a non-``str``.
     """
-    escaped = escape_egress_tokens(strip_control_chars(text), allow_tokens=allow_tokens)
-    return defang_mentions(escaped)
+    _require_str(text, "text")
+    allowed = _coerce_allowed(allow_tokens)
+    masked: list[str] = []
+    live: list[str] = []
+    for piece, is_live in _split_live(text, allowed):
+        if is_live:
+            masked.append(_LIVE)
+            live.append(piece)
+        else:
+            masked.append(_escape_plain(strip_control_chars(piece)))
+    return _restore_live(_defang_masked("".join(masked)), live)
