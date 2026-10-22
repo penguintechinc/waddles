@@ -21,6 +21,7 @@ from waddle_sdk.flask_core.bundle_runtime import bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.testing import FakeKvHost
 
+import app
 from app import (
     _LINES,
     NUMBERS,
@@ -286,14 +287,47 @@ def test_start_creates_a_round_and_announces(host: types.SimpleNamespace) -> Non
     assert incs[f"c.{COMMUNITY}.bingo.rid"] == 30 * 24 * 3600
 
 
-def test_the_seed_depends_on_the_clock_and_round(host: types.SimpleNamespace) -> None:
+def test_the_seed_is_os_entropy_not_a_hash_of_public_inputs(
+    host: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: sha256(now_millis, rid, community) was brute-forceable from the start time."""
+    draws: list[int] = []
+
+    def fake_bits(k: int) -> int:
+        draws.append(k)
+        return 0xA * len(draws)
+
+    monkeypatch.setattr(app._RNG, "getrandbits", fake_bits)
+    _modsay("!bingo start")
+    first = _round(host).seed
+    assert draws == [128] and first == f"{0xA:032x}"
+    _modsay("!bingo end")
+    _modsay("!bingo start")
+    assert _round(host).seed == f"{0x14:032x}" != first
+    assert _round(host).rid == 2
+
+
+def test_the_seed_does_not_depend_on_the_clock(
+    host: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(app._RNG, "getrandbits", lambda k: 7)
     _modsay("!bingo start")
     first = _round(host).seed
     _modsay("!bingo end")
-    host.state["now"] += 1
+    host.state["now"] += 12345
     _modsay("!bingo start")
-    assert _round(host).seed != first
-    assert _round(host).rid == 2
+    assert _round(host).seed == first == f"{7:032x}"
+
+
+def test_the_real_seed_is_128_random_bits_that_differ_per_round(
+    host: types.SimpleNamespace,
+) -> None:
+    seeds = set()
+    for _ in range(4):
+        _modsay("!bingo start")
+        seeds.add(_round(host).seed)
+        _modsay("!bingo end")
+    assert len(seeds) == 4 and all(re.fullmatch(r"[0-9a-f]{32}", s) for s in seeds)
 
 
 @pytest.mark.parametrize(

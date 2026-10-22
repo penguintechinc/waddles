@@ -621,24 +621,43 @@ def test_every_invocation_stays_inside_the_64_op_budget(host: types.SimpleNamesp
         assert len(host.kv.calls) <= 64
 
 
-def test_the_pick_depends_on_the_clock(host: types.SimpleNamespace) -> None:
+def test_the_pick_comes_from_os_entropy_not_the_clock(
+    host: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: a sha256(now_millis, ...) pick let whoever chose the draw moment steer it."""
     _entered_giveaway(host, ["alice", "bob", "carol", "dave"])
     snapshot = dict(host.kv.store)
-    seen = set()
-    for now in range(0, 400, 7):
+    seen = []
+    for index in range(4):
+        host.kv.inner.store.clear()
+        host.kv.inner.store.update(snapshot)
+        monkeypatch.setattr(app._RNG, "randrange", lambda size, i=index: i)
+        match = re.search(r"\{user:(u-\w+)\}", _text(_run(_mod("!kgiveaway draw"))))
+        assert match
+        seen.append(match.group(1))
+    assert seen == ["u-alice", "u-bob", "u-carol", "u-dave"]
+
+
+def test_the_pick_ignores_the_clock(
+    host: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(app._RNG, "randrange", lambda size: 1)
+    _entered_giveaway(host, ["alice", "bob", "carol"])
+    snapshot = dict(host.kv.store)
+    picks = set()
+    for now in (0, 7, 999_999):
         host.kv.inner.store.clear()
         host.kv.inner.store.update(snapshot)
         host.state["now"] = now
         match = re.search(r"\{user:(u-\w+)\}", _text(_run(_mod("!kgiveaway draw"))))
         assert match
-        seen.add(match.group(1))
-    assert seen == {"u-alice", "u-bob", "u-carol", "u-dave"}
+        picks.add(match.group(1))
+    assert picks == {"u-bob"}
 
 
-def test_the_pick_is_deterministic_for_fixed_inputs() -> None:
-    parts = (5, 1, 0, 4, 0)
-    assert _pick_index(parts, 4) == _pick_index(parts, 4)
-    assert 0 <= _pick_index(parts, 4) < 4
+def test_the_pick_index_is_in_range_and_unseeded() -> None:
+    assert all(0 <= _pick_index(4) < 4 for _ in range(200))
+    assert _pick_index(1) == 0
 
 
 def test_status_in_every_state(host: types.SimpleNamespace) -> None:

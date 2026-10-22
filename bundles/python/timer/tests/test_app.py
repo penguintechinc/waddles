@@ -17,6 +17,7 @@ from typing import Any, cast
 import pytest
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.safe_text import leads_with_command
 from waddle_sdk.testing import FakeKvHost, install_fake_kv_host
 
 import app
@@ -31,7 +32,6 @@ from app import (
     MIN_INTERVAL_MIN,
     Timer,
     _caller_role_signal,
-    _leads_with_command,
     _parse_config,
     _scope_of,
     dispatch,
@@ -322,7 +322,7 @@ def test_scope_is_a_non_reversible_per_channel_hash() -> None:
     ],
 )
 def test_command_lead_detection_sees_through_invisible_prefixes(text: str, expected: bool) -> None:
-    assert _leads_with_command(text) is expected
+    assert leads_with_command(text) is expected
 
 
 # -- admin: gate --------------------------------------------------------------------------------

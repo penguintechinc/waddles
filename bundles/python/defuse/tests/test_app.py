@@ -8,25 +8,45 @@ import itertools
 import json
 import re
 import types
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from waddle_sdk import event_dedupe
 from waddle_sdk.community_kv import _scoped_key
+from waddle_sdk.flask_core.bundle_runtime import bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.testing import (
     FakeEconomyHost,
     FakeIdentityHost,
     FakeKvHost,
+    StageGuard,
     install_fake_kv_host,
     rfc3339_from_millis,
 )
 
 import app
-from app import DEFAULT_STAKE, dispatch, transform
+from app import DEFAULT_STAKE
 
 ACTOR = "11111111-1111-4111-8111-111111111111"
 COMMUNITY = "comm-1"
+
+#: Makes every host fake stage-faithful: economy/identity answer the PROCESS stage only, `relay`
+#: the ACTION stage only (the real host's split). The `host` fixture fails a test that breaks it.
+GUARD = StageGuard()
+
+
+async def _transform_in_context(event: PlatformEvent) -> PlatformEvent | None:
+    """The real `transform` entry point, inside the bundle context the host binds around it."""
+    with bundle_context(tenant="t", community=COMMUNITY, app_id="waddles.core.example.defuse"):
+        return await app.transform(event)
+
+
+transform = GUARD.process_stage(_transform_in_context)
+#: Runs one command through the real stage split: `app._settle` as the process stage on the
+#: envelope's intent payload, then `app.dispatch` as the action stage on what it returned.
+dispatch = GUARD.two_stage(app._settle, app.dispatch)
+action_dispatch = GUARD.action_stage(app.dispatch)
 
 
 _MSG_IDS = itertools.count(1)
@@ -70,18 +90,22 @@ def _install(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> _Host:
     import wit_world
 
     ns = wit_world.imports
+    GUARD.reset()
     ns.economy = types.SimpleNamespace(
-        balance=eco.balance,
-        wager=eco.wager,
-        transfer=eco.transfer,
-        max_bet=eco.max_bet,
-        leaderboard=eco.leaderboard,
+        balance=GUARD.process_only("economy.balance", eco.balance),
+        wager=GUARD.process_only("economy.wager", eco.wager),
+        transfer=GUARD.process_only("economy.transfer", eco.transfer),
+        max_bet=GUARD.process_only("economy.max_bet", eco.max_bet),
+        leaderboard=GUARD.process_only("economy.leaderboard", eco.leaderboard),
     )
     ns.identity = types.SimpleNamespace(
-        resolve_actor=ident.resolve_actor, resolve_mention=ident.resolve_mention
+        resolve_actor=GUARD.process_only("identity.resolve_actor", ident.resolve_actor),
+        resolve_mention=GUARD.process_only("identity.resolve_mention", ident.resolve_mention),
     )
     ns.flags = types.SimpleNamespace(enabled=lambda key, default_value: flag)
-    ns.relay = types.SimpleNamespace(push=lambda p, m: host.relay_calls.append((p, m)))
+    ns.relay = types.SimpleNamespace(
+        push=GUARD.action_only("relay.push", lambda p, m: host.relay_calls.append((p, m)))
+    )
     ns.log = types.SimpleNamespace(
         Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3},
         write=lambda lvl, msg, f: host.log_calls.append((lvl, msg, f)),
@@ -93,8 +117,10 @@ def _install(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> _Host:
 
 
 @pytest.fixture
-def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
-    return _install(monkeypatch)
+def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Host]:
+    h = _install(monkeypatch)
+    yield h
+    GUARD.assert_clean()
 
 
 def _event(text: str, **extra: Any) -> PlatformEvent:
@@ -145,6 +171,12 @@ def _play(
 # -- transform -----------------------------------------------------------------
 
 
+def _recognize(event: PlatformEvent) -> types.SimpleNamespace | None:
+    """The routing intent `transform` derives from a chat line (pure, no host call)."""
+    intent = app._recognize(event)
+    return None if intent is None else types.SimpleNamespace(payload=intent)
+
+
 @pytest.mark.parametrize(
     ("text", "command", "arg"),
     [
@@ -159,7 +191,7 @@ def _play(
     ],
 )
 def test_transform_grammar(host: _Host, text: str, command: str, arg: str | None) -> None:
-    out = _run(transform(_event(text)))
+    out = _recognize(_event(text))
     assert out is not None
     assert out.payload["command"] == command
     assert out.payload.get("arg") == arg
@@ -177,7 +209,7 @@ def test_transform_ignores_non_string_text(host: _Host) -> None:
 
 
 def test_badges_strict_is_true(host: _Host) -> None:
-    out = _run(transform(_event("!defuse list", is_mod="false", is_broadcaster=1)))
+    out = _recognize(_event("!defuse list", is_mod="false", is_broadcaster=1))
     assert out is not None
     assert out.payload["is_mod"] is False
     assert out.payload["is_broadcaster"] is False
@@ -481,13 +513,13 @@ def _yielding_kv_all(mp: pytest.MonkeyPatch) -> None:
 
 
 def test_transform_forwards_the_platform_message_id(host: _Host) -> None:
-    out = _run(transform(_event("!defuse 5", message_id="m-9")))
+    out = _recognize(_event("!defuse 5", message_id="m-9"))
     assert out is not None and out.payload["message_id"] == "m-9"
 
 
 @pytest.mark.parametrize("bad", [None, 7, ["m"]])
 def test_transform_does_not_forward_a_non_string_message_id(host: _Host, bad: Any) -> None:
-    out = _run(transform(_event("!defuse 5", message_id=bad)))
+    out = _recognize(_event("!defuse 5", message_id=bad))
     assert out is not None and "message_id" not in out.payload
 
 
@@ -847,3 +879,75 @@ def test_a_full_key_quota_fails_closed_and_moves_no_money(
         _go(host, monkeypatch, win=True, msg_id="q-1")
     assert "unavailable" in _reply(host)
     assert host.eco.ledger == [] and _stat(host, "plays") == 0
+
+
+# -- stage split: economy/identity in transform (process stage), relay only in dispatch -----------
+
+
+def _action_envelope(event: PlatformEvent) -> StageEnvelope:
+    return StageEnvelope(
+        tenant="t",
+        community=COMMUNITY,
+        app_id="waddles.core.example.defuse",
+        stage="action",
+        event=event,
+        ts="2026-10-05T00:00:00.000Z",
+    )
+
+
+def test_the_whole_command_settles_in_transform_and_dispatch_only_relays(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real chat line: economy/identity calls run in the process stage, relay in the action."""
+    monkeypatch.setattr(app, "_roll", lambda *a, **k: False)
+    chat = _event("!defuse 10", message_id="stage-1")
+    chat.occurred_at = _now_stamp()  # inside the replay age fence
+    out = _run(transform(chat))
+    assert out is not None
+    assert host.eco.ledger != [], out.payload
+    assert host.ident.calls == ["actor"]
+    assert host.relay_calls == [], "transform cannot relay (process stage)"
+    assert set(out.payload) == {"channel_id", "text", "command"}
+    ledger, calls = list(host.eco.ledger), list(host.ident.calls)
+
+    result = _run(action_dispatch(_action_envelope(out), {}, http_client=None))
+    assert result.detail == "play"
+    assert _reply(host) == out.payload["text"]
+    assert host.eco.ledger == ledger and host.ident.calls == calls, "dispatch moved no money"
+    assert GUARD.violations == []
+
+
+@pytest.mark.parametrize("command", ["play", "list", "usage", "config_set_odds"])
+def test_dispatch_makes_no_economy_or_identity_call(host: _Host, command: str) -> None:
+    """`svc_action` serves no economy/identity: dispatch relays the given text and nothing else."""
+    event = PlatformEvent(
+        platform="twitch",
+        event_type="chat.message",
+        actor="viewer-1",
+        payload={"channel_id": "12345", "text": "already computed", "command": command},
+        occurred_at=_now_stamp(),
+    )
+    _run(action_dispatch(_action_envelope(event), {}, http_client=None))
+    assert _reply(host) == "already computed"
+    assert host.ident.calls == [] and host.eco.ledger == []
+    assert GUARD.violations == []
+
+
+def test_transform_failure_is_deferred_to_dispatch_not_relayed(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kv outage in transform cannot relay: it is marked, and dispatch relays then raises."""
+    import wit_world
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(wit_world.imports.kv, "get", boom)
+    chat = _event("!defuse list")
+    chat.occurred_at = _now_stamp()
+    out = _run(transform(chat))
+    assert out is not None and out.payload["failure"] == "defuse state backend failed"
+    assert host.relay_calls == []
+    with pytest.raises(RuntimeError, match="defuse state backend failed"):
+        _run(action_dispatch(_action_envelope(out), {}, http_client=None))
+    assert "unavailable" in _reply(host)

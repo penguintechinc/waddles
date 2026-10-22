@@ -44,6 +44,15 @@ the egress detokenizer renders as display names -- this bundle never sees, store
 Logs carry op/platform/count/limit/exception type only. A host refusal logs the type, sends a
 generic reply, and re-raises (never an empty board).
 
+## Stage split
+
+`economy.leaderboard` is served by the **process** stage only (`core/svc_process`;
+`core/svc_action` has no handler) and `relay` by the **action** stage only, so `transform` reads the
+board and `dispatch` only relays the rendered text. A refused/failed read travels as a `failure`
+marker: `dispatch` relays the generic "unavailable" reply and then raises. The tests run against
+`waddle_sdk.testing.StageGuard` fakes and `scripts/ci/tests/test_bundle_stage_gate.py` fails the
+build if `dispatch` can reach an economy/identity call.
+
 ## Tests
 
 `python3 -m pytest bundles/python/top` (fake `wit_world`: flags/economy/relay/log).

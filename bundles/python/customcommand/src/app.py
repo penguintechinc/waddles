@@ -81,7 +81,17 @@ from typing import Any, cast
 from waddle_sdk import identity, kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.safe_text import escape_egress_tokens, sanitize_user_text
+from waddle_sdk.safe_text import (
+    escape_egress_tokens,
+    guard_leading_command,
+    leads_with_command,
+    sanitize_user_text,
+)
+
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 SPEC = CommandSpec(name="cc")
 
@@ -134,13 +144,9 @@ RESERVED_NAMES: frozenset[str] = frozenset(
     time timer tldr top translate trivia truthordare unlurk uptime
     uwu vibecheck vote vso waddle wave weather wheel winner
     wordcount wouldyourather wyr yomama
+    blackjack chatguard hit hypetrain level lottery stand
     """.split()
 )
-
-#: Command leads that the platform would execute (`/`, `.` on Twitch/IRC) or that re-trigger other
-#: bots (`!`) -- mirrors `waddle_sdk.safe_text`'s completion-lead guard.
-_COMMAND_LEADS = ("/", ".", "!")
-_SAFE_LEAD = "\U0001f4ac "
 
 _FALLBACK_ACTOR = "someone"
 
@@ -275,22 +281,6 @@ def _name_error(name: str) -> str | None:
     return None
 
 
-def _leads_with_command(text: str) -> bool:
-    """Return True if the first VISIBLE character of `text` is a command lead (`/`, `.`, `!`).
-
-    "Visible" mirrors what the host's send path leaves behind: control (`Cc`) and format (`Cf`:
-    zero-width, bidi, Unicode tag characters) code points are dropped and leading whitespace is
-    skipped, so a `/ban` hidden behind a zero-width space still counts as leading with `/`.
-    """
-    visible = "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf"))
-    return visible.lstrip().startswith(_COMMAND_LEADS)
-
-
-def _guard_leading_command(text: str) -> str:
-    """Return `text`, given a visible prefix if it would lead with a command (idempotent)."""
-    return _SAFE_LEAD + text if _leads_with_command(text) else text
-
-
 def _parse_variable(inner: str) -> _Variable:
     """Parse the inside of one `$(...)`; raise `_TemplateError` for anything unsupported."""
     words = inner.split()
@@ -339,7 +329,7 @@ def _response_error(response: str) -> str | None:
         return "Responses may not contain control characters."
     if identity.mention_tokens(response):
         return "Responses can't contain user mentions - use $(user) or $(target) instead."
-    if _leads_with_command(response):
+    if leads_with_command(response):
         return "Responses can't start with /, . or ! (the bot would run it as a command)."
     try:
         _parse_template(response)
@@ -396,14 +386,14 @@ def _render(
         elif piece.kind == "count":
             parts.append(str(uses))
         else:
-            parts.append(str(random.randint(piece.low, piece.high)))  # noqa: S311 - not security
+            parts.append(str(_RNG.randint(piece.low, piece.high)))
     return "".join(parts), live
 
 
 def _finalize(text: str, live: list[str]) -> str:
     """Apply the ONE output gate: sanitize the assembled reply, then guard a command lead."""
     sanitized: str = sanitize_user_text(text, allow_tokens=live)
-    return _guard_leading_command(sanitized)
+    return guard_leading_command(sanitized)
 
 
 async def _run_locked(work: Callable[[], Awaitable[str]]) -> str:

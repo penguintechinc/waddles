@@ -49,9 +49,11 @@ it is ever emitted). Logs carry only the op and counts, never an actor, name or 
 the host placeholder kept live via `allow_tokens`, or -- when the actor is a raw name --
 `waddle_sdk.safe_text.sanitize_user_text` output.
 
-**Randomness.** No `random` module (componentize-py freezes module-level RNG state at build
-time): the seed is `sha256(now_millis, round id, community)`, cards/calls are SHA-256 rankings.
-A chat game, not a security decision.
+**Randomness.** The round seed is 128 bits from `random.SystemRandom()` (OS entropy, `wasi:random`
+in the component) -- never the module-level `random` functions (componentize-py freezes their
+import-time Mersenne Twister state into the build snapshot) and never a hash of public inputs: a
+seed of `sha256(now_millis, round id, community)` can be brute-forced from the round's start time,
+which would hand a viewer the whole call order. Cards/calls are SHA-256 rankings of the seed.
 
 Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
 decides whether this bundle runs.
@@ -64,6 +66,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 from dataclasses import dataclass
 from typing import Any, NoReturn, TypeIs
@@ -75,6 +78,11 @@ from waddle_sdk.flask_core.bundle_runtime import get_bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.identity import MAX_MENTION_TOKEN_LEN
 from waddle_sdk.safe_text import sanitize_user_text
+
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions (their Mersenne Twister is seeded at import and componentize-py freezes
+#: import-time state into the build snapshot) and never a hash of public inputs such as the clock.
+_RNG = random.SystemRandom()
 
 COMMAND = "bingo"
 _HEAD = f"!{COMMAND}"
@@ -387,7 +395,7 @@ async def _handle_start(community: str) -> str:
     if current is not None and await _is_live(community, current):
         return "a bingo round is already running -- finish it or !bingo end first"
     rid = await _incr(community, _RID_KEY, 1, _COUNTER_TTL_SECONDS)
-    seed = hashlib.sha256(f"{clock.now_millis()}\0{rid}\0{community}".encode()).hexdigest()[:32]
+    seed = f"{_RNG.getrandbits(128):032x}"
     await _set(community, _CUR_KEY, _Round(rid=rid, seed=seed, ended=False).dump())
     log.info("bingo.started")
     return (

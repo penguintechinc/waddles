@@ -7,34 +7,42 @@ import json
 import random
 import re
 import sys
+import types
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from harness import (
     COMM,
+    GUARD,
     NS,
     Host,
+    action_dispatch,
+    dispatch,
     envelope,
     make_event,
     run,
     say,
     to_envelope,
+    transform,
     yielding_kv,
 )
 from waddle_sdk import event_dedupe
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent
 
 import app
-from app import MAX_STAKE_PER_ROUND, OPEN_SECONDS, SETTLE_SECONDS, dispatch, transform
+from app import MAX_STAKE_PER_ROUND, OPEN_SECONDS, SETTLE_SECONDS
 
 ZWSP = "\u200b"
 OPEN = '!prediction open "Will it rain?" yes no'
 
 
 @pytest.fixture
-def host(monkeypatch: pytest.MonkeyPatch) -> Host:
-    return Host(monkeypatch)
+def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[Host]:
+    h = Host(monkeypatch)
+    yield h
+    GUARD.assert_clean()
 
 
 def open_round(host: Host, text: str = OPEN) -> str | None:
@@ -72,6 +80,12 @@ def fin(host: Host, n: int = 1) -> dict[str, int]:
 # --- routing / transform ----------------------------------------------------------------------
 
 
+def route(event: PlatformEvent) -> types.SimpleNamespace | None:
+    """The routing intent `transform` derives from a chat line (pure, no host call)."""
+    intent = app._recognize(event)
+    return None if intent is None else types.SimpleNamespace(payload=intent)
+
+
 @pytest.mark.parametrize(
     ("text", "command", "args"),
     [
@@ -95,7 +109,7 @@ def fin(host: Host, n: int = 1) -> dict[str, int]:
     ],
 )
 def test_transform_routes(host: Host, text: str, command: str, args: str | None) -> None:
-    out = run(transform(PlatformEvent("twitch", "chat.message", "v", {"text": text}, "t")))
+    out = route(PlatformEvent("twitch", "chat.message", "v", {"text": text}, "t"))
     assert out is not None and out.payload["command"] == command
     assert out.payload.get("args") == args
 
@@ -123,13 +137,11 @@ def test_transform_forwards_message_id_and_strict_badges(host: Host) -> None:
         },
         "t",
     )
-    out = run(transform(ev))
+    out = route(ev)
     assert out is not None
     assert out.payload["message_id"] == "abc"
     assert out.payload["is_mod"] is False and out.payload["is_broadcaster"] is True
-    bare = run(
-        transform(PlatformEvent("twitch", "chat.message", "v", {"text": "!prediction"}, "t"))
-    )
+    bare = route(PlatformEvent("twitch", "chat.message", "v", {"text": "!prediction"}, "t"))
     assert bare is not None and "is_mod" not in bare.payload and "message_id" not in bare.payload
 
 
@@ -138,7 +150,7 @@ def test_transform_drops_a_non_string_message_id(host: Host, bad: Any) -> None:
     ev = PlatformEvent(
         "twitch", "chat.message", "v", {"text": "!predict yes 1", "message_id": bad}, "t"
     )
-    out = run(transform(ev))
+    out = route(ev)
     assert out is not None and "message_id" not in out.payload
 
 
@@ -1220,9 +1232,9 @@ def test_missing_channel_unknown_command_and_empty_community_raise(host: Host) -
 
 def test_tenant_wide_sentinel_scope_works_end_to_end(host: Host) -> None:
     host.act_as("mod")
-    ev = run(transform(make_event(host, "mod", OPEN, mod=True)))
+    ev = run(transform(make_event(host, "mod", OPEN, mod=True), community=None))
     assert ev is not None
-    run(dispatch(to_envelope(ev, community=None), {}, http_client=None))
+    run(action_dispatch(to_envelope(ev, community=None), {}, http_client=None))
     assert "is open" in host.relayed[-1]
     assert any(k.startswith("c.0.prediction.") for k in host.kv.store)
 
@@ -1262,3 +1274,61 @@ def test_economy_permission_is_declared_with_bounds() -> None:
     assert {"storage.kv", "economy.read", "identity.resolve"} <= set(perms)
     assert all(len(p["justification"]) <= 280 for p in manifest["permissions"])
     assert manifest["version"] == "1.0.0" and "notice" not in manifest
+
+
+# --- stage split: economy/identity in transform (process stage), relay only in dispatch ---------
+
+
+def test_the_whole_bet_settles_in_transform_and_dispatch_only_relays(host: Host) -> None:
+    """A real chat line: economy/identity calls run in the process stage, relay in the action."""
+    open_round(host)
+    host.act_as("alice")
+    host.expire_cooldowns()
+    before, sent = len(host.eco.ledger), len(host.relayed)
+    out = run(transform(make_event(host, "alice", "!predict yes 50")))
+    assert out is not None
+    assert len(host.eco.ledger) == before + 1, "the stake moved in transform"
+    assert host.ident.calls == ["actor"]
+    assert len(host.relayed) == sent, "transform cannot relay (process stage)"
+    assert set(out.payload) == {"channel_id", "text", "command"}
+    relayed, ledger, calls = len(host.relayed), list(host.eco.ledger), list(host.ident.calls)
+
+    result = run(action_dispatch(to_envelope(out), {}, http_client=None))
+    assert result.detail == "bet"
+    assert host.relayed[relayed:] == [out.payload["text"]]
+    assert host.eco.ledger == ledger and host.ident.calls == calls, "dispatch moved no money"
+    assert GUARD.violations == []
+
+
+@pytest.mark.parametrize("command", ["status", "usage", "open", "lock", "resolve", "cancel", "bet"])
+def test_dispatch_makes_no_economy_or_identity_call(host: Host, command: str) -> None:
+    """`svc_action` serves no economy/identity: dispatch relays the given text and nothing else."""
+    event = PlatformEvent(
+        "twitch",
+        "chat.message",
+        "viewer-1",
+        {"channel_id": "123", "text": "already computed", "command": command},
+        host.stamp(),
+    )
+    run(action_dispatch(to_envelope(event), {}, http_client=None))
+    assert host.relayed == ["already computed"]
+    assert host.ident.calls == [] and host.eco.ledger == []
+    assert GUARD.violations == []
+
+
+def test_transform_failure_is_deferred_to_dispatch_not_relayed(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kv outage in transform cannot relay: it is marked, and dispatch relays then raises."""
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(sys.modules["wit_world"].imports.kv, "get", boom)
+    host.act_as("alice")
+    out = run(transform(make_event(host, "alice", "!prediction")))
+    assert out is not None and out.payload["failure"].startswith("prediction get failed")
+    assert host.relayed == []
+    with pytest.raises(RuntimeError, match="prediction get failed"):
+        run(action_dispatch(to_envelope(out), {}, http_client=None))
+    assert "temporarily unavailable" in host.relayed[-1]

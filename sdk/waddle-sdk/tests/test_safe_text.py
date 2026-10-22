@@ -866,3 +866,34 @@ def test_guard_rejects_non_text_instead_of_coercing_it(bad: object) -> None:
         guard_leading_command(bad)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         leads_with_command(bad)  # type: ignore[arg-type]
+
+
+def test_there_is_exactly_one_safe_text_implementation() -> None:
+    """Two merged lineages once risked an older sanitizer winning: only ONE may exist.
+
+    Walks the Python source trees for any other definition of the sanitizer entry points (a
+    vendored or forked copy would silently lack the later hardening: control-char differential,
+    allow-list escape, URL-span fix) and for any bundle-local copy of the lead check.
+    """
+    import os
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    skip = {"node_modules", ".venv", ".git", ".worktrees", "__pycache__", ".mypy_cache", "target"}
+    names = ("sanitize_user_text", "escape_egress_tokens", "defang_mentions")
+    needles = tuple("def " + n for n in names)
+    found: list[str] = []
+    scanned = 0
+    for top in ("sdk", "bundles", "libs", "core", "hub_api", "services", "scripts"):
+        for dirpath, dirnames, filenames in os.walk(root / top):
+            dirnames[:] = [d for d in dirnames if d not in skip]
+            for name in filenames:
+                if not name.endswith(".py"):
+                    continue
+                scanned += 1
+                path = Path(dirpath) / name
+                text = path.read_text(encoding="utf-8", errors="replace")
+                if any(needle in text for needle in needles):
+                    found.append(str(path.relative_to(root)))
+    assert scanned > 500, f"only {scanned} python files scanned -- the repo-root path is wrong"
+    assert found == ["sdk/waddle-sdk/src/waddle_sdk/safe_text.py"], found

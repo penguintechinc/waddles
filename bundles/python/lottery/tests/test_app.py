@@ -7,19 +7,25 @@ import json
 import random
 import re
 import sys
+import types
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from harness import (
     COMM,
+    GUARD,
     NS,
     Host,
+    action_dispatch,
+    dispatch,
     envelope,
     make_event,
     run,
     say,
     to_envelope,
+    transform,
     yielding_kv,
 )
 from waddle_sdk import event_dedupe
@@ -32,16 +38,16 @@ from app import (
     MAX_TICKETS_PER_USER,
     SETTLE_SECONDS,
     TICKET_PRICE,
-    dispatch,
-    transform,
 )
 
 ZWSP = "\u200b"
 
 
 @pytest.fixture
-def host(monkeypatch: pytest.MonkeyPatch) -> Host:
-    return Host(monkeypatch)
+def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[Host]:
+    h = Host(monkeypatch)
+    yield h
+    GUARD.assert_clean()
 
 
 def pin_draw(mp: pytest.MonkeyPatch, *positions: int) -> None:
@@ -86,6 +92,12 @@ def writes_to(host: Host, infix: str) -> list[Any]:
 # --- routing / transform ----------------------------------------------------------------------
 
 
+def route(event: PlatformEvent) -> types.SimpleNamespace | None:
+    """The routing intent `transform` derives from a chat line (pure, no host call)."""
+    intent = app._recognize(event)
+    return None if intent is None else types.SimpleNamespace(payload=intent)
+
+
 @pytest.mark.parametrize(
     ("text", "command", "args"),
     [
@@ -102,7 +114,7 @@ def writes_to(host: Host, infix: str) -> list[Any]:
     ],
 )
 def test_transform_routes(host: Host, text: str, command: str, args: str | None) -> None:
-    out = run(transform(PlatformEvent("twitch", "chat.message", "v", {"text": text}, "t")))
+    out = route(PlatformEvent("twitch", "chat.message", "v", {"text": text}, "t"))
     assert out is not None and out.payload["command"] == command
     assert out.payload.get("args") == args
 
@@ -125,10 +137,10 @@ def test_transform_forwards_message_id_and_strict_badges(host: Host) -> None:
         {"text": "!lottery draw", "message_id": "abc", "is_mod": "false", "is_broadcaster": True},
         "t",
     )
-    out = run(transform(ev))
+    out = route(ev)
     assert out is not None and out.payload["message_id"] == "abc"
     assert out.payload["is_mod"] is False and out.payload["is_broadcaster"] is True
-    bare = run(transform(PlatformEvent("twitch", "chat.message", "v", {"text": "!lottery"}, "t")))
+    bare = route(PlatformEvent("twitch", "chat.message", "v", {"text": "!lottery"}, "t"))
     assert bare is not None and "is_mod" not in bare.payload and "message_id" not in bare.payload
 
 
@@ -137,7 +149,7 @@ def test_transform_drops_a_non_string_message_id(host: Host, bad: Any) -> None:
     ev = PlatformEvent(
         "twitch", "chat.message", "v", {"text": "!lottery buy 1", "message_id": bad}, "t"
     )
-    out = run(transform(ev))
+    out = route(ev)
     assert out is not None and "message_id" not in out.payload
 
 
@@ -397,7 +409,7 @@ def test_the_draw_maps_a_ticket_position_to_its_buyer(
 def test_the_draw_is_exactly_ticket_weighted(host: Host, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every position wins for exactly its owner: wins per player == tickets held."""
     standard_round(host)
-    game = app._Game(app._Store(COMM, "twitch", "123"), None)  # type: ignore[arg-type]
+    game = app._Game(app._Store(COMM), None)  # type: ignore[arg-type]
     tally: dict[str, int] = {}
     for position in range(1, 11):
         pin_draw(monkeypatch, position)
@@ -1192,9 +1204,9 @@ def test_missing_channel_unknown_command_and_empty_community_raise(host: Host) -
 
 def test_tenant_wide_sentinel_scope_works_end_to_end(host: Host) -> None:
     host.act_as("alice")
-    ev = run(transform(make_event(host, "alice", "!lottery buy 1")))
+    ev = run(transform(make_event(host, "alice", "!lottery buy 1"), community=None))
     assert ev is not None
-    run(dispatch(to_envelope(ev, community=None), {}, http_client=None))
+    run(action_dispatch(to_envelope(ev, community=None), {}, http_client=None))
     assert "Lottery #1 is open!" in host.relayed[-1]
     assert any(k.startswith("c.0.lottery.") for k in host.kv.store)
 
@@ -1238,3 +1250,59 @@ def test_pot_clamp_bounds_a_payout_whatever_the_counter_says(host: Host) -> None
     host.kv.store[host.key("sold", 1)] = str(10**9).encode()
     status = say(host, "alice", "!lottery") or ""
     assert f"pot {app.MAX_POT} points" in status
+
+
+# --- stage split: economy/identity in transform (process stage), relay only in dispatch ---------
+
+
+def test_the_whole_purchase_settles_in_transform_and_dispatch_only_relays(host: Host) -> None:
+    """A real chat line: economy/identity calls run in the process stage, relay in the action."""
+    host.act_as("alice")
+    before, sent = len(host.eco.ledger), len(host.relayed)
+    out = run(transform(make_event(host, "alice", "!lottery buy 2")))
+    assert out is not None
+    assert len(host.eco.ledger) == before + 1, "the tickets were paid for in transform"
+    assert host.ident.calls == ["actor"]
+    assert len(host.relayed) == sent, "transform cannot relay (process stage)"
+    assert set(out.payload) == {"channel_id", "text", "command"}
+    relayed, ledger, calls = len(host.relayed), list(host.eco.ledger), list(host.ident.calls)
+
+    result = run(action_dispatch(to_envelope(out), {}, http_client=None))
+    assert result.detail == "buy"
+    assert host.relayed[relayed:] == [out.payload["text"]]
+    assert host.eco.ledger == ledger and host.ident.calls == calls, "dispatch moved no money"
+    assert GUARD.violations == []
+
+
+@pytest.mark.parametrize("command", ["status", "usage", "buy", "draw", "claim"])
+def test_dispatch_makes_no_economy_or_identity_call(host: Host, command: str) -> None:
+    """`svc_action` serves no economy/identity: dispatch relays the given text and nothing else."""
+    event = PlatformEvent(
+        "twitch",
+        "chat.message",
+        "viewer-1",
+        {"channel_id": "123", "text": "already computed", "command": command},
+        host.stamp(),
+    )
+    run(action_dispatch(to_envelope(event), {}, http_client=None))
+    assert host.relayed == ["already computed"]
+    assert host.ident.calls == [] and host.eco.ledger == []
+    assert GUARD.violations == []
+
+
+def test_transform_failure_is_deferred_to_dispatch_not_relayed(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kv outage in transform cannot relay: it is marked, and dispatch relays then raises."""
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(sys.modules["wit_world"].imports.kv, "get", boom)
+    host.act_as("alice")
+    out = run(transform(make_event(host, "alice", "!lottery")))
+    assert out is not None and out.payload["failure"].startswith("lottery get failed")
+    assert host.relayed == []
+    with pytest.raises(RuntimeError, match="lottery get failed"):
+        run(action_dispatch(to_envelope(out), {}, http_client=None))
+    assert "temporarily unavailable" in host.relayed[-1]

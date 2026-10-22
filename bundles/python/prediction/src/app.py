@@ -62,6 +62,14 @@ PII-free: kv keys/logs carry only `prediction.*` names, round numbers, outcome i
 of the platform-prefixed message id (never the id). Logs carry `op`/`outcome`/`amount_bucket`/
 error-case only -- never a title, outcome, name or message text.
 
+Stage split: the host serves `economy` and `identity` to the PROCESS stage only (`svc_process`;
+`svc_action` has no handler for them), and `relay` to the ACTION stage only. So the whole command --
+identity resolution, stake/payout wagers, kv state, replay claim -- runs in `transform`, and
+`dispatch` only relays the finished reply. The process stage cannot relay an "unavailable" notice,
+so a backend failure travels as a `failure` marker: `dispatch` relays the reply, then raises. If
+`dispatch` fails after `transform` settled the money, the redelivery is deduped by the replay claim
+(the reply may be lost, the money is never moved twice).
+
 Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
 decides whether this bundle runs.
 
@@ -83,6 +91,7 @@ from typing import Any, NoReturn, TypeVar
 from waddle_sdk import clock, community_kv, economy, event_dedupe, identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
 from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
+from waddle_sdk.flask_core import get_bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import sanitize_user_text, strip_control_chars
 
@@ -385,11 +394,12 @@ def _route(text: str) -> tuple[str, str | None] | None:
     return (action, parsed.args) if action else ("usage", None)
 
 
-async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize `!prediction ...` / `!predict ...`.
+def _recognize(event: PlatformEvent) -> dict[str, Any] | None:
+    """Pure routing: map a chat line onto the command intent `_settle` runs, or `None`.
 
     Routing only (no kv): the mod badge is forwarded as a strict boolean and the platform
-    `message_id` is forwarded for replay-dedupe. A recognized-but-malformed command replies usage.
+    `message_id` is forwarded for replay-dedupe. A recognized-but-malformed command is a `usage`
+    intent, never a silent drop.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -402,19 +412,27 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     if args is not None:
         payload["args"] = args
     message_id = event.payload.get("message_id")
-    if isinstance(message_id, str):  # replay-dedupe key; `dispatch` refuses a mutation without it
+    if isinstance(message_id, str):  # replay-dedupe key; `_settle` refuses a mutation without it
         payload["message_id"] = message_id
     for badge in ("is_mod", "is_broadcaster"):
-        if badge in event.payload:  # absence must reach dispatch as absence; identity check only
+        if badge in event.payload:  # absence must reach `_settle` as absence; identity check only
             payload[badge] = event.payload[badge] is True
     log.info("prediction.transform matched", command=command)
-    return PlatformEvent(
-        platform=event.platform,
-        event_type=event.event_type,
-        actor=event.actor,
-        payload=payload,
-        occurred_at=event.occurred_at,
-    )
+    return payload
+
+
+async def transform(event: PlatformEvent) -> PlatformEvent | None:
+    """Implement `process-stage.transform`: recognize the command and run it.
+
+    The economy/identity host capabilities are served by the PROCESS stage only (`svc_process`;
+    `svc_action` has no handler), so every stake, payout, balance read and identity resolution
+    happens here. The returned event carries just the reply text for `dispatch` to relay; `None`
+    for a non-matching line and for a redelivered/too-old event (nothing is mutated or sent).
+    """
+    intent = _recognize(event)
+    if intent is None:
+        return None
+    return await _settle(intent, event, community=get_bundle_context().community)
 
 
 @dataclass(slots=True)
@@ -432,21 +450,26 @@ def _k(*parts: object) -> str:
     return ".".join(("prediction", *(str(p) for p in parts)))
 
 
-class _Store:
-    """Community kv access for one dispatch; every kv failure is fail-loud (log, reply, raise)."""
+class _UnavailableError(RuntimeError):
+    """A kv/economy backend failure (already logged) to answer with the "unavailable" reply.
 
-    def __init__(self, scope: str | None, provider: str, channel_id: str) -> None:
-        """Bind to one community scope and the reply channel used on failure."""
+    Raised inside the process stage, which cannot relay: `_settle` turns it into a reply event
+    carrying a `failure` marker, and `dispatch` relays the reply and then raises.
+    """
+
+
+class _Store:
+    """Community kv access for one command; every kv failure is fail-loud (log, mark, raise)."""
+
+    def __init__(self, scope: str | None) -> None:
+        """Bind to one community scope."""
         self._scope = scope
-        self._provider = provider
-        self._channel_id = channel_id
 
     async def fail(self, exc: Exception, op: str) -> NoReturn:
-        """Log (error-case name only), reply an error to chat, then raise `RuntimeError`."""
+        """Log (error-case name only), then raise `_UnavailableError` for `_settle` to answer."""
         case_name = type(getattr(exc, "value", exc)).__name__
         log.error("prediction.error", op=op, error=case_name)
-        await relay.push(self._provider, {"channel": self._channel_id, "text": _UNAVAILABLE})
-        raise RuntimeError(f"prediction {op} failed: {case_name}") from exc
+        raise _UnavailableError(f"prediction {op} failed: {case_name}") from exc
 
     async def _guard(self, op: str, call: Awaitable[_T]) -> _T:
         """Await a kv call, turning any failure into the fail-loud path."""
@@ -959,39 +982,43 @@ class _Game:
         return None
 
 
-async def dispatch(
-    envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
-) -> DispatchResult:
-    """Implement `action-stage.dispatch`: run the command, then relay the reply.
+async def _settle(
+    intent: dict[str, Any], event: PlatformEvent, *, community: str | None
+) -> PlatformEvent | None:
+    """Run one recognized command (process stage) and return the reply event, or `None` to drop.
 
     Raises:
         ValueError: No `channel_id`, an empty community, or an unrecognized command.
-        RuntimeError: A kv/economy backend call failed (error reply + ERROR log emitted first).
+
+    A kv/economy backend failure does NOT raise here (the process stage cannot relay): it is
+    logged, and the returned event carries the "unavailable" reply plus a `failure` message that
+    `dispatch` relays and then raises, exactly as one invocation did before the economy calls
+    moved stages.
     """
-    payload = envelope.event.payload
-    channel_id = payload.get("channel_id")
+    channel_id = intent.get("channel_id")
     if not channel_id:
         raise ValueError("prediction reply requires a channel_id from the inbound chat.message")
-    command = payload.get("command")
+    command = intent.get("command")
     if command not in _KNOWN_COMMANDS:
         raise ValueError(f"unrecognized prediction command: {command!r}")
-    if envelope.community == "":
+    if community == "":
         log.error("prediction.missing_community", command=command)
         raise ValueError("prediction requires a community context (None = tenant-wide, never '')")
-    provider = envelope.event.platform
+    provider = event.platform
     ctx = _Ctx(
-        scope=envelope.community,
+        scope=community,
         provider=provider,
         channel_id=channel_id,
-        payload=payload,
-        occurred_at=envelope.event.occurred_at,
-        label=_actor_label(envelope.event.actor),
+        payload=intent,
+        occurred_at=event.occurred_at,
+        label=_actor_label(event.actor),
     )
-    game = _Game(_Store(ctx.scope, provider, channel_id), ctx)
-    arg = payload.get("args")
+    game = _Game(_Store(ctx.scope), ctx)
+    arg = intent.get("args")
     args = arg if isinstance(arg, str) else None
     reply: str | None
-    if command in _MOD_COMMANDS and not _is_privileged(payload):
+    failure: str | None = None
+    if command in _MOD_COMMANDS and not _is_privileged(intent):
         log.info("prediction.denied", op="permission", command=command)
         reply = f"{ctx.label}, only moderators and the broadcaster can do that."
     else:
@@ -999,12 +1026,52 @@ async def dispatch(
             reply = await _run(game, command, args)
         except CommandUsageError as exc:
             reply = str(exc)
+        except _UnavailableError as exc:
+            reply, failure = _UNAVAILABLE, str(exc)
+
     if reply is None:
-        log.info("prediction.dispatch skipped duplicate", platform=provider, command=command)
-        return DispatchResult(transport=provider, detail="duplicate")
-    await relay.push(provider, {"channel": channel_id, "text": reply})
-    log.info("prediction.dispatch relayed", platform=provider, command=command)
-    return DispatchResult(transport=provider, detail=command)
+        log.info("prediction.transform skipped duplicate", platform=provider, command=command)
+        return None
+    out: dict[str, Any] = {"channel_id": channel_id, "text": reply, "command": command}
+    if failure is not None:
+        out["failure"] = failure
+    return PlatformEvent(
+        platform=provider,
+        event_type=event.event_type,
+        actor=event.actor,
+        payload=out,
+        occurred_at=event.occurred_at,
+    )
+
+
+async def dispatch(
+    envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
+) -> DispatchResult:
+    """Implement `action-stage.dispatch`: relay the reply `transform()` already built.
+
+    No economy or identity call is made here -- `svc_action` does not serve them.
+
+    Raises:
+        ValueError: No `channel_id`, or no reply text, in the payload.
+        RuntimeError: `transform` hit a backend failure (the "unavailable" reply is relayed first).
+    """
+    payload = envelope.event.payload
+    channel_id = payload.get("channel_id")
+    if not channel_id:
+        raise ValueError("prediction reply requires a channel_id from the inbound chat.message")
+    text = payload.get("text")
+    if not isinstance(text, str) or not text:
+        raise ValueError("prediction reply requires non-empty text")
+    provider = envelope.event.platform
+    await relay.push(provider, {"channel": channel_id, "text": text})
+    failure = payload.get("failure")
+    if isinstance(failure, str) and failure:
+        log.error("prediction.dispatch relayed failure", platform=provider)
+        raise RuntimeError(failure)
+    command = payload.get("command")
+    log.info("prediction.dispatch relayed", platform=provider)
+    detail = command if isinstance(command, str) else "relayed"
+    return DispatchResult(transport=provider, detail=detail)
 
 
 async def _run(game: _Game, command: str, args: str | None) -> str | None:

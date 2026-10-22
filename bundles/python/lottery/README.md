@@ -49,7 +49,7 @@ claims; a per-round `paid` counter tracks it.
   the result is written once to `lottery.win.<round>`; a later `draw` (another moderator, a second
   try, a redelivery) just reports the stored winner and changes nothing. A crash mid-draw heals
   when the election lapses.
-- **Idempotent on redelivery.** `transform` forwards the platform `message_id`; every mutating
+- **Idempotent on redelivery.** `transform` reads the platform `message_id`; every mutating
   command claims it via `waddle_sdk.event_dedupe` -- ONE atomic `kv.increment` on a per-event TTL'd
   marker (`1` = first delivery) -- AFTER the cheap prechecks and the atomic per-actor cooldown and
   BEFORE any ticket money, payout or state change; a redelivery is skipped silently. Events older
@@ -99,6 +99,19 @@ announced as "a ticket holder"), and the stored token is re-validated before it 
 `event.actor` in replies: the minted token stays live, anything else goes through
 `waddle_sdk.safe_text.sanitize_user_text`.
 
+## Stage split
+
+The host serves `economy` and `identity` to the **process** stage only (`core/svc_process`;
+`core/svc_action` has no handler for them) and `relay` to the **action** stage only. So `transform`
+does the whole command -- identity resolution, balance/limit reads, wagers, kv state, the replay
+claim -- and `dispatch` only relays the finished reply. A backend failure cannot be relayed from
+the process stage, so it travels as a `failure` marker on the reply event: `dispatch` relays the
+"unavailable" reply and then raises. If `dispatch` fails after `transform` settled the money, the
+redelivery is deduped by the replay claim: the reply may be lost, the money is never moved twice.
+The tests run against `waddle_sdk.testing.StageGuard` fakes (a capability called from the wrong
+stage fails the test) and `scripts/ci/tests/test_bundle_stage_gate.py` fails the build if
+`dispatch` can reach an economy/identity call.
+
 ## Tests
 
 `python3 -m pytest bundles/python/lottery/tests` -- routing, purchase caps/validation, exact
@@ -106,5 +119,5 @@ position-to-buyer mapping and an exhaustive weighting proof, early/due draws, id
 concurrent draws, ghost ranges (redraw / fail loud), conserved payout with randomized rounds,
 chunked and zero-balance claims, redelivery of every mutating command, concurrent duplicates (with
 the cooldown disabled so the event claim alone is proven), crash-order, backend-error, quota, age
-fence, PII, sanitizer, tampered kv records, kv op budget (<= 64 per dispatch incl. the all-ghost
+fence, PII, sanitizer, tampered kv records, kv op budget (<= 64 per invocation incl. the all-ghost
 worst-case draw).

@@ -1,8 +1,10 @@
 """Shared host-native harness: a fake `wit_world` (kv/clock/relay/log + SDK economy/identity fakes).
 
-Every test drives the REAL path -- a chat line goes through `transform`, the transformed event
-through `dispatch` -- against in-memory hosts that enforce the real host's rules (kv key charset,
-economy actor binding / caps / payout multiple), so a bug in the money flow fails a test.
+Every test drives the REAL path -- a chat line goes through `transform` (the PROCESS stage: all
+economy/identity work), the reply event through `dispatch` (the ACTION stage: relay only) -- against
+in-memory hosts that enforce the real host's rules (kv key charset, economy actor binding / caps /
+payout multiple, and which stage serves which capability), so a bug in the money flow or a
+capability called from the wrong stage fails a test.
 """
 
 from __future__ import annotations
@@ -18,8 +20,15 @@ from typing import Any
 import pytest
 from waddle_sdk import community_kv
 from waddle_sdk.community_kv import _scoped_key
+from waddle_sdk.flask_core.bundle_runtime import bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.testing import FakeEconomyHost, FakeIdentityHost, FakeKvHost, rfc3339_from_millis
+from waddle_sdk.testing import (
+    FakeEconomyHost,
+    FakeIdentityHost,
+    FakeKvHost,
+    StageGuard,
+    rfc3339_from_millis,
+)
 
 import app
 
@@ -28,6 +37,25 @@ NS = "lottery"
 START_MS = 1_700_000_000_000
 
 _MSG_IDS = itertools.count(1)
+
+#: Makes every host fake stage-faithful: economy/identity answer the PROCESS stage only, `relay`
+#: the ACTION stage only (the real host's split). The `host` fixture fails a test that breaks it.
+GUARD = StageGuard()
+
+
+async def _transform_in_context(
+    event: PlatformEvent, community: str | None = COMM
+) -> PlatformEvent | None:
+    """The real `transform` entry point, inside the bundle context the host binds around it."""
+    with bundle_context(tenant="t", community=community, app_id=f"waddles.core.example.{NS}"):
+        return await app.transform(event)
+
+
+transform = GUARD.process_stage(_transform_in_context)
+#: Runs one command through the real stage split: `app._settle` as the process stage on the
+#: envelope's intent payload, then `app.dispatch` as the action stage on what it returned.
+dispatch = GUARD.two_stage(app._settle, app.dispatch)
+action_dispatch = GUARD.action_stage(app.dispatch)
 
 
 def next_msg_id() -> str:
@@ -54,23 +82,33 @@ class Host:
         self.logs: list[tuple[str, str]] = []
         self.kv_ops: list[int] = []
         kv, ns = self.kv, types.SimpleNamespace
+        GUARD.reset()
         mod = types.ModuleType("wit_world")
         mod.imports = ns(  # type: ignore[attr-defined]
             kv=ns(get=kv.get, set=kv.set, delete=kv.delete, increment=kv.increment),
             economy=ns(
-                balance=self.eco.balance,
-                wager=self.eco.wager,
-                transfer=self.eco.transfer,
-                max_bet=self.eco.max_bet,
-                leaderboard=self.eco.leaderboard,
+                balance=GUARD.process_only("economy.balance", self.eco.balance),
+                wager=GUARD.process_only("economy.wager", self.eco.wager),
+                transfer=GUARD.process_only("economy.transfer", self.eco.transfer),
+                max_bet=GUARD.process_only("economy.max_bet", self.eco.max_bet),
+                leaderboard=GUARD.process_only("economy.leaderboard", self.eco.leaderboard),
             ),
             identity=ns(
-                resolve_actor=self.ident.resolve_actor, resolve_mention=self.ident.resolve_mention
+                resolve_actor=GUARD.process_only(
+                    "identity.resolve_actor", self.ident.resolve_actor
+                ),
+                resolve_mention=GUARD.process_only(
+                    "identity.resolve_mention", self.ident.resolve_mention
+                ),
             ),
             clock=ns(
                 now_millis=lambda: self.now_ms, now_rfc3339=lambda: "x", monotonic_nanos=lambda: 0
             ),
-            relay=ns(push=lambda provider, msg: self.relayed.append(json.loads(msg)["text"])),
+            relay=ns(
+                push=GUARD.action_only(
+                    "relay.push", lambda provider, msg: self.relayed.append(json.loads(msg)["text"])
+                )
+            ),
             log=ns(
                 Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3},
                 write=lambda lvl, msg, fj: self.logs.append((msg, fj)),
@@ -174,10 +212,13 @@ def to_envelope(event: PlatformEvent, community: str | None = COMM) -> StageEnve
 
 
 def envelope(host: Host, who: str, text: str, **kw: Any) -> StageEnvelope:
-    """Raw chat line -> `transform` -> action envelope (the real path)."""
-    out = run(app.transform(make_event(host, who, text, **kw)))
-    assert out is not None, f"transform ignored {text!r}"
-    return to_envelope(out)
+    """Raw chat line -> routing intent -> envelope: the input of `dispatch` (the two-stage run)."""
+    event = make_event(host, who, text, **kw)
+    intent = app._recognize(event)
+    assert intent is not None, f"transform ignored {text!r}"
+    return to_envelope(
+        PlatformEvent(event.platform, event.event_type, event.actor, intent, event.occurred_at)
+    )
 
 
 def say(
@@ -194,9 +235,12 @@ def say(
     if not cooldown:
         host.expire_cooldowns()
     host.act_as(who)
-    env = envelope(host, who, text, mod=mod, msg_id=msg_id, **kw)
+    event = make_event(host, who, text, mod=mod, msg_id=msg_id, **kw)
     before, ops = len(host.relayed), len(host.kv.calls)
-    run(app.dispatch(env, {}, http_client=None))
+    out = run(transform(event))
+    assert out is not None or app._recognize(event) is not None, f"transform ignored {text!r}"
+    if out is not None:
+        run(action_dispatch(to_envelope(out), {}, http_client=None))
     host.kv_ops.append(len(host.kv.calls) - ops)
     return host.relayed[before] if len(host.relayed) > before else None
 

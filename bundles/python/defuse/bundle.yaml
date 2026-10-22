@@ -38,6 +38,8 @@ stages:
     spec:
       required_config: []
 egress: []
+# Stage split: the economy/identity host imports are served by the PROCESS stage only (svc_process),
+# so every command step runs in `transform`; `dispatch` only relays the reply (relay is action-stage only).
 # No `data.tables` -- state is kv-only; currency moves only through the economy host import.
 data:
   tables: []

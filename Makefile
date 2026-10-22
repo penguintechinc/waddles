@@ -82,7 +82,10 @@ check-no-stubs:
 # truthiness (`bool("false")` is True -> mod-gate bypass) in bundles AND the
 # legacy svc-ingest tree, and an `ai.generate` bundle that does not guard its
 # reply lead against a completion starting with `/`, `.` or `!` (pytest gate), and a bundle
-# missing from bundles/core-bundles.yaml or built on the wrong WIT world (stage vs stage-next).
+# missing from bundles/core-bundles.yaml or built on the wrong WIT world (stage vs stage-next), an
+# economy/identity/reputation/ai host call reachable from a bundle's `dispatch` (those capabilities are
+# served to the process stage only), and a game bundle drawing outcomes from the module-level `random`
+# (componentize-py freezes its seed into the snapshot; use `random.SystemRandom()`).
 # Each prints the count it examined and exits non-zero on a hit (or on zero
 # examined). Needs PyYAML for the manifest check and pytest for the AI-lead gate.
 check-bundle-hygiene:
@@ -92,6 +95,8 @@ check-bundle-hygiene:
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
 	@python3 -m pytest scripts/ci/tests/test_ai_output_lead_gate.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_wit_world.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_stage_gate.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -q -p no:cacheprovider
 
 # builtin_handlers -> Rust-path/bundle inventory gate (gh #840 PR4): FAILS if a live Python
 # ingest/process/action handler has no mapping in .ci/builtin-handler-map.yaml, a covered

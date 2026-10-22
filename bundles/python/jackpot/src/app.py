@@ -48,6 +48,14 @@ PII-free: kv keys/logs carry only `jackpot.pot`, `jackpot.cd.<pseudonym>` and
 `jackpot.seen.<digest>` where the pseudonym is SHA-256(community|resolved-uuid) and the digest is a
 truncated SHA-256 of the platform-prefixed message id (never the id); logs carry
 `op`/`outcome`/`amount_bucket`/error-case only.
+Stage split: the host serves `economy` and `identity` to the PROCESS stage only (`svc_process`;
+`svc_action` has no handler for them), and `relay` to the ACTION stage only. So the whole play --
+identity resolution, funds checks, cooldown, replay claim, roll, pot accounting, wager -- runs in
+`transform`, and `dispatch` only relays the finished reply. The process stage cannot relay an
+"unavailable" notice, so a backend failure travels as a `failure` marker: `dispatch` relays the
+reply, then raises. If `dispatch` fails after `transform` settled the money, the redelivery is
+deduped by the replay claim (the reply may be lost, the money is never moved twice).
+
 Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
 decides whether this bundle runs.
 
@@ -66,8 +74,14 @@ from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, economy, event_dedupe, identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
+from waddle_sdk.flask_core import get_bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import sanitize_user_text
+
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 SPEC = CommandSpec(name="jackpot")
 
@@ -80,6 +94,7 @@ _POT_KEY = "jackpot.pot"
 _DEDUPE_NAMESPACE = "jackpot"
 _USAGE = "Usage: !jackpot <stake> (win the whole pot, else your stake joins it) | !jackpot"
 _KNOWN_COMMANDS = frozenset({"play", "status", "usage"})
+_UNAVAILABLE_REPLY = "the jackpot is temporarily unavailable."
 
 
 #: The pipeline delivers `event.actor` as its own host-minted placeholder; anchored so ONLY an actor
@@ -122,14 +137,15 @@ def _amount_bucket(amount: int) -> str:
 
 def _roll_win() -> bool:
     """Return True with probability `WIN_PERCENT`/100."""
-    return random.randint(1, 100) <= WIN_PERCENT  # noqa: S311 - a game, not security
+    return _RNG.randint(1, 100) <= WIN_PERCENT
 
 
-async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize `!jackpot [stake]`.
+def _recognize(event: PlatformEvent) -> dict[str, Any] | None:
+    """Pure routing: map a chat line onto the command intent `_settle` runs, or `None`.
 
-    Cheap command match first, then grammar.
-    A recognized-but-malformed `!jackpot ...` replies `usage`, never a silent drop.
+    Cheap command match first, then grammar. A recognized-but-malformed `!jackpot ...` becomes a
+    `usage` intent, never a silent drop. The intent carries `command`, the stake, the replay-dedupe
+    `message_id` and the reply `channel_id`.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -141,7 +157,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     tail = stripped.partition(" ")[2].strip()
     payload: dict[str, Any] = {"channel_id": event.payload.get("channel_id")}
     message_id = event.payload.get("message_id")
-    if isinstance(message_id, str):  # replay-dedupe key; `dispatch` refuses a play without it
+    if isinstance(message_id, str):  # replay-dedupe key; `_settle` refuses a play without it
         payload["message_id"] = message_id
     if tail.isascii() and tail.isdigit():
         payload["command"] = "play"
@@ -154,13 +170,21 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         bare = parsed is not None and parsed.option is None
         payload["command"] = "status" if bare else "usage"
     log.info("jackpot.transform matched", command=payload["command"])
-    return PlatformEvent(
-        platform=event.platform,
-        event_type=event.event_type,
-        actor=event.actor,
-        payload=payload,
-        occurred_at=event.occurred_at,
-    )
+    return payload
+
+
+async def transform(event: PlatformEvent) -> PlatformEvent | None:
+    """Implement `process-stage.transform`: recognize `!jackpot [stake]` and play the command.
+
+    The economy/identity host capabilities are served by the PROCESS stage only (`svc_process`;
+    `svc_action` has no handler), so every wager, balance read and identity resolution happens
+    here. The returned event carries just the reply text for `dispatch` to relay; `None` for a
+    non-matching line and for a redelivered/too-old event (nothing is mutated or sent).
+    """
+    intent = _recognize(event)
+    if intent is None:
+        return None
+    return await _settle(intent, event, community=get_bundle_context().community)
 
 
 class DispatchResult:
@@ -176,24 +200,26 @@ class DispatchResult:
         self.http_status = None
 
 
-class _Pot:
-    """Community pot + cooldown kv access; every kv failure is fail-loud (log, reply, raise)."""
+class _UnavailableError(RuntimeError):
+    """A kv/economy backend failure (already logged) to answer with the "unavailable" reply.
 
-    def __init__(self, community: str, provider: str, channel_id: str) -> None:
-        """Bind to one community and the reply channel used on failure."""
+    Raised inside the process stage, which cannot relay: `_settle` turns it into a reply event
+    carrying a `failure` marker, and `dispatch` relays the reply and then raises.
+    """
+
+
+class _Pot:
+    """Community pot + cooldown kv access; every kv failure is fail-loud (log, mark, raise)."""
+
+    def __init__(self, community: str) -> None:
+        """Bind to one community."""
         self._community = community
-        self._provider = provider
-        self._channel_id = channel_id
 
     async def fail(self, exc: Exception, op: str) -> NoReturn:
-        """Log (error-case name only), reply an error to chat, then raise `RuntimeError`."""
+        """Log (error-case name only), then raise `_UnavailableError` for `_settle` to answer."""
         case_name = type(getattr(exc, "value", exc)).__name__
         log.error("jackpot.error", op=op, error=case_name)
-        await relay.push(
-            self._provider,
-            {"channel": self._channel_id, "text": "the jackpot is temporarily unavailable."},
-        )
-        raise RuntimeError(f"jackpot {op} failed: {case_name}") from exc
+        raise _UnavailableError(f"jackpot {op} failed: {case_name}") from exc
 
     async def event_id(
         self, payload: dict[str, Any], platform: str, occurred_at: str
@@ -410,55 +436,97 @@ async def _status(*, pot: _Pot) -> str:
     )
 
 
-async def dispatch(
-    envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
-) -> DispatchResult:
-    """Implement `action-stage.dispatch`: economy + kv state, then relay the reply.
+async def _settle(
+    intent: dict[str, Any], event: PlatformEvent, *, community: str | None
+) -> PlatformEvent | None:
+    """Run one recognized command (process stage) and return the reply event, or `None` to drop.
 
     Raises:
         ValueError: No `channel_id`, no `community`, or an unrecognized command.
-        RuntimeError: A kv/economy backend call failed (error reply + ERROR log emitted first).
+
+    A kv/economy backend failure does NOT raise here (the process stage cannot relay): it is
+    logged, and the returned event carries the "unavailable" reply plus a `failure` message that
+    `dispatch` relays and then raises, exactly as one invocation did before the economy calls
+    moved stages.
     """
-    payload = envelope.event.payload
-    channel_id = payload.get("channel_id")
+    channel_id = intent.get("channel_id")
     if not channel_id:
         raise ValueError("jackpot reply requires a channel_id from the inbound chat.message")
-    command = payload.get("command")
+    command = intent.get("command")
     if command not in _KNOWN_COMMANDS:
         raise ValueError(f"unrecognized jackpot command: {command!r}")
-    provider = envelope.event.platform
-    community = envelope.community
+    provider = event.platform
     if not community:
         log.error("jackpot.missing_community", command=command)
         raise ValueError("jackpot requires a community context and cannot operate tenant-wide")
 
-    username = _actor_label(envelope.event.actor)
-    pot = _Pot(community, provider, channel_id)
-    arg = payload.get("arg")
+    username = _actor_label(event.actor)
+    pot = _Pot(community)
+    arg = intent.get("arg")
     arg_text = arg if isinstance(arg, str) else None
     reply: str | None
+    failure: str | None = None
 
-    if command == "usage":
-        reply = _USAGE
-    elif command == "status":
-        reply = await _status(pot=pot)
-    else:
-        try:
+    try:
+        if command == "usage":
+            reply = _USAGE
+        elif command == "status":
+            reply = await _status(pot=pot)
+        else:
             reply = await _play(
                 arg_text,
                 pot=pot,
                 community=community,
                 username=username,
-                payload=payload,
+                payload=intent,
                 platform=provider,
-                occurred_at=envelope.event.occurred_at,
+                occurred_at=event.occurred_at,
             )
-        except CommandUsageError as exc:
-            reply = str(exc)
+    except CommandUsageError as exc:
+        reply = str(exc)
+    except _UnavailableError as exc:
+        reply, failure = _UNAVAILABLE_REPLY, str(exc)
 
     if reply is None:
-        log.info("jackpot.dispatch skipped duplicate", platform=provider, command=command)
-        return DispatchResult(transport=provider, detail="duplicate")
-    await relay.push(provider, {"channel": channel_id, "text": reply})
-    log.info("jackpot.dispatch relayed", platform=provider, command=command)
-    return DispatchResult(transport=provider, detail=command)
+        log.info("jackpot.transform skipped duplicate", platform=provider, command=command)
+        return None
+    out: dict[str, Any] = {"channel_id": channel_id, "text": reply, "command": command}
+    if failure is not None:
+        out["failure"] = failure
+    return PlatformEvent(
+        platform=provider,
+        event_type=event.event_type,
+        actor=event.actor,
+        payload=out,
+        occurred_at=event.occurred_at,
+    )
+
+
+async def dispatch(
+    envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
+) -> DispatchResult:
+    """Implement `action-stage.dispatch`: relay the reply `transform()` already built.
+
+    No economy or identity call is made here -- `svc_action` does not serve them.
+
+    Raises:
+        ValueError: No `channel_id`, or no reply text, in the payload.
+        RuntimeError: `transform` hit a backend failure (the "unavailable" reply is relayed first).
+    """
+    payload = envelope.event.payload
+    channel_id = payload.get("channel_id")
+    if not channel_id:
+        raise ValueError("jackpot reply requires a channel_id from the inbound chat.message")
+    text = payload.get("text")
+    if not isinstance(text, str) or not text:
+        raise ValueError("jackpot reply requires non-empty text")
+    provider = envelope.event.platform
+    await relay.push(provider, {"channel": channel_id, "text": text})
+    failure = payload.get("failure")
+    if isinstance(failure, str) and failure:
+        log.error("jackpot.dispatch relayed failure", platform=provider)
+        raise RuntimeError(failure)
+    command = payload.get("command")
+    log.info("jackpot.dispatch relayed", platform=provider)
+    detail = command if isinstance(command, str) else "relayed"
+    return DispatchResult(transport=provider, detail=detail)

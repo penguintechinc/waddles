@@ -488,13 +488,13 @@ def test_draw_picks_the_only_entrant(fake_host: _FakeExtras) -> None:
 def test_draw_uses_seeded_random_choice(
     fake_host: _FakeExtras, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`_pick_winner` is a thin `random.choice` wrapper -- deterministic under a seeded fake."""
+    """`_pick_winner` is a thin `_RNG.choice` wrapper -- deterministic under a seeded fake."""
     _run(dispatch(_sample_envelope("twitch", "open", is_mod=True), {}, http_client=None))
     _run(dispatch(_sample_envelope("twitch", "enter", actor="viewer-1"), {}, http_client=None))
     _run(dispatch(_sample_envelope("twitch", "enter", actor="viewer-2"), {}, http_client=None))
 
     expected = _expected_pseudonym("viewer-2")
-    monkeypatch.setattr("app.random.choice", lambda seq: expected)
+    monkeypatch.setattr("app._RNG.choice", lambda seq: expected)
     result = _run(dispatch(_sample_envelope("twitch", "draw", is_mod=True), {}, http_client=None))
 
     assert result.detail == "draw"

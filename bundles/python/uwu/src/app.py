@@ -25,7 +25,7 @@ from typing import Any
 from waddle_sdk import log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.safe_text import sanitize_user_text
+from waddle_sdk.safe_text import leads_with_command, sanitize_user_text
 
 SPEC = CommandSpec(name="uwu")
 
@@ -35,7 +35,6 @@ _USAGE = "Usage: !uwu <text>"
 _TOO_LONG = f"uwu text must be {MAX_INPUT_LEN} characters or fewer"
 #: Twitch/IRC treat a leading `/` or `.` as a chat command and `!` would re-trigger other bots;
 #: a transformed reply starting with one would let a caller make the bot run commands as itself.
-_UNSAFE_LEAD = ("/", ".", "!")
 _UNSAFE_MSG = "uwu can't produce a reply starting with / . or !"
 
 _FLOURISHES: tuple[str, ...] = (" uwu", " owo", " >w<", " UwU", " OwO", " ^w^")
@@ -73,7 +72,7 @@ def _build_reply(args: str | None) -> tuple[str, str]:
     if len(args) > MAX_INPUT_LEN:
         return _TOO_LONG, "too_long"
     reply = sanitize_user_text(apply_transform(args))
-    if reply.startswith(_UNSAFE_LEAD):
+    if leads_with_command(reply):
         return _UNSAFE_MSG, "unsafe"
     return reply, "uwu"
 

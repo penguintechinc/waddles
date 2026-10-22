@@ -108,3 +108,19 @@ jobs:
       # same case). Asserts its own denominators (>=100 rows and bundle dirs scanned).
       - name: Every bundle is registered and built on the WIT world its permissions need
         run: python3 -m pytest scripts/ci/tests/test_bundle_wit_world.py -v -p no:cacheprovider
+
+      # `economy`/`identity`/`reputation`/`ai` are served ONLY to the process stage (`transform`);
+      # `svc_action` (`dispatch`) has no handler -- a bundle that settles money in `dispatch` passes
+      # a stage-blind fake and fails on a real host. No process-only host call may be reachable
+      # from `dispatch` (nor `relay` from `transform`), and every economy/identity bundle's test
+      # fakes must be stage-faithful (waddle_sdk.testing.StageGuard). Asserts its own denominators
+      # (>=100 bundles, the money bundles seen calling from transform).
+      - name: Economy/identity are never called from the action stage (every bundle)
+        run: python3 -m pytest scripts/ci/tests/test_bundle_stage_gate.py -v -p no:cacheprovider
+
+      # componentize-py freezes the module-level `random` Mersenne Twister (seeded at import =
+      # build time) into the snapshot: every instance replays one stream, a predictable outcome.
+      # A game bundle must draw from `random.SystemRandom()`; every other module-level `random`
+      # user must be on the reasoned flavor-text allowlist. Asserts its own denominators.
+      - name: Game bundles draw outcomes from SystemRandom, never the frozen module-level RNG
+        run: python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -v -p no:cacheprovider

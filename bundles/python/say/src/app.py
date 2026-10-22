@@ -32,7 +32,7 @@ from typing import Any
 
 from waddle_sdk import identity, log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.safe_text import sanitize_user_text
+from waddle_sdk.safe_text import leads_with_command, sanitize_user_text
 
 _COMMAND = "!say"
 
@@ -41,7 +41,6 @@ MAX_SAY_LEN = 300
 _USAGE = "Usage: !say <text>"
 _DENIED_MSG = "Sorry, only moderators and the broadcaster can use !say."
 _TOO_LONG = f"say text must be {MAX_SAY_LEN} characters or fewer"
-_UNSAFE_LEAD = ("/", ".", "!")
 _UNSAFE_MSG = "say can't announce text starting with / . or !"
 
 _KNOWN_ACTIONS = frozenset({"announce", "usage"})
@@ -128,7 +127,7 @@ async def dispatch(
         reply, detail = _TOO_LONG, "too_long"
     else:
         safe = sanitize_user_text(text, allow_tokens=identity.mention_tokens(text))
-        if safe.startswith(_UNSAFE_LEAD):
+        if leads_with_command(safe):
             reply, detail = _UNSAFE_MSG, "unsafe"
         else:
             reply, detail = safe, "announce"

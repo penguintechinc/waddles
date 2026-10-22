@@ -184,9 +184,10 @@ check, and vice versa (`critical-rules.md` Feature Flags & License Tiers).
 - **A bundle that moves money must be replay-safe (`waddle_sdk.event_dedupe`).** The pipeline is
   at-least-once. The host makes `economy.wager`/`transfer` idempotent per event, but your own `kv`
   side effects (a pot credit, a counter, a cap) are not -- a redelivered event double-credits them.
-  `transform` must forward `event.payload["message_id"]` (the platform's own id: chatter-proof and
-  identical on every redelivery; the WIT `context.message-id` is empty today and is NOT used);
-  `dispatch` then derives `event_id_from_payload(payload, platform=...)` (raises `EventIdError` when
+  The money flow runs in `transform` (see the stage-split rule below), which reads
+  `event.payload["message_id"]` (the platform's own id: chatter-proof and identical on every
+  redelivery; the WIT `context.message-id` is empty today and is NOT used) and derives
+  `event_id_from_payload(payload, platform=...)` (raises `EventIdError` when
   absent -- fail loud, move nothing), drops the event silently if `is_fresh(event.occurred_at)` is
   False (too old to dedupe; a missing/garbled stamp raises `EventIdError` too), skips silently if
   `already_seen(...)` (a read-only courtesy, NOT the guard), and calls `claim(...)` AFTER its cheap
@@ -200,6 +201,25 @@ check, and vice versa (`critical-rules.md` Feature Flags & License Tiers).
   and a marker per event killed the bundle after 10,000 events). Claim AFTER the cooldown so an
   actor on cooldown cannot mint markers; a full quota raises (fail closed). See
   `bundles/python/jackpot`, `steal`, `defuse`.
+- **`economy`/`identity`/`reputation`/`ai` run in `transform`; `dispatch` only relays.** The host
+  serves those four capabilities to the process stage only (`core/svc_process`); the action stage
+  (`core/svc_action`) has no handler for them and is the only one that serves `relay`. A bundle that
+  settles money or resolves an actor inside `dispatch` passes every host-native test against a
+  stage-blind fake and fails on a real host. Do the whole command in `transform` and return the
+  finished reply (`payload = {"channel_id", "text"}`); `dispatch` relays `payload["text"]`. The
+  process stage cannot `relay`, so a failure notice travels as a `failure` marker on the reply
+  event: `dispatch` relays the text, then raises. Test against `waddle_sdk.testing.StageGuard`
+  (`process_only` / `action_only` wrap the fakes, `two_stage` drives the real split, `assert_clean`
+  fails a test that crossed it); `scripts/ci/tests/test_bundle_stage_gate.py` fails any bundle
+  whose `dispatch` can reach such a call. See `bundles/python/blackjack`, `steal`, `prediction`.
+- **Outcome randomness is `random.SystemRandom()`, never the module-level `random`.**
+  componentize-py freezes the interpreter state into the build snapshot, and the module-level
+  `random` functions share one Mersenne Twister seeded at import (= build time): every instance
+  replays the same stream, so a "random" win, roll or pick is fixed and predictable. Keep a module
+  `_RNG = random.SystemRandom()` (no state: it reads OS entropy / `wasi:random` per call) and draw
+  from it; patch `app._RNG.<fn>` in tests. A hash of public inputs (the clock, a counter) is no
+  substitute -- whoever picks the moment predicts it.
+  `scripts/ci/tests/test_bundle_rng_gate.py` fails a game bundle that uses module-level `random`.
 - **A bundle that relays an LLM completion must guard its lead
   (`waddle_sdk.safe_text.guard_leading_command`).** A reply that STARTS with `/`, `.` (Twitch/IRC
   bot commands) or `!` (re-triggers other bots) is executed, not read. After `sanitize_user_text`

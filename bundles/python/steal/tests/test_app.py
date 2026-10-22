@@ -8,22 +8,42 @@ import itertools
 import json
 import re
 import types
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from waddle_sdk import event_dedupe
 from waddle_sdk.community_kv import _scoped_key
+from waddle_sdk.flask_core.bundle_runtime import bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.testing import (
     FakeEconomyHost,
     FakeIdentityHost,
     FakeKvHost,
+    StageGuard,
     install_fake_kv_host,
     rfc3339_from_millis,
 )
 
 import app
-from app import STAKE, dispatch, transform
+from app import STAKE
+
+#: Makes every host fake stage-faithful: economy/identity answer the PROCESS stage only, `relay`
+#: the ACTION stage only (the real host's split). The `host` fixture fails a test that breaks it.
+GUARD = StageGuard()
+
+
+async def _transform_in_context(event: PlatformEvent) -> PlatformEvent | None:
+    """The real `transform` entry point, inside the bundle context the host binds around it."""
+    with bundle_context(tenant="t", community=COMMUNITY, app_id="waddles.core.example.steal"):
+        return await app.transform(event)
+
+
+transform = GUARD.process_stage(_transform_in_context)
+#: Runs one command through the real stage split: `app._settle` as the process stage on the
+#: envelope's intent payload, then `app.dispatch` as the action stage on what it returned.
+dispatch = GUARD.two_stage(app._settle, app.dispatch)
+action_dispatch = GUARD.action_stage(app.dispatch)
 
 ACTOR = "11111111-1111-4111-8111-111111111111"
 TARGET = "22222222-2222-4222-8222-222222222222"
@@ -72,18 +92,22 @@ def _install(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> _Host:
     import wit_world
 
     ns = wit_world.imports
+    GUARD.reset()
     ns.economy = types.SimpleNamespace(
-        balance=eco.balance,
-        wager=eco.wager,
-        transfer=eco.transfer,
-        max_bet=eco.max_bet,
-        leaderboard=eco.leaderboard,
+        balance=GUARD.process_only("economy.balance", eco.balance),
+        wager=GUARD.process_only("economy.wager", eco.wager),
+        transfer=GUARD.process_only("economy.transfer", eco.transfer),
+        max_bet=GUARD.process_only("economy.max_bet", eco.max_bet),
+        leaderboard=GUARD.process_only("economy.leaderboard", eco.leaderboard),
     )
     ns.identity = types.SimpleNamespace(
-        resolve_actor=ident.resolve_actor, resolve_mention=ident.resolve_mention
+        resolve_actor=GUARD.process_only("identity.resolve_actor", ident.resolve_actor),
+        resolve_mention=GUARD.process_only("identity.resolve_mention", ident.resolve_mention),
     )
     ns.flags = types.SimpleNamespace(enabled=lambda key, default_value: flag)
-    ns.relay = types.SimpleNamespace(push=lambda p, m: host.relay_calls.append((p, m)))
+    ns.relay = types.SimpleNamespace(
+        push=GUARD.action_only("relay.push", lambda p, m: host.relay_calls.append((p, m)))
+    )
     ns.log = types.SimpleNamespace(
         Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3},
         write=lambda lvl, msg, f: host.log_calls.append((lvl, msg, f)),
@@ -95,8 +119,10 @@ def _install(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> _Host:
 
 
 @pytest.fixture
-def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
-    return _install(monkeypatch)
+def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Host]:
+    h = _install(monkeypatch)
+    yield h
+    GUARD.assert_clean()
 
 
 def _event(text: str, **extra: Any) -> PlatformEvent:
@@ -144,8 +170,14 @@ def _steal(host: _Host, monkeypatch: pytest.MonkeyPatch, *, win: bool) -> str:
 # -- transform -----------------------------------------------------------------
 
 
+def _recognize(event: PlatformEvent) -> types.SimpleNamespace | None:
+    """The routing intent `transform` derives from a chat line (pure, no host call)."""
+    intent = app._recognize(event)
+    return None if intent is None else types.SimpleNamespace(payload=intent)
+
+
 def test_transform_forwards_mention_tokens(host: _Host) -> None:
-    out = _run(transform(_event("!steal {user:victim}")))
+    out = _recognize(_event("!steal {user:victim}"))
     assert out is not None
     assert out.payload["command"] == "steal"
     assert out.payload["tokens"] == ["victim"]
@@ -163,7 +195,7 @@ def test_transform_forwards_mention_tokens(host: _Host) -> None:
     ],
 )
 def test_transform_grammar(host: _Host, text: str, command: str) -> None:
-    out = _run(transform(_event(text)))
+    out = _recognize(_event(text))
     assert out is not None
     assert out.payload["command"] == command
 
@@ -180,11 +212,11 @@ def test_transform_ignores_non_string_text(host: _Host) -> None:
 
 
 def test_badges_strict_is_true(host: _Host) -> None:
-    out = _run(transform(_event("!steal list", is_mod="false", is_broadcaster=1)))
+    out = _recognize(_event("!steal list", is_mod="false", is_broadcaster=1))
     assert out is not None
     assert out.payload["is_mod"] is False
     assert out.payload["is_broadcaster"] is False
-    bare = _run(transform(_event("!steal list")))
+    bare = _recognize(_event("!steal list"))
     assert bare is not None
     assert "is_mod" not in bare.payload
 
@@ -196,7 +228,7 @@ def test_success_pays_loot_bounded_by_target_balance(
     host: _Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     host.eco.balances[TARGET] = 3
-    monkeypatch.setattr(app.random, "randint", lambda a, b: b)
+    monkeypatch.setattr(app._RNG, "randint", lambda a, b: b)
     reply = _steal(host, monkeypatch, win=True)
     assert "stole 3 points" in reply
     assert host.eco.balances[ACTOR] == 503
@@ -204,7 +236,7 @@ def test_success_pays_loot_bounded_by_target_balance(
 
 def test_success_loot_capped(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
     host.eco.balances[TARGET] = 10_000
-    monkeypatch.setattr(app.random, "randint", lambda a, b: b)
+    monkeypatch.setattr(app._RNG, "randint", lambda a, b: b)
     _steal(host, monkeypatch, win=True)
     assert host.eco.balances[ACTOR] == 500 + app.LOOT_CAP
 
@@ -492,7 +524,7 @@ def _go(
     if actor is not None:
         _as(host, actor)
     mp.setattr(app, "_roll", lambda percent: win)
-    mp.setattr(app.random, "randint", lambda a, b: b)  # worst case for the house: max loot
+    mp.setattr(app._RNG, "randint", lambda a, b: b)  # worst case for the house: max loot
     extra: dict[str, Any] = {"message_id": msg_id} if msg_id else {}
     before = len(host.relay_calls)
     _run(dispatch(_envelope("steal", tokens=[mention], **extra), {}, http_client=None))
@@ -545,13 +577,13 @@ def _yielding_kv_all(mp: pytest.MonkeyPatch) -> None:
 
 
 def test_transform_forwards_the_platform_message_id(host: _Host) -> None:
-    out = _run(transform(_event("!steal {user:victim}", message_id="m-9")))
+    out = _recognize(_event("!steal {user:victim}", message_id="m-9"))
     assert out is not None and out.payload["message_id"] == "m-9"
 
 
 @pytest.mark.parametrize("bad", [None, 7, ["m"]])
 def test_transform_does_not_forward_a_non_string_message_id(host: _Host, bad: Any) -> None:
-    out = _run(transform(_event("!steal {user:victim}", message_id=bad)))
+    out = _recognize(_event("!steal {user:victim}", message_id=bad))
     assert out is not None and "message_id" not in out.payload
 
 
@@ -993,7 +1025,7 @@ def test_losses_and_unused_reservation_never_consume_a_cap(
         assert "caught" in (_go(host, monkeypatch, "victim", win=False) or "")
     assert _pair_value(host, ACTOR, TARGET) == 0 and _budget_value(host, ACTOR) == 0
     monkeypatch.setattr(app, "_roll", lambda percent: True)
-    monkeypatch.setattr(app.random, "randint", lambda a, b: 40)  # wins 40 of a reserved 100
+    monkeypatch.setattr(app._RNG, "randint", lambda a, b: 40)  # wins 40 of a reserved 100
     _run(dispatch(_envelope("steal", tokens=["victim"]), {}, http_client=None))
     assert _pair_value(host, ACTOR, TARGET) == 40 and _budget_value(host, ACTOR) == 40
 
@@ -1048,7 +1080,7 @@ def test_simultaneous_opposite_steals_cannot_both_pass(
     wit_world.imports.identity.resolve_actor = lambda: current.get()
     monkeypatch.setattr(type(host.eco), "_bind", lambda self, payer: None)
     monkeypatch.setattr(app, "_roll", lambda percent: True)
-    monkeypatch.setattr(app.random, "randint", lambda a, b: b)
+    monkeypatch.setattr(app._RNG, "randint", lambda a, b: b)
 
     async def side(user: str, mention: str) -> None:
         current.set(user)
@@ -1097,7 +1129,7 @@ def test_concurrent_steals_cannot_overshoot_the_pair_cap(
     _yielding_kv_all(monkeypatch)
     monkeypatch.setattr(app, "PAIR_WINDOW_CAP", 150)
     monkeypatch.setattr(app, "_roll", lambda percent: True)
-    monkeypatch.setattr(app.random, "randint", lambda a, b: b)
+    monkeypatch.setattr(app._RNG, "randint", lambda a, b: b)
 
     async def race() -> None:
         await asyncio.gather(
@@ -1119,7 +1151,7 @@ def test_concurrent_steals_cannot_overshoot_the_actor_budget_across_targets(
     _yielding_kv_all(monkeypatch)
     monkeypatch.setattr(app, "ACTOR_WINDOW_BUDGET", 220)
     monkeypatch.setattr(app, "_roll", lambda percent: True)
-    monkeypatch.setattr(app.random, "randint", lambda a, b: b)
+    monkeypatch.setattr(app._RNG, "randint", lambda a, b: b)
 
     async def race() -> None:
         await asyncio.gather(
@@ -1283,3 +1315,86 @@ def test_bucket_ttls_are_positive_and_bounded(now_ms: int) -> None:
     assert bucket.index == now_ms // _WIN_MS
     assert 0 < bucket.budget_ttl <= app.WINDOW_SECONDS + app._SETTLE_GRACE_SECONDS
     assert bucket.budget_ttl < bucket.pair_ttl <= 2 * app.WINDOW_SECONDS + app._SETTLE_GRACE_SECONDS
+
+
+# -- stage split: economy/identity in transform (process stage), relay only in dispatch -----------
+
+
+def test_the_whole_steal_settles_in_transform_and_dispatch_only_relays(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real chat line: economy/identity calls run in the process stage, relay in the action."""
+    monkeypatch.setattr(app, "_roll", lambda percent: False)
+    chat = _event("!steal {user:victim}", message_id="stage-1")
+    chat.occurred_at = _now_stamp()  # inside the replay age fence
+    out = _run(transform(chat))
+    assert out is not None
+    assert host.eco.ledger != [], out.payload
+    assert host.ident.calls == ["actor", "mention:victim"]
+    assert host.relay_calls == [], "transform cannot relay (process stage)"
+    assert set(out.payload) == {"channel_id", "text", "command"}
+    ledger, calls = list(host.eco.ledger), list(host.ident.calls)
+
+    env = StageEnvelope(
+        tenant="t",
+        community=COMMUNITY,
+        app_id="waddles.core.example.steal",
+        stage="action",
+        event=out,
+        ts="2026-10-05T00:00:00.000Z",
+    )
+    result = _run(action_dispatch(env, {}, http_client=None))
+    assert result.detail == "steal"
+    assert "caught" in _reply(host)
+    assert host.eco.ledger == ledger and host.ident.calls == calls, "dispatch moved no money"
+    assert GUARD.violations == []
+
+
+@pytest.mark.parametrize("command", ["steal", "list", "usage", "config_set_cooldown"])
+def test_dispatch_makes_no_economy_or_identity_call(host: _Host, command: str) -> None:
+    """`svc_action` serves no economy/identity: dispatch relays the given text and nothing else."""
+    event = PlatformEvent(
+        platform="twitch",
+        event_type="chat.message",
+        actor="viewer-1",
+        payload={"channel_id": "12345", "text": "already computed", "command": command},
+        occurred_at=_now_stamp(),
+    )
+    env = StageEnvelope(
+        tenant="t",
+        community=COMMUNITY,
+        app_id="waddles.core.example.steal",
+        stage="action",
+        event=event,
+        ts="2026-10-05T00:00:00.000Z",
+    )
+    _run(action_dispatch(env, {}, http_client=None))
+    assert _reply(host) == "already computed"
+    assert host.ident.calls == [] and host.eco.ledger == []
+    assert GUARD.violations == []
+
+
+def test_transform_failure_is_deferred_to_dispatch_not_relayed(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kv outage in transform cannot relay: it is marked, and dispatch relays then raises."""
+    import wit_world
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(wit_world.imports.kv, "get", boom)
+    out = _run(transform(_event("!steal list")))
+    assert out is not None and out.payload["failure"] == "steal state backend failed"
+    assert host.relay_calls == []
+    env = StageEnvelope(
+        tenant="t",
+        community=COMMUNITY,
+        app_id="waddles.core.example.steal",
+        stage="action",
+        event=out,
+        ts="2026-10-05T00:00:00.000Z",
+    )
+    with pytest.raises(RuntimeError, match="backend failed"):
+        _run(action_dispatch(env, {}, http_client=None))
+    assert "unavailable" in _reply(host)

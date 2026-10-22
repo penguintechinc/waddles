@@ -80,7 +80,7 @@ def _win(host: _FakeHost, actor: str, *, community: str = "comm-1") -> str:
 def test_every_bank_entry_is_well_formed_and_start_does_not_leak_the_answer(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch, question: str, answer: str
 ) -> None:
-    monkeypatch.setattr(app.random, "choice", lambda _seq: (question, answer))
+    monkeypatch.setattr(app._RNG, "choice", lambda _seq: (question, answer))
 
     _run(dispatch(_envelope("start"), {}, http_client=None))
 
@@ -116,7 +116,7 @@ def test_bank_has_unique_questions_and_a_non_trivial_size() -> None:
 def test_answer_matching_is_case_and_whitespace_forgiving_but_otherwise_exact(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch, guess: str, correct: bool
 ) -> None:
-    monkeypatch.setattr(app.random, "choice", lambda _seq: ("Capital of France?", "Paris"))
+    monkeypatch.setattr(app._RNG, "choice", lambda _seq: ("Capital of France?", "Paris"))
     _run(dispatch(_envelope("start"), {}, http_client=None))
 
     _run(dispatch(_envelope("answer", arg=guess), {}, http_client=None))

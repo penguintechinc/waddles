@@ -43,6 +43,14 @@ ever reaches a key or log. Logs carry `op`/`outcome`/bucket fields only. Activat
 no feature flag: the platform's installed -> enabled -> activated check decides whether this bundle
 runs.
 
+Stage split: the host serves `economy` and `identity` to the PROCESS stage only (`svc_process`;
+`svc_action` has no handler for them), and `relay` to the ACTION stage only. So the whole command --
+identity resolution, funds checks, cooldown, replay claim, roll, wager -- runs in `transform`, and
+`dispatch` only relays the finished reply. The process stage cannot relay an "unavailable" notice,
+so a backend failure travels as a `failure` marker: `dispatch` relays the reply, then raises. If
+`dispatch` fails after `transform` settled the money, the redelivery is deduped by the replay claim
+(the reply may be lost, the money is never moved twice).
+
 Output safety: `event.actor` is interpolated into most replies. The host-minted
 `{user:<token>}` actor stays live (egress renders the display name); any other value is
 untrusted and goes through `waddle_sdk.safe_text.sanitize_user_text` (see `_actor_label`),
@@ -58,8 +66,14 @@ from typing import Any
 
 from waddle_sdk import community_kv, economy, event_dedupe, identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
+from waddle_sdk.flask_core import get_bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import sanitize_user_text
+
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 SPEC = CommandSpec(name="defuse")
 
@@ -78,6 +92,7 @@ _USAGE = (
 _PERMISSION_DENIED_MSG = "only moderators/broadcasters can configure !defuse"
 _KNOWN_COMMANDS = frozenset({"play", "list", "config_set_odds", "usage"})
 _WIRES = ("red", "blue", "green", "yellow")
+_UNAVAILABLE_REPLY = "defusing is unavailable."
 
 
 #: The pipeline delivers `event.actor` as its own host-minted placeholder; anchored so ONLY an actor
@@ -137,7 +152,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
 
 def _roll(percent: int) -> bool:
     """Return True with probability `percent`/100."""
-    return random.randint(1, 100) <= percent  # noqa: S311 - a game, not security
+    return _RNG.randint(1, 100) <= percent
 
 
 def _resolve_command(parsed: ParsedCommand | None) -> str:
@@ -153,8 +168,12 @@ def _resolve_command(parsed: ParsedCommand | None) -> str:
     return "usage"
 
 
-async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize `!defuse`."""
+def _recognize(event: PlatformEvent) -> dict[str, Any] | None:
+    """Pure routing: map a chat line onto the command intent `_settle` runs, or `None`.
+
+    The intent carries only what the command needs (`command`, the stake/`set` tail, the
+    replay-dedupe `message_id`, the strict-boolean badges) and the reply `channel_id`.
+    """
     text = event.payload.get("text")
     if not isinstance(text, str):
         return None
@@ -164,7 +183,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
 
     payload: dict[str, Any] = {"channel_id": event.payload.get("channel_id")}
     message_id = event.payload.get("message_id")
-    if isinstance(message_id, str):  # replay-dedupe key; `dispatch` refuses a play without it
+    if isinstance(message_id, str):  # replay-dedupe key; `_settle` refuses a play without it
         payload["message_id"] = message_id
     word = stripped.partition(" ")[2].strip().lower()
     if word == "all" or (word.isascii() and word.isdigit()):
@@ -183,13 +202,21 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
         payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
-    return PlatformEvent(
-        platform=event.platform,
-        event_type=event.event_type,
-        actor=event.actor,
-        payload=payload,
-        occurred_at=event.occurred_at,
-    )
+    return payload
+
+
+async def transform(event: PlatformEvent) -> PlatformEvent | None:
+    """Implement `process-stage.transform`: recognize `!defuse` and play the whole command.
+
+    The economy/identity host capabilities are served by the PROCESS stage only (`svc_process`;
+    `svc_action` has no handler), so every wager, balance read and identity resolution happens
+    here. The returned event carries just the reply text for `dispatch` to relay; `None` for a
+    non-matching line and for a redelivered/too-old event (nothing is mutated or sent).
+    """
+    intent = _recognize(event)
+    if intent is None:
+        return None
+    return await _settle(intent, event, community=get_bundle_context().community)
 
 
 class DispatchResult:
@@ -297,7 +324,7 @@ async def _handle_play(
         won = _roll(await _get_odds(community))
         new_balance = await economy.wager(actor, stake, stake * PAYOUT_MULTIPLE if won else 0)
         await community_kv.increment(community, _plays_key(pseudonym), 1, 0)
-        wire = random.choice(_WIRES)  # noqa: S311 - flavor only
+        wire = _RNG.choice(_WIRES)
         log.info(
             "defuse.settled", outcome="win" if won else "loss", amount_bucket=_amount_bucket(stake)
         )
@@ -377,54 +404,92 @@ async def _reply_for(
     )
 
 
-async def dispatch(
-    envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
-) -> DispatchResult:
-    """Implement `action-stage.dispatch`: settle via the economy SDK, then relay the reply.
+async def _settle(
+    intent: dict[str, Any], event: PlatformEvent, *, community: str | None
+) -> PlatformEvent | None:
+    """Run one recognized command (process stage) and return the reply event, or `None` to drop.
 
     Raises:
         ValueError: No `channel_id`, no `community`, or an unrecognized command.
-        RuntimeError: A kv backend call failed (error reply + ERROR log emitted first).
+
+    A kv/economy backend failure or a missing replay id does NOT raise here (the process stage
+    cannot relay): it is logged, and the returned event carries the "unavailable" reply plus a
+    `failure` message that `dispatch` relays and then raises, exactly as one invocation did before
+    the economy calls moved stages.
+    """
+    channel_id = intent.get("channel_id")
+    if not channel_id:
+        raise ValueError("defuse reply requires a channel_id from the inbound chat.message")
+    command = intent.get("command")
+    if command not in _KNOWN_COMMANDS:
+        raise ValueError(f"unrecognized defuse command: {command!r}")
+    provider = event.platform
+    if not community:
+        log.error("defuse.missing_community", command=command)
+        raise ValueError("defuse requires a community context and cannot operate tenant-wide")
+
+    username = _actor_label(event.actor)
+    failure: str | None = None
+    try:
+        reply = await _reply_for(
+            command,
+            intent,
+            community=community,
+            username=username,
+            platform=provider,
+            occurred_at=event.occurred_at,
+        )
+    except CommandUsageError as exc:
+        reply = str(exc)
+    except event_dedupe.EventIdError:
+        log.error("defuse.missing_event_id", command=command)
+        reply = _UNAVAILABLE_REPLY
+        failure = "defuse requires the inbound message_id and a valid occurred_at to be replay-safe"
+    except Exception as exc:
+        log.error("defuse.kv_error", error=type(getattr(exc, "value", exc)).__name__)
+        reply = _UNAVAILABLE_REPLY
+        failure = "defuse state backend failed"
+
+    if reply is None:
+        log.info("defuse.transform skipped duplicate", platform=provider, command=command)
+        return None
+    out: dict[str, Any] = {"channel_id": channel_id, "text": reply, "command": command}
+    if failure is not None:
+        out["failure"] = failure
+    return PlatformEvent(
+        platform=provider,
+        event_type=event.event_type,
+        actor=event.actor,
+        payload=out,
+        occurred_at=event.occurred_at,
+    )
+
+
+async def dispatch(
+    envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
+) -> DispatchResult:
+    """Implement `action-stage.dispatch`: relay the reply `transform()` already built.
+
+    No economy or identity call is made here -- `svc_action` does not serve them.
+
+    Raises:
+        ValueError: No `channel_id`, or no reply text, in the payload.
+        RuntimeError: `transform` hit a backend failure (the "unavailable" reply is relayed first).
     """
     payload = envelope.event.payload
     channel_id = payload.get("channel_id")
     if not channel_id:
         raise ValueError("defuse reply requires a channel_id from the inbound chat.message")
-    command = payload.get("command")
-    if command not in _KNOWN_COMMANDS:
-        raise ValueError(f"unrecognized defuse command: {command!r}")
+    text = payload.get("text")
+    if not isinstance(text, str) or not text:
+        raise ValueError("defuse reply requires non-empty text")
     provider = envelope.event.platform
-    community = envelope.community
-    if not community:
-        log.error("defuse.missing_community", command=command)
-        raise ValueError("defuse requires a community context and cannot operate tenant-wide")
-
-    username = _actor_label(envelope.event.actor)
-    try:
-        reply = await _reply_for(
-            command,
-            payload,
-            community=community,
-            username=username,
-            platform=provider,
-            occurred_at=envelope.event.occurred_at,
-        )
-    except CommandUsageError as exc:
-        reply = str(exc)
-    except event_dedupe.EventIdError as exc:
-        log.error("defuse.missing_event_id", command=command)
-        await relay.push(provider, {"channel": channel_id, "text": "defusing is unavailable."})
-        raise RuntimeError(
-            "defuse requires the inbound message_id and a valid occurred_at to be replay-safe"
-        ) from exc
-    except Exception as exc:
-        log.error("defuse.kv_error", error=type(getattr(exc, "value", exc)).__name__)
-        await relay.push(provider, {"channel": channel_id, "text": "defusing is unavailable."})
-        raise RuntimeError("defuse state backend failed") from exc
-
-    if reply is None:
-        log.info("defuse.dispatch skipped duplicate", platform=provider, command=command)
-        return DispatchResult(transport=provider, detail="duplicate")
-    await relay.push(provider, {"channel": channel_id, "text": reply})
-    log.info("defuse.dispatch relayed", platform=provider, command=command)
-    return DispatchResult(transport=provider, detail=command)
+    await relay.push(provider, {"channel": channel_id, "text": text})
+    failure = payload.get("failure")
+    if isinstance(failure, str) and failure:
+        log.error("defuse.dispatch relayed failure", platform=provider)
+        raise RuntimeError(failure)
+    command = payload.get("command")
+    log.info("defuse.dispatch relayed", platform=provider)
+    detail = command if isinstance(command, str) else "relayed"
+    return DispatchResult(transport=provider, detail=detail)

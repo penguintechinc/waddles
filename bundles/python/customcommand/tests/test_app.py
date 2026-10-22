@@ -578,7 +578,7 @@ def test_random_negative_and_single_point_ranges(fake_host) -> None:
 
 def test_random_calls_randint_with_the_declared_bounds(fake_host, monkeypatch) -> None:
     calls: list[tuple[int, int]] = []
-    monkeypatch.setattr(random, "randint", lambda a, b: calls.append((a, b)) or a)
+    monkeypatch.setattr(app._RNG, "randint", lambda a, b: calls.append((a, b)) or a)
     _admin("!cc add r $(random 10 20)")
     assert _say("!r") == "10"
     assert calls == [(10, 20)]
@@ -700,10 +700,10 @@ def test_substituted_value_cannot_make_the_reply_lead_with_a_command(lead: str, 
 
 
 def test_leading_command_guard_is_idempotent_and_leaves_safe_text_alone(fake_host) -> None:
-    assert app._guard_leading_command("welcome") == "welcome"
-    assert app._guard_leading_command(" /x") == SAFE_LEAD + " /x"
-    guarded = app._guard_leading_command("/ban")
-    assert app._guard_leading_command(guarded) == guarded
+    assert app.guard_leading_command("welcome") == "welcome"
+    assert app.guard_leading_command(" /x") == SAFE_LEAD + " /x"
+    guarded = app.guard_leading_command("/ban")
+    assert app.guard_leading_command(guarded) == guarded
 
 
 def test_mention_forming_across_a_live_placeholder_is_broken(fake_host) -> None:

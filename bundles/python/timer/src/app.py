@@ -77,7 +77,6 @@ import contextlib
 import hashlib
 import json
 import re
-import unicodedata
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any, NoReturn
@@ -85,7 +84,7 @@ from typing import Any, NoReturn
 from waddle_sdk import clock, community_kv, identity, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.safe_text import sanitize_user_text
+from waddle_sdk.safe_text import leads_with_command, sanitize_user_text
 
 _HEAD = "!timer"
 SPEC = CommandSpec(name="timer")
@@ -115,7 +114,6 @@ _LAST_TTL_SECONDS = 30 * 24 * 60 * 60
 _NAME_RE = re.compile(r"^[a-z0-9_-]{1,24}$")
 _INTERVAL_RE = re.compile(r"^[0-9]{1,4}$")
 _SCOPE_RE = re.compile(r"^[0-9a-f]{16}$")
-_COMMAND_LEAD = frozenset("/.!")
 
 _USAGE = (
     "Usage: !timer add <name> <interval-min> <message> | !timer del <name> | !timer list | "
@@ -171,19 +169,6 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
 def _scope_of(platform: str, channel_id: object) -> str:
     """16-hex non-reversible id of a platform+channel -- the raw channel id is never stored."""
     return hashlib.sha256(f"{platform}|{channel_id}".encode()).hexdigest()[:16]
-
-
-def _leads_with_command(text: str) -> bool:
-    """True when the first VISIBLE character is `/`, `.` or `!` (a Twitch/bot command lead).
-
-    Skips whitespace and invisible/format characters, because a leading zero-width character
-    would otherwise hide the command character from a naive `startswith` check.
-    """
-    for ch in text:
-        if ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf"):
-            continue
-        return ch in _COMMAND_LEAD
-    return False
 
 
 def _preview(message: str) -> str:
@@ -442,7 +427,7 @@ def _validate_new_timer(arg: object) -> tuple[str, int, str] | str:
         return f"Timer messages must be {MAX_MESSAGE_LEN} characters or fewer."
     if identity.mention_tokens(message):
         return "Timer messages can't @mention people (the mention would point at the wrong user)."
-    if _leads_with_command(message):
+    if leads_with_command(message):
         return "Timer messages can't start with /, . or ! (the bot would run it as a command)."
     return raw_name, interval, message
 
@@ -618,7 +603,7 @@ async def _handle_tick(community: str | None, *, provider: str, channel_id: str)
         except Exception as exc:  # noqa: BLE001 -- structurally classified, see `_kv_error`
             await _kv_error(exc, op="set_last", reply=None)
         text = sanitize_user_text(timer.message)
-        if not text.strip() or _leads_with_command(text):
+        if not text.strip() or leads_with_command(text):
             log.error("timer.unsafe_message_skipped")
             continue
         log.info("timer.fired", due=len(due))

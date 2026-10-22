@@ -243,6 +243,31 @@ def test_no_bundle_reimplements_the_guard(name: str) -> None:
     )
 
 
+#: Names a bundle-local copy of the lead check/guard has used. `waddle_sdk.safe_text`
+#: (`leads_with_command` / `guard_leading_command`) is the ONE implementation, in EVERY bundle --
+#: a local `startswith(("/", ".", "!"))` misses a lead hidden behind a zero-width character.
+ANY_LOCAL_LEAD_NAMES = FORBIDDEN_LOCAL_GUARD_NAMES | frozenset(
+    {"_UNSAFE_LEAD", "_COMMAND_LEADS", "_COMMAND_LEAD", "_guard_leading_command"}
+)
+
+
+def test_no_bundle_anywhere_reimplements_the_lead_check() -> None:
+    """Repo-wide (not just ai.generate bundles): one lead check, in the SDK, shared by all."""
+    apps = sorted(BUNDLES_DIR.glob("*/src/app.py"))
+    assert len(apps) >= 100, f"expected >=100 bundles, found {len(apps)}"
+    offenders = {
+        path.parent.parent.name: sorted(
+            _defined_names(ast.parse(path.read_text(encoding="utf-8"))) & ANY_LOCAL_LEAD_NAMES
+        )
+        for path in apps
+    }
+    offenders = {name: names for name, names in offenders.items() if names}
+    assert not offenders, (
+        f"bundle-local lead check/guard (use waddle_sdk.safe_text.leads_with_command / "
+        f"guard_leading_command): {offenders}"
+    )
+
+
 def test_the_prefix_safe_allowlist_names_real_bundles() -> None:
     assert set(PREFIX_SAFE) <= set(AI_APPS), (
         "PREFIX_SAFE names a bundle that does not call ai.generate"

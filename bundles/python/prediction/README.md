@@ -44,7 +44,7 @@ payout (it comes straight back in the same call -- a winner needs 1 point in han
   closed for `SETTLE_SECONDS = 10` (longer than any in-flight 2 s bet). Resolving an open round just
   closes betting and asks the moderator to repeat. A stake that races the lock is stopped by a
   re-read after the cooldown claim.
-- **Idempotent on redelivery.** `transform` forwards the platform `message_id`; every mutating
+- **Idempotent on redelivery.** `transform` reads the platform `message_id`; every mutating
   command (bet, claim and the moderator ones) claims it via `waddle_sdk.event_dedupe` -- ONE atomic
   `kv.increment` on a per-event TTL'd marker (`1` = first delivery) -- AFTER the cheap prechecks and
   the atomic per-actor cooldown and BEFORE any stake, payout or state change. A redelivery is
@@ -90,6 +90,19 @@ else and every echoed title/outcome goes through `waddle_sdk.safe_text.sanitize_
 Round definitions are stored as typed JSON (title/outcomes are stored raw, validated, and
 sanitized at every echo).
 
+## Stage split
+
+The host serves `economy` and `identity` to the **process** stage only (`core/svc_process`;
+`core/svc_action` has no handler for them) and `relay` to the **action** stage only. So `transform`
+does the whole command -- identity resolution, balance/limit reads, wagers, kv state, the replay
+claim -- and `dispatch` only relays the finished reply. A backend failure cannot be relayed from
+the process stage, so it travels as a `failure` marker on the reply event: `dispatch` relays the
+"unavailable" reply and then raises. If `dispatch` fails after `transform` settled the money, the
+redelivery is deduped by the replay claim: the reply may be lost, the money is never moved twice.
+The tests run against `waddle_sdk.testing.StageGuard` fakes (a capability called from the wrong
+stage fails the test) and `scripts/ci/tests/test_bundle_stage_gate.py` fails the build if
+`dispatch` can reach an economy/identity call.
+
 ## Tests
 
 `python3 -m pytest bundles/python/prediction/tests` -- routing, open/lock/resolve/cancel, bet
@@ -97,4 +110,4 @@ validation, the full proportional-payout scenario with conservation asserted, ra
 (sum of payouts <= pool), chunked and zero-balance claims, double-resolve / racing finalizers,
 redelivery of every mutating command, concurrent duplicates (with the cooldown disabled so the
 event claim alone is proven), crash-order, backend-error, quota, age fence, PII, sanitizer, kv op
-budget (<= 64 per dispatch).
+budget (<= 64 per invocation).

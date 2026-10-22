@@ -6,16 +6,42 @@ import asyncio
 import json
 import sys
 import types
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+import app
 import pytest
-from app import _USAGE, DEFAULT_LIMIT, MAX_LIMIT, dispatch, render, transform
+from app import _USAGE, DEFAULT_LIMIT, MAX_LIMIT, render
 from waddle_sdk import economy
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.testing import FakeEconomyHost
+from waddle_sdk.testing import FakeEconomyHost, StageGuard
 
 U1, U2, U3 = (f"00000000-0000-4000-8000-00000000000{i}" for i in (1, 2, 3))
+
+#: Makes every host fake stage-faithful: `economy` answers the PROCESS stage only, `relay` the
+#: ACTION stage only (the real host's split). The `host` fixture fails a test that breaks it.
+GUARD = StageGuard()
+
+
+async def _settle(
+    intent: dict[str, Any], event: PlatformEvent, *, community: str | None
+) -> PlatformEvent:
+    """`app._settle` under the `two_stage` driver's signature (top needs no community)."""
+    return await app._settle(intent, event)
+
+
+transform = GUARD.process_stage(app.transform)
+#: Runs one command through the real stage split: `app._settle` as the process stage on the
+#: envelope's intent payload, then `app.dispatch` as the action stage on what it returned.
+dispatch = GUARD.two_stage(_settle, app.dispatch)
+action_dispatch = GUARD.action_stage(app.dispatch)
+
+
+def _recognize(event: PlatformEvent) -> types.SimpleNamespace | None:
+    """The routing intent `transform` derives from a chat line (pure, no host call)."""
+    intent = app._recognize(event)
+    return None if intent is None else types.SimpleNamespace(payload=intent)
 
 
 def _text(h: Host) -> str:
@@ -35,13 +61,20 @@ class Host:
 
 
 @pytest.fixture
-def host(monkeypatch: pytest.MonkeyPatch) -> Host:
+def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[Host]:
+    GUARD.reset()
     h = Host(
         eco=FakeEconomyHost(members={U1, U2, U3}, balances={U1: 50, U2: 300, U3: 120})
     )
     flags = types.SimpleNamespace(enabled=lambda key, default: h.flag)
-    eco = types.SimpleNamespace(leaderboard=lambda limit: h.eco.leaderboard(limit))
-    relay_mod = types.SimpleNamespace(push=lambda p, m: h.relay_calls.append((p, m)))
+    eco = types.SimpleNamespace(
+        leaderboard=GUARD.process_only(
+            "economy.leaderboard", lambda limit: h.eco.leaderboard(limit)
+        )
+    )
+    relay_mod = types.SimpleNamespace(
+        push=GUARD.action_only("relay.push", lambda p, m: h.relay_calls.append((p, m)))
+    )
     log_mod = types.SimpleNamespace(
         Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3},
         write=lambda lvl, msg, fj: h.log_calls.append((lvl, msg, fj)),
@@ -51,7 +84,8 @@ def host(monkeypatch: pytest.MonkeyPatch) -> Host:
         flags=flags, economy=eco, relay=relay_mod, log=log_mod
     )
     monkeypatch.setitem(sys.modules, "wit_world", world)
-    return h
+    yield h
+    GUARD.assert_clean()
 
 
 def _event(text: str) -> PlatformEvent:
@@ -95,7 +129,7 @@ def _envelope(payload: dict[str, Any], platform: str = "twitch") -> StageEnvelop
     ],
 )
 def test_matches_and_parses_limit(host: Host, text: str, limit: int) -> None:
-    out = _run(transform(_event(text)))
+    out = _recognize(_event(text))
     assert out is not None
     assert out.payload["command"] == "top"
     assert out.payload["limit"] == limit
@@ -119,7 +153,7 @@ def test_matches_and_parses_limit(host: Host, text: str, limit: int) -> None:
     ],
 )
 def test_invalid_replies_usage(host: Host, text: str) -> None:
-    out = _run(transform(_event(text)))
+    out = _recognize(_event(text))
     assert out is not None
     assert out.payload["command"] == "usage"
     assert "limit" not in out.payload
@@ -206,7 +240,7 @@ def test_dispatch_requires_channel(host: Host) -> None:
 
 def test_denied_grant_fails_loud_with_generic_reply(host: Host) -> None:
     host.eco.granted = False
-    with pytest.raises(economy.DeniedError):
+    with pytest.raises(RuntimeError, match="top leaderboard failed: DeniedError"):
         _run(
             dispatch(
                 _envelope({"command": "top", "limit": 5, "channel_id": "1"}),
@@ -221,14 +255,15 @@ def test_denied_grant_fails_loud_with_generic_reply(host: Host) -> None:
 def test_end_to_end_transform_then_dispatch(host: Host) -> None:
     out = _run(transform(_event("!top2")))
     assert out is not None
-    _run(dispatch(_envelope(out.payload), {}, http_client=None))
+    assert host.relay_calls == [], "transform reads the board; only dispatch relays"
+    _run(action_dispatch(_envelope(out.payload), {}, http_client=None))
     assert _text(host).startswith("Top balances: 1. {user:")
 
 
 def test_logs_are_pii_free(host: Host) -> None:
     out = _run(transform(_event("!top3")))
     assert out is not None
-    _run(dispatch(_envelope(out.payload), {}, http_client=None))
+    _run(action_dispatch(_envelope(out.payload), {}, http_client=None))
     blob = " ".join(f"{m} {fj}" for _, m, fj in host.log_calls)
     assert host.log_calls
     for secret in (U1, U2, U3, "viewer-1", "300", "120"):
@@ -247,3 +282,34 @@ def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
     host.flag = False
     out = _run(transform(_event("!top")))
     assert out is not None
+
+
+# -- stage split: the leaderboard is read in transform (process stage), relay only in dispatch ------
+
+
+def test_dispatch_makes_no_economy_call(host: Host) -> None:
+    """`svc_action` serves no economy: dispatch relays the given text and reads no leaderboard."""
+    host.eco.granted = (
+        False  # a leaderboard read would be refused -- and is never attempted
+    )
+    _run(
+        action_dispatch(
+            _envelope({"channel_id": "1", "text": "already computed"}),
+            {},
+            http_client=None,
+        )
+    )
+    assert _text(host) == "already computed"
+    assert GUARD.violations == []
+
+
+def test_transform_failure_is_deferred_to_dispatch_not_relayed(host: Host) -> None:
+    """A refused read in transform cannot relay: it is marked, and dispatch relays then raises."""
+    host.eco.granted = False
+    out = _run(transform(_event("!top")))
+    assert out is not None
+    assert out.payload["failure"] == "top leaderboard failed: DeniedError"
+    assert host.relay_calls == []
+    with pytest.raises(RuntimeError, match="DeniedError"):
+        _run(action_dispatch(_envelope(out.payload), {}, http_client=None))
+    assert "temporarily unavailable" in _text(host)

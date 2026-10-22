@@ -29,7 +29,7 @@ Activation-gated only -- no feature flag (installed -> enabled -> activated).
 
 The pipeline is at-least-once. The host dedupes the `wager` per event, but the pot credit is ours:
 a redelivered loss used to credit the pot a second time, and a pot credited twice pays out money
-that was debited once. `transform` forwards the platform `message_id`; `dispatch` claims it
+that was debited once. `transform` claims the platform `message_id`
 (`waddle_sdk.event_dedupe`) after the atomic cooldown and **before any wager or pot mutation**
 with ONE atomic `kv.increment` on a per-event, TTL'd marker (`1` = first delivery, `> 1` =
 redelivery or a concurrent duplicate), and skips a redelivery silently (no wager, no credit, no
@@ -68,6 +68,19 @@ Logs carry `op`/`outcome`/`amount_bucket`/error-case only -- no names, uuids or 
 ## Output safety
 
 `event.actor` is interpolated into replies. The host-minted `{user:<token>}` actor stays live (egress renders the display name); any other value, and every typed echo, goes through `waddle_sdk.safe_text.sanitize_user_text`.
+
+## Stage split
+
+The host serves `economy` and `identity` to the **process** stage only (`core/svc_process`;
+`core/svc_action` has no handler for them) and `relay` to the **action** stage only. So `transform`
+does the whole command -- identity resolution, balance/limit reads, wagers, kv state, the replay
+claim -- and `dispatch` only relays the finished reply. A backend failure cannot be relayed from
+the process stage, so it travels as a `failure` marker on the reply event: `dispatch` relays the
+"unavailable" reply and then raises. If `dispatch` fails after `transform` settled the money, the
+redelivery is deduped by the replay claim: the reply may be lost, the money is never moved twice.
+The tests run against `waddle_sdk.testing.StageGuard` fakes (a capability called from the wrong
+stage fails the test) and `scripts/ci/tests/test_bundle_stage_gate.py` fails the build if
+`dispatch` can reach an economy/identity call.
 
 ## Tests
 

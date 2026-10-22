@@ -14,7 +14,12 @@ never sees, stores or logs a name. Logs carry op/platform/count/exception type o
 
 **Read-only.** `economy.read` only: no wager/transfer, no `storage.kv`, no state. A host refusal
 (not granted/unavailable/backend) is logged by type and answered with a generic reply, then
-re-raised -- never swallowed into an empty board.
+raised -- never swallowed into an empty board.
+
+**Stage split.** The host serves `economy` to the PROCESS stage only (`svc_process`; `svc_action`
+has no handler) and `relay` to the ACTION stage only, so `transform` reads the leaderboard and
+`dispatch` only relays the rendered text. The process stage cannot relay a failure notice, so a
+failed read travels as a `failure` marker: `dispatch` relays the generic reply, then raises.
 
 Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
 decides whether this bundle runs.
@@ -82,8 +87,8 @@ def _is_top(text: str) -> bool:
     return head == "!top" or bool(_FUSED.match(head))
 
 
-async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize `!top [N]`, parse N."""
+def _recognize(event: PlatformEvent) -> dict[str, Any] | None:
+    """Pure routing: map a chat line onto the `top`/`usage` intent `_settle` runs, or `None`."""
     text = event.payload.get("text")
     if not isinstance(text, str) or not _is_top(text):
         return None
@@ -97,13 +102,19 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     log.info(
         "top.transform matched", platform=event.platform, command=payload["command"]
     )
-    return PlatformEvent(
-        platform=event.platform,
-        event_type=event.event_type,
-        actor=event.actor,
-        payload=payload,
-        occurred_at=event.occurred_at,
-    )
+    return payload
+
+
+async def transform(event: PlatformEvent) -> PlatformEvent | None:
+    """Implement `process-stage.transform`: recognize `!top [N]` and read the leaderboard.
+
+    `economy.leaderboard` is served by the PROCESS stage only (`svc_process`; `svc_action` has no
+    handler), so the read happens here and `dispatch` only relays the rendered text.
+    """
+    intent = _recognize(event)
+    if intent is None:
+        return None
+    return await _settle(intent, event)
 
 
 def render(entries: list[economy.LeaderboardEntry]) -> str:
@@ -129,27 +140,29 @@ class DispatchResult:
         self.http_status = None
 
 
-async def dispatch(
-    envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
-) -> DispatchResult:
-    """Implement `action-stage.dispatch`: read the leaderboard and relay it to the origin platform.
+async def _settle(intent: dict[str, Any], event: PlatformEvent) -> PlatformEvent:
+    """Build the reply event for one recognized command (process stage).
 
     Raises:
-        ValueError: No `channel_id`, or a `top` payload whose limit is not an int in range.
-        economy.EconomyError: The host refused/failed the read (a generic reply is sent first).
+        ValueError: No `channel_id`, or a `top` intent whose limit is not an int in range.
+
+    A host refusal/failure of the leaderboard read (not granted/unavailable/backend) does NOT
+    raise here -- the process stage cannot relay: it is logged by type, and the returned event
+    carries the generic reply plus a `failure` message that `dispatch` relays and then raises, so
+    the error is never swallowed into an empty board.
     """
-    payload = envelope.event.payload
-    channel_id = payload.get("channel_id")
+    channel_id = intent.get("channel_id")
     if not channel_id:
         raise ValueError(
             "top reply requires a channel_id from the inbound chat.message"
         )
-    provider = envelope.event.platform
+    command = intent.get("command")
+    failure: str | None = None
 
-    if payload.get("command") == "usage":
+    if command == "usage":
         text = _USAGE
     else:
-        limit = payload.get("limit")
+        limit = intent.get("limit")
         if (
             isinstance(limit, bool)
             or not isinstance(limit, int)
@@ -160,10 +173,50 @@ async def dispatch(
             entries = await economy.leaderboard(limit)
         except economy.EconomyError as exc:
             log.error("top.economy_error", op="leaderboard", error=type(exc).__name__)
-            await relay.push(provider, {"channel": channel_id, "text": _UNAVAILABLE})
-            raise
-        text = render(entries)
-        log.info("top.dispatch", op="leaderboard", count=len(entries), limit=limit)
+            text = _UNAVAILABLE
+            failure = f"top leaderboard failed: {type(exc).__name__}"
+        else:
+            text = render(entries)
+            log.info("top.transform", op="leaderboard", count=len(entries), limit=limit)
 
+    out: dict[str, Any] = {"channel_id": channel_id, "text": text}
+    if failure is not None:
+        out["failure"] = failure
+    return PlatformEvent(
+        platform=event.platform,
+        event_type=event.event_type,
+        actor=event.actor,
+        payload=out,
+        occurred_at=event.occurred_at,
+    )
+
+
+async def dispatch(
+    envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
+) -> DispatchResult:
+    """Implement `action-stage.dispatch`: relay the reply `transform()` already built.
+
+    No economy call is made here -- `svc_action` does not serve it.
+
+    Raises:
+        ValueError: No `channel_id`, or no reply text, in the payload.
+        RuntimeError: The leaderboard read failed in `transform` (the generic reply is relayed
+            first).
+    """
+    payload = envelope.event.payload
+    channel_id = payload.get("channel_id")
+    if not channel_id:
+        raise ValueError(
+            "top reply requires a channel_id from the inbound chat.message"
+        )
+    text = payload.get("text")
+    if not isinstance(text, str) or not text:
+        raise ValueError("top reply requires non-empty text")
+    provider = envelope.event.platform
     await relay.push(provider, {"channel": channel_id, "text": text})
+    failure = payload.get("failure")
+    if isinstance(failure, str) and failure:
+        log.error("top.dispatch relayed failure", platform=provider)
+        raise RuntimeError(failure)
+    log.info("top.dispatch", op="relay", platform=provider)
     return DispatchResult(transport=provider, detail="relayed")

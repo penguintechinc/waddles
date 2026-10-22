@@ -21,8 +21,8 @@ cooldown is claimed, so a refusal never burns it).
 - The cooldown is one `kv.increment` on a TTL'd key (`kv.increment` is the only compare-and-swap):
   exactly one of any number of concurrent plays by one actor wins the window. The host re-applies
   the TTL on every call, so a refused attempt restarts the window (the reply says so).
-- The pipeline is at-least-once. `transform` forwards the platform `message_id`; `dispatch` claims
-  it (`waddle_sdk.event_dedupe`) after the cooldown and **before the roll, the wager and the stat
+- The pipeline is at-least-once. `transform` claims the platform `message_id`
+  (`waddle_sdk.event_dedupe`) after the cooldown and **before the roll, the wager and the stat
   counters** with ONE atomic `kv.increment` on a per-event, TTL'd marker (`1` = first delivery,
   `> 1` = redelivery or a concurrent duplicate), and skips a redelivery silently (no re-roll, no
   second wager, no double-counted plays/wins, no reply). The increment is race-free and has no
@@ -58,3 +58,16 @@ Activation-gated only -- no feature flag (installed -> enabled -> activated).
 ## Output safety
 
 `event.actor` is interpolated into replies. The host-minted `{user:<token>}` actor stays live (egress renders the display name); any other value, and every typed echo, goes through `waddle_sdk.safe_text.sanitize_user_text`.
+
+## Stage split
+
+The host serves `economy` and `identity` to the **process** stage only (`core/svc_process`;
+`core/svc_action` has no handler for them) and `relay` to the **action** stage only. So `transform`
+does the whole command -- identity resolution, balance/limit reads, wagers, kv state, the replay
+claim -- and `dispatch` only relays the finished reply. A backend failure cannot be relayed from
+the process stage, so it travels as a `failure` marker on the reply event: `dispatch` relays the
+"unavailable" reply and then raises. If `dispatch` fails after `transform` settled the money, the
+redelivery is deduped by the replay claim: the reply may be lost, the money is never moved twice.
+The tests run against `waddle_sdk.testing.StageGuard` fakes (a capability called from the wrong
+stage fails the test) and `scripts/ci/tests/test_bundle_stage_gate.py` fails the build if
+`dispatch` can reach an economy/identity call.

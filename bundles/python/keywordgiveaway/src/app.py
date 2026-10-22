@@ -59,9 +59,12 @@ goes through `waddle_sdk.safe_text.sanitize_user_text` (`@everyone`, `<@id>`, fo
 `{user:..}` placeholders and control characters are neutralized). The invoker's own label is the
 host placeholder kept live via `allow_tokens`, never a raw name.
 
-**Randomness.** No `random` module (componentize-py freezes module-level RNG state at build
-time): the pick is `sha256(now_millis, rid, draw number, pool size, probe) mod pool size`. This
-is a community giveaway, not a security decision -- the inputs are not secret.
+**Randomness.** The pick is `random.SystemRandom().randrange(pool)` (OS entropy, `wasi:random` in
+the component) -- never the module-level `random` functions (componentize-py freezes their
+import-time Mersenne Twister state into the build snapshot) and never a hash of public inputs:
+the former `sha256(now_millis, ...)` pick was reproducible by whoever chose the moment to draw, so
+a moderator could steer the winner. A `tests` gate fails any game bundle that uses module-level
+`random` for an outcome.
 
 Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
 decides whether this bundle runs.
@@ -75,6 +78,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 from dataclasses import dataclass, field
 from typing import Any, NoReturn, TypeIs
@@ -86,6 +90,11 @@ from waddle_sdk.flask_core.bundle_runtime import get_bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.identity import MAX_MENTION_TOKEN_LEN
 from waddle_sdk.safe_text import sanitize_user_text
+
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions (their Mersenne Twister is seeded at import and componentize-py freezes
+#: import-time state into the build snapshot) and never a hash of public inputs such as the clock.
+_RNG = random.SystemRandom()
 
 COMMAND = "kgiveaway"
 _HEAD = f"!{COMMAND}"
@@ -297,10 +306,9 @@ def _caller_is_mod(payload: dict[str, Any]) -> bool:
     return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
-def _pick_index(parts: tuple[object, ...], size: int) -> int:
-    """Uniform-enough index in `[0, size)` from a hash of `parts` (not security-sensitive)."""
-    digest = hashlib.sha256("\0".join(str(part) for part in parts).encode()).digest()
-    return int.from_bytes(digest, "big") % size
+def _pick_index(size: int) -> int:
+    """Uniform index in `[0, size)` from OS entropy (`SystemRandom`: no seed, no frozen state)."""
+    return _RNG.randrange(size)
 
 
 async def _load_state(community: str) -> _State | None:
@@ -485,13 +493,10 @@ async def _pick_winner(community: str, state: _State) -> tuple[int, _Entry] | No
         for slot in range(1, await _entry_count(community, state) + 1)
         if slot not in state.drawn
     ]
-    now = clock.now_millis()
-    for probe in range(MAX_DRAW_PROBES):
+    for _probe in range(MAX_DRAW_PROBES):
         if not candidates:
             break
-        pool = len(candidates)
-        index = _pick_index((now, state.rid, len(state.drawn), pool, probe), pool)
-        slot = candidates.pop(index)
+        slot = candidates.pop(_pick_index(len(candidates)))
         entry = await _load_entry(community, state.rid, slot)
         if entry is not None:
             return slot, entry
