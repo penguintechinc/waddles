@@ -242,7 +242,12 @@ reply = f"{sanitize_user_text(username)} says: {sanitize_user_text(rest)}"
   from fragments, nested braces or control-split text). `allow_tokens` takes a list/set/tuple —
   a bare `str` raises `TypeError` (its characters would become one-character tokens).
 - **Idempotent and cheap** — wrapping twice is harmless; ordinary text, URLs (`@name` inside a link
-  is left alone) and `user@host` come back byte-identical. Braces and backslashes are escaped
+  is left alone) and `user@host` come back byte-identical. The link exemption is for a bare
+  `@name` ONLY: `{user:<tok>}` is escaped inside a URL like anywhere else (the egress pass has no
+  URL awareness), mass mentions (`@everyone`/`@here`) are defanged inside one, and a URL never
+  extends across an allow-listed placeholder (its display name can hold `<`, `>` or spaces), so
+  `https://x/{user:tok}/@bob` gets no exemption for the `@bob` after the placeholder.
+  Braces and backslashes are escaped
   (`\{`, `\}`, `\\`) and the egress pass removes that escaping again, so the reader still sees
   exactly what was typed; every other change is an invisible zero-width space after a mention
   sigil (and, only next to an allow-listed mention, between it and a following word/`#`/`>`:

@@ -16,7 +16,11 @@ the property it must hold is stated against the HOST, not against itself:
   an adversarial display name, then on the Twitch path the strip of EVERY control character,
   `\t` and `\n` included -- `capabilities.rs::sanitize_irc_component`) no mention is left that
   the author's text helped form. A mention lying wholly inside a substituted display name is
-  the sink escaper's job, not the sanitizer's, and is excluded.
+  the sink escaper's job, not the sanitizer's, and is excluded. The ONE sanctioned exemption is a
+  Twitch-style ``@name`` that sits inside a URL-shaped span of the FINAL text (``https://host/@name``
+  is a link, not a ping); mass mentions and ``<@id>`` / ``<#id>`` / ``<!here>`` are never exempt.
+  A live placeholder resolves to a display name that can hold whitespace, ``<`` and ``>``, so a URL
+  span never extends across one: the oracle decides URL membership on the text AFTER substitution.
 
 The corpora are exhaustive over short sequences of hostile atoms plus seeded random strings;
 `_violations` returns what broke, and `test_the_differential_can_fail` proves the checker flags
@@ -35,6 +39,9 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
+from waddle_sdk import safe_text
 from waddle_sdk.safe_text import (
     ZERO_WIDTH_SPACE as ZW,
 )
@@ -194,7 +201,12 @@ def twitch_final(rendered: str, from_name: list[bool]) -> tuple[str, list[bool]]
 
 #: What Discord / Slack / Twitch turn into a ping: mass mentions anywhere, ``<@id>`` ``<@!id>``
 #: ``<@&role>`` ``<#chan>`` ``<!here>``, and a Twitch ``@name`` at a word boundary.
-_MENTION = re.compile(r"@(?:everyone|here)|<@[!&]?\w|<#\w|<!\w|(?<!\w)@\w", re.IGNORECASE)
+_HARD_MENTION = re.compile(r"@(?:everyone|here)|<@[!&]?\w|<#\w|<!\w", re.IGNORECASE)
+_SOFT_MENTION = re.compile(r"(?<!\w)@\w")
+
+#: A URL-shaped span of the FINAL text (written independently of the module under test): a Twitch
+#: ``@name`` wholly inside one is a link (``https://medium.com/@name``), the by-design exemption.
+_FINAL_URL = re.compile(r"(?i:\b[a-z][a-z0-9+.-]{1,15}://[^\s<>]+)")
 
 #: Worst-case display names for a live placeholder: the mentioned user controls this text, and
 #: a sink may escape none of it. Fragments of every mention form, so the author's text next to
@@ -206,11 +218,18 @@ _ADVERSARIAL_NAMES = (
 
 
 def _leaked_mentions(final: str, from_name: list[bool]) -> list[str]:
-    """Mentions in ``final`` that are NOT wholly inside a substituted display name."""
+    """Mentions in ``final`` that are NOT wholly inside a substituted display name.
+
+    A bare ``@name`` wholly inside a URL span of ``final`` is the one sanctioned exemption.
+    """
+    spans = [(u.start(), u.end()) for u in _FINAL_URL.finditer(final)]
+    found = [(m, True) for m in _HARD_MENTION.finditer(final)]
+    found += [(m, False) for m in _SOFT_MENTION.finditer(final)]
     return [
         m.group(0)
-        for m in _MENTION.finditer(final)
+        for m, hard in found
         if not all(from_name[k] for k in range(m.start(), m.end()))
+        and (hard or not any(a <= m.start() and m.end() <= b for a, b in spans))
     ]
 
 
@@ -267,12 +286,26 @@ _RANDOM_ATOMS = (
     "\x00", "\x1b", "\x85", "@", "<", "#", "!", "&", ">", "e", "ve", "ryone", "everyone", "here",
     "h", "ere", "1", "23", "é", " ", "\\\\", "\\{", "{{", "}}", ZW, "x", ".", "{user:a1\x00}",
     "{\x00user:a1}", "@\t", "<!\t", "\t#", "\n@", "{user:é}", "{user:١}",
+    "ab://", "https://x/", "/", "://", "ab:", "a/@", "/@", ".",
+)  # fmt: skip
+
+#: URL-focused atoms: a scheme, a live placeholder, and the mention fragments that can finish a
+#: ping across a placeholder -- every sequence of up to 4 (the original exhaustive atoms have no
+#: scheme, so URL spans were never exercised by them).
+_URL_ATOMS = (
+    "ab://", "{user:a1}", "{user:b2}", "@", "<", "#", "!", ">", "1", "e", "/", "\n", "\t", " ",
 )  # fmt: skip
 
 
 def _exhaustive(max_len: int) -> Iterable[str]:
     for length in range(max_len + 1):
         for combo in itertools.product(_EXHAUSTIVE_ATOMS, repeat=length):
+            yield "".join(combo)
+
+
+def _exhaustive_urls(max_len: int) -> Iterable[str]:
+    for length in range(max_len + 1):
+        for combo in itertools.product(_URL_ATOMS, repeat=length):
             yield "".join(combo)
 
 
@@ -307,6 +340,21 @@ def test_exhaustive_short_inputs_with_allow_list() -> None:
     a ping across the author's text.
     """
     assert _violations(_real, _exhaustive(4), _A1_B2) == []
+
+
+def test_exhaustive_url_spans_with_and_without_allow_list() -> None:
+    """Every sequence of up to 4 URL/placeholder/mention atoms -- the URL carve-out is sound.
+
+    A URL span is exempt only for a bare ``@name`` that is a link in the FINAL text: a live
+    placeholder inside or next to one (``ab://{P}123>`` with a display name ``<@``) must not
+    complete ``<@123>``, ``<#123>`` or ``@here`` -- the name can hold the ``<`` / ``>`` /
+    whitespace that ends the span. Token forgery inside a URL span is never exempt.
+    """
+    texts = list(_exhaustive_urls(4))
+    assert len(texts) > 40000
+    assert any("ab://{user:a1}" in t for t in texts)  # the corpus really holds URL + placeholder
+    assert _violations(_real, texts, _NONE) == []
+    assert _violations(_real, texts, _A1_B2) == []
 
 
 def test_random_hostile_inputs() -> None:
@@ -384,3 +432,19 @@ def test_the_differential_can_fail() -> None:
     assert any("live tokens" in v for v in pinned)  # control-char splice reconstructs a token
     gap = _violations(_legacy_sanitize, ["@\tbob", "<!\there>", "<#\n123>"], _NONE)
     assert len(gap) == 3  # the host strips the tab/newline after the detokenizer
+
+
+def test_the_url_differential_can_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    r"""A URL span that runs across a live placeholder (the third-review bug) is flagged.
+
+    Mutant: the pre-fix `_URL_RE` (`[^\s<>]+`, marker included). `ab://{P}123>` then keeps the
+    URL exemption past the placeholder, and a display name `<@` renders a live `<@123>`.
+    """
+    assert _violations(_real, ["ab://{user:a1}123>"], _A1) == []  # fixed: clean
+    monkeypatch.setattr(
+        safe_text, "_URL_RE", re.compile(r"(?i:\b[a-z][a-z0-9+.-]{1,15}://[^\s<>]+)")
+    )
+    one = _violations(_real, ["ab://{user:a1}123>"], _A1)
+    assert any("<@" in v and "survives" in v for v in one)
+    corpus = _violations(_real, _exhaustive_urls(4), _A1_B2)  # ...and the corpus finds it too
+    assert len(corpus) >= 10
