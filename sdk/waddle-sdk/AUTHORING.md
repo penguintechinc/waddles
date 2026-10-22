@@ -187,13 +187,27 @@ check, and vice versa (`critical-rules.md` Feature Flags & License Tiers).
   `transform` must forward `event.payload["message_id"]` (the platform's own id: chatter-proof and
   identical on every redelivery; the WIT `context.message-id` is empty today and is NOT used);
   `dispatch` then derives `event_id_from_payload(payload, platform=...)` (raises `EventIdError` when
-  absent -- fail loud, move nothing), skips silently if `already_seen(...)`, and calls
-  `claim(...)` AFTER its atomic `increment` cooldown and BEFORE the first mutation (at-most-once: a
-  crash loses one play, it can never repeat one). Why a ring and not a key per event: the `kv` host
-  charges a quota unit for every key it creates and never repays a key that lapses by TTL, so a
-  marker per event would exhaust the 10,000-key quota; `event_dedupe` keeps the last 16 events per
-  actor in ONE key. The ring is read-modify-write, so reach it through the cooldown CAS (see
-  `bundles/python/jackpot`, `steal`, `defuse`).
+  absent -- fail loud, move nothing), drops the event silently if `is_fresh(event.occurred_at)` is
+  False (too old to dedupe; a missing/garbled stamp raises `EventIdError` too), skips silently if
+  `already_seen(...)` (a read-only courtesy, NOT the guard), and calls `claim(...)` AFTER its cheap
+  per-actor gates (the atomic `increment` cooldown, funds) and BEFORE the first mutation
+  (at-most-once: a crash loses one play, it can never repeat one). `claim` is ONE atomic
+  `community_kv.increment("<ns>.seen.<digest>", 1, SEEN_TTL_SECONDS)`: `1` = first delivery,
+  anything more = skip. It is race-free (no get-then-set window) and needs no cooldown to be safe;
+  the marker's TTL is the dedupe horizon and the age fence guarantees no event outlives it.
+  Per-event keys are only sustainable because the `kv` host reclaims a key's quota unit when its
+  TTL lapses (`core/bundle_host_kv`, commit `4ad3eaae` -- before it every TTL'd key leaked a unit
+  and a marker per event killed the bundle after 10,000 events). Claim AFTER the cooldown so an
+  actor on cooldown cannot mint markers; a full quota raises (fail closed). See
+  `bundles/python/jackpot`, `steal`, `defuse`.
+- **A bundle that relays an LLM completion must guard its lead
+  (`waddle_sdk.safe_text.guard_leading_command`).** A reply that STARTS with `/`, `.` (Twitch/IRC
+  bot commands) or `!` (re-triggers other bots) is executed, not read. After `sanitize_user_text`
+  and after any emoji/label you put in front of the completion, pass the FINAL reply through
+  `guard_leading_command`; a bundle whose reply always sits behind a fixed visible prefix may be
+  allow-listed instead. `scripts/ci/tests/test_ai_output_lead_gate.py` fails any `ai.generate`
+  bundle that neither calls the guard nor is allow-listed, and drives each with a hostile
+  completion.
 
 ## 5. Echoing User Text: `waddle_sdk.safe_text`
 

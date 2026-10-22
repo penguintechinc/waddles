@@ -6,10 +6,12 @@ import asyncio
 import hashlib
 import itertools
 import json
+import re
 import types
 from typing import Any
 
 import pytest
+from waddle_sdk import event_dedupe
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.testing import (
@@ -17,6 +19,7 @@ from waddle_sdk.testing import (
     FakeIdentityHost,
     FakeKvHost,
     install_fake_kv_host,
+    rfc3339_from_millis,
 )
 
 import app
@@ -28,6 +31,7 @@ COMMUNITY = "comm-1"
 
 
 _MSG_IDS = itertools.count(1)
+_CURRENT_HOST: list[Any] = []
 
 
 def _next_msg_id() -> str:
@@ -37,6 +41,11 @@ def _next_msg_id() -> str:
 
 def _run(coro: Any) -> Any:
     return asyncio.run(coro)
+
+
+def _now_stamp(offset_seconds: int = 0) -> str:
+    """The ingest stamp of an event arriving NOW on the fake host clock (or that long ago/ahead)."""
+    return rfc3339_from_millis(_CURRENT_HOST[-1].now_ms + offset_seconds * 1000)
 
 
 class _Host:
@@ -59,6 +68,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> _Host:
     ident = FakeIdentityHost(members={ACTOR, TARGET}, actor=ACTOR)
     ident.add_mention("victim", TARGET)
     host = _Host(kv, eco, ident)
+    _CURRENT_HOST.append(host)
     import wit_world
 
     ns = wit_world.imports
@@ -115,7 +125,7 @@ def _envelope(command: str, **payload: Any) -> StageEnvelope:
                 "message_id": _next_msg_id(),
                 **payload,
             },
-            occurred_at="2026-10-05T00:00:00.000Z",
+            occurred_at=_now_stamp(),
         ),
         ts="2026-10-05T00:00:00.000Z",
     )
@@ -383,7 +393,7 @@ def _envelope_as(actor: str | None, command: str, **payload: Any) -> StageEnvelo
                 "message_id": _next_msg_id(),
                 **payload,
             },
-            occurred_at="2026-10-05T00:00:00.000Z",
+            occurred_at=_now_stamp(),
         ),
         ts="2026-10-05T00:00:00.000Z",
     )
@@ -687,6 +697,175 @@ def test_concurrent_duplicate_deliveries_settle_exactly_once(
     assert _kv_int(host, f"steal.attempts.{app._pseudonym(COMMUNITY, ACTOR)}") == 1
 
 
+@pytest.mark.parametrize("win", [False, True])
+@pytest.mark.parametrize("copies", [2, 6])
+def test_concurrent_duplicates_settle_once_even_with_no_cooldown_gate(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, win: bool, copies: int
+) -> None:
+    """regression: the old ring was a get-then-set (TOCTOU) only safe behind the cooldown CAS.
+
+    With the cooldown disabled nothing else serializes the copies: only the atomic per-event
+    `increment` can let exactly one through.
+    """
+    _world(host)
+    _no_cooldown(host)
+    # Lift the anti-collusion caps so they cannot incidentally refuse the losing copies: this test
+    # must be decided by the event claim alone.
+    monkeypatch.setattr(app, "PAIR_WINDOW_CAP", 10_000)
+    monkeypatch.setattr(app, "ACTOR_WINDOW_BUDGET", 10_000)
+    _yielding_kv_all(monkeypatch)
+    monkeypatch.setattr(app, "_roll", lambda percent: win)
+
+    async def race() -> None:
+        await asyncio.gather(
+            *(
+                dispatch(
+                    _envelope("steal", tokens=["victim"], message_id="race-2"), {}, http_client=None
+                )
+                for _ in range(copies)
+            )
+        )
+
+    _run(race())
+    assert len(host.eco.ledger) == (1 if win else 2), host.eco.ledger  # one wager | one transfer
+    assert _kv_int(host, f"steal.attempts.{app._pseudonym(COMMUNITY, ACTOR)}") == 1
+    assert len(host.relay_calls) == 1, "exactly one copy replies; every duplicate is silent"
+    assert len(_markers(host)) == 1
+
+
+def test_a_redelivery_older_than_any_ring_horizon_is_still_skipped(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: the last-16-ids ring forgot an event after 16 later steals (a replay)."""
+    _world(host)
+    _no_cooldown(host)
+    assert "caught" in (_go(host, monkeypatch, "victim", win=False, msg_id="oldest") or "")
+    for i in range(40):
+        assert "caught" in (_go(host, monkeypatch, "victim", win=False, msg_id=f"later-{i}") or "")
+    snap = _snapshot(host)
+    for win in (False, True):  # the same message, even if it would now roll the other way
+        assert _go(host, monkeypatch, "victim", win=win, msg_id="oldest") is None
+    assert _snapshot(host) == snap
+    assert _minted(host) == 0
+
+
+def _markers(host: _Host) -> list[str]:
+    return [k for k in host.kv.store if ".steal.seen." in k]
+
+
+def test_the_claim_is_one_ttl_increment_on_a_per_event_marker(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _go(host, monkeypatch, "victim", win=False, msg_id="m-ttl")
+    marker_calls = [c for c in host.kv.calls if ".steal.seen." in c[1][0]]
+    assert [c[0] for c in marker_calls] == ["get", "increment"]  # advisory peek, then the claim
+    assert marker_calls[1][1][1:] == (1, event_dedupe.SEEN_TTL_SECONDS)
+    assert not [c for c in host.kv.calls if c[0] == "set" and ".seen." in c[1][0]]
+
+
+def test_an_actor_on_cooldown_never_creates_a_marker(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One chatter's marker rate is bounded by its cooldown: refused attempts mint no keys."""
+    _world(host)
+    _go(host, monkeypatch, "victim", win=False)
+    assert len(_markers(host)) == 1
+    for _ in range(20):
+        assert "lay low" in (_go(host, monkeypatch, "victim", win=False) or "")
+    assert len(_markers(host)) == 1
+
+
+@pytest.mark.parametrize("age", [event_dedupe.MAX_EVENT_AGE_SECONDS + 1, 3600, 86_400 * 7])
+def test_an_event_too_old_to_dedupe_is_dropped_silently_and_moves_nothing(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, age: int
+) -> None:
+    """The marker TTL is the horizon, so an event past the age fence must never be processed."""
+    _world(host)
+    env = _envelope("steal", tokens=["victim"])
+    env.event.occurred_at = _now_stamp(-age)
+    snap = _snapshot(host)
+    _run(dispatch(env, {}, http_client=None))
+    assert host.relay_calls == [] and _snapshot(host) == snap
+    assert any("steal.stale_event_skipped" in m for _l, m, _f in host.log_calls)
+
+
+def test_an_event_at_the_age_limit_is_still_processed(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    monkeypatch.setattr(app, "_roll", lambda percent: False)
+    env = _envelope("steal", tokens=["victim"])
+    env.event.occurred_at = _now_stamp(-event_dedupe.MAX_EVENT_AGE_SECONDS)
+    _run(dispatch(env, {}, http_client=None))
+    assert "caught" in _reply(host)
+
+
+def test_a_replay_after_the_marker_lapsed_is_dropped_by_the_fence(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outage > marker TTL: the marker is gone, but the event is too old to be re-processed."""
+    _world(host)
+    _go(host, monkeypatch, "victim", win=True, msg_id="late-1")
+    host.expire(".steal.seen.")
+    host.expire(".steal.cd.")
+    host.now_ms += (event_dedupe.SEEN_TTL_SECONDS + 1) * 1000
+    snap = _snapshot(host)
+    env = _envelope("steal", tokens=["victim"], message_id="late-1")
+    env.event.occurred_at = rfc3339_from_millis(
+        host.now_ms - (event_dedupe.SEEN_TTL_SECONDS + 1) * 1000
+    )
+    _run(dispatch(env, {}, http_client=None))
+    assert _snapshot(host) == snap and len(host.eco.ledger) == 1
+
+
+@pytest.mark.parametrize("stamp", ["", "   ", "yesterday", "2026-10-05T00:00:00", None, 12345])
+def test_a_missing_or_malformed_occurred_at_fails_loud_and_moves_nothing(
+    host: _Host, stamp: Any
+) -> None:
+    _world(host)
+    env = _envelope("steal", tokens=["victim"])
+    env.event.occurred_at = stamp
+    with pytest.raises(RuntimeError, match="occurred_at"):
+        _run(dispatch(env, {}, http_client=None))
+    assert "unavailable" in _reply(host)
+    assert host.eco.ledger == [] and not host.kv.store
+
+
+def test_a_future_dated_event_fails_loud_and_moves_nothing(host: _Host) -> None:
+    _world(host)
+    env = _envelope("steal", tokens=["victim"])
+    env.event.occurred_at = _now_stamp(event_dedupe.EVENT_CLOCK_SKEW_SECONDS + 60)
+    with pytest.raises(RuntimeError, match="occurred_at"):
+        _run(dispatch(env, {}, http_client=None))
+    assert host.eco.ledger == [] and not host.kv.store
+
+
+def test_a_full_key_quota_fails_closed_and_moves_no_money(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host refuses a NEW key once 10,000 are live: the claim raises, so nothing settles."""
+    _world(host)
+    _no_cooldown(host)
+    import wit_world
+
+    real = wit_world.imports.kv.increment
+
+    def quota_full(key: str, delta: int, ttl: int) -> int:
+        if ".seen." in key:
+            raise RuntimeError("quota exceeded")
+        return real(key, delta, ttl)
+
+    wit_world.imports.kv.increment = quota_full
+    with pytest.raises(RuntimeError, match="backend failed"):
+        _go(host, monkeypatch, "victim", win=True, msg_id="q-1")
+    assert (
+        host.eco.ledger == []
+        and _kv_int(host, f"steal.wins.{app._pseudonym(COMMUNITY, ACTOR)}") == 0
+    )
+    assert "unavailable" in _reply(host)
+
+
 def test_the_claim_is_recorded_before_the_mutation(
     host: _Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -737,26 +916,42 @@ def test_list_usage_and_config_need_no_message_id(host: _Host) -> None:
     assert len(host.relay_calls) == 3
 
 
-def test_dedupe_state_is_one_pii_free_key_per_actor(
+def test_dedupe_state_is_one_pii_free_marker_per_event(
     host: _Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _world(host)
     _no_cooldown(host)
     for i in range(6):
         _go(host, monkeypatch, "victim", win=False, msg_id=f"private-platform-id-{i}")
-    assert len([k for k in host.kv.store if ".dedupe.steal." in k]) == 1
+    assert len(_markers(host)) == 6
+    for key in _markers(host):
+        assert re.fullmatch(rf"c\.{COMMUNITY}\.steal\.seen\.[0-9a-f]{{32}}", key)
     blob = " ".join(host.kv.store) + " ".join(v.decode() for v in host.kv.store.values())
     assert "private-platform-id" not in blob
     assert "private-platform-id" not in " ".join(f"{m} {f}" for _l, m, f in host.log_calls)
 
 
-def test_corrupt_dedupe_ring_fails_closed(host: _Host) -> None:
+@pytest.mark.parametrize("bad", [b"garbage", b"-5"])
+def test_a_corrupt_event_marker_never_lets_the_event_settle_again(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, bad: bytes
+) -> None:
+    """The peek sees an existing marker and skips; if the peek were raced past, `claim` raises."""
     _world(host)
-    pseud = app._pseudonym(COMMUNITY, ACTOR)
-    host.kv.store[_scoped_key(COMMUNITY, f"dedupe.steal.{pseud}")] = b"garbage"
+    _no_cooldown(host)
+    _go(host, monkeypatch, "victim", win=False, msg_id="corrupt-1")
+    (key,) = _markers(host)
+    host.kv.store[key] = bad
+    ledger, replies = list(host.eco.ledger), len(host.relay_calls)
+    assert _go(host, monkeypatch, "victim", win=False, msg_id="corrupt-1") is None
+    assert host.eco.ledger == ledger and len(host.relay_calls) == replies
+
+    async def peek_misses(*_a: Any, **_k: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(app.event_dedupe, "already_seen", peek_misses)
     with pytest.raises(RuntimeError, match="backend failed"):
-        _run(dispatch(_envelope("steal", tokens=["victim"]), {}, http_client=None))
-    assert host.eco.ledger == []
+        _go(host, monkeypatch, "victim", win=False, msg_id="corrupt-1")
+    assert host.eco.ledger == ledger
 
 
 # -- anti-collusion: pair cap, reciprocal block, per-actor budget ---------------
@@ -1011,3 +1206,80 @@ def test_cap_keys_are_pii_free_and_colon_free(host: _Host, monkeypatch: pytest.M
     blob = " ".join(f"{m} {f}" for _l, m, f in host.log_calls)
     for raw in (ACTOR, TARGET, "viewer-1", "platform-private-id"):
         assert raw not in blob
+
+
+# -- cap keys are TTL-bounded to their window ----------------------------------------------------
+
+_WIN_MS = app.WINDOW_SECONDS * 1000
+_GRACE_MS = app._SETTLE_GRACE_SECONDS * 1000
+
+
+def _increments(host: _Host) -> list[tuple[str, int, int]]:
+    """Every `(key, delta, ttl)` the fake kv saw an `increment` for."""
+    return [args for name, args in host.kv.calls if name == "increment"]
+
+
+def _cap_expiries(host: _Host) -> dict[str, list[int]]:
+    """Absolute expiry (ms) every cap-key `increment` asked for, by key family."""
+    out: dict[str, list[int]] = {"pair": [], "budget": []}
+    for key, _delta, ttl in _increments(host):
+        for family in out:
+            if f".steal.{family}." in key:
+                assert ttl > 0, f"{family} key written without a TTL (would hold quota forever)"
+                out[family].append(host.now_ms + ttl * 1000)
+    return out
+
+
+@pytest.mark.parametrize("into_window_s", [0, 1, 1800, 3599])
+def test_cap_keys_expire_at_the_end_of_their_window_not_a_fixed_span(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, into_window_s: int
+) -> None:
+    """A budget key lapses at the end of ITS window, a pair key at the end of the NEXT one."""
+    _world(host)
+    _no_cooldown(host)
+    host.now_ms = 700 * _WIN_MS + into_window_s * 1000
+    index = host.now_ms // _WIN_MS
+    _go(host, monkeypatch, "victim", win=True)
+    got = _cap_expiries(host)
+    assert got["pair"] and got["budget"], "the steal must have touched both cap families"
+    budget_end, pair_end = (index + 1) * _WIN_MS, (index + 2) * _WIN_MS
+    assert all(budget_end <= e <= budget_end + _GRACE_MS + 1000 for e in got["budget"])
+    assert all(pair_end <= e <= pair_end + _GRACE_MS + 1000 for e in got["pair"])
+
+
+def test_a_budget_key_made_late_in_a_window_is_not_given_a_fresh_full_window(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _world(host)
+    _no_cooldown(host)
+    host.now_ms = 700 * _WIN_MS + (app.WINDOW_SECONDS - 1) * 1000
+    _go(host, monkeypatch, "victim", win=True)
+    budget_ttls = [ttl for key, _d, ttl in _increments(host) if ".steal.budget." in key]
+    assert budget_ttls and max(budget_ttls) <= 1 + app._SETTLE_GRACE_SECONDS + 1
+
+
+def test_every_cap_key_write_carries_a_ttl_through_reserve_refund_and_release(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Win (reserve + refund of the unused loot), loss (reserve + full release), clamp, refusal."""
+    _world(host)
+    _no_cooldown(host)
+    monkeypatch.setattr(app, "PAIR_WINDOW_CAP", 150)
+    for win in (True, False, True, True):
+        _go(host, monkeypatch, "victim", win=win)
+    writes = [
+        (key, ttl)
+        for key, _d, ttl in _increments(host)
+        if ".steal.pair." in key or ".steal.budget." in key
+    ]
+    assert len(writes) >= 12
+    assert all(ttl > 0 for _key, ttl in writes)
+    assert all(ttl <= 2 * app.WINDOW_SECONDS + app._SETTLE_GRACE_SECONDS for _key, ttl in writes)
+
+
+@pytest.mark.parametrize("now_ms", [0, 1, _WIN_MS - 1, _WIN_MS, 5 * _WIN_MS + 123])
+def test_bucket_ttls_are_positive_and_bounded(now_ms: int) -> None:
+    bucket = app._Bucket.at(now_ms)
+    assert bucket.index == now_ms // _WIN_MS
+    assert 0 < bucket.budget_ttl <= app.WINDOW_SECONDS + app._SETTLE_GRACE_SECONDS
+    assert bucket.budget_ttl < bucket.pair_ttl <= 2 * app.WINDOW_SECONDS + app._SETTLE_GRACE_SECONDS

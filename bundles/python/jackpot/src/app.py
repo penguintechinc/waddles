@@ -31,14 +31,22 @@ Commands:
 
 Replay safety (at-most-once): the pipeline is at-least-once, and a redelivered loss would credit
 the pot a second time (the host dedupes the `wager` per event, the kv pot credit is ours). The
-inbound `message_id` (forwarded by `transform`) is recorded via `waddle_sdk.event_dedupe` AFTER the
-atomic per-actor cooldown and BEFORE any money or pot mutation; a redelivery is skipped silently
-(no wager, no pot credit, no reply). A crash between the claim and the pot credit therefore loses
-one stake into the void (never a double credit); a payload with no `message_id` fails loud.
+inbound `message_id` (forwarded by `transform`) is claimed via `waddle_sdk.event_dedupe` -- ONE
+atomic `kv.increment` on a per-event, TTL'd marker (`1` = first delivery) -- AFTER the atomic
+per-actor cooldown and BEFORE any money or pot mutation; a redelivery is skipped silently (no
+wager, no pot credit, no reply). The increment is race-free (two concurrent copies cannot both see
+`1`) and has no 16-event horizon; the marker's TTL is closed by an age fence (an event ingested
+more than `event_dedupe.MAX_EVENT_AGE_SECONDS` ago is dropped, never processed), so a redelivery is
+deduped or dropped, never replayed. A crash between the claim and the pot credit therefore loses
+one stake into the void (never a double credit); a payload with no `message_id`, or no valid
+`occurred_at`, fails loud. The claim comes after the cooldown, so one chatter's marker rate is
+bounded by its own cooldown; a full 10,000-key quota fails CLOSED (the play is refused) and heals
+as markers lapse -- the residual is a swarm of funded accounts, bounded properly only by a host
+per-actor kv rate limit (follow-up).
 
 PII-free: kv keys/logs carry only `jackpot.pot`, `jackpot.cd.<pseudonym>` and
-`dedupe.jackpot.<pseudonym>` where the pseudonym is SHA-256(community|resolved-uuid) (the dedupe
-ring stores truncated hashes of the platform message id, never the id); logs carry
+`jackpot.seen.<digest>` where the pseudonym is SHA-256(community|resolved-uuid) and the digest is a
+truncated SHA-256 of the platform-prefixed message id (never the id); logs carry
 `op`/`outcome`/`amount_bucket`/error-case only.
 Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
 decides whether this bundle runs.
@@ -187,27 +195,35 @@ class _Pot:
         )
         raise RuntimeError(f"jackpot {op} failed: {case_name}") from exc
 
-    async def event_id(self, payload: dict[str, Any], platform: str) -> str:
-        """Return the replay-stable event id, or fail loud (log, reply, raise) if there is none."""
+    async def event_id(
+        self, payload: dict[str, Any], platform: str, occurred_at: str
+    ) -> str | None:
+        """Return the replay-stable event id, or `None` if the event is too old to process.
+
+        Fails loud (log, reply, raise) when there is no usable id or ingest stamp: an event whose
+        identity or age cannot be established is never processed unguarded.
+        """
         try:
-            return event_dedupe.event_id_from_payload(payload, platform=platform)
+            event_id = event_dedupe.event_id_from_payload(payload, platform=platform)
+            fresh = event_dedupe.is_fresh(occurred_at)
         except event_dedupe.EventIdError as exc:
             await self.fail(exc, "event_id")
+        return event_id if fresh else None
 
-    async def seen(self, pseudonym: str, event_id: str) -> bool:
-        """Read-only: True if this actor already claimed this event (a redelivery)."""
+    async def seen(self, event_id: str) -> bool:
+        """Read-only, advisory: True if this event was already claimed (a redelivery)."""
         try:
             return await event_dedupe.already_seen(
-                self._community, namespace=_DEDUPE_NAMESPACE, subject=pseudonym, event_id=event_id
+                self._community, namespace=_DEDUPE_NAMESPACE, event_id=event_id
             )
         except Exception as exc:  # noqa: BLE001 - classified in `fail`
             await self.fail(exc, "dedupe")
 
-    async def claim_event(self, pseudonym: str, event_id: str) -> bool:
-        """Record the event BEFORE any mutation; False means a duplicate that must be skipped."""
+    async def claim_event(self, event_id: str) -> bool:
+        """Atomically claim the event BEFORE any mutation; False means a duplicate to skip."""
         try:
             return await event_dedupe.claim(
-                self._community, namespace=_DEDUPE_NAMESPACE, subject=pseudonym, event_id=event_id
+                self._community, namespace=_DEDUPE_NAMESPACE, event_id=event_id
             )
         except Exception as exc:  # noqa: BLE001 - classified in `fail`
             await self.fail(exc, "dedupe")
@@ -288,17 +304,21 @@ async def _play(
     username: str,
     payload: dict[str, Any],
     platform: str,
+    occurred_at: str,
 ) -> str | None:
     """Validate, stake, roll, and settle one jackpot entry; returns the chat reply.
 
-    Returns `None` for a redelivered event (already claimed): nothing is mutated or sent.
+    Returns `None` for a redelivered or too-old event: nothing is mutated or sent.
     """
     stake = _parse_stake(arg)
     try:
         actor_uuid = await identity.resolve_actor()
-        event_id = await pot.event_id(payload, platform)
+        event_id = await pot.event_id(payload, platform, occurred_at)
+        if event_id is None:
+            log.info("jackpot.stale_event_skipped", op="fence")
+            return None
         pseudonym = _pseudonym(community, actor_uuid)
-        if await pot.seen(pseudonym, event_id):
+        if await pot.seen(event_id):
             log.info("jackpot.redelivery_skipped", op="seen")
             return None
         held = await economy.balance(actor_uuid)
@@ -318,7 +338,7 @@ async def _play(
 
     if not await pot.cooldown_claim(pseudonym):
         return f"slow down, {username}! try again in a few seconds."
-    if not await pot.claim_event(pseudonym, event_id):
+    if not await pot.claim_event(event_id):
         log.info("jackpot.redelivery_skipped", op="claim")
         return None
 
@@ -431,6 +451,7 @@ async def dispatch(
                 username=username,
                 payload=payload,
                 platform=provider,
+                occurred_at=envelope.event.occurred_at,
             )
         except CommandUsageError as exc:
             reply = str(exc)

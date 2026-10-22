@@ -39,6 +39,7 @@ from __future__ import annotations
 import sys
 import types
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from waddle_sdk.kv import InvalidKvKeyError, validate_key
@@ -55,7 +56,18 @@ __all__ = [
     "install_fake_identity_host",
     "install_fake_kv_host",
     "install_fake_reputation_host",
+    "rfc3339_from_millis",
 ]
+
+
+def rfc3339_from_millis(millis: int) -> str:
+    """Render epoch milliseconds as the RFC 3339 ``...Z`` stamp ``svc-ingest`` puts on an event.
+
+    For tests that must give an event an ``occurred_at`` consistent with a fake clock (the age
+    fence in ``waddle_sdk.event_dedupe`` compares it to ``clock.now_millis()``).
+    """
+    stamp = datetime.fromtimestamp(millis // 1000, tz=UTC)
+    return f"{stamp:%Y-%m-%dT%H:%M:%S}.{millis % 1000:03d}Z"
 
 
 @dataclass(slots=True)

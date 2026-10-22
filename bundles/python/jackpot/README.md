@@ -29,11 +29,24 @@ Activation-gated only -- no feature flag (installed -> enabled -> activated).
 
 The pipeline is at-least-once. The host dedupes the `wager` per event, but the pot credit is ours:
 a redelivered loss used to credit the pot a second time, and a pot credited twice pays out money
-that was debited once. `transform` forwards the platform `message_id`; `dispatch` records it
-(`waddle_sdk.event_dedupe`, one ring key per actor) after the atomic cooldown and **before any
-wager or pot mutation**, and skips a redelivery silently (no wager, no credit, no reply). A crash
-after the claim loses one stake into the void (never a double credit); a payload with no
-`message_id` fails loud and moves nothing. The ring remembers the last 16 events per actor.
+that was debited once. `transform` forwards the platform `message_id`; `dispatch` claims it
+(`waddle_sdk.event_dedupe`) after the atomic cooldown and **before any wager or pot mutation**
+with ONE atomic `kv.increment` on a per-event, TTL'd marker (`1` = first delivery, `> 1` =
+redelivery or a concurrent duplicate), and skips a redelivery silently (no wager, no credit, no
+reply). The increment is race-free and has no 16-event horizon. A crash after the claim loses one
+stake into the void (never a double credit).
+
+The marker's TTL is the horizon, closed by an age fence: an event whose ingest stamp
+(`occurred_at`) is older than `event_dedupe.MAX_EVENT_AGE_SECONDS` (10 min) is dropped silently,
+never processed -- so a redelivery is deduped or dropped, never replayed. A payload with no
+`message_id`, or no valid `occurred_at`, fails loud and moves nothing. The claim comes after the
+cooldown, so an actor on cooldown never creates a marker.
+
+Quota (residual): markers live 15 min under kv's 10,000-key quota, whose units are reclaimed on
+TTL expiry (host fix `4ad3eaae`, **a prerequisite** -- without it every TTL'd key leaks a unit). A
+full quota fails closed (the play is refused, no money moves) and heals as markers lapse; a swarm
+of linked, funded accounts can still hold it full (each is bounded by the 10 s cooldown). The
+proper bound is a host-level per-actor kv new-key / write-rate limit (follow-up).
 
 ## Permissions (V2)
 
@@ -48,9 +61,9 @@ Uses `economy`/`identity` (`world stage-next` imports) -- build against that wor
 
 ## PII
 
-kv keys: `jackpot.pot`, `jackpot.cd.<sha256(community|uuid)>`, `dedupe.jackpot.<sha256(community|uuid)>`
-(truncated hashes of the platform message id, never the id) only (`.`-joined, never `:`). Logs carry
-`op`/`outcome`/`amount_bucket`/error-case only -- no names, uuids or message text.
+kv keys: `jackpot.pot`, `jackpot.cd.<sha256(community|uuid)>`, `jackpot.seen.<d>` where `d` is a
+truncated SHA-256 of the platform-prefixed message id (never the id) only (`.`-joined, never `:`).
+Logs carry `op`/`outcome`/`amount_bucket`/error-case only -- no names, uuids or message text.
 
 ## Output safety
 

@@ -58,19 +58,31 @@ live mention on Twitch. Mention detection therefore runs on the text as written 
 the host will leave it (``\t\r\n`` removed), and the space goes in at the sigil in the written
 text, which breaks both views.
 
+**Completion leads.** A model completion is attacker-influenced and is relayed raw, so one that
+STARTS with ``/`` or ``.`` (Twitch/IRC run it as the bot's own command) or ``!`` (re-triggers other
+bots) would be executed by the platform, not read. :func:`guard_leading_command` is the one shared
+guard every ``ai.generate`` bundle puts last in its reply path; it is separate from
+:func:`sanitize_user_text` because it must look at the lead of the FINAL reply (an emoji or prefix
+the bundle builds around the completion decides what leads), not at the completion alone.
+
 Deliberately dependency-free (no ``wit_world`` / kv imports): pure text in, text out.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from bisect import bisect_right
 from collections.abc import Iterable
 
 __all__ = [
+    "COMMAND_LEADS",
+    "SAFE_LEAD",
     "ZERO_WIDTH_SPACE",
     "defang_mentions",
     "escape_egress_tokens",
+    "guard_leading_command",
+    "leads_with_command",
     "sanitize_user_text",
     "strip_control_chars",
 ]
@@ -79,6 +91,14 @@ __all__ = [
 #: not a control character (Unicode category Cf), so every send path in ``core/svc_action``
 #: (``sanitize_irc_component`` strips only ``char::is_control`` / category Cc) preserves it.
 ZERO_WIDTH_SPACE = "\u200b"
+
+#: Twitch/IRC treat a leading ``/`` or ``.`` as a chat command and ``!`` re-triggers other bots.
+COMMAND_LEADS = ("/", ".", "!")
+
+#: Visible prefix put in front of a reply that would otherwise START with a :data:`COMMAND_LEADS`
+#: character, so no platform can parse it as a command. Not a control character (the host strips
+#: only those), so it survives every send path.
+SAFE_LEAD = "\U0001f4ac "
 
 #: Mirrors ``core/egress_detokenizer/src/lib.rs::TOKEN_PREFIX``.
 _PLACEHOLDER_OPEN = "{user:"
@@ -420,3 +440,31 @@ def sanitize_user_text(text: str, *, allow_tokens: Iterable[str] = ()) -> str:
         else:
             masked.append(_escape_plain(strip_control_chars(piece)))
     return _restore_live(_defang_masked("".join(masked)), live)
+
+
+def leads_with_command(text: str) -> bool:
+    """Return True if the first VISIBLE character of ``text`` is a chat-command lead.
+
+    "Visible" mirrors what the host's send path leaves behind: control (``Cc``) and format
+    (``Cf``: zero-width, bidi, Unicode tag characters) code points are dropped and leading
+    whitespace skipped before the lead is tested, so a ``/ban`` hidden behind a zero-width space
+    or a NUL still counts as leading with ``/`` exactly as the platform will see it.
+    """
+    _require_str(text, "text")
+    visible = "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf"))
+    return visible.lstrip().startswith(COMMAND_LEADS)
+
+
+def guard_leading_command(text: str) -> str:
+    """Return ``text`` unchanged, or prefixed with :data:`SAFE_LEAD` if it would lead a command.
+
+    Call it LAST on the complete reply of any bundle that relays model output (every
+    ``ai.generate`` bundle), after :func:`sanitize_user_text` and after any emoji/label the bundle
+    puts in front of the completion -- the guard has to see what actually leads the final text.
+    It is idempotent (a guarded reply leads with :data:`SAFE_LEAD`, which is not a command lead)
+    and leaves every reply that already leads safely byte-identical.
+
+    Raises:
+        TypeError: ``text`` is not a ``str``.
+    """
+    return SAFE_LEAD + text if leads_with_command(text) else text

@@ -27,7 +27,8 @@ emit `{user:<token>}` placeholders, `@everyone`, or a chat command such as `/ban
 through `waddle_sdk.safe_text.sanitize_user_text` LAST, immediately before it enters the reply. No
 `allow_tokens`: nothing in model output is ever a host-minted mention. A reply that would START
 with a command lead (`/`, `.`, `!` -- Twitch/IRC run `/`/`.` as the bot's own commands and `!`
-re-triggers other bots) gets a visible `_SAFE_LEAD` prefix so it can never be parsed as one.
+re-triggers other bots) is passed through `waddle_sdk.safe_text.guard_leading_command`, which
+gives it a visible prefix so it can never be parsed as one.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from typing import Any, NoReturn
 from waddle_sdk import ai, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.safe_text import sanitize_user_text
+from waddle_sdk.safe_text import guard_leading_command, sanitize_user_text
 
 SPEC = CommandSpec(name="ask")
 
@@ -51,10 +52,6 @@ REFUSE_TOKEN = "REFUSE"
 _USAGE = "Usage: !ask <question>  (e.g. !ask why is the sky blue)"
 _REFUSAL_REPLY = "Sorry, I can't help with that one. Try asking something else!"
 
-#: Twitch/IRC treat a leading `/` or `.` as a chat command and `!` re-triggers other bots; the
-#: model completion is attacker-influenced, so a reply may never START with one of these.
-_UNSAFE_LEAD = ("/", ".", "!")
-_SAFE_LEAD = "\U0001f4ac "
 
 #: Look-alike angle brackets (fullwidth/small/single-guillemet/mathematical/CJK/dingbat) folded to
 #: ASCII so the XML escape below catches them too. Plain quotes such as `\u00ab \u00bb` are kept.
@@ -174,14 +171,6 @@ def _parse(rest: str) -> str:
     return question
 
 
-def _leads_with_command(reply: str) -> bool:
-    """True if `reply`'s first visible character is a chat-command lead (`/`, `.`, `!`)."""
-    visible = "".join(
-        ch for ch in reply if unicodedata.category(ch) not in ("Cc", "Cf")
-    )
-    return visible.lstrip().startswith(_UNSAFE_LEAD)
-
-
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: match `!ask`, call the AI host, build the reply.
 
@@ -233,8 +222,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
                 )
             else:
                 reply = sanitize_user_text(cleaned)
-                if _leads_with_command(reply):
-                    reply = _SAFE_LEAD + reply
+                guarded = guard_leading_command(reply)
+                if guarded != reply:
+                    reply = guarded
                     log.info("ask.command_lead_neutralized", platform=event.platform)
                 log.info(
                     "ask.transform matched",

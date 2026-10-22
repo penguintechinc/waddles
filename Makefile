@@ -78,15 +78,18 @@ check-no-stubs:
 
 # Bundle hygiene gates (.github/workflows/bundle-hygiene.yml): raw user input in
 # bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, broad
-# silent `except` swallows, and role badges (`is_mod`, ...) read through Python
+# silent `except` swallows, role badges (`is_mod`, ...) read through Python
 # truthiness (`bool("false")` is True -> mod-gate bypass) in bundles AND the
-# legacy svc-ingest tree. Each prints the count it examined and exits non-zero on
-# a hit (or on zero examined). Needs PyYAML for the manifest check.
+# legacy svc-ingest tree, and an `ai.generate` bundle that does not guard its
+# reply lead against a completion starting with `/`, `.` or `!` (pytest gate).
+# Each prints the count it examined and exits non-zero on a hit (or on zero
+# examined). Needs PyYAML for the manifest check and pytest for the AI-lead gate.
 check-bundle-hygiene:
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check log-pii
 	@python3 scripts/ci/check-bundle-manifest-permissions.py
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
+	@python3 -m pytest scripts/ci/tests/test_ai_output_lead_gate.py -q -p no:cacheprovider
 
 # builtin_handlers -> Rust-path/bundle inventory gate (gh #840 PR4): FAILS if a live Python
 # ingest/process/action handler has no mapping in .ci/builtin-handler-map.yaml, a covered

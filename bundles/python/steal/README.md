@@ -54,14 +54,33 @@ paid from that pot), which conserves currency but changes the game.
 
 - The cooldown is one `kv.increment` on a TTL'd key (`kv.increment` is the only compare-and-swap):
   exactly one of any number of concurrent steals by one actor wins the window. `set cooldown 0`
-  disables the gate (and with it the serialization the replay ring relies on -- see below).
-- The pipeline is at-least-once. `transform` forwards the platform `message_id`; `dispatch`
-  records it (`waddle_sdk.event_dedupe`, one ring key per actor) after the cooldown and **before any
-  mutation**, and skips a redelivery silently (no money, stat, cap or reply). At-most-once by
-  design: a crash after the claim loses one attempt, never repeats it. A payload with no
-  `message_id` fails loud. The ring remembers the last 16 events per actor and is read-modify-write,
-  so with the cooldown disabled two same-instant deliveries of one event can race it (the host's
-  per-event wager/transfer idempotency still bounds the money).
+  disables the gate; replay safety does not depend on it.
+- The pipeline is at-least-once. `transform` forwards the platform `message_id`; `dispatch` claims
+  it (`waddle_sdk.event_dedupe`) after the cooldown and **before any mutation** with ONE atomic
+  `kv.increment` on a per-event, TTL'd marker (`1` = first delivery, `> 1` = redelivery or a
+  concurrent duplicate), and skips a redelivery silently (no money, stat, cap or reply). The
+  increment is race-free with or without a cooldown and has no 16-event horizon. At-most-once by
+  design: a crash after the claim loses one attempt, never repeats it.
+- The marker's TTL is the horizon, closed by an age fence: an event whose ingest stamp
+  (`occurred_at`) is older than `event_dedupe.MAX_EVENT_AGE_SECONDS` (10 min) is dropped silently,
+  never processed, so a redelivery is deduped or dropped but never replayed. A payload with no
+  `message_id`, or no valid `occurred_at`, fails loud.
+- The claim comes after the cooldown on purpose: an actor on cooldown never creates a marker.
+
+## Key quota (residual DoS -- read this)
+
+kv allows 10,000 live keys per (app, community); a key's quota unit is reclaimed when its TTL
+lapses (host fix `4ad3eaae`, **a prerequisite** -- without it every TTL'd key here leaks a unit
+and the bundle dies after 10,000 events). Every cap key is TTL-bounded to its window (a budget
+key lapses at the end of its window, a pair key at the end of the next, plus a 60 s settle grace),
+and a replay marker lives 15 min. A full quota fails **closed**: new keys are refused, steals reply
+"unavailable", no money moves, and it heals as keys lapse. What is NOT closed: an attacker with
+many linked, funded accounts can still create live keys faster than they lapse (a pair key per
+distinct target, ~2 h each) -- bounded per account by the cooldown (60 s default => <= 60
+steals/h) and, with `set cooldown 0`, only by the platform's chat rate limit. The per-actor
+`steal.attempts.<p>` / `steal.wins.<p>` counters have no TTL (2 permanent keys per player, ~5,000
+players fills the quota for good). The proper fix is host-level: a per-actor kv new-key /
+write-rate limit (only the host knows the actor); tracked as a follow-up.
 
 ## Permissions (V2)
 
@@ -71,9 +90,10 @@ paid from that pot), which conserves currency but changes the game.
 ## State and privacy
 
 kv keys (`steal.cd.<p>`, `steal.attempts.<p>`, `steal.wins.<p>`, `steal.budget.<window>.<p>`,
-`steal.pair.<window>.<h>`, `dedupe.steal.<p>`, `steal.config.cooldown`) use `.` separators (never
-`:`) with `p = sha256(community:actor_uuid)` and `h = sha256(community|sorted pair)`. No usernames,
-uuids or platform message ids in keys or logs.
+`steal.pair.<window>.<h>`, `steal.seen.<d>`, `steal.config.cooldown`) use `.` separators (never
+`:`) with `p = sha256(community:actor_uuid)`, `h = sha256(community|sorted pair)` and
+`d = sha256(platform|message_id)[:32]`. No usernames, uuids or platform message ids in keys or
+logs.
 
 ## Gating
 

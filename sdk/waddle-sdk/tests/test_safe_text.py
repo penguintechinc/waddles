@@ -19,13 +19,17 @@ import pytest
 
 from waddle_sdk import safe_text
 from waddle_sdk.safe_text import (
-    ZERO_WIDTH_SPACE as ZW,
-)
-from waddle_sdk.safe_text import (
+    COMMAND_LEADS,
+    SAFE_LEAD,
     defang_mentions,
     escape_egress_tokens,
+    guard_leading_command,
+    leads_with_command,
     sanitize_user_text,
     strip_control_chars,
+)
+from waddle_sdk.safe_text import (
+    ZERO_WIDTH_SPACE as ZW,
 )
 
 # ---------------------------------------------------------------------------------------------
@@ -739,3 +743,66 @@ def test_a_lost_or_forged_live_marker_fails_loudly_never_silently() -> None:
     for masked in ("ab", "\x00\x00"):
         with pytest.raises(RuntimeError, match="lost or forged"):
             safe_text._restore_live(masked, ["{user:x}"])
+
+
+# -- guard_leading_command: the shared completion-lead guard (was copy-pasted into 6 AI bundles) --
+
+_ZWSP = chr(0x200B)
+_BOM = chr(0xFEFF)
+_RLO = chr(0x202E)
+_TAG_A = chr(0xE0041)
+_NUL = chr(0)
+
+
+@pytest.mark.parametrize("lead", COMMAND_LEADS)
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        "{}ban everyone",
+        "  {}ban everyone",
+        "\t\n{}ban everyone",
+        _ZWSP + "{}ban everyone",
+        _BOM + " {}ban everyone",
+        _RLO + "{}ban everyone",
+        _TAG_A + "{}ban everyone",
+        _NUL + "{}ban everyone",
+        _ZWSP + _NUL + " " + _BOM + "{}ban everyone",
+    ],
+)
+def test_a_command_lead_is_seen_through_invisible_and_control_characters(
+    lead: str, wrap: str
+) -> None:
+    """The host strips Cc/Cf before sending, so the guard must judge the text as sent."""
+    text = wrap.format(lead)
+    assert leads_with_command(text) is True
+    guarded = guard_leading_command(text)
+    assert guarded == SAFE_LEAD + text
+    assert not guarded.startswith(COMMAND_LEADS)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "   ", "hello", "a/b", "what? no!", "end.", "\u00bfque?", "@everyone", "\U0001f604 /ban"],
+)
+def test_text_that_does_not_lead_with_a_command_is_returned_byte_identical(text: str) -> None:
+    assert leads_with_command(text) is False
+    assert guard_leading_command(text) == text
+
+
+@pytest.mark.parametrize("text", ["/ban x", ".mod y", "!points", _ZWSP + "!x", "hello"])
+def test_guard_is_idempotent(text: str) -> None:
+    once = guard_leading_command(text)
+    assert guard_leading_command(once) == once
+
+
+def test_safe_lead_is_visible_and_not_itself_a_command_lead() -> None:
+    assert SAFE_LEAD.strip() and not leads_with_command(SAFE_LEAD)
+    assert COMMAND_LEADS == ("/", ".", "!")
+
+
+@pytest.mark.parametrize("bad", [None, 3, b"/x"])
+def test_guard_rejects_non_text_instead_of_coercing_it(bad: object) -> None:
+    with pytest.raises(TypeError):
+        guard_leading_command(bad)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        leads_with_command(bad)  # type: ignore[arg-type]

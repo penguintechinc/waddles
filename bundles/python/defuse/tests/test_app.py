@@ -6,10 +6,12 @@ import asyncio
 import hashlib
 import itertools
 import json
+import re
 import types
 from typing import Any
 
 import pytest
+from waddle_sdk import event_dedupe
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.testing import (
@@ -17,6 +19,7 @@ from waddle_sdk.testing import (
     FakeIdentityHost,
     FakeKvHost,
     install_fake_kv_host,
+    rfc3339_from_millis,
 )
 
 import app
@@ -27,6 +30,7 @@ COMMUNITY = "comm-1"
 
 
 _MSG_IDS = itertools.count(1)
+_CURRENT_HOST: list[Any] = []
 
 
 def _next_msg_id() -> str:
@@ -36,6 +40,11 @@ def _next_msg_id() -> str:
 
 def _run(coro: Any) -> Any:
     return asyncio.run(coro)
+
+
+def _now_stamp(offset_seconds: int = 0) -> str:
+    """The ingest stamp of an event arriving NOW on the fake host clock (or that long ago/ahead)."""
+    return rfc3339_from_millis(_CURRENT_HOST[-1].now_ms + offset_seconds * 1000)
 
 
 class _Host:
@@ -57,6 +66,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> _Host:
     eco.balances = {ACTOR: 500}
     ident = FakeIdentityHost(members={ACTOR}, actor=ACTOR)
     host = _Host(kv, eco, ident)
+    _CURRENT_HOST.append(host)
     import wit_world
 
     ns = wit_world.imports
@@ -113,7 +123,7 @@ def _envelope(command: str, **payload: Any) -> StageEnvelope:
                 "message_id": _next_msg_id(),
                 **payload,
             },
-            occurred_at="2026-10-05T00:00:00.000Z",
+            occurred_at=_now_stamp(),
         ),
         ts="2026-10-05T00:00:00.000Z",
     )
@@ -361,7 +371,7 @@ def _envelope_as(actor: str | None, command: str, **payload: Any) -> StageEnvelo
                 "message_id": _next_msg_id(),
                 **payload,
             },
-            occurred_at="2026-10-05T00:00:00.000Z",
+            occurred_at=_now_stamp(),
         ),
         ts="2026-10-05T00:00:00.000Z",
     )
@@ -528,7 +538,7 @@ def test_a_refused_stake_does_not_burn_the_cooldown_or_the_event(
     host.eco.balances[ACTOR] = 20
     host.eco.max_bet_cap = 20
     assert _go(host, monkeypatch, win=True, arg=arg, msg_id="poor-1") is not None
-    assert not any(".defuse.cd." in k or ".dedupe.defuse." in k for k in host.kv.store)
+    assert not any(".defuse.cd." in k or ".defuse.seen." in k for k in host.kv.store)
     assert "DEFUSED" in (_go(host, monkeypatch, win=True, arg="5", msg_id="poor-2") or "")
 
 
@@ -652,21 +662,188 @@ def test_list_usage_and_config_need_no_message_id(host: _Host) -> None:
     assert len(host.relay_calls) == 3
 
 
-def test_dedupe_state_is_one_pii_free_key_per_actor(
+def _markers(host: _Host) -> list[str]:
+    return [k for k in host.kv.store if ".defuse.seen." in k]
+
+
+def test_dedupe_state_is_one_pii_free_marker_per_event(
     host: _Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for i in range(6):
         host.expire(".defuse.cd.")
         _go(host, monkeypatch, win=False, msg_id=f"private-platform-id-{i}")
-    assert len([k for k in host.kv.store if ".dedupe.defuse." in k]) == 1
+    assert len(_markers(host)) == 6, "exactly one marker per processed event"
+    for key in _markers(host):
+        assert re.fullmatch(rf"c\.{COMMUNITY}\.defuse\.seen\.[0-9a-f]{{32}}", key)
     blob = " ".join(host.kv.store) + " ".join(v.decode() for v in host.kv.store.values())
     assert "private-platform-id" not in blob
     assert "private-platform-id" not in " ".join(f"{m} {f}" for _l, m, f in host.log_calls)
 
 
-def test_corrupt_dedupe_ring_fails_closed(host: _Host) -> None:
-    pseud = app._pseudonym(COMMUNITY, ACTOR)
-    host.kv.store[_scoped_key(COMMUNITY, f"dedupe.defuse.{pseud}")] = b"garbage"
+@pytest.mark.parametrize("bad", [b"garbage", b"-5"])
+def test_a_corrupt_event_marker_never_lets_the_event_play_again(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, bad: bytes
+) -> None:
+    """The peek sees an existing marker and skips; if the peek were raced past, `claim` raises."""
+    _go(host, monkeypatch, win=False, msg_id="corrupt-1")
+    (key,) = _markers(host)
+    host.kv.store[key] = bad
+    host.expire(".defuse.cd.")
+    ledger, replies = list(host.eco.ledger), len(host.relay_calls)
+    assert _go(host, monkeypatch, win=False, msg_id="corrupt-1") is None
+    assert host.eco.ledger == ledger and len(host.relay_calls) == replies
+
+    async def peek_misses(*_a: Any, **_k: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(app.event_dedupe, "already_seen", peek_misses)
+    host.expire(".defuse.cd.")
     with pytest.raises(RuntimeError, match="backend failed"):
-        _run(dispatch(_envelope("play", arg="5"), {}, http_client=None))
-    assert host.eco.ledger == []
+        _go(host, monkeypatch, win=False, msg_id="corrupt-1")
+    assert host.eco.ledger == ledger
+
+
+def test_a_redelivery_older_than_any_ring_horizon_is_still_skipped(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: the last-16-ids ring forgot an event after 16 later plays (a replayed wager)."""
+    _go(host, monkeypatch, win=False, msg_id="oldest")
+    for i in range(40):
+        host.expire(".defuse.cd.")
+        _go(host, monkeypatch, win=False, msg_id=f"later-{i}")
+    snap = (dict(host.eco.balances), _wagers(host), _stat(host, "plays"))
+    for win in (False, True):  # even a redelivery that would now roll the other way
+        host.expire(".defuse.cd.")
+        assert _go(host, monkeypatch, win=win, msg_id="oldest") is None
+    assert (dict(host.eco.balances), _wagers(host), _stat(host, "plays")) == snap
+
+
+@pytest.mark.parametrize("copies", [2, 6])
+def test_concurrent_duplicates_play_once_even_with_no_cooldown_gate(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, copies: int
+) -> None:
+    """regression: the ring was a get-then-set (TOCTOU) only safe behind the cooldown CAS.
+
+    With the cooldown gate out of the picture only the atomic per-event `increment` can let
+    exactly one copy through.
+    """
+    _yielding_kv_all(monkeypatch)
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    real_inc = app.community_kv.increment
+
+    async def inc(c: str | None, k: str, d: int, ttl: int = 0) -> int:
+        if ".defuse.cd." in k or "defuse.cd." in k:
+            await asyncio.sleep(0)
+            return 1  # the cooldown always lets the caller through
+        return await real_inc(c, k, d, ttl)
+
+    monkeypatch.setattr(app.community_kv, "increment", inc)
+
+    async def race() -> None:
+        await asyncio.gather(
+            *(
+                dispatch(_envelope("play", arg="5", message_id="race-2"), {}, http_client=None)
+                for _ in range(copies)
+            )
+        )
+
+    _run(race())
+    assert _wagers(host) == 1 and _stat(host, "plays") == 1 and len(_markers(host)) == 1
+
+
+def test_the_claim_is_one_ttl_increment_on_a_per_event_marker(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _go(host, monkeypatch, win=False, msg_id="m-ttl")
+    marker_calls = [c for c in host.kv.calls if ".defuse.seen." in c[1][0]]
+    assert [c[0] for c in marker_calls] == ["get", "increment"]  # advisory peek, then the claim
+    assert marker_calls[1][1][1:] == (1, event_dedupe.SEEN_TTL_SECONDS)
+
+
+def test_an_actor_on_cooldown_never_creates_a_marker(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One chatter's marker rate is bounded by its cooldown: refused attempts mint no keys."""
+    _go(host, monkeypatch, win=False)
+    assert len(_markers(host)) == 1
+    for _ in range(20):
+        assert "easy" in (_go(host, monkeypatch, win=False) or "")
+    assert len(_markers(host)) == 1
+
+
+@pytest.mark.parametrize("age", [event_dedupe.MAX_EVENT_AGE_SECONDS + 1, 3600, 86_400 * 7])
+def test_an_event_too_old_to_dedupe_is_dropped_silently_and_moves_nothing(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, age: int
+) -> None:
+    """The marker TTL is the horizon, so an event past the age fence must never be processed."""
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    env = _envelope("play", arg="5")
+    env.event.occurred_at = _now_stamp(-age)
+    _run(dispatch(env, {}, http_client=None))
+    assert host.relay_calls == [] and not host.kv.store and host.eco.ledger == []
+    assert any("defuse.stale_event_skipped" in m for _l, m, _f in host.log_calls)
+
+
+def test_an_event_at_the_age_limit_is_still_processed(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    env = _envelope("play", arg="5")
+    env.event.occurred_at = _now_stamp(-event_dedupe.MAX_EVENT_AGE_SECONDS)
+    _run(dispatch(env, {}, http_client=None))
+    assert "DEFUSED" in _reply(host)
+
+
+def test_a_replay_after_the_marker_lapsed_is_dropped_by_the_fence(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outage > marker TTL: the marker is gone, but the event is too old to be re-processed."""
+    monkeypatch.setattr(app, "_roll", lambda percent: True)
+    first = _envelope("play", arg="5", message_id="late-1")
+    _run(dispatch(first, {}, http_client=None))
+    host.expire(".defuse.seen.")
+    host.expire(".defuse.cd.")
+    host.now_ms += (event_dedupe.SEEN_TTL_SECONDS + 1) * 1000
+    snap = (dict(host.eco.balances), list(host.eco.ledger), len(host.relay_calls))
+    _run(dispatch(first, {}, http_client=None))  # same envelope, same ingest stamp, much later
+    assert (dict(host.eco.balances), list(host.eco.ledger), len(host.relay_calls)) == snap
+
+
+@pytest.mark.parametrize("stamp", ["", "   ", "yesterday", "2026-10-05T00:00:00", None, 12345])
+def test_a_missing_or_malformed_occurred_at_fails_loud_and_moves_nothing(
+    host: _Host, stamp: Any
+) -> None:
+    env = _envelope("play", arg="5")
+    env.event.occurred_at = stamp
+    with pytest.raises(RuntimeError, match="occurred_at"):
+        _run(dispatch(env, {}, http_client=None))
+    assert "unavailable" in _reply(host)
+    assert host.eco.ledger == [] and not host.kv.store
+
+
+def test_a_future_dated_event_fails_loud_and_moves_nothing(host: _Host) -> None:
+    env = _envelope("play", arg="5")
+    env.event.occurred_at = _now_stamp(event_dedupe.EVENT_CLOCK_SKEW_SECONDS + 60)
+    with pytest.raises(RuntimeError, match="occurred_at"):
+        _run(dispatch(env, {}, http_client=None))
+    assert host.eco.ledger == [] and not host.kv.store
+
+
+def test_a_full_key_quota_fails_closed_and_moves_no_money(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host refuses a NEW key once 10,000 are live: the claim raises, so nothing settles."""
+    import wit_world
+
+    real = wit_world.imports.kv.increment
+
+    def quota_full(key: str, delta: int, ttl: int) -> int:
+        if ".defuse.seen." in key:
+            raise RuntimeError("quota exceeded")
+        return real(key, delta, ttl)
+
+    wit_world.imports.kv.increment = quota_full
+    with pytest.raises(RuntimeError, match="backend failed"):
+        _go(host, monkeypatch, win=True, msg_id="q-1")
+    assert "unavailable" in _reply(host)
+    assert host.eco.ledger == [] and _stat(host, "plays") == 0

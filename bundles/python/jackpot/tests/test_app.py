@@ -6,15 +6,16 @@ import asyncio
 import hashlib
 import itertools
 import json
+import re
 import sys
 import types
 from typing import Any
 
 import pytest
-from waddle_sdk import community_kv
+from waddle_sdk import community_kv, event_dedupe
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.testing import FakeEconomyHost, FakeIdentityHost, FakeKvHost
+from waddle_sdk.testing import FakeEconomyHost, FakeIdentityHost, FakeKvHost, rfc3339_from_millis
 
 import app
 from app import BASE_POT, COOLDOWN_SECONDS, dispatch, transform
@@ -25,6 +26,7 @@ POT_KEY = _scoped_key(COMM, "jackpot.pot")
 
 
 _MSG_IDS = itertools.count(1)
+_CURRENT_HOST: list[Any] = []
 
 
 def _next_msg_id() -> str:
@@ -36,6 +38,11 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _now_stamp(offset_seconds: int = 0) -> str:
+    """The ingest stamp of an event arriving NOW on the fake host clock (or that long ago/ahead)."""
+    return rfc3339_from_millis(_CURRENT_HOST[-1].now_ms + offset_seconds * 1000)
+
+
 class _Host:
     def __init__(self, mp: pytest.MonkeyPatch) -> None:
         self.kv = FakeKvHost()
@@ -43,6 +50,8 @@ class _Host:
         self.eco.actor = ACTOR_UUID
         self.ident = FakeIdentityHost(members={ACTOR_UUID}, actor=ACTOR_UUID)
         self.flag = True
+        self.now_ms = 1_700_000_000_000
+        _CURRENT_HOST.append(self)
         self.relayed: list[str] = []
         self.logs: list[tuple[str, str]] = []
         kv, ns = self.kv, types.SimpleNamespace
@@ -59,6 +68,9 @@ class _Host:
             ),
             identity=ns(
                 resolve_actor=self.ident.resolve_actor, resolve_mention=self.ident.resolve_mention
+            ),
+            clock=ns(
+                now_millis=lambda: self.now_ms, now_rfc3339=lambda: "x", monotonic_nanos=lambda: 0
             ),
             relay=ns(push=lambda provider, msg: self.relayed.append(json.loads(msg)["text"])),
             log=ns(
@@ -99,7 +111,7 @@ def _env(command: str, arg: str | None = None, msg_id: str | None = None) -> Sta
         community=COMM,
         app_id="waddles.core.example.jackpot",
         stage="action",
-        event=PlatformEvent("twitch", "chat.message", "viewer-1", payload, "2026-10-21T00:00:00Z"),
+        event=PlatformEvent("twitch", "chat.message", "viewer-1", payload, _now_stamp()),
         ts="2026-10-21T00:00:00Z",
     )
 
@@ -396,7 +408,7 @@ def _say_as(host: _Host, actor: str | None, arg: str | None = None) -> str:
         community=COMM,
         app_id="waddles.core.example.jackpot",
         stage="action",
-        event=PlatformEvent("twitch", "chat.message", actor, payload, "2026-10-21T00:00:00Z"),
+        event=PlatformEvent("twitch", "chat.message", actor, payload, _now_stamp()),
         ts="2026-10-21T00:00:00Z",
     )
     _run(dispatch(env, {}, http_client=None))
@@ -642,11 +654,15 @@ def test_concurrent_duplicate_deliveries_process_exactly_once(
     assert (host.pot, host.bal(), _wagers(host)) == (50, 950, 1)
 
 
+def _markers(host: _Host) -> list[str]:
+    return [k for k in host.kv.store if ".jackpot.seen." in k]
+
+
 def test_dedupe_kv_failure_is_loud(host: _Host) -> None:
     real = host.kv.get
 
     def get(key: str) -> bytes | None:
-        if ".dedupe.jackpot." in key:
+        if ".jackpot.seen." in key:
             raise RuntimeError("down")
         return real(key)
 
@@ -656,23 +672,186 @@ def test_dedupe_kv_failure_is_loud(host: _Host) -> None:
     assert (host.pot, host.bal(), _wagers(host)) == (0, 1000, 0)
 
 
-def test_corrupt_dedupe_ring_fails_closed(host: _Host) -> None:
-    pseud = hashlib.sha256(f"{COMM}|{ACTOR_UUID}".encode()).hexdigest()
-    host.kv.store[_scoped_key(COMM, f"dedupe.jackpot.{pseud}")] = b"not-a-ring"
-    with pytest.raises(RuntimeError, match="jackpot dedupe failed: DedupeStateError"):
-        _say(host, "play", "5")
+def test_a_full_key_quota_fails_closed_and_moves_no_money(host: _Host) -> None:
+    """The host refuses a NEW key once 10,000 are live: the claim raises, nothing settles."""
+    real = host.kv.increment
+
+    def inc(key: str, delta: int, ttl: int) -> int:
+        if ".jackpot.seen." in key:
+            raise RuntimeError("quota exceeded")
+        return real(key, delta, ttl)
+
+    sys.modules["wit_world"].imports.kv.increment = inc  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="jackpot dedupe failed"):
+        _say(host, "play", "5", msg_id="q-1")
     assert (host.pot, host.bal(), _wagers(host)) == (0, 1000, 0)
+    assert "temporarily unavailable" in host.relayed[-1]
 
 
-def test_dedupe_state_is_one_pii_free_key_per_actor(
+@pytest.mark.parametrize("bad", [b"not-a-number", b"-5"])
+def test_a_corrupt_event_marker_never_lets_the_event_settle_again(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, bad: bytes
+) -> None:
+    """The peek sees an existing marker and skips; if the peek were raced past, `claim` raises."""
+    _force(monkeypatch, False)
+    _say(host, "play", "5", msg_id="corrupt-1")
+    (key,) = _markers(host)
+    host.kv.store[key] = bad
+    host.expire_cooldown()
+    snapshot, sent = (host.pot, host.bal(), _wagers(host)), len(host.relayed)
+    _run(dispatch(_env("play", "5", msg_id="corrupt-1"), {}, http_client=None))
+    assert (host.pot, host.bal(), _wagers(host)) == snapshot and len(host.relayed) == sent
+
+    async def peek_misses(*_a: Any, **_k: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(app.event_dedupe, "already_seen", peek_misses)
+    host.expire_cooldown()
+    with pytest.raises(RuntimeError, match="jackpot dedupe failed"):
+        _run(dispatch(_env("play", "5", msg_id="corrupt-1"), {}, http_client=None))
+    assert (host.pot, host.bal(), _wagers(host)) == snapshot
+
+
+def test_dedupe_state_is_one_pii_free_marker_per_event(
     host: _Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _force(monkeypatch, False)
     for i in range(6):
         host.expire_cooldown()
         _say(host, "play", "5", msg_id=f"private-platform-id-{i}")
-    ring_keys = [k for k in host.kv.store if ".dedupe.jackpot." in k]
-    assert len(ring_keys) == 1, "the kv host charges a quota unit per key; events must not add keys"
+    assert len(_markers(host)) == 6, "exactly one marker per processed event"
+    for key in _markers(host):
+        assert re.fullmatch(rf"c\.{COMM}\.jackpot\.seen\.[0-9a-f]{{32}}", key)
     blob = " ".join(host.kv.store) + " ".join(v.decode() for v in host.kv.store.values())
     assert "private-platform-id" not in blob
     assert "private-platform-id" not in " ".join(m + fj for m, fj in host.logs)
+
+
+def test_a_redelivery_older_than_any_ring_horizon_is_still_skipped(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: the last-16-ids ring forgot an event after 16 later plays (pot double-credit)."""
+    _force(monkeypatch, False)
+    _say(host, "play", "5", msg_id="oldest")
+    for i in range(40):
+        host.expire_cooldown()
+        _say(host, "play", "5", msg_id=f"later-{i}")
+    snapshot, sent = (host.pot, host.bal(), _wagers(host)), len(host.relayed)
+    for win in (False, True):  # even a redelivery that would now roll the other way
+        _force(monkeypatch, win)
+        host.expire_cooldown()
+        _run(dispatch(_env("play", "5", msg_id="oldest"), {}, http_client=None))
+    assert (host.pot, host.bal(), _wagers(host)) == snapshot and len(host.relayed) == sent
+
+
+@pytest.mark.parametrize("copies", [2, 6])
+def test_concurrent_duplicates_process_once_even_with_no_cooldown_gate(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, copies: int
+) -> None:
+    """regression: the ring was a get-then-set (TOCTOU) only safe behind the cooldown CAS.
+
+    With the cooldown gate out of the picture only the atomic per-event `increment` can let
+    exactly one copy through.
+    """
+    _force(monkeypatch, False)
+    _yielding_kv_all(monkeypatch)
+
+    async def always_allowed(self: Any, pseudonym: str) -> bool:
+        return True
+
+    monkeypatch.setattr(app._Pot, "cooldown_claim", always_allowed)
+
+    async def go() -> None:
+        await asyncio.gather(
+            *(
+                dispatch(_env("play", "50", msg_id="race-2"), {}, http_client=None)
+                for _ in range(copies)
+            )
+        )
+
+    _run(go())
+    assert (host.pot, host.bal(), _wagers(host)) == (50, 950, 1)
+    assert len(_markers(host)) == 1
+
+
+def test_the_claim_is_one_ttl_increment_on_a_per_event_marker(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, False)
+    _say(host, "play", "5", msg_id="m-ttl")
+    marker_calls = [c for c in host.kv.calls if ".jackpot.seen." in c[1][0]]
+    assert [c[0] for c in marker_calls] == ["get", "increment"]  # advisory peek, then the claim
+    assert marker_calls[1][1][1:] == (1, event_dedupe.SEEN_TTL_SECONDS)
+
+
+def test_an_actor_on_cooldown_never_creates_a_marker(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One chatter's marker rate is bounded by its cooldown: refused attempts mint no keys."""
+    _force(monkeypatch, False)
+    _say(host, "play", "5")
+    assert len(_markers(host)) == 1
+    for _ in range(20):
+        assert "slow down" in _say(host, "play", "5")
+    assert len(_markers(host)) == 1
+
+
+@pytest.mark.parametrize("age", [event_dedupe.MAX_EVENT_AGE_SECONDS + 1, 3600, 86_400 * 7])
+def test_an_event_too_old_to_dedupe_is_dropped_silently_and_moves_nothing(
+    host: _Host, monkeypatch: pytest.MonkeyPatch, age: int
+) -> None:
+    """The marker TTL is the horizon, so an event past the age fence must never be processed."""
+    _force(monkeypatch, False)
+    env = _env("play", "5")
+    env.event.occurred_at = _now_stamp(-age)
+    _run(dispatch(env, {}, http_client=None))
+    assert host.relayed == [] and not host.kv.store
+    assert (host.pot, host.bal(), _wagers(host)) == (0, 1000, 0)
+    assert any("jackpot.stale_event_skipped" in m for m, _fj in host.logs)
+
+
+def test_an_event_at_the_age_limit_is_still_processed(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, False)
+    env = _env("play", "5")
+    env.event.occurred_at = _now_stamp(-event_dedupe.MAX_EVENT_AGE_SECONDS)
+    _run(dispatch(env, {}, http_client=None))
+    assert "join the pot" in host.relayed[-1]
+
+
+def test_a_replay_after_the_marker_lapsed_is_dropped_by_the_fence(
+    host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outage > marker TTL: the marker is gone, but the event is too old to be re-processed."""
+    _force(monkeypatch, False)
+    first = _env("play", "5", msg_id="late-1")
+    _run(dispatch(first, {}, http_client=None))
+    for key in _markers(host):
+        del host.kv.store[key]  # the fake ignores TTL: the host expired the marker
+    host.expire_cooldown()
+    host.now_ms += (event_dedupe.SEEN_TTL_SECONDS + 1) * 1000
+    snapshot, sent = (host.pot, host.bal(), _wagers(host)), len(host.relayed)
+    _run(dispatch(first, {}, http_client=None))  # same envelope, same ingest stamp, much later
+    assert (host.pot, host.bal(), _wagers(host)) == snapshot and len(host.relayed) == sent
+
+
+@pytest.mark.parametrize("stamp", ["", "   ", "yesterday", "2026-10-21T00:00:00", None, 12345])
+def test_a_missing_or_malformed_occurred_at_fails_loud_and_moves_nothing(
+    host: _Host, stamp: Any
+) -> None:
+    env = _env("play", "5")
+    env.event.occurred_at = stamp
+    with pytest.raises(RuntimeError, match="jackpot event_id failed: EventIdError"):
+        _run(dispatch(env, {}, http_client=None))
+    assert "temporarily unavailable" in host.relayed[-1]
+    assert (host.pot, host.bal(), _wagers(host)) == (0, 1000, 0)
+    assert not host.kv.store
+
+
+def test_a_future_dated_event_fails_loud_and_moves_nothing(host: _Host) -> None:
+    env = _env("play", "5")
+    env.event.occurred_at = _now_stamp(event_dedupe.EVENT_CLOCK_SKEW_SECONDS + 60)
+    with pytest.raises(RuntimeError, match="jackpot event_id failed: EventIdError"):
+        _run(dispatch(env, {}, http_client=None))
+    assert (host.pot, host.bal(), _wagers(host)) == (0, 1000, 0) and not host.kv.store

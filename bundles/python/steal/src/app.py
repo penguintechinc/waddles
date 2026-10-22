@@ -42,6 +42,18 @@ steals cannot overshoot. Colluders are *bounded*, not stopped: N sybil accounts 
 N x budget per window. A truly zero-sum steal needs a host capability that debits the victim
 (an actor-from-target transfer); that is a follow-up.
 
+Cap keys are TTL-bounded to their window (`_Bucket`): a budget key lapses at the end of its own
+window, a pair key at the end of the NEXT one (the reciprocal check reads it), plus a short settle
+grace -- so no cap key outlives its usefulness and, with the host's TTL-reclaiming key quota, none
+can hold quota past that. The residual: kv keys are capped at 10,000 per (app, community), and an
+attacker with many linked, funded accounts can still create live keys faster than they lapse (one
+pair key per distinct target per steal, ~2 h each, plus a replay marker for 15 min). Each account
+is bounded by the cooldown (default 60 s, so <= 60 steals/h/account) and, with `set cooldown 0`,
+only by the platform's own chat rate limit -- so a moderator who disables the cooldown widens it.
+A full quota fails CLOSED (new keys are refused, steals reply "unavailable", no money moves) and
+heals as keys lapse. The proper bound is a host-level per-actor kv write-rate/new-key limit
+(only the host knows the actor); that is a follow-up, this bundle cannot enforce it.
+
 Fail-loud: no mention, self-target, an unresolved/ambiguous target, an empty victim, a too-poor
 actor or an exhausted cap each reply a clear message (`CommandUsageError`) and move no money.
 Economy/identity host refusals reply with a stable message and are logged by type only.
@@ -52,14 +64,21 @@ other attempt is refused. The host re-applies the TTL on every call, so a refuse
 the window (the reply says so); `set cooldown 0` disables the gate.
 
 Replay safety (at-most-once): the pipeline is at-least-once. The inbound `message_id` (forwarded by
-`transform`) is recorded via `waddle_sdk.event_dedupe` AFTER the cooldown and BEFORE any mutation,
-and a redelivery is skipped silently -- no wager, no transfer, no stat or cap change, no reply
-(the host already dedupes the money per event, but a re-roll on redelivery could otherwise pick the
-other money mover). A crash after the claim loses one attempt, never repeats it; a payload with no
-`message_id` fails loud.
+`transform`) is claimed via `waddle_sdk.event_dedupe` -- ONE atomic `kv.increment` on a per-event,
+TTL'd marker (`1` = first delivery) -- AFTER the cooldown and BEFORE any mutation, and a redelivery
+is skipped silently: no wager, no transfer, no stat or cap change, no reply (the host already
+dedupes the money per event, but a re-roll on redelivery could otherwise pick the other money
+mover). The increment is the race-free guard (two concurrent copies cannot both see `1`), it needs
+no cooldown to be safe, and it has no 16-event horizon. The marker's TTL is the horizon, closed by
+an age fence: an event ingested more than `event_dedupe.MAX_EVENT_AGE_SECONDS` ago is dropped
+(silently, logged), never processed -- so a redelivery is deduped or dropped, never replayed. A
+crash after the claim loses one attempt, never repeats it; a payload with no `message_id`, or no
+valid `occurred_at`, fails loud. The claim comes AFTER the cooldown on purpose: an actor on
+cooldown never creates a marker, so one chatter's marker rate is bounded by its own cooldown.
 
 State (kv, community-scoped, `.`-separated keys -- never `:`): every key uses a SHA-256 pseudonym
-(`_pseudonym`, or a hash of the sorted pair) -- no handle, uuid or platform message id. The actor
+(`_pseudonym`, or a hash of the sorted pair) or a SHA-256 digest of the event id -- no handle, uuid
+or platform message id. The actor
 handle appears only in the visible chat reply, never in a key or log. Logs carry
 `op`/`outcome`/bucket fields only.
 
@@ -77,6 +96,7 @@ from __future__ import annotations
 import hashlib
 import random
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from waddle_sdk import clock, community_kv, economy, event_dedupe, identity, log, relay
@@ -99,6 +119,10 @@ WINDOW_SECONDS = 3600
 PAIR_WINDOW_CAP = 100
 ACTOR_WINDOW_BUDGET = 300
 
+#: Seconds a cap key outlives its window so a settle/refund landing just after the bucket rolls
+#: still finds it instead of re-creating a stray key.
+_SETTLE_GRACE_SECONDS = 60
+
 _COOLDOWN_CONFIG_KEY = "steal.config.cooldown"
 _USAGE = "Usage: !steal @user | !steal list | !steal set cooldown <seconds> (set is admin/mod only)"
 _PERMISSION_DENIED_MSG = "only moderators/broadcasters can configure !steal"
@@ -113,6 +137,39 @@ _BUDGET_MSG = "you've hit your steal limit for now -- try again later"
 _HALF_BITS = 32
 _HALF_MASK = (1 << _HALF_BITS) - 1
 _HALF_LIMIT = 1 << (_HALF_BITS - 1)  # a half this large is corruption, never real traffic
+
+
+@dataclass(slots=True, frozen=True)
+class _Bucket:
+    """The fixed anti-collusion window one steal is accounted in, and when its keys may lapse.
+
+    Every cap key is written with a TTL computed from the window it belongs to, so it expires at an
+    absolute instant (the end of the window it is last read in, plus a settle grace) instead of a
+    fixed span that outlives the window it was created late in.
+    """
+
+    index: int
+    now_ms: int
+
+    @classmethod
+    def at(cls, now_ms: int) -> _Bucket:
+        """Return the bucket containing `now_ms`."""
+        return cls(index=now_ms // (WINDOW_SECONDS * 1000), now_ms=now_ms)
+
+    def _ttl(self, windows: int) -> int:
+        """Seconds from now to the end of window `index + windows - 1`, plus the settle grace."""
+        end_ms = (self.index + windows) * WINDOW_SECONDS * 1000
+        return max(-(-(end_ms - self.now_ms) // 1000), 1) + _SETTLE_GRACE_SECONDS
+
+    @property
+    def budget_ttl(self) -> int:
+        """TTL for the per-actor budget key: it is only ever read inside its own window."""
+        return self._ttl(1)
+
+    @property
+    def pair_ttl(self) -> int:
+        """TTL for a pair key: the NEXT window's reciprocal check still reads it as `previous`."""
+        return self._ttl(2)
 
 
 #: The pipeline delivers `event.actor` as its own host-minted placeholder; anchored so ONLY an actor
@@ -315,7 +372,7 @@ def _counter(raw: bytes | None) -> int:
 
 
 async def _reserve_pair(
-    community: str, window: int, pair: str, *, mine_is_low: bool, want: int
+    community: str, bucket: _Bucket, pair: str, *, mine_is_low: bool, want: int
 ) -> int:
     """Atomically reserve up to `want` of this direction's pair cap; return what was granted.
 
@@ -324,11 +381,11 @@ async def _reserve_pair(
     plain read; the current one is a single `increment`, so two opposite steals racing cannot both
     pass -- whichever lands second sees the first in the packed value.
     """
-    prior = _counter(await community_kv.get(community, _pair_key(window - 1, pair)))
+    prior = _counter(await community_kv.get(community, _pair_key(bucket.index - 1, pair)))
     if _split(prior, mine_is_low=mine_is_low)[1] > 0:
         raise CommandUsageError(_RECIPROCAL_MSG)
     shift = 0 if mine_is_low else _HALF_BITS
-    key, ttl = _pair_key(window, pair), 2 * WINDOW_SECONDS
+    key, ttl = _pair_key(bucket.index, pair), bucket.pair_ttl
     after = await community_kv.increment(community, key, want << shift, ttl)
     mine_after, other = _split(after, mine_is_low=mine_is_low)
     if other > 0:
@@ -342,9 +399,9 @@ async def _reserve_pair(
     return granted
 
 
-async def _reserve_budget(community: str, window: int, pseudonym: str, want: int) -> int:
+async def _reserve_budget(community: str, bucket: _Bucket, pseudonym: str, want: int) -> int:
     """Atomically reserve up to `want` of the actor's per-window budget; return what was granted."""
-    key, ttl = _budget_key(window, pseudonym), 2 * WINDOW_SECONDS
+    key, ttl = _budget_key(bucket.index, pseudonym), bucket.budget_ttl
     after = await community_kv.increment(community, key, want, ttl)
     if after < want:
         raise _StealStateError("steal budget counter went negative")
@@ -355,15 +412,18 @@ async def _reserve_budget(community: str, window: int, pseudonym: str, want: int
 
 
 async def _release(
-    community: str, window: int, pair: str, pseudonym: str, *, mine_is_low: bool, amount: int
+    community: str, bucket: _Bucket, pair: str, pseudonym: str, *, mine_is_low: bool, amount: int
 ) -> None:
     """Give back `amount` of a reservation on BOTH the pair and the budget counters."""
     if amount <= 0:
         return
-    ttl = 2 * WINDOW_SECONDS
     shift = 0 if mine_is_low else _HALF_BITS
-    await community_kv.increment(community, _pair_key(window, pair), -(amount << shift), ttl)
-    await community_kv.increment(community, _budget_key(window, pseudonym), -amount, ttl)
+    await community_kv.increment(
+        community, _pair_key(bucket.index, pair), -(amount << shift), bucket.pair_ttl
+    )
+    await community_kv.increment(
+        community, _budget_key(bucket.index, pseudonym), -amount, bucket.budget_ttl
+    )
 
 
 async def _resolve_parties(tokens: list[str]) -> tuple[str, str]:
@@ -386,20 +446,20 @@ async def _resolve_parties(tokens: list[str]) -> tuple[str, str]:
 
 
 async def _reserve_loot(
-    community: str, window: int, pair: str, pseudonym: str, *, mine_is_low: bool, want: int
+    community: str, bucket: _Bucket, pair: str, pseudonym: str, *, mine_is_low: bool, want: int
 ) -> int:
     """Reserve up to `want` gross loot on the pair AND the actor's budget; return what is granted.
 
     Raises `CommandUsageError` (reply text) when the pair is blocked/capped or the budget is spent;
     every partial reservation is given back before raising.
     """
-    pair_granted = await _reserve_pair(community, window, pair, mine_is_low=mine_is_low, want=want)
-    granted = await _reserve_budget(community, window, pseudonym, pair_granted)
+    pair_granted = await _reserve_pair(community, bucket, pair, mine_is_low=mine_is_low, want=want)
+    granted = await _reserve_budget(community, bucket, pseudonym, pair_granted)
     if granted < pair_granted:  # the budget was the tighter bound: return the pair's surplus
         shift = 0 if mine_is_low else _HALF_BITS
-        key = _pair_key(window, pair)
+        key = _pair_key(bucket.index, pair)
         await community_kv.increment(
-            community, key, -((pair_granted - granted) << shift), 2 * WINDOW_SECONDS
+            community, key, -((pair_granted - granted) << shift), bucket.pair_ttl
         )
     if granted == 0:
         raise CommandUsageError(_BUDGET_MSG)
@@ -413,19 +473,21 @@ async def _handle_steal(
     username: str,
     payload: dict[str, Any],
     platform: str,
+    occurred_at: str,
 ) -> str | None:
     """Resolve, replay-guard, cooldown-gate, cap, roll and settle one steal; return the reply.
 
-    Returns `None` for a redelivered event (already claimed): nothing is mutated or sent.
+    Returns `None` for a redelivered or too-old event: nothing is mutated or sent.
     """
     if not tokens:
         raise CommandUsageError(_USAGE)
     actor, target = await _resolve_parties(tokens)
     pseudonym = _pseudonym(community, actor)
     event_id = event_dedupe.event_id_from_payload(payload, platform=platform)
-    if await event_dedupe.already_seen(
-        community, namespace=_DEDUPE_NAMESPACE, subject=pseudonym, event_id=event_id
-    ):
+    if not event_dedupe.is_fresh(occurred_at):
+        log.info("steal.stale_event_skipped", op="fence")
+        return None
+    if await event_dedupe.already_seen(community, namespace=_DEDUPE_NAMESPACE, event_id=event_id):
         log.info("steal.redelivery_skipped", op="seen")
         return None
     try:
@@ -439,16 +501,14 @@ async def _handle_steal(
         slow = await _claim_cooldown(community, pseudonym, username)
         if slow is not None:
             return slow
-        if not await event_dedupe.claim(
-            community, namespace=_DEDUPE_NAMESPACE, subject=pseudonym, event_id=event_id
-        ):
+        if not await event_dedupe.claim(community, namespace=_DEDUPE_NAMESPACE, event_id=event_id):
             log.info("steal.redelivery_skipped", op="claim")
             return None
-        window = clock.now_millis() // (WINDOW_SECONDS * 1000)
+        bucket = _Bucket.at(clock.now_millis())
         pair, mine_is_low = _pair_id(community, actor, target)
         granted = await _reserve_loot(
             community,
-            window,
+            bucket,
             pair,
             pseudonym,
             mine_is_low=mine_is_low,
@@ -466,11 +526,11 @@ async def _handle_steal(
             raise  # may have committed: keep the reservation, never refund an ambiguous mint
         except economy.EconomyError:
             await _release(
-                community, window, pair, pseudonym, mine_is_low=mine_is_low, amount=granted
+                community, bucket, pair, pseudonym, mine_is_low=mine_is_low, amount=granted
             )
             raise
         await _release(
-            community, window, pair, pseudonym, mine_is_low=mine_is_low, amount=granted - loot
+            community, bucket, pair, pseudonym, mine_is_low=mine_is_low, amount=granted - loot
         )
         if won:
             await community_kv.increment(community, _wins_key(pseudonym), 1, 0)
@@ -518,7 +578,13 @@ async def _handle_set_cooldown(arg: str | None, *, community: str) -> str:
 
 
 async def _reply_for(
-    command: str, payload: dict[str, Any], *, community: str, username: str, platform: str
+    command: str,
+    payload: dict[str, Any],
+    *,
+    community: str,
+    username: str,
+    platform: str,
+    occurred_at: str,
 ) -> str | None:
     """Compute the chat reply for one recognized command (`None` = a skipped redelivery)."""
     if command == "usage":
@@ -540,6 +606,7 @@ async def _reply_for(
         username=username,
         payload=payload,
         platform=platform,
+        occurred_at=occurred_at,
     )
 
 
@@ -568,14 +635,21 @@ async def dispatch(
     username = _actor_label(envelope.event.actor)
     try:
         reply = await _reply_for(
-            command, payload, community=community, username=username, platform=provider
+            command,
+            payload,
+            community=community,
+            username=username,
+            platform=provider,
+            occurred_at=envelope.event.occurred_at,
         )
     except CommandUsageError as exc:
         reply = str(exc)
     except event_dedupe.EventIdError as exc:
         log.error("steal.missing_event_id", command=command)
         await relay.push(provider, {"channel": channel_id, "text": "stealing is unavailable."})
-        raise RuntimeError("steal requires the inbound message_id to be replay-safe") from exc
+        raise RuntimeError(
+            "steal requires the inbound message_id and a valid occurred_at to be replay-safe"
+        ) from exc
     except Exception as exc:
         log.error("steal.kv_error", error=type(getattr(exc, "value", exc)).__name__)
         await relay.push(provider, {"channel": channel_id, "text": "stealing is unavailable."})

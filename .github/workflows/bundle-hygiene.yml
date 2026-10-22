@@ -19,6 +19,11 @@ name: Bundle Hygiene
 #                         over every badge-reading bundle. The svc-ingest
 #                         behavioural regression runs in the unit suite
 #                         (core/svc_ingest/tests/test_badge_flags_regression.py).
+#   5. ai-output-lead  -- a model completion that STARTS with `/`, `.` or `!` runs as
+#                         a chat command. Every bundle calling `ai.generate` must pass
+#                         its reply through `waddle_sdk.safe_text.guard_leading_command`
+#                         (or be a reasoned fixed-prefix exception); proved on the real
+#                         modules with hostile completions.
 #
 # ci-gate.yml aggregates every check-run on the head SHA, so each failure here
 # is fatal to the merge queue with no ci-gate edit. No `paths:` filter on
@@ -85,3 +90,10 @@ jobs:
       # as a real False. Asserts its own denominators (>=30 bundles, >=20 transforms exercised).
       - name: Mod gate is behaviourally strict across every badge-reading bundle
         run: python3 -m pytest scripts/ci/tests/test_bundle_badge_gate.py -v -p no:cacheprovider
+
+      # Every `ai.generate` bundle guards its reply lead through the ONE shared helper (static),
+      # and a hostile completion (every command lead, hidden behind invisible/control characters)
+      # never yields a reply that starts with a command (behavioural). Asserts its own
+      # denominators (>=8 bundles, one sample each) so a new unguarded AI bundle FAILS here.
+      - name: AI completions can never lead a reply with a chat command (every ai.generate bundle)
+        run: python3 -m pytest scripts/ci/tests/test_ai_output_lead_gate.py -v -p no:cacheprovider

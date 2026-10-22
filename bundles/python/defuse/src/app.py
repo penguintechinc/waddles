@@ -24,16 +24,24 @@ restarts the window (the reply says so). Funds/cap are pre-checked first so a pl
 burns the cooldown.
 
 Replay safety (at-most-once): the pipeline is at-least-once. The inbound `message_id` (forwarded by
-`transform`) is recorded via `waddle_sdk.event_dedupe` AFTER the cooldown and BEFORE the roll, the
-wager and the stat counters, and a redelivery is skipped silently -- no re-roll, no second wager,
-no double-counted plays/wins, no reply. A crash after the claim loses one play, never repeats it; a
-payload with no `message_id` fails loud.
+`transform`) is claimed via `waddle_sdk.event_dedupe` -- ONE atomic `kv.increment` on a per-event,
+TTL'd marker (`1` = first delivery) -- AFTER the cooldown and BEFORE the roll, the wager and the
+stat counters, and a redelivery is skipped silently -- no re-roll, no second wager, no
+double-counted plays/wins, no reply. The increment is race-free (two concurrent copies cannot both
+see `1`) and has no 16-event horizon; the marker's TTL is closed by an age fence (an event ingested
+more than `event_dedupe.MAX_EVENT_AGE_SECONDS` ago is dropped, never processed), so a redelivery is
+deduped or dropped, never replayed. A crash after the claim loses one play, never repeats it; a
+payload with no `message_id`, or no valid `occurred_at`, fails loud. The claim comes after the
+cooldown, so one chatter's marker rate is bounded by its own cooldown; a full 10,000-key quota
+fails CLOSED (the play is refused) and heals as markers lapse -- the residual is a swarm of funded
+accounts, bounded properly only by a host per-actor kv rate limit (follow-up).
 
-State (kv, community-scoped, `.`-separated -- never `:`): cooldown/stat/dedupe keys use
-`sha256(community + ":" + actor_uuid)` pseudonyms (the dedupe ring holds truncated hashes of the
-platform message id, never the id); no handle ever reaches a key or log. Logs carry
-`op`/`outcome`/bucket fields only. Activation-gated only -- no feature flag: the platform's
-installed -> enabled -> activated check decides whether this bundle runs.
+State (kv, community-scoped, `.`-separated -- never `:`): cooldown/stat keys use
+`sha256(community + ":" + actor_uuid)` pseudonyms and the replay marker is
+`defuse.seen.<truncated sha256 of the platform-prefixed message id>` (never the id); no handle
+ever reaches a key or log. Logs carry `op`/`outcome`/bucket fields only. Activation-gated only --
+no feature flag: the platform's installed -> enabled -> activated check decides whether this bundle
+runs.
 
 Output safety: `event.actor` is interpolated into most replies. The host-minted
 `{user:<token>}` actor stays live (egress renders the display name); any other value is
@@ -260,17 +268,19 @@ async def _handle_play(
     username: str,
     payload: dict[str, Any],
     platform: str,
+    occurred_at: str,
 ) -> str | None:
     """Replay-guard, validate, cooldown-claim, roll and settle one game via `economy.wager`.
 
-    Returns `None` for a redelivered event (already claimed): nothing is mutated or sent.
+    Returns `None` for a redelivered or too-old event: nothing is mutated or sent.
     """
     actor = await _actor()
     pseudonym = _pseudonym(community, actor)
     event_id = event_dedupe.event_id_from_payload(payload, platform=platform)
-    if await event_dedupe.already_seen(
-        community, namespace=_DEDUPE_NAMESPACE, subject=pseudonym, event_id=event_id
-    ):
+    if not event_dedupe.is_fresh(occurred_at):
+        log.info("defuse.stale_event_skipped", op="fence")
+        return None
+    if await event_dedupe.already_seen(community, namespace=_DEDUPE_NAMESPACE, event_id=event_id):
         log.info("defuse.redelivery_skipped", op="seen")
         return None
     try:
@@ -281,9 +291,7 @@ async def _handle_play(
         )
         if claims != 1:
             return f"\U0001f4a3 easy, {username}! try again in {DEFAULT_COOLDOWN_SECONDS}s."
-        if not await event_dedupe.claim(
-            community, namespace=_DEDUPE_NAMESPACE, subject=pseudonym, event_id=event_id
-        ):
+        if not await event_dedupe.claim(community, namespace=_DEDUPE_NAMESPACE, event_id=event_id):
             log.info("defuse.redelivery_skipped", op="claim")
             return None
         won = _roll(await _get_odds(community))
@@ -339,7 +347,13 @@ async def _handle_set_odds(arg: str | None, *, community: str) -> str:
 
 
 async def _reply_for(
-    command: str, payload: dict[str, Any], *, community: str, username: str, platform: str
+    command: str,
+    payload: dict[str, Any],
+    *,
+    community: str,
+    username: str,
+    platform: str,
+    occurred_at: str,
 ) -> str | None:
     """Compute the chat reply for one recognized command (`None` = a skipped redelivery)."""
     arg = payload.get("arg")
@@ -354,7 +368,12 @@ async def _reply_for(
     if command == "list":
         return await _handle_list(community=community)
     return await _handle_play(
-        arg_text, community=community, username=username, payload=payload, platform=platform
+        arg_text,
+        community=community,
+        username=username,
+        payload=payload,
+        platform=platform,
+        occurred_at=occurred_at,
     )
 
 
@@ -383,14 +402,21 @@ async def dispatch(
     username = _actor_label(envelope.event.actor)
     try:
         reply = await _reply_for(
-            command, payload, community=community, username=username, platform=provider
+            command,
+            payload,
+            community=community,
+            username=username,
+            platform=provider,
+            occurred_at=envelope.event.occurred_at,
         )
     except CommandUsageError as exc:
         reply = str(exc)
     except event_dedupe.EventIdError as exc:
         log.error("defuse.missing_event_id", command=command)
         await relay.push(provider, {"channel": channel_id, "text": "defusing is unavailable."})
-        raise RuntimeError("defuse requires the inbound message_id to be replay-safe") from exc
+        raise RuntimeError(
+            "defuse requires the inbound message_id and a valid occurred_at to be replay-safe"
+        ) from exc
     except Exception as exc:
         log.error("defuse.kv_error", error=type(getattr(exc, "value", exc)).__name__)
         await relay.push(provider, {"channel": channel_id, "text": "defusing is unavailable."})

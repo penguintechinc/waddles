@@ -22,19 +22,19 @@ emit `{user:<token>}` placeholders or `@everyone`), so it goes through
 `waddle_sdk.safe_text.sanitize_user_text` LAST, immediately before it enters the reply. No
 `allow_tokens`: nothing in model output is ever a host-minted mention. A reply that would START
 with a command lead (`/`, `.`, `!` -- Twitch/IRC run `/`/`.` as the bot's own commands and `!`
-re-triggers other bots) gets a visible `_SAFE_LEAD` prefix so it can never be parsed as one.
+re-triggers other bots) is passed through `waddle_sdk.safe_text.guard_leading_command`, which
+gives it a visible prefix so it can never be parsed as one.
 """
 
 from __future__ import annotations
 
 import re
-import unicodedata
 from typing import Any
 
 from waddle_sdk import ai, log, relay
 from waddle_sdk.command import CommandSpec, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.safe_text import sanitize_user_text
+from waddle_sdk.safe_text import guard_leading_command, sanitize_user_text
 
 SPEC = CommandSpec(name="define")
 
@@ -58,20 +58,6 @@ PROMPT_TEMPLATE = (
     "(SFW). If the term is unsafe or inappropriate to define, politely refuse instead.\n"
     "Term: {text}"
 )
-
-
-#: Twitch/IRC treat a leading `/` or `.` as a chat command and `!` re-triggers other bots; the
-#: model completion is attacker-influenced, so a reply may never START with one of these.
-_UNSAFE_LEAD = ("/", ".", "!")
-_SAFE_LEAD = "\U0001f4ac "
-
-
-def _leads_with_command(reply: str) -> bool:
-    """True if `reply`'s first visible character is a chat-command lead (`/`, `.`, `!`)."""
-    visible = "".join(
-        ch for ch in reply if unicodedata.category(ch) not in ("Cc", "Cf")
-    )
-    return visible.lstrip().startswith(_UNSAFE_LEAD)
 
 
 def build_prompt(text: str) -> str:
@@ -127,8 +113,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         else:
             answer = " ".join(completion.split())[:MAX_REPLY_CHARS]
             reply = sanitize_user_text(answer)
-            if _leads_with_command(reply):
-                reply = _SAFE_LEAD + reply
+            guarded = guard_leading_command(reply)
+            if guarded != reply:
+                reply = guarded
                 log.info("define.command_lead_neutralized", platform=event.platform)
             log.info(
                 "define.transform answered",

@@ -21,11 +21,23 @@ cooldown is claimed, so a refusal never burns it).
 - The cooldown is one `kv.increment` on a TTL'd key (`kv.increment` is the only compare-and-swap):
   exactly one of any number of concurrent plays by one actor wins the window. The host re-applies
   the TTL on every call, so a refused attempt restarts the window (the reply says so).
-- The pipeline is at-least-once. `transform` forwards the platform `message_id`; `dispatch` records
-  it (`waddle_sdk.event_dedupe`, one ring key per actor) after the cooldown and **before the roll,
-  the wager and the stat counters**, and skips a redelivery silently (no re-roll, no second wager,
-  no double-counted plays/wins, no reply). At-most-once by design: a crash after the claim loses
-  one play, never repeats it. A payload with no `message_id` fails loud and moves nothing.
+- The pipeline is at-least-once. `transform` forwards the platform `message_id`; `dispatch` claims
+  it (`waddle_sdk.event_dedupe`) after the cooldown and **before the roll, the wager and the stat
+  counters** with ONE atomic `kv.increment` on a per-event, TTL'd marker (`1` = first delivery,
+  `> 1` = redelivery or a concurrent duplicate), and skips a redelivery silently (no re-roll, no
+  second wager, no double-counted plays/wins, no reply). The increment is race-free and has no
+  16-event horizon. At-most-once by design: a crash after the claim loses one play, never repeats
+  it.
+- The marker's TTL is the horizon, closed by an age fence: an event whose ingest stamp
+  (`occurred_at`) is older than `event_dedupe.MAX_EVENT_AGE_SECONDS` (10 min) is dropped silently,
+  never processed -- a redelivery is deduped or dropped, never replayed. A payload with no
+  `message_id`, or no valid `occurred_at`, fails loud and moves nothing. The claim comes after the
+  cooldown, so an actor on cooldown never creates a marker.
+- Quota (residual): markers live 15 min under kv's 10,000-key quota, whose units are reclaimed on
+  TTL expiry (host fix `4ad3eaae`, **a prerequisite**). A full quota fails closed (the play is
+  refused, no money moves) and heals as markers lapse; a swarm of linked, funded accounts can
+  still hold it full (each is bounded by the 10 s cooldown). The proper bound is a host-level
+  per-actor kv new-key / write-rate limit (follow-up).
 
 ## Permissions (V2)
 
@@ -34,9 +46,10 @@ cooldown is claimed, so a refusal never burns it).
 
 ## State and privacy
 
-kv keys (`defuse.cd.<p>`, `defuse.plays.<p>`, `defuse.wins.<p>`, `dedupe.defuse.<p>`,
-`defuse.config.odds`) use `.` separators (never `:`) with `p = sha256(community:actor_uuid)`. No
-usernames, uuids or platform message ids in keys or logs.
+kv keys (`defuse.cd.<p>`, `defuse.plays.<p>`, `defuse.wins.<p>`, `defuse.seen.<d>`,
+`defuse.config.odds`) use `.` separators (never `:`) with `p = sha256(community:actor_uuid)` and
+`d = sha256(platform|message_id)[:32]`. No usernames, uuids or platform message ids in keys or
+logs.
 
 ## Gating
 
