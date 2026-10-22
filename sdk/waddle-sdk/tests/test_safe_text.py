@@ -733,6 +733,66 @@ def test_urls_still_only_defang_mass_mentions_but_placeholders_in_them_are_guard
     )
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://x/{user:victim-uuid}",
+        "https://x/{user:handle:victim}?q={user:42}&z={user:a1}",
+        "ab://{user:a1}",
+        "ftp://h/@bob/{user:a1}@everyone",
+    ],
+)
+@pytest.mark.parametrize("allow", [(), (_T,)])
+def test_token_forgery_is_neutralized_inside_url_spans_too(
+    url: str, allow: tuple[str, ...]
+) -> None:
+    """The URL carve-out covers a bare `@name` ONLY: the detokenizer has no URL awareness.
+
+    `https://x/{user:<tok>}` resolves exactly like a bare placeholder would, so every brace in a
+    URL span is escaped like anywhere else -- with or without an (unrelated) allow-list -- and the
+    reader still sees the URL as typed once the egress un-escape has run.
+    """
+    clean = sanitize_user_text(url, allow_tokens=allow)
+    assert _extract_tokens(clean) == []  # nothing resolves
+    assert _render(clean, _NAMES).replace(ZW, "") == url  # the reader still sees the URL as typed
+    assert "{user:" not in clean.replace("\\{", "")  # every brace sits inside an escape pair
+
+
+def test_a_url_span_never_extends_across_a_live_placeholder() -> None:
+    """A display name can hold `<`, `>` and spaces, so the link cannot be assumed to continue.
+
+    Regression (third review): ``ab://{P}123>`` with the display name ``<@`` renders
+    ``ab://<@123>`` -- a live user mention -- because everything after a placeholder inside a
+    URL span used to be exempt. The rules around a placeholder now apply even next to a URL.
+    """
+    for tail, want in (
+        ("123>", f"{ZW}123>"),  # name `<@` / `<#` / `@` completes a ping or a channel mention
+        ("here>", f"{ZW}here>"),  # name `<!` / `@`: Slack broadcast / @here
+        ("#123>", f"{ZW}#123>"),  # name `<`: Discord channel mention
+        ("&123>", f"{ZW}&123>"),  # name `<@`: role mention
+        ("@bob", f"@{ZW}bob"),  # name `<` or ending in whitespace: `<@bob` / a word-start @bob
+    ):
+        got = sanitize_user_text(f"ab://{_LIVE_T}{tail}", allow_tokens=[_T])
+        assert got == f"ab://{_LIVE_T}{want}", tail
+    assert sanitize_user_text(f"ab://a/!{_LIVE_T}!here>", allow_tokens=[_T]) == (
+        f"ab://a/!{_LIVE_T}{ZW}!here>"
+    )
+    # ...and the public helper agrees (it treats a raw placeholder as live).
+    assert defang_mentions(f"ab://{_LIVE_T}123>") == f"ab://{_LIVE_T}{ZW}123>"
+
+
+def test_the_url_exemption_still_holds_where_no_placeholder_is_involved() -> None:
+    """Links, and a placeholder SEPARATED from one by whitespace, are left byte-identical."""
+    for text in (
+        "https://medium.com/@bob/x",
+        "ab://@bob",
+        f"https://medium.com/@bob/x {_LIVE_T}",
+        f"{_LIVE_T} https://medium.com/@bob",
+        f"see {_LIVE_T}: https://x.io/@bob/page",
+    ):
+        assert sanitize_user_text(text, allow_tokens=[_T]) == text
+
+
 def test_a_lost_or_forged_live_marker_fails_loudly_never_silently() -> None:
     """The internal marker count must match the live placeholders it stands for (unreachable)."""
     assert safe_text._restore_live("a\x00b", ["{user:x}"]) == "a{user:x}b"

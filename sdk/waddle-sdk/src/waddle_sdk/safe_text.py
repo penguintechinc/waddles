@@ -50,6 +50,10 @@ resolved name could otherwise complete a ping across the boundary.
 technique ``discord.py``'s ``escape_mentions`` and ``discord.js``'s ``cleanContent`` use. The
 text still reads identically; the platform no longer recognizes a mention. Inside a URL-shaped
 span only ``@everyone`` / ``@here`` are defanged, so ``https://medium.com/@name`` keeps working.
+That exemption covers a bare ``@name`` and nothing else: token forgery is escaped in URL spans
+exactly as everywhere (the egress detokenizer has no URL awareness, so ``https://x/{user:<tok>}``
+would resolve), and a span never extends across a live placeholder -- its display name can hold
+whitespace, ``<`` and ``>``, so the rules around a placeholder apply even next to a URL.
 Control characters (other than newline and tab) are stripped first, and newline and tab are
 *seen through*: the host's send paths (``capabilities.rs::sanitize_irc_component``, its Python
 twin in ``waddle_transports``) strip EVERY control character -- ``\n`` and ``\t`` included --
@@ -115,8 +119,11 @@ _HOST_STRIPPED_RE = re.compile(r"[\t\r\n]")
 _LIVE = "\x00"
 
 #: A URL-shaped span. Inside one, only the mass mentions are defanged: ``https://medium.com/@name``
-#: and ``https://host/@user/page`` are links, and a zero-width space would break them.
-_URL_RE = re.compile(r"(?i:\b[a-z][a-z0-9+.-]{1,15}://[^\s<>]+)")
+#: and ``https://host/@user/page`` are links, and a zero-width space would break them. The span
+#: STOPS at a live-placeholder marker: the display name it stands for is user-controlled and can
+#: hold whitespace, ``<`` and ``>`` -- exactly what ends a URL -- so nothing on the far side of a
+#: marker is known to still be inside the link (``ab://{P}123>`` + a name ``<@`` is ``<@123>``).
+_URL_RE = re.compile(r"(?i:\b[a-z][a-z0-9+.-]{1,15}://[^\s<>\x00]+)")
 
 #: ``@everyone`` / ``@here`` in any case and anywhere (Discord matches the substring, so
 #: ``hi@everyone`` is live too) -- plus ``@`` followed by name characters and then a live
