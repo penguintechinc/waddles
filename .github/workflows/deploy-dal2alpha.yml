@@ -10,6 +10,11 @@ name: Deploy dal2-alpha
 # It cannot reuse build-container.yml (that workflow is main/release/dispatch
 # gated, tags beta-* on release branches, and builds one module at a time).
 #
+# Runners: gha-runner-scale-set (ARC) matches on the scale-set NAME only, so
+# `runs-on: dal2-alpha` is a single label (an array form never picks up).
+# Builds use the in-cluster rootless buildkitd via the buildx `remote` driver
+# (no docker.sock on the runner). Deploy uses the runner pod's ServiceAccount.
+#
 # Alpha is FULLY self-hosted (build AND deploy on the dal2 runner) so it costs
 # zero GitHub-hosted Actions minutes. Beta/prod will use a separate HYBRID
 # workflow later (GitHub-hosted build + self-hosted deploy) -- not built here.
@@ -29,12 +34,13 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  BUILDKIT_HOST: tcp://buildkitd.buildkit.svc:1234
   IMAGE_PREFIX: ghcr.io/penguintechinc/waddles
 
 jobs:
   build:
     name: Build ${{ matrix.service }}
-    runs-on: [self-hosted, dal2-alpha]
+    runs-on: dal2-alpha
     permissions:
       contents: read
       packages: write
@@ -79,8 +85,11 @@ jobs:
           [ -n "${EPOCH}" ] || { echo "::error::could not derive epoch" >&2; exit 1; }
           echo "tag=alpha-${EPOCH}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Docker Buildx
+      - name: Set up Docker Buildx (remote buildkitd)
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+        with:
+          driver: remote
+          endpoint: ${{ env.BUILDKIT_HOST }}
 
       - name: Log in to ghcr.io
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
@@ -107,7 +116,7 @@ jobs:
   deploy:
     name: Deploy to dal2-alpha
     needs: build
-    runs-on: [self-hosted, dal2-alpha]
+    runs-on: dal2-alpha
     # Creates/updates the GitHub Environment + Deployment; job failure = failure status.
     environment:
       name: dal2-alpha
@@ -124,16 +133,22 @@ jobs:
         with:
           persist-credentials: false
 
+      # ARC runner image ships no helm. Pinned v3 (helm v4 breaks fresh installs, helm#31361).
+      - name: Install helm v3.17.3
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5
+        with:
+          version: v3.17.3
+
       - name: Helm upgrade
         run: |
           set -euo pipefail
-          # Kube access: the runner's in-cluster ServiceAccount / own kubeconfig
-          # (never a checked-in one). Chart needs helm v3 (v4 breaks fresh installs, helm#31361).
+          # Kube access: the runner pod's in-cluster ServiceAccount (no kubeconfig).
+          # Namespace is pre-created (runner RBAC has namespaceCreate:false).
           [ -n "${TAG}" ] || { echo "::error::empty image tag from build job" >&2; exit 1; }
           helm version --short
           helm lint k8s/helm/waddlebot -f k8s/helm/waddlebot/values-alpha.yaml -f k8s/helm/waddlebot/values-dal2alpha.yaml --set-string "global.imageTag=${TAG}"
           helm upgrade --install "${RELEASE}" k8s/helm/waddlebot \
-            --namespace "${NAMESPACE}" --create-namespace \
+            --namespace "${NAMESPACE}" \
             -f k8s/helm/waddlebot/values-alpha.yaml \
             -f k8s/helm/waddlebot/values-dal2alpha.yaml \
             --set-string "global.imageTag=${TAG}" \
