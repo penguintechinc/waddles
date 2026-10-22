@@ -1,0 +1,57 @@
+# dal2-alpha SHARED cluster-wide Cilium Gateway (platform infra for ALL apps, not Waddles-specific).
+# Apply order: see APPLY.md. Waddles HTTPRoute hardcodes Gateway `shared` / ns gateway-system /
+# sectionName `https` -- do NOT rename the listener below.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Bare-metal alpha has no LoadBalancer, so the Gateway Service is NodePort. NOTE: Cilium does not
+# reliably honor a pinned nodePort via this config; leave it dynamic and read it from
+# `kubectl -n gateway-system get svc` (cilium-gateway-shared) to point the NAT at it.
+apiVersion: cilium.io/v2alpha1
+kind: CiliumGatewayClassConfig
+metadata:
+  name: cilium-shared-config
+  namespace: gateway-system
+spec:
+  service:
+    type: NodePort
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: cilium-shared
+spec:
+  controllerName: io.cilium/gateway-controller
+  parametersRef:
+    group: cilium.io
+    kind: CiliumGatewayClassConfig
+    name: cilium-shared-config
+    namespace: gateway-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shared
+  namespace: gateway-system
+spec:
+  gatewayClassName: cilium-shared
+  listeners:
+    # Listener name MUST be `https` (HTTPRoute sectionName). 443 only: port 80 is not reachable
+    # (443-only NAT), so no HTTP->HTTPS redirect listener.
+    - name: https
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: cloudflare-origin-wildcard
+      allowedRoutes:
+        namespaces:
+          from: All
