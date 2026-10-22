@@ -3007,6 +3007,30 @@ tetragon:
     - /usr/bin/sh
     - /bin/dash
     - /usr/bin/dash
+  # Container-runtime exec support (kubelet exec probes + `kubectl exec`/`debug`) in covered pods.
+  # runc >= 1.2 re-execs itself as `execve("/proc/self/fd/<N>", ["runc","init"])` (a sealed clone of
+  # its own binary; N varies) from a child born INSIDE the pod's cgroup (CLONE_INTO_CGROUP), so the
+  # allowlist above SIGKILLs it ("error copying bootstrap data to pipe: write init-p: broken pipe")
+  # and every exec probe / kubectl exec in the pod fails. Reproduced with runc 1.5.2 under strace.
+  # NOT "/proc/self/exe" and NOT the runc path: neither is the execve filename Tetragon sees.
+  # Allowing `/proc/self/fd/` for EVERY process would reopen fileless exec (memfd_create + execve),
+  # so it is allowed ONLY when the calling process's binary is one of `callerBinaries` (the runc
+  # fork child, which has not exec'd yet, still carries runc's binary) -- a second selector in the
+  # policy SIGKILLs any `/proc/self/fd/` exec from any other binary. Everything else stays on the
+  # allowlist above (no shells, no interpreters, no wildcards added).
+  # TODO(tighten): once Tetragon events are flowing on the target cluster, confirm the observed
+  # filename shape + runc path (`tetra getevents -o compact --namespace <ns>`), then trim this list.
+  runcInit:
+    enabled: true
+    # Absolute path(s) of the node's runc binary (as exec'd by containerd-shim-runc-v2). Must be
+    # non-empty while enabled -- the chart fails loudly rather than allow /proc/self/fd/ unscoped.
+    # Add your node's path in the env overlay if it is elsewhere. Keep <= 4 entries (matchBinaries
+    # In-list limit on older Tetragon).
+    callerBinaries:
+      - /usr/bin/runc
+      - /usr/sbin/runc
+      - /usr/local/sbin/runc
+      - /usr/local/bin/runc
 
 # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- shared wait-for-hub-api
 # initContainer config (waddlebot.waitForHubApiInitContainer, _helpers.tpl), applied to
