@@ -146,7 +146,7 @@ export default function AdminCalendarScanner() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm text-gray-400 mb-1">
+          <div className="flex items-center gap-2 text-sm text-fg-muted mb-1">
             <Link to={`/admin/${communityId}/calendar`} className="hover:text-sky-400">
               Calendar
             </Link>
@@ -178,21 +178,21 @@ export default function AdminCalendarScanner() {
         <div className="grid grid-cols-4 gap-4">
           <div className="bg-navy-800 rounded-lg p-4 border border-navy-700 text-center">
             <div className="text-3xl font-bold text-white">{stats.total_tickets || 0}</div>
-            <div className="text-sm text-gray-400">Total</div>
+            <div className="text-sm text-fg-muted">Total</div>
           </div>
           <div className="bg-navy-800 rounded-lg p-4 border border-navy-700 text-center">
             <div className="text-3xl font-bold text-green-400">{stats.checked_in || 0}</div>
-            <div className="text-sm text-gray-400">Checked In</div>
+            <div className="text-sm text-fg-muted">Checked In</div>
           </div>
           <div className="bg-navy-800 rounded-lg p-4 border border-navy-700 text-center">
             <div className="text-3xl font-bold text-sky-400">{stats.not_checked_in || 0}</div>
-            <div className="text-sm text-gray-400">Remaining</div>
+            <div className="text-sm text-fg-muted">Remaining</div>
           </div>
           <div className="bg-navy-800 rounded-lg p-4 border border-navy-700 text-center">
             <div className="text-3xl font-bold text-purple-400">
               {stats.check_in_rate ? `${stats.check_in_rate}%` : '0%'}
             </div>
-            <div className="text-sm text-gray-400">Rate</div>
+            <div className="text-sm text-fg-muted">Rate</div>
           </div>
         </div>
       )}
@@ -205,7 +205,7 @@ export default function AdminCalendarScanner() {
             className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${
               scannerMode === 'manual'
                 ? 'bg-purple-600 text-white'
-                : 'bg-navy-700 text-gray-400 hover:text-white'
+                : 'bg-navy-700 text-fg-muted hover:text-white'
             }`}
           >
             <KeyIcon className="h-5 w-5" />
@@ -216,7 +216,7 @@ export default function AdminCalendarScanner() {
             className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${
               scannerMode === 'camera'
                 ? 'bg-purple-600 text-white'
-                : 'bg-navy-700 text-gray-400 hover:text-white'
+                : 'bg-navy-700 text-fg-muted hover:text-white'
             }`}
           >
             <QrCodeIcon className="h-5 w-5" />
@@ -227,7 +227,7 @@ export default function AdminCalendarScanner() {
         {scannerMode === 'manual' ? (
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label htmlFor="admin-calendar-scanner-ticket-code-64-characters" className="block text-sm font-medium text-gray-300 mb-2">
+              <label htmlFor="admin-calendar-scanner-ticket-code-64-characters" className="block text-sm font-medium text-fg-secondary mb-2">
                 Ticket Code (64 characters)
               </label>
               <div className="flex gap-3">
@@ -240,7 +240,7 @@ export default function AdminCalendarScanner() {
                   onKeyDown={handleKeyDown}
                   placeholder="Paste or scan the 64-character ticket code..."
                   maxLength={64}
-                  className="flex-1 px-4 py-3 bg-navy-900 border border-navy-700 rounded-lg text-white font-mono text-sm placeholder-gray-500 focus:border-purple-500 focus:ring-1 focus:ring-purple-500"
+                  className="flex-1 px-4 py-3 bg-navy-900 border border-navy-700 rounded-lg text-white font-mono text-sm placeholder-fg-muted focus:border-purple-500 focus:ring-1 focus:ring-purple-500"
                   autoComplete="off"
                   autoFocus
                 />
@@ -257,7 +257,7 @@ export default function AdminCalendarScanner() {
                   Check In
                 </button>
               </div>
-              <div className="mt-2 text-sm text-gray-400">
+              <div className="mt-2 text-sm text-fg-muted">
                 {manualCode.length}/64 characters
                 {manualCode.length === 64 && (
                   <span className="text-green-400 ml-2">Ready to scan</span>
@@ -267,8 +267,8 @@ export default function AdminCalendarScanner() {
           </form>
         ) : (
           <div className="text-center py-12">
-            <QrCodeIcon className="h-16 w-16 text-gray-500 mx-auto mb-4" />
-            <p className="text-gray-400">
+            <QrCodeIcon className="h-16 w-16 text-fg-muted mx-auto mb-4" />
+            <p className="text-fg-muted">
               Camera scanning requires a secure context (HTTPS).
               <br />
               For now, use a QR scanner app that types the code into the manual entry field.
@@ -291,7 +291,7 @@ export default function AdminCalendarScanner() {
               {lastResult.ticket && (
                 <div className="mt-3 space-y-2">
                   <div className="flex items-center gap-2 text-white">
-                    <TicketIcon className="h-5 w-5 text-gray-400" />
+                    <TicketIcon className="h-5 w-5 text-fg-muted" />
                     <span>
                       Ticket #{String(lastResult.ticket.ticket_number).padStart(3, '0')}
                     </span>
@@ -301,12 +301,12 @@ export default function AdminCalendarScanner() {
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 text-gray-300">
-                    <UserIcon className="h-5 w-5 text-gray-400" />
+                  <div className="flex items-center gap-2 text-fg-secondary">
+                    <UserIcon className="h-5 w-5 text-fg-muted" />
                     <span>{lastResult.ticket.holder_name || lastResult.ticket.username}</span>
                   </div>
                   {lastResult.ticket.checked_in_at && (
-                    <div className="flex items-center gap-2 text-gray-400 text-sm">
+                    <div className="flex items-center gap-2 text-fg-muted text-sm">
                       <ClockIcon className="h-4 w-4" />
                       <span>
                         Checked in at {new Date(lastResult.ticket.checked_in_at).toLocaleTimeString()}
@@ -342,7 +342,7 @@ export default function AdminCalendarScanner() {
                       <div className="text-sm text-white">
                         {scan.ticket?.holder_name || scan.ticket?.username || 'Unknown'}
                       </div>
-                      <div className="text-xs text-gray-400">
+                      <div className="text-xs text-fg-muted">
                         {scan.code} • {new Date(scan.timestamp).toLocaleTimeString()}
                       </div>
                     </div>
@@ -363,8 +363,8 @@ export default function AdminCalendarScanner() {
 
       {/* Instructions */}
       <div className="bg-navy-800/50 rounded-lg p-4 border border-navy-700">
-        <h4 className="text-sm font-medium text-gray-300 mb-2">How to use:</h4>
-        <ul className="text-sm text-gray-400 space-y-1 list-disc list-inside">
+        <h4 className="text-sm font-medium text-fg-secondary mb-2">How to use:</h4>
+        <ul className="text-sm text-fg-muted space-y-1 list-disc list-inside">
           <li>Use a QR scanner app or handheld scanner that outputs text</li>
           <li>Point the scanner at the ticket QR code</li>
           <li>The 64-character code will be automatically entered</li>

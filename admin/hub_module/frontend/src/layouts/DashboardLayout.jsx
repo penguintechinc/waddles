@@ -1,4 +1,4 @@
-import { Outlet, Link, useLocation, useParams, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import VendorRequestFooter from '../components/VendorRequestFooter';
 import {
@@ -25,6 +25,9 @@ import { useMemo, useState } from 'react';
 import GlobalBanner from '../components/GlobalBanner';
 import { SidebarMenu, SidebarMenuTrigger } from '@penguintechinc/react-libs';
 import UserDropdown from '../components/UserDropdown';
+import { MAIN_CONTENT_ID, RouteAnnouncer, RouteOutlet, SkipLink } from '../components/ui';
+import { WADDLES_SIDEBAR_COLORS } from '../theme/sidebarTheme';
+import { useSidebarNav } from './useSidebarNav';
 
 function DashboardLayout() {
   const { user, isSuperAdmin, isVendor, isAnalyticsConsumer, isCommunityAdmin } = useAuth();
@@ -92,7 +95,7 @@ function DashboardLayout() {
           defaultOpen: activeGroupKey === 'community-admin',
           items: [
             { name: 'Community Settings', href: `/dashboard/community/${communityId}/settings`, icon: Cog6ToothIcon },
-            { name: 'Moderation', href: `/dashboard/community/${communityId}/moderation`, icon: ShieldCheckIcon },
+            { name: 'Moderation', href: `/admin/${communityId}/security`, icon: ShieldCheckIcon },
             { name: 'Admin Panel', href: `/admin/${communityId}`, icon: BuildingStorefrontIcon },
           ],
         });
@@ -140,51 +143,66 @@ function DashboardLayout() {
     return cats;
   }, [communityId, activeGroupKey, isSuperAdmin, isVendor, isAnalyticsConsumer, isCommunityAdmin]);
 
+  const footer = useMemo(
+    () => [
+      {
+        name: user?.displayName || user?.username || 'Account',
+        href: '/dashboard/profile',
+        icon: UserCircleIcon,
+      },
+    ],
+    [user?.displayName, user?.username],
+  );
+  const nav = useSidebarNav(categories, footer, location.pathname, navigate);
+
+  const brand = (
+    <Link to="/" className="flex items-center gap-2 rounded-control">
+      <img src="/waddlebot-logo.png" alt="" className="h-8 w-8" />
+      <span className="text-xl font-bold text-fg-accent">Waddles</span>
+    </Link>
+  );
+
   return (
-    <div className="min-h-screen bg-navy-950">
-      <GlobalBanner />
-      {/* Top bar */}
-      <header className="bg-navy-900 border-b border-navy-700 sticky top-0 z-50">
-        <div className="flex justify-between items-center h-16 px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center space-x-3">
+    <div className="min-h-screen bg-app">
+      <SkipLink />
+      <RouteAnnouncer />
+      <SidebarMenu
+        logo={brand}
+        categories={nav.categories}
+        currentPath={nav.currentPath}
+        onNavigate={nav.onNavigate}
+        footerItems={nav.footerItems}
+        autoCollapse={true}
+        activeGroupKey={activeGroupKey}
+        width="w-64"
+        themeMode="dark"
+        colors={WADDLES_SIDEBAR_COLORS}
+        mobileOpen={mobileOpen}
+        onMobileClose={() => setMobileOpen(false)}
+      />
+
+      <div className="flex min-h-screen flex-col lg:pl-64">
+        <GlobalBanner />
+        <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-line bg-surface/95 px-4 backdrop-blur sm:px-6 lg:px-8">
+          <div className="flex items-center gap-3">
             <SidebarMenuTrigger
               onClick={() => setMobileOpen((o) => !o)}
               isOpen={mobileOpen}
               themeMode="dark"
+              colors={WADDLES_SIDEBAR_COLORS}
             />
-            <Link to="/" className="flex items-center space-x-2">
-              <img src="/waddlebot-logo.png" alt="Waddles" className="w-8 h-8" />
-              <span className="text-xl font-bold text-gold-400">Waddles</span>
-            </Link>
+            <div className="lg:hidden">{brand}</div>
           </div>
-
           <UserDropdown />
-        </div>
-      </header>
+        </header>
 
-      <div className="flex">
-        {/* Sidebar */}
-        <SidebarMenu
-          categories={categories}
-          currentPath={location.pathname}
-          onNavigate={(href) => navigate(href)}
-          autoCollapse={true}
-          activeGroupKey={activeGroupKey}
-          width="w-64"
-          themeMode="dark"
-          mobileOpen={mobileOpen}
-          onMobileClose={() => setMobileOpen(false)}
-          footerItems={[
-            { name: user?.displayName || user?.username || 'Account', href: '/dashboard/profile', icon: UserCircleIcon },
-          ]}
-        />
-
-        {/* Main content — offset by sidebar width */}
-        <main className="flex-1 p-6 lg:ml-64">
-          <Outlet />
+        <main id={MAIN_CONTENT_ID} tabIndex={-1} className="flex-1 px-4 py-8 focus:outline-none sm:px-6 lg:px-8">
+          <div className="mx-auto w-full max-w-7xl">
+            <RouteOutlet />
+          </div>
         </main>
+        <VendorRequestFooter />
       </div>
-      <VendorRequestFooter />
     </div>
   );
 }

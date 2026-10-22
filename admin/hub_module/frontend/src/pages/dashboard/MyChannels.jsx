@@ -311,9 +311,9 @@ function MyChannels() {
       {/* Join Request Modal */}
       {joinModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md w-full mx-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="my-channels-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md w-full mx-4">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-sky-100">
+              <h3 id="my-channels-dialog-1-title" className="text-lg font-semibold text-sky-100">
                 Request to Join a Community
               </h3>
               <button aria-label="Close" onClick={closeJoinModal} className="text-navy-400 hover:text-sky-100">

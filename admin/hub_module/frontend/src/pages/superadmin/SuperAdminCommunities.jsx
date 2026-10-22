@@ -306,9 +306,9 @@ function EditCommunityModal({ community, onClose, onSave }) {
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div className="bg-navy-900 rounded-xl shadow-xl max-w-md w-full mx-4 border border-navy-700">
+      <div role="dialog" aria-modal="true" aria-labelledby="super-admin-communities-dialog-1-title" className="bg-navy-900 rounded-xl shadow-xl max-w-md w-full mx-4 border border-navy-700">
         <div className="p-6 border-b border-navy-700">
-          <h2 className="text-xl font-semibold text-sky-100">Edit Community</h2>
+          <h2 id="super-admin-communities-dialog-1-title" className="text-xl font-semibold text-sky-100">Edit Community</h2>
         </div>
         <form onSubmit={handleSubmit}>
           <div className="p-6 space-y-4">
@@ -406,9 +406,9 @@ function ReassignOwnerModal({ community, onClose, onReassign }) {
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div className="bg-navy-900 rounded-xl shadow-xl max-w-md w-full mx-4 border border-navy-700">
+      <div role="dialog" aria-modal="true" aria-labelledby="super-admin-communities-dialog-2-title" className="bg-navy-900 rounded-xl shadow-xl max-w-md w-full mx-4 border border-navy-700">
         <div className="p-6 border-b border-navy-700">
-          <h2 className="text-xl font-semibold text-gold-400">Reassign Owner</h2>
+          <h2 id="super-admin-communities-dialog-2-title" className="text-xl font-semibold text-gold-400">Reassign Owner</h2>
           <p className="text-sm text-navy-400 mt-1">
             Reassigning ownership of: <strong className="text-sky-100">{community.displayName}</strong>
           </p>
@@ -473,9 +473,9 @@ function DeleteCommunityModal({ community, onClose, onDelete }) {
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div className="bg-navy-900 rounded-xl shadow-xl max-w-md w-full mx-4 border border-navy-700">
+      <div role="dialog" aria-modal="true" aria-labelledby="super-admin-communities-dialog-3-title" className="bg-navy-900 rounded-xl shadow-xl max-w-md w-full mx-4 border border-navy-700">
         <div className="p-6 border-b border-navy-700">
-          <h2 className="text-xl font-semibold text-red-400">Delete Community</h2>
+          <h2 id="super-admin-communities-dialog-3-title" className="text-xl font-semibold text-red-400">Delete Community</h2>
         </div>
         <form onSubmit={handleSubmit}>
           <div className="p-6 space-y-4">

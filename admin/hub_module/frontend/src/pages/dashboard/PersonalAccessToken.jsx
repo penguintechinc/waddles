@@ -220,8 +220,8 @@ export default function PersonalAccessToken() {
       {/* Create Token Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
-            <h2 className="text-lg font-semibold text-sky-100 mb-4">Create Personal Access Token</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="personal-access-token-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
+            <h2 id="personal-access-token-dialog-1-title" className="text-lg font-semibold text-sky-100 mb-4">Create Personal Access Token</h2>
 
             <form onSubmit={handleCreate} className="space-y-5">
               <div>
@@ -292,10 +292,10 @@ export default function PersonalAccessToken() {
       {/* Success Modal */}
       {showSuccessModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="personal-access-token-dialog-2-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
             <div className="flex items-center gap-2 mb-2">
               <ShieldCheckIcon className="h-5 w-5 text-green-400" />
-              <h2 className="text-lg font-semibold text-sky-100">Token Created</h2>
+              <h2 id="personal-access-token-dialog-2-title" className="text-lg font-semibold text-sky-100">Token Created</h2>
             </div>
             <p className="text-red-400 text-sm mb-4 font-medium">
               This token will not be shown again. Store it securely.

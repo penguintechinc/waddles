@@ -111,8 +111,8 @@ export default function BroadcastStatusModal({
       default:
         return {
           icon: ClockIcon,
-          bgColor: 'bg-gray-500/20',
-          textColor: 'text-gray-400',
+          bgColor: 'bg-navy-500/20',
+          textColor: 'text-fg-muted',
           label: 'Unknown',
         };
     }
@@ -123,10 +123,10 @@ export default function BroadcastStatusModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-navy-800 rounded-lg max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <div role="dialog" aria-modal="true" aria-labelledby="broadcast-status-modal-dialog-1-title" className="bg-navy-800 rounded-lg max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-navy-700">
-          <h2 className="text-xl font-semibold text-sky-100">
+          <h2 id="broadcast-status-modal-dialog-1-title" className="text-xl font-semibold text-sky-100">
             Broadcast Status
           </h2>
           <button
@@ -134,7 +134,7 @@ export default function BroadcastStatusModal({
             onClick={onClose}
             className="p-1 hover:bg-navy-700 rounded-lg transition-colors"
           >
-            <XMarkIcon className="w-6 h-6 text-gray-400 hover:text-gray-200" />
+            <XMarkIcon className="w-6 h-6 text-fg-muted hover:text-fg" />
           </button>
         </div>
 
@@ -165,7 +165,7 @@ export default function BroadcastStatusModal({
                     >
                       {platform.label}
                     </span>
-                    <span className="text-gray-400 group-hover:text-gray-300 transition-colors">
+                    <span className="text-fg-muted group-hover:text-fg-secondary transition-colors">
                       {platform.label}
                     </span>
                   </label>
@@ -180,7 +180,7 @@ export default function BroadcastStatusModal({
                 }
                 className={`w-full py-2 px-4 rounded-lg font-semibold transition-colors ${
                   broadcasting || selectedPlatforms.length === 0
-                    ? 'bg-navy-700 text-gray-500 cursor-not-allowed'
+                    ? 'bg-navy-700 text-fg-muted cursor-not-allowed'
                     : 'bg-purple-600 hover:bg-purple-700 text-white'
                 }`}
               >
@@ -202,7 +202,7 @@ export default function BroadcastStatusModal({
                 </div>
               </div>
             ) : broadcasts.length === 0 ? (
-              <div className="text-center py-8 text-gray-400">
+              <div className="text-center py-8 text-fg-muted">
                 <p>No broadcasts yet</p>
               </div>
             ) : (
@@ -211,19 +211,19 @@ export default function BroadcastStatusModal({
                   {/* Table Header */}
                   <thead>
                     <tr className="bg-navy-700 border-b border-navy-600">
-                      <th className="px-4 py-2 text-left text-gray-300 font-semibold">
+                      <th className="px-4 py-2 text-left text-fg-secondary font-semibold">
                         Platform
                       </th>
-                      <th className="px-4 py-2 text-left text-gray-300 font-semibold">
+                      <th className="px-4 py-2 text-left text-fg-secondary font-semibold">
                         Server/Channel
                       </th>
-                      <th className="px-4 py-2 text-left text-gray-300 font-semibold">
+                      <th className="px-4 py-2 text-left text-fg-secondary font-semibold">
                         Status
                       </th>
-                      <th className="px-4 py-2 text-left text-gray-300 font-semibold">
+                      <th className="px-4 py-2 text-left text-fg-secondary font-semibold">
                         Time
                       </th>
-                      <th className="px-4 py-2 text-left text-gray-300 font-semibold">
+                      <th className="px-4 py-2 text-left text-fg-secondary font-semibold">
                         Error
                       </th>
                     </tr>
@@ -259,14 +259,14 @@ export default function BroadcastStatusModal({
                                 }
                               </span>
                             ) : (
-                              <span className="text-gray-400">
+                              <span className="text-fg-muted">
                                 {broadcast.platform}
                               </span>
                             )}
                           </td>
 
                           {/* Server/Channel */}
-                          <td className="px-4 py-3 text-gray-300">
+                          <td className="px-4 py-3 text-fg-secondary">
                             {broadcast.serverName || broadcast.channelName || '-'}
                           </td>
 
@@ -283,7 +283,7 @@ export default function BroadcastStatusModal({
                           </td>
 
                           {/* Time */}
-                          <td className="px-4 py-3 text-gray-400 text-xs">
+                          <td className="px-4 py-3 text-fg-muted text-xs">
                             {broadcast.timestamp
                               ? new Date(broadcast.timestamp).toLocaleString()
                               : '-'}

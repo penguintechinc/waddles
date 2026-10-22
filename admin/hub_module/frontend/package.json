@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "coverage": "vitest run --coverage"
+    "coverage": "vitest run --coverage",
+    "audit:ui": "node scripts/ui-audit.mjs",
+    "audit:api": "node scripts/api-gap-check.mjs --pages"
   },
   "dependencies": {
     "@heroicons/react": "2.2.0",

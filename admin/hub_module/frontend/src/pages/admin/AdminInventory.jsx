@@ -11,7 +11,7 @@ const ITEM_TYPES = ['general', 'equipment', 'resource', 'consumable'];
 
 const CLAIM_STATUS_COLORS = {
   active: 'bg-green-500/20 text-green-300 border-green-500/30',
-  returned: 'bg-gray-500/20 text-gray-300 border-gray-500/30',
+  returned: 'bg-navy-500/20 text-fg-secondary border-navy-500/30',
   overdue: 'bg-red-500/20 text-red-300 border-red-500/30',
 };
 
@@ -357,8 +357,8 @@ function AdminInventory() {
       {/* Create / Edit Item Modal */}
       {showItemModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg">
-            <h2 className="text-lg font-bold text-sky-100 mb-4">{editingItem ? 'Edit Item' : 'Add Inventory Item'}</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-inventory-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg">
+            <h2 id="admin-inventory-dialog-1-title" className="text-lg font-bold text-sky-100 mb-4">{editingItem ? 'Edit Item' : 'Add Inventory Item'}</h2>
             <div className="space-y-4">
               <div>
                 <label htmlFor="admin-inventory-input" className="block text-sm text-navy-400 mb-1">Name <span className="text-red-400">*</span></label>
@@ -399,8 +399,8 @@ function AdminInventory() {
       {/* Stock +/- Modal */}
       {stockModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-sm">
-            <h2 className="text-lg font-bold text-sky-100 mb-1">{stockModal.direction === 'add' ? 'Add Stock' : 'Remove Stock'}</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-inventory-dialog-2-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-sm">
+            <h2 id="admin-inventory-dialog-2-title" className="text-lg font-bold text-sky-100 mb-1">{stockModal.direction === 'add' ? 'Add Stock' : 'Remove Stock'}</h2>
             <p className="text-sm text-navy-400 mb-4">{stockModal.item.name}</p>
             <div className="space-y-4">
               <div>

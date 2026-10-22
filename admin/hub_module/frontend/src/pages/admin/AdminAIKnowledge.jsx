@@ -84,11 +84,11 @@ function ConfirmDialog({ open, title, message, confirmLabel = 'Confirm', onConfi
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-navy-800 border border-navy-700 rounded-xl p-6 w-full max-w-sm shadow-2xl">
+      <div role="dialog" aria-modal="true" aria-labelledby="admin-aiknowledge-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-xl p-6 w-full max-w-sm shadow-2xl">
         <div className="flex items-start space-x-3 mb-4">
           <ExclamationTriangleIcon className="w-6 h-6 text-orange-400 flex-shrink-0 mt-0.5" />
           <div>
-            <h3 className="text-white font-semibold">{title}</h3>
+            <h3 id="admin-aiknowledge-dialog-1-title" className="text-white font-semibold">{title}</h3>
             <p className="text-navy-300 text-sm mt-1">{message}</p>
           </div>
         </div>
@@ -191,9 +191,9 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="bg-navy-800 border border-navy-700 rounded-xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div role="dialog" aria-modal="true" aria-labelledby="admin-aiknowledge-dialog-2-title" className="bg-navy-800 border border-navy-700 rounded-xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-navy-700">
-          <h2 className="text-lg font-bold text-white">
+          <h2 id="admin-aiknowledge-dialog-2-title" className="text-lg font-bold text-white">
             {editTarget ? 'Edit Knowledge Source' : 'Add Knowledge Source'}
           </h2>
           <button aria-label="Close" onClick={onClose} className="text-navy-400 hover:text-white transition-colors">

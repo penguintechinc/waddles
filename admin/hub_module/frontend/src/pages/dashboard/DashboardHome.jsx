@@ -198,7 +198,7 @@ function DashboardHome() {
                       </p>
                       <div className="mt-3 flex items-center justify-between text-xs text-navy-500">
                         <span>{community.memberCount} members</span>
-                        <span>Joined {new Date(community.joinedAt).toLocaleDateString()}</span>
+                        {community.joinedAt && <span>Joined {new Date(community.joinedAt).toLocaleDateString()}</span>}
                       </div>
                     </div>
                   </Link>

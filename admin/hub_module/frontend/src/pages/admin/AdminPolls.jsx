@@ -190,8 +190,8 @@ function AdminPolls() {
         <div className="space-y-4">
           {polls.length === 0 ? (
             <div className="card p-8 text-center">
-              <ChartBarIcon className="h-16 w-16 text-gray-500 mx-auto mb-4" />
-              <p className="text-gray-400">No polls yet. Create your first poll!</p>
+              <ChartBarIcon className="h-16 w-16 text-fg-muted mx-auto mb-4" />
+              <p className="text-fg-muted">No polls yet. Create your first poll!</p>
             </div>
           ) : (
             polls.map((poll) => (
@@ -207,9 +207,9 @@ function AdminPolls() {
                   <div>
                     <h3 className="text-white font-medium"><button type="button" className="text-left hover:underline focus-visible:underline">{poll.title}</button></h3>
                     {poll.description && (
-                      <p className="text-gray-400 text-sm mt-1 line-clamp-2">{poll.description}</p>
+                      <p className="text-fg-muted text-sm mt-1 line-clamp-2">{poll.description}</p>
                     )}
-                    <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
+                    <div className="flex items-center gap-4 mt-2 text-xs text-fg-muted">
                       <span className="flex items-center gap-1">
                         <EyeIcon className="h-3 w-3" />
                         {poll.view_visibility}
@@ -241,9 +241,9 @@ function AdminPolls() {
             <>
               <h2 className="text-lg font-semibold text-white mb-2">{selectedPoll.title}</h2>
               {selectedPoll.description && (
-                <p className="text-gray-400 text-sm mb-4">{selectedPoll.description}</p>
+                <p className="text-fg-muted text-sm mb-4">{selectedPoll.description}</p>
               )}
-              <p className="text-gray-500 text-sm mb-4">
+              <p className="text-fg-muted text-sm mb-4">
                 Total votes: {getTotalVotes(selectedPoll)}
               </p>
               <div className="space-y-3">
@@ -255,9 +255,9 @@ function AdminPolls() {
                     <div key={opt.id}>
                       <div className="flex justify-between text-sm mb-1">
                         <span className="text-white">{opt.text}</span>
-                        <span className="text-gray-400">{votes} ({percent}%)</span>
+                        <span className="text-fg-muted">{votes} ({percent}%)</span>
                       </div>
-                      <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                      <div className="h-2 bg-navy-700 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-sky-500 transition-all"
                           style={{ width: `${percent}%` }}
@@ -269,7 +269,7 @@ function AdminPolls() {
               </div>
             </>
           ) : (
-            <p className="text-gray-400 text-center py-8">Select a poll to view results</p>
+            <p className="text-fg-muted text-center py-8">Select a poll to view results</p>
           )}
         </div>
       </div>

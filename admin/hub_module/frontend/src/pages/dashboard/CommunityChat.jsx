@@ -168,21 +168,21 @@ export default function CommunityChat() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-900 flex flex-col">
+    <div className="min-h-screen bg-surface flex flex-col">
       {/* Header */}
-      <div className="bg-gray-800 border-b border-gray-700 px-6 py-4">
+      <div className="bg-surface-raised border-b border-line px-6 py-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <button
               aria-label="Back"
               onClick={() => navigate(`/dashboard/community/${id}`)}
-              className="text-gray-400 hover:text-white transition-colors"
+              className="text-fg-muted hover:text-white transition-colors"
             >
               <ArrowLeftIcon className="w-6 h-6" />
             </button>
             <div>
               <h1 className="text-2xl font-bold text-white">Community Chat</h1>
-              <p className="text-sm text-gray-400">
+              <p className="text-sm text-fg-muted">
                 #{activeChannel}
                 {!connected && <span className="text-red-400 ml-2">(Disconnected)</span>}
               </p>

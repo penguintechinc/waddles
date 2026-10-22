@@ -197,9 +197,9 @@ function AdminLiveStreams() {
 
       {!config ? (
         <div className="card p-8 text-center">
-          <VideoCameraIcon className="h-16 w-16 text-gray-500 mx-auto mb-4" />
+          <VideoCameraIcon className="h-16 w-16 text-fg-muted mx-auto mb-4" />
           <h2 className="text-xl font-semibold text-white mb-2">No Stream Configuration</h2>
-          <p className="text-gray-400 mb-4">Set up streaming to multicast to multiple platforms.</p>
+          <p className="text-fg-muted mb-4">Set up streaming to multicast to multiple platforms.</p>
           <button onClick={createConfig} className="btn btn-primary">
             <PlusIcon className="h-5 w-5 mr-2" />
             Create Stream Configuration
@@ -212,14 +212,14 @@ function AdminLiveStreams() {
             <h2 className="text-lg font-semibold text-white mb-4">Stream Key</h2>
             <div className="space-y-4">
               <div>
-                <label htmlFor="admin-live-streams-ingest-url" className="block text-sm text-gray-400 mb-1">Ingest URL</label>
+                <label htmlFor="admin-live-streams-ingest-url" className="block text-sm text-fg-muted mb-1">Ingest URL</label>
                 <div className="flex gap-2">
                   <input
                     id="admin-live-streams-ingest-url"
                     type="text"
                     value={config.ingest_url || ''}
                     readOnly
-                    className="input flex-1 bg-gray-800"
+                    className="input flex-1 bg-surface-raised"
                   />
                   <button aria-label="Copy ingest URL" onClick={() => copyToClipboard(config.ingest_url)} className="btn btn-secondary">
                     <ClipboardIcon className="h-5 w-5" />
@@ -227,14 +227,14 @@ function AdminLiveStreams() {
                 </div>
               </div>
               <div>
-                <label htmlFor="admin-live-streams-stream-key" className="block text-sm text-gray-400 mb-1">Stream Key</label>
+                <label htmlFor="admin-live-streams-stream-key" className="block text-sm text-fg-muted mb-1">Stream Key</label>
                 <div className="flex gap-2">
                   <input
                     id="admin-live-streams-stream-key"
                     type={showKey ? 'text' : 'password'}
                     value={config.stream_key || ''}
                     readOnly
-                    className="input flex-1 bg-gray-800"
+                    className="input flex-1 bg-surface-raised"
                   />
                   <button aria-label={showKey ? 'Hide stream key' : 'Show stream key'} onClick={() => setShowKey(!showKey)} className="btn btn-secondary">
                     <EyeIcon className="h-5 w-5" />
@@ -261,23 +261,23 @@ function AdminLiveStreams() {
             </div>
 
             {destinations.length === 0 ? (
-              <p className="text-gray-400 text-center py-8">No destinations configured</p>
+              <p className="text-fg-muted text-center py-8">No destinations configured</p>
             ) : (
               <div className="space-y-3">
                 {destinations.map((dest) => (
-                  <div key={dest.id} className="flex items-center justify-between p-4 bg-gray-800 rounded-lg">
+                  <div key={dest.id} className="flex items-center justify-between p-4 bg-surface-raised rounded-lg">
                     <div className="flex items-center gap-4">
                       <span className={`px-2 py-1 rounded text-xs font-medium ${
                         dest.platform === 'twitch' ? 'bg-purple-500/20 text-purple-400' :
                         dest.platform === 'youtube' ? 'bg-red-500/20 text-red-400' :
                         dest.platform === 'kick' ? 'bg-green-500/20 text-green-400' :
-                        'bg-gray-500/20 text-gray-400'
+                        'bg-navy-500/20 text-fg-muted'
                       }`}>
                         {dest.platform.toUpperCase()}
                       </span>
                       <div>
                         <p className="text-white text-sm">{dest.rtmp_url}</p>
-                        <p className="text-gray-500 text-xs">Resolution: {dest.max_resolution}</p>
+                        <p className="text-fg-muted text-xs">Resolution: {dest.max_resolution}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -309,15 +309,15 @@ function AdminLiveStreams() {
               <div className="grid grid-cols-3 gap-4">
                 <div className="text-center">
                   <p className="text-2xl font-bold text-white">{status.is_streaming ? 'Live' : 'Offline'}</p>
-                  <p className="text-gray-400 text-sm">Status</p>
+                  <p className="text-fg-muted text-sm">Status</p>
                 </div>
                 <div className="text-center">
                   <p className="text-2xl font-bold text-white">{status.viewer_count || 0}</p>
-                  <p className="text-gray-400 text-sm">Viewers</p>
+                  <p className="text-fg-muted text-sm">Viewers</p>
                 </div>
                 <div className="text-center">
                   <p className="text-2xl font-bold text-white">{status.bitrate_kbps || 0} kbps</p>
-                  <p className="text-gray-400 text-sm">Bitrate</p>
+                  <p className="text-fg-muted text-sm">Bitrate</p>
                 </div>
               </div>
             </div>

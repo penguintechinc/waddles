@@ -121,23 +121,23 @@ export default function CookiePreferencesModal() {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-xl">
+      <div role="dialog" aria-modal="true" aria-labelledby="cookie-preferences-modal-dialog-1-title" className="bg-surface rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-xl">
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-gray-200 sticky top-0 bg-white">
-          <h2 className="text-2xl font-bold text-gray-900">Cookie Preferences</h2>
+        <div className="flex items-center justify-between p-6 border-b border-line sticky top-0 bg-surface">
+          <h2 id="cookie-preferences-modal-dialog-1-title" className="text-2xl font-bold text-fg">Cookie Preferences</h2>
           <button
             aria-label="Close"
             onClick={() => setShowPreferences(false)}
-            className="p-1 hover:bg-gray-100 rounded-lg transition-colors"
+            className="p-1 hover:bg-surface-raised rounded-lg transition-colors"
           >
-            <XMarkIcon className="w-6 h-6 text-gray-600 hover:text-gray-900" />
+            <XMarkIcon className="w-6 h-6 text-fg-muted hover:text-fg" />
           </button>
         </div>
 
         {/* Content */}
         <div className="p-6 space-y-6">
           {/* Introduction */}
-          <p className="text-gray-600 text-sm leading-relaxed">
+          <p className="text-fg-muted text-sm leading-relaxed">
             Cookies are small files stored on your device that help us improve your experience.
             Below you can choose which types of cookies you'd like to accept. Essential cookies
             cannot be disabled as they're required for the site to function properly.
@@ -148,14 +148,14 @@ export default function CookiePreferencesModal() {
             {COOKIE_CATEGORIES.map((category) => (
               <div
                 key={category.id}
-                className="border border-gray-200 rounded-lg p-4 hover:border-gray-300 transition-colors"
+                className="border border-line rounded-lg p-4 hover:border-line-strong transition-colors"
               >
                 {/* Category Header with Toggle */}
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex-1">
-                    <h3 className="font-semibold text-gray-900">{category.name}</h3>
+                    <h3 className="font-semibold text-fg">{category.name}</h3>
                     {category.required && (
-                      <span className="inline-block mt-1 px-2 py-1 bg-gray-100 text-gray-700 text-xs font-medium rounded">
+                      <span className="inline-block mt-1 px-2 py-1 bg-surface-raised text-fg-secondary text-xs font-medium rounded">
                         Required
                       </span>
                     )}
@@ -170,11 +170,11 @@ export default function CookiePreferencesModal() {
                       disabled={category.required}
                       className={`w-5 h-5 rounded border-2 transition-colors ${
                         category.required
-                          ? 'bg-gray-200 border-gray-300 cursor-not-allowed'
-                          : 'bg-white border-gray-300 hover:border-blue-500 cursor-pointer'
+                          ? 'bg-navy-700 border-line-strong cursor-not-allowed'
+                          : 'bg-surface border-line-strong hover:border-sky-400 cursor-pointer'
                       } ${
                         preferences[category.id]
-                          ? 'bg-blue-600 border-blue-600'
+                          ? 'bg-sky-700 border-sky-500'
                           : ''
                       }`}
                       aria-label={`Toggle ${category.name}`}
@@ -182,8 +182,8 @@ export default function CookiePreferencesModal() {
                     <span
                       className={`ml-2 text-sm font-medium ${
                         preferences[category.id]
-                          ? 'text-blue-600'
-                          : 'text-gray-500'
+                          ? 'text-interactive'
+                          : 'text-fg-muted'
                       }`}
                     >
                       {preferences[category.id] ? 'Enabled' : 'Disabled'}
@@ -192,20 +192,20 @@ export default function CookiePreferencesModal() {
                 </div>
 
                 {/* Category Description */}
-                <p className="text-gray-600 text-sm mb-3">{category.description}</p>
+                <p className="text-fg-muted text-sm mb-3">{category.description}</p>
 
                 {/* Cookie Examples */}
-                <div className="bg-gray-50 rounded p-3 space-y-2">
-                  <p className="text-xs font-semibold text-gray-700 uppercase">
+                <div className="bg-surface-raised rounded p-3 space-y-2">
+                  <p className="text-xs font-semibold text-fg-secondary uppercase">
                     Cookies Set
                   </p>
                   {category.examples.length === 0 && (
-                    <p className="text-xs text-gray-600">{category.noneNote}</p>
+                    <p className="text-xs text-fg-muted">{category.noneNote}</p>
                   )}
                   <ul className="space-y-1">
                     {category.examples.map((example, idx) => (
-                      <li key={idx} className="text-xs text-gray-600">
-                        <span className="font-mono font-medium text-gray-700">
+                      <li key={idx} className="text-xs text-fg-muted">
+                        <span className="font-mono font-medium text-fg-secondary">
                           {example.name}
                         </span>
                         {' '}
@@ -221,8 +221,8 @@ export default function CookiePreferencesModal() {
           </div>
 
           {/* Info Box */}
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <p className="text-sm text-blue-900">
+          <div className="bg-info/10 border border-info/30 rounded-lg p-4">
+            <p className="text-sm text-info-fg">
               You can change your cookie preferences at any time by visiting our
               {' '}
               <a href="/cookie-policy" className="font-semibold underline hover:no-underline">
@@ -234,20 +234,20 @@ export default function CookiePreferencesModal() {
         </div>
 
         {/* Footer */}
-        <div className="p-6 border-t border-gray-200 bg-gray-50 space-y-3 sticky bottom-0">
+        <div className="p-6 border-t border-line bg-surface-raised space-y-3 sticky bottom-0">
           {/* Quick Action Buttons */}
           <div className="grid grid-cols-2 gap-3 mb-3">
             <button
               onClick={handleRejectAll}
               disabled={saving}
-              className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 border border-line-strong text-fg-secondary rounded-lg font-medium hover:bg-surface-raised transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Reject All
             </button>
             <button
               onClick={handleAcceptAll}
               disabled={saving}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 bg-sky-700 text-white rounded-lg font-medium hover:bg-sky-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Accept All
             </button>
@@ -257,7 +257,7 @@ export default function CookiePreferencesModal() {
           <button
             onClick={handleSave}
             disabled={saving}
-            className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+            className="w-full px-4 py-3 bg-sky-700 text-white rounded-lg font-semibold hover:bg-sky-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
           >
             {saving ? (
               <>

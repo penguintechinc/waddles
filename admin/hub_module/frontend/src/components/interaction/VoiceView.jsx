@@ -27,8 +27,8 @@ function CreateRoomModal({ onClose, onSubmit }) {
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div className="bg-navy-800 border border-navy-700 rounded-xl p-6 w-full max-w-md shadow-xl">
-        <h3 className="text-sky-100 font-semibold text-lg mb-4">Create Ad-Hoc Voice Room</h3>
+      <div role="dialog" aria-modal="true" aria-labelledby="voice-view-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-xl p-6 w-full max-w-md shadow-xl">
+        <h3 id="voice-view-dialog-1-title" className="text-sky-100 font-semibold text-lg mb-4">Create Ad-Hoc Voice Room</h3>
         <form onSubmit={handleSubmit}>
           <label className="block text-navy-300 text-sm mb-1" htmlFor="room-name">
             Room Name

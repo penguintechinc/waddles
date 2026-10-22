@@ -47,7 +47,7 @@ const TYPE_BADGES = {
   rcon: { bg: 'bg-amber-500/20', text: 'text-amber-300', border: 'border-amber-500/30', label: 'RCON' },
   mumble: { bg: 'bg-indigo-500/20', text: 'text-indigo-300', border: 'border-indigo-500/30', label: 'Mumble' },
   teamspeak: { bg: 'bg-sky-500/20', text: 'text-sky-300', border: 'border-sky-500/30', label: 'TeamSpeak' },
-  status_only: { bg: 'bg-gray-500/20', text: 'text-gray-300', border: 'border-gray-500/30', label: 'Status' },
+  status_only: { bg: 'bg-navy-500/20', text: 'text-fg-secondary', border: 'border-navy-500/30', label: 'Status' },
 };
 
 const VIS_BADGES = {
@@ -760,9 +760,9 @@ function AdminRconServers() {
       {/* ═══ Server Create/Edit Modal ═══ */}
       {showServerModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className="bg-navy-900 border border-navy-700 rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-rcon-servers-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
             <div className="flex items-center justify-between p-5 border-b border-navy-700">
-              <h2 className="text-lg font-bold text-sky-100">
+              <h2 id="admin-rcon-servers-dialog-1-title" className="text-lg font-bold text-sky-100">
                 {editingServer ? 'Edit Server' : 'Add Server'}
               </h2>
               <button aria-label="Close" onClick={() => setShowServerModal(false)} className="text-navy-400 hover:text-sky-300">

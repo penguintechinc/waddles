@@ -105,7 +105,7 @@ export default function AdminMarketplace() {
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gold-400 mb-2">Module Marketplace</h1>
-          <p className="text-gray-400">Browse and install modules for your community</p>
+          <p className="text-fg-muted">Browse and install modules for your community</p>
         </div>
 
         {/* Error Message */}
@@ -119,7 +119,7 @@ export default function AdminMarketplace() {
         {/* Search and Filter Bar */}
         <div className="mb-6 flex gap-4">
           <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-fg-muted" size={20} />
             <input
               aria-label="Search modules"
               type="text"
@@ -173,10 +173,10 @@ export default function AdminMarketplace() {
               </div>
 
               {/* Module Info */}
-              <p className="text-gray-400 text-sm mb-4 line-clamp-3">{module.description}</p>
+              <p className="text-fg-muted text-sm mb-4 line-clamp-3">{module.description}</p>
 
               {/* Module Meta */}
-              <div className="flex items-center gap-4 text-sm text-gray-400 mb-4">
+              <div className="flex items-center gap-4 text-sm text-fg-muted mb-4">
                 <div className="flex items-center gap-1">
                   <Star className="text-gold-400" size={14} />
                   <span>{module.avgRating}</span>
@@ -189,7 +189,7 @@ export default function AdminMarketplace() {
               </div>
 
               {/* Module Details */}
-              <div className="flex items-center gap-2 text-xs text-gray-500 mb-3">
+              <div className="flex items-center gap-2 text-xs text-fg-muted mb-3">
                 <span className="bg-navy-700 px-2 py-1 rounded">{module.category}</span>
                 <span>v{module.version}</span>
                 <span>by {module.author}</span>
@@ -275,7 +275,7 @@ export default function AdminMarketplace() {
             >
               Previous
             </button>
-            <span className="px-4 py-2 text-gray-400">
+            <span className="px-4 py-2 text-fg-muted">
               Page {page} of {pagination.totalPages}
             </span>
             <button

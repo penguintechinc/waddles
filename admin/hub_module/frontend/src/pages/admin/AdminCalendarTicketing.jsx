@@ -52,7 +52,7 @@ export default function AdminCalendarTicketing() {
     valid: { bg: 'bg-green-500/20', text: 'text-green-400', label: 'Valid' },
     checked_in: { bg: 'bg-sky-500/20', text: 'text-sky-400', label: 'Checked In' },
     cancelled: { bg: 'bg-red-500/20', text: 'text-red-400', label: 'Cancelled' },
-    expired: { bg: 'bg-gray-500/20', text: 'text-gray-400', label: 'Expired' },
+    expired: { bg: 'bg-navy-500/20', text: 'text-fg-muted', label: 'Expired' },
     refunded: { bg: 'bg-yellow-500/20', text: 'text-yellow-400', label: 'Refunded' },
     transferred: { bg: 'bg-purple-500/20', text: 'text-purple-400', label: 'Transferred' },
   };
@@ -277,7 +277,7 @@ export default function AdminCalendarTicketing() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm text-gray-400 mb-1">
+          <div className="flex items-center gap-2 text-sm text-fg-muted mb-1">
             <Link to={`/admin/${communityId}/calendar`} className="hover:text-sky-400">
               Calendar
             </Link>
@@ -319,25 +319,25 @@ export default function AdminCalendarTicketing() {
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           <div className="bg-navy-800 rounded-lg p-4 border border-navy-700">
             <div className="text-2xl font-bold text-white">{stats.total_tickets || 0}</div>
-            <div className="text-sm text-gray-400">Total Tickets</div>
+            <div className="text-sm text-fg-muted">Total Tickets</div>
           </div>
           <div className="bg-navy-800 rounded-lg p-4 border border-navy-700">
             <div className="text-2xl font-bold text-green-400">{stats.checked_in || 0}</div>
-            <div className="text-sm text-gray-400">Checked In</div>
+            <div className="text-sm text-fg-muted">Checked In</div>
           </div>
           <div className="bg-navy-800 rounded-lg p-4 border border-navy-700">
             <div className="text-2xl font-bold text-sky-400">{stats.not_checked_in || 0}</div>
-            <div className="text-sm text-gray-400">Not Checked In</div>
+            <div className="text-sm text-fg-muted">Not Checked In</div>
           </div>
           <div className="bg-navy-800 rounded-lg p-4 border border-navy-700">
             <div className="text-2xl font-bold text-red-400">{stats.cancelled || 0}</div>
-            <div className="text-sm text-gray-400">Cancelled</div>
+            <div className="text-sm text-fg-muted">Cancelled</div>
           </div>
           <div className="bg-navy-800 rounded-lg p-4 border border-navy-700">
             <div className="text-2xl font-bold text-purple-400">
               {stats.check_in_rate ? `${stats.check_in_rate}%` : '0%'}
             </div>
-            <div className="text-sm text-gray-400">Check-in Rate</div>
+            <div className="text-sm text-fg-muted">Check-in Rate</div>
           </div>
         </div>
       )}
@@ -356,14 +356,14 @@ export default function AdminCalendarTicketing() {
       <form onSubmit={handleSearch} className="flex flex-wrap gap-4">
         <div className="flex-1 min-w-[200px]">
           <div className="relative">
-            <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-gray-400" />
+            <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-fg-muted" />
             <input
               aria-label="Search by name, username, or email"
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search by name, username, or email..."
-              className="w-full pl-10 pr-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-white placeholder-gray-400 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+              className="w-full pl-10 pr-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-white placeholder-fg-muted focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
             />
           </div>
         </div>
@@ -403,19 +403,19 @@ export default function AdminCalendarTicketing() {
         <table className="w-full">
           <thead className="bg-navy-900">
             <tr>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-400">#</th>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-400">Holder</th>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-400">Type</th>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-400">Status</th>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-400">Check-in</th>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-400">Created</th>
-              <th className="px-4 py-3 text-right text-sm font-medium text-gray-400">Actions</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-fg-muted">#</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-fg-muted">Holder</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-fg-muted">Type</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-fg-muted">Status</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-fg-muted">Check-in</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-fg-muted">Created</th>
+              <th className="px-4 py-3 text-right text-sm font-medium text-fg-muted">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-navy-700">
             {tickets.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={7} className="px-4 py-8 text-center text-fg-muted">
                   No tickets found
                 </td>
               </tr>
@@ -424,14 +424,14 @@ export default function AdminCalendarTicketing() {
                 const status = statusColors[ticket.status] || statusColors.valid;
                 return (
                   <tr key={ticket.id} className="hover:bg-navy-700/50">
-                    <td className="px-4 py-3 text-sm font-mono text-gray-300">
+                    <td className="px-4 py-3 text-sm font-mono text-fg-secondary">
                       #{String(ticket.ticket_number).padStart(3, '0')}
                     </td>
                     <td className="px-4 py-3">
                       <div className="text-sm text-white">{ticket.holder_name || ticket.username}</div>
-                      <div className="text-xs text-gray-400">{ticket.holder_email || `@${ticket.username}`}</div>
+                      <div className="text-xs text-fg-muted">{ticket.holder_email || `@${ticket.username}`}</div>
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-300">
+                    <td className="px-4 py-3 text-sm text-fg-secondary">
                       {ticket.ticket_type_name || 'General'}
                     </td>
                     <td className="px-4 py-3">
@@ -448,10 +448,10 @@ export default function AdminCalendarTicketing() {
                           </span>
                         </div>
                       ) : (
-                        <span className="text-gray-400 text-sm">-</span>
+                        <span className="text-fg-muted text-sm">-</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-400">
+                    <td className="px-4 py-3 text-sm text-fg-muted">
                       {ticket.created_at ? new Date(ticket.created_at).toLocaleDateString() : '-'}
                     </td>
                     <td className="px-4 py-3 text-right">
@@ -463,7 +463,7 @@ export default function AdminCalendarTicketing() {
                                 setSelectedTicket(ticket);
                                 setShowTransferModal(true);
                               }}
-                              className="p-1.5 text-gray-400 hover:text-purple-400 hover:bg-purple-500/10 rounded transition-colors"
+                              className="p-1.5 text-fg-muted hover:text-purple-400 hover:bg-purple-500/10 rounded transition-colors"
                               title="Transfer Ticket"
                             >
                               <ArrowPathRoundedSquareIcon className="h-5 w-5" />
@@ -473,7 +473,7 @@ export default function AdminCalendarTicketing() {
                                 setSelectedTicket(ticket);
                                 setShowCancelModal(true);
                               }}
-                              className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"
+                              className="p-1.5 text-fg-muted hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"
                               title="Cancel Ticket"
                             >
                               <XMarkIcon className="h-5 w-5" />
@@ -492,7 +492,7 @@ export default function AdminCalendarTicketing() {
         {/* Pagination */}
         {totalPages > 1 && (
           <div className="flex items-center justify-between px-4 py-3 border-t border-navy-700">
-            <div className="text-sm text-gray-400">
+            <div className="text-sm text-fg-muted">
               Showing {(page - 1) * 25 + 1} - {Math.min(page * 25, totalTickets)} of {totalTickets}
             </div>
             <div className="flex items-center gap-2">
@@ -500,18 +500,18 @@ export default function AdminCalendarTicketing() {
                 aria-label="Previous page"
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page === 1}
-                className="p-2 text-gray-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                className="p-2 text-fg-muted hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <ChevronLeftIcon className="h-5 w-5" />
               </button>
-              <span className="text-sm text-gray-400">
+              <span className="text-sm text-fg-muted">
                 Page {page} of {totalPages}
               </span>
               <button
                 aria-label="Next page"
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page === totalPages}
-                className="p-2 text-gray-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                className="p-2 text-fg-muted hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <ChevronRightIcon className="h-5 w-5" />
               </button>

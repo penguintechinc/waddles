@@ -101,18 +101,18 @@ export default function PrivacyRights() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-200">
+    <div className="min-h-screen bg-surface text-fg">
       <div className="mx-auto max-w-3xl px-4 py-10">
         <Link
           to="/"
-          className="mb-6 inline-flex items-center gap-2 text-amber-400 hover:text-amber-300 focus:outline-none focus:ring-2 focus:ring-sky-500 rounded"
+          className="mb-6 inline-flex items-center gap-2 text-gold-400 hover:text-gold-300 focus:outline-none focus:ring-2 focus:ring-sky-500 rounded"
         >
           <ArrowLeftIcon className="h-4 w-4" aria-hidden="true" />
           Back
         </Link>
 
-        <h1 className="text-3xl font-bold text-amber-400">Your privacy rights</h1>
-        <p className="mt-2 text-slate-400">
+        <h1 className="text-3xl font-bold text-gold-400">Your privacy rights</h1>
+        <p className="mt-2 text-fg-muted">
           Access, download, correct or delete the personal information we hold about you, and
           control whether it is shared.
         </p>
@@ -128,9 +128,9 @@ export default function PrivacyRights() {
           </p>
         )}
 
-        <section className="mt-8 rounded-lg border border-slate-700 bg-slate-800 p-5">
-          <h2 className="text-xl font-semibold text-amber-400">Get a copy of your data</h2>
-          <p className="mt-1 text-sm text-slate-400">
+        <section className="mt-8 rounded-lg border border-line bg-surface-raised p-5">
+          <h2 className="text-xl font-semibold text-gold-400">Get a copy of your data</h2>
+          <p className="mt-1 text-sm text-fg-muted">
             Downloads everything we hold about you as a JSON file you can keep or move to
             another service. Passwords, session tokens and security keys are never included.
           </p>
@@ -145,11 +145,11 @@ export default function PrivacyRights() {
           </button>
         </section>
 
-        <section className="mt-6 rounded-lg border border-slate-700 bg-slate-800 p-5">
-          <h2 className="text-xl font-semibold text-amber-400">
+        <section className="mt-6 rounded-lg border border-line bg-surface-raised p-5">
+          <h2 className="text-xl font-semibold text-gold-400">
             Do Not Sell or Share My Personal Information
           </h2>
-          <p className="mt-1 text-sm text-slate-400">
+          <p className="mt-1 text-sm text-fg-muted">
             Opting out stops your personal information being sold or shared, and turns off
             marketing cookies. If your browser sends a Global Privacy Control signal we honour
             it automatically.
@@ -160,15 +160,15 @@ export default function PrivacyRights() {
             disabled={busy === 'optout' || consentLoading}
             aria-pressed={optedOut}
             data-testid="toggle-do-not-sell"
-            className="mt-4 rounded border border-amber-500 px-4 py-2 font-medium text-amber-400 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
+            className="mt-4 rounded border border-gold-500 px-4 py-2 font-medium text-gold-400 hover:bg-navy-700 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
           >
             {optedOut ? 'You are opted out — allow sharing again' : 'Opt out of sale or sharing'}
           </button>
         </section>
 
-        <section className="mt-6 rounded-lg border border-red-800 bg-slate-800 p-5">
+        <section className="mt-6 rounded-lg border border-red-800 bg-surface-raised p-5">
           <h2 className="text-xl font-semibold text-red-400">Delete my data</h2>
-          <p className="mt-1 text-sm text-slate-400">
+          <p className="mt-1 text-sm text-fg-muted">
             Permanently removes your profile, activity, sessions, community memberships, linked
             platform accounts and reputation. The one exception: if you are under an active ban
             in a community, a one-way coded record of that ban (never your platform ID) is kept
@@ -187,7 +187,7 @@ export default function PrivacyRights() {
             </button>
           ) : (
             <div className="mt-4 space-y-3">
-              <label htmlFor="confirm-password" className="block text-sm text-slate-300">
+              <label htmlFor="confirm-password" className="block text-sm text-fg-secondary">
                 Confirm your password
               </label>
               <input
@@ -195,7 +195,7 @@ export default function PrivacyRights() {
                 type="password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full rounded border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                className="w-full rounded border border-line-strong bg-surface px-3 py-2 text-fg focus:outline-none focus:ring-2 focus:ring-sky-400"
               />
               <div className="flex gap-3">
                 <button
@@ -210,7 +210,7 @@ export default function PrivacyRights() {
                 <button
                   type="button"
                   onClick={() => { setConfirmingDelete(false); setConfirmPassword(''); }}
-                  className="rounded border border-slate-600 px-4 py-2 text-slate-300 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                  className="rounded border border-line-strong px-4 py-2 text-fg-secondary hover:bg-navy-700 focus:outline-none focus:ring-2 focus:ring-sky-400"
                 >
                   Cancel
                 </button>
@@ -219,13 +219,13 @@ export default function PrivacyRights() {
           )}
         </section>
 
-        <p className="mt-8 text-sm text-slate-500">
+        <p className="mt-8 text-sm text-fg-muted">
           To correct your details, edit your{' '}
-          <Link to="/dashboard/profile" className="text-amber-400 hover:text-amber-300">
+          <Link to="/dashboard/profile" className="text-gold-400 hover:text-gold-300">
             profile
           </Link>
           . See the{' '}
-          <Link to="/cookie-policy" className="text-amber-400 hover:text-amber-300">
+          <Link to="/cookie-policy" className="text-gold-400 hover:text-gold-300">
             cookie policy
           </Link>{' '}
           for what each category covers.

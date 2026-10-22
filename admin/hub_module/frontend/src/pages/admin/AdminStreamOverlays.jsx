@@ -380,8 +380,8 @@ function AdminStreamOverlays() {
       {/* Rotate Confirmation Modal */}
       {showRotateConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md mx-4">
-            <h3 className="text-lg font-semibold text-sky-100 mb-2">Rotate Overlay Key?</h3>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-stream-overlays-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md mx-4">
+            <h3 id="admin-stream-overlays-dialog-1-title" className="text-lg font-semibold text-sky-100 mb-2">Rotate Overlay Key?</h3>
             <p className="text-navy-300 mb-4">
               This will generate a new overlay URL. The old URL will continue working for 5 minutes
               to allow you to update your OBS settings.

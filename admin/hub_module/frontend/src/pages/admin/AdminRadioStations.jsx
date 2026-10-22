@@ -446,8 +446,8 @@ function AdminRadioStations() {
       {/* Delete Confirmation Modal */}
       {deleteConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md mx-4">
-            <h3 className="text-lg font-semibold text-sky-100 mb-2">Remove Radio Station?</h3>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-radio-stations-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md mx-4">
+            <h3 id="admin-radio-stations-dialog-1-title" className="text-lg font-semibold text-sky-100 mb-2">Remove Radio Station?</h3>
             <p className="text-navy-300 mb-4">
               Are you sure you want to remove{' '}
               <span className="text-gold-400 font-medium">{deleteConfirm.name}</span>?

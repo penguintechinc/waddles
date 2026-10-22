@@ -539,9 +539,9 @@ function ReputationSettings() {
       {/* At-Risk Users Modal */}
       {showAtRisk && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 rounded-xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
+          <div role="dialog" aria-modal="true" aria-labelledby="reputation-settings-dialog-1-title" className="bg-navy-900 rounded-xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-xl font-bold text-sky-100">At-Risk Users</h3>
+              <h3 id="reputation-settings-dialog-1-title" className="text-xl font-bold text-sky-100">At-Risk Users</h3>
               <button aria-label="Close at-risk users"
                 onClick={() => setShowAtRisk(false)}
                 className="text-navy-400 hover:text-sky-100"

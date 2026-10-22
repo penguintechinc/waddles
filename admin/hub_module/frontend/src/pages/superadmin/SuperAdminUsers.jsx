@@ -496,8 +496,8 @@ function SuperAdminUsers() {
       {/* Role Assignment Modal */}
       {showRoleModal && selectedUser && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
-            <h2 className="text-xl font-bold text-gold-400 mb-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="super-admin-users-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
+            <h2 id="super-admin-users-dialog-1-title" className="text-xl font-bold text-gold-400 mb-4">
               {roleName === 'super_admin'
                 ? 'Super Admin Role'
                 : roleName === 'vendor'
@@ -535,8 +535,8 @@ function SuperAdminUsers() {
       {/* Verify Email Modal */}
       {showVerifyModal && selectedUser && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
-            <h2 className="text-xl font-bold text-gold-400 mb-4">Email Verification</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="super-admin-users-dialog-2-title" className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
+            <h2 id="super-admin-users-dialog-2-title" className="text-xl font-bold text-gold-400 mb-4">Email Verification</h2>
             <p className="text-navy-300 mb-4">
               {selectedUser.emailVerified
                 ? <>Remove email verification from <span className="font-medium text-sky-100">{selectedUser.username}</span>?</>
@@ -563,8 +563,8 @@ function SuperAdminUsers() {
       {/* Delete User Modal */}
       {showDeleteModal && selectedUser && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
-            <h2 className="text-xl font-bold text-red-400 mb-4">Delete User</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="super-admin-users-dialog-3-title" className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
+            <h2 id="super-admin-users-dialog-3-title" className="text-xl font-bold text-red-400 mb-4">Delete User</h2>
             <p className="text-navy-300 mb-4">
               Are you sure you want to delete{' '}
               <span className="font-medium text-sky-100">{selectedUser.username}</span>?

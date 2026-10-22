@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import { CheckboxField, SelectField, SwitchField, TextareaField, TextField } from '../Field';
+import { CheckboxField } from '../CheckboxField';
+import { SelectField } from '../SelectField';
+import { SwitchField } from '../SwitchField';
+import { TextareaField } from '../TextareaField';
+import { TextField } from '../TextField';
 import { axeViolations } from '../../../test/axe';
 
 describe('TextField', () => {

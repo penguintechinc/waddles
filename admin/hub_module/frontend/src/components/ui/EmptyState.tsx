@@ -10,14 +10,24 @@ export interface EmptyStateProps {
   action?: ReactNode;
   headingLevel?: 2 | 3 | 4;
   className?: string;
+  /** Override the default `empty-state` test id (pages assert on their own). */
+  testId?: string;
 }
 
 /** "Nothing here yet" block that explains why and offers the next action. */
-export function EmptyState({ title, description, icon, action, headingLevel = 3, className }: EmptyStateProps) {
+export function EmptyState({
+  title,
+  description,
+  icon,
+  action,
+  headingLevel = 3,
+  className,
+  testId = 'empty-state',
+}: EmptyStateProps) {
   const Heading = `h${headingLevel}` as const;
   return (
     <div
-      data-testid="empty-state"
+      data-testid={testId}
       className={cx('flex flex-col items-center justify-center px-6 py-14 text-center', className)}
     >
       {icon ? (

@@ -43,6 +43,7 @@ function auditFile(file) {
     imgNoAlt: f.imgNoAlt.map((x) => x.line),
     iconButtons: f.iconButtons.map((x) => x.line),
     clickable: f.clickable.map((x) => x.line),
+    overlays: f.overlays.map((x) => x.line),
     outlineNone: f.outline.length,
     outlineNoReplacement: f.outline.filter((x) => !x.replaced).length,
     animate: f.animate,
@@ -74,13 +75,14 @@ if (files.length === 0) {
   process.exit(2);
 }
 
-const totals = { unlabeled: 0, imgNoAlt: 0, iconButtons: 0, outlineNone: 0, outlineNoReplacement: 0, clickable: 0, animate: 0 };
+const totals = { unlabeled: 0, imgNoAlt: 0, iconButtons: 0, overlaysWithoutDialog: 0, outlineNone: 0, outlineNoReplacement: 0, clickable: 0, animate: 0 };
 const perFile = [];
 for (const f of files) {
   const r = auditFile(f);
   totals.unlabeled += r.unlabeled.length;
   totals.imgNoAlt += r.imgNoAlt.length;
   totals.iconButtons += r.iconButtons.length;
+  totals.overlaysWithoutDialog += r.overlays.length;
   totals.outlineNone += r.outlineNone;
   totals.outlineNoReplacement += r.outlineNoReplacement;
   totals.clickable += r.clickable.length;

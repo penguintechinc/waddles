@@ -88,21 +88,21 @@ export default function SuperAdminMarketplaceSettings() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-900">
+      <div className="flex items-center justify-center min-h-screen bg-surface">
         <div className="text-yellow-400">Loading marketplace settings...</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-6">
+    <div className="min-h-screen bg-surface text-white p-6">
       <div className="max-w-2xl mx-auto">
         {/* Header */}
         <div className="mb-8 flex items-center gap-3">
           <Cog6ToothIcon className="w-8 h-8 text-yellow-400" />
           <div>
             <h1 className="text-3xl font-bold text-yellow-400">Marketplace Settings</h1>
-            <p className="text-gray-400">Global marketplace configuration</p>
+            <p className="text-fg-muted">Global marketplace configuration</p>
           </div>
         </div>
 
@@ -123,11 +123,11 @@ export default function SuperAdminMarketplaceSettings() {
         )}
 
         {/* Settings Form */}
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 space-y-6">
+        <div className="bg-surface-raised border border-line rounded-xl p-6 space-y-6">
 
           {/* Platform Fee */}
           <div>
-            <label htmlFor="super-admin-marketplace-settings-platform-fee" className="block text-sm font-medium text-gray-300 mb-1">
+            <label htmlFor="super-admin-marketplace-settings-platform-fee" className="block text-sm font-medium text-fg-secondary mb-1">
               Platform Fee (%)
             </label>
             <div className="flex items-center gap-2">
@@ -140,20 +140,20 @@ export default function SuperAdminMarketplaceSettings() {
                 min="0"
                 max="100"
                 step="0.1"
-                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
+                className="w-40 bg-navy-700 border border-line-strong rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
-              <span className="text-gray-400">%</span>
+              <span className="text-fg-muted">%</span>
             </div>
-            <p className="text-gray-500 text-xs mt-1">Percentage taken from each vendor sale</p>
+            <p className="text-fg-muted text-xs mt-1">Percentage taken from each vendor sale</p>
           </div>
 
           {/* Community Premium Base Price */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
+            <label className="block text-sm font-medium text-fg-secondary mb-1">
               Community Premium Base Price (USD / month)
             </label>
             <div className="flex items-center gap-2">
-              <span className="text-gray-400">$</span>
+              <span className="text-fg-muted">$</span>
               <input
                 aria-label="Community premium base price (USD per month)"
                 type="number"
@@ -162,15 +162,15 @@ export default function SuperAdminMarketplaceSettings() {
                 onChange={handleChange}
                 min="0"
                 step="0.01"
-                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
+                className="w-40 bg-navy-700 border border-line-strong rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
             </div>
-            <p className="text-gray-500 text-xs mt-1">Monthly base subscription price for community premium</p>
+            <p className="text-fg-muted text-xs mt-1">Monthly base subscription price for community premium</p>
           </div>
 
           {/* Base Seat Limit */}
           <div>
-            <label htmlFor="super-admin-marketplace-settings-community-premium-base-seat-limit" className="block text-sm font-medium text-gray-300 mb-1">
+            <label htmlFor="super-admin-marketplace-settings-community-premium-base-seat-limit" className="block text-sm font-medium text-fg-secondary mb-1">
               Community Premium Base Seat Limit
             </label>
             <input
@@ -180,14 +180,14 @@ export default function SuperAdminMarketplaceSettings() {
               value={settings.community_premium_base_seat_limit}
               onChange={handleChange}
               min="0"
-              className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
+              className="w-40 bg-navy-700 border border-line-strong rounded-lg px-3 py-2 text-white focus:border-yellow-500"
             />
-            <p className="text-gray-500 text-xs mt-1">Number of seats included in the base price</p>
+            <p className="text-fg-muted text-xs mt-1">Number of seats included in the base price</p>
           </div>
 
           {/* Overage Price per Seat */}
           <div>
-            <label htmlFor="super-admin-marketplace-settings-community-premium-overage-price-per-seat" className="block text-sm font-medium text-gray-300 mb-1">
+            <label htmlFor="super-admin-marketplace-settings-community-premium-overage-price-per-seat" className="block text-sm font-medium text-fg-secondary mb-1">
               Community Premium Overage Price per Seat (cents)
             </label>
             <div className="flex items-center gap-2">
@@ -198,20 +198,20 @@ export default function SuperAdminMarketplaceSettings() {
                 value={settings.community_premium_overage_price_cents}
                 onChange={handleChange}
                 min="0"
-                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
+                className="w-40 bg-navy-700 border border-line-strong rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
-              <span className="text-gray-400">¢ / seat</span>
+              <span className="text-fg-muted">¢ / seat</span>
             </div>
-            <p className="text-gray-500 text-xs mt-1">Additional cost in cents per seat above the base limit</p>
+            <p className="text-fg-muted text-xs mt-1">Additional cost in cents per seat above the base limit</p>
           </div>
 
           {/* Payout Threshold */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
+            <label className="block text-sm font-medium text-fg-secondary mb-1">
               Payout Threshold (USD)
             </label>
             <div className="flex items-center gap-2">
-              <span className="text-gray-400">$</span>
+              <span className="text-fg-muted">$</span>
               <input
                 aria-label="Payout threshold (USD)"
                 type="number"
@@ -220,15 +220,15 @@ export default function SuperAdminMarketplaceSettings() {
                 onChange={handleChange}
                 min="0"
                 step="0.01"
-                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
+                className="w-40 bg-navy-700 border border-line-strong rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
             </div>
-            <p className="text-gray-500 text-xs mt-1">Minimum balance before vendor payout is triggered</p>
+            <p className="text-fg-muted text-xs mt-1">Minimum balance before vendor payout is triggered</p>
           </div>
 
           {/* Minimum Price */}
           <div>
-            <label htmlFor="super-admin-marketplace-settings-minimum-module-price-cents" className="block text-sm font-medium text-gray-300 mb-1">
+            <label htmlFor="super-admin-marketplace-settings-minimum-module-price-cents" className="block text-sm font-medium text-fg-secondary mb-1">
               Minimum Module Price (cents)
             </label>
             <div className="flex items-center gap-2">
@@ -239,15 +239,15 @@ export default function SuperAdminMarketplaceSettings() {
                 value={settings.minimum_price_cents}
                 onChange={handleChange}
                 min="0"
-                className="w-40 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white focus:border-yellow-500"
+                className="w-40 bg-navy-700 border border-line-strong rounded-lg px-3 py-2 text-white focus:border-yellow-500"
               />
-              <span className="text-gray-400">¢</span>
+              <span className="text-fg-muted">¢</span>
             </div>
-            <p className="text-gray-500 text-xs mt-1">Minimum price allowed for paid modules (0 = no minimum)</p>
+            <p className="text-fg-muted text-xs mt-1">Minimum price allowed for paid modules (0 = no minimum)</p>
           </div>
 
           {/* Save Button */}
-          <div className="pt-4 border-t border-gray-700">
+          <div className="pt-4 border-t border-line">
             <button
               onClick={handleSave}
               disabled={saving}

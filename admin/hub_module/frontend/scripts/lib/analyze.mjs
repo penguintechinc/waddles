@@ -11,6 +11,9 @@ import traverseModule from '@babel/traverse';
 
 const traverse = traverseModule.default ?? traverseModule;
 
+/** Re-exported so codemods share the exact traverse implementation the audit uses. */
+export { traverse };
+
 const CONTROL_TAGS = new Set(['input', 'select', 'textarea']);
 const NON_LABELLED_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'image']);
 const CLICKABLE_NON_INTERACTIVE = new Set(['div', 'span', 'li', 'tr', 'td', 'p', 'section', 'article', 'img', 'h1', 'h2', 'h3', 'h4']);
@@ -150,7 +153,7 @@ function isIconOnlyButton(element) {
 export function analyzeSource(src, file) {
   const ast = parseSource(src, file);
   const targets = collectLabelTargets(ast);
-  const findings = { unlabeled: [], imgNoAlt: [], iconButtons: [], clickable: [], outline: [], animate: 0 };
+  const findings = { unlabeled: [], imgNoAlt: [], iconButtons: [], clickable: [], outline: [], overlays: [], animate: 0 };
 
   traverse(ast, {
     JSXElement(path) {
@@ -176,6 +179,24 @@ export function analyzeSource(src, file) {
         if (insideLabel(path)) return;
         findings.unlabeled.push({ line, start: opening.start, end: opening.end, tag: name, type, path, element: el });
         return;
+      }
+
+      // Hand-rolled modal overlays (`fixed inset-0`) must expose dialog semantics somewhere in
+      // their subtree; `role=presentation` backdrops are skipped (their panel is checked).
+      const overlayClasses = classFragments(getAttr(opening, 'className')).map((f) => f.text).join(' ');
+      if (/\bfixed\b/.test(overlayClasses) && /\binset-0\b/.test(overlayClasses) && !getAttr(opening, 'aria-hidden')) {
+        let hasDialog = false;
+        const probe = (n) => {
+          if (hasDialog || n.type !== 'JSXElement') return;
+          const role = attrString(getAttr(n.openingElement, 'role'));
+          if (role === 'dialog' || role === 'alertdialog') hasDialog = true;
+          n.children.forEach(probe);
+        };
+        probe(el);
+        const ownRole = attrString(getAttr(opening, 'role'));
+        if (!hasDialog && ownRole !== 'dialog' && ownRole !== 'alertdialog') {
+          findings.overlays.push({ line, start: opening.start, end: opening.end });
+        }
       }
 
       if (name === 'img' && !getAttr(opening, 'alt') && !hasSpread(opening)) {
@@ -208,7 +229,11 @@ export function analyzeSource(src, file) {
       if (/\banimate-(spin|pulse|bounce|ping)\b/.test(all)) findings.animate++;
       const hasRemoval = /(^|\s)(focus:|focus-visible:)?outline-none(\s|$)/.test(all);
       if (!hasRemoval) return;
-      const replaced = /(^|\s)(focus|focus-visible|peer-focus|peer-focus-visible|group-focus):ring-/.test(all) || /(^|\s)focus(-visible)?:outline(?!-none)\b/.test(all);
+      // A programmatic-focus-only target (`tabIndex={-1}`, e.g. <main> behind the skip link) is
+      // not a keyboard tab stop, so suppressing its outline does not hide focus from anyone.
+      const tabIdx = getAttr(path.parent, 'tabIndex');
+      const programmaticOnly = Boolean(tabIdx && tabIdx.value?.type === 'JSXExpressionContainer' && tabIdx.value.expression.type === 'UnaryExpression' && tabIdx.value.expression.operator === '-' && tabIdx.value.expression.argument.value === 1);
+      const replaced = programmaticOnly || /(^|\s)(focus|focus-visible|peer-focus|peer-focus-visible|group-focus):ring-/.test(all) || /(^|\s)focus(-visible)?:outline(?!-none)\b/.test(all);
       findings.outline.push({ line: path.node.loc?.start.line ?? 0, replaced, fragments: frags });
     },
   });

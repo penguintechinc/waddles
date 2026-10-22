@@ -1,10 +1,10 @@
-import { lazy, Suspense } from 'react';
+import { lazy } from 'react';
 import { Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
+import { LoadingState } from './components/ui';
 
-// Wave-1 route stubs (S0 foundation) -- lazy so later slices only need to
-// fill in the component file; the import line and <Route> below are
-// pre-registered to avoid App.jsx merge conflicts between parallel slices.
+// Every page is route-level code-split: the shell (layouts) ships in the main
+// bundle, each page loads on demand behind the layout's <RouteOutlet />.
 const TenantBundleCatalog = lazy(() => import('./pages/tenant/TenantBundleCatalog'));
 const AdminCommunityBundles = lazy(() => import('./pages/admin/AdminCommunityBundles'));
 const SuperAdminSuperCommunities = lazy(() => import('./pages/superadmin/SuperAdminSuperCommunities'));
@@ -16,153 +16,156 @@ import DashboardLayout from './layouts/DashboardLayout';
 import AdminLayout from './layouts/AdminLayout';
 
 // Public pages
-import HomePage from './pages/public/HomePage';
-import CommunitiesPage from './pages/public/CommunitiesPage';
-import CommunityPublicPage from './pages/public/CommunityPublicPage';
-import LiveStreamsPage from './pages/public/LiveStreamsPage';
-import UserPublicProfile from './pages/public/UserPublicProfile';
-import MusicQueuePage from './pages/public/MusicQueuePage';
+const HomePage = lazy(() => import('./pages/public/HomePage'));
+const CommunitiesPage = lazy(() => import('./pages/public/CommunitiesPage'));
+const CommunityPublicPage = lazy(() => import('./pages/public/CommunityPublicPage'));
+const LiveStreamsPage = lazy(() => import('./pages/public/LiveStreamsPage'));
+const UserPublicProfile = lazy(() => import('./pages/public/UserPublicProfile'));
+const MusicQueuePage = lazy(() => import('./pages/public/MusicQueuePage'));
 
 // Auth pages
-import LoginPage from './pages/auth/LoginPage';
-import RegisterPage from './pages/auth/RegisterPage';
-import PasswordRecoveryUnavailablePage from './pages/auth/PasswordRecoveryUnavailablePage';
-import OAuthCallback from './pages/auth/OAuthCallback';
+const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
+const RegisterPage = lazy(() => import('./pages/auth/RegisterPage'));
+const PasswordRecoveryUnavailablePage = lazy(() => import('./pages/auth/PasswordRecoveryUnavailablePage'));
+const OAuthCallback = lazy(() => import('./pages/auth/OAuthCallback'));
 
 // Cookie Policy page
-import CookiePolicy from './pages/CookiePolicy';
-import PrivacyRights from './pages/PrivacyRights';
+const CookiePolicy = lazy(() => import('./pages/CookiePolicy'));
+const PrivacyRights = lazy(() => import('./pages/PrivacyRights'));
 
 // Calendar pages
-import CalendarSettings from './pages/calendar/CalendarSettings';
-import BookingPages from './pages/calendar/BookingPages';
-import MyBookings from './pages/calendar/MyBookings';
-import BookingPagePublic from './pages/calendar/BookingPagePublic';
+const CalendarSettings = lazy(() => import('./pages/calendar/CalendarSettings'));
+const BookingPages = lazy(() => import('./pages/calendar/BookingPages'));
+const MyBookings = lazy(() => import('./pages/calendar/MyBookings'));
+const BookingPagePublic = lazy(() => import('./pages/calendar/BookingPagePublic'));
 
 // Dashboard pages
-import DashboardHome from './pages/dashboard/DashboardHome';
-import CommunityDashboard from './pages/dashboard/CommunityDashboard';
-import CommunitySettings from './pages/dashboard/CommunitySettings';
-import CommunityChat from './pages/dashboard/CommunityChat';
-import CommunityLeaderboard from './pages/dashboard/CommunityLeaderboard';
-import CommunityMembers from './pages/dashboard/CommunityMembers';
-import AccountSettings from './pages/dashboard/AccountSettings';
-import UserProfileEdit from './pages/dashboard/UserProfileEdit';
-import CreateCommunity from './pages/dashboard/CreateCommunity';
-import MyAnalytics from './pages/dashboard/MyAnalytics';
+const DashboardHome = lazy(() => import('./pages/dashboard/DashboardHome'));
+const CommunityDashboard = lazy(() => import('./pages/dashboard/CommunityDashboard'));
+const CommunitySettings = lazy(() => import('./pages/dashboard/CommunitySettings'));
+const CommunityChat = lazy(() => import('./pages/dashboard/CommunityChat'));
+const CommunityLeaderboard = lazy(() => import('./pages/dashboard/CommunityLeaderboard'));
+const CommunityMembers = lazy(() => import('./pages/dashboard/CommunityMembers'));
+const AccountSettings = lazy(() => import('./pages/dashboard/AccountSettings'));
+const UserProfileEdit = lazy(() => import('./pages/dashboard/UserProfileEdit'));
+const CreateCommunity = lazy(() => import('./pages/dashboard/CreateCommunity'));
+const MyAnalytics = lazy(() => import('./pages/dashboard/MyAnalytics'));
 
 // Admin pages
-import AdminHome from './pages/admin/AdminHome';
-import AdminMembers from './pages/admin/AdminMembers';
-import AdminModules from './pages/admin/AdminModules';
-import AdminMarketplace from './pages/admin/AdminMarketplace';
-import AdminMarketplaceModuleDetail from './pages/admin/AdminMarketplaceModuleDetail.jsx';
-import AdminCommunityPremium from './pages/admin/AdminCommunityPremium.jsx';
-import SuperAdminMarketplaceSettings from './pages/superadmin/SuperAdminMarketplaceSettings.jsx';
-import AdminStreamOverlays from './pages/admin/AdminStreamOverlays';
-import AdminDomains from './pages/admin/AdminDomains';
-import AdminServers from './pages/admin/AdminServers';
-import AdminConnectedPlatforms from './pages/admin/AdminConnectedPlatforms';
-import LiveActivity from './pages/community/LiveActivity';
-import AdminMirrorGroups from './pages/admin/AdminMirrorGroups';
-import AdminLeaderboardConfig from './pages/admin/AdminLeaderboardConfig';
-import AdminCommunityProfile from './pages/admin/AdminCommunityProfile';
-import ReputationSettings from './pages/admin/ReputationSettings';
-import AdminAIInsights from './pages/admin/AdminAIInsights';
-import AdminAIResearcherConfig from './pages/admin/AdminAIResearcherConfig';
-import AdminAIChatterConfig from './pages/admin/AdminAIChatterConfig';
-import AdminBotDetection from './pages/admin/AdminBotDetection';
-import AdminAnnouncements from './pages/admin/AdminAnnouncements';
-import AdminAnalytics from './pages/admin/AdminAnalytics';
-import AdminMemberAnalytics from './pages/admin/AdminMemberAnalytics';
-import AdminSecurity from './pages/admin/AdminSecurity';
-import LoyaltySettings from './pages/admin/LoyaltySettings';
-import LoyaltyLeaderboard from './pages/admin/LoyaltyLeaderboard';
-import LoyaltyGiveaways from './pages/admin/LoyaltyGiveaways';
-import LoyaltyGames from './pages/admin/LoyaltyGames';
-import LoyaltyGear from './pages/admin/LoyaltyGear';
-import CommunityConnections from './pages/admin/CommunityConnections';
-import AdminWorkflows from './pages/admin/AdminWorkflows';
-import AdminShoutouts from './pages/admin/AdminShoutouts';
-import AdminTranslation from './pages/admin/AdminTranslation';
-import AdminMusicDashboard from './pages/admin/AdminMusicDashboard';
-import AdminMusicSettings from './pages/admin/AdminMusicSettings';
-import AdminMusicProviders from './pages/admin/AdminMusicProviders';
-import AdminRadioStations from './pages/admin/AdminRadioStations';
-import AdminVendorReview from './pages/admin/AdminVendorReview';
-import AdminCalendarEvents from './pages/admin/AdminCalendarEvents';
-import AdminCalendarTicketing from './pages/admin/AdminCalendarTicketing';
-import AdminCalendarScanner from './pages/admin/AdminCalendarScanner';
-import AdminCalendarAttendance from './pages/admin/AdminCalendarAttendance';
-import AdminLiveStreams from './pages/admin/AdminLiveStreams';
-import AdminCommunityCalls from './pages/admin/AdminCommunityCalls';
-import AdminPolls from './pages/admin/AdminPolls';
-import AdminForms from './pages/admin/AdminForms';
-import AdminSupportDashboard from './pages/admin/AdminSupportDashboard';
-import AdminSupportTicketDetail from './pages/admin/AdminSupportTicketDetail';
-import AdminJoinRequests from './pages/admin/AdminJoinRequests';
-import AdminInventory from './pages/admin/AdminInventory';
-import AdminRconServers from './pages/admin/AdminRconServers';
-import AdminCommunityTokens from './pages/admin/AdminCommunityTokens';
-import AdminCommands from './pages/admin/AdminCommands';
-import AdminPlatformSettings from './pages/admin/AdminPlatformSettings';
-import AdminLfgConfig from './pages/admin/AdminLfgConfig';
-import AdminClipConfig from './pages/admin/AdminClipConfig';
-import AdminAliasConfig from './pages/admin/AdminAliasConfig';
-import AdminMemoriesConfig from './pages/admin/AdminMemoriesConfig';
-import AdminServerStatusConfig from './pages/admin/AdminServerStatusConfig';
-import AdminServerManagerConfig from './pages/admin/AdminServerManagerConfig';
-import MyChannels from './pages/dashboard/MyChannels';
-import SupportSubmitTicket from './pages/community/SupportSubmitTicket';
-import SupportMyTickets from './pages/community/SupportMyTickets';
-import InventoryBrowse from './pages/community/InventoryBrowse';
-import GameServers from './pages/community/GameServers';
-import InventoryMyItems from './pages/community/InventoryMyItems';
-import PersonalAccessToken from './pages/dashboard/PersonalAccessToken';
-import CommunityInteraction from './pages/community/CommunityInteraction';
-import AdminInteractionChannels from './pages/admin/AdminInteractionChannels';
+const AdminHome = lazy(() => import('./pages/admin/AdminHome'));
+const AdminMembers = lazy(() => import('./pages/admin/AdminMembers'));
+const AdminModules = lazy(() => import('./pages/admin/AdminModules'));
+const AdminMarketplace = lazy(() => import('./pages/admin/AdminMarketplace'));
+const AdminMarketplaceModuleDetail = lazy(() => import('./pages/admin/AdminMarketplaceModuleDetail.jsx'));
+const AdminCommunityPremium = lazy(() => import('./pages/admin/AdminCommunityPremium.jsx'));
+const SuperAdminMarketplaceSettings = lazy(() => import('./pages/superadmin/SuperAdminMarketplaceSettings.jsx'));
+const AdminStreamOverlays = lazy(() => import('./pages/admin/AdminStreamOverlays'));
+const AdminDomains = lazy(() => import('./pages/admin/AdminDomains'));
+const AdminServers = lazy(() => import('./pages/admin/AdminServers'));
+const AdminConnectedPlatforms = lazy(() => import('./pages/admin/AdminConnectedPlatforms'));
+const LiveActivity = lazy(() => import('./pages/community/LiveActivity'));
+const AdminMirrorGroups = lazy(() => import('./pages/admin/AdminMirrorGroups'));
+const AdminLeaderboardConfig = lazy(() => import('./pages/admin/AdminLeaderboardConfig'));
+const AdminCommunityProfile = lazy(() => import('./pages/admin/AdminCommunityProfile'));
+const ReputationSettings = lazy(() => import('./pages/admin/ReputationSettings'));
+const AdminAIInsights = lazy(() => import('./pages/admin/AdminAIInsights'));
+const AdminAIResearcherConfig = lazy(() => import('./pages/admin/AdminAIResearcherConfig'));
+const AdminAIChatterConfig = lazy(() => import('./pages/admin/AdminAIChatterConfig'));
+const AdminBotDetection = lazy(() => import('./pages/admin/AdminBotDetection'));
+const AdminAnnouncements = lazy(() => import('./pages/admin/AdminAnnouncements'));
+const AdminAnalytics = lazy(() => import('./pages/admin/AdminAnalytics'));
+const AdminMemberAnalytics = lazy(() => import('./pages/admin/AdminMemberAnalytics'));
+const AdminSecurity = lazy(() => import('./pages/admin/AdminSecurity'));
+const LoyaltySettings = lazy(() => import('./pages/admin/LoyaltySettings'));
+const LoyaltyLeaderboard = lazy(() => import('./pages/admin/LoyaltyLeaderboard'));
+const LoyaltyGiveaways = lazy(() => import('./pages/admin/LoyaltyGiveaways'));
+const LoyaltyGames = lazy(() => import('./pages/admin/LoyaltyGames'));
+const LoyaltyGear = lazy(() => import('./pages/admin/LoyaltyGear'));
+const CommunityConnections = lazy(() => import('./pages/admin/CommunityConnections'));
+const AdminWorkflows = lazy(() => import('./pages/admin/AdminWorkflows'));
+const AdminShoutouts = lazy(() => import('./pages/admin/AdminShoutouts'));
+const AdminTranslation = lazy(() => import('./pages/admin/AdminTranslation'));
+const AdminMusicDashboard = lazy(() => import('./pages/admin/AdminMusicDashboard'));
+const AdminMusicSettings = lazy(() => import('./pages/admin/AdminMusicSettings'));
+const AdminMusicProviders = lazy(() => import('./pages/admin/AdminMusicProviders'));
+const AdminRadioStations = lazy(() => import('./pages/admin/AdminRadioStations'));
+const AdminVendorReview = lazy(() => import('./pages/admin/AdminVendorReview'));
+const AdminCalendarEvents = lazy(() => import('./pages/admin/AdminCalendarEvents'));
+const AdminCalendarTicketing = lazy(() => import('./pages/admin/AdminCalendarTicketing'));
+const AdminCalendarScanner = lazy(() => import('./pages/admin/AdminCalendarScanner'));
+const AdminCalendarAttendance = lazy(() => import('./pages/admin/AdminCalendarAttendance'));
+const AdminLiveStreams = lazy(() => import('./pages/admin/AdminLiveStreams'));
+const AdminCommunityCalls = lazy(() => import('./pages/admin/AdminCommunityCalls'));
+const AdminPolls = lazy(() => import('./pages/admin/AdminPolls'));
+const AdminForms = lazy(() => import('./pages/admin/AdminForms'));
+const AdminSupportDashboard = lazy(() => import('./pages/admin/AdminSupportDashboard'));
+const AdminSupportTicketDetail = lazy(() => import('./pages/admin/AdminSupportTicketDetail'));
+const AdminJoinRequests = lazy(() => import('./pages/admin/AdminJoinRequests'));
+const AdminInventory = lazy(() => import('./pages/admin/AdminInventory'));
+const AdminRconServers = lazy(() => import('./pages/admin/AdminRconServers'));
+const AdminCommunityTokens = lazy(() => import('./pages/admin/AdminCommunityTokens'));
+const AdminCommands = lazy(() => import('./pages/admin/AdminCommands'));
+const AdminPlatformSettings = lazy(() => import('./pages/admin/AdminPlatformSettings'));
+const AdminLfgConfig = lazy(() => import('./pages/admin/AdminLfgConfig'));
+const AdminClipConfig = lazy(() => import('./pages/admin/AdminClipConfig'));
+const AdminAliasConfig = lazy(() => import('./pages/admin/AdminAliasConfig'));
+const AdminMemoriesConfig = lazy(() => import('./pages/admin/AdminMemoriesConfig'));
+const AdminServerStatusConfig = lazy(() => import('./pages/admin/AdminServerStatusConfig'));
+const AdminServerManagerConfig = lazy(() => import('./pages/admin/AdminServerManagerConfig'));
+const MyChannels = lazy(() => import('./pages/dashboard/MyChannels'));
+const SupportSubmitTicket = lazy(() => import('./pages/community/SupportSubmitTicket'));
+const SupportMyTickets = lazy(() => import('./pages/community/SupportMyTickets'));
+const InventoryBrowse = lazy(() => import('./pages/community/InventoryBrowse'));
+const GameServers = lazy(() => import('./pages/community/GameServers'));
+const InventoryMyItems = lazy(() => import('./pages/community/InventoryMyItems'));
+const PersonalAccessToken = lazy(() => import('./pages/dashboard/PersonalAccessToken'));
+const CommunityInteraction = lazy(() => import('./pages/community/CommunityInteraction'));
+const AdminInteractionChannels = lazy(() => import('./pages/admin/AdminInteractionChannels'));
 
 // Vendor pages
-import VendorSubmissionForm from './pages/vendor/VendorSubmissionForm';
-import VendorSubmissionStatus from './pages/vendor/VendorSubmissionStatus';
-import VendorDashboard from './pages/vendor/VendorDashboard';
-import VendorSubmissions from './pages/vendor/VendorSubmissions';
-import VendorRequest from './pages/vendor/VendorRequest';
-import VendorModules from './pages/vendor/VendorModules';
-import VendorAnalytics from './pages/vendor/VendorAnalytics';
-import VendorDiscountCodes from './pages/vendor/VendorDiscountCodes';
-import VendorSettings from './pages/vendor/VendorSettings';
-import VendorGithubSync from './pages/vendor/VendorGithubSync';
+const VendorSubmissionForm = lazy(() => import('./pages/vendor/VendorSubmissionForm'));
+const VendorSubmissionStatus = lazy(() => import('./pages/vendor/VendorSubmissionStatus'));
+const VendorDashboard = lazy(() => import('./pages/vendor/VendorDashboard'));
+const VendorSubmissions = lazy(() => import('./pages/vendor/VendorSubmissions'));
+const VendorRequest = lazy(() => import('./pages/vendor/VendorRequest'));
+const VendorModules = lazy(() => import('./pages/vendor/VendorModules'));
+const VendorAnalytics = lazy(() => import('./pages/vendor/VendorAnalytics'));
+const VendorDiscountCodes = lazy(() => import('./pages/vendor/VendorDiscountCodes'));
+const VendorSettings = lazy(() => import('./pages/vendor/VendorSettings'));
+const VendorGithubSync = lazy(() => import('./pages/vendor/VendorGithubSync'));
 
 // Platform admin pages
-import PlatformDashboard from './pages/platform/PlatformDashboard';
-import PlatformUsers from './pages/platform/PlatformUsers';
-import PlatformCommunities from './pages/platform/PlatformCommunities';
-import PlatformAnalytics from './pages/platform/PlatformAnalytics';
+const PlatformDashboard = lazy(() => import('./pages/platform/PlatformDashboard'));
+const PlatformUsers = lazy(() => import('./pages/platform/PlatformUsers'));
+const PlatformCommunities = lazy(() => import('./pages/platform/PlatformCommunities'));
+const PlatformAnalytics = lazy(() => import('./pages/platform/PlatformAnalytics'));
 
 // Super admin pages
-import SuperAdminDashboard from './pages/superadmin/SuperAdminDashboard';
-import SuperAdminCommunities from './pages/superadmin/SuperAdminCommunities';
-import SuperAdminModuleRegistry from './pages/superadmin/SuperAdminModuleRegistry';
-import SuperAdminBundleApprovals from './pages/superadmin/SuperAdminBundleApprovals';
-import SuperAdminPlatformConfig from './pages/superadmin/SuperAdminPlatformConfig';
-import SuperAdminSoftwareDiscovery from './pages/superadmin/SuperAdminSoftwareDiscovery';
-import SuperAdminServiceDiscovery from './pages/superadmin/SuperAdminServiceDiscovery';
-import SuperAdminVendorRequests from './pages/superadmin/SuperAdminVendorRequests';
-import SuperAdminUsers from './pages/superadmin/SuperAdminUsers';
-import SuperAdminAnalytics from './pages/superadmin/SuperAdminAnalytics';
-import SuperAdminTenants from './pages/superadmin/SuperAdminTenants';
+const SuperAdminDashboard = lazy(() => import('./pages/superadmin/SuperAdminDashboard'));
+const SuperAdminCommunities = lazy(() => import('./pages/superadmin/SuperAdminCommunities'));
+const SuperAdminModuleRegistry = lazy(() => import('./pages/superadmin/SuperAdminModuleRegistry'));
+const SuperAdminBundleApprovals = lazy(() => import('./pages/superadmin/SuperAdminBundleApprovals'));
+const SuperAdminPlatformConfig = lazy(() => import('./pages/superadmin/SuperAdminPlatformConfig'));
+const SuperAdminSoftwareDiscovery = lazy(() => import('./pages/superadmin/SuperAdminSoftwareDiscovery'));
+const SuperAdminServiceDiscovery = lazy(() => import('./pages/superadmin/SuperAdminServiceDiscovery'));
+const SuperAdminVendorRequests = lazy(() => import('./pages/superadmin/SuperAdminVendorRequests'));
+const SuperAdminUsers = lazy(() => import('./pages/superadmin/SuperAdminUsers'));
+const SuperAdminAnalytics = lazy(() => import('./pages/superadmin/SuperAdminAnalytics'));
+const SuperAdminTenants = lazy(() => import('./pages/superadmin/SuperAdminTenants'));
 
 // Tenant admin pages
-import TenantDashboard from './pages/tenant/TenantDashboard';
-import TenantModules from './pages/tenant/TenantModules';
-import TenantAdmins from './pages/tenant/TenantAdmins';
-import TenantCommunities from './pages/tenant/TenantCommunities';
+const TenantDashboard = lazy(() => import('./pages/tenant/TenantDashboard'));
+const TenantModules = lazy(() => import('./pages/tenant/TenantModules'));
+const TenantAdmins = lazy(() => import('./pages/tenant/TenantAdmins'));
+const TenantCommunities = lazy(() => import('./pages/tenant/TenantCommunities'));
 
 // Admin pages (new)
-import AdminCommunityRoles from './pages/admin/AdminCommunityRoles';
-import AdminRaffleCustomization from './pages/admin/AdminRaffleCustomization';
-import AdminAIKnowledge from './pages/admin/AdminAIKnowledge';
+const AdminCommunityRoles = lazy(() => import('./pages/admin/AdminCommunityRoles'));
+const AdminRaffleCustomization = lazy(() => import('./pages/admin/AdminRaffleCustomization'));
+const AdminAIKnowledge = lazy(() => import('./pages/admin/AdminAIKnowledge'));
+
+// Living style guide: development builds only (tree-shaken from production).
+const DesignSystem = import.meta.env.DEV ? lazy(() => import('./pages/dev/DesignSystem')) : null;
 
 // Marketplace redirect helper
 function MarketplaceRedirect() {
@@ -170,21 +173,12 @@ function MarketplaceRedirect() {
   return <Navigate to={`/admin/${communityId}/modules`} replace />;
 }
 
-// Loading spinner
-function LoadingSpinner() {
-  return (
-    <div className="flex items-center justify-center min-h-screen">
-      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
-    </div>
-  );
-}
-
 // Protected route wrapper
 function ProtectedRoute({ children, requireCommunityAdmin = false, requirePlatformAdmin = false, requireSuperAdmin = false, requireAnalyticsConsumerOrSuperAdmin = false }) {
   const { user, loading, hasRole, isAnalyticsConsumer } = useAuth();
 
   if (loading) {
-    return <LoadingSpinner />;
+    return <LoadingState fullPage label="Checking your session" />;
   }
 
   if (!user) {
@@ -231,6 +225,7 @@ function App() {
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/forgot-password" element={<PasswordRecoveryUnavailablePage />} />
         <Route path="/auth/callback" element={<OAuthCallback />} />
+        {DesignSystem && <Route path="/design-system" element={<DesignSystem />} />}
         <Route path="/cookie-policy" element={<CookiePolicy />} />
         <Route path="/privacy-rights" element={<PrivacyRights />} />
 
@@ -368,22 +363,8 @@ function App() {
         <Route path="/admin/:communityId/members/:userId/analytics" element={<AdminMemberAnalytics />} />
         <Route path="/admin/:communityId/ai-knowledge" element={<AdminAIKnowledge />} />
         {/* Wave-1 stub: community bundles slice */}
-        <Route
-          path="/admin/:communityId/bundles"
-          element={
-            <Suspense fallback={<LoadingSpinner />}>
-              <AdminCommunityBundles />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/admin/:communityId/role-sync"
-          element={
-            <Suspense fallback={<LoadingSpinner />}>
-              <AdminRoleSyncMapping />
-            </Suspense>
-          }
-        />
+        <Route path="/admin/:communityId/bundles" element={<AdminCommunityBundles />} />
+        <Route path="/admin/:communityId/role-sync" element={<AdminRoleSyncMapping />} />
       </Route>
 
       {/* Platform admin routes */}
@@ -433,14 +414,7 @@ function App() {
         <Route path="/superadmin/tenants" element={<SuperAdminTenants />} />
         <Route path="/superadmin/marketplace-settings" element={<SuperAdminMarketplaceSettings />} />
         {/* Wave-1 stub: super communities (1:N model) slice */}
-        <Route
-          path="/superadmin/super-communities"
-          element={
-            <Suspense fallback={<LoadingSpinner />}>
-              <SuperAdminSuperCommunities />
-            </Suspense>
-          }
-        />
+        <Route path="/superadmin/super-communities" element={<SuperAdminSuperCommunities />} />
       </Route>
 
       {/* Tenant admin routes */}
@@ -456,14 +430,7 @@ function App() {
         <Route path="/tenant/:tenantSlug/admins" element={<TenantAdmins />} />
         <Route path="/tenant/:tenantSlug/communities" element={<TenantCommunities />} />
         {/* Wave-1 stub: tenant bundle catalog slice */}
-        <Route
-          path="/tenant/:tenantSlug/bundles"
-          element={
-            <Suspense fallback={<LoadingSpinner />}>
-              <TenantBundleCatalog />
-            </Suspense>
-          }
-        />
+        <Route path="/tenant/:tenantSlug/bundles" element={<TenantBundleCatalog />} />
       </Route>
 
       {/* Catch all - redirect to home */}
