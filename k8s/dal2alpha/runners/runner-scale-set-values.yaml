@@ -1,0 +1,34 @@
+# gha-runner-scale-set values (chart 0.13.0). Installed with release name `dal2-alpha`
+# => the runner "label" is the scale set name `dal2-alpha`.
+githubConfigUrl: https://github.com/penguintechinc/waddles
+githubConfigSecret: arc-github-app   # k8s Secret created by the user (see SETUP.md) - never inline
+minRunners: 0
+maxRunners: 2
+# Deploy-only: no containerMode (no dind, no privileged). Builds run on GitHub-hosted runners.
+template:
+  spec:
+    serviceAccountName: dal2-alpha-runner
+    nodeSelector:
+      kubernetes.io/arch: amd64
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1001
+      runAsGroup: 123
+      fsGroup: 123
+      seccompProfile: {type: RuntimeDefault}
+    containers:
+      - name: runner
+        # Pin by digest before activation: replace tag with @sha256:<digest> (SETUP.md step).
+        image: ghcr.io/actions/actions-runner:2.328.0
+        command: ["/home/runner/run.sh"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+        resources:
+          requests: {cpu: 500m, memory: 512Mi}
+          limits: {cpu: "1", memory: 1Gi}
+        volumeMounts:
+          - {name: work, mountPath: /home/runner/_work}
+    volumes:
+      - name: work
+        emptyDir: {}
