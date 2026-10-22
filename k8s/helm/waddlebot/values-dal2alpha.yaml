@@ -27,13 +27,25 @@ global:
   # and hang the pod. (Never would make containerd skip localhost:32000 -> ErrImageNeverPull.)
   # This now governs EVERY workload incl. hub-api + the Rust svc-*/bundle-executor Deployments.
   imagePullPolicy: IfNotPresent
+  # POSTURE: dedicated-cluster (stricter than local alpha). The "alpha" tier string is kept ONLY because the
+  # chart gates secret self-provisioning on it; every alpha-exempt transport/network shortcut is off here.
   deploymentTier: "alpha"
-  # gRPC transport TLS (PR #264) -- alpha is single-node local dev with no cert material
-  # provisioned, so it uses flask_core's own documented dev-only escape hatch instead of
-  # real certs (refused outright under production posture, so this can never leak into
-  # beta/gamma/production even if this file were merged upward by mistake).
+  # gRPC transport TLS -- dal2-alpha is a REAL multi-node dedicated cluster (NOT the alpha-exempt
+  # local box), so inter-service gRPC uses real mTLS minted by cert-manager from the internal CA
+  # ClusterIssuer "waddlebot-internal-ca". insecureDev is NEVER set here.
+  # PREREQ (operator): cert-manager installed + ClusterIssuer waddlebot-internal-ca (CA type).
   grpcTls:
-    insecureDev: true
+    insecureDev: false
+    requireClientCert: true
+    certManager:
+      enabled: true
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
+  hostApiTls:
+    certManager:
+      enabled: true
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
   # First-run super-admin bootstrap (PR #256) -- email is non-sensitive and
   # documented so alpha's Playwright e2e suite (tests/k8s/alpha/) has a known
   # login. The password is NOT committed here (fix/alpha-helm-deploy) -- it
@@ -531,11 +543,13 @@ egressPolicy:
   # dal2-alpha is a real cluster: full all-workload egress default-deny (base default true).
   workloadEgress:
     enabled: true
-  # TODO(dal2-alpha): confirm against `kubectl cluster-info dump | grep -m1 cluster-cidr` before deploy.
+  # Verified from live cluster: kubeadm clusterCIDR 10.244.0.0/16 (per-node /24), service 10.96.0.0/12.
+  # Node InternalIPs (10.244.0.146, 10.244.1.167) sit inside 10.244.0.0/16, so nodeCidr is scoped to
+  # that same range instead of the former over-broad 10.0.0.0/8.
   clusterCidrs:
-    podCidr: "10.0.0.0/16"
+    podCidr: "10.244.0.0/16"
     serviceCidr: "10.96.0.0/12"
-    nodeCidr: "10.0.0.0/8"
+    nodeCidr: "10.244.0.0/16"
 
 # spire.enabled defaults to false at the chart level (values.yaml) pending
 # https://github.com/penguintechinc/waddles/issues/437 (SPIRE server/agent
