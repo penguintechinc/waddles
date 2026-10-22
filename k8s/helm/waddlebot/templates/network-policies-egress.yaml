@@ -63,6 +63,22 @@ spec:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
               protocol: TCP
+    {{- /*
+      Valkey dual-listener TLS port. Rust data-plane pods use
+      rediss://<svc>:<tls.port> when TLS material is available; permit that
+      listener only under the same condition used by the deployment and clients.
+    */}}
+    {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: redis
+            app.kubernetes.io/component: cache
+      toPorts:
+        - ports:
+            - port: {{ .Values.infrastructure.redis.tls.port | quote }}
+              protocol: TCP
+    {{- end }}
     {{- if .Values.infrastructure.valkeyDurable.enabled }}
     # Durable delivery-state Valkey (templates/infrastructure/valkey-durable.yaml): spine
     # streams / transport queues / acks. TLS port only when TLS is on (plaintext listener is
