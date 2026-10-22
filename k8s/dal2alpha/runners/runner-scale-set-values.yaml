@@ -4,6 +4,18 @@ githubConfigUrl: https://github.com/penguintechinc/waddles
 githubConfigSecret: arc-github-app   # k8s Secret created by the user (see SETUP.md) - never inline
 minRunners: 0
 maxRunners: 2
+# Listener pod runs in arc-systems (PSA restricted): must set its own securityContext.
+listenerTemplate:
+  spec:
+    containers:
+      - name: listener
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+          seccompProfile: {type: RuntimeDefault}
 # Alpha is FULL self-hosted (build + deploy). No containerMode (no dind/privileged); builds go to the
 # rootless buildkitd in ns `buildkit` via BUILDKIT_HOST. Beta/prod use GitHub-hosted build runners.
 template:

@@ -56,8 +56,15 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 30
           securityContext:
-            allowPrivilegeEscalation: false
-            capabilities: {drop: [ALL]}
+            runAsNonRoot: true
+            runAsUser: 1000   # rootless buildkit requires: non-root uid; user namespace is built via newuidmap, never real root
+            runAsGroup: 1000  # rootless buildkit requires: matching non-root gid for the subgid map
+            allowPrivilegeEscalation: true  # rootless buildkit requires: setuid newuidmap/newgidmap must gain privilege to write uid_map/gid_map
+            seccompProfile: {type: Unconfined}  # rootless buildkit requires: RuntimeDefault blocks userns/mount syscalls rootlesskit + newuidmap use
+            appArmorProfile: {type: Unconfined}  # rootless buildkit requires: default AppArmor denies userns creation + mounts (k8s 1.30+ field)
+            capabilities:
+              drop: [ALL]
+              add: [SETUID, SETGID]  # rootless buildkit requires: newuidmap/newgidmap need CAP_SETUID/CAP_SETGID (no NET_ADMIN/SYS_ADMIN/privileged)
           resources:
             requests: {cpu: "2", memory: 4Gi, ephemeral-storage: 10Gi}
             limits: {cpu: "6", memory: 12Gi, ephemeral-storage: 60Gi}
