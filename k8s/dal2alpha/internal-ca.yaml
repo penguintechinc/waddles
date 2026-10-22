@@ -16,6 +16,20 @@ metadata:
   namespace: cert-manager
 spec:
   isCA: true
+  # FINDING 1: X.509 nameConstraints (critical) -- this CA can ONLY sign identities inside the
+  # waddlebot trust domain; a cert for any other DNS/URI name fails chain validation. Only
+  # waddlebot internal svcs (ns `waddlebot`) + the chart's SPIFFE IDs (spiffe://penguintech.io/...)
+  # are in scope. Any new service name outside these must be added here deliberately (re-issue CA).
+  nameConstraints:
+    critical: true
+    permitted:
+      dnsDomains:
+        - waddlebot.svc.cluster.local     # matches this domain and all subdomains
+      uriDomains:
+        - penguintech.io                  # SPIFFE: spiffe://penguintech.io/<env>/<service>
+    # No IP SANs permitted (an empty permitted list is not expressible) -- deny all via excluded.
+    excluded:
+      ipRanges: ["0.0.0.0/0", "::/0"]
   commonName: waddlebot-internal-ca
   subject:
     organizations: [PenguinTech]
