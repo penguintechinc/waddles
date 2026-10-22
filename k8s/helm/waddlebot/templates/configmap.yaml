@@ -129,6 +129,9 @@ data:
   # waddles.calendar.event_discord_sync ENV baseline (default OFF; PostHog overrides when connected).
   # Read by hub-api via envFrom waddlebot-config.
   FLAG_WADDLES_CALENDAR_EVENT_DISCORD_SYNC: {{ .Values.config.eventDiscordSyncEnabled | default false | quote }}
+  # waddles.bar_citizen.role_sync ENV baseline (default OFF; PostHog overrides when connected).
+  # Read by hub-api AND the role-sync CronJob (hub_api/services/role_sync_service.py) via envFrom waddlebot-config.
+  FLAG_WADDLES_BAR_CITIZEN_ROLE_SYNC: {{ .Values.config.barCitizenRoleSyncEnabled | default false | quote }}
   SPECTRUM_ORG_POLL_INTERVAL_S: {{ .Values.config.spectrumOrgPollIntervalS | default 300 | quote }}
   SPECTRUM_ROSTER_MAX_DEPARTURE_RATIO: {{ .Values.config.spectrumRosterMaxDepartureRatio | default 0.5 | quote }}
   SPECTRUM_ORG_EMIT_BACKLOG: {{ .Values.config.spectrumOrgEmitBacklog | default false | quote }}
