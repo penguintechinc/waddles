@@ -118,7 +118,8 @@ spec:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.seaweedfsPort | quote }}
               protocol: TCP
-    # hub-api gRPC.
+    # hub-api gRPC + HTTP readiness (the wait-for-hub-api init container probes
+    # /ready on the HTTP port; without it every data-plane pod sticks in Init).
     - toEndpoints:
         - matchLabels:
             {{- include "waddlebot.selectorLabels" . | nindent 12 }}
@@ -126,6 +127,8 @@ spec:
       toPorts:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.hubApiGrpcPort | quote }}
+              protocol: TCP
+            - port: {{ .Values.egressPolicy.inCluster.hubApiHttpPort | quote }}
               protocol: TCP
     # feature/alpha-localized-posthog -- in-cluster PostHog (feature-flag
     # execution plane), reached directly by svc-process-rust/svc-action-rust's

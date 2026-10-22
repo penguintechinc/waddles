@@ -3137,6 +3137,9 @@ egressPolicy:
     valkeyPort: 6379
     postgresReplicaPort: 5432
     hubApiGrpcPort: 50204
+    # hub-api HTTP port (pipeline.hubApi.port) -- the data-plane `wait-for-hub-api`
+    # init container probes /ready here, so the dataplane egress CNP must allow it.
+    hubApiHttpPort: 8204
     seaweedfsPort: 8333
     otelGrpcPort: 4317
   # CIDRs that must NEVER be reachable via the egress proxy's "world" allow,
