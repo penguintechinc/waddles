@@ -28,6 +28,11 @@ use std::sync::{Arc, OnceLock};
 /// state during rollout.
 pub const RUST_DATA_PLANE_FLAG: &str = "waddles.core.rust-data-plane";
 
+/// Operational toggle routing bundle egress through the action dispatcher
+/// instead of the inline path. Env baseline only (not a license flag);
+/// unseen/absent => OFF => inline path.
+pub const EGRESS_VIA_DISPATCHER_FLAG: &str = "waddles.core.egress-via-dispatcher";
+
 /// Gates the bundle `http` host capability (`crate::egress::EgressGuard`).
 /// OFF ⇒ every egress call is denied `feature_disabled`.
 pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
@@ -644,6 +649,27 @@ mod flags_capability_tests {
             None,
             "an unrecognized value must fall through, not panic or guess"
         );
+    }
+
+    /// The dispatcher-egress toggle is operational (env baseline only): its
+    /// env var is exactly `FLAG_WADDLES_CORE_EGRESS_VIA_DISPATCHER`, `true`
+    /// turns it on, and unset leaves it OFF (caller default `false`).
+    #[tokio::test]
+    async fn egress_dispatcher_flag_env_baseline() {
+        let _guard = ENV_LOCK.lock().await;
+        let var = env_flag_var_name(EGRESS_VIA_DISPATCHER_FLAG);
+        assert_eq!(var, "FLAG_WADDLES_CORE_EGRESS_VIA_DISPATCHER");
+        let on = await_with_env_var(
+            &var,
+            "true",
+            resolve_flag_with::<FakeFlagSource>(None, true, EGRESS_VIA_DISPATCHER_FLAG, false),
+        )
+        .await;
+        assert!(on, "env baseline true must enable the dispatcher flag");
+        let unset =
+            resolve_flag_with::<FakeFlagSource>(None, true, EGRESS_VIA_DISPATCHER_FLAG, false)
+                .await;
+        assert!(!unset, "unset env must leave the dispatcher flag OFF");
     }
 
     /// Precedence proof: a live PostHog value must win even when the ENV

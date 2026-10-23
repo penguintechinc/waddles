@@ -819,6 +819,10 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// set in production; tests swap it via `with_stage_metrics` so they can
     /// read back exactly what this call emitted.
     stage_metrics: Arc<StageMetrics>,
+    /// Operational toggle (`crate::flags::EGRESS_VIA_DISPATCHER_FLAG`);
+    /// `None` until [`Self::with_egress_dispatcher_flag`] -- reads as OFF
+    /// (fail-safe to the inline egress path).
+    egress_dispatcher_flag: Option<Arc<dyn FeatureFlag>>,
 }
 
 /// The outbound PII-detokenization dependency: a live resolver over
@@ -862,6 +866,25 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             db: None,
             detokenize: None,
             stage_metrics: stage_metrics::stage_metrics(),
+            egress_dispatcher_flag: None,
+        }
+    }
+
+    /// Wires the egress-via-dispatcher toggle. Without it
+    /// [`Self::egress_via_dispatcher`] is always `false` (inline path).
+    #[must_use]
+    pub fn with_egress_dispatcher_flag(mut self, flag: Arc<dyn FeatureFlag>) -> Self {
+        self.egress_dispatcher_flag = Some(flag);
+        self
+    }
+
+    /// Whether egress should route through the action dispatcher; `false`
+    /// when no flag is wired. Async because [`FeatureFlag::enabled`] is.
+    #[allow(dead_code)] // consumed by the dispatcher egress wiring (next task)
+    pub(crate) async fn egress_via_dispatcher(&self) -> bool {
+        match &self.egress_dispatcher_flag {
+            Some(flag) => flag.enabled().await,
+            None => false,
         }
     }
 
@@ -2636,6 +2659,22 @@ mod tests {
 
     fn caps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
         caps_with_usage(queue, Arc::new(Mutex::new(UsageBatcher::new())))
+    }
+
+    #[tokio::test]
+    async fn caps_without_flag_default_off() {
+        let c = caps(FakeRelayQueue::default());
+        assert!(!c.egress_via_dispatcher().await);
+    }
+
+    #[tokio::test]
+    async fn caps_with_static_on_flag() {
+        let c = caps(FakeRelayQueue::default())
+            .with_egress_dispatcher_flag(crate::flags::boxed(crate::flags::StaticFlag(true)));
+        assert!(c.egress_via_dispatcher().await);
+        let off = caps(FakeRelayQueue::default())
+            .with_egress_dispatcher_flag(crate::flags::boxed(crate::flags::StaticFlag(false)));
+        assert!(!off.egress_via_dispatcher().await);
     }
 
     fn caps_with_usage(
