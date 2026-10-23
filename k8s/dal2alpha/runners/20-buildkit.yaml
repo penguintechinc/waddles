@@ -1,0 +1,130 @@
+# Rootless BuildKit for alpha-only in-cluster image builds (runner connects via BUILDKIT_HOST).
+# No privileged container, no docker.sock. Rootless buildkit needs seccomp/apparmor Unconfined
+# (kernel userns + mount syscalls), which PSA baseline/restricted forbid, so this lives in its own
+# namespace labeled PSA `privileged` - the CONTAINER is still non-root uid 1000, caps dropped ALL except SETUID/SETGID (see ACKNOWLEDGED FINDING below).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buildkit
+  labels:
+    pod-security.kubernetes.io/enforce: privileged   # required for Unconfined seccomp/AppArmor + allowPrivilegeEscalation
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+apiVersion: apps/v1
+kind: StatefulSet   # STATEFUL EXCEPTION (approved-by-design): layer cache; loss only costs rebuild time
+metadata:
+  name: buildkitd
+  namespace: buildkit
+spec:
+  replicas: 1
+  serviceName: buildkitd
+  selector:
+    matchLabels: {app: buildkitd}
+  template:
+    metadata:
+      labels: {app: buildkitd}
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: Unconfined}
+      containers:
+        - name: buildkitd
+          # Digest-pinned (resolved 2026-10-22, multi-arch index).
+          image: moby/buildkit:v0.23.2-rootless@sha256:cab936745de5d673465948f1e93ff4d6e372bbe33f218afd3314eba45a6f85a9
+          args:
+            - --addr=unix:///run/user/1000/buildkit/buildkitd.sock
+            - --addr=tcp://0.0.0.0:1234
+            - --oci-worker-no-process-sandbox
+            - --oci-worker-gc=true
+            - --oci-worker-gc-keepstorage=2000,2000,40000   # MB "Reserved,Free,Maximum": 40GB max cache; bounds DiskPressure on 2-node/100Gi cluster
+          ports: [{containerPort: 1234, name: grpc}]
+          readinessProbe:
+            exec: {command: [buildctl, debug, workers]}
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          livenessProbe:
+            exec: {command: [buildctl, debug, workers]}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          # ACKNOWLEDGED FINDING (MEDIUM, container privilege escalation) - ACCEPTED with justification:
+          #  WHY the caps are required: rootlesskit's PARENT maps a subuid RANGE ([0 1000 1][1 100000 65536]),
+          #   which needs setuid newuidmap/newgidmap, which need CAP_SETUID/CAP_SETGID +
+          #   allowPrivilegeEscalation. Proven empirically: the no-caps config (a9496b9c) crashes buildkitd with
+          #   "newuidmap ... operation not permitted". --oci-worker-no-process-sandbox does NOT avoid this (it only
+          #   affects the inner build-step sandbox).
+          #  WHY acceptable: least-privilege-VIABLE rootless (strictly safer than privileged/root dockerd); runs as
+          #   uid 1000; ONLY SETUID+SETGID added (no SYS_ADMIN/NET_ADMIN/privileged); dedicated `buildkit` ns;
+          #   gRPC gated by CiliumNetworkPolicy to ns github-runners; runner restricted to trusted non-fork /
+          #   protected-branch workflows (commit 9af23709).
+          #  HARDENING FOLLOW-UPS (beta/prod, NOT implemented): (1) replace seccomp Unconfined with a custom
+          #   `Localhost` profile allowing only needed userns/mount syscalls (distribute to nodes via DaemonSet);
+          #   (2) buildkitd mTLS (--tlscacert/--tlscert/--tlskey; client certs only on deploy jobs). See SETUP.md.
+          # ACCEPTED TRADE-OFF: --oci-worker-no-process-sandbox means build RUN steps are NOT PID-isolated from
+          # buildkitd; combined with the trusted-code-only runner restriction this is an acceptable posture.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000   # rootless buildkit requires: non-root uid; userns built via newuidmap, never real root
+            runAsGroup: 1000  # rootless buildkit requires: matching non-root gid for the subgid map
+            allowPrivilegeEscalation: true  # rootless buildkit requires: setuid newuidmap/newgidmap must gain privilege to write uid_map/gid_map
+            seccompProfile: {type: Unconfined}  # rootless buildkit requires: RuntimeDefault blocks userns/mount syscalls (follow-up: Localhost profile)
+            appArmorProfile: {type: Unconfined}  # rootless buildkit requires: default AppArmor denies userns creation + mounts (k8s 1.30+ field)
+            capabilities:
+              drop: [ALL]
+              add: [SETUID, SETGID]  # rootless buildkit requires: newuidmap/newgidmap need these (no NET_ADMIN/SYS_ADMIN/privileged)
+          resources:
+            requests: {cpu: "2", memory: 4Gi, ephemeral-storage: 10Gi}
+            limits: {cpu: "6", memory: 12Gi, ephemeral-storage: 60Gi}
+          volumeMounts:
+            - {name: cache, mountPath: /home/user/.local/share/buildkit}
+      volumes:
+        - name: cache
+          emptyDir: {sizeLimit: 50Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd
+  namespace: buildkit
+spec:
+  type: ClusterIP
+  selector: {app: buildkitd}
+  ports: [{name: grpc, port: 1234, targetPort: 1234}]
+---
+# Default-deny; only runner namespace may reach buildkitd (unauthenticated gRPC = build access).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: buildkitd-access
+  namespace: buildkit
+spec:
+  endpointSelector: {matchLabels: {app: buildkitd}}
+  ingress:
+    - fromEndpoints:
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: github-runners}
+      toPorts: [{ports: [{port: "1234", protocol: TCP}]}]
+  egress:
+    - toEndpoints:
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: kube-system, k8s-app: kube-dns}
+      toPorts: [{ports: [{port: "53", protocol: ANY}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toFQDNs:
+        - matchPattern: "*.docker.io"
+        - matchPattern: "*.ghcr.io"
+        - matchName: ghcr.io
+        - matchPattern: "*.pkg.github.com"
+        - matchName: crates.io
+        - matchPattern: "*.crates.io"
+        - matchName: pypi.org
+        - matchName: files.pythonhosted.org
+        - matchName: registry.npmjs.org
+        - matchName: index.crates.io
+        - matchName: static.crates.io
+      toPorts: [{ports: [{port: "443", protocol: TCP}]}]

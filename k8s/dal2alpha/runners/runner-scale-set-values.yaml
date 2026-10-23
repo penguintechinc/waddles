@@ -1,0 +1,49 @@
+# gha-runner-scale-set values (chart 0.13.0). Installed with release name `dal2-alpha`
+# => the runner "label" is the scale set name `dal2-alpha`.
+githubConfigUrl: https://github.com/penguintechinc/waddles
+githubConfigSecret: arc-github-app   # k8s Secret created by the user (see SETUP.md) - never inline
+minRunners: 0
+maxRunners: 2
+# Listener pod runs in arc-systems (PSA restricted): must set its own securityContext.
+listenerTemplate:
+  spec:
+    containers:
+      - name: listener
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+          seccompProfile: {type: RuntimeDefault}
+# Alpha is FULL self-hosted (build + deploy). No containerMode (no dind/privileged); builds go to the
+# rootless buildkitd in ns `buildkit` via BUILDKIT_HOST. Beta/prod use GitHub-hosted build runners.
+template:
+  spec:
+    serviceAccountName: dal2-alpha-runner
+    nodeSelector:
+      kubernetes.io/arch: amd64
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1001
+      runAsGroup: 123
+      fsGroup: 123
+      seccompProfile: {type: RuntimeDefault}
+    containers:
+      - name: runner
+        # Digest-pinned (resolved 2026-10-22).
+        image: ghcr.io/actions/actions-runner:2.328.0@sha256:db0dcae6d28559e54277755a33aba7d0665f255b3bd2a66cdc5e132712f155e0
+        command: ["/home/runner/run.sh"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+        resources:
+          requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 10Gi}
+          limits: {cpu: "2", memory: 4Gi, ephemeral-storage: 30Gi}
+        env:
+          - {name: BUILDKIT_HOST, value: "tcp://buildkitd.buildkit.svc:1234"}
+        volumeMounts:
+          - {name: work, mountPath: /home/runner/_work}
+    volumes:
+      - name: work
+        emptyDir: {}
