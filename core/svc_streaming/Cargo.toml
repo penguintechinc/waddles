@@ -32,8 +32,8 @@ opentelemetry-otlp = { version = "=0.32.0", features = ["grpc-tonic"] }
 opentelemetry_sdk = { version = "=0.32.1", features = ["rt-tokio"] }
 tracing-opentelemetry = "=0.33.0"
 prometheus = "=0.14.0"
-utoipa = { version = "=5.5.0", features = ["axum_extras", "uuid"] }
-utoipa-swagger-ui = { version = "=9.0.2", features = ["axum"] }
+utoipa = { version = "=6.0.0", features = ["axum_extras", "uuid"] }
+utoipa-swagger-ui = { version = "=10.0.2", features = ["axum"] }
 # `aws_lc_rs` (not `rust_crypto`): the `rust_crypto` feature pulls in the
 # pure-Rust `rsa` crate, which carries RUSTSEC-2023-0071 (Marvin Attack --
 # RSA private-key timing side-channel, no fix available) -- a live network
@@ -96,7 +96,7 @@ webrtc = { version = "=0.20.5", default-features = false, features = ["runtime-t
 # than silently expanded; the alternative is code that cannot compile.
 rtc = "=0.20.5"
 async-trait = "=0.1.92"
-ffmpeg-sidecar = "=2.5.2"
+ffmpeg-sidecar = "=2.7.0"
 hls_m3u8 = "=0.7.0"
 object_store = { version = "=0.14.1", features = ["aws"] }
 
