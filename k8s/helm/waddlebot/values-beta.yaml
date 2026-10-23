@@ -50,6 +50,19 @@ infrastructure:
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
+  # Durable delivery-state Valkey: primary + 1 warm replica on longhorn (replicated volume).
+  # Set infrastructure.valkeyDurable.password explicitly (no auto-generation outside alpha/local).
+  valkeyDurable:
+    enabled: true
+    replicas: 2
+    maxMemory: "256mb"
+    antiAffinity: "soft"
+    persistence:
+      size: 3Gi
+      storageClass: "longhorn"
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "400m", memory: "512Mi" }
   seaweedfs:
     enabled: false
   ollama:

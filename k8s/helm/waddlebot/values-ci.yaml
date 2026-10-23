@@ -112,6 +112,16 @@ spire:
   enabled: false
 
 infrastructure:
+  valkeyDurable:
+    enabled: true
+    replicas: 1
+    maxMemory: "128mb"
+    antiAffinity: "soft"
+    pdb: {enabled: false}
+    persistence: {size: 1Gi}
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits: { cpu: "250m", memory: "256Mi" }
   seaweedfs:
     enabled: true       # exercises the #479 immutable bucket-init Job fix (now aws-cli/SeaweedFS, gh-508)
   ollama:

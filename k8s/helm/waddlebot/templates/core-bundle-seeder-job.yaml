@@ -148,12 +148,12 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
+              key: VALKEY_DURABLE_URL_TLS
         - name: VALKEY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: REDIS_PASSWORD
+              key: VALKEY_DURABLE_PASSWORD
         {{- end }}
         # Platform connections (services/ingest_source_service.py::ensure_ingest_source(),
         # NO credentials/tokens stored -- see hub_api/cli/seed_core_bundles.py's own module

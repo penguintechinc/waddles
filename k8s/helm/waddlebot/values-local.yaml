@@ -126,6 +126,10 @@ infrastructure:
     enabled: false
     replicas: 1
 
+  # Durable delivery-state Valkey: off with the rest of local's infra (clients fall back to the cache URLs).
+  valkeyDurable:
+    enabled: false
+
   # SeaweedFS - Single instance for local
   seaweedfs:
     enabled: false

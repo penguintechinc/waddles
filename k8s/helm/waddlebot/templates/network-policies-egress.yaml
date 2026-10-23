@@ -63,6 +63,21 @@ spec:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
               protocol: TCP
+    {{- if .Values.infrastructure.valkeyDurable.enabled }}
+    # Durable delivery-state Valkey (templates/infrastructure/valkey-durable.yaml): spine
+    # streams / transport queues / acks. Plaintext port + TLS port (Rust spine pods use TLS).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: valkey-durable
+            app.kubernetes.io/component: delivery-store
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
+              protocol: TCP
+            - port: {{ .Values.infrastructure.redis.tls.port | quote }}
+              protocol: TCP
+    {{- end }}
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/instance: {{ .Release.Name }}

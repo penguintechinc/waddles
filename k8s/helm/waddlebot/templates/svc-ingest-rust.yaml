@@ -145,18 +145,18 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
+              key: VALKEY_DURABLE_URL_TLS
         - name: VALKEY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: REDIS_PASSWORD
+              key: VALKEY_DURABLE_PASSWORD
         {{- else }}
         - name: VALKEY_URL
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL
+              key: VALKEY_DURABLE_URL
         {{- end }}
         - name: SECRET_KEY
           valueFrom:

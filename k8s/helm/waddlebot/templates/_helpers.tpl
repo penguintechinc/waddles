@@ -929,7 +929,35 @@ what that template actually mints.
 {{- define "waddlebot.valkeyTlsDesiredDnsNames" -}}
 {{- $svcName := .Values.infrastructure.redis.service.name -}}
 {{- $ns := .Values.namespace -}}
-{{- list $svcName (printf "%s.%s" $svcName $ns) (printf "%s.%s.svc" $svcName $ns) (printf "%s.%s.svc.cluster.local" $svcName $ns) | sortAlpha | join "," -}}
+{{- $names := list $svcName (printf "%s.%s" $svcName $ns) (printf "%s.%s.svc" $svcName $ns) (printf "%s.%s.svc.cluster.local" $svcName $ns) -}}
+{{- range (include "waddlebot.valkeyDurableTlsDnsNames" . | fromJsonArray) -}}{{- $names = append $names . -}}{{- end -}}
+{{- $names | sortAlpha | join "," -}}
+{{- end }}
+
+{{/*
+Durable delivery-state Valkey (infrastructure.valkeyDurable) extra SANs, as a JSON array so
+templates/infrastructure/valkey-tls-secret.yaml can append them to its genSignedCert list
+byte-identically to the hash above. Primary Service (short/ns/svc/FQDN) + wildcard over the
+headless Service (per-pod DNS: replicas dial valkey-durable-0.<headless>.<ns>.svc... for
+`tls-replication yes`). Empty when the durable instance is disabled.
+*/}}
+{{- define "waddlebot.valkeyDurableTlsDnsNames" -}}
+{{- $names := list -}}
+{{- if .Values.infrastructure.valkeyDurable.enabled -}}
+{{- $d := .Values.infrastructure.valkeyDurable -}}
+{{- $ns := .Values.namespace -}}
+{{- $svc := $d.service.name -}}
+{{- $hl := $d.service.headlessName -}}
+{{- $names = list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns) (printf "*.%s.%s.svc" $hl $ns) (printf "*.%s.%s.svc.cluster.local" $hl $ns) -}}
+{{- end -}}
+{{- $names | toJson -}}
+{{- end }}
+
+{{/* True when the dedicated durable Valkey is rendered (delivery clients then use its URLs). */}}
+{{- define "waddlebot.valkeyDurableEnabled" -}}
+{{- if .Values.infrastructure.valkeyDurable.enabled -}}
+true
+{{- end -}}
 {{- end }}
 
 {{- define "waddlebot.valkeyTlsSansSha256" -}}

@@ -81,7 +81,7 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL
+              key: VALKEY_DURABLE_URL
         - name: RUNNER_TENANT_SLUG
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL

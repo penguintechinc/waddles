@@ -78,3 +78,18 @@ supplyChain:
   verifyImages:
     enabled: true
     enforce: true
+
+infrastructure:
+  # Durable delivery-state Valkey (99.99% delivery SLA): primary + 1 warm replica, REQUIRED
+  # anti-affinity (separate nodes), PDB. Set infrastructure.valkeyDurable.password explicitly.
+  # Pick a replicated/durable storageClass for the target cluster before first deploy.
+  valkeyDurable:
+    enabled: true
+    replicas: 2
+    maxMemory: "1gb"
+    antiAffinity: "hard"
+    persistence:
+      size: 10Gi
+    resources:
+      requests: { cpu: "500m", memory: "1536Mi" }
+      limits: { cpu: "1000m", memory: "2Gi" }

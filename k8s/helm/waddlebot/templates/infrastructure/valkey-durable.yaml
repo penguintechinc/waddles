@@ -1,0 +1,283 @@
+{{- if .Values.infrastructure.valkeyDurable.enabled }}
+{{- $d := .Values.infrastructure.valkeyDurable }}
+{{- $tls := eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+{{- $tlsPort := .Values.infrastructure.redis.tls.port }}
+{{- /* Fail loud, never silently degrade: durable delivery state must be on a PVC. */}}
+{{- if not $d.persistence.enabled }}
+{{- fail "infrastructure.valkeyDurable.persistence.enabled=false is not allowed -- the durable Valkey holds in-flight delivery state (spine streams, outbound drain queue, acks, interaction tokens) and must never run on emptyDir. Disable the whole instance (infrastructure.valkeyDurable.enabled=false, clients fall back to the LRU cache -- NOT recommended) instead." }}
+{{- end }}
+{{- if lt (int $d.replicas) 1 }}
+{{- fail "infrastructure.valkeyDurable.replicas must be >= 1" }}
+{{- end }}
+{{- if not (has $d.aof.appendfsync (list "everysec" "always")) }}
+{{- fail (printf "infrastructure.valkeyDurable.aof.appendfsync must be everysec|always, got %q (never `no`: delivery state must be fsynced)" $d.aof.appendfsync) }}
+{{- end }}
+{{- if not (has $d.antiAffinity (list "soft" "hard")) }}
+{{- fail (printf "infrastructure.valkeyDurable.antiAffinity must be soft|hard, got %q" $d.antiAffinity) }}
+{{- end }}
+{{- $name := "valkey-durable" }}
+{{- $pwSecret := printf "%s-secrets" (include "waddlebot.fullname" .) }}
+---
+# STATEFUL EXCEPTION (approved) -- 2026-10-23, user approval for the 99.99% customer
+# delivery SLA: the durable Valkey holds ALL in-flight delivery state and needs stable
+# per-pod identity + per-pod PVCs (volumeClaimTemplates) for primary/replica, which the
+# chart's Deployment+Recreate+PVC convention cannot give. Rootless (uid 999) preserved.
+# Eviction hazard removed: `--maxmemory-policy noeviction` is hard-wired (NOT a value).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: delivery-store
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  serviceName: {{ $d.service.headlessName }}
+  replicas: {{ $d.replicas }}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  # Never auto-delete delivery-state volumes on scale-down / StatefulSet deletion.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      {{- if $tls }}
+      annotations:
+        # Rolls the pods when the valkey-tls identity/SANs change (same helper as redis.yaml
+        # and every client) -- see waddlebot.valkeyTlsPodChecksum.
+        checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: delivery-store
+    spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.infrastructure.redis.podSecurityContext | nindent 8 }}
+      affinity:
+        podAntiAffinity:
+          {{- if eq $d.antiAffinity "hard" }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: {{ $name }}
+                app.kubernetes.io/instance: {{ .Release.Name }}
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {{ $name }}
+                  app.kubernetes.io/instance: {{ .Release.Name }}
+          {{- end }}
+      initContainers:
+      # volumeClaimTemplates mounts a fresh volume; create the rootless data dir as uid 999
+      # (volume root is fsGroup-writable). Fails loud (set -e).
+      - name: init-data-dir
+        image: {{ $d.image }}
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          {{- toYaml .Values.infrastructure.redis.securityContext | nindent 10 }}
+        command: ["sh", "-c", "set -eu; mkdir -p /data/valkey"]
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          requests: {memory: 16Mi, cpu: 10m}
+          limits: {memory: 64Mi, cpu: 100m}
+      containers:
+      - name: valkey
+        image: {{ $d.image }}
+        imagePullPolicy: IfNotPresent
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          {{- toYaml .Values.infrastructure.redis.securityContext | nindent 10 }}
+        # Ordinal 0 = primary; every other ordinal replicates from it (over TLS when
+        # tls-replication is on). `set -- ... ; exec "$@"` keeps valkey as PID 1 for signals.
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          ORD="${HOSTNAME##*-}"
+          set -- valkey-server \
+            --dir /data/valkey \
+            --requirepass "$VALKEY_PASSWORD" \
+            --masterauth "$VALKEY_PASSWORD" \
+            --appendonly yes \
+            --appendfsync {{ $d.aof.appendfsync }} \
+            --no-appendfsync-on-rewrite no \
+            --auto-aof-rewrite-percentage {{ $d.aof.rewritePercentage }} \
+            --auto-aof-rewrite-min-size {{ $d.aof.rewriteMinSize }} \
+            --maxmemory {{ $d.maxMemory }} \
+            --maxmemory-policy noeviction \
+            --port {{ $d.port }}
+          {{- if $tls }}
+          set -- "$@" \
+            --tls-port {{ $tlsPort }} \
+            --tls-cert-file /etc/valkey/tls/tls.crt \
+            --tls-key-file /etc/valkey/tls/tls.key \
+            --tls-ca-cert-file /etc/valkey/tls/ca.crt \
+            --tls-auth-clients no \
+            --tls-protocols "TLSv1.2 TLSv1.3" \
+            --tls-replication yes
+          PRIMARY_PORT={{ $tlsPort }}
+          {{- else }}
+          PRIMARY_PORT={{ $d.port }}
+          {{- end }}
+          if [ "$ORD" != "0" ]; then
+            set -- "$@" --replicaof "{{ $name }}-0.{{ $d.service.headlessName }}.{{ .Values.namespace }}.svc.cluster.local" "$PRIMARY_PORT"
+          fi
+          exec "$@"
+        ports:
+        - name: valkey
+          containerPort: {{ $d.port }}
+          protocol: TCP
+        {{- if $tls }}
+        - name: valkey-tls
+          containerPort: {{ $tlsPort }}
+          protocol: TCP
+        {{- end }}
+        env:
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $pwSecret }}
+              key: VALKEY_DURABLE_PASSWORD
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        {{- if $tls }}
+        {{- include "waddlebot.valkeyTlsServerVolumeMount" . | nindent 8 }}
+        {{- end }}
+        resources:
+          {{- toYaml $d.resources | nindent 10 }}
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      {{- if $tls }}
+      volumes:
+      {{- include "waddlebot.valkeyTlsServerVolume" . | nindent 6 }}
+      {{- end }}
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: delivery-store
+    spec:
+      accessModes:
+        - {{ $d.persistence.accessMode }}
+      {{- if $d.persistence.storageClass }}
+      storageClassName: {{ $d.persistence.storageClass }}
+      {{- end }}
+      resources:
+        requests:
+          storage: {{ $d.persistence.size }}
+---
+# Primary-only client Service: pinned to ordinal 0. NO Sentinel -- penguin_spine cannot
+# discover a promoted replica (see values.yaml infrastructure.valkeyDurable comment), so
+# the Service never silently follows a failover; promotion is a deliberate manual step.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $d.service.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: delivery-store
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  type: ClusterIP
+  ports:
+  - port: {{ $d.service.port }}
+    targetPort: valkey
+    protocol: TCP
+    name: valkey
+  {{- if $tls }}
+  - port: {{ $tlsPort }}
+    targetPort: valkey-tls
+    protocol: TCP
+    name: valkey-tls
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    statefulset.kubernetes.io/pod-name: {{ $name }}-0
+---
+# Headless Service: stable per-pod DNS for replication (replicas dial ordinal 0 before it is Ready).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $d.service.headlessName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: delivery-store
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+  - port: {{ $d.port }}
+    targetPort: valkey
+    name: valkey
+  {{- if $tls }}
+  - port: {{ $tlsPort }}
+    targetPort: valkey-tls
+    name: valkey-tls
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- if and $d.pdb.enabled (gt (int $d.replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: delivery-store
+spec:
+  # Voluntary disruptions (node drain) may take at most one pod -- primary and replica are
+  # never down together.
+  minAvailable: {{ sub (int $d.replicas) 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+{{- $ports := list $d.port }}
+{{- if $tls }}{{- $ports = append $ports $tlsPort }}{{- end }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "delivery-store" "name" $name "selector" (dict "app.kubernetes.io/name" $name "app.kubernetes.io/instance" $.Release.Name) "ports" $ports "egress" "internal" "tetragon" false) }}
+{{- end }}
