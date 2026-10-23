@@ -41,8 +41,8 @@ async def public_login_spec() -> dict[str, Any]:
 # as "untyped decorator" across every consumer, not a hub-api-specific gap.
 # Tracked as a known upstream issue (mem0); ignored at each of the 2 call
 # sites in this scaffold rather than silencing --strict project-wide.
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:read")  # type: ignore[misc]
 async def full_spec() -> dict[str, Any]:
     """The complete, auto-generated OpenAPI document -- every mounted route.
 

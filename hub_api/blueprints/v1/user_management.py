@@ -225,8 +225,8 @@ def _row_dto(row: Any) -> UserDTO:
 
 
 @user_management_bp.route("", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(ListUsersResponse)
 async def list_users() -> ListUsersResponse:
     """List users."""
@@ -251,8 +251,8 @@ async def list_users() -> ListUsersResponse:
 
 
 @user_management_bp.route("/<int:user_id>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(UserResponse)
 async def get_user(user_id: int) -> UserResponse | tuple[dict[str, object], int]:
     """Get user."""
@@ -265,8 +265,8 @@ async def get_user(user_id: int) -> UserResponse | tuple[dict[str, object], int]
 
 
 @user_management_bp.route("", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_request(CreateUserRequest)
 # NOT @validate_response -- create_user() inserts into hub_users, hitting
 # the crash documented in services/dto_response.py. jsonify_dto() below is
@@ -283,8 +283,8 @@ async def create_user(data: CreateUserRequest) -> tuple[Any, int]:
 
 
 @user_management_bp.route("/<int:user_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_request(UpdateUserRequest)
 # NOT @validate_response -- same crash class (update_async + nested-dataclass
 # response); see services/dto_response.py.
@@ -301,8 +301,8 @@ async def update_user(data: UpdateUserRequest, user_id: int) -> tuple[Any, int]:
 
 
 @user_management_bp.route("/<int:user_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def delete_user(user_id: int) -> MessageResponse | tuple[dict[str, object], int]:
     """Delete user."""
@@ -316,8 +316,8 @@ async def delete_user(user_id: int) -> MessageResponse | tuple[dict[str, object]
 
 
 @user_management_bp.route("/<int:user_id>/super-admin-role", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_request(GrantRequest)
 @validate_response(MessageResponse)
 async def assign_super_admin_role(
@@ -342,8 +342,8 @@ async def assign_super_admin_role(
 
 
 @user_management_bp.route("/<int:user_id>/vendor-role", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_request(GrantRequest)
 @validate_response(MessageResponse)
 async def assign_vendor_role(
@@ -365,8 +365,8 @@ async def assign_vendor_role(
 
 
 @user_management_bp.route("/<int:user_id>/verify-email", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_request(VerifiedRequest)
 @validate_response(MessageResponse)
 async def set_email_verification(
@@ -386,8 +386,8 @@ async def set_email_verification(
 
 
 @user_management_bp.route("/<int:user_id>/password-reset", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(PasswordResetResponse)
 async def generate_password_reset(
     user_id: int,
@@ -409,8 +409,8 @@ async def generate_password_reset(
 
 
 @user_management_bp.route("/<int:user_id>/sessions", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(SessionsResponse)
 async def list_user_sessions(user_id: int) -> SessionsResponse | tuple[dict[str, object], int]:
     """List a user's login sessions (newest first) so one can be revoked by id."""
@@ -438,8 +438,8 @@ async def list_user_sessions(user_id: int) -> SessionsResponse | tuple[dict[str,
 
 
 @user_management_bp.route("/<int:user_id>/revoke-sessions", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(RevokeSessionsResponse)
 async def revoke_user_sessions(
     user_id: int,
@@ -461,8 +461,8 @@ async def revoke_user_sessions(
 
 
 @user_management_bp.route("/<int:user_id>/sessions/<int:session_id>/revoke", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(RevokeSessionsResponse)
 async def revoke_user_session(
     user_id: int, session_id: int
@@ -486,8 +486,8 @@ async def revoke_user_session(
 
 
 @user_management_bp.route("/<int:user_id>/analytics-consumer-role", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_request(AnalyticsConsumerRequest)
 # NOT @validate_response -- same crash class (update_async + nested-dataclass
 # response); see services/dto_response.py.
@@ -506,8 +506,8 @@ async def assign_analytics_consumer_role(
 
 
 @user_management_bp.route("/<int:user_id>/deletion-request", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(DeletionRequestResponse)
 async def get_user_deletion_request(user_id: int) -> DeletionRequestResponse:
     """Get user deletion request."""
