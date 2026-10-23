@@ -234,7 +234,7 @@ pub fn outbound_relay_queue_key(provider: &str) -> String {
 /// Adding a provider here without adding its table rows leaves every op
 /// refused `unsupported_op` -- a new provider is unsupported until someone
 /// deliberately opts it in, never auto-supported onto an undrained queue.
-const RELAY_PROVIDERS: &[&str] = &["twitch", "discord"];
+pub(crate) const RELAY_PROVIDERS: &[&str] = &["twitch", "discord"];
 
 /// Valkey key the Discord outbound drain (`svc_ingest::outbound::
 /// run_discord`) keeps alive (short TTL, heartbeat-refreshed) while it is
@@ -302,7 +302,7 @@ const OUTBOUND_SCHEMA_VERSION: u32 = 1;
 /// issue #719). Mirrors `svc_ingest::outbound_ops::OutboundAction`; the
 /// wire string is the same `op` field the queue envelope carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RelayOp {
+pub(crate) enum RelayOp {
     ChatSend,
     ChatDelete,
     DmSend,
@@ -321,7 +321,7 @@ impl RelayOp {
     }
 
     /// The wire/permission-family spelling of this op.
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::ChatSend => "chat.send",
             Self::ChatDelete => "chat.delete",
@@ -351,7 +351,7 @@ impl RelayOp {
 /// (`unsupported_op`) until the Helix client lands -- never queued into a
 /// consumer that cannot act on them, so the bundle sees the failure instead of
 /// a silent black hole.
-fn relay_op_supported(provider: &str, op: RelayOp) -> bool {
+pub(crate) fn relay_op_supported(provider: &str, op: RelayOp) -> bool {
     matches!(
         (provider, op),
         ("twitch", RelayOp::ChatSend)

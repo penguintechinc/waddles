@@ -70,6 +70,9 @@ pub mod config;
 pub(crate) mod crypto;
 pub mod db;
 pub mod dispatch;
+// Not yet wired into the relay path (next task); drop this allow then.
+#[allow(dead_code)]
+mod dispatch_destination;
 pub mod dispatch_supervisor;
 pub mod distribution;
 pub mod egress;
