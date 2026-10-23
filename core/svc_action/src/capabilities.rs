@@ -216,6 +216,11 @@ pub(crate) fn denied(code: &str, message: impl Into<String>) -> HostResultError 
 /// `op` (closed enum) only -- bounded cardinality, no bundle/user data.
 pub const NO_DESTINATION_METRIC: &str = "svc_action_dispatch_no_destination_total";
 
+/// Counter incremented once per successfully routed dispatcher action.
+/// Labels `provider` (allowlist), `op` (closed enum), `destination` (closed
+/// label) only -- bounded cardinality, no bundle/user data.
+pub const ROUTED_METRIC: &str = "svc_action_dispatch_routed_total";
+
 /// Surfaces a `NoDestination` loudly: error log (ids only), counter, and a
 /// refused `unsupported_op` result -- never a silent success or drop.
 fn no_destination_error(
@@ -1804,18 +1809,49 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         >,
     ) -> Result<serde_json::Value, HostResultError> {
         use crate::dispatch_destination::Destination;
-        match routed {
-            Ok(Destination::StatefulPlatformReply { .. }) => {
-                self.handle_discord_queued_op(
-                    scope,
-                    RelayOp::ChatSend,
-                    &serde_json::json!({ "text": text }),
-                )
-                .await?;
-                Ok(serde_json::json!({"sent": true, "provider": "discord"}))
+        use tracing::Instrument;
+        let (provider, op, destination) = match &routed {
+            Ok(d @ Destination::StatefulPlatformReply { provider, op }) => {
+                (provider.as_str(), op.as_str(), d.label())
             }
-            Err(e) => Err(no_destination_error(scope, &e)),
+            Err(crate::dispatch_destination::DispatchError::NoDestination { provider, op }) => {
+                (provider.as_str(), op.as_str(), "none")
+            }
+        };
+        // Bounded, PII-free attributes only: allowlisted provider, closed op
+        // enum, closed destination label. Never message text or channel ids.
+        let span = tracing::info_span!(
+            "dispatch.route",
+            provider = %provider,
+            op = op,
+            destination = destination,
+            flag_on = true
+        );
+        if routed.is_ok() {
+            metrics::counter!(
+                ROUTED_METRIC,
+                "provider" => provider.to_string(),
+                "op" => op,
+                "destination" => destination
+            )
+            .increment(1);
         }
+        async {
+            match routed {
+                Ok(Destination::StatefulPlatformReply { .. }) => {
+                    self.handle_discord_queued_op(
+                        scope,
+                        RelayOp::ChatSend,
+                        &serde_json::json!({ "text": text }),
+                    )
+                    .await?;
+                    Ok(serde_json::json!({"sent": true, "provider": "discord"}))
+                }
+                Err(e) => Err(no_destination_error(scope, &e)),
+            }
+        }
+        .instrument(span)
+        .await
     }
 
     fn handle_clock(

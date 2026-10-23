@@ -14,6 +14,15 @@ pub enum Destination {
     StatefulPlatformReply { provider: String, op: RelayOp },
 }
 
+impl Destination {
+    /// Bounded, PII-free label for span/metric attributes.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::StatefulPlatformReply { .. } => "stateful_platform_reply",
+        }
+    }
+}
+
 /// Routing failure. Carries provider + op only -- never bundle/user text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispatchError {
