@@ -51,8 +51,11 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
-      {{- if $tls }}
       annotations:
+        # Rolls primary + replicas when the admin password rotates so replication re-establishes with
+        # the new masteruser password (same inputs as the dedicated admin Secret in secrets.yaml).
+        checksum/valkey-admin: {{ include "waddlebot.autoSecretValue" (dict "ctx" . "key" "VALKEY_DURABLE_ADMIN_PASSWORD" "explicit" (ternary "" $d.adminPassword (hasPrefix "REPLACE_ME" ($d.adminPassword | toString))) "secret" (printf "%s-valkey-durable-admin" (include "waddlebot.fullname" .))) | sha256sum | quote }}
+      {{- if $tls }}
         # Rolls the pods when the valkey-tls identity/SANs change (same helper as redis.yaml
         # and every client) -- see waddlebot.valkeyTlsPodChecksum.
         checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}

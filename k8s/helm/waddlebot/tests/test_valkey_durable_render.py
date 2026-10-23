@@ -163,3 +163,18 @@ def test_admin_password_isolated_from_workloads():
 def test_tls_off_keeps_plaintext_port():
     docs = _docs("values-ci.yaml", ("infrastructure.redis.tls.enabled=false",))
     assert "--port 6379" in _durable_cmd(docs) and "--port 0" not in _durable_cmd(docs)
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_admin_password_not_migrated_and_statefulset_restarts_on_rotation(values):
+    """Admin Secret has no legacy waddlebot-secrets migration source; StatefulSet carries checksum/valkey-admin."""
+    docs = _docs(values)
+    admin = [d for d in docs if d["kind"] == "Secret" and "VALKEY_DURABLE_ADMIN_PASSWORD" in (d.get("stringData") or {})]
+    assert len(admin) == 1
+    assert "waddlebot-secrets" not in yaml.safe_dump(admin[0])
+    src = (_CHART / "templates" / "secrets.yaml").read_text()
+    line = next(ln for ln in src.splitlines() if '"key" "VALKEY_DURABLE_ADMIN_PASSWORD"' in ln)
+    assert "legacySecret" not in line
+    sts = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "valkey-durable")
+    ann = sts["spec"]["template"]["metadata"]["annotations"]
+    assert len(ann.get("checksum/valkey-admin", "")) == 64
