@@ -60,3 +60,12 @@ infrastructure:
     antiAffinity: "hard"
     persistence:
       size: 5Gi
+  # Dedicated bundle-kv Valkey (noeviction quota store): single pod, no replication.
+  valkeyKv:
+    enabled: true
+    maxMemory: "128mb"
+    persistence:
+      size: 1Gi
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits: { cpu: "250m", memory: "256Mi" }

@@ -93,3 +93,12 @@ infrastructure:
     resources:
       requests: { cpu: "500m", memory: "1536Mi" }
       limits: { cpu: "1000m", memory: "2Gi" }
+  # Dedicated bundle-kv Valkey (noeviction quota store): single pod, no replication.
+  valkeyKv:
+    enabled: true
+    maxMemory: "256mb"
+    persistence:
+      size: 2Gi
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }

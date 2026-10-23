@@ -125,9 +125,14 @@ infrastructure:
   redis:
     enabled: false
     replicas: 1
+    tls:
+      enabled: false
 
   # Durable delivery-state Valkey: off with the rest of local's infra (clients fall back to the cache URLs).
   valkeyDurable:
+    enabled: false
+  # Bundle-kv Valkey off too (bundle-kv falls back to the cache instance).
+  valkeyKv:
     enabled: false
 
   # SeaweedFS - Single instance for local

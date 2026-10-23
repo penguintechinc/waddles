@@ -266,6 +266,8 @@ spec:
         - name: ENVELOPE_BINDING_ACTIVE_KID
           value: {{ .Values.pipeline.rustDataPlane.svcAction.envelopeBindingActiveKid | quote }}
         {{- end }}
+        {{- /* Durable VALKEY_URL override below is TLS-only: fail the render rather than leave the spine on the cache/plaintext envFrom VALKEY_URL. */}}
+        {{- include "waddlebot.assertDurableTls" . }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # fix/valkey-tls-alpha -- see templates/svc-process-rust.yaml's comment on this same
         # override block for the full rationale (identical here).
@@ -279,18 +281,34 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: VALKEY_DURABLE_PASSWORD
-        # bundle-kv rides the CACHE instance (infra-redis), never the durable noeviction one
-        # (TTL-less quota counters would fill it); Rust builds the kv conn from these.
-        - name: VALKEY_CACHE_URL
+        # bundle-kv rides its OWN dedicated noeviction kv Valkey (valkey-kv): quota counters are
+        # integrity-critical (eviction = quota bypass) and must not share the delivery (durable)
+        # instance. Credential-free URL + password via secretKeyRef from the dedicated
+        # <fullname>-valkey-kv Secret (not the shared envFrom'd one). Kv disabled (local) falls
+        # back to the cache instance. Rust builds the kv conn from these.
+        {{- if eq (include "waddlebot.valkeyKvEnabled" .) "true" }}
+        - name: VALKEY_KV_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-valkey-kv
+              key: VALKEY_KV_URL_TLS
+        - name: VALKEY_KV_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-valkey-kv
+              key: VALKEY_KV_PASSWORD
+        {{- else }}
+        - name: VALKEY_KV_URL
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: VALKEY_URL_TLS
-        - name: VALKEY_CACHE_PASSWORD
+        - name: VALKEY_KV_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: REDIS_PASSWORD
+        {{- end }}
         {{- end }}
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}

@@ -63,6 +63,16 @@ infrastructure:
     resources:
       requests: { cpu: "100m", memory: "256Mi" }
       limits: { cpu: "400m", memory: "512Mi" }
+  # Dedicated bundle-kv Valkey (noeviction quota store): single pod, no replication.
+  valkeyKv:
+    enabled: true
+    maxMemory: "128mb"
+    persistence:
+      size: 1Gi
+      storageClass: "longhorn"
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits: { cpu: "250m", memory: "256Mi" }
   seaweedfs:
     enabled: false
   ollama:

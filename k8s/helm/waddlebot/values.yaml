@@ -444,7 +444,10 @@ infrastructure:
     # SECURITY_TRANSPORT_TLS=false as the alternative -- that weakens a fail-closed check
     # `penguin_spine::SpineConfig::validate()` deliberately enforces.
     tls:
-      enabled: false
+      # Default ON: the durable delivery Valkey is TLS-only and the render FAILS if it is
+      # enabled without TLS (waddlebot.assertDurableTls). Non-alpha tiers must supply
+      # global.valkeyTls material (cert rotation) -- see docs/valkey-durability.md.
+      enabled: true
       port: 6380
     service:
       name: "infra-redis"
@@ -532,6 +535,48 @@ infrastructure:
       limits:
         cpu: "500m"
         memory: "1Gi"
+
+  # Dedicated bundle-kv Valkey (quota counters / bundle key-value state). SIMPLE by design:
+  # a single pod, NO replication/Sentinel/admin user -- quota is not on the 99.99% delivery
+  # path (a brief restart degrades quota checks, never delivery). Split from BOTH other
+  # instances: bundle-kv quota counters are integrity-critical, so they must NOT be evicted
+  # (eviction = quota bypass -> `maxmemory-policy noeviction` is hard-wired in the template,
+  # deliberately NOT a value) and must NOT fill the durable delivery instance.
+  #
+  # STATEFUL EXCEPTION (approved) -- 2026-10-23: StatefulSet + volumeClaimTemplates (PVC
+  # retained) so quota survives restarts. Rootless (uid 999) preserved.
+  # Password lives in its OWN Secret <fullname>-valkey-kv (never the envFrom'd shared one).
+  # When disabled (local), bundle-kv env falls back to the cache instance.
+  valkeyKv:
+    enabled: true
+    image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+    # REPLACE_ME => auto-generated alpha/local only; beta/gamma/prod must set it explicitly
+    # (or pre-populate the <fullname>-valkey-kv Secret).
+    password: "REPLACE_ME"
+    port: 6379
+    # Headroom under resources.limits.memory (~50%): AOF-rewrite fork COW + client buffers.
+    # At maxmemory writes fail LOUDLY (never evict) -- alert on used_memory/maxmemory > 0.8.
+    maxMemory: "128mb"
+    aof:
+      appendfsync: "everysec"
+      rewritePercentage: 100
+      rewriteMinSize: "32mb"
+    persistence:
+      # Rendering FAILS if false -- quota state never lands on emptyDir.
+      enabled: true
+      size: 1Gi
+      accessMode: ReadWriteOnce
+      storageClass: ""
+    service:
+      name: "infra-valkey-kv"
+      port: 6379
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
 
   # SeaweedFS Object Storage (replaces MinIO -- quay.io/minio/{minio,mc} started
   # returning 401 on anonymous pulls and Docker Hub never carried them; see

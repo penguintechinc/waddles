@@ -1,4 +1,5 @@
 {{- if .Values.infrastructure.valkeyDurable.enabled }}
+{{- include "waddlebot.assertDurableTls" . }}
 {{- $d := .Values.infrastructure.valkeyDurable }}
 {{- $tls := eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
 {{- $tlsPort := .Values.infrastructure.redis.tls.port }}

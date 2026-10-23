@@ -161,9 +161,20 @@ def test_admin_password_isolated_from_workloads():
     assert referrers == 1, "valkey-durable StatefulSet must reference the admin Secret"
 
 
-def test_tls_off_keeps_plaintext_port():
-    docs = _docs("values-ci.yaml", ("infrastructure.redis.tls.enabled=false",))
-    assert "--port 6379" in _durable_cmd(docs) and "--port 0" not in _durable_cmd(docs)
+def test_durable_without_tls_fails_render():
+    """Durable enabled + TLS off => render FAILS (delivery state must never silently ride the cache/plaintext path)."""
+    for values in ("values-alpha.yaml", "values-ci.yaml", "values-beta.yaml"):
+        r = _helm(values, ("infrastructure.redis.tls.enabled=false",))
+        assert r.returncode != 0, values
+        assert "delivery state would silently fall back" in r.stderr and "infrastructure.redis.tls.enabled=true" in r.stderr, r.stderr
+
+
+def test_durable_disabled_without_tls_is_exempt():
+    """Local/ci style: durable (and kv) disabled + TLS off still renders -- the guard only fires when durable is ENABLED."""
+    docs = _docs("values-alpha.yaml", ("infrastructure.redis.tls.enabled=false", "infrastructure.valkeyDurable.enabled=false",
+                                       "infrastructure.valkeyKv.enabled=false"))
+    assert not [d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "valkey-durable"]
+    assert _docs("values-local.yaml")
 
 
 @pytest.mark.parametrize("values", _ENVS)
@@ -201,7 +212,7 @@ _LEGACY = "legacy-leaked-test-fixture"
 @pytest.mark.parametrize("tier", ("beta", "gamma", "production"))
 def test_legacy_seeded_admin_fails_closed_outside_alpha(tier):
     """Admin value == value in waddlebot-secrets (leaked) => render FAILS on beta/gamma/prod."""
-    r = _helm("values-beta.yaml", ("global.deploymentTier=" + tier,
+    r = _helm("values-beta.yaml", ("global.deploymentTier=" + tier, "global.valkeyTls.externalSecret=true",
                                    "infrastructure.valkeyDurable.adminPassword=" + _LEGACY,
                                    "infrastructure.valkeyDurable.legacyAdminPassword=" + _LEGACY))
     assert r.returncode != 0 and "Rotate the Valkey admin password" in r.stderr, r.stderr

@@ -82,6 +82,24 @@ spec:
               protocol: TCP
             {{- end }}
     {{- end }}
+    {{- if .Values.infrastructure.valkeyKv.enabled }}
+    # Dedicated bundle-kv Valkey (templates/infrastructure/valkey-kv.yaml): quota counters.
+    # TLS port only when TLS is on (plaintext listener disabled server-side).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: valkey-kv
+            app.kubernetes.io/component: kv-store
+      toPorts:
+        - ports:
+            {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+            - port: {{ .Values.infrastructure.redis.tls.port | quote }}
+              protocol: TCP
+            {{- else }}
+            - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
+              protocol: TCP
+            {{- end }}
+    {{- end }}
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/instance: {{ .Release.Name }}
