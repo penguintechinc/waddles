@@ -14,6 +14,7 @@ any compiler Job would be created.
 
 from __future__ import annotations
 
+import enum
 import logging
 import re
 from dataclasses import dataclass, field
@@ -83,6 +84,38 @@ class ConsumeRule:
     source_id: str | None
     event_types: tuple[str, ...]
     filters: dict[str, Any] = field(default_factory=dict)
+
+
+#: Slash-command declaration constants (`commands:` manifest field). Values mirror
+#: the `app_commands` table (migration 0062): `command_types` bitmask 1..3 and the
+#: command-name CHECK regex.
+COMMAND_WILDCARD = "*"
+COMMAND_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+_MAX_COMMAND_DESCRIPTION_LEN = 100
+
+
+class CommandType(enum.IntFlag):
+    """Delivery kinds a declared command supports; values equal the DB `command_types` bitmask."""
+
+    STANDARD = 1
+    WEBHOOK = 2
+
+
+_COMMAND_TYPE_BY_NAME = {"standard": CommandType.STANDARD, "webhook": CommandType.WEBHOOK}
+
+
+@dataclass(slots=True, frozen=True)
+class CommandDeclaration:
+    """One `commands:` entry -- a command name this bundle serves, its types and platforms.
+
+    `platforms` of `None` means unrestricted (resolved against the bundle's
+    `supported_platforms` by the registry); `*` is the standard-only catch-all.
+    """
+
+    name: str
+    types: CommandType
+    platforms: tuple[str, ...] | None
+    description: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -164,6 +197,9 @@ class BundleManifestV2:
     # means ALL platforms (back-compat for every pre-existing bundle). Rides
     # in the stored `manifest_json` blob; no DB column.
     supported_platforms: tuple[str, ...] | None = None
+    # Slash-command registry (phase 1) -- the validated `commands:` block.
+    # Defaulted last so hand-built manifests in existing fixtures keep working.
+    command_declarations: tuple[CommandDeclaration, ...] = ()
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -207,6 +243,126 @@ def _require(condition: bool, reason: str, detail: str) -> None:
     """Raise `ManifestV2Error(reason, detail)` when `condition` is false."""
     if not condition:
         raise ManifestV2Error(reason, detail)
+
+
+def _parse_command_types(raw_types: Any, *, name: str) -> CommandType:
+    """Validate one command's `types` list (default `[standard]`) into a `CommandType` mask."""
+    if raw_types is None:
+        raw_types = ["standard"]
+    _require(
+        isinstance(raw_types, list) and bool(raw_types),
+        "invalid_command_type",
+        f"command {name!r}: types must be a non-empty list",
+    )
+    mask = CommandType(0)
+    for entry in raw_types:
+        _require(
+            isinstance(entry, str) and entry in _COMMAND_TYPE_BY_NAME,
+            "invalid_command_type",
+            f"command {name!r}: types entries must be one of {sorted(_COMMAND_TYPE_BY_NAME)}",
+        )
+        mask |= _COMMAND_TYPE_BY_NAME[entry]
+    _require(
+        name != COMMAND_WILDCARD or mask == CommandType.STANDARD,
+        "invalid_command_type",
+        "the '*' wildcard command is standard-only",
+    )
+    return mask
+
+
+def _parse_command_platforms(
+    raw_platforms: Any,
+    *,
+    name: str,
+    known_custom_platforms: frozenset[str],
+    supported_platforms: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    """Validate one command's optional `platforms` list; `None` when absent (unrestricted)."""
+    if raw_platforms is None:
+        return None
+    _require(
+        isinstance(raw_platforms, list) and bool(raw_platforms),
+        "invalid_command_platforms",
+        f"command {name!r}: platforms must be a non-empty list when present",
+    )
+    seen: list[str] = []
+    for entry in raw_platforms:
+        _require(
+            isinstance(entry, str),
+            "invalid_command_platforms",
+            f"command {name!r}: platforms entries must be strings",
+        )
+        if entry.startswith("custom:"):
+            _require(
+                entry.removeprefix("custom:") in known_custom_platforms,
+                "invalid_command_platforms",
+                f"command {name!r}: {entry!r} is not registered for this tenant",
+            )
+        else:
+            _require(
+                entry in KNOWN_SUPPORTED_PLATFORMS,
+                "invalid_command_platforms",
+                f"command {name!r}: {entry!r} is not one of {sorted(KNOWN_SUPPORTED_PLATFORMS)}",
+            )
+        _require(
+            supported_platforms is None or entry in supported_platforms,
+            "command_platform_unsupported",
+            f"command {name!r}: platform {entry!r} is not in supported_platforms",
+        )
+        if entry not in seen:
+            seen.append(entry)
+    return tuple(seen)
+
+
+def parse_command_declarations(
+    raw_entries: Any,
+    *,
+    known_custom_platforms: frozenset[str],
+    supported_platforms: tuple[str, ...] | None,
+) -> tuple[CommandDeclaration, ...]:
+    """Validate the optional `commands:` list; absent (`None`) parses to no declarations.
+
+    Each entry is `{name, types?, platforms?, description?}`. Raises
+    `ManifestV2Error` with a command-specific reason code on any violation.
+    """
+    if raw_entries is None:
+        return ()
+    _require(isinstance(raw_entries, list), "invalid_commands", "commands must be a list")
+    declarations: list[CommandDeclaration] = []
+    seen_names: set[str] = set()
+    for entry in raw_entries:
+        _require(
+            isinstance(entry, dict), "invalid_commands", "each commands entry must be a mapping"
+        )
+        name = entry.get("name")
+        _require(
+            isinstance(name, str)
+            and (name == COMMAND_WILDCARD or bool(COMMAND_NAME_RE.match(name))),
+            "invalid_command_name",
+            "command name must be '*' or match [a-z0-9][a-z0-9_-]{0,31}",
+        )
+        assert isinstance(name, str)  # narrowed by _require above, for mypy
+        _require(name not in seen_names, "duplicate_command", f"command {name!r} declared twice")
+        seen_names.add(name)
+        types = _parse_command_types(entry.get("types"), name=name)
+        platforms = _parse_command_platforms(
+            entry.get("platforms"),
+            name=name,
+            known_custom_platforms=known_custom_platforms,
+            supported_platforms=supported_platforms,
+        )
+        description = entry.get("description")
+        if description is not None:
+            _require(
+                isinstance(description, str)
+                and 1 <= len(description) <= _MAX_COMMAND_DESCRIPTION_LEN,
+                "invalid_command_description",
+                f"command {name!r}: description must be 1-{_MAX_COMMAND_DESCRIPTION_LEN} chars",
+            )
+        declarations.append(
+            CommandDeclaration(name=name, types=types, platforms=platforms, description=description)
+        )
+    return tuple(declarations)
 
 
 def _parse_consumes(
@@ -564,6 +720,12 @@ def parse_bundle_manifest_v2(
                 f"consumes platform {rule.platform!r} is not in supported_platforms",
             )
 
+    command_declarations = parse_command_declarations(
+        raw.get("commands"),
+        known_custom_platforms=known_custom_platforms,
+        supported_platforms=supported_platforms,
+    )
+
     egress_rules: list[EgressRule] = []
     for entry in raw.get("egress") or []:
         host = entry.get("host", "")
@@ -632,4 +794,5 @@ def parse_bundle_manifest_v2(
         notice=notice,
         category=category,
         supported_platforms=supported_platforms,
+        command_declarations=command_declarations,
     )

@@ -105,6 +105,7 @@ from services.bundle_manifest_v2 import (
     ConsumeRule,
     EgressRule,
     Limits,
+    parse_command_declarations,
     parse_permission_declarations,
 )
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
@@ -140,6 +141,23 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
     permission_declarations = parse_permission_declarations(
         [e for e in (raw.get("permissions") or ()) if isinstance(e, dict)]
     )
+    supported_platforms = (
+        tuple(raw["supported_platforms"]) if raw.get("supported_platforms") else None
+    )
+    # Already-validated blob -- tenant custom-platform registration is not
+    # re-checked, so accept exactly the `custom:` names the blob itself declares.
+    declared_custom = frozenset(
+        platform.removeprefix("custom:")
+        for entry in (raw.get("commands") or ())
+        if isinstance(entry, dict)
+        for platform in (entry.get("platforms") or ())
+        if isinstance(platform, str) and platform.startswith("custom:")
+    )
+    command_declarations = parse_command_declarations(
+        raw.get("commands"),
+        known_custom_platforms=declared_custom,
+        supported_platforms=supported_platforms,
+    )
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -174,9 +192,8 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         homepage_url=raw.get("homepage_url"),
         notice=raw.get("notice"),
         category=raw.get("category"),
-        supported_platforms=(
-            tuple(raw["supported_platforms"]) if raw.get("supported_platforms") else None
-        ),
+        supported_platforms=supported_platforms,
+        command_declarations=command_declarations,
     )
 
 
