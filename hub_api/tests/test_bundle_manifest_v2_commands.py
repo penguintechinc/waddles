@@ -96,7 +96,7 @@ def test_wildcard_is_standard_only() -> None:
     assert _reason([{"name": "*", "types": ["standard", "webhook"]}]) == "invalid_command_type"
 
 
-@pytest.mark.parametrize("bad", ["Ping", "!ping", "a b", "", "x" * 33, 5])
+@pytest.mark.parametrize("bad", ["Ping", "!ping", "a b", "", "x" * 33, 5, "ping\n"])
 def test_bad_name(bad: Any) -> None:
     assert _reason([{"name": bad}]) == "invalid_command_name"
 

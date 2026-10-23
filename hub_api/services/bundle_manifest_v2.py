@@ -337,7 +337,7 @@ def parse_command_declarations(
         name = entry.get("name")
         _require(
             isinstance(name, str)
-            and (name == COMMAND_WILDCARD or bool(COMMAND_NAME_RE.match(name))),
+            and (name == COMMAND_WILDCARD or bool(COMMAND_NAME_RE.fullmatch(name))),
             "invalid_command_name",
             "command name must be '*' or match [a-z0-9][a-z0-9_-]{0,31}",
         )
