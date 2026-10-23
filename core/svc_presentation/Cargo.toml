@@ -22,7 +22,7 @@ path = "src/main.rs"
 # so cargo-deny/the workspace dependency graph never sees two resolved
 # versions of the same crate.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 # "ws" (not a default axum feature) -- P4's live overlay viewer channel
 # (`http::overlay::live_ws`) needs `axum::extract::ws`; "tokio" (default)
 # already covers `axum::serve` itself. "multipart" (`dep:multer`, not a

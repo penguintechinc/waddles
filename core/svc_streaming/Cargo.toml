@@ -18,7 +18,7 @@ path = "src/main.rs"
 # Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
 # Dependency Pinning. Cargo.lock is committed alongside this file.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 axum = "=0.8.9"
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace", "cors"] }
@@ -122,7 +122,7 @@ opentelemetry_sdk = { version = "=0.32.1", features = ["rt-tokio", "testing"] }
 # `tokio::time::{pause,advance}` so `ingest::rtmp`'s >5s backpressure-stall
 # disconnect path can be tested against a virtual clock instead of a real
 # 5s sleep in the suite. Never linked into the release binary.
-tokio = { version = "=1.53.1", features = ["test-util"] }
+tokio = { version = "=1.53.3", features = ["test-util"] }
 
 [profile.release]
 opt-level = 3

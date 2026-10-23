@@ -73,7 +73,7 @@ path = "src/main.rs"
 # `deny.toml`'s `[sources]` `allow-git` must list this exact repository URL
 # or `cargo deny check` fails closed on `unknown-git`.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 axum = "=0.8.9"
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace"] }
@@ -205,7 +205,7 @@ futures-util = "=0.3.34"
 # virtual-time reconnect cycles instead of a real multi-minute sleep in the
 # suite. Never linked into the release binary. Matches
 # `core/svc_streaming/Cargo.toml`'s own precedent/comment.
-tokio = { version = "=1.53.1", features = ["test-util"] }
+tokio = { version = "=1.53.3", features = ["test-util"] }
 # Already resolved transitively (tokio's unix signal support) at this exact
 # version -- promoted to a direct dev-dependency only so
 # `tests/main_binary.rs` can send a real SIGTERM to a spawned child process

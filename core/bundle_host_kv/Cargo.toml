@@ -35,7 +35,7 @@ sha2 = "=0.10.9"
 opentelemetry = "=0.32.0"
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
 # Integration test against a real Valkey container (task requirement --
 # no existing testcontainers pattern in this repo to follow yet, so this
 # is the first landing of it; `rust-bundle-host-kv.yml` installs Docker

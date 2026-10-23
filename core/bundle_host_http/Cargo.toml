@@ -17,7 +17,7 @@ path = "src/lib.rs"
 # this pipeline was extracted from) so no dependent crate resolves a
 # second version of the same package.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["net", "time", "rt"] }
+tokio = { version = "=1.53.3", features = ["net", "time", "rt"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tracing = "=0.1.44"
@@ -32,7 +32,7 @@ penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.gi
 egress-assertion = { path = "../egress_assertion", version = "=0.1.0" }
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 # Test-only real HTTP server for `ReqwestTransport`'s connect/size-cap
 # tests (moved verbatim from svc_action) -- never linked into any release
 # binary of either consuming crate.

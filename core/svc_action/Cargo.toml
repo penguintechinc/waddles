@@ -27,7 +27,7 @@ path = "src/main.rs"
 # that file's header comment for the full rationale. `deny.toml`'s
 # `[sources] allow-git` must list this exact repository URL.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 # Host-API acceptor TCP keepalive (fix/executor-link-heartbeat, alpha
 # 2026-10-02 incident: a rolled svc pod left the executor's socket
 # half-open with no OS-level signal) -- already resolves to this exact
@@ -196,7 +196,7 @@ opentelemetry_sdk = { version = "=0.32.1", features = ["testing"] }
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
 # `tokio::time::{pause,advance}` for retry-backoff tests. Never linked into
 # the release binary.
-tokio = { version = "=1.53.1", features = ["test-util"] }
+tokio = { version = "=1.53.3", features = ["test-util"] }
 # `ServiceExt::oneshot` -- drives a request through the full `http::router`
 # (middleware included) in tests without binding a real socket. Test-only;
 # never linked into the release binary.

@@ -21,7 +21,7 @@ path = "src/main.rs"
 # path dependencies below) are copied verbatim so no dependent crate
 # resolves a second version of the same package.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 hyper = { version = "=1.11.1", features = ["full"] }
 hyper-util = { version = "=0.1.19", features = ["full"] }
 http-body-util = "=0.1.3"
@@ -100,7 +100,7 @@ bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 egress-assertion = { path = "../egress_assertion", version = "=0.1.0" }
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 tower = { version = "=0.5.3", features = ["util"] }
 # Test-only: `service_auth::test_support::Capture` (an in-memory OTel metric
 # exporter) proves the assertion verifier reports into the same

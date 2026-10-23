@@ -61,7 +61,7 @@ path = "src/main.rs"
 # `deny.toml`'s `[sources]` `allow-git` must list this exact repository URL
 # or `cargo deny check` fails closed on `unknown-git` (see that file).
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 # Host-API acceptor TCP keepalive (fix/executor-link-heartbeat, alpha
 # 2026-10-02 incident: a rolled svc pod left the executor's socket
 # half-open with no OS-level signal) -- already resolves to this exact
