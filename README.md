@@ -113,6 +113,10 @@ See **[docs/QUICKSTART.md](docs/QUICKSTART.md)** for detailed deployment and fir
 
 Mobile and desktop client code does not live in this repository. Mobile apps (Android/iOS/Flutter) are owned by the **`penguinm`** repo; the desktop client is owned by **`penguind`** (the `penguin` repo). Waddles keeps only the server-side, client-facing APIs (hub-api).
 
+## Acknowledgements
+
+- Command designs inspired by **PenguinTwitchBot by SuperPenguinTV** (GitHub [@Psychoboy](https://github.com/Psychoboy/PenguinTwitchBot)), used with permission. Ideas and design only; no code copied.
+
 ## License
 
 **Open Source (AGPL-3.0, with PenguinTech exceptions)** — free for personal, internal, and non-commercial use. Commercial license required for SaaS hosting, resale, and embedded commercial deployments. SDKs/client libraries are MIT. See [docs/LICENSE.md](docs/LICENSE.md) and [docs/LICENSING.md](docs/LICENSING.md).

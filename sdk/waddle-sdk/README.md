@@ -6,7 +6,8 @@ plus `flask_core` compatibility shims, implemented over the
 
 See [`AUTHORING.md`](AUTHORING.md) for the standard `!<command>` grammar
 (`waddle_sdk.command`), default-OFF sub-modules (`waddle_sdk.sub_modules`),
-and community-scoped state (`waddle_sdk.community_kv`).
+and community-scoped state (`waddle_sdk.community_kv`). Any bundle that echoes user-derived
+text into a reply must wrap it in `waddle_sdk.safe_text.sanitize_user_text` (AUTHORING.md §5).
 
 ## Writing a bundle
 
