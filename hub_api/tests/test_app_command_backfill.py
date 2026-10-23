@@ -162,3 +162,25 @@ async def test_backfill_records_failure_for_corrupt_manifest_and_continues(
 
 async def test_backfill_with_no_active_rows_reports_zero(install_dal: Any) -> None:
     assert await backfill_active_commands(install_dal) == BackfillResult(0, 0, ())
+
+
+async def test_backfill_records_lookup_error_when_upload_is_missing(install_dal: Any) -> None:
+    """An active row whose version has no stored upload fails in isolation (LookupError)."""
+    version_id = int(
+        await install_dal.app_versions.async_insert(
+            app_id=_A, version="1.0.0", language="python", artifact_kind="source"
+        )
+    )
+    active = install_dal.metadata.tables["app_active_versions"]
+    async with install_dal.engine.begin() as conn:
+        await conn.execute(
+            active.insert().values(
+                app_id=_A, tenant_id=1, community_id=0, version_id=version_id, activated_at=_T0
+            )
+        )
+    await _activate(install_dal, _B, ("!pong",), activated_at=_T1)
+
+    result = await backfill_active_commands(install_dal)
+
+    assert result == BackfillResult(examined=2, synced=1, failed=(f"{_A}@0: LookupError",))
+    assert {r.app_id for r in await _rows(install_dal)} == {_B}

@@ -7,6 +7,7 @@ Covers replace semantics, first-registered ownership, conflict warnings, and PII
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -21,7 +22,13 @@ from services.app_command_service import (
     command_owner,
     sync_commands,
 )
-from services.bundle_manifest_v2 import BundleManifestV2, ConsumeRule, Limits
+from services.bundle_manifest_v2 import (
+    BundleManifestV2,
+    CommandDeclaration,
+    CommandType,
+    ConsumeRule,
+    Limits,
+)
 
 _A = "waddles.core.alpha.default"
 _B = "waddles.core.beta.default"
@@ -291,3 +298,37 @@ async def test_sync_logs_counts_without_command_text(
     assert (rec.app_id, rec.tenant_id, rec.community_id) == (_B, 1, 0)
     assert (rec.rows, rec.warnings) == (2, 1)
     assert "secretverb" not in caplog.text and "other" not in caplog.text.replace(_B, "")
+
+
+async def _sync_declared_wildcard_platform(install_dal: Any, app_id: str, *, now: datetime) -> Any:
+    """Register an explicit `ping` declaration whose platform list is the `*` catch-all."""
+    manifest = dataclasses.replace(
+        _manifest(app_id, {}),
+        command_declarations=(CommandDeclaration("ping", CommandType.STANDARD, ("*",), None),),
+    )
+    table = install_dal.metadata.tables["app_commands"]
+    async with install_dal.engine.begin() as conn:
+        return await sync_commands(
+            conn,
+            tenant_id=1,
+            community_id=None,
+            app_id=app_id,
+            manifest=manifest,
+            commands_table=table,
+            now=now,
+        )
+
+
+async def test_star_platform_row_conflicts_with_specific_platform_row(install_dal: Any) -> None:
+    """A `platforms=["*"]` row overlaps every platform, in both registration orders."""
+    # wildcard-platform first -> the later specific-platform app warns
+    assert await _sync_declared_wildcard_platform(install_dal, _A, now=_T0) == ()
+    later = await _sync(install_dal, _B, {"discord": ("!ping",)}, now=_T1)
+    assert [(w.app_id, w.owner_app_id) for w in later] == [(_B, _A)]
+    await _clear(install_dal, _A)
+    await _clear(install_dal, _B)
+
+    # specific first -> the later wildcard-platform app warns
+    await _sync(install_dal, _A, {"discord": ("!ping",)}, now=_T0)
+    later = await _sync_declared_wildcard_platform(install_dal, _B, now=_T1)
+    assert [(w.app_id, w.owner_app_id) for w in later] == [(_B, _A)]
