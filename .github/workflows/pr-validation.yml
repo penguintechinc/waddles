@@ -920,6 +920,38 @@ jobs:
       - name: Check single alembic head
         run: bash scripts/ci/check-alembic-single-head.sh .
 
+  openapi-drift:
+    name: OpenAPI spec drift (openapi/v1.yaml matches generated)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: hub_api/requirements.txt
+
+      # The generator imports create_app(), which needs the full hub-api
+      # runtime set. defusedxml + signxml (services/sso_saml.py) were missing
+      # on py3.13 and broke `make openapi-hubapi`; both are hash-pinned in
+      # requirements.txt -- the import assert fails loudly if that regresses.
+      - name: Install openapi-gen dependencies
+        run: |
+          set -euo pipefail
+          pip install --disable-pip-version-check --require-hashes -r hub_api/requirements.txt
+          pip install --disable-pip-version-check "PyYAML>=6.0.2,<7.0.0"
+          python3 -c "import defusedxml, signxml, yaml"
+
+      - name: Fail on OpenAPI spec drift
+        run: make check-openapi-drift
+
   lockfile-no-downgrades:
     name: Lockfile additions-only (no silent version changes)
     if: github.event_name == 'pull_request'
