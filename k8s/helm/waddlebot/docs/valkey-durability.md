@@ -48,3 +48,18 @@ Three Valkey instances:
   - The key is blanked (`""`) in `waddlebot-secrets`, removing the leaked value from the shared secret on upgrade. The real value lives only in `<release>-valkey-durable-admin`, referenced only by the `valkey-durable` StatefulSet.
   - **Operator responsibility:** the chart does NOT detect a deliberately re-entered old password (stateless renders cannot reliably compare against a secret that has been blanked). Never reuse the old value.
   - Rotation procedure: (1) set a new `infrastructure.valkeyDurable.adminPassword` (out-of-git values/ExternalSecret), (2) bump `infrastructure.valkeyDurable.adminPasswordRevision` (non-secret) -> pod annotation `valkey.waddles/admin-revision` changes -> primary + replicas roll and re-establish replication with the new `masteruser` password. No password or hash is placed in pod metadata.
+
+## Admin password rotation (REQUIRED, operator-enforced)
+
+- **Why:** the previous durable admin password was exposed in the shared `waddlebot-secrets` (readable by every app pod). It is **COMPROMISED** and MUST be rotated to a genuinely new value on EVERY environment.
+- **Chart enforces:**
+  - beta/gamma/prod FAIL the render unless `infrastructure.valkeyDurable.adminPassword` is set (not empty, not `REPLACE_ME*`).
+  - alpha/local auto-generate a fresh value.
+  - The admin key in the shared `waddlebot-secrets` is blanked.
+  - The admin secret (`<release>-valkey-durable-admin`) is isolated — only `valkey-durable` reads it.
+- **Chart does NOT enforce (operator responsibility):** that the new password DIFFERS from the old compromised one — impossible to verify safely in a stateless render. NEVER re-enter the old value.
+- **Runbook / GitOps enforcement (how reuse is actually caught):**
+  1. Before upgrading, record `sha256` of the OLD admin password (`printf %s "$OLD" | sha256sum`) — store the hash only, never the value.
+  2. GitOps/PR review, or a CI check on the values files, REJECTS any `adminPassword` whose sha256 matches the recorded old hash.
+  3. Bump `infrastructure.valkeyDurable.adminPasswordRevision` on every rotation — the pod annotation `valkey.waddles/admin-revision` changes, so primary + replicas restart with the new `masteruser` password.
+- **One-time migration:** on first upgrade past this change, every environment MUST set a NEW `adminPassword` AND bump the revision. The old value stops working for replication once pods restart.
