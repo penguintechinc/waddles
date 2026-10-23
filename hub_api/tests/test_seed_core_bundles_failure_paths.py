@@ -422,6 +422,28 @@ class TestRunOuterContainment:
         assert code == 1
         assert "command registry backfill (examined=3, synced=2, failed=1)" in caplog.text
 
+    async def test_backfill_sweep_exception_log_omits_message(
+        self,
+        install_dal: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from services import app_command_backfill
+
+        _patch_run_dependencies(install_dal, monkeypatch)
+        monkeypatch.setattr(seeder, "load_platform_connections", lambda p: [])
+        monkeypatch.setattr(
+            app_command_backfill,
+            "backfill_active_commands",
+            AsyncMock(side_effect=RuntimeError("secret-manifest-command-text")),
+        )
+        with caplog.at_level(logging.ERROR):
+            code = await seeder._run(tmp_path, self._catalog(tmp_path))
+        assert code == 1
+        assert "command registry backfill sweep failed (RuntimeError)" in caplog.text
+        assert "secret-manifest-command-text" not in caplog.text
+
     async def test_clean_empty_run_exits_zero_and_logs_denominators(
         self,
         install_dal: Any,

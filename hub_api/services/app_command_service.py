@@ -344,6 +344,7 @@ async def command_owner(
                     (c.tenant_id == tenant_id)
                     & c.community_id.in_((community_id, TENANT_WIDE_COMMUNITY_SENTINEL))
                     & (c.command == command)
+                    & (c.command != "*")
                 )
                 .order_by(c.registered_at, c.id)
             )

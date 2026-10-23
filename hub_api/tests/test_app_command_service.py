@@ -286,6 +286,15 @@ async def test_command_owner_picks_first_registered_and_filters_platform(
     assert await command_owner(install_dal, tenant_id=2, community_id=5, command="ping") is None
 
 
+async def test_command_owner_excludes_wildcard_rows(install_dal: Any) -> None:
+    """A `*` row never owns anything; a real non-wildcard owner still does."""
+    await _sync(install_dal, _A, {"discord": ()}, now=_T0, community_id=5)  # wildcard row
+    assert await command_owner(install_dal, tenant_id=1, community_id=5, command="*") is None
+    await _sync(install_dal, _B, {"discord": ("!ping",)}, now=_T1, community_id=5)
+    assert await command_owner(install_dal, tenant_id=1, community_id=5, command="ping") == _B
+    assert await command_owner(install_dal, tenant_id=1, community_id=5, command="*") is None
+
+
 async def test_sync_logs_counts_without_command_text(
     install_dal: Any, caplog: pytest.LogCaptureFixture
 ) -> None:

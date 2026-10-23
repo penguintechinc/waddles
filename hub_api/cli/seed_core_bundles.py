@@ -1563,9 +1563,8 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
         except Exception as exc:  # noqa: BLE001 -- the backfill must not abort the summary/exit code
             logger.error(
                 "core-bundle-seeder: command registry backfill sweep failed "
-                f"({type(exc).__name__}: {exc})",
-                extra={"error_type": type(exc).__name__, "error": str(exc)},
-                exc_info=True,
+                f"({type(exc).__name__})",
+                extra={"error_type": type(exc).__name__},
             )
             failures += 1
         else:
