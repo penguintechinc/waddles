@@ -5,10 +5,10 @@
 # Usage: helm upgrade --install waddlebot . -n waddlebot -f values-dal2alpha.yaml (NO other -f needed).
 # Prereqs (operator-provisioned, never in git): Secret ghcr-pull + waddlebot-platform-credentials in ns waddlebot.
 webui:
-  publicUrl: "https://waddlebot.dal2a.penguintech.cloud"
+  publicUrl: "https://waddles-alpha.penguintech.cloud"
   # #320 Connections: Google/Spotify only accept http (non-TLS) redirect URIs on
   # `localhost` -- the LAN-IP publicUrl above is rejected by their OAuth consent screens.
-  connectionsCallbackBaseUrl: "https://waddlebot.dal2a.penguintech.cloud"
+  connectionsCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud"
 
 global:
   # fix/alpha-helm-deploy -- was "" (empty), which (a) rendered every
@@ -54,7 +54,7 @@ global:
   # jwtSecret/moduleSecretKey/serviceApiKey/minio root creds below. NEVER
   # reused in beta/gamma/production (see values.yaml global.initialAdmin).
   initialAdmin:
-    email: "admin@waddlebot.dal2a.penguintech.cloud"
+    email: "admin@waddles-alpha.penguintech.cloud"
 
 # Monday-demo: pin ONLY the hub-api image family (hub-api Deployment + role-sync / event-sync /
 # odoo-sync / bundle-signing CronJobs) to the sync-worker DAL fix, rebuilt as
@@ -525,7 +525,7 @@ httproute:
   gatewayName: shared
   gatewayNamespace: gateway-system
   hostnames:
-    - waddlebot.dal2a.penguintech.cloud
+    - waddles-alpha.penguintech.cloud
   rules:
     - path: /
       service: "waddlebot-hub-webui-v3"
