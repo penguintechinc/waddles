@@ -220,6 +220,18 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: VALKEY_DURABLE_PASSWORD
+        # bundle-kv rides the CACHE instance (infra-redis), never the durable noeviction one
+        # (TTL-less quota counters would fill it); Rust builds the kv conn from these.
+        - name: VALKEY_CACHE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_URL_TLS
+        - name: VALKEY_CACHE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: REDIS_PASSWORD
         {{- end }}
         # fix/alpha-deploy-executor-and-failfast -- the legacy single-app selection env
         # below (PROCESS_APP_ID, PROCESS_INGEST_*, PROCESS_BUNDLE_*) now renders ONLY

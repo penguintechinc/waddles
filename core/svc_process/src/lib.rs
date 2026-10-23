@@ -721,11 +721,36 @@ fn build_redis_client(cfg: &penguin_spine::SpineConfig) -> Option<redis::Client>
     }
 }
 
+/// Derives the bundle-`kv` Valkey connection config from the spine (durable,
+/// `noeviction`) config: when `VALKEY_CACHE_URL` is set, `kv` is routed to
+/// the cache instance (`infra-redis`) so its TTL-less quota counters can never
+/// fill the durable instance; unset falls back to the spine config unchanged
+/// (local/back-compat). TLS follows the cache URL scheme, never the spine's.
+fn kv_cache_config(
+    spine: &penguin_spine::SpineConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> penguin_spine::SpineConfig {
+    let non_empty = |k: &str| lookup(k).filter(|v| !v.trim().is_empty());
+    let Some(url) = non_empty("VALKEY_CACHE_URL") else {
+        return spine.clone();
+    };
+    let mut cfg = spine.clone();
+    cfg.security_transport_tls = url.starts_with("rediss://");
+    cfg.valkey_url = url;
+    cfg.valkey_username = non_empty("VALKEY_CACHE_USERNAME");
+    cfg.valkey_password = non_empty("VALKEY_CACHE_PASSWORD");
+    cfg
+}
+
 /// Opens the direct Valkey connection the `kv` host capability is backed
 /// by (`spine::ProcessDeps::kv_conn`'s doc). Never fatal on failure --
 /// returns `None` (logged) so the caller can start every other capability
 /// regardless.
-async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::MultiplexedConnection> {
+async fn connect_kv(
+    spine_cfg: &penguin_spine::SpineConfig,
+) -> Option<redis::aio::MultiplexedConnection> {
+    // Cache instance, not the durable spine one -- see `kv_cache_config`.
+    let cfg = &kv_cache_config(spine_cfg, |k| std::env::var(k).ok());
     let client = build_redis_client(cfg)?;
     match client.get_multiplexed_async_connection().await {
         Ok(mut conn) => {
@@ -2124,6 +2149,52 @@ pub async fn run_healthcheck() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Wiring: bundle-kv goes to `VALKEY_CACHE_URL` (cache), the spine config
+    /// stays on the durable `VALKEY_URL`; unset cache URL falls back.
+    #[test]
+    fn kv_cache_config_routes_kv_to_cache_and_leaves_spine_on_durable() {
+        let spine = penguin_spine::SpineConfig {
+            valkey_url: "rediss://durable:6380/0".to_string(),
+            valkey_username: None,
+            valkey_password: Some("durable-pass".to_string()),
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: true,
+            security_transport_auth: true,
+            consumer_id: "c".to_string(),
+            stream_maxlen: 100,
+            read_count: 1,
+            block_ms: 1_000,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 100,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 65,
+            relay_block_timeout_s: 30,
+        };
+        let env = |k: &str| match k {
+            "VALKEY_CACHE_URL" => Some("rediss://infra-redis:6380/0".to_string()),
+            "VALKEY_CACHE_PASSWORD" => Some("cache-pass".to_string()),
+            _ => None,
+        };
+        let kv = kv_cache_config(&spine, env);
+        assert_eq!(kv.valkey_url, "rediss://infra-redis:6380/0");
+        assert_eq!(kv.valkey_password.as_deref(), Some("cache-pass"));
+        assert!(kv.security_transport_tls);
+        assert_eq!(spine.valkey_url, "rediss://durable:6380/0");
+        assert_eq!(spine.valkey_password.as_deref(), Some("durable-pass"));
+
+        let plain = kv_cache_config(&spine, |k| {
+            (k == "VALKEY_CACHE_URL").then(|| "redis://:p@infra-redis:6379/0".to_string())
+        });
+        assert!(!plain.security_transport_tls);
+        assert!(plain.valkey_password.is_none());
+
+        let fallback = kv_cache_config(&spine, |_| None);
+        assert_eq!(fallback.valkey_url, spine.valkey_url);
+    }
+
     use super::*;
     use crate::config::{CliConfig, Config};
     use clap::Parser;

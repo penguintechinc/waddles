@@ -599,6 +599,27 @@ fn flag_or_closed(
     }
 }
 
+/// Derives the bundle-`kv` Valkey connection config from the spine (durable,
+/// `noeviction`) config: when `VALKEY_CACHE_URL` is set, `kv` is routed to
+/// the cache instance (`infra-redis`) so its TTL-less quota counters can never
+/// fill the durable instance; unset falls back to the spine config unchanged
+/// (local/back-compat). TLS follows the cache URL scheme, never the spine's.
+fn kv_cache_config(
+    spine: &penguin_spine::SpineConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> penguin_spine::SpineConfig {
+    let non_empty = |k: &str| lookup(k).filter(|v| !v.trim().is_empty());
+    let Some(url) = non_empty("VALKEY_CACHE_URL") else {
+        return spine.clone();
+    };
+    let mut cfg = spine.clone();
+    cfg.security_transport_tls = url.starts_with("rediss://");
+    cfg.valkey_url = url;
+    cfg.valkey_username = non_empty("VALKEY_CACHE_USERNAME");
+    cfg.valkey_password = non_empty("VALKEY_CACHE_PASSWORD");
+    cfg
+}
+
 /// Builds (never connects) a [`redis::Client`] from `cfg`'s `VALKEY_URL`/
 /// username/password/TLS/CA-file settings -- the same client-construction
 /// logic as `crate::usage::connect` (duplicated rather than shared: that
@@ -747,20 +768,25 @@ async fn build_stage_capabilities(
         Some(guard) => guard,
         None => return None,
     };
-    // `kv` reuses this same direct Valkey connection (cloned -- a cheap
-    // handle clone over one shared TCP connection, not a second socket)
-    // rather than opening a dedicated one: `relay_conn` already IS the
-    // "second, direct redis connection" `usage.rs`'s module doc describes,
-    // and `kv`'s isolation/quota model needs nothing about the connection
-    // itself that `relay`/usage don't already require (`crate::capabilities`'
-    // `StageCapabilities::with_kv`'s doc).
-    let mut kv_conn = relay_conn.clone();
-    // Low-severity fix, security review of PR #425: `count_key` has no
-    // TTL, so an `allkeys-*` `maxmemory-policy` can evict it under memory
-    // pressure, silently resetting the kv quota -- checked once here,
-    // never on the per-op hot path (`bundle_host_kv::policy`'s doc).
-    let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut kv_conn).await;
-    bundle_host_kv::policy::log_and_record(&policy_check);
+    // `kv` gets its OWN connection to the CACHE instance (`VALKEY_CACHE_URL`,
+    // see `kv_cache_config`), never `relay_conn`'s durable `noeviction`
+    // instance: `kv`'s TTL-less quota counters would otherwise fill the
+    // durable instance and make delivery writes ERROR. Failure disables only
+    // `kv` (not_implemented), never the other capabilities.
+    let kv_cfg = kv_cache_config(&spine_cfg, |k| std::env::var(k).ok());
+    let kv_conn = match usage::connect(&kv_cfg).await {
+        Ok(mut conn) => {
+            // `count_key` has no TTL, so an `allkeys-*` `maxmemory-policy`
+            // can evict it -- checked once here (`bundle_host_kv::policy`).
+            let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut conn).await;
+            bundle_host_kv::policy::log_and_record(&policy_check);
+            Some(conn)
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "kv capability: cache Valkey connection failed; kv disabled (not_implemented on every kv host-call)");
+            None
+        }
+    };
     // `core/bundle_capability_gate::CapabilityGate` (spec
     // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     // SS5): `PgGrantLoader` against the RO-replica reader account when
@@ -804,8 +830,11 @@ async fn build_stage_capabilities(
     };
     let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
         relay_conn, egress, usage, gate,
-    )
-    .with_kv(kv_conn, kv_capabilities);
+    );
+    let caps = match kv_conn {
+        Some(kv_conn) => caps.with_kv(kv_conn, kv_capabilities),
+        None => caps,
+    };
     // Discord relay send (spec: relay providers, `discord`) -- graceful
     // degradation, not a startup requirement: a deployment that never sets
     // `DISCORD_BOT_TOKEN` simply never enables this provider, and a bundle
@@ -2044,6 +2073,38 @@ mod tests {
             drain_socket_timeout_s: 65,
             relay_block_timeout_s: 30,
         }
+    }
+
+    /// Wiring: bundle-kv goes to `VALKEY_CACHE_URL` (cache), the spine config
+    /// stays on the durable `VALKEY_URL`; unset cache URL falls back.
+    #[test]
+    fn kv_cache_config_routes_kv_to_cache_and_leaves_spine_on_durable() {
+        let mut spine = unreachable_spine_config();
+        spine.valkey_url = "rediss://durable:6380/0".to_string();
+        spine.valkey_password = Some("durable-pass".to_string());
+        spine.security_transport_tls = true;
+        let env = |k: &str| match k {
+            "VALKEY_CACHE_URL" => Some("rediss://infra-redis:6380/0".to_string()),
+            "VALKEY_CACHE_PASSWORD" => Some("cache-pass".to_string()),
+            _ => None,
+        };
+        let kv = kv_cache_config(&spine, env);
+        assert_eq!(kv.valkey_url, "rediss://infra-redis:6380/0");
+        assert_eq!(kv.valkey_password.as_deref(), Some("cache-pass"));
+        assert!(kv.security_transport_tls);
+        assert_eq!(spine.valkey_url, "rediss://durable:6380/0");
+        assert_eq!(spine.valkey_password.as_deref(), Some("durable-pass"));
+
+        let plain = kv_cache_config(&spine, |k| {
+            (k == "VALKEY_CACHE_URL").then(|| "redis://:p@infra-redis:6379/0".to_string())
+        });
+        assert!(!plain.security_transport_tls);
+        assert!(plain.valkey_password.is_none());
+
+        let fallback = kv_cache_config(&spine, |_| None);
+        assert_eq!(fallback.valkey_url, spine.valkey_url);
+        let blank = kv_cache_config(&spine, |_| Some("  ".to_string()));
+        assert_eq!(blank.valkey_url, spine.valkey_url);
     }
 
     /// Regression coverage for the CRITICAL usage-metering finding: proves
