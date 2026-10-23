@@ -68,3 +68,51 @@ def test_rust_spine_clients_use_durable_keys():
             assert "VALKEY_DURABLE_URL_TLS" in keys and "VALKEY_DURABLE_PASSWORD" in keys, d["metadata"]["name"]
             seen += 1
     assert seen == len(_CLIENTS), f"examined {seen} spine clients"
+
+
+def _durable_cmd(docs):
+    sts = [d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "valkey-durable"]
+    assert len(sts) == 1
+    return sts[0]["spec"]["template"]["spec"]["containers"][0]["command"][2]
+
+
+def test_tls_on_disables_plaintext_listener_and_url():
+    """Security review MEDIUM: TLS on => --port 0, no plaintext Service port, no plaintext URL."""
+    docs = _docs("values-alpha.yaml")
+    cmd = _durable_cmd(docs)
+    assert "--port 0" in cmd and "--tls-port" in cmd
+    svcs = [d for d in docs if d["kind"] == "Service" and d["metadata"]["name"] in ("infra-valkey-durable", "valkey-durable-headless")]
+    assert len(svcs) == 2
+    for s in svcs:
+        assert [p["name"] for p in s["spec"]["ports"]] == ["valkey-tls"], s["metadata"]["name"]
+    sec = [d for d in docs if d["kind"] == "Secret" and "VALKEY_DURABLE_PASSWORD" in (d.get("stringData") or {})]
+    assert len(sec) == 1
+    keys = sec[0]["stringData"]
+    assert "VALKEY_DURABLE_URL" not in keys
+    assert keys["VALKEY_DURABLE_URL_TLS"].startswith("rediss://")
+    assert keys["VALKEY_DURABLE_URL_TLS_AUTH"].startswith("rediss://:") and "ssl_ca_certs=" in keys["VALKEY_DURABLE_URL_TLS_AUTH"]
+
+
+def test_python_stage_clients_use_rediss():
+    docs = _docs("values-beta.yaml", ("infrastructure.redis.tls.enabled=true",))
+    seen = 0
+    for d in docs:
+        if d["kind"] == "Deployment" and d["metadata"]["name"].endswith(("-svc-ingest", "-svc-process", "-svc-action")):
+            keys = [e["valueFrom"]["secretKeyRef"]["key"] for c in d["spec"]["template"]["spec"]["containers"]
+                    for e in c.get("env", []) if e["name"] == "VALKEY_URL" and "valueFrom" in e]
+            assert keys == ["VALKEY_DURABLE_URL_TLS_AUTH"], d["metadata"]["name"]
+            assert any(v["name"] == "valkey-ca" for v in d["spec"]["template"]["spec"]["volumes"])
+            seen += 1
+    assert seen == 3, f"examined {seen} python stage clients"
+
+
+def test_acl_restricts_default_user():
+    cmd = _durable_cmd(_docs("values-alpha.yaml"))
+    for denied in ("-config", "-flushall", "-flushdb", "-replicaof", "-slaveof", "-debug", "-shutdown"):
+        assert f" {denied} " in cmd or cmd.count(denied) >= 1, denied
+    assert "--masteruser admin" in cmd and "--requirepass" not in cmd
+
+
+def test_tls_off_keeps_plaintext_port():
+    docs = _docs("values-ci.yaml", ("infrastructure.redis.tls.enabled=false",))
+    assert "--port 6379" in _durable_cmd(docs) and "--port 0" not in _durable_cmd(docs)

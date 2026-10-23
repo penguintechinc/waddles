@@ -487,6 +487,9 @@ infrastructure:
     # Dedicated password (own secret key VALKEY_DURABLE_PASSWORD). REPLACE_ME => auto-generated
     # alpha/local only; beta/gamma/prod must set it explicitly (or pre-populate the Secret).
     password: "REPLACE_ME"
+    # Full-access ACL `admin` user (replication masteruser + break-glass); app clients use the
+    # restricted `default` user (password above). Same REPLACE_ME/auto-generate rules.
+    adminPassword: "REPLACE_ME"
     port: 6379
     # 1 primary + (replicas-1) warm replicas.
     replicas: 2

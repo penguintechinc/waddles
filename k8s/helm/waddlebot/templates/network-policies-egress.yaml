@@ -65,7 +65,8 @@ spec:
               protocol: TCP
     {{- if .Values.infrastructure.valkeyDurable.enabled }}
     # Durable delivery-state Valkey (templates/infrastructure/valkey-durable.yaml): spine
-    # streams / transport queues / acks. Plaintext port + TLS port (Rust spine pods use TLS).
+    # streams / transport queues / acks. TLS port only when TLS is on (plaintext listener is
+    # disabled server-side); plaintext port only in the TLS-off local/ci path.
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/instance: {{ .Release.Name }}
@@ -73,10 +74,13 @@ spec:
             app.kubernetes.io/component: delivery-store
       toPorts:
         - ports:
-            - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
-              protocol: TCP
+            {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
             - port: {{ .Values.infrastructure.redis.tls.port | quote }}
               protocol: TCP
+            {{- else }}
+            - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
+              protocol: TCP
+            {{- end }}
     {{- end }}
     - toEndpoints:
         - matchLabels:

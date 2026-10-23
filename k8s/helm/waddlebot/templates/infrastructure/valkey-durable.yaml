@@ -112,20 +112,33 @@ spec:
         - |
           set -eu
           ORD="${HOSTNAME##*-}"
+          # ACL (security review MEDIUM, defense-in-depth): app clients authenticate with the
+          # password-only `default` user (every client -- Rust spine, redis-py -- sends AUTH <pw>),
+          # so the DEFAULT user is the restricted one: no CONFIG/FLUSH*/REPLICAOF/SLAVEOF/DEBUG/
+          # SHUTDOWN/ACL/FAILOVER/MODULE -- a compromised client cannot wipe or repartition
+          # delivery state. `admin` (separate password) is full-access: replication (masteruser)
+          # + operator break-glass. Passwords are passed as SHA-256 hashes (`#hex`), never
+          # cleartext in the ACL rules.
+          APP_HASH="$(printf %s "$VALKEY_PASSWORD" | sha256sum | cut -d' ' -f1)"
+          ADMIN_HASH="$(printf %s "$VALKEY_ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)"
           set -- valkey-server \
             --dir /data/valkey \
-            --requirepass "$VALKEY_PASSWORD" \
-            --masterauth "$VALKEY_PASSWORD" \
+            --user default on "#$APP_HASH" '~*' '&*' +@all -config -flushall -flushdb -replicaof -slaveof -debug -shutdown -acl -failover -module \
+            --user admin on "#$ADMIN_HASH" '~*' '&*' +@all \
+            --masteruser admin \
+            --masterauth "$VALKEY_ADMIN_PASSWORD" \
             --appendonly yes \
             --appendfsync {{ $d.aof.appendfsync }} \
             --no-appendfsync-on-rewrite no \
             --auto-aof-rewrite-percentage {{ $d.aof.rewritePercentage }} \
             --auto-aof-rewrite-min-size {{ $d.aof.rewriteMinSize }} \
             --maxmemory {{ $d.maxMemory }} \
-            --maxmemory-policy noeviction \
-            --port {{ $d.port }}
+            --maxmemory-policy noeviction
           {{- if $tls }}
+          # TLS-only: plaintext listener DISABLED (--port 0) so the password can never cross the
+          # wire in cleartext (security review MEDIUM, cleartext-credential-transport).
           set -- "$@" \
+            --port 0 \
             --tls-port {{ $tlsPort }} \
             --tls-cert-file /etc/valkey/tls/tls.crt \
             --tls-key-file /etc/valkey/tls/tls.key \
@@ -135,6 +148,8 @@ spec:
             --tls-replication yes
           PRIMARY_PORT={{ $tlsPort }}
           {{- else }}
+          # TLS disabled (local/ci only): plaintext port stays.
+          set -- "$@" --port {{ $d.port }}
           PRIMARY_PORT={{ $d.port }}
           {{- end }}
           if [ "$ORD" != "0" ]; then
@@ -142,12 +157,13 @@ spec:
           fi
           exec "$@"
         ports:
-        - name: valkey
-          containerPort: {{ $d.port }}
-          protocol: TCP
         {{- if $tls }}
         - name: valkey-tls
           containerPort: {{ $tlsPort }}
+          protocol: TCP
+        {{- else }}
+        - name: valkey
+          containerPort: {{ $d.port }}
           protocol: TCP
         {{- end }}
         env:
@@ -156,6 +172,11 @@ spec:
             secretKeyRef:
               name: {{ $pwSecret }}
               key: VALKEY_DURABLE_PASSWORD
+        - name: VALKEY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $pwSecret }}
+              key: VALKEY_DURABLE_ADMIN_PASSWORD
         volumeMounts:
         - name: data
           mountPath: /data
@@ -166,14 +187,28 @@ spec:
           {{- toYaml $d.resources | nindent 10 }}
         livenessProbe:
           exec:
-            command: ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            command:
+            {{- if $tls }}
+              # Loopback probe inside the pod over TLS (plaintext listener is off); --insecure only
+              # skips hostname/chain verification of the pod's own 127.0.0.1 connection.
+              ["sh", "-c", "valkey-cli --tls --insecure -p {{ $tlsPort }} -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            {{- else }}
+              ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            {{- end }}
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
           exec:
-            command: ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            command:
+            {{- if $tls }}
+              # Loopback probe inside the pod over TLS (plaintext listener is off); --insecure only
+              # skips hostname/chain verification of the pod's own 127.0.0.1 connection.
+              ["sh", "-c", "valkey-cli --tls --insecure -p {{ $tlsPort }} -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            {{- else }}
+              ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            {{- end }}
           initialDelaySeconds: 5
           periodSeconds: 10
           timeoutSeconds: 5
@@ -215,15 +250,17 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-  - port: {{ $d.service.port }}
-    targetPort: valkey
-    protocol: TCP
-    name: valkey
   {{- if $tls }}
+  # TLS-only: no plaintext Service port when TLS is on.
   - port: {{ $tlsPort }}
     targetPort: valkey-tls
     protocol: TCP
     name: valkey-tls
+  {{- else }}
+  - port: {{ $d.service.port }}
+    targetPort: valkey
+    protocol: TCP
+    name: valkey
   {{- end }}
   selector:
     app.kubernetes.io/name: {{ $name }}
@@ -245,13 +282,14 @@ spec:
   clusterIP: None
   publishNotReadyAddresses: true
   ports:
-  - port: {{ $d.port }}
-    targetPort: valkey
-    name: valkey
   {{- if $tls }}
   - port: {{ $tlsPort }}
     targetPort: valkey-tls
     name: valkey-tls
+  {{- else }}
+  - port: {{ $d.port }}
+    targetPort: valkey
+    name: valkey
   {{- end }}
   selector:
     app.kubernetes.io/name: {{ $name }}
@@ -277,7 +315,7 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- $ports := list $d.port }}
-{{- if $tls }}{{- $ports = append $ports $tlsPort }}{{- end }}
+{{- if $tls }}{{- $ports = list $tlsPort }}{{- end }}
 # R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
 {{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "delivery-store" "name" $name "selector" (dict "app.kubernetes.io/name" $name "app.kubernetes.io/instance" $.Release.Name) "ports" $ports "egress" "internal" "tetragon" false) }}
 {{- end }}
