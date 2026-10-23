@@ -144,3 +144,8 @@ data:
   # per-env where the provider's accepted redirect host differs from the public link URL
   # (e.g. alpha: Google/Spotify only accept http redirect URIs on localhost).
   CONNECTIONS_CALLBACK_BASE_URL: {{ .Values.webui.connectionsCallbackBaseUrl | default "" | quote }}
+  # Identity/auth/Discord-install callback base. Only rendered when set so hub-api keeps its
+  # built-in default (http://localhost:8204) in other envs.
+  {{- if .Values.webui.identityCallbackBaseUrl }}
+  IDENTITY_CALLBACK_BASE_URL: {{ .Values.webui.identityCallbackBaseUrl | quote }}
+  {{- end }}

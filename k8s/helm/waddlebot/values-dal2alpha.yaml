@@ -9,6 +9,7 @@ webui:
   # #320 Connections: Google/Spotify only accept http (non-TLS) redirect URIs on
   # `localhost` -- the LAN-IP publicUrl above is rejected by their OAuth consent screens.
   connectionsCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud:8443"
+  identityCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud:8443"
 
 global:
   # fix/alpha-helm-deploy -- was "" (empty), which (a) rendered every
