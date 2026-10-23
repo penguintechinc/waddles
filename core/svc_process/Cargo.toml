@@ -88,7 +88,7 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 # `cargo deny`'s `[bans] wildcards = "deny"` (deny.toml) from flagging this
 # as an unconstrained dependency -- Cargo additionally verifies the pinned
 # commit's own `Cargo.toml` actually satisfies this requirement.
-penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0a320ba2b08a6850b66e3062f6a9dfb44fec6950", package = "penguin-logging", version = "=0.1.0" }
 # `penguin-spine` (spec SS4.7): the process-stage granted-ingest-stream
 # `XREADGROUP` consumer -- see `src/spine.rs`. Bumped to
 # `release/rust-spine/v0.1.x`'s finalized tip (was
@@ -98,16 +98,16 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # instead of guessing from `d.env.app_id` -- the exact "shared ingest-source
 # stream" bug this crate's own `src/hop.rs` doc comment already called out
 # (env.app_id never identifies the reading bundle on a shared stream).
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ce638ec24f0bca0e2afd7655b99d1f9162030156", package = "penguin-spine", version = "=0.2.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "90060a93925c50668cc1c6dd47a4ae24a7b4e321", package = "penguin-spine", version = "=0.2.0" }
 # `penguin-licensing` (spec SS13.5): gates the process-stage drain loop on
 # the `waddles.core.rust-data-plane` PostHog-compatible flag (default OFF,
 # fail-closed on an unreachable license server) -- see `src/license.rs`.
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "7110125df28045322e7c4c527d1d1be806f2f086", package = "penguin-licensing", version = "=0.1.0" }
 # `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Same pinned rev `core/svc_action`/`core/bundle_executor`
 # already use (PR penguintechinc/penguin-libs#93).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b063b7ba49f8544f95dba0d23dcbe0e109b7b16c", package = "penguin-bundle-host", version = "=0.2.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "17cd3956808e425e9710245dedde69aca7969d9a", package = "penguin-bundle-host", version = "=0.2.1" }
 # mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8301`; this
 # crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
 # (the client side) with the roles reversed -- same exact version pins

@@ -846,7 +846,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -1387,7 +1387,7 @@ dependencies = [
 [[package]]
 name = "penguin-connector-discord"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=79a32e9676dfa55e9561b7bf94cb7f69023b393c#79a32e9676dfa55e9561b7bf94cb7f69023b393c"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=ecf906a326dfd41ef65e9a2fcb3daf9633cba7ec#ecf906a326dfd41ef65e9a2fcb3daf9633cba7ec"
 dependencies = [
  "futures-util",
  "reqwest 0.13.4",
@@ -1402,7 +1402,7 @@ dependencies = [
 [[package]]
 name = "penguin-connector-twitch"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=79a32e9676dfa55e9561b7bf94cb7f69023b393c#79a32e9676dfa55e9561b7bf94cb7f69023b393c"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=ecf906a326dfd41ef65e9a2fcb3daf9633cba7ec#ecf906a326dfd41ef65e9a2fcb3daf9633cba7ec"
 dependencies = [
  "hex",
  "hmac",
@@ -1415,13 +1415,13 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "penguin-licensing"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=f642e0695046386ca674e47eb9e6f7d6283ac531#f642e0695046386ca674e47eb9e6f7d6283ac531"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=7110125df28045322e7c4c527d1d1be806f2f086#7110125df28045322e7c4c527d1d1be806f2f086"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -1438,7 +1438,7 @@ dependencies = [
 [[package]]
 name = "penguin-logging"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=69e740ce5411d8cd005241fbd829c62e68efb96e#69e740ce5411d8cd005241fbd829c62e68efb96e"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=0a320ba2b08a6850b66e3062f6a9dfb44fec6950#0a320ba2b08a6850b66e3062f6a9dfb44fec6950"
 dependencies = [
  "axum",
  "opentelemetry",
@@ -1460,7 +1460,7 @@ dependencies = [
 [[package]]
 name = "penguin-spine"
 version = "0.2.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=ce638ec24f0bca0e2afd7655b99d1f9162030156#ce638ec24f0bca0e2afd7655b99d1f9162030156"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=90060a93925c50668cc1c6dd47a4ae24a7b4e321#90060a93925c50668cc1c6dd47a4ae24a7b4e321"
 dependencies = [
  "chrono",
  "hex",
@@ -1863,7 +1863,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -2452,9 +2452,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
@@ -2954,14 +2954,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

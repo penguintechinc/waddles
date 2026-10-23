@@ -143,7 +143,7 @@ bytes = "=1.12.1"
 # `core/svc_action`/`core/svc_process`/`core/svc_ingest` already use, so no
 # second resolved revision of this unpublished crate appears anywhere in
 # this repo.
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "7110125df28045322e7c4c527d1d1be806f2f086", package = "penguin-licensing", version = "=0.1.0" }
 
 # P3's live SSE stream (`overlay::hub`/`http::overlay::live_event_stream`)
 # builds a `Stream` by hand with `futures::stream::unfold` rather than
