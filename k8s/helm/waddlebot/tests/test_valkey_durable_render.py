@@ -206,23 +206,42 @@ def test_revision_bump_changes_annotation():
     assert sts["spec"]["template"]["metadata"]["annotations"]["valkey.waddles/admin-revision"] == "2"
 
 
-_LEGACY = "legacy-leaked-test-fixture"
+_FRESH = "fresh-admin-pw-0123456789abcdef"
+_ADMIN_MSG = "Set a FRESH infrastructure.valkeyDurable.adminPassword"
 
 
 @pytest.mark.parametrize("tier", ("beta", "gamma", "production"))
-def test_legacy_seeded_admin_fails_closed_outside_alpha(tier):
-    """Admin value == value in waddlebot-secrets (leaked) => render FAILS on beta/gamma/prod."""
+@pytest.mark.parametrize("pw", (None, "", "REPLACE_ME", "REPLACE_ME_please"))
+def test_admin_password_required_fails_closed_outside_alpha(tier, pw):
+    """beta/gamma/prod: unset/empty/placeholder adminPassword => render FAILS closed with the rotation message."""
+    extra = ["global.deploymentTier=" + tier, "global.valkeyTls.externalSecret=true"]
+    if pw is not None:
+        extra.append("infrastructure.valkeyDurable.adminPassword=" + pw)
+    r = _helm("values-beta.yaml", extra)
+    assert r.returncode != 0 and _ADMIN_MSG in r.stderr and "must be rotated" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("tier", ("beta", "gamma", "production"))
+def test_fresh_admin_password_passes_admin_gate_outside_alpha(tier):
+    """A fresh explicit value clears the admin gate (admin is resolved first; any later failure is a different, unrelated required secret)."""
     r = _helm("values-beta.yaml", ("global.deploymentTier=" + tier, "global.valkeyTls.externalSecret=true",
-                                   "infrastructure.valkeyDurable.adminPassword=" + _LEGACY,
-                                   "infrastructure.valkeyDurable.legacyAdminPassword=" + _LEGACY))
-    assert r.returncode != 0 and "Rotate the Valkey admin password" in r.stderr, r.stderr
+                                   "infrastructure.valkeyDurable.adminPassword=" + _FRESH))
+    assert _ADMIN_MSG not in r.stderr, r.stderr
+    assert r.returncode != 0 and "outside alpha/local" in r.stderr, "expected the NEXT required-secret failure, proving the admin gate passed"
 
 
-def test_legacy_seeded_admin_regenerates_on_alpha():
-    r = _helm("values-alpha.yaml", ("infrastructure.valkeyDurable.adminPassword=" + _LEGACY,
-                                    "infrastructure.valkeyDurable.legacyAdminPassword=" + _LEGACY))
-    assert r.returncode == 0, r.stderr
-    assert _LEGACY not in r.stdout
-    docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+def test_no_legacy_reuse_detection_left():
+    """The stateful lookup/compare against waddlebot-secrets is gone (it drifted once the key was blanked)."""
+    src = (_CHART / "templates" / "secrets.yaml").read_text()
+    assert "vdLegacy" not in src and "legacyAdminPassword" not in src
+    head = src[src.index("$vdAdminPassword := "):src.index("$postgresPassword :=")]  # admin-resolution block only
+    assert "lookup" not in head and "b64dec" not in head
+    assert "legacyAdminPassword" not in (_CHART / "values.yaml").read_text()
+
+
+def test_alpha_autogenerates_fresh_admin_password():
+    docs = _docs("values-alpha.yaml")
     admin = [d for d in docs if d["kind"] == "Secret" and (d.get("stringData") or {}).get("VALKEY_DURABLE_ADMIN_PASSWORD")]
     assert len(admin) == 1 and len(admin[0]["stringData"]["VALKEY_DURABLE_ADMIN_PASSWORD"]) == 32
+    shared = [d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"] == "waddlebot-secrets"]
+    assert shared and shared[0]["stringData"]["VALKEY_DURABLE_ADMIN_PASSWORD"] == ""

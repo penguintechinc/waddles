@@ -491,15 +491,13 @@ infrastructure:
     # alpha/local only; beta/gamma/prod must set it explicitly (or pre-populate the Secret).
     password: "REPLACE_ME"
     # Full-access ACL `admin` user (replication masteruser + break-glass); app clients use the
-    # restricted `default` user (password above). Same REPLACE_ME/auto-generate rules.
+    # restricted `default` user (password above). alpha/local: auto-generated when REPLACE_ME.
+    # beta/gamma/prod: REQUIRED -- set a FRESH value (the old admin password is COMPROMISED); the
+    # render fails closed if unset/REPLACE_ME*.
     adminPassword: "REPLACE_ME"
     # Non-secret rotation trigger rendered as pod annotation valkey.waddles/admin-revision.
     # Rotating the admin password? Update the value/Secret AND bump this -> primary+replicas restart.
     adminPasswordRevision: "1"
-    # The OLD (exposed) admin password, for offline `helm template`/GitOps renders that cannot
-    # `lookup` the live Secret: if the resolved admin value equals it, beta/gamma/prod FAIL and
-    # alpha/local regenerate. Normally empty (the live waddlebot-secrets is looked up).
-    legacyAdminPassword: ""
     port: 6379
     # 1 primary + (replicas-1) warm replicas.
     replicas: 2
