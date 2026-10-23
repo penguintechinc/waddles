@@ -17,6 +17,8 @@
 {{- end }}
 {{- $name := "valkey-durable" }}
 {{- $pwSecret := printf "%s-secrets" (include "waddlebot.fullname" .) }}
+{{- /* Admin password lives in its OWN Secret, never in the envFrom'd shared one. */}}
+{{- $adminSecret := printf "%s-valkey-durable-admin" (include "waddlebot.fullname" .) }}
 ---
 # STATEFUL EXCEPTION (approved) -- 2026-10-23, user approval for the 99.99% customer
 # delivery SLA: the durable Valkey holds ALL in-flight delivery state and needs stable
@@ -112,18 +114,20 @@ spec:
         - |
           set -eu
           ORD="${HOSTNAME##*-}"
-          # ACL (security review MEDIUM, defense-in-depth): app clients authenticate with the
+          # ACL (security review, defense-in-depth): app clients authenticate with the
           # password-only `default` user (every client -- Rust spine, redis-py -- sends AUTH <pw>),
-          # so the DEFAULT user is the restricted one: no CONFIG/FLUSH*/REPLICAOF/SLAVEOF/DEBUG/
-          # SHUTDOWN/ACL/FAILOVER/MODULE -- a compromised client cannot wipe or repartition
-          # delivery state. `admin` (separate password) is full-access: replication (masteruser)
-          # + operator break-glass. Passwords are passed as SHA-256 hashes (`#hex`), never
-          # cleartext in the ACL rules.
+          # so the DEFAULT user is an ALLOW-list built from the verified client command set
+          # (AUTH/PING/CLIENT, X* streams, GET/SET/DEL/LPUSH/LTRIM/EXPIRE/GETDEL, EVAL, MULTI/EXEC):
+          # -@all first, then only the categories those use. `-@dangerous` last strips what
+          # @write/@keyspace drag in (FLUSHALL/FLUSHDB/SWAPDB/KEYS/MIGRATE) -- verified against the
+          # pinned image; no +@admin, no +config. `admin` (separate password, own Secret) is
+          # full-access: replication (masteruser) + operator break-glass. Passwords are passed as
+          # SHA-256 hashes (`#hex`), never cleartext in the ACL rules.
           APP_HASH="$(printf %s "$VALKEY_PASSWORD" | sha256sum | cut -d' ' -f1)"
           ADMIN_HASH="$(printf %s "$VALKEY_ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)"
           set -- valkey-server \
             --dir /data/valkey \
-            --user default on "#$APP_HASH" '~*' '&*' +@all -config -flushall -flushdb -replicaof -slaveof -debug -shutdown -acl -failover -module \
+            --user default on "#$APP_HASH" '~*' '&*' -@all +@connection +@read +@write +@stream +@keyspace +@transaction +@scripting -@dangerous \
             --user admin on "#$ADMIN_HASH" '~*' '&*' +@all \
             --masteruser admin \
             --masterauth "$VALKEY_ADMIN_PASSWORD" \
@@ -175,7 +179,7 @@ spec:
         - name: VALKEY_ADMIN_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ $pwSecret }}
+              name: {{ $adminSecret }}
               key: VALKEY_DURABLE_ADMIN_PASSWORD
         volumeMounts:
         - name: data

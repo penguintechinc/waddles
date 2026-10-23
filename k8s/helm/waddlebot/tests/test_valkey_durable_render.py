@@ -106,11 +106,58 @@ def test_python_stage_clients_use_rediss():
     assert seen == 3, f"examined {seen} python stage clients"
 
 
-def test_acl_restricts_default_user():
+def _default_acl(cmd):
+    line = [ln for ln in cmd.splitlines() if "--user default" in ln]
+    assert len(line) == 1, "expected exactly one default-user ACL line"
+    return line[0]
+
+
+def test_acl_default_user_is_allow_list():
+    """Default user = allow-list: -@all first, only the client categories, no admin/dangerous/config."""
     cmd = _durable_cmd(_docs("values-alpha.yaml"))
-    for denied in ("-config", "-flushall", "-flushdb", "-replicaof", "-slaveof", "-debug", "-shutdown"):
-        assert f" {denied} " in cmd or cmd.count(denied) >= 1, denied
+    acl = _default_acl(cmd)
+    rules = acl.split("--user default on", 1)[1].split()
+    rules = [r for r in rules if r[0] in "+-" and r != "\\"]
+    assert rules[0] == "-@all", rules
+    for cat in ("+@connection", "+@read", "+@write", "+@stream", "+@keyspace", "+@transaction", "+@scripting"):
+        assert cat in rules, cat
+    assert "+@all" not in acl and "+@dangerous" not in acl and "+@admin" not in acl and "+config" not in acl
+    assert "-@dangerous" in rules and rules.index("-@dangerous") > rules.index("+@scripting")
+    assert not [r for r in rules if r.startswith("-") and not r.startswith("-@")], "no per-command deny-list"
     assert "--masteruser admin" in cmd and "--requirepass" not in cmd
+
+
+def test_admin_password_isolated_from_workloads():
+    """The admin password Secret is read ONLY by the valkey-durable StatefulSet -- never envFrom'd/referenced elsewhere."""
+    docs = _docs("values-alpha.yaml")
+    admin = [d for d in docs if d["kind"] == "Secret" and "VALKEY_DURABLE_ADMIN_PASSWORD" in (d.get("stringData") or {})]
+    assert len(admin) == 1, "admin password must live in exactly one dedicated Secret"
+    assert admin[0]["metadata"]["name"].endswith("-valkey-durable-admin")
+    assert len(admin[0]["stringData"]) == 1
+    for d in docs:
+        if d["kind"] == "Secret" and d is not admin[0]:
+            assert "VALKEY_DURABLE_ADMIN_PASSWORD" not in (d.get("stringData") or {}), d["metadata"]["name"]
+    admin_name = admin[0]["metadata"]["name"]
+    scanned = referrers = 0
+    for d in docs:
+        if d["kind"] not in ("Deployment", "StatefulSet", "Job", "CronJob", "DaemonSet", "Pod"):
+            continue
+        tpl = d["spec"]["jobTemplate"]["spec"]["template"] if d["kind"] == "CronJob" else d["spec"]["template"] if d["kind"] != "Pod" else d
+        pod = tpl["spec"]
+        scanned += 1
+        refs = []
+        for c in pod.get("containers", []) + pod.get("initContainers", []):
+            refs += [f["secretRef"]["name"] for f in c.get("envFrom", []) if "secretRef" in f]
+            refs += [e["valueFrom"]["secretKeyRef"]["name"] for e in c.get("env", []) if "secretKeyRef" in e.get("valueFrom", {})]
+            for e in c.get("env", []):
+                assert e.get("valueFrom", {}).get("secretKeyRef", {}).get("key") != "VALKEY_DURABLE_ADMIN_PASSWORD" or (
+                    d["kind"] == "StatefulSet" and d["metadata"]["name"] == "valkey-durable"), d["metadata"]["name"]
+        refs += [v["secret"]["secretName"] for v in pod.get("volumes", []) if "secret" in v]
+        if admin_name in refs:
+            referrers += 1
+            assert d["kind"] == "StatefulSet" and d["metadata"]["name"] == "valkey-durable", d["metadata"]["name"]
+    assert scanned > 10, f"examined only {scanned} workloads"
+    assert referrers == 1, "valkey-durable StatefulSet must reference the admin Secret"
 
 
 def test_tls_off_keeps_plaintext_port():
