@@ -211,6 +211,33 @@ pub(crate) fn denied(code: &str, message: impl Into<String>) -> HostResultError 
     }
 }
 
+/// Counter incremented whenever the dispatcher finds no destination for an
+/// authorized relay op. Labels are `provider` (compiled-in allowlist) and
+/// `op` (closed enum) only -- bounded cardinality, no bundle/user data.
+pub const NO_DESTINATION_METRIC: &str = "svc_action_dispatch_no_destination_total";
+
+/// Surfaces a `NoDestination` loudly: error log (ids only), counter, and a
+/// refused `unsupported_op` result -- never a silent success or drop.
+fn no_destination_error(
+    scope: &InvokeScope,
+    err: &crate::dispatch_destination::DispatchError,
+) -> HostResultError {
+    let crate::dispatch_destination::DispatchError::NoDestination { provider, op } = err;
+    metrics::counter!(
+        NO_DESTINATION_METRIC,
+        "provider" => provider.clone(),
+        "op" => op.as_str()
+    )
+    .increment(1);
+    tracing::error!(
+        provider = %provider,
+        op = op.as_str(),
+        app_id = %scope.app_id,
+        "relay op has no dispatch destination"
+    );
+    denied("unsupported_op", err.to_string())
+}
+
 /// The Valkey list key an outbound relay send `LPUSH`es onto for
 /// `provider` -- a byte-exact Rust port of `waddle_transports.transports.
 /// irc_relay.outbound_queue_key` (`libs/waddle_transports` in this repo):
@@ -1035,6 +1062,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             )
             .map_err(denied_from_gate)?;
         if !relay_op_supported(provider, op) {
+            // Flag ON: an unroutable op is a `NoDestination` -- counted and
+            // refused loudly via the dispatcher's own error path.
+            if self.egress_via_dispatcher().await {
+                if let Err(e) = crate::dispatch_destination::route_destination(provider, op) {
+                    return Err(no_destination_error(scope, &e));
+                }
+            }
             tracing::error!(
                 provider,
                 op = op.as_str(),
@@ -1753,8 +1787,24 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         scope: &InvokeScope,
         text: &str,
     ) -> Result<serde_json::Value, HostResultError> {
-        use crate::dispatch_destination::{route_destination, Destination};
-        match route_destination("discord", RelayOp::ChatSend) {
+        let routed = crate::dispatch_destination::route_destination("discord", RelayOp::ChatSend);
+        self.dispatch_chat_send_routed(scope, text, routed).await
+    }
+
+    /// Acts on an already-computed routing decision. Split from
+    /// [`Self::dispatch_discord_chat_send`] so the `NoDestination` arm --
+    /// unreachable for Discord `chat.send` today -- is testable directly.
+    async fn dispatch_chat_send_routed(
+        &self,
+        scope: &InvokeScope,
+        text: &str,
+        routed: Result<
+            crate::dispatch_destination::Destination,
+            crate::dispatch_destination::DispatchError,
+        >,
+    ) -> Result<serde_json::Value, HostResultError> {
+        use crate::dispatch_destination::Destination;
+        match routed {
             Ok(Destination::StatefulPlatformReply { .. }) => {
                 self.handle_discord_queued_op(
                     scope,
@@ -1764,15 +1814,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 .await?;
                 Ok(serde_json::json!({"sent": true, "provider": "discord"}))
             }
-            Err(e) => {
-                tracing::error!(
-                    provider = "discord",
-                    app_id = %scope.app_id,
-                    error = %e,
-                    "chat.send has no dispatch destination"
-                );
-                Err(denied("unsupported_op", e.to_string()))
-            }
+            Err(e) => Err(no_destination_error(scope, &e)),
         }
     }
 
@@ -5431,5 +5473,118 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, "invalid_args");
         assert_eq!(caps.relay_queue.pushed.lock().unwrap().len(), 1);
+    }
+
+    // NoDestination is loud: refused (never Ok), nothing queued/sent, and the
+    // counter increments with bounded labels.
+    #[tokio::test]
+    async fn no_destination_is_loud_not_dropped() {
+        use crate::dispatch_destination::DispatchError;
+        let harness = crate::stage_metrics::test_support::Harness::new();
+        let recorder = crate::metrics_facade::OtelRecorder::new(harness.meter());
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let caps = caps(FakeRelayQueue::with_live_drain())
+            .with_discord(transport.clone(), crate::config::Secret::new("t"))
+            .with_egress_dispatcher_flag(flag(true));
+        // Direct arm: a routing decision of NoDestination.
+        let direct = {
+            let _g = metrics::set_default_local_recorder(&recorder);
+            caps.dispatch_chat_send_routed(
+                &discord_scope(),
+                "pong",
+                Err(DispatchError::NoDestination {
+                    provider: "discord".to_string(),
+                    op: RelayOp::ChatSend,
+                }),
+            )
+            .await
+        };
+        assert_eq!(direct.unwrap_err().code, "unsupported_op");
+        // Real relay boundary, flag ON: twitch dm.send has no route.
+        let via_relay = {
+            let _g = metrics::set_default_local_recorder(&recorder);
+            caps.handle(
+                &discord_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({
+                        "provider": "twitch",
+                        "message_json": serde_json::json!({"op": "dm.send", "text": "x"}).to_string(),
+                    }),
+                ),
+            )
+            .await
+        };
+        assert!(via_relay.is_err(), "must not be acked as success");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        assert!(transport.requests.lock().unwrap().is_empty());
+        assert_eq!(
+            harness.count(
+                NO_DESTINATION_METRIC,
+                &[("provider", "discord"), ("op", "chat.send")]
+            ),
+            1.0
+        );
+        assert_eq!(
+            harness.count(
+                NO_DESTINATION_METRIC,
+                &[("provider", "twitch"), ("op", "dm.send")]
+            ),
+            1.0
+        );
+    }
+
+    // Grant gate denying ONLY chat.send:discord (everything else granted)
+    // still short-circuits before routing, in both flag states.
+    #[tokio::test]
+    async fn flag_on_denies_only_chat_send_grant() {
+        for on in [true, false] {
+            let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+            let mut grants = std::collections::HashMap::new();
+            for id in ["platform.log", "chat.delete:discord", "dm.send:discord"] {
+                grants.insert(
+                    id.to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: id.to_string(),
+                        params: serde_json::json!({}),
+                    },
+                );
+            }
+            snapshot.set(
+                bundle_capability_gate::GrantScopeKey {
+                    tenant_id: 7,
+                    community_id: 3,
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_version: 1,
+                },
+                bundle_capability_gate::GrantSet {
+                    permission_snapshot_hash: "test".to_string(),
+                    grants,
+                },
+            );
+            let gate = Arc::new(CapabilityGate::new(
+                Arc::new(snapshot),
+                Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+                Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+                Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+            ));
+            let transport = Arc::new(FakeDiscordTransport::default());
+            let caps: StageCapabilities<FakeRelayQueue> = StageCapabilities::new(
+                FakeRelayQueue::with_live_drain(),
+                test_egress(),
+                Arc::new(Mutex::new(UsageBatcher::new())),
+                gate,
+            )
+            .with_discord(transport.clone(), crate::config::Secret::new("t"))
+            .with_egress_dispatcher_flag(flag(on));
+            let err = caps
+                .handle(&discord_scope(), chat_send_call("pong"))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted", "flag {on}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+            assert!(transport.requests.lock().unwrap().is_empty());
+        }
     }
 }
