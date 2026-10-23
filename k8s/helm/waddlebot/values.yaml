@@ -9,6 +9,9 @@ webui:
   # to publicUrl above when blank. See values-alpha.yaml for why this needs its own
   # override in some environments.
   connectionsCallbackBaseUrl: ""
+  # IDENTITY_CALLBACK_BASE_URL for hub-api (Discord bot-install + identity callbacks).
+  # Empty = env not set, hub-api defaults to http://localhost:8204.
+  identityCallbackBaseUrl: ""
 
 # Global settings
 global:
