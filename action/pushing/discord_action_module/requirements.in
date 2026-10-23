@@ -7,7 +7,7 @@ pydal==20241204.1
 psycopg2-binary==2.9.12
 aiohttp==3.14.4
 pyjwt==2.15.0
-setuptools==84.0.0
+setuptools==84.1.0
 
 # Testing
 pytest>=9.0.3
