@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from pydal import DAL
 
 from services import role_sync_service as svc
 from services.credential_resolver import TransportUnavailable
@@ -34,6 +35,11 @@ from tests.test_role_sync_service import (
     _link_identity,
     _make_pairing,
     _make_platform_pairing,
+)
+from tests.test_sync_worker_dal import (
+    block_penguin_dal_asyncdb,
+    fake_worker_dal,
+    seed_twitch_connection,
 )
 
 
@@ -377,20 +383,24 @@ class TestBatchAndMain:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         fake_dal = object()
-
-        async def _fake_install_dal() -> Any:
-            return SimpleNamespace(dal=fake_dal)
+        monkeypatch.setenv("DATABASE_URL", "sqlite://unused")
+        # regression: main() once read `.dal` off a penguin-dal AsyncDB (TableNotFoundError:
+        # Table 'dal' not found). Any return to `build_install_dal` now dies with that real error.
+        block_penguin_dal_asyncdb(monkeypatch)
+        monkeypatch.setattr(svc, "open_worker_dal", fake_worker_dal(fake_dal))
 
         async def _fake_batch(dal: Any, **kw: Any) -> svc.ReconcileSummary:
             assert dal is fake_dal
             assert await kw["get_broadcaster_user_token"](1) == "tok"
             return svc.ReconcileSummary(pairings_examined=3, pairings_synced=2, pairings_failed=1)
 
-        async def _fake_tokens(install_dal: Any, community_id: int, platform: str) -> Any:
+        async def _fake_tokens(db: Any, community_id: int, platform: str) -> Any:
+            # `get_decrypted_tokens` reads `db.dal` + `db.select_async`: it must get the
+            # flask_core AsyncDAL (whose `.dal` is the raw pydal DAL), never an AsyncDB.
+            assert db.dal is fake_dal
             assert platform == "twitch"
             return SimpleNamespace(access_token="tok")  # noqa: S106
 
-        monkeypatch.setattr(svc, "_build_install_dal", _fake_install_dal)
         monkeypatch.setattr(svc, "run_role_sync_reconcile_batch", _fake_batch)
         import services.community_connections as cc
 
@@ -399,3 +409,42 @@ class TestBatchAndMain:
         out = capsys.readouterr().out
         assert "pairings_examined=3" in out
         assert "pairings_failed=1" in out
+
+    async def test_main_runs_on_a_real_pydal_dal_not_an_asyncdb_attribute(
+        self,
+        bar_citizen_db: Any,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """regression: main() read `.dal` off a penguin-dal AsyncDB -> `TableNotFoundError`.
+
+        Nothing about the DAL layer is faked: the real `main()` opens a real sqlite file
+        through the real `init_database` seam, the real batch queries it with raw pydal, and
+        the real `get_decrypted_tokens` reads it through `select_async`. A reintroduced
+        `build_install_dal(...).dal` dies here with the production error.
+        """
+        dal, community_id, _t, _g = bar_citizen_db
+        pairing = _make_pairing(dal, community_id)
+        # An unknown direction is counted (never dropped) with no Twitch/Discord I/O.
+        dal(dal.guild_tenant_pairings.id == pairing.id).update(direction="sideways")
+        dal.commit()
+        seed_twitch_connection(dal, community_id, "tok-real")
+        monkeypatch.setenv("DATABASE_URL", f"sqlite://{tmp_path / 'bar_citizen_test.db'}")
+
+        seen: dict[str, Any] = {}
+        real_batch = svc.run_role_sync_reconcile_batch
+
+        async def _spy(batch_dal: Any, **kw: Any) -> svc.ReconcileSummary:
+            seen["dal"] = batch_dal
+            seen["token"] = await kw["get_broadcaster_user_token"](community_id)
+            return await real_batch(batch_dal, **kw)
+
+        monkeypatch.setattr(svc, "run_role_sync_reconcile_batch", _spy)
+        assert await svc.main() == 0
+
+        assert isinstance(seen["dal"], DAL)
+        assert seen["token"] == "tok-real"  # noqa: S105
+        out = capsys.readouterr().out
+        assert "pairings_examined=1" in out
+        assert "pairings_skipped_wrong_direction=1" in out
