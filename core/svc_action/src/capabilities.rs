@@ -216,7 +216,8 @@ pub(crate) fn denied(code: &str, message: impl Into<String>) -> HostResultError 
 /// `op` (closed enum) only -- bounded cardinality, no bundle/user data.
 pub const NO_DESTINATION_METRIC: &str = "svc_action_dispatch_no_destination_total";
 
-/// Counter incremented once per successfully routed dispatcher action.
+/// Counter incremented once per dispatcher routing decision (before the
+/// drain send, so it counts decisions, not delivered sends).
 /// Labels `provider` (allowlist), `op` (closed enum), `destination` (closed
 /// label) only -- bounded cardinality, no bundle/user data.
 pub const ROUTED_METRIC: &str = "svc_action_dispatch_routed_total";

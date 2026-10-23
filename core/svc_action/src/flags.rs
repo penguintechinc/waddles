@@ -289,6 +289,49 @@ pub fn pii_detokenization_flag(
     }
 }
 
+/// Operational [`FeatureFlag`] for [`EGRESS_VIA_DISPATCHER_FLAG`]: resolves
+/// through [`resolve_flag`] (PostHog, then `FLAG_WADDLES_CORE_EGRESS_VIA_
+/// DISPATCHER` env baseline, then default OFF) on every read, so flipping
+/// it takes effect without a restart. Never-seen/absent => OFF (inline path).
+pub struct EgressViaDispatcherFlag;
+
+/// Adapter reporting no license bypass: this is an operational rollout
+/// toggle, not a licensed feature, so the `*.penguintech.cloud` bypass
+/// domains must NOT force it ON (default OFF everywhere until set).
+struct NoBypass<F>(F);
+
+impl<F: FlagSource> FlagSource for NoBypass<F> {
+    fn bypass_active(&self) -> bool {
+        false
+    }
+
+    fn flag_value<'a>(&'a self, key: &'a str) -> FlagValueFuture<'a> {
+        self.0.flag_value(key)
+    }
+}
+
+impl FeatureFlag for EgressViaDispatcherFlag {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let source = shared_flags_license_client().map(NoBypass);
+            resolve_flag_with(
+                source.as_ref(),
+                flags_capability_env_enabled(),
+                EGRESS_VIA_DISPATCHER_FLAG,
+                false,
+            )
+            .await
+        })
+    }
+}
+
+/// Builds the flag `crate::build_stage_capabilities` hands to
+/// `StageCapabilities::with_egress_dispatcher_flag` -- the production
+/// wiring that makes the dispatcher path reachable, default OFF.
+pub fn egress_dispatcher_flag() -> Arc<dyn FeatureFlag> {
+    boxed(EgressViaDispatcherFlag)
+}
+
 /// Combines multiple [`FeatureFlag`]s with logical AND, short-circuiting on
 /// the first `false`.
 pub struct AllFlags(pub Vec<Arc<dyn FeatureFlag>>);
@@ -670,6 +713,17 @@ mod flags_capability_tests {
             resolve_flag_with::<FakeFlagSource>(None, true, EGRESS_VIA_DISPATCHER_FLAG, false)
                 .await;
         assert!(!unset, "unset env must leave the dispatcher flag OFF");
+    }
+
+    /// Wiring pin: the production constructor `lib.rs` uses resolves
+    /// `EGRESS_VIA_DISPATCHER_FLAG` via the env baseline, default OFF.
+    #[tokio::test]
+    async fn egress_dispatcher_flag_constructor_resolves_env_default_off() {
+        let _guard = ENV_LOCK.lock().await;
+        let flag = egress_dispatcher_flag();
+        assert!(!flag.enabled().await, "unset must be OFF");
+        let var = env_flag_var_name(EGRESS_VIA_DISPATCHER_FLAG);
+        assert!(await_with_env_var(&var, "true", flag.enabled()).await);
     }
 
     /// Precedence proof: a live PostHog value must win even when the ENV

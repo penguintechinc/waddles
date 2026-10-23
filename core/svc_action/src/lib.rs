@@ -838,6 +838,10 @@ async fn build_stage_capabilities(
         ),
         None => caps,
     };
+    // Dispatcher egress toggle (`flags::EGRESS_VIA_DISPATCHER_FLAG`) --
+    // default OFF (unseen/absent => inline path); this is the only
+    // production wiring that makes the dispatcher path reachable.
+    let caps = caps.with_egress_dispatcher_flag(flags::egress_dispatcher_flag());
     Some(Arc::new(caps))
 }
 
