@@ -130,13 +130,14 @@ def test_acl_default_user_is_allow_list():
 def test_admin_password_isolated_from_workloads():
     """The admin password Secret is read ONLY by the valkey-durable StatefulSet -- never envFrom'd/referenced elsewhere."""
     docs = _docs("values-alpha.yaml")
-    admin = [d for d in docs if d["kind"] == "Secret" and "VALKEY_DURABLE_ADMIN_PASSWORD" in (d.get("stringData") or {})]
+    admin = [d for d in docs if d["kind"] == "Secret" and (d.get("stringData") or {}).get("VALKEY_DURABLE_ADMIN_PASSWORD")]
     assert len(admin) == 1, "admin password must live in exactly one dedicated Secret"
     assert admin[0]["metadata"]["name"].endswith("-valkey-durable-admin")
     assert len(admin[0]["stringData"]) == 1
     for d in docs:
         if d["kind"] == "Secret" and d is not admin[0]:
-            assert "VALKEY_DURABLE_ADMIN_PASSWORD" not in (d.get("stringData") or {}), d["metadata"]["name"]
+            # shared envFrom'd Secret may only carry the key BLANKED (overwrites the leaked legacy value)
+            assert (d.get("stringData") or {}).get("VALKEY_DURABLE_ADMIN_PASSWORD", "") == "", d["metadata"]["name"]
     admin_name = admin[0]["metadata"]["name"]
     scanned = referrers = 0
     for d in docs:
@@ -167,14 +168,50 @@ def test_tls_off_keeps_plaintext_port():
 
 @pytest.mark.parametrize("values", _ENVS)
 def test_admin_password_not_migrated_and_statefulset_restarts_on_rotation(values):
-    """Admin Secret has no legacy waddlebot-secrets migration source; StatefulSet carries checksum/valkey-admin."""
+    """No legacy migration source; pod carries a NON-secret revision annotation, never a password hash."""
     docs = _docs(values)
-    admin = [d for d in docs if d["kind"] == "Secret" and "VALKEY_DURABLE_ADMIN_PASSWORD" in (d.get("stringData") or {})]
+    admin = [d for d in docs if d["kind"] == "Secret" and (d.get("stringData") or {}).get("VALKEY_DURABLE_ADMIN_PASSWORD")]
     assert len(admin) == 1
+    pw = admin[0]["stringData"]["VALKEY_DURABLE_ADMIN_PASSWORD"]
     assert "waddlebot-secrets" not in yaml.safe_dump(admin[0])
     src = (_CHART / "templates" / "secrets.yaml").read_text()
     line = next(ln for ln in src.splitlines() if '"key" "VALKEY_DURABLE_ADMIN_PASSWORD"' in ln)
     assert "legacySecret" not in line
     sts = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "valkey-durable")
     ann = sts["spec"]["template"]["metadata"]["annotations"]
-    assert len(ann.get("checksum/valkey-admin", "")) == 64
+    assert ann.get("valkey.waddles/admin-revision") == "1"
+    assert "checksum/valkey-admin" not in ann
+    import hashlib
+    for d in docs:  # no password / password hash anywhere in non-secret docs
+        if d["kind"] == "Secret":
+            continue
+        blob = yaml.safe_dump(d)
+        assert pw not in blob and hashlib.sha256(pw.encode()).hexdigest() not in blob, d["metadata"]["name"]
+
+
+def test_revision_bump_changes_annotation():
+    docs = _docs("values-alpha.yaml", ("infrastructure.valkeyDurable.adminPasswordRevision=2",))
+    sts = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "valkey-durable")
+    assert sts["spec"]["template"]["metadata"]["annotations"]["valkey.waddles/admin-revision"] == "2"
+
+
+_LEGACY = "legacy-leaked-test-fixture"
+
+
+@pytest.mark.parametrize("tier", ("beta", "gamma", "production"))
+def test_legacy_seeded_admin_fails_closed_outside_alpha(tier):
+    """Admin value == value in waddlebot-secrets (leaked) => render FAILS on beta/gamma/prod."""
+    r = _helm("values-beta.yaml", ("global.deploymentTier=" + tier,
+                                   "infrastructure.valkeyDurable.adminPassword=" + _LEGACY,
+                                   "infrastructure.valkeyDurable.legacyAdminPassword=" + _LEGACY))
+    assert r.returncode != 0 and "Rotate the Valkey admin password" in r.stderr, r.stderr
+
+
+def test_legacy_seeded_admin_regenerates_on_alpha():
+    r = _helm("values-alpha.yaml", ("infrastructure.valkeyDurable.adminPassword=" + _LEGACY,
+                                    "infrastructure.valkeyDurable.legacyAdminPassword=" + _LEGACY))
+    assert r.returncode == 0, r.stderr
+    assert _LEGACY not in r.stdout
+    docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+    admin = [d for d in docs if d["kind"] == "Secret" and (d.get("stringData") or {}).get("VALKEY_DURABLE_ADMIN_PASSWORD")]
+    assert len(admin) == 1 and len(admin[0]["stringData"]["VALKEY_DURABLE_ADMIN_PASSWORD"]) == 32
