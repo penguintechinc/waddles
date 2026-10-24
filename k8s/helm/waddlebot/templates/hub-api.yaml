@@ -228,7 +228,10 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_URL_TLS
+              # _TLS_AUTH (password+CA embedded): hub-api's RateLimiter/JWT-revocation connect
+              # straight from VALKEY_URL and never read VALKEY_PASSWORD -> credential-free URL
+              # = "HELLO must be called with the client already authenticated".
+              key: VALKEY_DURABLE_URL_TLS_AUTH
         - name: VALKEY_PASSWORD
           valueFrom:
             secretKeyRef:
