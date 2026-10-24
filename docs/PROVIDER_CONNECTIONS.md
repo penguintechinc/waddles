@@ -300,6 +300,34 @@ http://localhost:30879/api/v1/tenant/twitch-install/callback
 The browser completing the consent must be able to reach `localhost:30879` (run it on the node, or
 SSH-tunnel `-L 30879:localhost:30879`).
 
+## Static-secret kinds (`external_http`, `aws_lambda`, `gcp_function`)
+
+Not every target is an OAuth install. These three providers take a pasted, structured secret and a
+target instead of a token pair (`connection_kind` 2/3/4; OAuth rows are 1).
+
+```
+POST /api/v1/communities/{id}/provider-connections
+{"provider": "external_http",
+ "secret":   {"scheme": 1, "document": {"token": "..."}},        # write-only, sealed on arrival
+ "metadata": {"url": "https://hooks.example.com/waddles"}}
+```
+
+| Provider | `secret.scheme` (code) | document keys | `metadata` |
+|---|---|---|---|
+| `external_http` | 1 bearer, 2 basic, 3 api-key-header | `token` / `username`+`password` / `header`+`value` | `url` |
+| `aws_lambda` | 4 aws-access-key | `access_key_id`, `secret_access_key` | `region`, `function` |
+| `gcp_function` | 5 gcp-service-account | `client_email`, `private_key` | `project`, `region`, `function` |
+
+- **Sealed at rest**: the JSON document is AES-256-GCM sealed (`platform_connections.sealed_secret`)
+  under the row-bound AAD (`conn:<public_id>:<platform>`), `resource_id = public_id`, `access_token` NULL.
+  No admin route, DTO, list, log or span carries it; the descriptor advertises `kind` + `secretSchemes` only.
+- **Structural validation only** -- no outbound call at write time. Endpoint URLs must be https, with no
+  userinfo/fragment and no private / loopback / link-local / CGNAT IP literal (DNS-name hosts are
+  re-checked, DNS-pinned, at send time by the dispatcher). Secret documents have exact keys per scheme.
+- Gated by flag `waddles.integrations.static_connections` (Professional, default OFF) on create, on top
+  of the base feature; with it off the three providers are not even listed. A static link cannot be
+  edited (delete + recreate); `resolve` refuses it loudly (`static_secret`) -- it has no OAuth token.
+
 ## Adding a provider
 
 A provider is **one adapter module + one registry line**. Nothing else changes -- the service,

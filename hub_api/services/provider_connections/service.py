@@ -25,6 +25,7 @@ Hard rules enforced in this file:
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -54,6 +55,12 @@ from services.provider_connections.errors import (
     RefreshRejected,
     UnknownProvider,
     VaultCorrupt,
+)
+from services.provider_connections.kinds import ConnectionKind, SecretScheme, UnknownSecretScheme
+from services.provider_connections.static_secret import (
+    StaticSecretAdapter,
+    reject_control_characters,
+    validate_secret_document,
 )
 from services.provider_connections.store import Binding, ResolveState, SealedSecrets
 from services.provider_connections.telemetry import (
@@ -154,6 +161,10 @@ class ProviderConnectionService:
         """Every registered provider's spec; the API renders these into install descriptors."""
         return self._registry.specs()
 
+    def provider_kind(self, provider: str) -> ConnectionKind:
+        """The :class:`ConnectionKind` a provider creates (:class:`UnknownProvider` if unknown)."""
+        return self._registry.get(provider).spec.kind
+
     # -- admin: create ---------------------------------------------------------------------
 
     async def create(
@@ -171,6 +182,8 @@ class ProviderConnectionService:
         """Verify the credential with the provider, resolve the resource, then store it sealed."""
         adapter = self._registry.get(provider)
         spec = adapter.spec
+        if spec.kind is not ConnectionKind.PLATFORM_OAUTH:
+            raise InvalidConnectionInput("this provider takes a secret document, not credentials")
         with operation_span(provider, "create"):
             clean_metadata = validate_metadata(spec, metadata)
             credentials = adapter.normalize_credentials(
@@ -233,6 +246,87 @@ class ProviderConnectionService:
             )
             return self._view(binding)
 
+    async def create_static(
+        self,
+        *,
+        tenant_id: int,
+        community_id: int,
+        actor_user_id: int | None,
+        provider: str,
+        secret_scheme: int,
+        secret_document: Mapping[str, Any],
+        metadata: Mapping[str, Any],
+        enabled: bool,
+    ) -> ConnectionView:
+        """Create an external-http / aws-lambda / gcp-function connection from a secret document.
+
+        Everything is validated structurally (no outbound call -- host policy is the dispatcher's
+        send-time job), the JSON document is sealed with the row-bound AAD, and the row is stored
+        with ``connection_kind`` set, ``resource_id = public_id`` and only non-secret target facts
+        in ``resource_metadata``. The secret is never echoed, logged or returned.
+        """
+        adapter = self._registry.get(provider)
+        spec = adapter.spec
+        if spec.kind is ConnectionKind.PLATFORM_OAUTH or not isinstance(
+            adapter, StaticSecretAdapter
+        ):
+            raise InvalidConnectionInput("this provider takes OAuth credentials, not a secret")
+        with operation_span(provider, "create_static"):
+            try:
+                scheme = SecretScheme.from_code(secret_scheme)
+            except UnknownSecretScheme:
+                raise InvalidConnectionInput("unknown secret scheme") from None
+            if scheme not in spec.secret_schemes:
+                raise InvalidConnectionInput("secret scheme is not supported by this provider")
+            document = validate_secret_document(scheme, secret_document)
+            reject_control_characters(metadata)
+            facts = adapter.validate_target(validate_metadata(spec, metadata))
+            owner = await store.community_tenant_id(self._db, community_id)
+            if owner != tenant_id:
+                raise ConnectionNotFound("community not found")
+            facts = {
+                **facts,
+                "secret_scheme": int(scheme),
+                "scopes": ["dispatch"],
+                "capabilities": ["dispatch"],
+            }
+            public_id = uuid4()
+            aad = platform_connection_aad(public_id=public_id, platform=spec.platform)
+            sealed = self._vault.seal(
+                json.dumps(document, sort_keys=True, separators=(",", ":")), aad=aad
+            )
+            binding = await store.insert_connection(
+                self._db,
+                tenant_id=tenant_id,
+                community_id=community_id,
+                platform=spec.platform,
+                resource_type=spec.resource_type,
+                resource_id=str(public_id),
+                public_id=public_id,
+                secrets=SealedSecrets(
+                    access_token=None,
+                    refresh_token=None,
+                    seal_version=SEAL_AAD,
+                    sealed_secret=sealed,
+                ),
+                expires_at=None,
+                resource_metadata=facts,
+                installed_by_user_id=actor_user_id,
+                enabled=enabled,
+                now=self._clock(),
+                connection_kind=int(spec.kind),
+            )
+            logger.info(
+                "provider_connections.created_static provider=%s connection_id=%d "
+                "community_id=%d scheme=%d enabled=%s",
+                provider,
+                binding.connection.id,
+                community_id,
+                int(scheme),
+                enabled,
+            )
+            return self._view(binding)
+
     # -- admin: read -----------------------------------------------------------------------
 
     async def list(self, *, tenant_id: int, community_id: int) -> list[ConnectionView]:
@@ -286,6 +380,12 @@ class ProviderConnectionService:
             raise ConnectionNotFound("connection not found")
         adapter = self._registry.get(binding.connection.platform)
         spec = adapter.spec
+        if spec.kind is not ConnectionKind.PLATFORM_OAUTH and (
+            metadata is not None or access_token is not None
+        ):
+            raise InvalidConnectionInput(
+                "a static-secret connection cannot be edited; delete it and create a new one"
+            )
         with operation_span(spec.provider, "update"):
             changes_link = metadata is not None or access_token is not None
             if changes_link and binding.shared_with > 0:
@@ -462,6 +562,12 @@ class ProviderConnectionService:
             raise ConnectionNotFound("connection not found")
         provider = state.connection.platform
         adapter = self._registry.get(provider)
+        if state.connection.connection_kind != int(ConnectionKind.PLATFORM_OAUTH):
+            # Fail loud: a static row has no OAuth token to hand out, and must never fall through
+            # to the token-opening path (its access_token is NULL by construction).
+            raise ConnectionNotUsable(
+                "a static-secret connection has no OAuth token to resolve", reason="static_secret"
+            )
         with operation_span(provider, "resolve"):
             self._assert_usable(state)
             plaintext, connection = await self._fresh_token(
@@ -667,6 +773,8 @@ class ProviderConnectionService:
         downgrade (the column was flipped): it is logged (ids only) and left alone, never
         re-blessed.
         """
+        if current.access_token is None:  # pragma: no cover - the 0064 CHECK forbids it
+            return None  # a legacy (v0) row always carries an OAuth token
         aad = platform_connection_aad(public_id=public_id, platform=platform)
         access = reseal_if_legacy(current.access_token, aad=aad)
         refresh = (

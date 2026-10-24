@@ -10,6 +10,7 @@ same convention as every other real-Postgres test in this repo.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
@@ -19,6 +20,7 @@ from uuid import UUID
 
 import httpx
 import psycopg2
+import psycopg2.errors
 import pytest
 from penguin_dal import AsyncDB
 
@@ -40,6 +42,7 @@ from services.provider_connections.errors import (  # noqa: E402
     ConnectionNotFound,
     ConnectionNotUsable,
     ProviderUnavailable,
+    VaultCorrupt,
 )
 from services.provider_connections.twitch import TwitchAdapter  # noqa: E402
 from services.provider_connections.vault import seal_secret  # noqa: E402
@@ -616,3 +619,110 @@ class TestSealAadOnPostgres:
 
         with pytest.raises(VaultCorrupt):
             await service.resolve(community_id=ids.community, connection_id=ca)
+
+
+class TestStaticKindsOnPostgres:
+    """Migration 0064 on the real database: sealed structured secrets, CHECKs, lifecycle."""
+
+    @pytest.fixture
+    def static_service(self, install_dal: AsyncDB, clock: FakeClock) -> ProviderConnectionService:
+        from services.provider_connections.static_secret import (
+            AwsLambdaAdapter,
+            ExternalHttpAdapter,
+            GcpFunctionAdapter,
+        )
+
+        registry = AdapterRegistry(
+            [ExternalHttpAdapter(), AwsLambdaAdapter(), GcpFunctionAdapter()]
+        )
+        return ProviderConnectionService(install_dal, registry, PlatformKeyVault(), clock=clock)
+
+    async def test_a_static_secret_is_sealed_row_bound_and_listable_on_postgres(
+        self, static_service: ProviderConnectionService, ids: Ids, pg_db: PgTestDatabase
+    ) -> None:
+        secret = {"token": "PG-STATIC-SECRET-0123456789"}
+        view = await static_service.create_static(
+            tenant_id=ids.tenant,
+            community_id=ids.community,
+            actor_user_id=None,
+            provider="external_http",
+            secret_scheme=1,
+            secret_document=secret,
+            metadata={"url": "https://hooks.example.com/pg"},
+            enabled=True,
+        )
+        cid = view.binding.connection.id
+        (row,) = _sql(
+            pg_db,
+            "SELECT access_token, sealed_secret, connection_kind, seal_version, public_id::text, "
+            "resource_id, resource_metadata->>'url', t::text FROM platform_connections t WHERE id=%s",
+            (cid,),
+        )
+        access, sealed, kind, seal_version, public_id, resource_id, url, whole = row
+        assert access is None and kind == 2 and seal_version == 1
+        assert resource_id == public_id and url == "https://hooks.example.com/pg"
+        assert secret["token"] not in whole  # not even in the row's text form
+        aad = platform_connection_aad(public_id=UUID(public_id), platform="external_http")
+        assert json.loads(PlatformKeyVault().open(sealed, aad=aad, seal_version=1)) == secret
+        # a different row identity cannot open it
+        other = platform_connection_aad(public_id=UUID(int=1), platform="external_http")
+        with pytest.raises(VaultCorrupt):
+            PlatformKeyVault().open(sealed, aad=other, seal_version=1)
+
+        listed = await static_service.list(tenant_id=ids.tenant, community_id=ids.community)
+        assert [v.binding.connection.connection_kind for v in listed] == [2]
+        assert secret["token"] not in repr(listed)
+        assert await static_service.delete(
+            tenant_id=ids.tenant, community_id=ids.community, connection_id=cid
+        )
+        assert _sql(pg_db, "SELECT count(*) FROM platform_connections WHERE id=%s", (cid,)) == [
+            (0,)
+        ]
+
+    async def test_the_database_itself_refuses_a_misshapen_or_out_of_range_row(
+        self, ids: Ids, pg_db: PgTestDatabase
+    ) -> None:
+        insert = (
+            "INSERT INTO platform_connections (tenant_id, platform, resource_type, resource_id, "
+            "connection_kind, access_token, sealed_secret) VALUES (%s, 'external_http', "
+            "'external_http', %s, %s, %s, %s)"
+        )
+        for rid, kind, access, sealed in (
+            ("shape-1", 2, "tok", "s"),  # static row carrying an OAuth token
+            ("shape-2", 2, None, None),  # static row with no sealed secret
+            ("shape-3", 1, None, "s"),  # OAuth row with no token
+            ("shape-4", 7, None, "s"),  # kind out of range
+        ):
+            with pytest.raises(psycopg2.errors.CheckViolation):
+                _sql(pg_db, insert, (ids.tenant, rid, kind, access, sealed))
+
+    async def test_aws_and_gcp_rows_pass_the_extended_resource_type_check(
+        self, static_service: ProviderConnectionService, ids: Ids, pg_db: PgTestDatabase
+    ) -> None:
+        await static_service.create_static(
+            tenant_id=ids.tenant,
+            community_id=ids.community,
+            actor_user_id=None,
+            provider="aws_lambda",
+            secret_scheme=4,
+            secret_document={"access_key_id": "AKIAX", "secret_access_key": "S"},
+            metadata={"region": "eu-west-1", "function": "hook"},
+            enabled=True,
+        )
+        await static_service.create_static(
+            tenant_id=ids.tenant,
+            community_id=ids.community,
+            actor_user_id=None,
+            provider="gcp_function",
+            secret_scheme=5,
+            secret_document={"client_email": "a@b.c", "private_key": "PEM"},
+            metadata={"project": "my-project-1", "region": "us-central1", "function": "hook"},
+            enabled=True,
+        )
+        kinds = _sql(
+            pg_db,
+            "SELECT resource_type, connection_kind FROM platform_connections WHERE tenant_id=%s "
+            "ORDER BY id",
+            (ids.tenant,),
+        )
+        assert kinds == [("aws_lambda", 3), ("gcp_function", 4)]

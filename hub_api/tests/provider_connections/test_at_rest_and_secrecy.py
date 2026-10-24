@@ -169,6 +169,7 @@ class TestNoSecretIsEverSelectedForAdminReads:
             )
             assert "access_token" not in scrubbed, sql
             assert "refresh_token" not in scrubbed, sql
+            assert "sealed_secret" not in scrubbed, sql
 
     def test_read_models_do_not_repr_secrets(self) -> None:
         sealed = SealedSecrets(

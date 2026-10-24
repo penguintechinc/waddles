@@ -58,6 +58,7 @@ from services.provider_connections import (
     ProviderConnectionService,
 )
 from services.provider_connections import errors as pc_errors
+from services.provider_connections.kinds import ConnectionKind
 from services.provider_connections.registry import build_default_registry
 from services.provider_connections.service import (
     MAX_PAGE_SIZE,
@@ -83,6 +84,9 @@ SCOPE_CONNECTIONS_RESOLVE = "connections:resolve"
 #: Two-gate feature (PostHog flag default OFF AND Professional tier) -- see
 #: ``libs/core_platform_module/features.py`` ``integrations.provider_connections``.
 FEATURE_PROVIDER_CONNECTIONS = "waddles.integrations.provider_connections"
+#: Extra two-gate feature (flag default OFF, Professional tier) for the static-secret kinds
+#: (external_http / aws_lambda / gcp_function): creating one needs this on top of the base feature.
+FEATURE_STATIC_CONNECTIONS = "waddles.integrations.static_connections"
 
 #: ``app.config`` key a test (or a future composition root) may pre-populate; otherwise the
 #: service is built once, lazily, from ``install_dal`` + the default registry + the platform vault.
@@ -127,6 +131,8 @@ class ProviderDTO:
     capabilities: list[str]
     requiredScopes: list[str]
     refreshable: bool
+    kind: int
+    secretSchemes: list[int]
     credentialFields: list[CredentialFieldDTO]
     metadataFields: list[MetadataFieldDTO]
 
@@ -144,6 +150,8 @@ class ProviderConnectionDTO:
     """Admin view of one connection. Has no token field of any kind."""
 
     id: int
+    publicId: str
+    kind: int
     provider: str
     resourceType: str
     status: str
@@ -195,13 +203,31 @@ class CredentialsBody:
 
 
 @dataclass(slots=True, frozen=True)
+class SecretBody:
+    """Structured secret of a static-secret provider: a ``SecretScheme`` code + its document.
+
+    The document is write-only -- sealed on arrival, with no field in any response to carry it.
+    """
+
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    scheme: int
+    document: dict[str, str] = field(repr=False)
+
+
+@dataclass(slots=True, frozen=True)
 class CreateConnectionRequest:
-    """Body of ``POST``. ``metadata`` keys are the provider's ``metadataFields``."""
+    """Body of ``POST``. ``metadata`` keys are the provider's ``metadataFields``.
+
+    An OAuth provider takes ``credentials``; a static-secret provider takes ``secret`` -- exactly
+    one of the two, never both.
+    """
 
     __pydantic_config__ = ConfigDict(extra="forbid")
 
     provider: str
-    credentials: CredentialsBody
+    credentials: CredentialsBody | None = None
+    secret: SecretBody | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
 
@@ -269,6 +295,8 @@ def _provider_dto(spec: AdapterSpec) -> ProviderDTO:
         capabilities=sorted(spec.capabilities),
         requiredScopes=list(spec.required_scopes),
         refreshable=spec.refreshable,
+        kind=int(spec.kind),
+        secretSchemes=[int(scheme) for scheme in spec.secret_schemes],
         credentialFields=[
             CredentialFieldDTO(name=item.name, required=item.required, description=item.description)
             for item in spec.credential_fields
@@ -290,6 +318,8 @@ def _connection_dto(view: ConnectionView) -> ProviderConnectionDTO:
     binding = view.binding
     return ProviderConnectionDTO(
         id=binding.connection.id,
+        publicId=str(binding.connection.public_id),
+        kind=binding.connection.connection_kind,
         provider=binding.connection.platform,
         resourceType=binding.connection.resource_type,
         status=binding.connection.status,
@@ -479,8 +509,14 @@ async def list_connection_providers() -> ProviderListResponse:
     assert ctx is not None  # nosec B101 - tenant_middleware guarantees this
     if not await feature_enabled(FEATURE_PROVIDER_CONNECTIONS, tenant=ctx.tenant_slug):
         raise payment_required("Provider connections are not enabled for this plan")
+    static_on = await feature_enabled(FEATURE_STATIC_CONNECTIONS, tenant=ctx.tenant_slug)
     return ProviderListResponse(
-        success=True, providers=[_provider_dto(spec) for spec in _service().providers()]
+        success=True,
+        providers=[
+            _provider_dto(spec)
+            for spec in _service().providers()
+            if static_on or spec.kind is ConnectionKind.PLATFORM_OAUTH
+        ],
     )
 
 
@@ -509,16 +545,37 @@ async def create_provider_connection(
 ) -> tuple[ProviderConnectionResponse, int]:
     """``POST`` -- verify the credential upstream, resolve the resource, store it sealed."""
     tenant_id, actor = await _admin_guard(community_id)
-    view = await _service().create(
-        tenant_id=tenant_id,
-        community_id=community_id,
-        actor_user_id=actor,
-        provider=data.provider,
-        access_token=data.credentials.access_token,
-        refresh_token=data.credentials.refresh_token,
-        metadata=data.metadata,
-        enabled=data.enabled,
-    )
+    service = _service()
+    if service.provider_kind(data.provider) is ConnectionKind.PLATFORM_OAUTH:
+        if data.credentials is None or data.secret is not None:
+            raise pc_errors.InvalidConnectionInput("this provider takes 'credentials' only")
+        view = await service.create(
+            tenant_id=tenant_id,
+            community_id=community_id,
+            actor_user_id=actor,
+            provider=data.provider,
+            access_token=data.credentials.access_token,
+            refresh_token=data.credentials.refresh_token,
+            metadata=data.metadata,
+            enabled=data.enabled,
+        )
+    else:
+        ctx = get_tenant_context(request)
+        assert ctx is not None  # nosec B101 - _admin_guard just resolved it
+        if not await feature_enabled(FEATURE_STATIC_CONNECTIONS, tenant=ctx.tenant_slug):
+            raise payment_required("Static-secret connections are not enabled for this plan")
+        if data.secret is None or data.credentials is not None:
+            raise pc_errors.InvalidConnectionInput("this provider takes 'secret' only")
+        view = await service.create_static(
+            tenant_id=tenant_id,
+            community_id=community_id,
+            actor_user_id=actor,
+            provider=data.provider,
+            secret_scheme=data.secret.scheme,
+            secret_document=data.secret.document,
+            metadata=data.metadata,
+            enabled=data.enabled,
+        )
     return ProviderConnectionResponse(success=True, connection=_connection_dto(view)), 201
 
 

@@ -35,6 +35,7 @@ TestCatalogMatchesContracts`` fails on any drift.
 | ``compliance.external_kms``             | enterprise   | ``waddles.compliance.external_kms``             |
 | ``integrations.waddleai``               | enterprise   | ``waddles.integrations.waddleai``               |
 | ``integrations.provider_connections``   | professional | ``waddles.integrations.provider_connections``   |
+| ``integrations.static_connections``     | professional | ``waddles.integrations.static_connections``     |
 | ``tenancy.multi_tenant``                | enterprise   | ``waddles.tenancy.multi_tenant``                |
 | ``compliance.bulk_dsar``                | enterprise   | ``waddles.compliance.bulk_dsar``                |
 | ``tenancy.whitelabel``                  | professional | ``waddles.tenancy.whitelabel``                  |
@@ -219,6 +220,16 @@ _FEATURE_DEFS: Tuple[Dict[str, Any], ...] = (
         "requires_scopes": frozenset({"connections:admin"}),
         "min_tier": "professional",
         "flag": "waddles.integrations.provider_connections",
+    },
+    {
+        # Static-secret connection kinds (external HTTP / AWS Lambda / GCP function): an extra gate
+        # on top of `integrations.provider_connections` for creating one (default OFF).
+        "id": "integrations.static_connections",
+        "version": 1,
+        "module": "integrations",
+        "requires_scopes": frozenset({"connections:admin"}),
+        "min_tier": "professional",
+        "flag": "waddles.integrations.static_connections",
     },
     {
         "id": "tenancy.multi_tenant",
@@ -412,6 +423,17 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
         "name": "Provider Connections (default)",
         "version": "1.0.0",
         "feature": "waddles.integrations.provider_connections",
+        "module": "integrations",
+        "provider": "builtin",
+        "surfaces": ("action",),
+        "permissions": ("connections:admin",),
+        "is_default": True,
+    },
+    {
+        "app_id": "waddles.integrations.static_connections.default",
+        "name": "Static-Secret Connections (default)",
+        "version": "1.0.0",
+        "feature": "waddles.integrations.static_connections",
         "module": "integrations",
         "provider": "builtin",
         "surfaces": ("action",),

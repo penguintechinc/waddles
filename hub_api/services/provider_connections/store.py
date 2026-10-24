@@ -51,18 +51,25 @@ _REQUIRED_CONNECTION_COLUMNS: Final = (
     "status_reason",
     "public_id",
     "seal_version",
+    "connection_kind",
+    "sealed_secret",
 )
 
 
 @dataclass(slots=True, frozen=True)
 class SealedSecrets:
-    """Ciphertext of a connection's tokens, exactly as stored. Excluded from ``repr``."""
+    """Ciphertext of a connection's secrets, exactly as stored. Excluded from ``repr``.
 
-    access_token: str = field(repr=False)
+    An OAuth row carries ``access_token`` (+ optional ``refresh_token``); a static-secret row
+    carries ``sealed_secret`` instead and its ``access_token`` is ``None``.
+    """
+
+    access_token: str | None = field(repr=False)
     refresh_token: str | None = field(repr=False)
     #: 0 = legacy no-AAD seal, 1 = AAD-bound (see ``vault``). Required: a caller must say which,
     #: so forgetting it can never silently mark a ciphertext AAD-bound.
     seal_version: int
+    sealed_secret: str | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True, frozen=True)
@@ -83,6 +90,8 @@ class ConnectionRow:
     installed_by_user_id: int | None
     created_at: datetime | None
     updated_at: datetime | None
+    #: ``ConnectionKind`` int code; 1 (platform OAuth) unless a static-secret row.
+    connection_kind: int = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -148,7 +157,7 @@ def _tables(db: Any) -> _Tables:
     if absent:
         raise SchemaMissing(
             f"column(s) not present: {', '.join(absent)} -- run migrations "
-            "0058_provider_connections and 0063_seal_aad_version"
+            "0058_provider_connections, 0063_seal_aad_version and 0064_connection_kinds"
         )
     return _Tables(connections=connections, grants=grants, communities=tables["communities"])
 
@@ -185,6 +194,7 @@ def _connection_columns(t: _Tables) -> list[Any]:
         c.installed_by_user_id,
         c.created_at,
         c.updated_at,
+        c.connection_kind,
     ]
 
 
@@ -220,6 +230,7 @@ def _connection_from(row: Any) -> ConnectionRow:
         ),
         created_at=_aware(row.created_at),
         updated_at=_aware(row.updated_at),
+        connection_kind=int(row.connection_kind),
     )
 
 
@@ -313,6 +324,7 @@ async def insert_connection(
     installed_by_user_id: int | None,
     enabled: bool,
     now: datetime,
+    connection_kind: int = 1,
 ) -> Binding:
     """Atomically create the link (layer 2) and this community's approved grant (layer 3).
 
@@ -323,6 +335,8 @@ async def insert_connection(
 
     ``public_id`` is minted by the caller *before* sealing because it is part of the tokens' AAD
     (finding M4); the row is stored with it and with the secrets' ``seal_version``.
+    ``connection_kind`` is the ``ConnectionKind`` code; a static-secret row stores its sealed JSON
+    document in ``sealed_secret`` (``secrets.sealed_secret``) and no ``access_token``.
     """
     t = _tables(db)
     c = t.connections.c
@@ -354,6 +368,8 @@ async def insert_connection(
                     access_token=secrets.access_token,
                     refresh_token=secrets.refresh_token,
                     seal_version=secrets.seal_version,
+                    connection_kind=connection_kind,
+                    sealed_secret=secrets.sealed_secret,
                     status=STATUS_ACTIVE,
                     status_reason=None,
                     resource_metadata=dict(resource_metadata),
@@ -564,6 +580,7 @@ def _resolve_columns(t: _Tables) -> list[Any]:
         c.access_token,
         c.refresh_token,
         c.seal_version,
+        c.sealed_secret,
     ]
 
 
@@ -575,6 +592,7 @@ def _resolve_state_from(row: Any) -> ResolveState:
             access_token=row.access_token,
             refresh_token=row.refresh_token,
             seal_version=int(row.seal_version),
+            sealed_secret=row.sealed_secret,
         ),
     )
 

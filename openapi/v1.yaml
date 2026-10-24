@@ -3706,12 +3706,18 @@ components:
         id:
           title: Id
           type: integer
+        kind:
+          title: Kind
+          type: integer
         metadata:
           additionalProperties: true
           title: Metadata
           type: object
         provider:
           title: Provider
+          type: string
+        publicId:
+          title: Publicid
           type: string
         resourceType:
           title: Resourcetype
@@ -3737,6 +3743,8 @@ components:
           type: boolean
       required:
       - id
+      - publicId
+      - kind
       - provider
       - resourceType
       - status
@@ -3773,6 +3781,9 @@ components:
         installKind:
           title: Installkind
           type: string
+        kind:
+          title: Kind
+          type: integer
         metadataFields:
           items:
             $ref: '#/components/schemas/MetadataFieldDTO'
@@ -3792,6 +3803,11 @@ components:
         resourceType:
           title: Resourcetype
           type: string
+        secretSchemes:
+          items:
+            type: integer
+          title: Secretschemes
+          type: array
       required:
       - provider
       - displayName
@@ -3800,6 +3816,8 @@ components:
       - capabilities
       - requiredScopes
       - refreshable
+      - kind
+      - secretSchemes
       - credentialFields
       - metadataFields
       title: ProviderDTO
@@ -4333,6 +4351,28 @@ components:
           title: Necessary
           type: boolean
       title: SaveConsentPreferencesDTO
+      type: object
+    SecretBody:
+      additionalProperties: false
+      description: 'Structured secret of a static-secret provider: a ``SecretScheme``
+        code + its document.
+
+
+        The document is write-only -- sealed on arrival, with no field in any response
+        to carry it.'
+      properties:
+        document:
+          additionalProperties:
+            type: string
+          title: Document
+          type: object
+        scheme:
+          title: Scheme
+          type: integer
+      required:
+      - scheme
+      - document
+      title: SecretBody
       type: object
     Server:
       description: Response DTO -- one `server_status_configs` row, admin view (host/port
@@ -14491,11 +14531,20 @@ paths:
           application/json:
             schema:
               additionalProperties: false
-              description: Body of ``POST``. ``metadata`` keys are the provider's
+              description: 'Body of ``POST``. ``metadata`` keys are the provider''s
                 ``metadataFields``.
+
+
+                An OAuth provider takes ``credentials``; a static-secret provider
+                takes ``secret`` -- exactly
+
+                one of the two, never both.'
               properties:
                 credentials:
-                  $ref: '#/components/schemas/CredentialsBody'
+                  anyOf:
+                  - $ref: '#/components/schemas/CredentialsBody'
+                  - type: 'null'
+                  default: null
                 enabled:
                   default: true
                   title: Enabled
@@ -14508,9 +14557,13 @@ paths:
                 provider:
                   title: Provider
                   type: string
+                secret:
+                  anyOf:
+                  - $ref: '#/components/schemas/SecretBody'
+                  - type: 'null'
+                  default: null
               required:
               - provider
-              - credentials
               title: CreateConnectionRequest
               type: object
       responses:

@@ -86,3 +86,33 @@ def open_row(row: Mapping[str, Any], column: str = "access_token") -> str:
 def seal_for_row(row: Mapping[str, Any], plaintext: str) -> str:
     """Seal ``plaintext`` as if the service had written it to this raw row."""
     return PlatformKeyVault().seal(plaintext, aad=row_aad(row))
+
+
+async def create_static(
+    service: ProviderConnectionService,
+    db: Any,
+    *,
+    provider: str = "external_http",
+    scheme: int = 1,
+    document: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    community_id: int | None = None,
+    tenant_id: int | None = None,
+    enabled: bool = True,
+) -> ConnectionView:
+    """Create a static-secret connection (default: external_http + bearer) for ``acme-corp``."""
+    return await service.create_static(
+        tenant_id=tenant_id if tenant_id is not None else db.seed.tenant_id,
+        community_id=community_id if community_id is not None else db.seed.community_id,
+        actor_user_id=db.seed.admin_user_id,
+        provider=provider,
+        secret_scheme=scheme,
+        secret_document=document if document is not None else {"token": STATIC_BEARER},
+        metadata=metadata if metadata is not None else {"url": STATIC_URL},
+        enabled=enabled,
+    )
+
+
+#: The plaintext secret the static-secret tests seal -- every test asserts it never leaks.
+STATIC_BEARER = "STATIC-SECRET-bearer-0123456789"
+STATIC_URL = "https://hooks.example.com/waddles"

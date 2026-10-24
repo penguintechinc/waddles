@@ -58,6 +58,11 @@ from blueprints.v1.provider_connections import (
 from config import HubAPIConfig
 from services.provider_connections import PlatformKeyVault, ProviderConnectionService
 from services.provider_connections.adapter import AdapterRegistry
+from services.provider_connections.static_secret import (
+    AwsLambdaAdapter,
+    ExternalHttpAdapter,
+    GcpFunctionAdapter,
+)
 from services.provider_connections.twitch import TwitchAdapter
 from services.schema import bind_auth_tables, bind_community_authz_tables
 from tests.conftest import SECRET_KEY, TENANT_SLUG, make_user_token
@@ -144,7 +149,8 @@ def build_pc_metadata() -> MetaData:
         Column("platform", String(50), nullable=False),
         Column("resource_type", String(20), nullable=False),
         Column("resource_id", String(255), nullable=False),
-        Column("access_token", Text, nullable=False),
+        # migration 0064: nullable -- a static-secret row has no OAuth token (sealed_secret instead).
+        Column("access_token", Text),
         Column("refresh_token", Text),
         Column("status", String(20), nullable=False, server_default="active"),
         Column("installed_by_user_id", Integer),
@@ -154,6 +160,10 @@ def build_pc_metadata() -> MetaData:
         # migration 0063: the row's AAD identity + which seal layout its tokens use.
         Column("public_id", String(36), nullable=False, unique=True),
         Column("seal_version", Integer, nullable=False, server_default="0"),
+        # migration 0064: int kind authority (1 oauth, 2 external_http, 3 aws_lambda, 4 gcp_function)
+        # + the AAD-sealed static-secret document.
+        Column("connection_kind", Integer, nullable=False, server_default="1"),
+        Column("sealed_secret", Text),
         Column(
             "created_at",
             DateTime(timezone=True),
@@ -168,7 +178,16 @@ def build_pc_metadata() -> MetaData:
         ),
         UniqueConstraint("tenant_id", "platform", "resource_id"),
         CheckConstraint("status IN ('active', 'revoked', 'expired')"),
-        CheckConstraint("resource_type IN ('discord_guild', 'twitch_channel', 'fake_room')"),
+        CheckConstraint(
+            "resource_type IN ('discord_guild', 'twitch_channel', 'fake_room', "
+            "'external_http', 'aws_lambda', 'gcp_function')"
+        ),
+        CheckConstraint("connection_kind BETWEEN 1 AND 4"),
+        CheckConstraint(
+            "(connection_kind = 1 AND access_token IS NOT NULL AND sealed_secret IS NULL) OR "
+            "(connection_kind <> 1 AND access_token IS NULL AND refresh_token IS NULL "
+            "AND sealed_secret IS NOT NULL)"
+        ),
     )
     Table(
         "community_connection_access",
@@ -283,6 +302,25 @@ def make_registry(fake: FakeTwitch, clock: Callable[[], datetime]) -> AdapterReg
     )
 
 
+def make_static_registry(fake: FakeTwitch, clock: Callable[[], datetime]) -> AdapterRegistry:
+    """Twitch (on the fake socket) plus the three static-secret adapters (no network at all)."""
+    registry = make_registry(fake, clock)
+    registry.register(ExternalHttpAdapter())
+    registry.register(AwsLambdaAdapter())
+    registry.register(GcpFunctionAdapter())
+    return registry
+
+
+@pytest.fixture
+def pc_static_service(
+    pc_db: Any, fake_twitch: FakeTwitch, clock: FakeClock
+) -> ProviderConnectionService:
+    """The real service with the static-secret providers registered."""
+    return ProviderConnectionService(
+        pc_db.install_dal, make_static_registry(fake_twitch, clock), PlatformKeyVault(), clock=clock
+    )
+
+
 @pytest.fixture
 def pc_service(pc_db: Any, fake_twitch: FakeTwitch, clock: FakeClock) -> ProviderConnectionService:
     """The real service over the sqlite DB, real vault, real Twitch adapter on the fake socket."""
@@ -371,6 +409,13 @@ def pc_app(
 @pytest.fixture
 def client(pc_app: Quart) -> Any:
     """Quart test client over ``pc_app``."""
+    return pc_app.test_client()
+
+
+@pytest.fixture
+def static_client(pc_app: Quart, pc_static_service: ProviderConnectionService) -> Any:
+    """Test client whose service also has the three static-secret providers registered."""
+    pc_app.config[SERVICE_CONFIG_KEY] = pc_static_service
     return pc_app.test_client()
 
 
