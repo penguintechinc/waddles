@@ -9,6 +9,12 @@ their own row identity, in the same transaction that holds the row `FOR UPDATE`:
 * ``platform_integrations`` (``community_oauth`` rows only; the ``bot``/``user_oauth`` lanes belong
   to ``credential_manager_module`` and stay legacy) -- AAD ``<community_id>:<platform>``
 
+``seal_version`` is only a hint (an attacker-writable column): legacy rows are recognised by their
+ciphertext (the AAD open fails, the no-AAD open succeeds). A row whose column says 0 but whose
+ciphertext already opens under its AAD is a suspected downgrade -- it is counted as failed and
+never re-blessed. When a run reports ``failed=0`` (no legacy rows left) set
+``CONNECTION_SEAL_REFUSE_LEGACY=1`` on hub-api so no-AAD connection secrets fail closed.
+
 Rows already at version 1 are *examined* too: each is opened with its AAD, so a row that no longer
 authenticates (tampered, swapped, wrong key) is reported instead of silently skipped.
 
@@ -52,7 +58,7 @@ from services.provider_connections.vault import (  # noqa: E402
     SEAL_AAD,
     SEAL_LEGACY,
     open_secret,
-    seal_secret,
+    reseal_if_legacy,
 )
 
 EXIT_OK = 0
@@ -125,12 +131,18 @@ def _process_row(cur: Any, table: _Table, row: Any, counts: Counts) -> None:
     try:
         aad = table.aad_for(row)
         if seal_version == SEAL_LEGACY:
-            new_access = seal_secret(open_secret(access, seal_version=SEAL_LEGACY), aad=aad)
-            new_refresh = (
-                seal_secret(open_secret(refresh, seal_version=SEAL_LEGACY), aad=aad)
-                if refresh
-                else None
-            )
+            new_access = reseal_if_legacy(access, aad=aad)
+            new_refresh = reseal_if_legacy(refresh, aad=aad) if refresh else None
+            if new_access is None or (refresh and new_refresh is None):
+                # Opens under the row's AAD although the column says legacy: a downgrade of an
+                # AAD-bound row (or a half-written one). Never re-bless -- report it.
+                counts.failed += 1
+                logger.error(
+                    "reseal_connections.suspected_downgrade table=%s row_id=%s",
+                    table.name,
+                    int(row_id),
+                )
+                return
             cur.execute(table.update_sql, (new_access, new_refresh, SEAL_AAD, row_id))
             counts.resealed += 1
         else:

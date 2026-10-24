@@ -465,7 +465,7 @@ class TestPlatformConnectionRowBoundSealing:
         )
         dal.commit()
         monkeypatch.setattr(
-            "services.credential_resolver.seal_secret",
+            "services.credential_resolver.reseal_if_legacy",
             lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("lock timeout")),
         )
         connection = get_platform_connection(

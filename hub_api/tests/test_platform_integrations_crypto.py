@@ -108,3 +108,17 @@ class TestAadBinding:
             platform_connection_aad(public_id=pid, platform="discord")
             == b"conn:12345678-1234-5678-1234-567812345678:discord"
         )
+
+
+class TestDomainSeparation:
+    """regression: M4 -- row-bound ciphertexts use a derived key, distinct from the raw key."""
+
+    def test_a_raw_key_ciphertext_never_authenticates_as_row_bound(self) -> None:
+        with pytest.raises(PlatformCredentialCryptoError):
+            decrypt_value(_encrypt("tok"), aad=b"")  # even with an empty AAD
+
+    def test_a_row_bound_ciphertext_is_not_readable_with_the_raw_key(self) -> None:
+        key = bytes.fromhex(_KEY)
+        raw = base64.b64decode(encrypt_token("tok", aad=b"7:twitch"))
+        with pytest.raises(Exception):  # noqa: B017,PT011 - InvalidTag from the raw-key attempt
+            AESGCM(key).decrypt(raw[:12], raw[12:], b"7:twitch")

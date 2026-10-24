@@ -578,3 +578,41 @@ class TestSealAadOnPostgres:
         assert _sql(pg_db, "SELECT seal_version FROM platform_connections WHERE id=%s", (cid,)) == [
             (1,)
         ]
+
+    async def test_downgrade_column_does_not_disable_aad(
+        self,
+        service: ProviderConnectionService,
+        slow_twitch: SlowTwitch,
+        ids: Ids,
+        pg_db: PgTestDatabase,
+    ) -> None:
+        access, refresh = slow_twitch.mint(account=BOT)
+        a = await _create(service, ids, (access, refresh))
+        b = await _create(
+            service,
+            ids,
+            slow_twitch.mint(account=BOT),
+            community_id=ids.second,
+            metadata={"channel_login": OTHER_CHANNEL_LOGIN},
+        )
+        ca, cb = a.binding.connection.id, b.binding.connection.id
+        _sql(pg_db, "UPDATE platform_connections SET seal_version = 0 WHERE id=%s", (ca,))
+
+        # (a) the genuine ciphertext still opens via the AAD; the row is NOT silently re-blessed
+        resolved = await service.resolve(community_id=ids.community, connection_id=ca)
+        assert resolved.access_token == access
+        assert _sql(pg_db, "SELECT seal_version FROM platform_connections WHERE id=%s", (ca,)) == [
+            (0,)
+        ]
+
+        # (b) a ciphertext substituted from another row still fails closed
+        _sql(
+            pg_db,
+            "UPDATE platform_connections SET access_token = "
+            "(SELECT access_token FROM platform_connections WHERE id=%s) WHERE id=%s",
+            (cb, ca),
+        )
+        from services.provider_connections.errors import VaultCorrupt
+
+        with pytest.raises(VaultCorrupt):
+            await service.resolve(community_id=ids.community, connection_id=ca)

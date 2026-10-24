@@ -140,7 +140,7 @@ class TestCrossTenant:
                 resource_type="twitch_channel",
                 resource_id="1",
                 public_id=uuid4(),
-                secrets=store.SealedSecrets("a", None),
+                secrets=store.SealedSecrets("a", None, seal_version=1),
                 expires_at=None,
                 resource_metadata={},
                 installed_by_user_id=None,

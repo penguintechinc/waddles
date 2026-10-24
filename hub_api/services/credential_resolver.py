@@ -73,7 +73,13 @@ from services.platform_integrations_crypto import (
     platform_connection_aad,
 )
 from services.provider_connections.telemetry import log_failure
-from services.provider_connections.vault import SEAL_AAD, SEAL_LEGACY, open_secret, seal_secret
+from services.provider_connections.vault import (
+    SEAL_AAD,
+    SEAL_LEGACY,
+    open_secret,
+    reseal_if_legacy,
+    seal_secret,
+)
 from services.schema import bind_bar_citizen_tables
 
 logger = logging.getLogger(__name__)
@@ -290,10 +296,17 @@ def _reseal_connection_row(dal: Any, row: Any) -> None:
     t = dal.platform_connections
     try:
         aad = _row_aad(row)
-        access = seal_secret(open_secret(row.access_token), aad=aad)
-        refresh = (
-            seal_secret(open_secret(row.refresh_token), aad=aad) if row.refresh_token else None
-        )
+        access = reseal_if_legacy(row.access_token, aad=aad)
+        refresh = reseal_if_legacy(row.refresh_token, aad=aad) if row.refresh_token else None
+        if access is None or (row.refresh_token and refresh is None):
+            # Opens under the AAD although the column says legacy: a suspected downgrade. Never
+            # re-bless it silently.
+            logger.warning(
+                "credential_resolver.suspected_seal_downgrade connection_id=%s -- ciphertext is "
+                "AAD-bound but seal_version says legacy; not re-sealed",
+                row.id,
+            )
+            return
         dal((t.id == row.id) & (t.seal_version == SEAL_LEGACY)).update(
             access_token=access, refresh_token=refresh, seal_version=SEAL_AAD
         )
@@ -316,11 +329,11 @@ def _decrypt_connection_row(dal: Any, row: Any) -> PlatformConnection:
     ciphertext, key mismatch, a ciphertext sealed for a different row) --
     same fail-closed posture `resolve()` already uses for layer-1 rows,
     never surfacing ciphertext as if it were a usable token. A legacy (v0)
-    row opens without AAD and is then re-sealed AAD-bound.
+    row opens without AAD (migration window) and is then re-sealed AAD-bound.
     """
     seal_version = int(row.seal_version or SEAL_LEGACY)
     try:
-        aad = _row_aad(row) if seal_version != SEAL_LEGACY else None
+        aad = _row_aad(row)  # always: the AAD open is tried first whatever the column says
         access_token = open_secret(row.access_token, aad=aad, seal_version=seal_version)
         refresh_token = (
             open_secret(row.refresh_token, aad=aad, seal_version=seal_version)

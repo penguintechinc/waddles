@@ -48,7 +48,13 @@ from typing import Any
 from services.errors import bad_request, not_found
 from services.platform_integrations_crypto import PlatformCredentialCryptoError, connection_aad
 from services.provider_connections.telemetry import log_failure
-from services.provider_connections.vault import SEAL_AAD, SEAL_LEGACY, open_secret, seal_secret
+from services.provider_connections.vault import (
+    SEAL_AAD,
+    SEAL_LEGACY,
+    open_secret,
+    reseal_if_legacy,
+    seal_secret,
+)
 from services.schema import bind_platform_tables
 
 logger = logging.getLogger(__name__)
@@ -433,11 +439,33 @@ async def delete_connection(
     return deleted
 
 
-def _rewrap_legacy(ciphertext: str | None, aad: bytes) -> str | None:
-    """Re-seal one legacy (no-AAD) ciphertext under `aad`; `None` stays `None`."""
-    if not ciphertext:
+def _log_suspected_downgrade(community_id: int, provider: str) -> None:
+    """Record (ids only) a row whose column says legacy while its ciphertext is AAD-bound."""
+    logger.warning(
+        "community_connections.suspected_seal_downgrade community_id=%s provider=%s "
+        "-- ciphertext is AAD-bound but seal_version says legacy; not re-sealed",
+        community_id,
+        provider,
+    )
+
+
+def _refresh_for_stamp(row: Any, aad: bytes, *, community_id: int, provider: str) -> str | None:
+    """The refresh-token value to write when the row is stamped AAD-bound, `None` = leave as is.
+
+    Every stamped row must hold a refresh token that really is AAD-sealed: plaintext (an
+    `is_encrypted = FALSE` row) is sealed now, a genuinely legacy ciphertext is re-sealed, and a
+    ciphertext that already opens under the AAD is kept (and flagged if the column claimed legacy).
+    """
+    if not row.refresh_token:
         return None
-    return seal_secret(open_secret(ciphertext, aad=None, seal_version=SEAL_LEGACY), aad=aad)
+    if not row.is_encrypted:
+        return seal_secret(row.refresh_token, aad=aad)
+    if int(row.seal_version or SEAL_LEGACY) != SEAL_LEGACY:
+        return None
+    resealed = reseal_if_legacy(row.refresh_token, aad=aad)
+    if resealed is None:
+        _log_suspected_downgrade(community_id, provider)
+    return resealed
 
 
 def _sync_reseal_legacy(dal: Any, *, community_id: int, provider: str) -> bool:
@@ -458,10 +486,16 @@ def _sync_reseal_legacy(dal: Any, *, community_id: int, provider: str) -> bool:
             dal.commit()
             return False
         aad = connection_aad(community_id=community_id, provider=provider)
+        access = reseal_if_legacy(row.access_token, aad=aad)
+        refresh = reseal_if_legacy(row.refresh_token, aad=aad) if row.refresh_token else None
+        if access is None or (row.refresh_token and refresh is None):
+            # Opens under the AAD although the column says legacy: a suspected downgrade. Never
+            # re-bless it silently -- leave the row for an operator.
+            _log_suspected_downgrade(community_id, provider)
+            dal.commit()
+            return False
         dal(t.id == row.id).update(
-            access_token=_rewrap_legacy(row.access_token, aad),
-            refresh_token=_rewrap_legacy(row.refresh_token, aad),
-            seal_version=SEAL_AAD,
+            access_token=access, refresh_token=refresh, seal_version=SEAL_AAD
         )
         dal.commit()
         return True
@@ -573,10 +607,11 @@ def _sync_store_refreshed(
 
         aad = connection_aad(community_id=community_id, provider=provider)
         refresh_values: dict[str, Any] = {}
-        if row.is_encrypted and int(row.seal_version or SEAL_LEGACY) == SEAL_LEGACY:
-            # The row is about to be stamped AAD-bound, so its untouched refresh token must be
-            # re-sealed in the same statement or it would fail authentication on the next read.
-            refresh_values["refresh_token"] = _rewrap_legacy(row.refresh_token, aad)
+        # The row is about to be stamped AAD-bound/encrypted, so its untouched refresh token must
+        # really be AAD-sealed in the same statement or it would mislabel (or fail) on next read.
+        refresh = _refresh_for_stamp(row, aad, community_id=community_id, provider=provider)
+        if refresh is not None:
+            refresh_values["refresh_token"] = refresh
         dal(t.id == row.id).update(
             access_token=seal_secret(access_token, aad=aad),
             expires_at=expires_at,

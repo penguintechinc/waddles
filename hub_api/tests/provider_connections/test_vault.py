@@ -122,3 +122,62 @@ class TestSealVersioning:
     ) -> None:
         with pytest.raises(VaultCorrupt):
             vault.open(vault.seal("token", aad=AAD), aad=AAD, seal_version=version)
+
+
+class TestColumnIsOnlyAHint:
+    """regression: M4 -- the attacker-writable `seal_version` column can never disable the AAD."""
+
+    def test_a_v1_blob_whose_column_was_flipped_to_0_still_opens_only_via_aad(
+        self, vault: PlatformKeyVault
+    ) -> None:
+        sealed = vault.seal("token", aad=AAD)
+        assert vault.open(sealed, aad=AAD, seal_version=0) == "token"
+        with pytest.raises(VaultCorrupt):  # a substituted blob fails even with the column at 0
+            vault.open(vault.seal("other", aad=b"8:twitch"), aad=AAD, seal_version=0)
+
+    def test_a_row_bound_blob_never_opens_through_the_no_aad_path(
+        self, vault: PlatformKeyVault
+    ) -> None:
+        sealed = vault.seal("token", aad=AAD)
+        with pytest.raises(VaultCorrupt):
+            vault.open(sealed, aad=None, seal_version=0)
+
+    def test_a_no_aad_blob_from_another_path_is_a_legacy_open_only_in_the_window(
+        self, vault: PlatformKeyVault, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from services.platform_integrations_crypto import encrypt_token
+
+        unbound = encrypt_token("tenant-app-secret")  # e.g. tenant credentials / install state
+        assert vault.open(unbound, aad=AAD, seal_version=0) == "tenant-app-secret"
+        # a v1-marked row never falls back, even inside the migration window
+        with pytest.raises(VaultCorrupt):
+            vault.open(unbound, aad=AAD, seal_version=1)
+        monkeypatch.setenv("CONNECTION_SEAL_REFUSE_LEGACY", "1")
+        with pytest.raises(VaultCorrupt):
+            vault.open(unbound, aad=AAD, seal_version=0)
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+    def test_the_refuse_flag_fails_a_true_legacy_row_closed(
+        self, vault: PlatformKeyVault, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        from services.platform_integrations_crypto import encrypt_token
+
+        legacy = encrypt_token("legacy-token")
+        assert vault.open(legacy, aad=AAD, seal_version=0) == "legacy-token"  # default: allowed
+        monkeypatch.setenv("CONNECTION_SEAL_REFUSE_LEGACY", value)
+        with pytest.raises(VaultCorrupt):
+            vault.open(legacy, aad=AAD, seal_version=0)
+        # the refusal only concerns row-bound secrets: AAD-bound ones and the unbound path work
+        assert vault.open(vault.seal("t", aad=AAD), aad=AAD, seal_version=1) == "t"
+
+    def test_reseal_if_legacy_distinguishes_legacy_from_already_bound(
+        self, vault: PlatformKeyVault
+    ) -> None:
+        from services.platform_integrations_crypto import encrypt_token
+        from services.provider_connections.vault import open_secret, reseal_if_legacy
+
+        resealed = reseal_if_legacy(encrypt_token("legacy"), aad=AAD)
+        assert resealed is not None and open_secret(resealed, aad=AAD, seal_version=1) == "legacy"
+        assert (
+            reseal_if_legacy(vault.seal("bound", aad=AAD), aad=AAD) is None
+        )  # suspected downgrade

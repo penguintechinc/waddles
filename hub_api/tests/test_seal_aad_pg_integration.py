@@ -13,7 +13,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg2
 import pytest
@@ -30,13 +30,18 @@ from pg_docker import (  # noqa: E402  # type: ignore[import-not-found]
 )
 
 from services import community_connections as svc  # noqa: E402
+from services import credential_resolver as cr  # noqa: E402
 from services.platform_integrations_crypto import (  # noqa: E402
     PlatformCredentialCryptoError,
     connection_aad,
     platform_connection_aad,
 )
 from services.provider_connections.vault import open_secret, seal_secret  # noqa: E402
-from services.schema import bind_platform_tables  # noqa: E402
+from services.schema import (  # noqa: E402
+    bind_auth_tables,
+    bind_bar_citizen_tables,
+    bind_platform_tables,
+)
 
 pytestmark = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
@@ -96,6 +101,29 @@ def adal(pg_db: PgTestDatabase) -> Iterator[AsyncDAL]:
     bind_platform_tables(async_dal.dal, migrate=False)
     yield async_dal
     async_dal.dal.close()
+
+
+@pytest.fixture
+def cr_dal(pg_db: PgTestDatabase) -> Iterator[Any]:
+    """The pydal path `credential_resolver` uses, on the real migrated tables (`migrate=False`)."""
+    from pydal import Field
+
+    async_dal = AsyncDAL(pg_db.dsn.replace("postgresql://", "postgres://", 1), pool_size=1)
+    dal = async_dal.dal
+    dal.define_table(
+        "tenants",
+        Field("slug"),
+        Field("display_name"),
+        Field("logo_url"),
+        Field("is_global", "boolean"),
+        Field("is_active", "boolean"),
+        Field("config", "json"),
+        migrate=False,
+    )
+    bind_auth_tables(dal, migrate=False)
+    bind_bar_citizen_tables(dal, migrate=False)
+    yield dal
+    dal.close()
 
 
 def _community(db: PgTestDatabase, name: str) -> int:
@@ -238,6 +266,176 @@ class TestPlatformIntegrationsAad:
         assert tokens is not None
         assert (tokens.access_token, tokens.refresh_token) == ("acc-new", "ref-lr")
         assert _integration_row(pg_db, community, "twitch")[3] == 1
+
+
+class TestDowngradeResistance:
+    """regression: M4 -- flipping `seal_version` to 0 must not switch the AAD control off."""
+
+    async def test_downgrade_column_does_not_disable_aad(
+        self, adal: AsyncDAL, pg_db: PgTestDatabase
+    ) -> None:
+        one, two = _community(pg_db, "c-down-1"), _community(pg_db, "c-down-2")
+        _insert_v1_integration(pg_db, one, "twitch", "one")
+        _insert_v1_integration(pg_db, two, "twitch", "two")
+        _sql(
+            pg_db, "UPDATE platform_integrations SET seal_version = 0 WHERE community_id=%s", (one,)
+        )
+
+        # (a) the real ciphertext still opens (via the AAD) ...
+        tokens = await svc.get_decrypted_tokens(adal, one, "twitch")
+        assert tokens is not None and tokens.access_token == "acc-one"
+        # ... and the lazy reseal did NOT silently re-bless the flipped row
+        assert _integration_row(pg_db, one, "twitch")[3] == 0
+
+        # (b) a ciphertext substituted from another row still fails closed, column or not
+        stolen = _integration_row(pg_db, two, "twitch")[1]
+        _sql(
+            pg_db,
+            "UPDATE platform_integrations SET access_token=%s WHERE community_id=%s",
+            (stolen, one),
+        )
+        with pytest.raises(PlatformCredentialCryptoError):
+            await svc.get_decrypted_tokens(adal, one, "twitch")
+
+    async def test_a_substituted_unbound_ciphertext_is_refused_once_the_flag_is_set(
+        self, adal: AsyncDAL, pg_db: PgTestDatabase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        community = _community(pg_db, "c-flag")
+        _insert_legacy_integration(pg_db, community, "twitch", "legacy")
+        tokens = await svc.get_decrypted_tokens(adal, community, "twitch")  # window: still opens
+        assert tokens is not None and tokens.access_token == "acc-legacy"
+
+        other = _community(pg_db, "c-flag-2")
+        _insert_legacy_integration(pg_db, other, "twitch", "legacy2")
+        monkeypatch.setenv("CONNECTION_SEAL_REFUSE_LEGACY", "1")
+        with pytest.raises(PlatformCredentialCryptoError):  # true legacy v0 row now fails closed
+            await svc.get_decrypted_tokens(adal, other, "twitch")
+        assert _integration_row(pg_db, other, "twitch")[3] == 0  # and was left untouched
+
+    async def test_refresh_stamp_seals_a_plaintext_refresh_token(
+        self, adal: AsyncDAL, pg_db: PgTestDatabase
+    ) -> None:
+        community = _community(pg_db, "c-plain")
+        _sql(
+            pg_db,
+            "INSERT INTO platform_integrations (platform, integration_type, community_id, "
+            "access_token, refresh_token, is_active, is_encrypted, seal_version) "
+            "VALUES ('twitch', 'community_oauth', %s, 'plain-acc', 'plain-ref', TRUE, FALSE, 0)",
+            (community,),
+        )
+        await svc.store_refreshed_access_token(
+            adal, community, "twitch", access_token="acc-new", expires_at=None
+        )
+        tokens = await svc.get_decrypted_tokens(adal, community, "twitch")
+        assert tokens is not None
+        assert (tokens.access_token, tokens.refresh_token) == ("acc-new", "plain-ref")
+        _, _, refresh_ct, version = _integration_row(pg_db, community, "twitch")
+        assert version == 1 and refresh_ct != "plain-ref"
+
+
+class TestCredentialResolverOnPostgres:
+    """The `credential_resolver` pydal path on real Postgres: uuid `public_id`, guarded reseal."""
+
+    def _tenant(self, pg_db: PgTestDatabase) -> int:
+        return _tenant(pg_db, f"t-cr-{uuid4().hex[:6]}")
+
+    def test_upsert_binds_a_real_uuid_public_id_and_round_trips(
+        self, cr_dal: Any, pg_db: PgTestDatabase
+    ) -> None:
+        tenant = self._tenant(pg_db)
+        connection_id = cr.upsert_platform_connection(
+            cr_dal,
+            tenant_id=tenant,
+            platform="twitch",
+            resource_type="twitch_channel",
+            resource_id="chan-1",
+            access_token="acc-1",
+            refresh_token="ref-1",
+            installed_by_user_id=None,
+        )
+        version, public_id = _sql(
+            pg_db,
+            "SELECT seal_version, public_id::text FROM platform_connections WHERE id=%s",
+            (connection_id,),
+        )[0]
+        assert version == 1 and str(UUID(public_id)) == public_id  # a real uuid column value
+        got = cr.get_platform_connection(
+            cr_dal, tenant_id=tenant, platform="twitch", resource_id="chan-1"
+        )
+        assert got is not None and (got.access_token, got.refresh_token) == ("acc-1", "ref-1")
+        # an update keeps the row's identity (its tokens' AAD)
+        cr.upsert_platform_connection(
+            cr_dal,
+            tenant_id=tenant,
+            platform="twitch",
+            resource_type="twitch_channel",
+            resource_id="chan-1",
+            access_token="acc-2",
+            refresh_token=None,
+            installed_by_user_id=None,
+        )
+        assert _sql(
+            pg_db, "SELECT public_id::text FROM platform_connections WHERE id=%s", (connection_id,)
+        ) == [(public_id,)]
+
+    def test_legacy_row_opens_then_the_guarded_update_reseals_it(
+        self, cr_dal: Any, pg_db: PgTestDatabase
+    ) -> None:
+        tenant = self._tenant(pg_db)
+        connection_id = _insert_legacy_connection(pg_db, tenant, "cr-legacy")
+        got = cr.get_platform_connection(
+            cr_dal, tenant_id=tenant, platform="twitch", resource_id="res-cr-legacy"
+        )
+        assert got is not None and (got.access_token, got.refresh_token) == (
+            "acc-cr-legacy",
+            "ref-cr-legacy",
+        )
+        access_ct, public_id, version = _sql(
+            pg_db,
+            "SELECT access_token, public_id::text, seal_version FROM platform_connections "
+            "WHERE id=%s",
+            (connection_id,),
+        )[0]
+        assert version == 1
+        aad = platform_connection_aad(public_id=UUID(public_id), platform="twitch")
+        assert open_secret(access_ct, aad=aad, seal_version=1) == "acc-cr-legacy"
+
+    def test_a_flipped_column_is_not_re_blessed_and_a_swap_fails_closed(
+        self, cr_dal: Any, pg_db: PgTestDatabase
+    ) -> None:
+        tenant = self._tenant(pg_db)
+        ids = []
+        for res in ("chan-x", "chan-y"):
+            ids.append(
+                cr.upsert_platform_connection(
+                    cr_dal,
+                    tenant_id=tenant,
+                    platform="twitch",
+                    resource_type="twitch_channel",
+                    resource_id=res,
+                    access_token=f"acc-{res}",
+                    refresh_token=None,
+                    installed_by_user_id=None,
+                )
+            )
+        _sql(pg_db, "UPDATE platform_connections SET seal_version = 0 WHERE id=%s", (ids[0],))
+        got = cr.get_platform_connection(
+            cr_dal, tenant_id=tenant, platform="twitch", resource_id="chan-x"
+        )
+        assert got is not None and got.access_token == "acc-chan-x"
+        assert _sql(
+            pg_db, "SELECT seal_version FROM platform_connections WHERE id=%s", (ids[0],)
+        ) == [(0,)]
+        _sql(
+            pg_db,
+            "UPDATE platform_connections SET access_token = "
+            "(SELECT access_token FROM platform_connections WHERE id=%s) WHERE id=%s",
+            (ids[1], ids[0]),
+        )
+        with pytest.raises(cr.TransportUnavailable):
+            cr.get_platform_connection(
+                cr_dal, tenant_id=tenant, platform="twitch", resource_id="chan-x"
+            )
 
 
 class TestResealJob:

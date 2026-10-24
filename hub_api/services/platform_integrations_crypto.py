@@ -34,7 +34,9 @@ import os
 from uuid import UUID
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from flask_core.safe_logging import log_exc_safe
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,23 @@ def _encryption_key() -> bytes:
     return key
 
 
+#: HKDF `info` label separating connection-secret sealing from every no-AAD path (tenant app
+#: credentials, Redis install state, credential_manager rows), which use the raw key.
+_CONNECTION_KEY_INFO = b"waddles/connection-secret/aad-v1"
+
+
+def _row_bound_key(key: bytes) -> bytes:
+    """Derive the key used for AAD-bound (connection-secret) ciphertexts from the platform key.
+
+    Domain separation (M4): a no-AAD ciphertext from another path -- sealed under the raw key --
+    can never authenticate as a connection token, because connection tokens use this derived key.
+    The wire format is unchanged; only the key differs.
+    """
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=_CONNECTION_KEY_INFO).derive(
+        key
+    )
+
+
 def connection_aad(*, community_id: int, provider: str) -> bytes:
     """AAD binding a `platform_integrations` community_oauth ciphertext to its row (M4).
 
@@ -98,11 +117,14 @@ def encrypt_token(plaintext: str, *, aad: bytes | None = None) -> str:
     Mirrors `token_crypto.encrypt_value()`'s wire format exactly (same
     primitive, same layout) so a value written here decrypts cleanly via
     either service's `decrypt_value()`, and vice versa -- see module
-    docstring. `aad` (when given) is authenticated but not stored: the same bytes must be
-    supplied to decrypt. Callers must never log `plaintext` or the returned
+    docstring. `aad` (when given) selects the row-bound key (domain-separated from the raw key)
+    and is authenticated but not stored: the same bytes must be supplied to decrypt.
+    Callers must never log `plaintext` or the returned
     ciphertext's decrypted form.
     """
     key = _encryption_key()
+    if aad is not None:
+        key = _row_bound_key(key)
     iv = os.urandom(_IV_LENGTH)
     ciphertext_and_tag = AESGCM(key).encrypt(iv, plaintext.encode("utf-8"), aad)
     return base64.b64encode(iv + ciphertext_and_tag).decode("ascii")
@@ -115,6 +137,8 @@ def decrypt_value(encrypted_b64: str, *, aad: bytes | None = None) -> str:
     mismatch fails authentication and raises `PlatformCredentialCryptoError`.
     """
     key = _encryption_key()
+    if aad is not None:
+        key = _row_bound_key(key)
     try:
         raw = base64.b64decode(encrypted_b64, validate=True)
         iv, ciphertext_and_tag = raw[:_IV_LENGTH], raw[_IV_LENGTH:]

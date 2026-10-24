@@ -30,26 +30,42 @@ def _production_files() -> list[Path]:
     )
 
 
+_MODULE_LEAF = CRYPTO_MODULE.rsplit(".", 1)[1]
+
+
+def _is_crypto_module(module: str | None, level: int) -> bool:
+    """Whether `from <dots><module> import ...` names the crypto module (absolute or relative)."""
+    if module is None:
+        return False
+    return module == CRYPTO_MODULE or (level > 0 and module.split(".")[-1] == _MODULE_LEAF)
+
+
 def violations_in(source: str) -> list[str]:
-    """Return `name@line` for each raw-primitive use that resolves to the crypto module."""
+    """Return `name@line` for each raw-primitive use that resolves to the crypto module.
+
+    Handles `from services.platform_integrations_crypto import x [as y]`, relative imports,
+    `from services import platform_integrations_crypto [as c]`, `from . import ...`, and the dotted
+    `import services.platform_integrations_crypto` spelling (matched on the full attribute chain).
+    """
     tree = ast.parse(source)
     imported: set[str] = set()  # local names bound by `from <crypto> import decrypt_value [as x]`
-    module_aliases: set[str] = set()  # local names bound to the crypto module itself
+    module_aliases: set[str] = set()  # dotted text that evaluates to the crypto module
     found: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == CRYPTO_MODULE:
-            for alias in node.names:
-                if alias.name in GUARDED:
-                    imported.add(alias.asname or alias.name)
-                    found.append(f"import {alias.name}@{node.lineno}")
-        elif isinstance(node, ast.ImportFrom) and node.module == "services":
-            for alias in node.names:
-                if alias.name == "platform_integrations_crypto":
-                    module_aliases.add(alias.asname or alias.name)
+        if isinstance(node, ast.ImportFrom):
+            if _is_crypto_module(node.module, node.level):
+                for alias in node.names:
+                    if alias.name in GUARDED:
+                        imported.add(alias.asname or alias.name)
+                        found.append(f"import {alias.name}@{node.lineno}")
+            else:
+                for alias in node.names:
+                    if alias.name == _MODULE_LEAF:
+                        module_aliases.add(alias.asname or alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == CRYPTO_MODULE:
-                    module_aliases.add(alias.asname or alias.name)
+                    module_aliases.add(alias.asname or CRYPTO_MODULE)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -59,8 +75,7 @@ def violations_in(source: str) -> list[str]:
         elif (
             isinstance(func, ast.Attribute)
             and func.attr in GUARDED
-            and isinstance(func.value, ast.Name)
-            and func.value.id in module_aliases
+            and ast.unparse(func.value) in module_aliases
         ):
             found.append(f"{func.attr}@{node.lineno}")
     return found
@@ -98,6 +113,22 @@ def test_the_guard_can_fail() -> None:
     )
     assert violations_in(
         "from services.platform_integrations_crypto import decrypt_value as d\nd('x')\n"
+    )
+    # the dotted spelling and relative imports are caught too
+    assert violations_in(
+        "import services.platform_integrations_crypto\n"
+        "def f(x):\n    return services.platform_integrations_crypto.decrypt_value(x)\n"
+    )
+    assert violations_in(
+        "import services.platform_integrations_crypto as pic\n"
+        "def f(x):\n    return pic.encrypt_token(x)\n"
+    )
+    assert violations_in(
+        "from .platform_integrations_crypto import decrypt_value\ndecrypt_value('x')\n"
+    )
+    assert violations_in(
+        "from . import platform_integrations_crypto\n"
+        "platform_integrations_crypto.decrypt_value('x')\n"
     )
     assert violations_in("def decrypt_value(x):\n    return x\ndecrypt_value('x')\n") == []
 

@@ -53,6 +53,7 @@ from services.provider_connections.errors import (
     RefreshNotConfigured,
     RefreshRejected,
     UnknownProvider,
+    VaultCorrupt,
 )
 from services.provider_connections.store import Binding, ResolveState, SealedSecrets
 from services.provider_connections.telemetry import (
@@ -61,7 +62,12 @@ from services.provider_connections.telemetry import (
     operation_span,
     token_refresh_counter,
 )
-from services.provider_connections.vault import SEAL_AAD, SEAL_LEGACY, TokenVault
+from services.provider_connections.vault import (
+    SEAL_AAD,
+    SEAL_LEGACY,
+    TokenVault,
+    reseal_if_legacy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -622,7 +628,8 @@ class ProviderConnectionService:
 
     def _open(self, ciphertext: str | None, state: ResolveState) -> str:
         """Open one of this row's ciphertexts through the versioned vault."""
-        assert ciphertext is not None  # noqa: S101 - callers only pass a present secret
+        if ciphertext is None:
+            raise VaultCorrupt("a stored connection secret is missing")
         return self._vault.open(
             ciphertext,
             aad=self._row_aad(state.connection),
@@ -653,20 +660,27 @@ class ProviderConnectionService:
 
     def _rewrap_legacy(
         self, public_id: UUID, platform: str, current: SealedSecrets
-    ) -> SealedSecrets:
-        """Open a legacy pair (no AAD) and seal it under the row's AAD."""
+    ) -> SealedSecrets | None:
+        """Re-seal a genuinely legacy pair under the row's AAD; ``None`` if it is not legacy.
+
+        A pair that already opens under the row's AAD while the column says legacy is a suspected
+        downgrade (the column was flipped): it is logged (ids only) and left alone, never
+        re-blessed.
+        """
         aad = platform_connection_aad(public_id=public_id, platform=platform)
-
-        def convert(ciphertext: str | None) -> str | None:
-            if ciphertext is None:
-                return None
-            return self._vault.seal(
-                self._vault.open(ciphertext, aad=None, seal_version=SEAL_LEGACY), aad=aad
+        access = reseal_if_legacy(current.access_token, aad=aad)
+        refresh = (
+            reseal_if_legacy(current.refresh_token, aad=aad) if current.refresh_token else None
+        )
+        if access is None or (current.refresh_token and refresh is None):
+            logger.warning(
+                "provider_connections.suspected_seal_downgrade platform=%s public_id=%s "
+                "-- ciphertext is AAD-bound but seal_version says legacy; not re-sealed",
+                platform,
+                public_id,
             )
-
-        access = convert(current.access_token)
-        assert access is not None  # noqa: S101 - access_token is NOT NULL
-        return SealedSecrets(access, convert(current.refresh_token), seal_version=SEAL_AAD)
+            return None
+        return SealedSecrets(access, refresh, seal_version=SEAL_AAD)
 
     @staticmethod
     def _assert_usable_connection(state: ResolveState) -> None:

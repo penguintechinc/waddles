@@ -171,7 +171,9 @@ class TestNoSecretIsEverSelectedForAdminReads:
             assert "refresh_token" not in scrubbed, sql
 
     def test_read_models_do_not_repr_secrets(self) -> None:
-        sealed = SealedSecrets(access_token="CIPHERTEXT-A", refresh_token="CIPHERTEXT-R")
+        sealed = SealedSecrets(
+            access_token="CIPHERTEXT-A", refresh_token="CIPHERTEXT-R", seal_version=1
+        )
         assert "CIPHERTEXT" not in repr(sealed)
         row = ConnectionRow(
             1,

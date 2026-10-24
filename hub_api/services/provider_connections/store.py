@@ -59,9 +59,10 @@ class SealedSecrets:
     """Ciphertext of a connection's tokens, exactly as stored. Excluded from ``repr``."""
 
     access_token: str = field(repr=False)
-    refresh_token: str | None = field(default=None, repr=False)
-    #: 0 = legacy no-AAD seal, 1 = AAD-bound (see ``vault``); every new write is 1.
-    seal_version: int = 1
+    refresh_token: str | None = field(repr=False)
+    #: 0 = legacy no-AAD seal, 1 = AAD-bound (see ``vault``). Required: a caller must say which,
+    #: so forgetting it can never silently mark a ciphertext AAD-bound.
+    seal_version: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -660,11 +661,12 @@ async def reseal_legacy(
     db: Any,
     *,
     connection_id: int,
-    rewrap: Callable[[UUID, str, SealedSecrets], SealedSecrets],
+    rewrap: Callable[[UUID, str, SealedSecrets], SealedSecrets | None],
 ) -> bool:
     """Upgrade one legacy (``seal_version`` 0) row to AAD-bound under its own row lock.
 
-    ``rewrap(public_id, platform, current)`` returns the re-sealed pair. The row is locked
+    ``rewrap(public_id, platform, current)`` returns the re-sealed pair, or ``None`` to leave the
+    row untouched (a suspected downgrade -- the caller logs it). The row is locked
     ``FOR UPDATE`` and re-checked, so concurrent callers upgrade it exactly once; returns ``False``
     when the row is gone or already upgraded. ``updated_at`` is left alone: nothing about the
     connection changed, only how its secrets are sealed.
@@ -682,6 +684,8 @@ async def reseal_legacy(
             return False
         current = SealedSecrets(row.access_token, row.refresh_token, seal_version=0)
         upgraded = rewrap(UUID(str(row.public_id)), row.platform, current)
+        if upgraded is None:
+            return False
         await conn.execute(
             update(t.connections)
             .where(c.id == connection_id)
