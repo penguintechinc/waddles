@@ -16,7 +16,7 @@ path = "src/lib.rs"
 # same crate is already pinned there, to avoid a second pin of the same
 # dependency once these crates share a workspace.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["sync", "time", "rt", "fs"] }
+tokio = { version = "=1.53.3", features = ["sync", "time", "rt", "fs"] }
 # =0.12.28 (not =0.12.12, the version first pinned here) -- 0.12.12's
 # rustls-tls chain unconditionally pulls the unmaintained `rustls-pemfile`
 # (RUSTSEC-2025-0134); reqwest >=0.12.13 reads PEM via `rustls-pki-types`
@@ -64,7 +64,7 @@ default = []
 test-support = ["dep:opentelemetry_sdk"]
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 # Test-only: the capturing exporter proves the counter/histogram carry the
 # exact `waddles_jwt_verifications_total{verifier,alg,outcome}` label set the
 # Python verifiers emit. Never linked into a service binary.
