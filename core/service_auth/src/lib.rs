@@ -854,7 +854,7 @@ impl BoundMachineJwtClient {
             return Ok(t);
         }
         let gate = {
-            let mut gates = self.gates.lock().unwrap_or_else(|e| e.into_inner());
+            let mut gates = self.lock_gates();
             gates.entry(key).or_default().clone()
         };
         let result = {
@@ -870,12 +870,24 @@ impl BoundMachineJwtClient {
                 None => self.mint(key).await,
             }
         };
-        let mut gates = self.gates.lock().unwrap_or_else(|e| e.into_inner());
+        let mut gates = self.lock_gates();
         // Only the map and our local `gate` remain -> no waiters; drop the entry.
         if Arc::strong_count(&gate) <= 2 {
             gates.remove(&key);
         }
         result
+    }
+
+    /// Lock the single-flight gate map; a poisoned lock (a panicked holder) is recovered because
+    /// the map only holds per-binding `Arc` gates, but the recovery is logged, never silent.
+    fn lock_gates(&self) -> std::sync::MutexGuard<'_, HashMap<BindingKey, Arc<Mutex<()>>>> {
+        match self.gates.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("service_auth.bound_gates_poisoned_recovered");
+                poisoned.into_inner()
+            }
+        }
     }
 
     async fn mint(&self, key: BindingKey) -> Result<Arc<str>, ServiceAuthError> {

@@ -1162,6 +1162,11 @@ pipeline:
     enabled: true
     port: 8204
     grpcPort: 50204
+    # SPIFFE_PEER_TRUST / SPIFFE_PEER_ID_HEADER (hub_api/services/machine_auth.py). Default OFF.
+    # Enable ONLY behind an mTLS terminator that strips the header from non-mTLS traffic AND
+    # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.
+    spiffePeerTrust: false
+    spiffePeerIdHeader: "X-Spiffe-Peer-Id"
     replicas: 2
     # Maps to WADDLES_AI_ENABLED (hub_api/config.py) -- deploy-time
     # kill-switch for the whole services/ai_routing/ subsystem, so
@@ -1608,6 +1613,13 @@ pipeline:
       # mTLS host-API listener core/bundle_executor dials (spec SS6.6/SS7.1) -- matches
       # HOST_API_PORT's own CliConfig default (core/svc_action/src/config.rs).
       hostApiPort: 8302
+      # feature/edge-reshape-chunk2-conn-store (Task 8) -- gates svc-action's
+      # `connections:resolve` + `connections:resolve:static` grant in
+      # `serviceJwt.identities.svc-action` (stripped from hub-api's SERVICE_JWT_IDENTITIES while
+      # false) and the SERVICE_JWT_* env/mount both svc-action pods use to mint it. Default false;
+      # only values-alpha.yaml enables it (same posture as svcIngest.dynamicConnections).
+      dynamicConnections:
+        enabled: false
       # ACTION_APP_ID (core/svc_action/src/config.rs) -- empty (default) disables the
       # dispatch drain loop entirely. values-alpha.yaml sets this to the migration-083
       # seeded demo app_id.
@@ -3275,6 +3287,15 @@ serviceJwt:
         # ResolveDisplayNames call would 403 even with a working connection.
         - "identity:displayname:read"
         - "egress:connect"
+        # feature/edge-reshape-chunk2-conn-store (Task 8) -- svc-action is the per-send EGRESS
+        # consumer of the connection store: `connections:resolve` mints a community-bound token
+        # for twitch OAuth / youtube / moderation sends and `connections:resolve:static` is the
+        # separate (least-privilege) scope hub-api demands for the static Lambda/GCP/HTTP kinds.
+        # It does NOT get `connections:list` (binding discovery is svc-ingest's job). Both are
+        # filtered out of the rendered allow-list unless
+        # pipeline.rustDataPlane.svcAction.dynamicConnections.enabled (default false).
+        - "connections:resolve"
+        - "connections:resolve:static"
     # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
     # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
     # pseudonyms or calls egress, so exactly one scope.
@@ -3300,6 +3321,10 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "connections:resolve"
+        # feature/edge-reshape-chunk2-conn-store (Task 8) -- unbound binding discovery
+        # (GET /api/v1/internal/provider-connections) for the twitch OAuth kind. NOT the
+        # `connections:resolve:static` scope: svc-ingest never resolves Lambda/GCP/HTTP secrets.
+        - "connections:list"
         # feature/dataplane-scope-resolver (numeric-id migration, Slice A) -- svc-ingest has no DB;
         # it resolves (platform, guild/channel) -> numeric (tenant_id, community_id) through
         # hub-api's GET /api/v1/internal/dataplane/resolve-scope. A SEPARATE scope from

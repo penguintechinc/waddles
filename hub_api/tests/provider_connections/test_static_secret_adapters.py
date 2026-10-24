@@ -392,8 +392,8 @@ class TestAdapters:
     def test_the_base_class_refuses_to_guess_a_target(self) -> None:
         from services.provider_connections.static_secret import StaticSecretAdapter
 
-        with pytest.raises(NotImplementedError):
-            StaticSecretAdapter().validate_target({})
+        with pytest.raises(TypeError):  # abstract: cannot even be instantiated
+            StaticSecretAdapter()  # type: ignore[abstract]
 
     def test_the_default_registry_wires_all_four_providers(self) -> None:
         registry = build_default_registry()

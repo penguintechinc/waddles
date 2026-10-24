@@ -383,6 +383,10 @@ pipeline:
     svcAction:
       replicas: 1
       envelopeBindingActiveKid: "e2e1"
+      # Task 8 -- turns on svc-action's connections:resolve(+:static) grant + SERVICE_JWT env
+      # (alpha only; base default false so beta/prod never render the grant).
+      dynamicConnections:
+        enabled: true
       # fix/alpha-deploy-executor-and-failfast -- see svcProcess's identical
       # comment above: the legacy actionAppId/actionBundleDigest/Version/
       # ComponentKey/SidecarKey fields (including the same stale pinned

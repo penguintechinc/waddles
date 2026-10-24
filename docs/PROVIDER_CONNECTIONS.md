@@ -232,7 +232,7 @@ allow-listed identity carries. The allow-list is chart config, rendered into hub
 
 | Piece | Where |
 |---|---|
-| Identity + scope policy | `k8s/helm/waddlebot/values.yaml` `serviceJwt.identities.svc-ingest` -- `spiffe://penguintech.io/<env>/svc-ingest`, `allowedScopes: ["connections:resolve"]` (only), `tenant: system` | **Rendered only when `pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=true`** (default false in `values.yaml`, true in `values-alpha.yaml`): the grant, the `SERVICE_JWT_*` env and the bootstrap-token mount are absent otherwise, so an internet-facing svc-ingest pod cannot mint a cross-tenant `system` token while the feature is off.
+| Identity + scope policy | `k8s/helm/waddlebot/values.yaml` `serviceJwt.identities.svc-ingest` -- `spiffe://penguintech.io/<env>/svc-ingest`, `allowedScopes: ["connections:resolve", "connections:list", "dataplane:resolve-scope"]` (never `connections:resolve:static`), `tenant: system` | **Rendered only when `pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=true`** (default false in `values.yaml`, true in `values-alpha.yaml`): the grant, the `SERVICE_JWT_*` env and the bootstrap-token mount are absent otherwise, so an internet-facing svc-ingest pod cannot mint a cross-tenant `system` token while the feature is off.
 | Dedicated ServiceAccount | `k8s/helm/waddlebot/templates/service-jwt-rbac.yaml` (`svc-ingest`); the identity matches on namespace + this name, so no other pod can bootstrap it |
 | Caller wiring | `templates/svc-ingest-rust.yaml`: `serviceAccountName: svc-ingest`, projected token (audience `hub-api`), `SERVICE_JWT_TOKEN_ENDPOINT`, `SERVICE_JWT_SA_TOKEN_PATH` |
 | Verification | `hub_api/tests/provider_connections/test_chart_service_identity_grant.py` (renders the chart, mints through the real issuer, hits the real routes) and `k8s/helm/waddlebot/tests/test_svc_ingest_connections_scope_render.py` |
@@ -326,7 +326,85 @@ POST /api/v1/communities/{id}/provider-connections
   re-checked, DNS-pinned, at send time by the dispatcher). Secret documents have exact keys per scheme.
 - Gated by flag `waddles.integrations.static_connections` (Professional, default OFF) on create, on top
   of the base feature; with it off the three providers are not even listed. A static link cannot be
-  edited (delete + recreate); `resolve` refuses it loudly (`static_secret`) -- it has no OAuth token.
+  edited (delete + recreate). The data-plane `resolve` returns its `endpoint` + structured `secret`
+  only to a caller holding `connections:resolve:static` (see [Scope matrix](#scope-matrix)); the base
+  `connections:resolve` scope is refused with a generic `403`.
+
+### Resolve v2 wire shape (all four kinds)
+
+`POST /api/v1/internal/communities/{communityId}/provider-connections/{connectionId}/resolve` returns
+`{connectionId, communityId, provider, kind, accessToken, expiresAt, endpoint:{url,region,function,project},
+secret:{scheme, fields}, metadata}`. `kind` is the int code (1 `platform_oauth`, 2 `external_http`,
+3 `aws_lambda`, 4 `gcp_function`); `secret.scheme` is 1 bearer, 2 basic, 3 api-key-header, 4 aws-access-key,
+5 gcp-service-account. OAuth rows carry `accessToken` and no `secret`; static rows the reverse. Golden
+fixtures: `hub_api/tests/fixtures/resolve_v2_*.json` (parsed byte-for-byte by the Rust contract test).
+Responses are `Cache-Control: no-store`. The Rust client is `core/connection_resolver`: one authenticated
+call per send, no credential cache, zeroizing secrets, `Debug` redacts them.
+
+## Scope matrix
+
+Each service identity mints only what it needs (chart `serviceJwt.identities`, rendered into hub-api's
+`SERVICE_JWT_IDENTITIES`). Resolve tokens are **community-bound** (`community` claim, optional `conn`);
+`connections:list` is unbound.
+
+| Identity | `connections:resolve` | `connections:resolve:static` | `connections:list` | Gate (default false) |
+|---|---|---|---|---|
+| `svc-action` | yes (twitch OAuth, youtube, moderation sends) | yes (Lambda / GCP / HTTP kinds) | **no** | `pipeline.rustDataPlane.svcAction.dynamicConnections.enabled` -- strips only its `connections:*` scopes; its other scopes always render |
+| `svc-ingest` | yes (twitch OAuth) | **no** | yes (binding discovery) | `pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled` -- the whole identity is absent while off |
+| every other identity | no | no | no | -- |
+
+Both flags are on only in `values-alpha.yaml`. The legacy Python `svc_action` pod
+(`platform_moderation` / `youtube_oauth` via `resolve_community_tokens`) mounts the same
+audience-scoped projected ServiceAccount token (`serviceJwtBootstrapVolume`) and, when the svcAction flag is
+on, gets `SERVICE_JWT_TOKEN_ENDPOINT` + `SERVICE_JWT_SA_TOKEN_PATH`; without them it would silently stay on the
+static env fallback after the cutover. Data-plane DB roles hold **no** privilege on `platform_connections`
+(`rbac-matrix.yaml`; pinned by `hub_api/tests/provider_connections/test_rbac_no_data_plane_connection_privileges.py`).
+
+## At-rest AAD (finding M4)
+
+Every sealed value is AES-256-GCM bound to its row via associated data, so a ciphertext copied to another
+row (or another platform) fails to open: `platform_integrations` uses `community_id:provider`; the
+tenant-shared `platform_connections` uses `conn:{public_id}:{platform}`. `seal_version` is only a **hint**
+(never the AAD switch -- a downgrade attempt cannot select the no-AAD path). Legacy rows (`seal_version` 0, no
+AAD) still open through a fallback until you close it -- see the runbook below.
+
+## `X-Service-Key` removed
+
+The shared `X-Service-Key` header no longer authenticates either data-plane route nor the connection token
+endpoint (HIGH-2): there is **no dual-accept window**. Callers use a machine JWT minted via
+`/internal/service-token` from their projected ServiceAccount token. A request carrying only the old header
+gets `401` (asserted live by `live_legacy_service_key_is_rejected`).
+
+## SPIFFE readiness and its footguns
+
+hub-api can take the caller identity from a verified peer header instead of the SA-token bootstrap:
+`SPIFFE_PEER_TRUST` (chart `pipeline.hubApi.spiffePeerTrust`, default **false**) and `SPIFFE_PEER_ID_HEADER`
+(`pipeline.hubApi.spiffePeerIdHeader`, default `X-Spiffe-Peer-Id`). Before enabling:
+
+* the edge/mesh **must strip** `X-Spiffe-Peer-Id` on every non-mTLS path -- with trust on, whoever can set that
+  header is that service;
+* `X-Connection-Community` is **not** an entitlement check -- it only names the community; require a
+  per-identity community allow-list first, otherwise any trusted identity could resolve any community.
+
+## Reseal runbook (after deploy)
+
+Rows written before the AAD change are `seal_version` 0 (no AAD). After deploying:
+
+1. Run `make reseal-connections` from hub-api's environment (`DATABASE_URL`/`DB_*`, `CREDENTIAL_ENCRYPTION_KEY`).
+   It prints `examined=N resealed=M failed=K`; re-run until it reports **`failed=0`** (exit 1 = a row failed,
+   2 = nothing examined although rows exist, 3 = could not run; add `EXPECT_ROWS=1` to also fail on empty tables).
+2. **Only then** set `CONNECTION_SEAL_REFUSE_LEGACY=1` on hub-api. This closes the legacy no-AAD fallback: any
+   remaining no-AAD secret fails closed instead of opening. Setting it earlier turns un-resealed rows into outages.
+
+## Live end-to-end (Rust client <-> real hub-api <-> Postgres)
+
+`make test-connection-resolver-live` (`scripts/ci/connection-resolver-live.sh`, needs docker + helm + cargo and a
+python with hub-api's requirements via `HUB_PYTHON`) boots Postgres 17 at Alembic head and the real blueprints
+(`hub_api/tests/live/live_hub.py`, identities rendered from the real chart), then runs
+`core/connection_resolver/tests/e2e_live_hub.rs`: per-kind round trip (decrypted fields equal what was stored),
+cross-community `NotFound`, tampered ciphertext -> fixed error with no secret text, legacy `X-Service-Key` -> `401`,
+and the chart's scope split. It prints the pass count and the resolver's log/span/metric counts and fails on zero.
+Only the Kubernetes TokenReview call and the PostHog/licence backends are stubbed. Amd64-only for now.
 
 ## Adding a provider
 
@@ -410,5 +488,5 @@ sqlite test mirror, FK/unique enforcement, JSONB/timestamptz, and the concurrent
   is a platform-wide change to session issuance, out of scope here.
 * **Refresh uses the platform Twitch app only**, not a tenant's own app (layer 1). Tenant-app refresh
   is a follow-up.
-* **AAD binding.** The platform-baseline vault uses the shared wire format, which has no associated
-  data; the envelope/KMS vault (PR #789) is the place to bind ciphertext to its row.
+* **AAD binding.** Done for connection secrets (see [At-rest AAD](#at-rest-aad-finding-m4)); the legacy no-AAD
+  fallback stays open until the reseal runbook completes and `CONNECTION_SEAL_REFUSE_LEGACY=1` is set.

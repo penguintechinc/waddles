@@ -51,7 +51,14 @@ impl Breaker {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // The breaker state is plain counters, valid after a panicked holder; recover but say so.
+                tracing::warn!("connection_resolver.breaker_state_poisoned_recovered");
+                poisoned.into_inner()
+            }
+        }
     }
 
     /// Admit a call, or `CircuitOpen` while shedding.

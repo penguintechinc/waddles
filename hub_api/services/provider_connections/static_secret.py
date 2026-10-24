@@ -15,6 +15,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 from urllib.parse import urlsplit, urlunsplit
@@ -248,7 +249,7 @@ def infer_scheme(doc: Mapping[str, Any]) -> SecretScheme | None:
     return None
 
 
-class StaticSecretAdapter:
+class StaticSecretAdapter(ABC):
     """Shared behaviour of the three static-secret adapters (concrete ones set ``spec``)."""
 
     spec: AdapterSpec
@@ -292,9 +293,9 @@ class StaticSecretAdapter:
         """A static connection can always ``dispatch`` -- it has no scopes to narrow it."""
         return frozenset({"dispatch"})
 
+    @abstractmethod
     def validate_target(self, metadata: Mapping[str, str]) -> dict[str, Any]:
-        """Return the non-secret, normalised target facts (overridden per provider)."""
-        raise NotImplementedError("a static adapter must implement validate_target")
+        """Return the non-secret, normalised target facts (each provider implements this)."""
 
 
 def _spec(

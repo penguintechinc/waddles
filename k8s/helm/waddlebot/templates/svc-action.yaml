@@ -99,6 +99,16 @@ spec:
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+        {{- if .Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled }}
+        # Task 8 -- the legacy Python pod's per-send credential resolution (waddle_transports
+        # resolve_community_tokens: platform_moderation / youtube_oauth) mints a community-bound
+        # `connections:resolve` token from the audience-scoped projected SA token mounted below;
+        # without these it silently stays on the static env fallback after the cutover.
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        {{- end }}
         - name: SECRET_KEY
           valueFrom:
             secretKeyRef:

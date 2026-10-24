@@ -95,6 +95,8 @@ async def issue_service_token() -> tuple[Response, int]:
     try:
         extra_claims = _binding_claims(scope, body)
     except ValueError:
+        # Fixed event only: the rejected body fields are caller-controlled, never logged.
+        current_app.logger.warning("service_jwt.invalid_binding_request")
         return jsonify({"error": "invalid request"}), 400
 
     try:

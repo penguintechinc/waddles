@@ -20,7 +20,6 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -112,15 +111,7 @@ def service_issuer(chart_identities: dict[str, ServiceIdentity]) -> ServiceJwtIs
     """Override the shared hand-built issuer: a real Ed25519 issuer over the CHART's allow-list."""
     private = Ed25519PrivateKey.generate()
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
-    # The chart grants svc-ingest only ``connections:resolve`` today; the unbound ``connections:list``
-    # scope the list route now requires lands with the Phase B chart change (plan Task 8). Until then
-    # the issuer under test adds it to svc-ingest alone -- the chart-pinning tests above use
-    # ``chart_identities`` directly and still assert the chart's own, unmodified grant.
     identities = dict(chart_identities)
-    identities[_SVC_INGEST] = replace(
-        identities[_SVC_INGEST],
-        allowed_scopes=identities[_SVC_INGEST].allowed_scopes | {"connections:list"},
-    )
     return ServiceJwtIssuer(
         keys={"k1": key},
         active_kid="k1",
@@ -134,7 +125,8 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
 ) -> None:
     identity = chart_identities[_SVC_INGEST]
     # Minimum: the two data-plane scopes (connections + scope resolver), nothing else.
-    assert identity.allowed_scopes == frozenset({_SCOPE, "dataplane:resolve-scope"})
+    assert identity.allowed_scopes == frozenset({_SCOPE, _LIST_SCOPE, "dataplane:resolve-scope"})
+    assert "connections:resolve:static" not in identity.allowed_scopes
     assert identity.tenant == "system"
     # Pinned to the dedicated ServiceAccount, never the chart-wide shared one.
     assert (identity.k8s_namespace, identity.k8s_service_account) != ("", "")
@@ -170,14 +162,25 @@ def test_svc_ingest_identity_cannot_mint_any_scope_beyond_connections_resolve(
         service_issuer.issue(_SVC_INGEST, scope)
 
 
-def test_no_other_chart_identity_may_mint_connections_resolve(
+def test_only_svc_ingest_and_svc_action_may_mint_connections_resolve(
     service_issuer: ServiceJwtIssuer, chart_identities: dict[str, ServiceIdentity]
 ) -> None:
-    others = [sid for sid in chart_identities if sid != _SVC_INGEST]
-    assert others, "expected other service identities in the chart (svc-process, svc-action, ...)"
+    others = [sid for sid in chart_identities if not sid.endswith(("/svc-ingest", "/svc-action"))]
+    assert others, "expected other service identities in the chart (svc-process, ...)"
     for service_id in others:
         with pytest.raises(BootstrapRejected):
             service_issuer.issue(service_id, _SCOPE)
+
+
+def test_svc_action_may_mint_resolve_and_static_but_not_list(
+    service_issuer: ServiceJwtIssuer, chart_identities: dict[str, ServiceIdentity]
+) -> None:
+    action_id = next(sid for sid in chart_identities if sid.endswith("/svc-action"))
+    for scope in (_SCOPE, "connections:resolve:static"):
+        _token, claims = service_issuer.issue_with_claims(action_id, scope)
+        assert (claims["scope"], claims["tenant"]) == (scope, "system")
+    with pytest.raises(BootstrapRejected):
+        service_issuer.issue(action_id, _LIST_SCOPE)
 
 
 @pytest.mark.parametrize(
@@ -289,8 +292,18 @@ def test_svc_ingest_grant_is_absent_when_dynamic_connections_is_disabled(
     assert len(identities) >= 3, "other identities must still render"  # denominator
     ids = {identity.service_id for identity in identities}
     assert _SVC_INGEST not in ids
-    assert all(_SCOPE not in identity.allowed_scopes for identity in identities)
-    assert _SCOPE not in env
+    # Both flags off: no identity carries any connections:* scope at all.
+    env_off = _render_identities_env(
+        "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false",
+        "pipeline.rustDataPlane.svcAction.dynamicConnections.enabled=false",
+    )
+    monkeypatch.setenv("SERVICE_JWT_IDENTITIES", env_off)
+    off = load_identities_from_env(env="alpha")
+    assert len(off) >= 3
+    assert all(
+        not any(s.startswith("connections:") for s in identity.allowed_scopes) for identity in off
+    )
+    assert "connections:" not in env_off
 
 
 def test_svc_ingest_grant_is_present_when_dynamic_connections_is_enabled(
