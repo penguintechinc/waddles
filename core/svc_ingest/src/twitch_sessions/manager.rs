@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use connection_resolver::ConnectionResolve;
 use penguin_spine::{KeyRing, Scope, SpineMetrics};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 
@@ -34,6 +34,10 @@ pub const LEASE_TTL: Duration = Duration::from_secs(180);
 pub const RESTART_COOLDOWN: Duration = Duration::from_secs(120);
 /// Bound on one binding discovery (each page call is bounded by this too).
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Safety margin before lease expiry at which a session stops itself if no
+/// renew landed: sessions live at most `LEASE_TTL - LEASE_MARGIN` (120s) past
+/// the last successful acquire/renew, independent of reconcile timing.
+const LEASE_MARGIN: Duration = RECONCILE_INTERVAL;
 /// Bound on a session task finishing after its shutdown signal.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Consecutive renew errors after which a session is stopped (fail-closed).
@@ -189,6 +193,8 @@ struct RunningSession {
     /// Aborts the runner's own task if it ignores shutdown.
     inner_abort: AbortHandle,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Session-local lease deadline; pushed forward on every successful renew.
+    deadline_tx: watch::Sender<Instant>,
     /// Set by the wrapper the instant the session task finishes.
     ended: Arc<Mutex<Option<(Instant, SessionEnd)>>>,
     /// Consecutive lease-renew errors.
@@ -433,15 +439,56 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
         }
     }
 
-    /// Spawns via the runner and wraps the handle to stamp the end time.
+    /// Spawns via the runner and wraps the handle: the wrapper stamps the end
+    /// time and stops the session itself once its lease deadline passes
+    /// without a renew (no fencing token, so this closes the window in which a
+    /// lost lease could keep publishing next to another replica's session).
     fn launch(&self, spec: SessionSpec) -> RunningSession {
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let inner = self.deps.runner.spawn(spec.clone(), shutdown_rx);
+        let (shutdown_tx, mut outer_rx) = oneshot::channel::<()>();
+        let (inner_tx, inner_rx) = oneshot::channel();
+        let mut inner = self.deps.runner.spawn(spec.clone(), inner_rx);
         let inner_abort = inner.abort_handle();
+        let window = LEASE_TTL.saturating_sub(LEASE_MARGIN);
+        let (deadline_tx, mut deadline_rx) = watch::channel(Instant::now() + window);
         let ended = Arc::new(Mutex::new(None));
         let stamp = ended.clone();
+        let label = spec.key();
         let handle = tokio::spawn(async move {
-            let end = inner.await.unwrap_or(SessionEnd::NonRetryable);
+            let mut inner_tx = Some(inner_tx);
+            let end = loop {
+                let dl = *deadline_rx.borrow();
+                let stop = tokio::select! {
+                    r = &mut inner => break r.unwrap_or(SessionEnd::NonRetryable),
+                    _ = &mut outer_rx => SessionEnd::Shutdown,
+                    () = tokio::time::sleep_until(dl) => {
+                        if *deadline_rx.borrow() > dl {
+                            continue;
+                        }
+                        tracing::warn!(
+                            community_id = label.0,
+                            connection_id = label.1,
+                            "lease deadline passed without renew; stopping session"
+                        );
+                        SessionEnd::LeaseLost
+                    }
+                    changed = deadline_rx.changed() => {
+                        if changed.is_ok() {
+                            continue;
+                        }
+                        SessionEnd::Shutdown
+                    }
+                };
+                if let Some(tx) = inner_tx.take() {
+                    let _ = tx.send(());
+                }
+                if tokio::time::timeout(STOP_TIMEOUT, &mut inner)
+                    .await
+                    .is_err()
+                {
+                    inner.abort();
+                }
+                break stop;
+            };
             *stamp.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), end));
             end
         });
@@ -450,6 +497,7 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
             handle,
             inner_abort,
             shutdown_tx: Some(shutdown_tx),
+            deadline_tx,
             ended,
             renew_failures: 0,
             lease_held: true,
@@ -459,12 +507,15 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
     /// Renews one live session's lease; stops it when the lease is lost or
     /// could not be renewed [`MAX_RENEW_FAILURES`] times in a row.
     async fn renew_one(&mut self, key: (i64, i64)) -> Renewal {
+        let before = Instant::now();
         let outcome = self.lease.renew(key, LEASE_TTL).await;
         let lost = match outcome {
             Ok(true) => {
                 self.deps.metrics.lease_event(LeaseOutcome::Renewed);
                 if let Some(s) = self.sessions.get_mut(&key) {
                     s.renew_failures = 0;
+                    s.deadline_tx
+                        .send_replace(before + LEASE_TTL.saturating_sub(LEASE_MARGIN));
                 }
                 false
             }
@@ -499,6 +550,7 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
     /// Signals shutdown, waits (bounded) for the task, releases the lease and
     /// records the end.
     async fn stop_session(&self, key: (i64, i64), mut rs: RunningSession, reason: SessionEnd) {
+        let already = rs.finished();
         if let Some(tx) = rs.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -520,7 +572,16 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
                 tracing::warn!(community_id = key.0, connection_id = key.1, error = %e, "lease release failed");
             }
         }
-        self.deps.metrics.session_ended(reason);
+        // A session that already ended on its own had its end recorded when
+        // reaped; only an unreaped one still owes its (real) end metric.
+        let recorded = match already {
+            Some((_, end)) if rs.lease_held => Some(end),
+            Some(_) => None,
+            None => Some(reason),
+        };
+        if let Some(end) = recorded {
+            self.deps.metrics.session_ended(end);
+        }
         tracing::info!(
             community_id = key.0,
             connection_id = key.1,
@@ -851,6 +912,61 @@ mod tests {
             2,
             "a new spawn means a fresh connector, hence a fresh resolve"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrenewed_session_stops_itself_before_the_lease_can_lapse() {
+        let mut h = harness(vec![binding(1, 10, "chan_a")]);
+        h.mgr.reconcile().await;
+        // No further reconcile fires: the manager "stopped renewing".
+        tokio::time::advance(Duration::from_secs(119)).await;
+        settle().await;
+        assert_eq!(h.mgr.live_session_count(), 1, "still inside the window");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settle().await;
+        assert_eq!(
+            h.mgr.live_session_count(),
+            0,
+            "stopped itself at ~120s < TTL"
+        );
+        assert!(LEASE_TTL > Duration::from_secs(121));
+        let r = h.mgr.reconcile().await;
+        assert_eq!(r.restarted, 0, "cooldown still applies");
+        assert_eq!(*h.metrics.ends.lock().unwrap(), vec![SessionEnd::LeaseLost]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_renews_push_the_session_deadline_forward() {
+        let mut h = harness(vec![binding(1, 10, "chan_a")]);
+        for _ in 0..4 {
+            h.mgr.reconcile().await;
+            tokio::time::advance(Duration::from_secs(60)).await;
+            settle().await;
+        }
+        // Last renew at t=180; deadline t=300; now t=240.
+        assert_eq!(h.mgr.live_session_count(), 1);
+        tokio::time::advance(Duration::from_secs(59)).await;
+        settle().await;
+        assert_eq!(h.mgr.live_session_count(), 1);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settle().await;
+        assert_eq!(h.mgr.live_session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn naturally_ended_session_removed_by_binding_change_is_recorded_once() {
+        let mut h = harness(vec![binding(1, 10, "chan_a")]);
+        *h.runner.end_with.lock().unwrap() = Some(SessionEnd::NonRetryable);
+        h.mgr.reconcile().await;
+        settle().await;
+        h.mgr.reconcile().await; // reaps: records the real end
+        *h.resolver.bindings.lock().unwrap() = Some(vec![]);
+        h.mgr.reconcile().await; // removes the dead entry
+        assert_eq!(
+            *h.metrics.ends.lock().unwrap(),
+            vec![SessionEnd::NonRetryable]
+        );
+        assert_eq!(h.lease.0.lock().unwrap().released.len(), 1, "released once");
     }
 
     #[tokio::test]
