@@ -194,6 +194,10 @@ pub struct CliConfig {
 /// Floor for `TWITCH_RECONCILE_INTERVAL_SECS`.
 pub const MIN_TWITCH_RECONCILE_INTERVAL_SECS: u64 = 10;
 
+/// Ceiling for `TWITCH_RECONCILE_INTERVAL_SECS` (one hour) -- keeps the
+/// lease/window arithmetic far from `Duration` overflow.
+pub const MAX_TWITCH_RECONCILE_INTERVAL_SECS: u64 = 3600;
+
 /// How the Twitch inbound path starts, decided by [`validate_twitch_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TwitchMode {
@@ -251,6 +255,12 @@ impl CliConfig {
             return Err(ConfigError::InvalidValue {
                 field: "TWITCH_RECONCILE_INTERVAL_SECS",
                 reason: format!("must be at least {MIN_TWITCH_RECONCILE_INTERVAL_SECS}"),
+            });
+        }
+        if self.twitch_reconcile_interval_secs > MAX_TWITCH_RECONCILE_INTERVAL_SECS {
+            return Err(ConfigError::InvalidValue {
+                field: "TWITCH_RECONCILE_INTERVAL_SECS",
+                reason: format!("must be at most {MAX_TWITCH_RECONCILE_INTERVAL_SECS}"),
             });
         }
         if self.twitch_resolve_timeout_secs == 0 {
@@ -484,6 +494,11 @@ mod tests {
         assert!(cli.validate().is_err());
         cli.twitch_reconcile_interval_secs = MIN_TWITCH_RECONCILE_INTERVAL_SECS;
         assert!(cli.validate().is_ok());
+        cli.twitch_reconcile_interval_secs = MAX_TWITCH_RECONCILE_INTERVAL_SECS;
+        assert!(cli.validate().is_ok());
+        cli.twitch_reconcile_interval_secs = MAX_TWITCH_RECONCILE_INTERVAL_SECS + 1;
+        assert!(cli.validate().is_err(), "above the ceiling is rejected");
+        cli.twitch_reconcile_interval_secs = 60;
         cli.twitch_resolve_timeout_secs = 0;
         assert!(cli.validate().is_err(), "zero resolve timeout is invalid");
         let mut cfg = mode_cfg(true, "", "", None);

@@ -6,6 +6,7 @@
 //! `Err` -- dynamic mode never falls back to the static identity.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -94,6 +95,16 @@ where
     tokio::spawn(manager.run(rx))
 }
 
+/// `true` when the manager task ended without a requested shutdown (a panic,
+/// or any early return) -- the process must then exit rather than sit healthy
+/// with zero Twitch sessions.
+pub fn manager_exit_is_fatal(
+    result: &Result<(), tokio::task::JoinError>,
+    shutdown_requested: bool,
+) -> bool {
+    result.is_err() || !shutdown_requested
+}
+
 /// Starts per-community Twitch sessions (flag ON) and returns immediately;
 /// the spine/Valkey connects and the manager run in a background task.
 /// Returns `Err` -- the process must not start -- when the service-JWT
@@ -115,8 +126,13 @@ pub fn try_start_twitch_sessions(
     })?;
     let spine_cfg = penguin_spine::SpineConfig::from_env()
         .map_err(|e| anyhow::anyhow!("spine config unavailable for twitch sessions: {e}"))?;
-    let redis_client = outbound::build_redis_client(&spine_cfg)
-        .map_err(|e| anyhow::anyhow!("valkey client build failed for twitch sessions: {e}"))?;
+    let redis_client = outbound::build_redis_client(&spine_cfg).map_err(|e| {
+        // Type only: a redis error Display can echo the URL + password.
+        anyhow::anyhow!(
+            "valkey client build failed for twitch sessions ({:?})",
+            e.kind()
+        )
+    })?;
     let resolver = Arc::new(
         ConnectionResolver::new(
             ResolverConfig::new(
@@ -167,7 +183,7 @@ pub fn try_start_twitch_sessions(
             Ok(conn) => conn,
             Err(err) => {
                 readiness.twitch_irc.set_ready(false);
-                tracing::error!(error = %err, "valkey connect failed; exiting so Kubernetes restarts this pod (twitch sessions never started)");
+                tracing::error!(error_kind = ?err.kind(), "valkey connect failed; exiting so Kubernetes restarts this pod (twitch sessions never started)");
                 std::process::exit(1);
             }
         };
@@ -195,7 +211,21 @@ pub fn try_start_twitch_sessions(
         )
         .with_timing(interval, resolve_timeout);
         tracing::info!("twitch per-community sessions started");
-        let _ = spawn_manager_task(manager, crate::shutdown_signal()).await;
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let flag = shutdown_requested.clone();
+        let result = spawn_manager_task(manager, async move {
+            crate::shutdown_signal().await;
+            flag.store(true, Ordering::SeqCst);
+        })
+        .await;
+        if manager_exit_is_fatal(&result, shutdown_requested.load(Ordering::SeqCst)) {
+            readiness.twitch_irc.set_ready(false);
+            tracing::error!(
+                panicked = result.is_err(),
+                "twitch session manager ended unexpectedly; exiting so Kubernetes restarts this pod (no sessions would run)"
+            );
+            std::process::exit(1);
+        }
     });
     Ok(())
 }
