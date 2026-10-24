@@ -76,6 +76,7 @@ pub mod outbound_ops;
 pub mod publish;
 pub mod scope_resolver;
 pub mod telemetry;
+pub mod twitch_sessions;
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
