@@ -76,6 +76,19 @@ pub struct SessionLabel {
     pub connection_id: i64,
 }
 
+/// Maps a [`TwitchError`] to a static class label for logging. The error's
+/// `Display` embeds free-form transport/server text (which can echo the
+/// channel login or nick -- PII), so it must never reach a log field.
+fn twitch_error_class(err: &TwitchError) -> &'static str {
+    match err {
+        TwitchError::Config(_) => "config",
+        TwitchError::Connection(_) => "connection",
+        TwitchError::RegistrationRejected(_) => "registration_rejected",
+        TwitchError::RegistrationTimeout => "registration_timeout",
+        TwitchError::ClosedBeforeRegistration => "closed_before_registration",
+    }
+}
+
 /// Runs the connect/receive/publish/reconnect loop until `shutdown`
 /// resolves. Split out from [`run`] (which builds the real connector,
 /// keyring, and `SpineClient`) so this control flow is exercised in tests
@@ -127,9 +140,9 @@ async fn run_loop<C, A, M>(
                     channel
                 }
                 Err(err) => {
-                    tracing::warn!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error = %err, "connect failed, retrying");
+                    tracing::warn!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = twitch_error_class(&err), "connect failed, retrying");
                     if !err.is_retryable() {
-                        tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error = %err, "non-retryable connect failure, stopping Twitch ingest");
+                        tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = twitch_error_class(&err), "non-retryable connect failure, stopping Twitch ingest");
                         return;
                     }
                     let delay = backoff.delay();
@@ -165,7 +178,9 @@ async fn run_loop<C, A, M>(
                             continue;
                         }
                         let event = crate::normalize::normalize_twitch_irc(&msg);
-                        if let Err(err) = publish_event(
+                        // The spine error's Display can embed the stream key (which contains the
+                        // channel-derived source_id), so only a static class is logged.
+                        if publish_event(
                             appender,
                             metrics,
                             keyring,
@@ -177,8 +192,9 @@ async fn run_loop<C, A, M>(
                             event,
                         )
                         .await
+                        .is_err()
                         {
-                            tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error = %err, "failed to publish chat event");
+                            tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = "publish", "failed to publish chat event");
                         }
                     }
                     Ok(None) => {
@@ -191,9 +207,9 @@ async fn run_loop<C, A, M>(
                         continue 'outer;
                     }
                     Err(err) => {
-                        tracing::warn!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error = %err, "recv error, reconnecting");
+                        tracing::warn!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = twitch_error_class(&err), "recv error, reconnecting");
                         if !err.is_retryable() {
-                            tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error = %err, "non-retryable gateway error, stopping Twitch ingest");
+                            tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = twitch_error_class(&err), "non-retryable gateway error, stopping Twitch ingest");
                             return;
                         }
                         let delay = backoff.delay();
