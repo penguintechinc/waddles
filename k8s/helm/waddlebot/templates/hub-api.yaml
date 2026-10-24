@@ -228,12 +228,12 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
+              key: VALKEY_DURABLE_URL_TLS
         - name: VALKEY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: REDIS_PASSWORD
+              key: VALKEY_DURABLE_PASSWORD
         {{- end }}
         {{- if .Values.modules.bot.enabled }}
         - name: MODULE_LOAD_BOT
