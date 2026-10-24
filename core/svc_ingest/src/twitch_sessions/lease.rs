@@ -8,6 +8,10 @@
 
 use std::time::Duration;
 
+/// Upper bound on any single Valkey round trip. Enforced inside every lease
+/// operation (not on the connection) so no caller can stall on a blackhole.
+pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Key prefix for session leases (numeric ids are appended).
 const KEY_PREFIX: &str = "waddles:ingest:twitch:session:";
 
@@ -39,14 +43,38 @@ fn ttl_ms(ttl: Duration) -> Result<u64, LeaseError> {
 }
 
 /// Replica-singleton ownership of a Twitch session binding.
-#[allow(async_fn_in_trait)]
 pub trait SessionLease: Send + Sync {
     /// Takes the lease if free (`SET .. NX PX`); `Ok(false)` if held.
-    async fn acquire(&self, key: (i64, i64), ttl: Duration) -> Result<bool, LeaseError>;
+    fn acquire(
+        &self,
+        key: (i64, i64),
+        ttl: Duration,
+    ) -> impl std::future::Future<Output = Result<bool, LeaseError>> + Send;
     /// Extends the lease only if still ours; `Ok(false)` means it was lost.
-    async fn renew(&self, key: (i64, i64), ttl: Duration) -> Result<bool, LeaseError>;
+    fn renew(
+        &self,
+        key: (i64, i64),
+        ttl: Duration,
+    ) -> impl std::future::Future<Output = Result<bool, LeaseError>> + Send;
     /// Deletes the lease only if it is ours.
-    async fn release(&self, key: (i64, i64)) -> Result<(), LeaseError>;
+    fn release(
+        &self,
+        key: (i64, i64),
+    ) -> impl std::future::Future<Output = Result<(), LeaseError>> + Send;
+}
+
+/// Runs one Valkey round trip under [`RESPONSE_TIMEOUT`]; an elapsed timeout
+/// or a Valkey error is a [`LeaseError`] (fail-closed).
+async fn bounded<T>(
+    fut: impl std::future::Future<Output = Result<T, redis::RedisError>>,
+) -> Result<T, LeaseError> {
+    match tokio::time::timeout(RESPONSE_TIMEOUT, fut).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(LeaseError(e.to_string())),
+        Err(_) => Err(LeaseError(format!(
+            "valkey did not respond within {RESPONSE_TIMEOUT:?}"
+        ))),
+    }
 }
 
 /// Valkey-backed [`SessionLease`] identified by a random per-boot replica id.
@@ -80,41 +108,42 @@ impl SessionLease for ValkeyLease {
     async fn acquire(&self, key: (i64, i64), ttl: Duration) -> Result<bool, LeaseError> {
         let ms = ttl_ms(ttl)?;
         let mut conn = self.conn.clone();
-        let res: Option<String> = redis::cmd("SET")
-            .arg(lease_key(key))
-            .arg(&self.replica_id)
-            .arg("NX")
-            .arg("PX")
-            .arg(ms)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| LeaseError(e.to_string()))?;
+        let res: Option<String> = bounded(
+            redis::cmd("SET")
+                .arg(lease_key(key))
+                .arg(&self.replica_id)
+                .arg("NX")
+                .arg("PX")
+                .arg(ms)
+                .query_async(&mut conn),
+        )
+        .await?;
         Ok(res.is_some())
     }
 
     async fn renew(&self, key: (i64, i64), ttl: Duration) -> Result<bool, LeaseError> {
         let ms = ttl_ms(ttl)?;
         let mut conn = self.conn.clone();
-        let n: i64 = self
-            .renew
-            .key(lease_key(key))
-            .arg(&self.replica_id)
-            .arg(ms)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| LeaseError(e.to_string()))?;
+        let n: i64 = bounded(
+            self.renew
+                .key(lease_key(key))
+                .arg(&self.replica_id)
+                .arg(ms)
+                .invoke_async(&mut conn),
+        )
+        .await?;
         Ok(n == 1)
     }
 
     async fn release(&self, key: (i64, i64)) -> Result<(), LeaseError> {
         let mut conn = self.conn.clone();
-        let _: i64 = self
-            .release
-            .key(lease_key(key))
-            .arg(&self.replica_id)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| LeaseError(e.to_string()))?;
+        let _: i64 = bounded(
+            self.release
+                .key(lease_key(key))
+                .arg(&self.replica_id)
+                .invoke_async(&mut conn),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -266,10 +295,10 @@ mod tests {
             }
         });
         let client = redis::Client::open(format!("redis://{addr}/")).expect("client");
-        let cfg = redis::AsyncConnectionConfig::new()
-            .set_response_timeout(Some(Duration::from_millis(200)));
+        // Connection built with NO response timeout: only the lease's own
+        // enforcement can bound the blackholed commands.
         let conn = client
-            .get_multiplexed_async_connection_with_config(&cfg)
+            .get_multiplexed_async_connection()
             .await
             .expect("connect");
         let l = ValkeyLease::with_replica_id(conn, "r".to_string());
@@ -278,7 +307,9 @@ mod tests {
         assert!(l.acquire(k, Duration::from_secs(5)).await.expect("pre"));
         l.release(k).await.expect("pre release");
         blackhole.store(true, std::sync::atomic::Ordering::SeqCst);
+        let started = std::time::Instant::now();
         assert!(l.acquire(k, Duration::from_secs(5)).await.is_err());
+        assert!(started.elapsed() < RESPONSE_TIMEOUT + Duration::from_secs(1));
         assert!(l.renew(k, Duration::from_secs(5)).await.is_err());
         assert!(l.release(k).await.is_err());
     }
@@ -300,5 +331,22 @@ mod ttl_tests {
     fn zero_ttl_is_rejected() {
         assert!(ttl_ms(Duration::ZERO).is_err());
         assert_eq!(ttl_ms(Duration::from_secs(2)).expect("ok"), 2000);
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    /// Compile-time proof the trait futures are `Send` (needed by `tokio::spawn`).
+    #[test]
+    fn lease_futures_are_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        fn check<L: SessionLease>(l: &L) {
+            assert_send(&l.acquire((1, 2), Duration::from_secs(1)));
+            assert_send(&l.renew((1, 2), Duration::from_secs(1)));
+            assert_send(&l.release((1, 2)));
+        }
+        let _ = check::<ValkeyLease>;
     }
 }
