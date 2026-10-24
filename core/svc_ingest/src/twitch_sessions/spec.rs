@@ -20,6 +20,8 @@ pub const PAGE_LIMIT: u32 = 200;
 pub const MAX_PAGES: u32 = 100;
 /// Provider name as hub-api's binding list knows it.
 const PROVIDER: &str = "twitch";
+/// Capability the binding list is scoped to.
+pub const CAPABILITY: &str = "chat_ingest";
 /// Twitch login length ceiling.
 const MAX_LOGIN_LEN: usize = 25;
 
@@ -29,6 +31,9 @@ pub enum SpecError {
     /// The binding is not a platform-OAuth connection.
     #[error("binding kind is not platform_oauth")]
     WrongKind,
+    /// The binding belongs to a different provider (mis-scoped response).
+    #[error("binding provider is not twitch")]
+    WrongProvider,
     /// A required metadata key is absent.
     #[error("binding metadata is missing required key `{0}`")]
     MissingKey(&'static str),
@@ -90,6 +95,9 @@ impl SessionSpec {
 
     /// Builds a spec from a binding; never invents missing metadata.
     pub fn from_summary(s: &BindingSummary) -> Result<Self, SpecError> {
+        if s.provider != PROVIDER {
+            return Err(SpecError::WrongProvider);
+        }
         if s.kind != ConnectionKind::PlatformOauth {
             return Err(SpecError::WrongKind);
         }
@@ -109,7 +117,10 @@ impl SessionSpec {
 pub struct Discovery {
     pub specs: Vec<SessionSpec>,
     pub skipped_malformed: u32,
+    /// Same-community, same-channel extras dropped (lowest connection_id kept).
     pub skipped_duplicate: u32,
+    /// Channels claimed by DIFFERENT communities; every claimant is dropped.
+    pub skipped_conflict: u32,
 }
 
 /// Why discovery failed; there is no partial-success variant.
@@ -121,6 +132,8 @@ pub enum DiscoverError {
     PageCapExceeded,
     #[error("binding list call timed out")]
     Timeout,
+    #[error("binding list cursor did not advance")]
+    StuckCursor,
 }
 
 /// Pages the twitch binding list to completion (each call bounded by
@@ -130,9 +143,8 @@ pub async fn discover<R: ConnectionResolve>(
     r: &R,
     timeout: Duration,
 ) -> Result<Discovery, DiscoverError> {
-    let mut by_channel: BTreeMap<String, SessionSpec> = BTreeMap::new();
+    let mut by_channel: BTreeMap<String, Vec<SessionSpec>> = BTreeMap::new();
     let mut skipped_malformed = 0u32;
-    let mut skipped_duplicate = 0u32;
     let mut after = 0i64;
     let mut pages = 0u32;
     loop {
@@ -140,14 +152,19 @@ pub async fn discover<R: ConnectionResolve>(
             return Err(DiscoverError::PageCapExceeded);
         }
         pages += 1;
-        let page =
-            tokio::time::timeout(timeout, r.list_bindings(PROVIDER, None, after, PAGE_LIMIT))
-                .await
-                .map_err(|_| DiscoverError::Timeout)?
-                .map_err(DiscoverError::Resolve)?;
+        let page = tokio::time::timeout(
+            timeout,
+            r.list_bindings(PROVIDER, Some(CAPABILITY), after, PAGE_LIMIT),
+        )
+        .await
+        .map_err(|_| DiscoverError::Timeout)?
+        .map_err(DiscoverError::Resolve)?;
         for item in &page.items {
-            let spec = match SessionSpec::from_summary(item) {
-                Ok(s) => s,
+            match SessionSpec::from_summary(item) {
+                Ok(spec) => by_channel
+                    .entry(spec.channel.clone())
+                    .or_default()
+                    .push(spec),
                 Err(e) => {
                     tracing::warn!(
                         community_id = item.community_id,
@@ -156,32 +173,52 @@ pub async fn discover<R: ConnectionResolve>(
                         "skipping malformed twitch binding"
                     );
                     skipped_malformed += 1;
-                    continue;
-                }
-            };
-            match by_channel.get(&spec.channel) {
-                Some(existing) if existing.community_id <= spec.community_id => {
-                    skipped_duplicate += 1;
-                }
-                Some(_) => {
-                    skipped_duplicate += 1;
-                    by_channel.insert(spec.channel.clone(), spec);
-                }
-                None => {
-                    by_channel.insert(spec.channel.clone(), spec);
                 }
             }
         }
         match page.next_after {
+            Some(next) if next <= after => return Err(DiscoverError::StuckCursor),
             Some(next) => after = next,
             None => break,
         }
     }
+    let mut specs = Vec::new();
+    let mut skipped_duplicate = 0u32;
+    let mut skipped_conflict = 0u32;
+    for (channel, mut group) in by_channel {
+        let mut communities: Vec<i64> = group.iter().map(|g| g.community_id).collect();
+        communities.sort_unstable();
+        communities.dedup();
+        if communities.len() > 1 {
+            // Fail closed: no claimant's token may join a contested channel.
+            tracing::warn!(
+                communities = ?communities,
+                channel_hash = %channel_fingerprint(&channel),
+                "twitch channel claimed by multiple communities; skipping all claimants"
+            );
+            skipped_conflict += 1;
+            continue;
+        }
+        group.sort_by_key(|g| g.connection_id);
+        skipped_duplicate += u32::try_from(group.len() - 1).unwrap_or(u32::MAX);
+        specs.extend(group.into_iter().take(1));
+    }
     Ok(Discovery {
-        specs: by_channel.into_values().collect(),
+        specs,
         skipped_malformed,
         skipped_duplicate,
+        skipped_conflict,
     })
+}
+
+/// Short SHA-256 fingerprint of a channel login, safe to log (the login is PII).
+fn channel_fingerprint(channel: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(channel.as_bytes())
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -357,18 +394,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_channel_keeps_lowest_community_id_and_counts() {
+    async fn same_community_duplicate_channel_keeps_one_and_counts() {
         let f = Fake::new(vec![page(
             vec![
-                summary(9, 90, Some("Same"), Some("bot")),
+                summary(3, 90, Some("Same"), Some("bot")),
                 summary(3, 30, Some("#same"), Some("bot")),
             ],
             None,
         )]);
         let d = discover(&f, T).await.unwrap();
         assert_eq!(d.specs.len(), 1);
-        assert_eq!(d.specs[0].community_id, 3);
-        assert_eq!(d.skipped_duplicate, 1);
+        assert_eq!(d.specs[0].connection_id, 30);
+        assert_eq!((d.skipped_duplicate, d.skipped_conflict), (1, 0));
+    }
+
+    /// Records the fields of every `warn!` event for assertions.
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<Mutex<Vec<String>>>);
+    impl tracing::field::Visit for Capture {
+        fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn fmt::Debug) {
+            self.0.lock().unwrap().push(format!("{}={v:?}", f.name()));
+        }
+    }
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            e.record(&mut self.clone());
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[tokio::test]
+    async fn cross_community_same_channel_skips_all_and_alerts() {
+        let cap = Capture::default();
+        let _g = tracing::subscriber::set_default(cap.clone());
+        let f = Fake::new(vec![page(
+            vec![
+                summary(9, 90, Some("Contested"), Some("bot")),
+                summary(3, 30, Some("#contested"), Some("bot")),
+                summary(4, 40, Some("fine"), Some("bot")),
+            ],
+            None,
+        )]);
+        let d = discover(&f, T).await.unwrap();
+        assert_eq!(d.specs.len(), 1);
+        assert_eq!(d.specs[0].community_id, 4);
+        assert_eq!((d.skipped_conflict, d.skipped_duplicate), (1, 0));
+        let logged = cap.0.lock().unwrap().join(" | ");
+        assert!(logged.contains("channel_hash="), "{logged}");
+        assert!(logged.contains("[3, 9]"), "{logged}");
+        assert!(!logged.to_lowercase().contains("contested"), "{logged}");
+    }
+
+    #[tokio::test]
+    async fn stuck_cursor_is_failure() {
+        let f = Fake::new(vec![page(vec![], Some(10)), page(vec![], Some(10))]);
+        assert!(matches!(
+            discover(&f, T).await,
+            Err(DiscoverError::StuckCursor)
+        ));
+    }
+
+    #[test]
+    fn from_summary_rejects_wrong_provider() {
+        let mut s = summary(1, 1, Some("a"), Some("bot"));
+        s.provider = "discord".to_owned();
+        assert_eq!(SessionSpec::from_summary(&s), Err(SpecError::WrongProvider));
     }
 
     #[tokio::test]
@@ -389,7 +488,7 @@ mod tests {
     /// binding metadata; `channel` and `bot_login` must be present.
     #[test]
     fn contract_fixture_summary_parses_to_a_spec() {
-        let raw = include_str!("../../../../hub_api/tests/fixtures/resolve_v2_oauth.json");
+        let raw = include_str!("../../tests/fixtures/resolve_v2_oauth.json");
         let v: serde_json::Value = serde_json::from_str(raw).unwrap();
         let metadata: BTreeMap<String, String> = v["metadata"]
             .as_object()
