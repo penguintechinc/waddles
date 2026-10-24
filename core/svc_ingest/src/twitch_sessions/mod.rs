@@ -5,9 +5,11 @@
 //! that set against running sessions.
 
 pub mod connector;
+pub mod lease;
 pub mod spec;
 
 pub use connector::{DeadlineChannel, ResolvingConnector, MIN_SESSION, RECYCLE_MARGIN};
+pub use lease::{LeaseError, SessionLease, ValkeyLease};
 pub use spec::{
     discover, DiscoverError, Discovery, SessionSpec, SpecError, CAPABILITY, MAX_PAGES,
     META_BOT_LOGIN, META_CHANNEL, PAGE_LIMIT,
