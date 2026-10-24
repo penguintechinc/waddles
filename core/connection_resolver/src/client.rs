@@ -153,6 +153,7 @@ fn map_status(status: reqwest::StatusCode, body: &[u8]) -> ResolveError {
             Err(_) => ResolveError::Malformed("invalid not_usable body"),
         },
         401 | 403 => ResolveError::Auth,
+        408 | 429 => ResolveError::Transient("hub rate limited or timed out"),
         s if s >= 500 => ResolveError::Transient("hub server error"),
         _ => ResolveError::Malformed("unexpected status"),
     }
@@ -282,7 +283,7 @@ impl ConnectionResolver {
             .bytes()
             .await
             .map_err(|_| ResolveError::Transient("hub response read failed"))?;
-        Ok((status, body.to_vec()))
+        Ok((status, Vec::from(body)))
     }
 
     /// One page of bindings (no secrets), via the unbound `connections:list` token.
@@ -592,6 +593,16 @@ mod tests {
             (401, "{}", ResolveError::Auth),
             (403, "{}", ResolveError::Auth),
             (500, "{}", ResolveError::Transient("hub server error")),
+            (
+                429,
+                "{}",
+                ResolveError::Transient("hub rate limited or timed out"),
+            ),
+            (
+                408,
+                "{}",
+                ResolveError::Transient("hub rate limited or timed out"),
+            ),
             (503, "{}", ResolveError::Transient("hub server error")),
             (400, "{}", ResolveError::Malformed("unexpected status")),
             (

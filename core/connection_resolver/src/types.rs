@@ -43,12 +43,24 @@ impl ConnectionKind {
 }
 
 /// Non-secret target facts of a static connection; all `None` for OAuth rows.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct Endpoint {
     pub url: Option<String>,
     pub region: Option<String>,
     pub function: Option<String>,
     pub project: Option<String>,
+}
+
+impl std::fmt::Debug for Endpoint {
+    /// `url` is redacted: webhook-style URLs can embed a token in the path or query.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("url", &self.url.as_ref().map(|_| "[REDACTED]"))
+            .field("region", &self.region)
+            .field("function", &self.function)
+            .field("project", &self.project)
+            .finish()
+    }
 }
 
 /// A decrypted credential, shaped by the wire `secret.scheme` (or OAuth access token).
@@ -267,6 +279,25 @@ fn map_secret(wire: SecretWire) -> Result<ConnectionSecret, ResolveError> {
     }
 }
 
+/// kind 2 takes bearer/basic/api-key; kind 3 takes AWS keys; kind 4 takes a GCP service account.
+fn scheme_fits_kind(kind: ConnectionKind, secret: &ConnectionSecret) -> bool {
+    matches!(
+        (kind, secret),
+        (
+            ConnectionKind::ExternalHttp,
+            ConnectionSecret::Bearer { .. }
+                | ConnectionSecret::Basic { .. }
+                | ConnectionSecret::ApiKeyHeader { .. }
+        ) | (
+            ConnectionKind::AwsLambda,
+            ConnectionSecret::AwsAccessKey { .. }
+        ) | (
+            ConnectionKind::GcpFunction,
+            ConnectionSecret::GcpServiceAccount { .. }
+        )
+    )
+}
+
 /// Parse a 200 resolve body into a [`ResolvedConnection`], enforcing that it answers `want`.
 pub(crate) fn parse_resolved(
     body: &[u8],
@@ -284,7 +315,13 @@ pub(crate) fn parse_resolved(
         (Some(access_token), None) if kind == ConnectionKind::PlatformOauth => {
             ConnectionSecret::OAuthAccessToken { access_token }
         }
-        (None, Some(secret)) if kind != ConnectionKind::PlatformOauth => map_secret(secret)?,
+        (None, Some(secret)) if kind != ConnectionKind::PlatformOauth => {
+            let mapped = map_secret(secret)?;
+            if !scheme_fits_kind(kind, &mapped) {
+                return Err(ResolveError::Malformed("secret scheme does not match kind"));
+            }
+            mapped
+        }
         _ => return Err(ResolveError::Malformed("credential does not match kind")),
     };
     let expires_at = match wire.expires_at {
@@ -325,6 +362,16 @@ pub(crate) fn parse_page(body: &[u8]) -> Result<BindingPage, ResolveError> {
     })
 }
 
+/// Days in `month` (1-12) of `year`, leap-year aware.
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
 /// Days since 1970-01-01 for a proleptic Gregorian date (Hinnant's algorithm).
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -356,7 +403,13 @@ pub(crate) fn parse_rfc3339(s: &str) -> Option<i64> {
     }
     let (year, month, day) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (hour, min, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
+    if !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in_month(year, month)
+        || hour > 23
+        || min > 59
+        || sec > 60
+    {
         return None;
     }
     let mut rest = s.get(19..)?;
@@ -475,8 +528,45 @@ mod tests {
             (r#"{"scheme":5,"fields":{"clientEmail":"e"}}"#, false),
         ];
         for (secret, ok) in cases {
-            let r = parse_resolved(&resolved_body(2, secret, "null"), REF);
+            let kind = if secret.contains("\"scheme\":4") {
+                3
+            } else if secret.contains("\"scheme\":5") {
+                4
+            } else {
+                2
+            };
+            let r = parse_resolved(&resolved_body(kind, secret, "null"), REF);
             assert_eq!(r.is_ok(), ok, "{secret}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn kind_and_scheme_must_agree() {
+        let schemes = [
+            r#"{"scheme":1,"fields":{"token":"a"}}"#,
+            r#"{"scheme":2,"fields":{"username":"u","password":"p"}}"#,
+            r#"{"scheme":3,"fields":{"header":"X-K","value":"v"}}"#,
+            r#"{"scheme":4,"fields":{"accessKeyId":"a","secretAccessKey":"s"}}"#,
+            r#"{"scheme":5,"fields":{"clientEmail":"e","privateKey":"k"}}"#,
+        ];
+        // allowed[kind-2][scheme-1]
+        let allowed = [
+            [true, true, true, false, false],
+            [false, false, false, true, false],
+            [false, false, false, false, true],
+        ];
+        for (ki, row) in allowed.iter().enumerate() {
+            for (si, ok) in row.iter().enumerate() {
+                let kind = ki as i64 + 2;
+                let r = parse_resolved(&resolved_body(kind, schemes[si], "null"), REF);
+                assert_eq!(r.is_ok(), *ok, "kind {kind} scheme {}: {r:?}", si + 1);
+                if !ok {
+                    assert!(matches!(
+                        r,
+                        Err(ResolveError::Malformed("secret scheme does not match kind"))
+                    ));
+                }
+            }
         }
     }
 
@@ -527,6 +617,13 @@ mod tests {
             Some(1_791_648_000)
         );
         assert_eq!(parse_rfc3339("2000-02-29T00:00:00Z"), Some(951_782_400));
+        assert!(parse_rfc3339("2024-02-29T00:00:00Z").is_some());
+        assert_eq!(parse_rfc3339("2026-02-31T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339("2024-02-30T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339("2026-02-29T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339("1900-02-29T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339("2026-04-31T00:00:00Z"), None);
+        assert!(parse_rfc3339("2026-01-31T00:00:00Z").is_some());
         for bad in [
             "",
             "garbage",
@@ -582,11 +679,16 @@ mod tests {
                 community_id: 2,
                 provider: "p".into(),
                 kind: ConnectionKind::ExternalHttp,
-                endpoint: Endpoint::default(),
+                endpoint: Endpoint {
+                    url: Some("https://h.example/hook/PLAIN-url-token?k=PLAIN-q".into()),
+                    region: Some("us-east-1".into()),
+                    ..Endpoint::default()
+                },
                 secret,
                 expires_at: None,
             };
             assert!(!format!("{rc:?}").contains("PLAIN"));
+            assert!(format!("{rc:?}").contains("us-east-1"));
             assert!(!format!("{rc:#?}").contains("PLAIN"));
         }
     }
