@@ -110,6 +110,7 @@ struct Hub {
     table: Mutex<BTreeMap<Key, Binding>>,
     list_fail_ticks: AtomicU32,
     resolve_down: AtomicBool,
+    resolve_failures: AtomicU32,
     resolves: Mutex<Vec<(Key, String)>>,
 }
 
@@ -158,6 +159,7 @@ impl Hub {
 impl ConnectionResolve for Hub {
     async fn resolve(&self, r: ConnectionRef) -> Result<ResolvedConnection, ResolveError> {
         if self.resolve_down.load(Ordering::SeqCst) {
+            self.resolve_failures.fetch_add(1, Ordering::SeqCst);
             return Err(ResolveError::Transient("hub down"));
         }
         let key = (r.community_id, r.connection_id);
@@ -372,8 +374,8 @@ impl Env {
             self.appender.count() >= n
         })
         .await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(self.appender.count(), n, "exactly {n} events, no dupes");
+        // Bounded re-poll: a late duplicate must not slip past a short sleep.
+        stays("event count", n, || self.appender.count()).await;
     }
 }
 
@@ -386,6 +388,18 @@ async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for: {what}");
+}
+
+/// Re-polls `f` every 20ms for 2s and asserts it never leaves `expected`.
+async fn stays(what: &str, expected: usize, f: impl Fn() -> usize) {
+    for _ in 0..100 {
+        assert_eq!(
+            f(),
+            expected,
+            "{what} changed from {expected} (late duplicate?)"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// Jumps the clock `by` without letting auto-advance distort real-socket
@@ -465,6 +479,9 @@ async fn reconcile_adds_session_for_new_binding_and_server_sees_the_join() {
     assert_eq!(conns.len(), 1, "connections observed");
     assert_eq!(conns[0].joined, "#chanlogin_add");
     assert_eq!(mgr.live_session_count(), 1);
+    env.server.send_privmsg(0, "viewer1", "hi");
+    env.events_settle_at(1).await;
+    assert_eq!(env.appender.count_for("chanlogin_add"), 1);
 }
 
 #[tokio::test]
@@ -588,12 +605,51 @@ async fn hub_outage_mid_run_keeps_sockets_open_and_recovers() {
     env.server.send_privmsg(0, "viewer1", "during outage");
     env.events_settle_at(1).await;
 
+    // Mid-outage the socket dies: the session must retry resolve() (which
+    // fails Transient) and stay alive in the manager, not be torn down.
+    env.server.drop_conn(0);
+    eventually("socket gone", || env.server.live_conn_count() == 0).await;
+    eventually("session retried resolve() and it failed", || {
+        env.hub.resolve_failures.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+    env.hub.list_fail_ticks.store(1, Ordering::SeqCst);
+    let rep = mgr.reconcile().await;
+    assert!(rep.discovery_failed, "{rep:?}");
+    assert_eq!((rep.kept, rep.stopped, rep.started), (1, 0, 0), "{rep:?}");
+    assert_eq!(
+        mgr.live_session_count(),
+        1,
+        "not torn down by resolve Transient"
+    );
+    assert_eq!(env.server.live_conn_count(), 0);
+    assert_eq!(
+        env.server.connections().len(),
+        1,
+        "no connect while hub down"
+    );
+
     env.hub.resolve_down.store(false, Ordering::SeqCst);
     let rep = mgr.reconcile().await;
     assert!(!rep.discovery_failed, "{rep:?}");
     assert_eq!((rep.kept, rep.started, rep.restarted), (1, 0, 0), "{rep:?}");
-    assert_eq!(env.server.connections().len(), 1, "never reconnected");
-    env.server.send_privmsg(0, "viewer1", "after recovery");
+    eventually("session reconnects after recovery", || {
+        env.server.connections().len() == 2
+    })
+    .await;
+    env.joined(1).await;
+    assert_eq!(
+        env.hub.resolved_tokens(key).len(),
+        2,
+        "initial + post-recovery"
+    );
+    assert!(env
+        .metrics
+        .ended
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_empty());
+    env.server.send_privmsg(1, "viewer1", "after recovery");
     env.events_settle_at(2).await;
 }
 
@@ -665,15 +721,13 @@ async fn two_managers_one_server_one_connection() {
     assert_eq!(r1.started, 1, "{r1:?}");
     assert_eq!((r2.started, r2.lease_denied), (0, 1), "{r2:?}");
     env.joined(0).await;
-    // Give a (wrongly started) second session ample time to connect.
-    tokio::time::sleep(Duration::from_millis(500)).await;
     let r2b = m2.reconcile().await;
     assert_eq!((r2b.started, r2b.lease_denied), (0, 1), "{r2b:?}");
-    assert_eq!(
-        env.server.connections().len(),
-        1,
-        "exactly one server connection across both managers"
-    );
+    // Give a (wrongly started) second session ample time to connect.
+    stays("server connections across both managers", 1, || {
+        env.server.connections().len()
+    })
+    .await;
     assert_eq!(m1.live_session_count() + m2.live_session_count(), 1);
 
     env.server.send_privmsg(0, "viewer1", "once");
@@ -732,7 +786,7 @@ async fn token_never_appears_in_captured_tracing_output() {
 }
 
 #[tokio::test]
-async fn session_recycles_before_token_expiry_with_fresh_resolve() {
+async fn session_recycle_floor_applies_to_near_expiry_token() {
     let env = Env::new().await;
     let key = fresh_key();
     let now = i64::try_from(
@@ -772,6 +826,66 @@ async fn session_recycles_before_token_expiry_with_fresh_resolve() {
     assert_eq!(mgr.live_session_count(), 1, "session survived the recycle");
 
     // The recycled channel is the live one: a message on it is published once.
+    env.server.send_privmsg(1, "viewer1", "post-recycle");
+    env.events_settle_at(1).await;
+}
+
+#[tokio::test]
+async fn session_recycles_before_token_expiry_with_fresh_resolve() {
+    let env = Env::new().await;
+    let key = fresh_key();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs(),
+    )
+    .expect("epoch fits i64");
+    // expiry = now+400s -> recycle_at = 400 - RECYCLE_MARGIN(300) = ~100s,
+    // well above the 30s MIN_SESSION floor: only expires_at can drive it.
+    env.hub.put(
+        key,
+        "chanlogin_exp",
+        "botlogin_exp",
+        "SECRETTOKEN_exp_1",
+        Some(now + 400),
+    );
+    let mut mgr = env.manager("replica-exp").await;
+    mgr.reconcile().await;
+    env.joined(0).await;
+    env.hub.set_token(key, "SECRETTOKEN_exp_2", None);
+
+    // Past the floor but before recycle_at: the session must NOT recycle.
+    jump_clock(Duration::from_secs(40)).await;
+    stays("server connections before recycle_at", 1, || {
+        env.server.connections().len()
+    })
+    .await;
+    assert!(
+        env.server.connections()[0].live,
+        "still on the original socket"
+    );
+
+    // Past recycle_at (~100s): reconnect with the refreshed token.
+    jump_clock(Duration::from_secs(65)).await;
+    eventually("expiry-driven recycle reconnect", || {
+        env.server.connections().len() == 2
+    })
+    .await;
+    env.joined(1).await;
+    assert_eq!(
+        env.server.connections()[1].token.as_deref(),
+        Some("SECRETTOKEN_exp_2")
+    );
+    eventually("old socket closed", || !env.server.connections()[0].live).await;
+    assert_eq!(
+        env.hub.resolved_tokens(key),
+        vec![
+            "SECRETTOKEN_exp_1".to_string(),
+            "SECRETTOKEN_exp_2".to_string()
+        ]
+    );
+    assert_eq!(mgr.live_session_count(), 1);
     env.server.send_privmsg(1, "viewer1", "post-recycle");
     env.events_settle_at(1).await;
 }
