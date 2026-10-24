@@ -229,3 +229,22 @@ pub fn try_start_twitch_sessions(
     });
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The debug-only resolver telemetry must accept every outcome and never panic; it carries
+    /// only a fixed outcome label and a latency (no ids, no tokens).
+    #[test]
+    fn resolver_telemetry_accepts_every_signal_without_panicking() {
+        let t = ResolverTelemetry;
+        t.resolve(
+            ConnectionKind::PlatformOauth,
+            "ok",
+            Duration::from_millis(3),
+        );
+        t.resolve_failed("auth", Duration::from_millis(5));
+        t.list("ok");
+    }
+}

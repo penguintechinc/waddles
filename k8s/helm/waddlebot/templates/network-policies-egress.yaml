@@ -127,6 +127,21 @@ spec:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.hubApiGrpcPort | quote }}
               protocol: TCP
+    {{- if or .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled .Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled }}
+    # feature/edge-reshape-chunk2-twitch-inbound (Task 9) -- hub-api's HTTP port, the
+    # transport for the internal provider-connections routes (list bindings / resolve token)
+    # and /internal/service-token that svc-ingest's per-community Twitch sessions (and
+    # svc-action's resolver) call. Distinct from the gRPC rule above; only rendered while a
+    # dynamic-connections consumer is enabled.
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: hub-api
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.hubApi.port | quote }}
+              protocol: TCP
+    {{- end }}
     # feature/alpha-localized-posthog -- in-cluster PostHog (feature-flag
     # execution plane), reached directly by svc-process-rust/svc-action-rust's
     # penguin_licensing client (POSTHOG_HOST), not proxied through

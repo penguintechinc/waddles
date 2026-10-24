@@ -25,7 +25,7 @@ asks hub-api which connections to run and for a fresh token to run them with.
 | Provider adapter interface + registry | **shipped (this change)** |
 | Twitch adapter (bot account + channel resolution + refresh) | **shipped (this change)** |
 | `GET/POST /api/v1/internal/...` data-plane endpoints (list + resolve) | **shipped (this change)** |
-| `svc-ingest` (Rust) resolves connections dynamically instead of static env | follow-up (paired PR) |
+| `svc-ingest` (Rust) resolves connections dynamically instead of static env | per-community Twitch sessions behind `INGEST_DYNAMIC_CONNECTIONS` (alpha) -- runbook: `core/svc_ingest/README.md` |
 | webui connection UI, CLI connection commands | follow-ups (call the API below unchanged) |
 | Discord / Slack / Kick / YouTube adapters | follow-ups (one adapter + one registry line each) |
 | Redirect-style installs (OAuth connect, Discord invite link) | follow-up -- see [Limitations](#limitations-and-follow-ups) |
