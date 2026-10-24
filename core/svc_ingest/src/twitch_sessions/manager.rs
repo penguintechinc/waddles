@@ -103,9 +103,18 @@ pub struct RealRunner<R, A, M> {
     host: String,
     port: u16,
     use_tls: bool,
+    session_metrics: Option<Arc<dyn SessionMetrics>>,
 }
 
 impl<R, A, M> RealRunner<R, A, M> {
+    /// Attaches the telemetry sink that records resolve failures from every
+    /// session's connector.
+    #[must_use]
+    pub fn with_session_metrics(mut self, metrics: Arc<dyn SessionMetrics>) -> Self {
+        self.session_metrics = Some(metrics);
+        self
+    }
+
     /// Bundles the shared publish/IRC dependencies of every session.
     #[allow(clippy::too_many_arguments)] // one flat constructor for boot wiring
     pub fn new(
@@ -129,6 +138,7 @@ impl<R, A, M> RealRunner<R, A, M> {
             host,
             port,
             use_tls,
+            session_metrics: None,
         }
     }
 }
@@ -151,13 +161,17 @@ where
         let kid = self.active_kid.clone();
         let scope = self.scope.clone();
         let (host, port, tls) = (self.host.clone(), self.port, self.use_tls);
+        let session_metrics = self.session_metrics.clone();
         tokio::spawn(async move {
             let label = SessionLabel {
                 community_id: spec.community_id,
                 connection_id: spec.connection_id,
             };
-            let connector =
+            let mut connector =
                 ResolvingConnector::new(resolver, spec.clone(), host, port, tls, RESOLVE_TIMEOUT);
+            if let Some(m) = session_metrics {
+                connector = connector.with_metrics(m);
+            }
             let (stop_tx, stop_rx) = oneshot::channel();
             let session = run_with_connector(
                 connector,
@@ -263,6 +277,11 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
 
     /// One reconcile pass. Never panics and never returns an error: failures
     /// are isolated per session and surface in the report and metrics.
+    #[tracing::instrument(
+        name = "twitch.reconcile",
+        skip_all,
+        fields(desired, started, stopped, discovery_failed)
+    )]
     pub async fn reconcile(&mut self) -> ReconcileReport {
         let began = Instant::now();
         let mut rep = ReconcileReport::default();
@@ -271,6 +290,11 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
             Err(e) => {
                 rep.discovery_failed = true;
                 self.deps.metrics.discovery(DiscoveryOutcome::Failed);
+                if let DiscoverError::Resolve(re) = &e {
+                    self.deps.metrics.resolve_failed(re.outcome());
+                } else if matches!(e, DiscoverError::Timeout) {
+                    self.deps.metrics.resolve_failed("timeout");
+                }
                 tracing::warn!(
                     class = discover_error_class(&e),
                     "twitch binding discovery failed; keeping all sessions"
@@ -285,6 +309,12 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
             }
             Ok(d) => {
                 self.deps.metrics.discovery(DiscoveryOutcome::Ok);
+                self.deps
+                    .metrics
+                    .discovery_skipped("malformed", d.skipped_malformed);
+                self.deps
+                    .metrics
+                    .discovery_skipped("duplicate", d.skipped_duplicate);
                 self.apply(d.specs, &mut rep).await;
             }
         }
@@ -292,6 +322,11 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
         self.deps
             .metrics
             .reconcile_done(&rep, began.elapsed(), live);
+        let span = tracing::Span::current();
+        span.record("desired", rep.desired);
+        span.record("started", rep.started);
+        span.record("stopped", rep.stopped);
+        span.record("discovery_failed", rep.discovery_failed);
         tracing::debug!(
             desired = rep.desired,
             started = rep.started,
@@ -604,6 +639,7 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
             }
             self.stop_session(key, rs, SessionEnd::Shutdown).await;
         }
+        self.deps.metrics.set_live_sessions(0);
     }
 }
 
@@ -761,6 +797,9 @@ mod tests {
         fn reconcile_done(&self, _r: &ReconcileReport, _e: Duration, _live: usize) {
             *self.reconciles.lock().unwrap() += 1;
         }
+        fn set_live_sessions(&self, _n: usize) {}
+        fn resolve_failed(&self, _class: &'static str) {}
+        fn discovery_skipped(&self, _why: &'static str, _n: u32) {}
     }
 
     struct H {
@@ -801,6 +840,70 @@ mod tests {
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
+    }
+
+    #[tokio::test]
+    async fn manager_updates_gauge_on_start_and_stop() {
+        let registry = prometheus::Registry::new();
+        let metrics = Arc::new(crate::telemetry::register_ingest_metrics(&registry));
+        let resolver = Arc::new(FakeResolver {
+            bindings: Mutex::new(Some(vec![
+                binding(1, 10, "chan_a"),
+                binding(2, 20, "chan_b"),
+            ])),
+            resolve_transient: false,
+        });
+        let mut mgr = SessionManager::new(
+            resolver.clone(),
+            Arc::new(FakeLease::default()),
+            SessionDeps {
+                runner: Arc::new(RecRunner::default()),
+                metrics: metrics.clone(),
+            },
+        );
+        mgr.reconcile().await;
+        let text = crate::telemetry::render_metrics(&registry).unwrap();
+        assert!(text.contains("svc_ingest_twitch_sessions_live 2"), "{text}");
+        assert!(text.contains(r#"svc_ingest_twitch_session_events_total{event="started"} 2"#));
+
+        *resolver.bindings.lock().unwrap() = Some(vec![binding(2, 20, "chan_b")]);
+        mgr.reconcile().await;
+        let text = crate::telemetry::render_metrics(&registry).unwrap();
+        assert!(text.contains("svc_ingest_twitch_sessions_live 1"), "{text}");
+        assert!(text.contains(r#"svc_ingest_twitch_session_events_total{event="stopped"} 1"#));
+
+        mgr.stop_all().await;
+        let text = crate::telemetry::render_metrics(&registry).unwrap();
+        assert!(text.contains("svc_ingest_twitch_sessions_live 0"), "{text}");
+        assert_eq!(
+            metrics
+                .receiver_connection_healthy
+                .with_label_values(&["twitch_irc"])
+                .get(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_failure_records_resolve_class_and_failed_outcome() {
+        let registry = prometheus::Registry::new();
+        let metrics = Arc::new(crate::telemetry::register_ingest_metrics(&registry));
+        let resolver = Arc::new(FakeResolver {
+            bindings: Mutex::new(None),
+            resolve_transient: false,
+        });
+        let mut mgr = SessionManager::new(
+            resolver,
+            Arc::new(FakeLease::default()),
+            SessionDeps {
+                runner: Arc::new(RecRunner::default()),
+                metrics: metrics.clone(),
+            },
+        );
+        mgr.reconcile().await;
+        let text = crate::telemetry::render_metrics(&registry).unwrap();
+        assert!(text.contains(r#"svc_ingest_twitch_resolve_errors_total{class="transient"} 1"#));
+        assert!(text.contains(r#"svc_ingest_twitch_reconcile_total{outcome="discovery_failed"} 1"#));
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@
 //! `IrcConfig` build, and a live session is recycled before its token expires.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,8 +13,10 @@ use connection_resolver::{
 use penguin_connector_twitch::irc::{IrcConnection, IrcStream, TwitchIrcReceiver};
 use penguin_connector_twitch::TwitchError;
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use crate::ingest::twitch::{irc_config, IrcChannel, IrcConnector};
+use crate::twitch_sessions::metrics::SessionMetrics;
 use crate::twitch_sessions::spec::SessionSpec;
 
 /// How long before token expiry a live session is closed so the loop
@@ -73,9 +76,18 @@ pub struct ResolvingConnector<R: ConnectionResolve> {
     use_tls: bool,
     timeout: Duration,
     clock: fn() -> i64,
+    attempts: AtomicU64,
+    metrics: Option<Arc<dyn SessionMetrics>>,
 }
 
 impl<R: ConnectionResolve> ResolvingConnector<R> {
+    /// Records resolve failures into `metrics` (fixed class labels only).
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<dyn SessionMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
     /// Builds a connector for one session; `timeout` bounds each resolve call.
     pub fn new(
         resolver: Arc<R>,
@@ -106,6 +118,15 @@ impl<R: ConnectionResolve> ResolvingConnector<R> {
             use_tls,
             timeout,
             clock,
+            attempts: AtomicU64::new(0),
+            metrics: None,
+        }
+    }
+
+    /// Counts a resolve failure under its fixed class label.
+    fn note_resolve_failed(&self, class: &'static str) {
+        if let Some(m) = &self.metrics {
+            m.resolve_failed(class);
         }
     }
 }
@@ -127,14 +148,34 @@ impl<R: ConnectionResolve> IrcConnector for ResolvingConnector<R> {
     /// Resolves, builds the `IrcConfig`, drops the resolved secret, then
     /// connects; the returned channel closes itself before token expiry.
     async fn connect(&self) -> Result<Self::Channel, TwitchError> {
+        let attempt = self.attempts.fetch_add(1, Ordering::Relaxed) + 1;
+        let span = tracing::info_span!(
+            "twitch.session.connect",
+            community_id = self.spec.community_id,
+            connection_id = self.spec.connection_id,
+            attempt
+        );
+        self.connect_inner().instrument(span).await
+    }
+}
+
+impl<R: ConnectionResolve> ResolvingConnector<R> {
+    /// The body of [`IrcConnector::connect`], run inside its span.
+    async fn connect_inner(&self) -> Result<<Self as IrcConnector>::Channel, TwitchError> {
         let r = ConnectionRef {
             community_id: self.spec.community_id,
             connection_id: self.spec.connection_id,
         };
         let resolved = tokio::time::timeout(self.timeout, self.resolver.resolve(r))
             .await
-            .map_err(|_elapsed| TwitchError::Connection("resolve failed: timeout".into()))?
-            .map_err(|e| map_resolve_error(&e))?;
+            .map_err(|_elapsed| {
+                self.note_resolve_failed("timeout");
+                TwitchError::Connection("resolve failed: timeout".into())
+            })?
+            .map_err(|e| {
+                self.note_resolve_failed(e.outcome());
+                map_resolve_error(&e)
+            })?;
         let expires_at = resolved.expires_at;
         let cfg = match &resolved.secret {
             ConnectionSecret::OAuthAccessToken { access_token } => irc_config(
