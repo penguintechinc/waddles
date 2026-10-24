@@ -51,6 +51,16 @@ older `AppManifest` pipeline (`app_catalog` -> `app_tenant_availability`
      `approve_version()` did for its own `community_id is not None`
      branch; the join's shape and columns are untouched.
 
+**Slash-command registry write.** Both activation paths also call
+`app_command_service.sync_commands()` inside the SAME `engine.begin()` transaction as the
+approval/signing/`sync_bindings()` writes (right after bindings, before the
+`app_active_versions` write), registering the bundle's inferred/declared commands into
+`app_commands` (tenant-wide activations use the scope-0 sentinel); both deactivation paths call
+`clear_commands()` in their own transaction. A later failure rolls the command rows back with
+everything else. Conflicts never block activation: they come back as `ActivationWarning`s on
+`ActivationResult` (`activate_*_with_warnings`) and are logged AFTER commit, code only. The
+legacy `activate_for_community()`/`activate_tenant_wide()` wrappers still return the approval row.
+
 R52 (coordinator ruling, inherited from the pre-split module): every
 handler reads/writes through the penguin-dal `install_dal: AsyncDB`
 (`services/bundle_install_dal.py`) -- `reflect()` discovers hub-api's
@@ -86,6 +96,7 @@ denied.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -95,6 +106,7 @@ from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
 from services import (
+    app_command_service,
     app_source_binding_service,
     bundle_audit,
     bundle_signing_service,
@@ -105,6 +117,7 @@ from services.bundle_manifest_v2 import (
     ConsumeRule,
     EgressRule,
     Limits,
+    parse_command_declarations,
     parse_permission_declarations,
 )
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
@@ -112,6 +125,14 @@ from services.errors import ApiError, conflict, not_found
 from services.permission_summary_service import build_permission_summary, permission_hash
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True, frozen=True)
+class ActivationResult:
+    """Outcome of an activation: the approval row plus any non-fatal command-registry warnings."""
+
+    approval: Any
+    warnings: tuple[app_command_service.ActivationWarning, ...]
 
 
 def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
@@ -139,6 +160,23 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
     limits_raw = raw.get("limits") or {}
     permission_declarations = parse_permission_declarations(
         [e for e in (raw.get("permissions") or ()) if isinstance(e, dict)]
+    )
+    supported_platforms = (
+        tuple(raw["supported_platforms"]) if raw.get("supported_platforms") else None
+    )
+    # Already-validated blob -- tenant custom-platform registration is not
+    # re-checked, so accept exactly the `custom:` names the blob itself declares.
+    declared_custom = frozenset(
+        platform.removeprefix("custom:")
+        for entry in (raw.get("commands") or ())
+        if isinstance(entry, dict)
+        for platform in (entry.get("platforms") or ())
+        if isinstance(platform, str) and platform.startswith("custom:")
+    )
+    command_declarations = parse_command_declarations(
+        raw.get("commands"),
+        known_custom_platforms=declared_custom,
+        supported_platforms=supported_platforms,
     )
     return BundleManifestV2(
         schema_version=raw["schema_version"],
@@ -174,9 +212,8 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         homepage_url=raw.get("homepage_url"),
         notice=raw.get("notice"),
         category=raw.get("category"),
-        supported_platforms=(
-            tuple(raw["supported_platforms"]) if raw.get("supported_platforms") else None
-        ),
+        supported_platforms=supported_platforms,
+        command_declarations=command_declarations,
     )
 
 
@@ -616,7 +653,9 @@ async def _write_approval_and_activate(
     version_id: int,
     manifest: BundleManifestV2,
     approval_source: str = "human",
-) -> tuple[int, dict[str, list[str]], dict[str, Any]]:
+) -> tuple[
+    int, dict[str, list[str]], dict[str, Any], tuple[app_command_service.ActivationWarning, ...]
+]:
     """Write `app_install_approvals` + upsert `app_active_versions` + AUTO-BIND sources, in one tx.
 
     `community_id` is a required `int` (never `None`) -- see this
@@ -733,6 +772,17 @@ async def _write_approval_and_activate(
             ingest_sources_table=install_dal.metadata.tables["ingest_sources"],
         )
 
+        # Slash-command registry: same tx, so a later failure (incl. the
+        # active_table write below) rolls the command rows back too.
+        warnings = await app_command_service.sync_commands(
+            conn,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            manifest=manifest,
+            commands_table=install_dal.metadata.tables["app_commands"],
+        )
+
         active_where = (
             (active_table.c.app_id == app_id)
             & (active_table.c.tenant_id == tenant_id)
@@ -759,7 +809,7 @@ async def _write_approval_and_activate(
                 )
             )
 
-    return int(new_id), bound, signing_result
+    return int(new_id), bound, signing_result, warnings
 
 
 async def _write_tenant_wide_approval_and_activate(
@@ -774,7 +824,9 @@ async def _write_tenant_wide_approval_and_activate(
     version_id: int,
     manifest: BundleManifestV2,
     approval_source: str,
-) -> tuple[int, dict[str, list[str]], dict[str, Any]]:
+) -> tuple[
+    int, dict[str, list[str]], dict[str, Any], tuple[app_command_service.ActivationWarning, ...]
+]:
     """TENANT-WIDE sibling of `_write_approval_and_activate()` -- SYSTEM actor only.
 
     Deliberately a SEPARATE function rather than a `community_id: int | None`
@@ -861,6 +913,16 @@ async def _write_tenant_wide_approval_and_activate(
             ingest_sources_table=install_dal.metadata.tables["ingest_sources"],
         )
 
+        # Slash-command registry (scope-0 sentinel via `community_id=None`), same tx.
+        warnings = await app_command_service.sync_commands(
+            conn,
+            tenant_id=tenant_id,
+            community_id=None,
+            app_id=app_id,
+            manifest=manifest,
+            commands_table=install_dal.metadata.tables["app_commands"],
+        )
+
         active_where = (
             (active_table.c.app_id == app_id)
             & (active_table.c.tenant_id == tenant_id)
@@ -887,7 +949,27 @@ async def _write_tenant_wide_approval_and_activate(
                 )
             )
 
-    return int(new_id), bound, signing_result
+    return int(new_id), bound, signing_result, warnings
+
+
+def _log_activation_warnings(
+    warnings: tuple[app_command_service.ActivationWarning, ...],
+    *,
+    app_id: str,
+    tenant_id: int,
+    community_id: int | None,
+) -> None:
+    """Log each activation warning AFTER commit -- constant code only, never command/user text."""
+    for warning in warnings:
+        logger.warning(
+            "bundle activation: command warning",
+            extra={
+                "app_id": app_id,
+                "tenant_id": tenant_id,
+                "community_id": community_id,
+                "code": warning.code,
+            },
+        )
 
 
 async def activate_tenant_wide(
@@ -899,6 +981,27 @@ async def activate_tenant_wide(
     valkey_client: Any | None = None,
     approval_source: str = "system:core-seeder",
 ) -> Any:
+    """Legacy wrapper: `activate_tenant_wide_with_warnings()` returning only the approval row."""
+    result = await activate_tenant_wide_with_warnings(
+        install_dal,
+        tenant_id=tenant_id,
+        app_id=app_id,
+        activated_by=activated_by,
+        valkey_client=valkey_client,
+        approval_source=approval_source,
+    )
+    return result.approval
+
+
+async def activate_tenant_wide_with_warnings(
+    install_dal: AsyncDB,
+    *,
+    tenant_id: int,
+    app_id: str,
+    activated_by: int | None,
+    valkey_client: Any | None = None,
+    approval_source: str = "system:core-seeder",
+) -> ActivationResult:
     """TENANT-WIDE activation -- SYSTEM actor only, never wired to any HTTP route.
 
     Reinstates the tenant-wide write path this module's own docstring
@@ -973,7 +1076,7 @@ async def activate_tenant_wide(
         install_dal, app_id=app_id, version=version
     )
 
-    new_id, bound, signing_result = await _write_tenant_wide_approval_and_activate(
+    new_id, bound, signing_result, warnings = await _write_tenant_wide_approval_and_activate(
         install_dal,
         app_id=app_id,
         version=version,
@@ -1024,8 +1127,10 @@ async def activate_tenant_wide(
             if valkey_client is None:
                 await client.aclose()
 
+    _log_activation_warnings(warnings, app_id=app_id, tenant_id=tenant_id, community_id=None)
     deferred_audit.raise_if_failed()
-    return (await install_dal(install_dal.app_install_approvals.id == new_id).select()).first()
+    approval = (await install_dal(install_dal.app_install_approvals.id == new_id).select()).first()
+    return ActivationResult(approval=approval, warnings=warnings)
 
 
 async def activate_for_community(
@@ -1038,6 +1143,29 @@ async def activate_for_community(
     valkey_client: Any | None = None,
     approval_source: str = "human",
 ) -> Any:
+    """Legacy wrapper: `activate_for_community_with_warnings()` returning only the approval row."""
+    result = await activate_for_community_with_warnings(
+        install_dal,
+        tenant_id=tenant_id,
+        community_id=community_id,
+        app_id=app_id,
+        activated_by=activated_by,
+        valkey_client=valkey_client,
+        approval_source=approval_source,
+    )
+    return result.approval
+
+
+async def activate_for_community_with_warnings(
+    install_dal: AsyncDB,
+    *,
+    tenant_id: int,
+    community_id: int,
+    app_id: str,
+    activated_by: int | None,
+    valkey_client: Any | None = None,
+    approval_source: str = "human",
+) -> ActivationResult:
     """COMMUNITY tier: activate `app_id` for `community_id`, AUTO-BINDing its sources.
 
     409 unless `app_id` has a CURRENT `bundle_tenant_availability` row for
@@ -1104,7 +1232,7 @@ async def activate_for_community(
         install_dal, app_id=app_id, version=version
     )
 
-    new_id, bound, signing_result = await _write_approval_and_activate(
+    new_id, bound, signing_result, warnings = await _write_approval_and_activate(
         install_dal,
         app_id=app_id,
         version=version,
@@ -1167,8 +1295,12 @@ async def activate_for_community(
             if valkey_client is None:
                 await client.aclose()
 
+    _log_activation_warnings(
+        warnings, app_id=app_id, tenant_id=tenant_id, community_id=community_id
+    )
     deferred_audit.raise_if_failed()
-    return (await install_dal(install_dal.app_install_approvals.id == new_id).select()).first()
+    approval = (await install_dal(install_dal.app_install_approvals.id == new_id).select()).first()
+    return ActivationResult(approval=approval, warnings=warnings)
 
 
 async def deactivate_for_community(
@@ -1209,6 +1341,13 @@ async def deactivate_for_community(
             community_id=community_id,
             app_id=app_id,
             bindings_table=install_dal.metadata.tables["app_source_bindings"],
+        )
+        await app_command_service.clear_commands(
+            conn,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            commands_table=install_dal.metadata.tables["app_commands"],
         )
 
     await bundle_audit.record(
@@ -1274,6 +1413,13 @@ async def deactivate_tenant_wide(
             community_id=sentinel,
             app_id=app_id,
             bindings_table=install_dal.metadata.tables["app_source_bindings"],
+        )
+        await app_command_service.clear_commands(
+            conn,
+            tenant_id=tenant_id,
+            community_id=None,
+            app_id=app_id,
+            commands_table=install_dal.metadata.tables["app_commands"],
         )
 
     await bundle_audit.record(
