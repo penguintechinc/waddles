@@ -39,16 +39,20 @@ AWS_DOC = {"access_key_id": "FAKE-ACCESS-KEY-ID", "secret_access_key": "FAKE-SEC
 GCP_DOC = {"client_email": "svc@fake-project.example", "private_key": "FAKE-PRIVATE-KEY"}
 
 
+STATIC_SCOPE = "connections:resolve:static"
+
+
 def _bound(
-    issuer: ServiceJwtIssuer, community_id: int, connection_id: int | None = None
+    issuer: ServiceJwtIssuer,
+    community_id: int,
+    connection_id: int | None = None,
+    scope: str = STATIC_SCOPE,
 ) -> dict[str, str]:
-    """Bearer for a community-bound ``connections:resolve`` token."""
+    """Bearer for a community-bound resolve token (default: the static-capable scope)."""
     extra = {"community": community_id}
     if connection_id is not None:
         extra["conn"] = connection_id
-    token, _ = issuer.issue_with_claims(
-        SYSTEM_SERVICE_ID, "connections:resolve", extra_claims=extra
-    )
+    token, _ = issuer.issue_with_claims(SYSTEM_SERVICE_ID, scope, extra_claims=extra)
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -56,8 +60,16 @@ def _url(community_id: int, connection_id: int) -> str:
     return f"{INTERNAL}/communities/{community_id}/provider-connections/{connection_id}/resolve"
 
 
-async def _resolve(client: Any, issuer: ServiceJwtIssuer, community_id: int, conn: int) -> Any:
-    return await client.post(_url(community_id, conn), headers=_bound(issuer, community_id))
+async def _resolve(
+    client: Any,
+    issuer: ServiceJwtIssuer,
+    community_id: int,
+    conn: int,
+    scope: str = STATIC_SCOPE,
+) -> Any:
+    return await client.post(
+        _url(community_id, conn), headers=_bound(issuer, community_id, scope=scope)
+    )
 
 
 def _normalised(body: dict[str, Any]) -> dict[str, Any]:
@@ -245,6 +257,64 @@ class TestGoldenFixturesMatchTheDto:
             assert set(raw["secret"]) == {f.name for f in fields(SecretDTO)}
         parsed = TypeAdapter(ResolvedCredentialsDTO).validate_python(raw)
         assert json.loads(TypeAdapter(ResolvedCredentialsDTO).dump_json(parsed)) == raw
+
+
+class TestStaticScopeLeastPrivilege:
+    @pytest.mark.parametrize(
+        ("provider", "scheme", "doc", "meta", "kind"),
+        [(c.values[0], c.values[1], c.values[2], c.values[3], c.values[6]) for c in STATIC_CASES],
+    )
+    async def test_base_resolve_scope_cannot_release_a_static_kind(
+        self,
+        static_client: Any,
+        pc_static_service: Any,
+        pc_db: Any,
+        service_issuer: ServiceJwtIssuer,
+        provider: str,
+        scheme: int,
+        doc: dict[str, str],
+        meta: dict[str, str],
+        kind: int,
+    ) -> None:
+        view = await create_static(
+            pc_static_service, pc_db, provider=provider, scheme=scheme, document=doc, metadata=meta
+        )
+        cid, conn = pc_db.seed.community_id, view.binding.connection.id
+        base = await _resolve(static_client, service_issuer, cid, conn, scope="connections:resolve")
+        assert base.status_code == 403
+        assert await base.get_json() == {"error": "forbidden"}  # generic: no secret, no reason
+        text = await base.get_data(as_text=True)
+        assert not any(v in text for v in doc.values())
+        full = await _resolve(static_client, service_issuer, cid, conn, scope=STATIC_SCOPE)
+        assert full.status_code == 200
+        assert (await full.get_json())["kind"] == kind
+
+    async def test_base_scope_still_resolves_an_oauth_connection(
+        self, client: Any, pc_db: Any, bot_tokens: Any, service_issuer: ServiceJwtIssuer
+    ) -> None:
+        conn = (await (await _create(client, pc_db, bot_tokens)).get_json())["connection"]["id"]
+        base = await _resolve(
+            client, service_issuer, pc_db.seed.community_id, conn, scope="connections:resolve"
+        )
+        assert base.status_code == 200 and (await base.get_json())["kind"] == 1
+
+    async def test_the_static_scope_token_is_community_bound_like_the_base(
+        self, static_client: Any, pc_static_service: Any, pc_db: Any, service_issuer: Any
+    ) -> None:
+        view = await create_static(pc_static_service, pc_db)
+        wrong = await static_client.post(
+            _url(pc_db.seed.community_id, view.binding.connection.id),
+            headers=_bound(service_issuer, pc_db.seed.second_community_id),
+        )
+        assert wrong.status_code == 403
+        unbound = {
+            "Authorization": "Bearer " + service_issuer.issue(SYSTEM_SERVICE_ID, STATIC_SCOPE)
+        }
+        assert (
+            await static_client.post(
+                _url(pc_db.seed.community_id, view.binding.connection.id), headers=unbound
+            )
+        ).status_code == 401
 
 
 class TestResolveErrors:

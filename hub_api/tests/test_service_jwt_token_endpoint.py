@@ -177,7 +177,9 @@ def _connections_issuer() -> ServiceJwtIssuer:
         service_id=SERVICE_ID,
         k8s_namespace="waddlebot",
         k8s_service_account="svc-process",
-        allowed_scopes=frozenset({SCOPE, "connections:resolve", "connections:list"}),
+        allowed_scopes=frozenset(
+            {SCOPE, "connections:resolve", "connections:resolve:static", "connections:list"}
+        ),
         tenant="system",
     )
     return ServiceJwtIssuer(
@@ -226,6 +228,19 @@ async def test_resolve_token_is_bound_and_short_lived(app: Quart, audit: _AuditL
     assert claims["exp"] - claims["iat"] <= 300
     event = audit.events[-1]
     assert event["community_id"] == 7 and body["token"] not in repr(event)
+
+
+async def test_static_resolve_scope_is_community_bound_like_the_base_scope(app: Quart) -> None:
+    scope = "connections:resolve:static"
+    assert (await _post_body(app, {"scope": scope})).status_code == 400
+    response = await _post_body(app, {"scope": scope, "community_id": 7})
+    assert response.status_code == 200
+    claims = (
+        app.config["SERVICE_JWT_ISSUER"]
+        .as_verifier()
+        .verify((await response.get_json())["token"], required_scope=scope)
+    )
+    assert claims["community"] == 7 and claims["exp"] - claims["iat"] <= 300
 
 
 async def test_resolve_token_without_connection_has_no_conn_claim(app: Quart) -> None:

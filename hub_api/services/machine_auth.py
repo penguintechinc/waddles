@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from functools import wraps
 from typing import Any, Final, LiteralString
 
@@ -32,7 +32,7 @@ from flask_core.service_jwt import (
     UnknownKeyId,
 )
 from opentelemetry import metrics
-from quart import current_app, request
+from quart import current_app, g, request
 
 from services.provider_connections.telemetry import log_failure
 
@@ -91,7 +91,7 @@ def _svid_peer_id() -> str | None:
 
 
 def machine_authenticated(
-    required_scope: str,
+    required_scope: str | Collection[str],
     *,
     unconfigured_event: LiteralString,
     rejected_event: LiteralString,
@@ -105,7 +105,12 @@ def machine_authenticated(
     wrong-scope credential -> 401, valid credential from a non-``system`` tenant -> 403. With
     ``bind_community`` a missing/garbled community binding -> 401 and a binding that does not equal
     the route's ``community_id`` (or ``connection_id``) -> 403.
+
+    ``required_scope`` may be a collection: a credential holding ANY one of them is accepted, and
+    the scopes the caller actually holds are published on ``quart.g.machine_scopes`` so a handler
+    can apply a finer, per-resource check (least privilege by connection kind).
     """
+    accepted = (required_scope,) if isinstance(required_scope, str) else tuple(required_scope)
 
     def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(handler)
@@ -123,7 +128,7 @@ def machine_authenticated(
                     kwargs,
                     verifier,
                     header[len("Bearer ") :],
-                    required_scope,
+                    accepted,
                     bind_community,
                     rejected_event,
                     wrong_tenant_event,
@@ -135,7 +140,7 @@ def machine_authenticated(
                     args,
                     kwargs,
                     peer,
-                    required_scope,
+                    accepted,
                     bind_community,
                     unconfigured_event,
                     rejected_event,
@@ -155,18 +160,30 @@ async def _jwt_path(
     kwargs: dict[str, Any],
     verifier: Any,
     token: str,
-    required_scope: str,
+    required_scope: tuple[str, ...],
     bind_community: bool,
     rejected_event: LiteralString,
     wrong_tenant_event: LiteralString,
 ) -> Any:
     """Verify a bearer machine JWT, enforce tenant + (optionally) community binding, then call."""
-    try:
-        claims = verifier.verify(token, required_scope=required_scope)
-    except (UnknownKeyId, InvalidServiceToken) as exc:
-        log_failure(logger, rejected_event, exc, level=logging.WARNING)
+    claims: dict[str, Any] | None = None
+    failure: Exception | None = None
+    for scope in required_scope:
+        try:
+            claims = verifier.verify(token, required_scope=scope)
+            break
+        except (UnknownKeyId, InvalidServiceToken) as exc:
+            failure = exc
+    if claims is None:
+        log_failure(
+            logger,
+            rejected_event,
+            failure or InvalidServiceToken("no scope"),
+            level=logging.WARNING,
+        )
         _count(_MECH_JWT, _OUT_UNAUTHORIZED)
         return _UNAUTHORIZED, 401
+    g.machine_scopes = frozenset({str(claims.get("scope"))})
     if claims.get("tenant") != SYSTEM_TENANT:
         logger.warning(wrong_tenant_event)
         _count(_MECH_JWT, _OUT_FORBIDDEN)
@@ -199,7 +216,7 @@ async def _svid_path(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     peer: str,
-    required_scope: str,
+    required_scope: tuple[str, ...],
     bind_community: bool,
     unconfigured_event: LiteralString,
     rejected_event: LiteralString,
@@ -212,7 +229,7 @@ async def _svid_path(
         _count(_MECH_SVID, _OUT_UNCONFIGURED)
         return {"error": "service authentication is not configured"}, 503
     identity = issuer.identities.get(peer) if _SPIFFE_ID_RE.fullmatch(peer) else None
-    if identity is None or required_scope not in identity.allowed_scopes:
+    if identity is None or not any(scope in identity.allowed_scopes for scope in required_scope):
         logger.warning(rejected_event)
         _count(_MECH_SVID, _OUT_UNAUTHORIZED)
         return _UNAUTHORIZED, 401
@@ -230,5 +247,6 @@ async def _svid_path(
             logger.warning(wrong_tenant_event)
             _count(_MECH_SVID, _OUT_FORBIDDEN)
             return _FORBIDDEN, 403
+    g.machine_scopes = frozenset(identity.allowed_scopes)
     _count(_MECH_SVID, _OUT_OK)
     return await handler(*args, **kwargs)

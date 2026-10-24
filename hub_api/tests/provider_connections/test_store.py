@@ -201,6 +201,7 @@ from sqlalchemy import CheckConstraint, event  # noqa: E402
 from services.platform_integrations_crypto import PlatformCredentialCryptoError  # noqa: E402
 from services.provider_connections.errors import (  # noqa: E402
     InvalidConnectionInput,
+    StaticScopeRequired,
     UnknownProvider,
 )
 from services.provider_connections.kinds import ConnectionKind  # noqa: E402
@@ -426,8 +427,14 @@ class TestStaticLifecycle:
         self, pc_static_service: ProviderConnectionService, pc_db: Any
     ) -> None:
         view = await create_static(pc_static_service, pc_db)
+        with pytest.raises(StaticScopeRequired):  # fail-closed by default
+            await pc_static_service.resolve(
+                community_id=pc_db.seed.community_id, connection_id=view.binding.connection.id
+            )
         resolved = await pc_static_service.resolve(
-            community_id=pc_db.seed.community_id, connection_id=view.binding.connection.id
+            community_id=pc_db.seed.community_id,
+            connection_id=view.binding.connection.id,
+            static_allowed=True,
         )
         assert resolved.access_token is None and resolved.kind == 2
         assert resolved.secret_fields == {"token": STATIC_BEARER}

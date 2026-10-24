@@ -56,6 +56,7 @@ from services.provider_connections.errors import (
     ProviderUnavailable,
     RefreshNotConfigured,
     RefreshRejected,
+    StaticScopeRequired,
     UnknownProvider,
     VaultCorrupt,
 )
@@ -583,8 +584,15 @@ class ProviderConnectionService:
             )
             return DataPlanePage(items=items, next_after=next_after)
 
-    async def resolve(self, *, community_id: int, connection_id: int) -> ResolvedCredentials:
-        """Hand the data plane a fresh access token for one usable binding (refresh if stale)."""
+    async def resolve(
+        self, *, community_id: int, connection_id: int, static_allowed: bool = False
+    ) -> ResolvedCredentials:
+        """Hand the data plane a fresh access token for one usable binding (refresh if stale).
+
+        ``static_allowed`` is the caller's ``connections:resolve:static`` entitlement and defaults
+        to fail-closed: a static-secret kind is refused with :class:`StaticScopeRequired` (before
+        any usability check, so nothing about the row leaks) unless the caller holds it.
+        """
         state = await store.read_resolve_state(
             self._db, community_id=community_id, connection_id=connection_id
         )
@@ -594,6 +602,8 @@ class ProviderConnectionService:
         adapter = self._registry.get(provider)
         kind = ConnectionKind.from_code(state.connection.connection_kind)
         if kind is not ConnectionKind.PLATFORM_OAUTH:
+            if not static_allowed:
+                raise StaticScopeRequired("static-secret connections need a broader scope")
             # A static row never falls through to the token-opening path (its access_token is
             # NULL by construction): it has its own branch and its own sealed document.
             with operation_span(provider, "resolve"):

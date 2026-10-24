@@ -16396,6 +16396,22 @@ paths:
 
             Exactly one of ``accessToken`` (OAuth, kind 1) / ``secret`` (static, kinds
             2-4) is non-null.'
+        '403':
+          content:
+            application/json:
+              schema:
+                description: '403 body (guard refusals and a missing ``connections:resolve:static``):
+                  one fixed word.'
+                properties:
+                  error:
+                    title: Error
+                    type: string
+                required:
+                - error
+                title: ForbiddenDTO
+                type: object
+          description: '403 body (guard refusals and a missing ``connections:resolve:static``):
+            one fixed word.'
         '404':
           content:
             application/json:

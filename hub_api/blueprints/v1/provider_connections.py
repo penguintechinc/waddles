@@ -48,7 +48,7 @@ from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from pydantic import ConfigDict
-from quart import Blueprint, Response, current_app, request
+from quart import Blueprint, Response, current_app, g, request
 from quart_schema import document_response, validate_request, validate_response
 
 from services.community_authz import authorize_community
@@ -85,6 +85,9 @@ provider_connections_internal_bp = Blueprint(
 SCOPE_CONNECTIONS_ADMIN = "connections:admin"
 #: Machine-JWT scope the data plane's service identity must hold.
 SCOPE_CONNECTIONS_RESOLVE = "connections:resolve"
+#: Additionally required to resolve static-secret kinds (least privilege by kind); a token carrying
+#: only the base scope can resolve platform-OAuth connections and nothing else.
+SCOPE_CONNECTIONS_RESOLVE_STATIC = "connections:resolve:static"
 #: Machine-JWT scope for enumerating what to run (unbound, never returns a secret).
 SCOPE_CONNECTIONS_LIST = "connections:list"
 #: Two-gate feature (PostHog flag default OFF AND Professional tier) -- see
@@ -337,6 +340,13 @@ class NotUsableDTO:
 
 
 @dataclass(slots=True, frozen=True)
+class ForbiddenDTO:
+    """403 body (guard refusals and a missing ``connections:resolve:static``): one fixed word."""
+
+    error: str
+
+
+@dataclass(slots=True, frozen=True)
 class ErrorBodyDTO:
     """The inner ``error`` object of the standard error envelope."""
 
@@ -515,6 +525,12 @@ def _connection_err(
     A refusal to hand out a connection carries a machine-readable ``reason`` in ``error.details``
     so the data plane can tell "stop" (disabled, expired) from "retry later" without parsing text.
     """
+    if isinstance(exc, pc_errors.StaticScopeRequired):
+        # Same generic body as the guard's 403: never says which check failed.
+        log_failure(
+            logger, "provider_connections.request_failed", exc, level=logging.WARNING, route=event
+        )
+        return {"error": "forbidden"}, 403
     if event == "internal_resolve" and isinstance(exc, pc_errors.ConnectionNotUsable):
         # The data-plane contract: a flat, fixed-code body (no free text, no envelope).
         log_failure(
@@ -749,7 +765,7 @@ async def delete_provider_connection(community_id: int, connection_id: int) -> D
 #: Requires a valid machine JWT with ``connections:resolve`` from the operator-plane tenant; the
 #: fail-closed ladder lives in :func:`services.machine_auth.machine_authenticated`.
 _resolve_authenticated = machine_authenticated(
-    SCOPE_CONNECTIONS_RESOLVE,
+    (SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC),
     bind_community=True,
     unconfigured_event="provider_connections.service_auth_unconfigured",
     rejected_event="provider_connections.service_auth_rejected",
@@ -808,6 +824,7 @@ async def internal_list() -> DataPlaneListResponse:
 @_resolve_authenticated
 @validate_response(ResolvedCredentialsDTO)
 @document_response(NotUsableDTO, 409)
+@document_response(ForbiddenDTO, 403)
 @document_response(ErrorEnvelopeDTO, 404)
 @document_response(ErrorEnvelopeDTO, 503)
 @_guarded("internal_resolve")
@@ -818,7 +835,12 @@ async def internal_resolve(community_id: int, connection_id: int) -> ResolvedCre
     ``endpoint`` + structured ``secret``. Not found or not granted to this community is a 404 (never
     a 403: no existence oracle).
     """
-    resolved = await _service().resolve(community_id=community_id, connection_id=connection_id)
+    resolved = await _service().resolve(
+        community_id=community_id,
+        connection_id=connection_id,
+        static_allowed=SCOPE_CONNECTIONS_RESOLVE_STATIC
+        in getattr(g, "machine_scopes", frozenset()),
+    )
     return _resolved_dto(resolved)
 
 

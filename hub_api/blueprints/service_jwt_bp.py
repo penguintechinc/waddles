@@ -22,8 +22,8 @@ from typing import Any
 
 from flask_core.service_jwt import (
     BOUND_TOKEN_TTL_SECONDS,
+    COMMUNITY_BOUND_SCOPES,
     DEFAULT_TOKEN_TTL_SECONDS,
-    SCOPE_CONNECTIONS_RESOLVE,
     BootstrapRejected,
     ServiceJwtIssuer,
     verify_service_account_token,
@@ -44,12 +44,13 @@ K8S_CA_CERT_PATH = os.getenv(
 def _binding_claims(scope: str, body: dict[str, Any]) -> dict[str, int] | None:
     """Translate the request's binding fields into issuer ``extra_claims``.
 
-    ``connections:resolve`` REQUIRES ``community_id`` (non-negative int; ``connection_id`` optional)
-    -- a resolve token is always community-bound. Every other scope (``connections:list`` included,
-    which is unbound) must not carry the fields. Raises ``ValueError`` on any violation.
+    ``connections:resolve`` / ``connections:resolve:static`` REQUIRE ``community_id`` (non-negative
+    int; ``connection_id`` optional) -- a resolve token is always community-bound. Every other
+    scope (``connections:list`` included, which is unbound) must not carry the fields.
+    Raises ``ValueError`` on any violation.
     """
     has_binding = "community_id" in body or "connection_id" in body
-    if scope != SCOPE_CONNECTIONS_RESOLVE:
+    if scope not in COMMUNITY_BOUND_SCOPES:
         if has_binding:
             raise ValueError("binding fields not accepted for this scope")
         return None

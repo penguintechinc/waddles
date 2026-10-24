@@ -100,6 +100,12 @@ BOUND_TOKEN_TTL_SECONDS = 300
 #: operator-plane, and the routes it guards never return secrets.
 SCOPE_CONNECTIONS_RESOLVE = "connections:resolve"
 SCOPE_CONNECTIONS_LIST = "connections:list"
+#: Least privilege by kind: ``resolve`` alone releases only platform-OAuth (kind 1) credentials;
+#: static-secret kinds (external HTTP / AWS Lambda / GCP function) additionally need this scope.
+#: Community-bound exactly like ``resolve``.
+SCOPE_CONNECTIONS_RESOLVE_STATIC = "connections:resolve:static"
+#: Scopes whose tokens are community-bound.
+COMMUNITY_BOUND_SCOPES = frozenset({SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC})
 
 #: The ONLY extra claims an issuer call may stamp, and both are integers (numeric ids only --
 #: never a name/slug, never PII), so a JWS suffices and no JWE wrapping is needed.
