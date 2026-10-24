@@ -915,6 +915,12 @@ impl BoundMachineJwtClient {
             )));
         }
         let parsed: TokenResponse = response.json().await?;
+        if parsed.token.trim().is_empty() {
+            warn!(community_id, "service_auth.bound_mint_empty_token");
+            return Err(ServiceAuthError::BootstrapRejected(
+                "token endpoint returned an empty token".into(),
+            ));
+        }
         let ttl = parsed.expires_in.min(MAX_TOKEN_TTL_SECONDS);
         let token: Arc<str> = Arc::from(parsed.token.as_str());
         self.cache.lock().await.insert(
@@ -1873,6 +1879,26 @@ mod tests {
         c.get_token_for(0, None).await.expect("re-mint");
         assert_eq!(hits.load(Ordering::SeqCst), BOUND_TOKEN_CACHE_CAP + 2);
         assert_eq!(c.cache.lock().await.map.len(), BOUND_TOKEN_CACHE_CAP);
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn bound_empty_minted_token_is_rejected_and_not_cached() {
+        let (url, hits) = mock_server(vec![tok_body("  ", 300)]).await;
+        let sa = temp_sa_token("bound_empty", "sa");
+        let c = bound_client(url, &sa);
+        for expected in 1..=2 {
+            assert!(matches!(
+                c.get_token_for(1, None).await.unwrap_err(),
+                ServiceAuthError::BootstrapRejected(m) if m.contains("empty token")
+            ));
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                expected,
+                "re-mints, never cached"
+            );
+        }
+        assert!(c.cache.lock().await.map.is_empty());
         let _ = std::fs::remove_file(sa);
     }
 
