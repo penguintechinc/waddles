@@ -24,7 +24,9 @@ use penguin_spine::{KeyRing, Scope, SpineMetrics};
 use tokio::sync::oneshot;
 
 use crate::ingest::{Backoff, STABILITY_WINDOW};
-use crate::publish::{deterministic_workstream_id, publish_event, EventAppender};
+use crate::publish::{
+    deterministic_workstream_id, publish_event, publish_event_bound, EventAppender,
+};
 
 /// Abstraction over a live, joined IRC connection's `recv()` -- lets
 /// [`run_loop`] be driven by a scripted fake in tests instead of a real
@@ -180,18 +182,37 @@ async fn run_loop<C, A, M>(
                         let event = crate::normalize::normalize_twitch_irc(&msg);
                         // The spine error's Display can embed the stream key (which contains the
                         // channel-derived source_id), so only a static class is logged.
-                        if publish_event(
-                            appender,
-                            metrics,
-                            keyring,
-                            active_kid,
-                            scope,
-                            &source_id,
-                            &workstream_id,
-                            None,
-                            event,
-                        )
-                        .await
+                        let published = if label.connection_id != 0 {
+                            // Dynamic session: bind the publish scope to this
+                            // session's own community (tenant isolation).
+                            publish_event_bound(
+                                label.community_id,
+                                appender,
+                                metrics,
+                                keyring,
+                                active_kid,
+                                scope,
+                                &source_id,
+                                &workstream_id,
+                                None,
+                                event,
+                            )
+                            .await
+                        } else {
+                            publish_event(
+                                appender,
+                                metrics,
+                                keyring,
+                                active_kid,
+                                scope,
+                                &source_id,
+                                &workstream_id,
+                                None,
+                                event,
+                            )
+                            .await
+                        };
+                        if published
                         .is_err()
                         {
                             tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = "publish", "failed to publish chat event");
