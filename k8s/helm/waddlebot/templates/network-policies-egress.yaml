@@ -218,8 +218,7 @@ spec:
 # sessions. Deliberately NOT part of dataplane-egress-deny (which selects every dataplane
 # component): granting it there would hand hub-api HTTP to every dataplane pod. Cilium
 # unions allows across CNPs selecting the same endpoint, so this adds to that baseline.
-# TODO(B1): when svc-action-rust's dynamic-connections flag lands, give it its OWN sibling
-# CiliumNetworkPolicy (endpointSelector component: svc-action-rust) -- do not widen this one.
+# svc-action has its OWN sibling policy below -- never widen this one.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -232,6 +231,33 @@ spec:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: svc-ingest-rust
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: hub-api
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.hubApi.port | quote }}
+              protocol: TCP
+{{- end }}
+---
+{{- if .Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled }}
+# hub-api HTTP egress for svc-action ONLY: its per-send community credential resolution
+# (connections:resolve via /internal/service-token + the provider-connections routes) calls
+# hub-api's HTTP port. Own policy, not dataplane-wide -- see the svc-ingest policy above.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-action-hubapi-http-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-action
   egress:
     - toEndpoints:
         - matchLabels:
