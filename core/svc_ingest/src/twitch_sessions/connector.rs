@@ -6,7 +6,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use connection_resolver::{ConnectionRef, ConnectionResolve, ConnectionSecret, ResolveError};
+use connection_resolver::{
+    ConnectionRef, ConnectionResolve, ConnectionSecret, NotUsableReason, ResolveError,
+};
 use penguin_connector_twitch::irc::{IrcConnection, IrcStream, TwitchIrcReceiver};
 use penguin_connector_twitch::TwitchError;
 use tokio::time::Instant;
@@ -43,11 +45,16 @@ fn recycle_delay(expires_at: Option<i64>, now_epoch: i64) -> Option<Duration> {
 /// only -- never the error text -- so hub payloads cannot reach logs.
 ///
 /// Hub trouble (`Transient`/`CircuitOpen`/`Auth`) is retryable: it says
-/// nothing about the session's own validity. A refused connection
-/// (`NotFound`/`NotUsable`/`Malformed`) is terminal for this session.
+/// nothing about the session's own validity. `NotUsable(TokenExpired)` also
+/// retries: the recycle re-resolves right at expiry and the hub may need a beat
+/// to surface the refreshed token. A refused connection (`NotFound`, other
+/// `NotUsable`, `Malformed`) is terminal for this session.
 pub(crate) fn map_resolve_error(e: &ResolveError) -> TwitchError {
     match e {
-        ResolveError::Transient(_) | ResolveError::CircuitOpen | ResolveError::Auth => {
+        ResolveError::Transient(_)
+        | ResolveError::CircuitOpen
+        | ResolveError::Auth
+        | ResolveError::NotUsable(NotUsableReason::TokenExpired) => {
             TwitchError::Connection(format!("resolve failed: {}", e.outcome()))
         }
         ResolveError::NotFound | ResolveError::NotUsable(_) | ResolveError::Malformed(_) => {
@@ -318,6 +325,7 @@ mod tests {
             ResolveError::Transient("x"),
             ResolveError::CircuitOpen,
             ResolveError::Auth,
+            ResolveError::NotUsable(NotUsableReason::TokenExpired),
         ] {
             let m = map_resolve_error(&e);
             assert!(matches!(m, TwitchError::Connection(_)), "{e:?}");
@@ -325,7 +333,11 @@ mod tests {
         }
         for e in [
             ResolveError::NotFound,
+            ResolveError::NotUsable(NotUsableReason::PendingApproval),
+            ResolveError::NotUsable(NotUsableReason::RevokedGrant),
             ResolveError::NotUsable(NotUsableReason::Disabled),
+            ResolveError::NotUsable(NotUsableReason::ConnectionExpired),
+            ResolveError::NotUsable(NotUsableReason::Other),
             ResolveError::Malformed("x"),
         ] {
             let m = map_resolve_error(&e);
@@ -382,26 +394,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolving_connector_error_and_debug_carry_no_token() {
+    #[tokio::test]
+    async fn resolving_connector_error_and_debug_carry_no_token() {
         let c = connector(FakeResolver::new(Mode::Oauth, None), 1);
         let dbg = format!("{c:?}");
+        let leaky = ["oauth_SECRETTOKEN_xyz", "secretchan"];
         for e in [
+            ResolveError::Transient("oauth_SECRETTOKEN_xyz"),
+            ResolveError::Malformed("secretchan"),
             ResolveError::NotFound,
             ResolveError::NotUsable(NotUsableReason::TokenExpired),
+            ResolveError::NotUsable(NotUsableReason::Disabled),
             ResolveError::Auth,
-            ResolveError::Transient("x"),
             ResolveError::CircuitOpen,
-            ResolveError::Malformed("x"),
         ] {
-            let out = format!(
-                "{dbg} {:?} {}",
-                map_resolve_error(&e),
-                map_resolve_error(&e)
-            );
-            for secret in [TOKEN, LOGIN, BOT] {
+            let m = map_resolve_error(&e);
+            let out = format!("{dbg} {m:?} {m}");
+            for secret in [TOKEN, LOGIN, BOT, leaky[0], leaky[1]] {
                 assert!(!out.contains(secret), "leaked {secret}: {out}");
             }
+        }
+        // Non-OAuth secret path: error text must not carry the token either.
+        let r = FakeResolver::new(Mode::Bearer, None);
+        let err = connector(r, 1).connect().await.err().expect("must fail");
+        let out = format!("{err:?} {err}");
+        for secret in [TOKEN, LOGIN, BOT] {
+            assert!(!out.contains(secret), "leaked {secret}: {out}");
         }
     }
 }
