@@ -40,7 +40,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: bundle-signing-backfill
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         command: ["python3", "-m", "cli.sign_approved_bundles"]
         securityContext:
