@@ -30,7 +30,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
+from uuid import UUID, uuid4
 
+from services.platform_integrations_crypto import platform_connection_aad
 from services.provider_connections import store
 from services.provider_connections.adapter import (
     AdapterRegistry,
@@ -59,7 +61,7 @@ from services.provider_connections.telemetry import (
     operation_span,
     token_refresh_counter,
 )
-from services.provider_connections.vault import TokenVault
+from services.provider_connections.vault import SEAL_AAD, SEAL_LEGACY, TokenVault
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +184,9 @@ class ProviderConnectionService:
             facts = self._compose_facts(adapter, account.scopes, resource.facts)
             facts.update(self._metadata_inputs(spec, clean_metadata))
             now = self._clock()
+            # The row's immutable identity is minted first: it is part of the tokens' AAD (M4).
+            public_id = uuid4()
+            aad = platform_connection_aad(public_id=public_id, platform=spec.platform)
             binding = await store.insert_connection(
                 self._db,
                 tenant_id=tenant_id,
@@ -189,13 +194,15 @@ class ProviderConnectionService:
                 platform=spec.platform,
                 resource_type=spec.resource_type,
                 resource_id=resource.resource_id,
+                public_id=public_id,
                 secrets=SealedSecrets(
-                    access_token=self._vault.seal(credentials.access_token),
+                    access_token=self._vault.seal(credentials.access_token, aad=aad),
                     refresh_token=(
-                        self._vault.seal(credentials.refresh_token)
+                        self._vault.seal(credentials.refresh_token, aad=aad)
                         if credentials.refresh_token
                         else None
                     ),
+                    seal_version=SEAL_AAD,
                 ),
                 expires_at=account.expires_at,
                 resource_metadata=facts,
@@ -343,10 +350,14 @@ class ProviderConnectionService:
             if credentials.refresh_token and not spec.refreshable:
                 raise InvalidConnectionInput("this provider does not use a refresh token")
             account = await adapter.validate_credentials(credentials)
-            values["access_token"] = self._vault.seal(credentials.access_token)
+            aad = self._row_aad(binding.connection)
+            values["access_token"] = self._vault.seal(credentials.access_token, aad=aad)
             values["refresh_token"] = (
-                self._vault.seal(credentials.refresh_token) if credentials.refresh_token else None
+                self._vault.seal(credentials.refresh_token, aad=aad)
+                if credentials.refresh_token
+                else None
             )
+            values["seal_version"] = SEAL_AAD
             values["expires_at"] = account.expires_at
             values["status"] = store.STATUS_ACTIVE
             values["status_reason"] = None
@@ -505,7 +516,9 @@ class ProviderConnectionService:
             if state is None:
                 raise ConnectionNotFound("connection not found")
         if not self._needs_refresh(state.connection.expires_at):
-            return self._vault.open(state.secrets.access_token), state.connection
+            access = self._open(state.secrets.access_token, state)
+            await self._reseal_if_legacy(state)
+            return access, state.connection
 
         failure: ConnectionNotUsable | None = None
         async with store.lock_for_refresh(
@@ -516,7 +529,7 @@ class ProviderConnectionService:
             current = locked.state
             if not self._needs_refresh(current.connection.expires_at):
                 token_refresh_counter.add(1, {"provider": provider, "outcome": "already_rotated"})
-                return self._vault.open(current.secrets.access_token), current.connection
+                return self._open(current.secrets.access_token, current), current.connection
             self._assert_usable_connection(current)
             now = self._clock()
             if current.secrets.refresh_token is None or not adapter.spec.refreshable:
@@ -528,7 +541,7 @@ class ProviderConnectionService:
             else:
                 try:
                     refreshed = await adapter.refresh(
-                        self._vault.open(current.secrets.refresh_token),
+                        self._open(current.secrets.refresh_token, current),
                         current.connection.resource_metadata,
                     )
                 except RefreshRejected:
@@ -569,14 +582,22 @@ class ProviderConnectionService:
                     )
                     raise
                 else:
-                    sealed_access = self._vault.seal(refreshed.access_token)
-                    sealed_refresh = (
-                        self._vault.seal(refreshed.refresh_token)
-                        if refreshed.refresh_token
-                        else current.secrets.refresh_token
-                    )
+                    aad = self._row_aad(current.connection)
+                    sealed_access = self._vault.seal(refreshed.access_token, aad=aad)
+                    if refreshed.refresh_token:
+                        sealed_refresh: str | None = self._vault.seal(
+                            refreshed.refresh_token, aad=aad
+                        )
+                    elif current.secrets.seal_version == SEAL_LEGACY:
+                        # Keeping the old refresh token, but the row is being stamped AAD-bound:
+                        # it must be re-sealed too or it would fail authentication next read.
+                        sealed_refresh = self._vault.seal(
+                            self._open(current.secrets.refresh_token, current), aad=aad
+                        )
+                    else:
+                        sealed_refresh = current.secrets.refresh_token
                     await locked.save_tokens(
-                        secrets=SealedSecrets(sealed_access, sealed_refresh),
+                        secrets=SealedSecrets(sealed_access, sealed_refresh, seal_version=SEAL_AAD),
                         expires_at=refreshed.expires_at,
                         now=now,
                     )
@@ -593,6 +614,59 @@ class ProviderConnectionService:
         if failure is None:  # pragma: no cover - every non-returning path above sets it
             raise ProviderConnectionError("token refresh finished without a result")
         raise failure
+
+    @staticmethod
+    def _row_aad(connection: store.ConnectionRow) -> bytes:
+        """The AAD binding this row's sealed tokens to it: immutable ``public_id`` + platform."""
+        return platform_connection_aad(public_id=connection.public_id, platform=connection.platform)
+
+    def _open(self, ciphertext: str | None, state: ResolveState) -> str:
+        """Open one of this row's ciphertexts through the versioned vault."""
+        assert ciphertext is not None  # noqa: S101 - callers only pass a present secret
+        return self._vault.open(
+            ciphertext,
+            aad=self._row_aad(state.connection),
+            seal_version=state.secrets.seal_version,
+        )
+
+    async def _reseal_if_legacy(self, state: ResolveState) -> None:
+        """Lazy M4 upgrade on resolve: re-seal a legacy (v0) row AAD-bound, best effort.
+
+        The row just opened successfully, so a failure here is operational (lock/connection), not
+        tamper: it is logged by type only and must never fail the resolve that triggered it.
+        ``scripts/reseal_connections.py`` reports anything left behind.
+        """
+        if state.secrets.seal_version != SEAL_LEGACY:
+            return
+        try:
+            await store.reseal_legacy(
+                self._db, connection_id=state.connection.id, rewrap=self._rewrap_legacy
+            )
+        except Exception as exc:  # noqa: BLE001 - opportunistic upgrade, see docstring
+            log_failure(
+                logger,
+                "provider_connections.lazy_reseal_failed",
+                exc,
+                level=logging.WARNING,
+                connection_id=state.connection.id,
+            )
+
+    def _rewrap_legacy(
+        self, public_id: UUID, platform: str, current: SealedSecrets
+    ) -> SealedSecrets:
+        """Open a legacy pair (no AAD) and seal it under the row's AAD."""
+        aad = platform_connection_aad(public_id=public_id, platform=platform)
+
+        def convert(ciphertext: str | None) -> str | None:
+            if ciphertext is None:
+                return None
+            return self._vault.seal(
+                self._vault.open(ciphertext, aad=None, seal_version=SEAL_LEGACY), aad=aad
+            )
+
+        access = convert(current.access_token)
+        assert access is not None  # noqa: S101 - access_token is NOT NULL
+        return SealedSecrets(access, convert(current.refresh_token), seal_version=SEAL_AAD)
 
     @staticmethod
     def _assert_usable_connection(state: ResolveState) -> None:

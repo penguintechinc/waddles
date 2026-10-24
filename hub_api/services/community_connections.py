@@ -23,7 +23,8 @@ fail loudly at the call site, not silently resolve to whatever ALL
 currently returns).
 
 Access/refresh tokens are AES-256-GCM encrypted at rest via
-`platform_integrations_crypto.encrypt_token()`/`decrypt_value()` --
+`provider_connections.vault.seal_secret()`/`open_secret()` (AES-256-GCM, AAD-bound to
+`community_id:provider` -- finding M4) --
 `ConnectionStatus` (the DTO handed back to the blueprint/webui layer,
 chunks C3/C4) never carries token material, only connection metadata.
 `DecryptedTokens` is for internal callers only (chunks C5/C6's
@@ -45,11 +46,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from services.errors import bad_request, not_found
-from services.platform_integrations_crypto import (
-    PlatformCredentialCryptoError,
-    decrypt_value,
-    encrypt_token,
-)
+from services.platform_integrations_crypto import PlatformCredentialCryptoError, connection_aad
+from services.provider_connections.telemetry import log_failure
+from services.provider_connections.vault import SEAL_AAD, SEAL_LEGACY, open_secret, seal_secret
 from services.schema import bind_platform_tables
 
 logger = logging.getLogger(__name__)
@@ -80,6 +79,7 @@ _SELECT_COLUMNS: tuple[str, ...] = (
     "config_data",
     "is_active",
     "is_encrypted",
+    "seal_version",
     "created_at",
     "updated_at",
 )
@@ -278,8 +278,9 @@ def _sync_upsert(
         )
         existing = dal(query).select(*_fields(dal), for_update=for_update).first()
 
-        encrypted_access = encrypt_token(access_token)
-        encrypted_refresh = encrypt_token(refresh_token) if refresh_token else None
+        aad = connection_aad(community_id=community_id, provider=provider)
+        encrypted_access = seal_secret(access_token, aad=aad)
+        encrypted_refresh = seal_secret(refresh_token, aad=aad) if refresh_token else None
         config_data = {"account_label": account_label}
 
         if existing is None:
@@ -299,6 +300,7 @@ def _sync_upsert(
                     config_data=config_data,
                     is_active=True,
                     is_encrypted=True,
+                    seal_version=SEAL_AAD,
                     created_at=now,
                     updated_at=now,
                     created_by_user_id=actor_user_id,
@@ -316,6 +318,7 @@ def _sync_upsert(
                 config_data=config_data,
                 is_active=True,
                 is_encrypted=True,
+                seal_version=SEAL_AAD,
                 updated_at=now,
                 updated_by_user_id=actor_user_id,
             )
@@ -430,6 +433,66 @@ async def delete_connection(
     return deleted
 
 
+def _rewrap_legacy(ciphertext: str | None, aad: bytes) -> str | None:
+    """Re-seal one legacy (no-AAD) ciphertext under `aad`; `None` stays `None`."""
+    if not ciphertext:
+        return None
+    return seal_secret(open_secret(ciphertext, aad=None, seal_version=SEAL_LEGACY), aad=aad)
+
+
+def _sync_reseal_legacy(dal: Any, *, community_id: int, provider: str) -> bool:
+    """Lock the active row and, if still legacy (v0), re-seal both tokens as AAD-bound (v1)."""
+    for_update = _for_update(dal)
+    t = dal.platform_integrations
+    try:
+        row = (
+            dal(_active_query(dal, community_id, provider))
+            .select(*_fields(dal), for_update=for_update)
+            .first()
+        )
+        if (
+            row is None
+            or not row.is_encrypted
+            or int(row.seal_version or SEAL_LEGACY) != SEAL_LEGACY
+        ):
+            dal.commit()
+            return False
+        aad = connection_aad(community_id=community_id, provider=provider)
+        dal(t.id == row.id).update(
+            access_token=_rewrap_legacy(row.access_token, aad),
+            refresh_token=_rewrap_legacy(row.refresh_token, aad),
+            seal_version=SEAL_AAD,
+        )
+        dal.commit()
+        return True
+    except Exception:
+        dal.rollback()
+        raise
+
+
+async def _reseal_legacy_row(db: Any, dal: Any, *, community_id: int, provider: str) -> None:
+    """Lazy M4 upgrade on read: best effort -- a failure never breaks the read that triggered it.
+
+    The row was just opened successfully, so a failure here is operational (lock/connection), not
+    tamper; it is logged by type only and `scripts/reseal_connections.py` reports any leftovers.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(
+            db.executor,
+            lambda: _sync_reseal_legacy(dal, community_id=community_id, provider=provider),
+        )
+    except Exception as exc:  # noqa: BLE001 - see docstring: reseal is an opportunistic upgrade
+        log_failure(
+            logger,
+            "community_connections.lazy_reseal_failed",
+            exc,
+            level=logging.WARNING,
+            community_id=community_id,
+            provider=provider,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Decrypted token access (internal use only)
 # ---------------------------------------------------------------------------
@@ -452,12 +515,19 @@ async def get_decrypted_tokens(db: Any, community_id: int, provider: str) -> Dec
     if row is None or not row.access_token:
         return None
 
+    aad = connection_aad(community_id=community_id, provider=provider)
+    seal_version = int(row.seal_version or SEAL_LEGACY)
     try:
-        access_token = decrypt_value(row.access_token) if row.is_encrypted else row.access_token
+        if row.is_encrypted:
+            access_token = open_secret(row.access_token, aad=aad, seal_version=seal_version)
+        else:
+            access_token = row.access_token
         refresh_token = None
         if row.refresh_token:
             refresh_token = (
-                decrypt_value(row.refresh_token) if row.is_encrypted else row.refresh_token
+                open_secret(row.refresh_token, aad=aad, seal_version=seal_version)
+                if row.is_encrypted
+                else row.refresh_token
             )
     except PlatformCredentialCryptoError:
         logger.error(
@@ -466,6 +536,9 @@ async def get_decrypted_tokens(db: Any, community_id: int, provider: str) -> Dec
             provider,
         )
         raise
+
+    if row.is_encrypted and seal_version == SEAL_LEGACY:
+        await _reseal_legacy_row(db, dal, community_id=community_id, provider=provider)
 
     return DecryptedTokens(
         access_token=access_token,
@@ -498,11 +571,19 @@ def _sync_store_refreshed(
             dal.commit()
             return False
 
+        aad = connection_aad(community_id=community_id, provider=provider)
+        refresh_values: dict[str, Any] = {}
+        if row.is_encrypted and int(row.seal_version or SEAL_LEGACY) == SEAL_LEGACY:
+            # The row is about to be stamped AAD-bound, so its untouched refresh token must be
+            # re-sealed in the same statement or it would fail authentication on the next read.
+            refresh_values["refresh_token"] = _rewrap_legacy(row.refresh_token, aad)
         dal(t.id == row.id).update(
-            access_token=encrypt_token(access_token),
+            access_token=seal_secret(access_token, aad=aad),
             expires_at=expires_at,
             is_encrypted=True,
+            seal_version=SEAL_AAD,
             updated_at=now,
+            **refresh_values,
         )
         dal.commit()
         return True

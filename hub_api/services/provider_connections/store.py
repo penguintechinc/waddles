@@ -24,11 +24,12 @@ parameters are used -- no string-built SQL.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
+from uuid import UUID
 
 from sqlalchemy import Table, delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
@@ -44,7 +45,13 @@ GRANT_APPROVED: Final = "approved"
 GRANT_REVOKED: Final = "revoked"
 STATUS_ACTIVE: Final = "active"
 
-_REQUIRED_CONNECTION_COLUMNS: Final = ("resource_metadata", "expires_at", "status_reason")
+_REQUIRED_CONNECTION_COLUMNS: Final = (
+    "resource_metadata",
+    "expires_at",
+    "status_reason",
+    "public_id",
+    "seal_version",
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -53,6 +60,8 @@ class SealedSecrets:
 
     access_token: str = field(repr=False)
     refresh_token: str | None = field(default=None, repr=False)
+    #: 0 = legacy no-AAD seal, 1 = AAD-bound (see ``vault``); every new write is 1.
+    seal_version: int = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -60,6 +69,7 @@ class ConnectionRow:
     """Layer 2, secrets stripped: ``has_refresh_token`` replaces the token columns."""
 
     id: int
+    public_id: UUID
     tenant_id: int
     platform: str
     resource_type: str
@@ -136,7 +146,8 @@ def _tables(db: Any) -> _Tables:
         absent.append("enabled")
     if absent:
         raise SchemaMissing(
-            f"column(s) not present: {', '.join(absent)} -- run migration 0058_provider_connections"
+            f"column(s) not present: {', '.join(absent)} -- run migrations "
+            "0058_provider_connections and 0063_seal_aad_version"
         )
     return _Tables(connections=connections, grants=grants, communities=tables["communities"])
 
@@ -160,6 +171,7 @@ def _connection_columns(t: _Tables) -> list[Any]:
     c = t.connections.c
     return [
         c.id,
+        c.public_id,
         c.tenant_id,
         c.platform,
         c.resource_type,
@@ -192,6 +204,7 @@ def _grant_columns(t: _Tables) -> list[Any]:
 def _connection_from(row: Any) -> ConnectionRow:
     return ConnectionRow(
         id=int(row.id),
+        public_id=UUID(str(row.public_id)),
         tenant_id=int(row.tenant_id),
         platform=row.platform,
         resource_type=row.resource_type,
@@ -292,6 +305,7 @@ async def insert_connection(
     platform: str,
     resource_type: str,
     resource_id: str,
+    public_id: UUID,
     secrets: SealedSecrets,
     expires_at: datetime | None,
     resource_metadata: Mapping[str, Any],
@@ -305,6 +319,9 @@ async def insert_connection(
     (:class:`ConnectionConflict`) to overwrite an existing link for the same resource: the unique
     key ``(tenant, platform, resource)`` means someone already installed it, and silently replacing
     their tokens would be a takeover, not a create.
+
+    ``public_id`` is minted by the caller *before* sealing because it is part of the tokens' AAD
+    (finding M4); the row is stored with it and with the secrets' ``seal_version``.
     """
     t = _tables(db)
     c = t.connections.c
@@ -332,8 +349,10 @@ async def insert_connection(
                     platform=platform,
                     resource_type=resource_type,
                     resource_id=resource_id,
+                    public_id=str(public_id),
                     access_token=secrets.access_token,
                     refresh_token=secrets.refresh_token,
+                    seal_version=secrets.seal_version,
                     status=STATUS_ACTIVE,
                     status_reason=None,
                     resource_metadata=dict(resource_metadata),
@@ -538,14 +557,24 @@ async def list_dataplane(
 
 def _resolve_columns(t: _Tables) -> list[Any]:
     c = t.connections.c
-    return [*_connection_columns(t), *_grant_columns(t), c.access_token, c.refresh_token]
+    return [
+        *_connection_columns(t),
+        *_grant_columns(t),
+        c.access_token,
+        c.refresh_token,
+        c.seal_version,
+    ]
 
 
 def _resolve_state_from(row: Any) -> ResolveState:
     return ResolveState(
         connection=_connection_from(row),
         grant=_grant_from(row),
-        secrets=SealedSecrets(access_token=row.access_token, refresh_token=row.refresh_token),
+        secrets=SealedSecrets(
+            access_token=row.access_token,
+            refresh_token=row.refresh_token,
+            seal_version=int(row.seal_version),
+        ),
     )
 
 
@@ -587,6 +616,7 @@ class LockedResolve:
             .values(
                 access_token=secrets.access_token,
                 refresh_token=secrets.refresh_token,
+                seal_version=secrets.seal_version,
                 expires_at=expires_at,
                 status=STATUS_ACTIVE,
                 status_reason=None,
@@ -624,3 +654,41 @@ async def lock_for_refresh(
     async with db.engine.begin() as conn:
         row = (await conn.execute(stmt)).first()
         yield LockedResolve(conn, t, _resolve_state_from(row)) if row is not None else None
+
+
+async def reseal_legacy(
+    db: Any,
+    *,
+    connection_id: int,
+    rewrap: Callable[[UUID, str, SealedSecrets], SealedSecrets],
+) -> bool:
+    """Upgrade one legacy (``seal_version`` 0) row to AAD-bound under its own row lock.
+
+    ``rewrap(public_id, platform, current)`` returns the re-sealed pair. The row is locked
+    ``FOR UPDATE`` and re-checked, so concurrent callers upgrade it exactly once; returns ``False``
+    when the row is gone or already upgraded. ``updated_at`` is left alone: nothing about the
+    connection changed, only how its secrets are sealed.
+    """
+    t = _tables(db)
+    c = t.connections.c
+    stmt = (
+        select(c.id, c.public_id, c.platform, c.access_token, c.refresh_token, c.seal_version)
+        .where(c.id == connection_id)
+        .with_for_update()
+    )
+    async with db.engine.begin() as conn:
+        row = (await conn.execute(stmt)).first()
+        if row is None or int(row.seal_version) != 0:
+            return False
+        current = SealedSecrets(row.access_token, row.refresh_token, seal_version=0)
+        upgraded = rewrap(UUID(str(row.public_id)), row.platform, current)
+        await conn.execute(
+            update(t.connections)
+            .where(c.id == connection_id)
+            .values(
+                access_token=upgraded.access_token,
+                refresh_token=upgraded.refresh_token,
+                seal_version=upgraded.seal_version,
+            )
+        )
+    return True

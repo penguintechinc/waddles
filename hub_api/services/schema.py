@@ -1452,6 +1452,8 @@ def bind_platform_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("config_data", "json"),
         Field("is_active", "boolean", default=True),
         Field("is_encrypted", "boolean", default=True),
+        # migration 0063: 0 = legacy no-AAD seal, 1 = AAD-bound (M4); every new write is 1.
+        Field("seal_version", "integer", default=0),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         Field("created_by_user_id", "integer"),
@@ -3051,6 +3053,9 @@ def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("resource_metadata", "json"),
         Field("expires_at", "datetime"),
         Field("status_reason", "string", length=40),
+        # migration 0063: immutable row identity (the AAD of its sealed tokens) + seal version.
+        Field("public_id", "string", length=36),
+        Field("seal_version", "integer", default=0),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         migrate=migrate,

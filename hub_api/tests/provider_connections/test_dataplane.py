@@ -29,7 +29,14 @@ from tests.provider_connections.conftest import (
     make_registry,
 )
 from tests.provider_connections.fake_twitch import APP_CLIENT_ID, FakeTwitch
-from tests.provider_connections.support import create_twitch, grant_to, raw_rows, set_column
+from tests.provider_connections.support import (
+    create_twitch,
+    grant_to,
+    open_row,
+    raw_rows,
+    seal_for_row,
+    set_column,
+)
 
 
 def _ids(pc_db: Any) -> tuple[int, int]:
@@ -260,9 +267,8 @@ class TestResolve:
         assert resolved.expires_at == clock.now + timedelta(seconds=14400)
 
         row = (await raw_rows(pc_db, "platform_connections"))[0]
-        vault = PlatformKeyVault()
-        assert vault.open(row["access_token"]) == resolved.access_token
-        new_refresh = vault.open(row["refresh_token"])
+        assert open_row(row) == resolved.access_token
+        new_refresh = open_row(row, "refresh_token")
         assert new_refresh and new_refresh != bot_tokens[1]  # the rotated pair replaced the old
 
         # A second resolve reuses the stored token: still exactly one refresh.
@@ -419,7 +425,9 @@ class TestResolve:
         )
         assert stale is not None
         clock.advance(seconds=14000)
-        winner_access = PlatformKeyVault().seal("winnerAccessToken")
+        winner_access = seal_for_row(
+            (await raw_rows(pc_db, "platform_connections"))[0], "winnerAccessToken"
+        )
         fresh_expiry = clock.now + timedelta(hours=4)
         await set_column(
             pc_db, "platform_connections", cid, access_token=winner_access, expires_at=fresh_expiry

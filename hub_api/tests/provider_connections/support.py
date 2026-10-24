@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import text
 
+from services.platform_integrations_crypto import platform_connection_aad
 from services.provider_connections.service import ConnectionView, ProviderConnectionService
+from services.provider_connections.vault import PlatformKeyVault
 from tests.provider_connections.conftest import CHANNEL_LOGIN
 
 
@@ -65,3 +69,20 @@ async def set_column(db: Any, table: str, row_id: int, **values: Any) -> None:
             text(f"UPDATE {table} SET {assignments} WHERE id = :_id"),  # noqa: S608 - fixed test table names
             {**values, "_id": row_id},
         )
+
+
+def row_aad(row: Mapping[str, Any]) -> bytes:
+    """The AAD a raw ``platform_connections`` row's tokens are bound to (public_id + platform)."""
+    return platform_connection_aad(public_id=UUID(str(row["public_id"])), platform=row["platform"])
+
+
+def open_row(row: Mapping[str, Any], column: str = "access_token") -> str:
+    """Open one raw row's sealed column through the versioned vault, exactly as the service does."""
+    return PlatformKeyVault().open(
+        row[column], aad=row_aad(row), seal_version=int(row["seal_version"])
+    )
+
+
+def seal_for_row(row: Mapping[str, Any], plaintext: str) -> str:
+    """Seal ``plaintext`` as if the service had written it to this raw row."""
+    return PlatformKeyVault().seal(plaintext, aad=row_aad(row))

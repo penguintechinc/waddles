@@ -65,13 +65,15 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from uuid import UUID, uuid4
 
 from services.errors import bad_request, not_found
 from services.platform_integrations_crypto import (
     PlatformCredentialCryptoError,
-    decrypt_value,
-    encrypt_token,
+    platform_connection_aad,
 )
+from services.provider_connections.telemetry import log_failure
+from services.provider_connections.vault import SEAL_AAD, SEAL_LEGACY, open_secret, seal_secret
 from services.schema import bind_bar_citizen_tables
 
 logger = logging.getLogger(__name__)
@@ -168,7 +170,7 @@ class DefaultCredentialResolver:
             )
 
         try:
-            plaintext = decrypt_value(row.credentials_ciphertext)
+            plaintext = open_secret(row.credentials_ciphertext)
         except PlatformCredentialCryptoError as exc:
             logger.error(
                 "credential_resolver.decrypt_failed tenant_id=%s platform=%s",
@@ -216,7 +218,7 @@ def store_tenant_credentials(
 
     bind_bar_citizen_tables(dal)
     t = dal.tenant_platform_apps
-    ciphertext = encrypt_token(json.dumps(payload))
+    ciphertext = seal_secret(json.dumps(payload))
     now = datetime.now(UTC)
     try:
         existing = dal((t.tenant_id == tenant_id) & (t.platform == platform)).select().first()
@@ -267,20 +269,70 @@ class PlatformConnection:
     installed_by_user_id: int | None
 
 
-def _decrypt_connection_row(row: Any) -> PlatformConnection:
+def _row_aad(row: Any) -> bytes:
+    """AAD of a `platform_connections` row: its immutable `public_id` + platform (M4).
+
+    A row with no `public_id` has no identity to bind to, so this fails loudly instead of
+    sealing/opening against a guessed value.
+    """
+    if not row.public_id:
+        raise PlatformCredentialCryptoError("connection row has no public_id")
+    return platform_connection_aad(public_id=UUID(str(row.public_id)), platform=row.platform)
+
+
+def _reseal_connection_row(dal: Any, row: Any) -> None:
+    """Lazy M4 upgrade on read: re-seal a legacy (v0) row's tokens as AAD-bound (v1).
+
+    Best effort -- the row was just opened successfully, so a failure here is operational and must
+    not break the read that triggered it; it is logged by type only, and
+    `scripts/reseal_connections.py` reports anything left behind.
+    """
+    t = dal.platform_connections
+    try:
+        aad = _row_aad(row)
+        access = seal_secret(open_secret(row.access_token), aad=aad)
+        refresh = (
+            seal_secret(open_secret(row.refresh_token), aad=aad) if row.refresh_token else None
+        )
+        dal((t.id == row.id) & (t.seal_version == SEAL_LEGACY)).update(
+            access_token=access, refresh_token=refresh, seal_version=SEAL_AAD
+        )
+        dal.commit()
+    except Exception as exc:  # noqa: BLE001 - opportunistic upgrade, see docstring
+        dal.rollback()
+        log_failure(
+            logger,
+            "credential_resolver.lazy_reseal_failed",
+            exc,
+            level=logging.WARNING,
+            connection_id=int(row.id),
+        )
+
+
+def _decrypt_connection_row(dal: Any, row: Any) -> PlatformConnection:
     """Decrypt one `platform_connections` row into a `PlatformConnection`.
 
     Raises `TransportUnavailable` on a decrypt failure (tamper/corrupt
-    ciphertext, key mismatch) -- same fail-closed posture `resolve()`
-    already uses for layer-1 rows, never surfacing ciphertext as if it
-    were a usable token.
+    ciphertext, key mismatch, a ciphertext sealed for a different row) --
+    same fail-closed posture `resolve()` already uses for layer-1 rows,
+    never surfacing ciphertext as if it were a usable token. A legacy (v0)
+    row opens without AAD and is then re-sealed AAD-bound.
     """
+    seal_version = int(row.seal_version or SEAL_LEGACY)
     try:
-        access_token = decrypt_value(row.access_token)
-        refresh_token = decrypt_value(row.refresh_token) if row.refresh_token else None
+        aad = _row_aad(row) if seal_version != SEAL_LEGACY else None
+        access_token = open_secret(row.access_token, aad=aad, seal_version=seal_version)
+        refresh_token = (
+            open_secret(row.refresh_token, aad=aad, seal_version=seal_version)
+            if row.refresh_token
+            else None
+        )
     except PlatformCredentialCryptoError as exc:
         logger.error("credential_resolver.connection_decrypt_failed connection_id=%s", row.id)
         raise TransportUnavailable(f"stored connection {row.id} tokens are unreadable") from exc
+
+    if seal_version == SEAL_LEGACY:
+        _reseal_connection_row(dal, row)
 
     return PlatformConnection(
         id=int(row.id),
@@ -318,8 +370,6 @@ def upsert_platform_connection(
     bind_bar_citizen_tables(dal)
     t = dal.platform_connections
     now = datetime.now(UTC)
-    encrypted_access = encrypt_token(access_token)
-    encrypted_refresh = encrypt_token(refresh_token) if refresh_token else None
     try:
         existing = (
             dal(
@@ -330,6 +380,12 @@ def upsert_platform_connection(
             .select()
             .first()
         )
+        # The row's identity (AAD) must exist before its tokens are sealed: a new row gets its
+        # `public_id` minted here; an existing row keeps the one it already has.
+        public_id = str(uuid4()) if existing is None else str(existing.public_id or uuid4())
+        aad = platform_connection_aad(public_id=UUID(public_id), platform=platform)
+        encrypted_access = seal_secret(access_token, aad=aad)
+        encrypted_refresh = seal_secret(refresh_token, aad=aad) if refresh_token else None
         if existing is None:
             connection_id = int(
                 t.insert(
@@ -341,6 +397,8 @@ def upsert_platform_connection(
                     refresh_token=encrypted_refresh,
                     status=status,
                     installed_by_user_id=installed_by_user_id,
+                    public_id=public_id,
+                    seal_version=SEAL_AAD,
                     created_at=now,
                     updated_at=now,
                 )
@@ -352,6 +410,8 @@ def upsert_platform_connection(
                 refresh_token=encrypted_refresh,
                 status=status,
                 installed_by_user_id=installed_by_user_id,
+                public_id=public_id,
+                seal_version=SEAL_AAD,
                 updated_at=now,
             )
         dal.commit()
@@ -377,7 +437,7 @@ def get_platform_connection(
         .select()
         .first()
     )
-    return _decrypt_connection_row(row) if row is not None else None
+    return _decrypt_connection_row(dal, row) if row is not None else None
 
 
 def get_platform_connection_for_tenant(
@@ -401,7 +461,7 @@ def get_platform_connection_for_tenant(
         .select()
         .first()
     )
-    return _decrypt_connection_row(row) if row is not None else None
+    return _decrypt_connection_row(dal, row) if row is not None else None
 
 
 def delete_platform_connection(dal: Any, *, connection_id: int) -> None:
@@ -547,4 +607,4 @@ def resolve_community_connection(
         .select()
         .first()
     )
-    return _decrypt_connection_row(row) if row is not None else None
+    return _decrypt_connection_row(dal, row) if row is not None else None

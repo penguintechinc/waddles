@@ -9,6 +9,7 @@ against.
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -23,6 +24,8 @@ from services.credential_resolver import (
     upsert_platform_connection,
 )
 from services.errors import ApiError
+from services.platform_integrations_crypto import platform_connection_aad
+from services.provider_connections.vault import open_secret, seal_secret
 
 _KEY = "d4f9317783becee1a4415c1a1229b9258e7a90b768d72a9e2c7dc891af661df6"  # gitleaks:allow
 
@@ -380,3 +383,104 @@ class TestCommunityConnectionAccess:
         assert (
             resolve_community_connection(dal, community_id=community_id, platform="twitch") is None
         )
+
+
+class TestPlatformConnectionRowBoundSealing:
+    """regression: M4 -- `platform_connections` ciphertext is bound to `public_id:platform`."""
+
+    def _upsert(self, dal: Any, tenant_id: int, resource_id: str, tag: str) -> int:
+        return upsert_platform_connection(
+            dal,
+            tenant_id=tenant_id,
+            platform="twitch",
+            resource_type="twitch_channel",
+            resource_id=resource_id,
+            access_token=f"acc-{tag}",
+            refresh_token=f"ref-{tag}",
+            installed_by_user_id=None,
+        )
+
+    def _row(self, dal: Any, connection_id: int) -> Any:
+        t = dal.platform_connections
+        return dal(t.id == connection_id).select().first()
+
+    def test_new_writes_are_version_1_and_carry_a_public_id(self, bar_citizen_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        connection_id = self._upsert(dal, tenant_id, "chan-new", "new")
+        row = self._row(dal, connection_id)
+        assert row.seal_version == 1 and row.public_id
+        aad = platform_connection_aad(public_id=UUID(str(row.public_id)), platform="twitch")
+        assert open_secret(row.access_token, aad=aad, seal_version=1) == "acc-new"
+
+    def test_upsert_keeps_the_rows_public_id(self, bar_citizen_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        connection_id = self._upsert(dal, tenant_id, "chan-keep", "one")
+        first = self._row(dal, connection_id).public_id
+        assert self._upsert(dal, tenant_id, "chan-keep", "two") == connection_id
+        assert self._row(dal, connection_id).public_id == first
+
+    def test_ciphertext_swapped_between_rows_fails_open(self, bar_citizen_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        one = self._upsert(dal, tenant_id, "chan-a", "a")
+        two = self._upsert(dal, tenant_id, "chan-b", "b")
+        t = dal.platform_connections
+        row_one, row_two = self._row(dal, one), self._row(dal, two)
+        dal(t.id == one).update(access_token=row_two.access_token)
+        dal(t.id == two).update(access_token=row_one.access_token)
+        dal.commit()
+        for resource in ("chan-a", "chan-b"):
+            with pytest.raises(TransportUnavailable):
+                get_platform_connection(
+                    dal, tenant_id=tenant_id, platform="twitch", resource_id=resource
+                )
+
+    def test_legacy_v0_row_still_opens_then_reseals_on_read(self, bar_citizen_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        connection_id = self._upsert(dal, tenant_id, "chan-legacy", "x")
+        t = dal.platform_connections
+        dal(t.id == connection_id).update(
+            access_token=seal_secret("acc-legacy"),
+            refresh_token=seal_secret("ref-legacy"),
+            seal_version=0,
+        )
+        dal.commit()
+        connection = get_platform_connection(
+            dal, tenant_id=tenant_id, platform="twitch", resource_id="chan-legacy"
+        )
+        assert connection is not None
+        assert (connection.access_token, connection.refresh_token) == ("acc-legacy", "ref-legacy")
+        row = self._row(dal, connection_id)
+        assert row.seal_version == 1
+        aad = platform_connection_aad(public_id=UUID(str(row.public_id)), platform="twitch")
+        assert open_secret(row.refresh_token, aad=aad, seal_version=1) == "ref-legacy"
+
+    def test_a_failed_lazy_reseal_never_breaks_the_read(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        connection_id = self._upsert(dal, tenant_id, "chan-noreseal", "x")
+        t = dal.platform_connections
+        dal(t.id == connection_id).update(
+            access_token=seal_secret("acc-legacy"), refresh_token=None, seal_version=0
+        )
+        dal.commit()
+        monkeypatch.setattr(
+            "services.credential_resolver.seal_secret",
+            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("lock timeout")),
+        )
+        connection = get_platform_connection(
+            dal, tenant_id=tenant_id, platform="twitch", resource_id="chan-noreseal"
+        )
+        assert connection is not None and connection.access_token == "acc-legacy"
+        assert self._row(dal, connection_id).seal_version == 0  # left for the reseal job
+
+    def test_a_row_without_a_public_id_fails_closed(self, bar_citizen_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        connection_id = self._upsert(dal, tenant_id, "chan-noid", "x")
+        t = dal.platform_connections
+        dal(t.id == connection_id).update(public_id=None)
+        dal.commit()
+        with pytest.raises(TransportUnavailable):
+            get_platform_connection(
+                dal, tenant_id=tenant_id, platform="twitch", resource_id="chan-noid"
+            )

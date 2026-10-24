@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import httpx
 import psycopg2
@@ -31,6 +32,7 @@ from pg_docker import (  # noqa: E402  # type: ignore[import-not-found]
     migrated_postgres,
 )
 
+from services.platform_integrations_crypto import platform_connection_aad  # noqa: E402
 from services.provider_connections import PlatformKeyVault, ProviderConnectionService  # noqa: E402
 from services.provider_connections.adapter import AdapterRegistry  # noqa: E402
 from services.provider_connections.errors import (  # noqa: E402
@@ -40,6 +42,7 @@ from services.provider_connections.errors import (  # noqa: E402
     ProviderUnavailable,
 )
 from services.provider_connections.twitch import TwitchAdapter  # noqa: E402
+from services.provider_connections.vault import seal_secret  # noqa: E402
 from tests.provider_connections.conftest import (  # noqa: E402
     BOT,
     CHANNEL_ID,
@@ -211,15 +214,23 @@ class TestLifecycleOnPostgres:
             pg_db,
             "SELECT access_token, refresh_token, resource_metadata->>'channel_id', "
             "(SELECT enabled FROM community_connection_access WHERE connection_id=%s), "
-            "t::text FROM platform_connections t WHERE id=%s",
+            "t::text, public_id::text, seal_version FROM platform_connections t WHERE id=%s",
             (cid, cid),
         )
-        access_ct, refresh_ct, channel_id, enabled, whole_row = row
+        access_ct, refresh_ct, channel_id, enabled, whole_row, public_id, seal_version = row
+        assert seal_version == 1
         assert channel_id == CHANNEL_ID and enabled is True
         for plaintext, ciphertext in ((tokens[0], access_ct), (tokens[1], refresh_ct)):
             assert plaintext and plaintext not in whole_row  # not even in the row's text form
             assert ciphertext != plaintext
-            assert PlatformKeyVault().open(ciphertext) == plaintext
+            assert (
+                PlatformKeyVault().open(
+                    ciphertext,
+                    aad=platform_connection_aad(public_id=UUID(public_id), platform="twitch"),
+                    seal_version=seal_version,
+                )
+                == plaintext
+            )
 
         updated = await service.update(
             tenant_id=ids.tenant,
@@ -460,3 +471,110 @@ class TestRefreshLock:
         assert fresh.access_token
         assert (await slow).access_token  # and ``a`` itself completed its refresh
         assert slow_twitch.refresh_calls == 1
+
+
+class TestSealAadOnPostgres:
+    """regression: M4 -- connection ciphertext is bound to its own `platform_connections` row."""
+
+    async def test_new_writes_are_version_1(
+        self,
+        service: ProviderConnectionService,
+        slow_twitch: SlowTwitch,
+        ids: Ids,
+        pg_db: PgTestDatabase,
+    ) -> None:
+        view = await _create(service, ids, slow_twitch.mint(account=BOT))
+        cid = view.binding.connection.id
+        assert _sql(pg_db, "SELECT seal_version FROM platform_connections WHERE id=%s", (cid,)) == [
+            (1,)
+        ]
+        # the public_id stored in the row is the one the service exposes (the AAD identity)
+        stored = _sql(pg_db, "SELECT public_id::text FROM platform_connections WHERE id=%s", (cid,))
+        assert UUID(stored[0][0]) == view.binding.connection.public_id
+
+    async def test_ciphertext_swapped_between_rows_fails_open(
+        self,
+        service: ProviderConnectionService,
+        slow_twitch: SlowTwitch,
+        ids: Ids,
+        pg_db: PgTestDatabase,
+    ) -> None:
+        a = await _create(service, ids, slow_twitch.mint(account=BOT))
+        b = await _create(
+            service,
+            ids,
+            slow_twitch.mint(account=BOT),
+            community_id=ids.second,
+            metadata={"channel_login": OTHER_CHANNEL_LOGIN},
+        )
+        ca, cb = a.binding.connection.id, b.binding.connection.id
+        # An attacker with a DB write primitive swaps the two rows' sealed tokens.
+        _sql(
+            pg_db,
+            "UPDATE platform_connections SET access_token = CASE id WHEN %s THEN "
+            "(SELECT access_token FROM platform_connections WHERE id=%s) ELSE "
+            "(SELECT access_token FROM platform_connections WHERE id=%s) END WHERE id IN (%s, %s)",
+            (ca, cb, ca, ca, cb),
+        )
+        from services.provider_connections.errors import VaultCorrupt
+
+        with pytest.raises(VaultCorrupt):
+            await service.resolve(community_id=ids.community, connection_id=ca)
+        with pytest.raises(VaultCorrupt):
+            await service.resolve(community_id=ids.second, connection_id=cb)
+
+    async def test_legacy_v0_row_still_opens_then_reseals_on_resolve(
+        self,
+        service: ProviderConnectionService,
+        slow_twitch: SlowTwitch,
+        ids: Ids,
+        pg_db: PgTestDatabase,
+    ) -> None:
+        access, refresh = slow_twitch.mint(account=BOT)
+        view = await _create(service, ids, (access, refresh))
+        cid = view.binding.connection.id
+        # Rewrite the row exactly as a pre-M4 writer left it: no AAD, seal_version 0.
+        _sql(
+            pg_db,
+            "UPDATE platform_connections SET access_token=%s, refresh_token=%s, seal_version=0 "
+            "WHERE id=%s",
+            (seal_secret(access), seal_secret(refresh), cid),
+        )
+        resolved = await service.resolve(community_id=ids.community, connection_id=cid)
+        assert resolved.access_token == access  # a legacy row still opens (aad ignored)
+        version, access_ct, refresh_ct, public_id = _sql(
+            pg_db,
+            "SELECT seal_version, access_token, refresh_token, public_id::text "
+            "FROM platform_connections WHERE id=%s",
+            (cid,),
+        )[0]
+        assert version == 1  # ... and was re-sealed lazily
+        aad = platform_connection_aad(public_id=UUID(public_id), platform="twitch")
+        vault = PlatformKeyVault()
+        assert vault.open(access_ct, aad=aad, seal_version=1) == access
+        assert vault.open(refresh_ct, aad=aad, seal_version=1) == refresh
+
+    async def test_refresh_of_a_legacy_row_reseals_the_kept_refresh_token_too(
+        self,
+        service: ProviderConnectionService,
+        slow_twitch: SlowTwitch,
+        ids: Ids,
+        clock: FakeClock,
+        pg_db: PgTestDatabase,
+    ) -> None:
+        access, refresh = slow_twitch.mint(account=BOT)
+        view = await _create(service, ids, (access, refresh))
+        cid = view.binding.connection.id
+        _sql(
+            pg_db,
+            "UPDATE platform_connections SET access_token=%s, refresh_token=%s, seal_version=0 "
+            "WHERE id=%s",
+            (seal_secret(access), seal_secret(refresh), cid),
+        )
+        clock.advance(seconds=14000)  # stale: the resolve refreshes under the row lock
+        first = await service.resolve(community_id=ids.community, connection_id=cid)
+        again = await service.resolve(community_id=ids.community, connection_id=cid)
+        assert again.access_token == first.access_token
+        assert _sql(pg_db, "SELECT seal_version FROM platform_connections WHERE id=%s", (cid,)) == [
+            (1,)
+        ]

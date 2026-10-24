@@ -31,6 +31,7 @@ import base64
 import binascii
 import logging
 import os
+from uuid import UUID
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -73,28 +74,51 @@ def _encryption_key() -> bytes:
     return key
 
 
-def encrypt_token(plaintext: str) -> str:
+def connection_aad(*, community_id: int, provider: str) -> bytes:
+    """AAD binding a `platform_integrations` community_oauth ciphertext to its row (M4).
+
+    `community_id:provider` is the row's identity (one active row per pair), so a ciphertext
+    copied or swapped to another row no longer authenticates.
+    """
+    return f"{community_id}:{provider}".encode()
+
+
+def platform_connection_aad(*, public_id: UUID, platform: str) -> bytes:
+    """AAD binding a `platform_connections` ciphertext to its row (M4).
+
+    Those rows are tenant-owned and shared across communities via grants, so `community_id` is
+    not a stable identity there; the immutable `public_id` is.
+    """
+    return f"conn:{public_id}:{platform}".encode()
+
+
+def encrypt_token(plaintext: str, *, aad: bytes | None = None) -> str:
     """AES-256-GCM encrypt `plaintext`; returns base64(iv(12) || ciphertext || tag).
 
     Mirrors `token_crypto.encrypt_value()`'s wire format exactly (same
     primitive, same layout) so a value written here decrypts cleanly via
     either service's `decrypt_value()`, and vice versa -- see module
-    docstring. Callers must never log `plaintext` or the returned
+    docstring. `aad` (when given) is authenticated but not stored: the same bytes must be
+    supplied to decrypt. Callers must never log `plaintext` or the returned
     ciphertext's decrypted form.
     """
     key = _encryption_key()
     iv = os.urandom(_IV_LENGTH)
-    ciphertext_and_tag = AESGCM(key).encrypt(iv, plaintext.encode("utf-8"), None)
+    ciphertext_and_tag = AESGCM(key).encrypt(iv, plaintext.encode("utf-8"), aad)
     return base64.b64encode(iv + ciphertext_and_tag).decode("ascii")
 
 
-def decrypt_value(encrypted_b64: str) -> str:
-    """Decrypt a value produced by `token_crypto.encrypt_value()`."""
+def decrypt_value(encrypted_b64: str, *, aad: bytes | None = None) -> str:
+    """Decrypt a value produced by `encrypt_token()` / `token_crypto.encrypt_value()`.
+
+    `aad` must equal the bytes the value was sealed with (`None` for legacy no-AAD values); any
+    mismatch fails authentication and raises `PlatformCredentialCryptoError`.
+    """
     key = _encryption_key()
     try:
         raw = base64.b64decode(encrypted_b64, validate=True)
         iv, ciphertext_and_tag = raw[:_IV_LENGTH], raw[_IV_LENGTH:]
-        plaintext = AESGCM(key).decrypt(iv, ciphertext_and_tag, None)
+        plaintext = AESGCM(key).decrypt(iv, ciphertext_and_tag, aad)
     except (InvalidTag, ValueError, binascii.Error) as exc:
         raise PlatformCredentialCryptoError("Failed to decrypt credential value") from exc
     return plaintext.decode("utf-8")

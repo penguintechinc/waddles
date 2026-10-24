@@ -1,4 +1,4 @@
-.PHONY: codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: reseal-connections codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -287,6 +287,14 @@ suppression-check:
 suppression-lift:
 	@test -n "$(TENANT_ID)" -a -n "$(PLATFORM)" -a -n "$$PLATFORM_USER_ID" || { echo "usage: PLATFORM_USER_ID=<id> make suppression-lift TENANT_ID=<n> PLATFORM=<name>" >&2; exit 2; }
 	@cd hub_api && printf '%s\n' "$$PLATFORM_USER_ID" | python3 -m cli.suppression lift --tenant-id "$(TENANT_ID)" --platform "$(PLATFORM)" --platform-user-id-stdin
+
+# reseal-connections: re-seal legacy (seal_version 0) connection secrets as row-bound AAD
+# ciphertexts (finding M4); examines + verifies already-sealed rows too. Run from hub_api's
+# environment (DATABASE_URL or DB_*, CREDENTIAL_ENCRYPTION_KEY). Prints
+# "examined=N resealed=M failed=K"; exit 1 = a row failed, 2 = nothing examined although rows
+# exist (add EXPECT_ROWS=1 to also fail on empty tables), 3 = could not run.
+reseal-connections:
+	@python3 scripts/reseal_connections.py $(if $(EXPECT_ROWS),--expect-rows)
 
 # verify-audit-export: verify downloaded export file(s) offline -- no server, DB or network.
 #   make verify-audit-export EXPORT="page1.json page2.json" [ANCHOR=<hash>] [HEAD_SEQ=42] [HEAD_HASH=<hash>]

@@ -151,6 +151,9 @@ def build_pc_metadata() -> MetaData:
         Column("resource_metadata", JSON, nullable=False, server_default="{}"),
         Column("expires_at", DateTime(timezone=True)),
         Column("status_reason", String(40)),
+        # migration 0063: the row's AAD identity + which seal layout its tokens use.
+        Column("public_id", String(36), nullable=False, unique=True),
+        Column("seal_version", Integer, nullable=False, server_default="0"),
         Column(
             "created_at",
             DateTime(timezone=True),

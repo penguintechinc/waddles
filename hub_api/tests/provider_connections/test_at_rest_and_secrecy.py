@@ -6,6 +6,7 @@ import base64
 import logging
 import re
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import event
@@ -24,7 +25,7 @@ from tests.provider_connections.conftest import (
     FakeClock,
 )
 from tests.provider_connections.fake_twitch import APP_CLIENT_SECRET, FakeTwitch
-from tests.provider_connections.support import create_twitch, raw_rows, set_column
+from tests.provider_connections.support import create_twitch, open_row, raw_rows, set_column
 
 
 class TestEncryptionAtRest:
@@ -42,7 +43,7 @@ class TestEncryptionAtRest:
             blob = base64.b64decode(stored, validate=True)
             assert plaintext.encode() not in blob
             assert len(blob) == 12 + len(plaintext) + 16  # iv || ciphertext || GCM tag
-            assert PlatformKeyVault().open(stored) == plaintext
+            assert open_row(row, column) == plaintext
 
         assert access not in repr(row["resource_metadata"])
         assert refresh not in repr(row["resource_metadata"])
@@ -72,7 +73,7 @@ class TestEncryptionAtRest:
             refresh_token=new_refresh,
         )
         rows = await raw_rows(pc_db, "platform_connections")
-        assert PlatformKeyVault().open(rows[0]["access_token"]) == new_access
+        assert open_row(rows[0]) == new_access
         on_disk = pc_db.db_path.read_bytes()
         for secret in (new_access, new_refresh):
             assert secret and secret.encode() not in on_disk
@@ -87,8 +88,8 @@ class TestEncryptionAtRest:
             community_id=pc_db.seed.community_id,
             connection_id=a.binding.connection.id,
         )
-        first = PlatformKeyVault().seal(access)
-        assert first != PlatformKeyVault().seal(access)
+        first = PlatformKeyVault().seal(access, aad=b"x")
+        assert first != PlatformKeyVault().seal(access, aad=b"x")
 
     async def test_a_ciphertext_from_another_key_is_never_decrypted(
         self,
@@ -173,7 +174,20 @@ class TestNoSecretIsEverSelectedForAdminReads:
         sealed = SealedSecrets(access_token="CIPHERTEXT-A", refresh_token="CIPHERTEXT-R")
         assert "CIPHERTEXT" not in repr(sealed)
         row = ConnectionRow(
-            1, 1, "twitch", "twitch_channel", "7", "active", None, {}, None, True, None, None, None
+            1,
+            uuid4(),
+            1,
+            "twitch",
+            "twitch_channel",
+            "7",
+            "active",
+            None,
+            {},
+            None,
+            True,
+            None,
+            None,
+            None,
         )
         assert "CIPHERTEXT" not in repr(row)
 
