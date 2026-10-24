@@ -946,8 +946,9 @@ jobs:
         run: |
           set -euo pipefail
           pip install --disable-pip-version-check --require-hashes -r hub_api/requirements.txt
+          pip install --disable-pip-version-check --require-hashes -r libs/flask_core/requirements.txt
           pip install --disable-pip-version-check "PyYAML>=6.0.2,<7.0.0"
-          python3 -c "import defusedxml, signxml, yaml"
+          python3 -c "import authlib, defusedxml, signxml, yaml"
 
       - name: Fail on OpenAPI spec drift
         run: make check-openapi-drift
