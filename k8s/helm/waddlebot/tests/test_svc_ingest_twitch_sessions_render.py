@@ -185,15 +185,59 @@ def test_hub_api_http_egress_is_not_granted_dataplane_wide(
     ), "hub-api gRPC rule unexpectedly gone"
 
 
-def test_scoped_hub_api_egress_absent_when_flag_off() -> None:
-    """No dynamic connections -> the scoped CNP is not rendered at all."""
+_INGEST_FLAG = "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled"
+_ACTION_FLAG = "pipeline.rustDataPlane.svcAction.dynamicConnections.enabled"
+
+
+def _scoped_cnps(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map 'ingest'/'action' to the scoped hub-api HTTP CNPs present in `docs`."""
+    out: dict[str, dict[str, Any]] = {}
+    for d in docs:
+        if d.get("kind") != "CiliumNetworkPolicy":
+            continue
+        name = d["metadata"]["name"]
+        if name.endswith("-svc-ingest-hubapi-http-egress"):
+            out["ingest"] = d
+        elif name.endswith("-svc-action-hubapi-http-egress"):
+            out["action"] = d
+    return out
+
+
+@pytest.mark.parametrize(
+    ("ingest_on", "action_on"),
+    [(True, False), (False, True), (True, True), (False, False)],
+)
+def test_scoped_hub_api_egress_follows_each_flag_independently(
+    ingest_on: bool, action_on: bool
+) -> None:
+    """Each consumer gets its own CNP iff its own flag is on; never dataplane-wide."""
     docs = _render(
         "values-alpha.yaml",
-        "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false",
+        f"{_INGEST_FLAG}={str(ingest_on).lower()}",
+        f"{_ACTION_FLAG}={str(action_on).lower()}",
     )
-    assert not [
+    found = _scoped_cnps(docs)
+    assert ("ingest" in found) is ingest_on
+    assert ("action" in found) is action_on
+    port = _hub_port()
+    for key, comp in (("ingest", "svc-ingest-rust"), ("action", "svc-action")):
+        if key in found:
+            sel = found[key]["spec"]["endpointSelector"]
+            assert sel["matchLabels"]["app.kubernetes.io/component"] == comp
+            assert "matchExpressions" not in sel
+            assert len(_hub_http_rules(found[key], port)) == 1
+    shared = [
         d
         for d in docs
         if d.get("kind") == "CiliumNetworkPolicy"
-        and d["metadata"]["name"].endswith("-svc-ingest-hubapi-http-egress")
+        and d["metadata"]["name"].endswith("-dataplane-egress-deny")
     ]
+    assert len(shared) == 1
+    assert not _hub_http_rules(shared[0], port)
+
+
+def test_alpha_renders_both_scoped_hub_api_egress_policies(
+    alpha: list[dict[str, Any]],
+) -> None:
+    """Alpha has both flags on, so svc-action must not lose hub-api HTTP egress."""
+    assert set(_scoped_cnps(alpha)) == {"ingest", "action"}
