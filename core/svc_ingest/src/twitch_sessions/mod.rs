@@ -6,10 +6,17 @@
 
 pub mod connector;
 pub mod lease;
+pub mod manager;
+pub mod metrics;
 pub mod spec;
 
 pub use connector::{DeadlineChannel, ResolvingConnector, MIN_SESSION, RECYCLE_MARGIN};
 pub use lease::{LeaseError, SessionLease, ValkeyLease};
+pub use manager::{
+    RealRunner, ReconcileReport, SessionDeps, SessionEnd, SessionManager, SessionRunner, LEASE_TTL,
+    RECONCILE_INTERVAL, RESTART_COOLDOWN,
+};
+pub use metrics::{DiscoveryOutcome, LeaseOutcome, SessionMetrics};
 pub use spec::{
     discover, DiscoverError, Discovery, SessionSpec, SpecError, CAPABILITY, MAX_PAGES,
     META_BOT_LOGIN, META_CHANNEL, PAGE_LIMIT,
