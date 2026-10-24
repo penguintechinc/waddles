@@ -290,6 +290,8 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # fails closed with 503) rather than crashing hub-api's whole app
         # factory -- most non-prod/local deployments never call
         # /internal/service-token at all.
+        app.config["SPIFFE_PEER_TRUST"] = cfg.spiffe_peer_trust
+        app.config["SPIFFE_PEER_ID_HEADER"] = cfg.spiffe_peer_id_header
         try:
             identities = load_identities_from_env(env=cfg.deployment_env)
             issuer = load_issuer_from_env(identities)

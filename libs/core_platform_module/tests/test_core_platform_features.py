@@ -3,7 +3,7 @@ Core/Platform Module Feature tests
 ======================================
 
 Covers :mod:`core_platform_module.features` -- the Core/platform Module's
-registration of its 18 Feature contracts and their shipped default Apps
+registration of its 19 Feature contracts and their shipped default Apps
 against the v3 Feature-contract spine (:mod:`flask_core.feature_contract`,
 :mod:`flask_core.feature_registry`, :mod:`flask_core.app_manifest`,
 :mod:`flask_core.app_registry`). Mirrors
@@ -108,6 +108,11 @@ EXPECTED_FEATURES = {
         "professional",
         frozenset({"connections:admin"}),
     ),
+    "integrations.static_connections": (
+        "waddles.integrations.static_connections",
+        "professional",
+        frozenset({"connections:admin"}),
+    ),
     "tenancy.multi_tenant": (
         "waddles.tenancy.multi_tenant",
         "enterprise",
@@ -137,14 +142,14 @@ def registries() -> tuple[FeatureRegistry, AppRegistry]:
 
 
 class TestCorePlatformFeatureContracts:
-    def test_all_eighteen_features_registered_with_correct_tier_and_flag(
+    def test_all_nineteen_features_registered_with_correct_tier_and_flag(
         self, registries: tuple[FeatureRegistry, AppRegistry]
     ) -> None:
         feature_registry, app_registry = registries
         contracts, _ = register_all(feature_registry=feature_registry, app_registry=app_registry)
 
         assert {c.id for c in contracts} == set(EXPECTED_FEATURES)
-        assert len(contracts) == 18
+        assert len(contracts) == 19
         for c in contracts:
             expected_flag, expected_tier, expected_scopes = EXPECTED_FEATURES[c.id]
             assert c.module == EXPECTED_MODULE[c.id]
@@ -196,7 +201,7 @@ class TestCorePlatformDefaultApps:
         contracts, manifests = register_all(
             feature_registry=feature_registry, app_registry=app_registry
         )
-        assert len(manifests) == 18
+        assert len(manifests) == 19
         contracts_by_flag = {c.flag: c for c in contracts}
 
         for manifest in manifests:

@@ -111,6 +111,7 @@ _FEATURE_MIN_TIERS: dict[str, str] = {
     "waddles.community.virtual_stages": TIER_PROFESSIONAL,
     "waddles.event.ticketing": TIER_PROFESSIONAL,
     "waddles.integrations.provider_connections": TIER_PROFESSIONAL,
+    "waddles.integrations.static_connections": TIER_PROFESSIONAL,
     "waddles.marketing.publishing": TIER_PROFESSIONAL,
     "waddles.marketing.scheduling": TIER_PROFESSIONAL,
     "waddles.streaming.broadcast": TIER_PROFESSIONAL,
