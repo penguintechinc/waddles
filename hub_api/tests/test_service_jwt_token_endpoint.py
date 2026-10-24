@@ -166,3 +166,91 @@ async def test_scope_not_allow_listed_is_401_and_not_audited_as_success(
 async def test_missing_audit_logger_does_not_break_issuance(app: Quart) -> None:
     app.config["logger"] = None
     assert (await _post(app)).status_code == 200
+
+
+# --- community-bound connection scopes (HIGH-2) ---------------------------------------------
+
+
+def _connections_issuer() -> ServiceJwtIssuer:
+    priv = Ed25519PrivateKey.generate()
+    identity = ServiceIdentity(
+        service_id=SERVICE_ID,
+        k8s_namespace="waddlebot",
+        k8s_service_account="svc-process",
+        allowed_scopes=frozenset({SCOPE, "connections:resolve", "connections:list"}),
+        tenant="system",
+    )
+    return ServiceJwtIssuer(
+        keys={"k1": SigningKey(kid="k1", private_key=priv, public_key=priv.public_key())},
+        active_kid="k1",
+        identities={SERVICE_ID: identity},
+    )
+
+
+async def _post_body(app: Quart, body: dict[str, Any]) -> Any:
+    app.config["SERVICE_JWT_ISSUER"] = _connections_issuer()
+    return await app.test_client().post(
+        "/internal/service-token", headers={"Authorization": "Bearer sa"}, json=body
+    )
+
+
+async def test_token_endpoint_requires_community_for_resolve_scope(app: Quart) -> None:
+    assert (await _post_body(app, {"scope": "connections:resolve"})).status_code == 400
+
+
+@pytest.mark.parametrize("bad", ["7", 7.5, True, -1, None])
+async def test_token_endpoint_rejects_malformed_community(app: Quart, bad: Any) -> None:
+    body = {"scope": "connections:resolve", "community_id": bad}
+    assert (await _post_body(app, body)).status_code == 400
+
+
+@pytest.mark.parametrize("bad", ["3", True, -1])
+async def test_token_endpoint_rejects_malformed_connection_id(app: Quart, bad: Any) -> None:
+    body = {"scope": "connections:resolve", "community_id": 7, "connection_id": bad}
+    assert (await _post_body(app, body)).status_code == 400
+
+
+async def test_resolve_token_is_bound_and_short_lived(app: Quart, audit: _AuditLog) -> None:
+    response = await _post_body(
+        app, {"scope": "connections:resolve", "community_id": 7, "connection_id": 3}
+    )
+    assert response.status_code == 200
+    body = await response.get_json()
+    assert body["expires_in"] <= 300
+    claims = (
+        app.config["SERVICE_JWT_ISSUER"]
+        .as_verifier()
+        .verify(body["token"], required_scope="connections:resolve")
+    )
+    assert (claims["community"], claims["conn"]) == (7, 3)
+    assert claims["exp"] - claims["iat"] <= 300
+    event = audit.events[-1]
+    assert event["community_id"] == 7 and body["token"] not in repr(event)
+
+
+async def test_resolve_token_without_connection_has_no_conn_claim(app: Quart) -> None:
+    response = await _post_body(app, {"scope": "connections:resolve", "community_id": 0})
+    claims = (
+        app.config["SERVICE_JWT_ISSUER"]
+        .as_verifier()
+        .verify((await response.get_json())["token"], required_scope="connections:resolve")
+    )
+    assert claims["community"] == 0 and "conn" not in claims
+
+
+async def test_token_endpoint_unbound_list_scope_never_has_community(app: Quart) -> None:
+    response = await _post_body(app, {"scope": "connections:list"})
+    assert response.status_code == 200
+    claims = (
+        app.config["SERVICE_JWT_ISSUER"]
+        .as_verifier()
+        .verify((await response.get_json())["token"], required_scope="connections:list")
+    )
+    assert "community" not in claims and claims["tenant"] == "system"
+    rejected = await _post_body(app, {"scope": "connections:list", "community_id": 7})
+    assert rejected.status_code == 400
+
+
+async def test_other_scopes_reject_binding_fields(app: Quart) -> None:
+    response = await _post_body(app, {"scope": SCOPE, "community_id": 7})
+    assert response.status_code == 400

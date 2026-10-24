@@ -38,9 +38,10 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Callable, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 import jwt
 import requests
@@ -90,6 +91,19 @@ def spiffe_id(env: str, service: str) -> str:
 #: tokens are short-lived (1h, same ceiling as JWT Claims above)").
 MAX_TOKEN_TTL_SECONDS = 3600
 DEFAULT_TOKEN_TTL_SECONDS = 900
+
+#: Community-bound connection-resolve tokens are capped far tighter than the 1h ceiling: they
+#: authorise reading one community's provider credentials, so a leaked one must die fast.
+BOUND_TOKEN_TTL_SECONDS = 300
+
+#: Connection scopes. ``resolve`` is community-bound (claims below); ``list`` is unbound,
+#: operator-plane, and the routes it guards never return secrets.
+SCOPE_CONNECTIONS_RESOLVE = "connections:resolve"
+SCOPE_CONNECTIONS_LIST = "connections:list"
+
+#: The ONLY extra claims an issuer call may stamp, and both are integers (numeric ids only --
+#: never a name/slug, never PII), so a JWS suffices and no JWE wrapping is needed.
+ALLOWED_EXTRA_CLAIMS = frozenset({"community", "conn"})
 
 #: Allowed clock skew when validating `iat`/`exp` across services.
 CLOCK_SKEW_SECONDS = 30
@@ -285,14 +299,25 @@ class ServiceJwtIssuer:
         return self.issue_with_claims(service_id, scope, ttl_seconds=ttl_seconds)[0]
 
     def issue_with_claims(
-        self, service_id: str, scope: str, *, ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS
+        self,
+        service_id: str,
+        scope: str,
+        *,
+        ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
+        extra_claims: Mapping[str, int] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Mint a JWT like `issue()` and also return the exact claims that were signed.
 
         Lets the token endpoint audit-log `jti`/`exp`/`tenant` straight from what it just
         minted, instead of re-decoding its own output with signature verification
         disabled (an unverified decode is a footgun this codebase no longer carries).
+
+        ``extra_claims`` binds the token to a community (``community``) and optionally one
+        connection (``conn``). Only those two names are accepted, each a non-negative ``int``
+        (``bool`` refused); anything else raises ``ValueError``. A bound token's lifetime is
+        clamped to ``BOUND_TOKEN_TTL_SECONDS``.
         """
+        extra = _validated_extra_claims(extra_claims)
         if ttl_seconds > MAX_TOKEN_TTL_SECONDS:
             raise ServiceJwtError(f"ttl_seconds {ttl_seconds} exceeds {MAX_TOKEN_TTL_SECONDS}s ceiling")
         identity = self.identities.get(service_id)
@@ -301,6 +326,8 @@ class ServiceJwtIssuer:
         key = self.keys[self.active_kid]
         if key.private_key is None:
             raise ServiceJwtError(f"active key {self.active_kid!r} has no private key loaded")
+        if extra:
+            ttl_seconds = min(ttl_seconds, BOUND_TOKEN_TTL_SECONDS)
         now = int(time.time())
         payload: dict[str, Any] = {
             "iss": ISSUER,
@@ -322,6 +349,7 @@ class ServiceJwtIssuer:
             # Tenant binding comes from the allow-listed identity only -- the caller
             # supplies a scope, never a tenant (security.md Tenant Isolation).
             payload["tenant"] = identity.tenant
+        payload.update(extra)
         # PyJWT's EdDSA signer accepts a `cryptography` private-key object
         # directly -- extracting raw bytes here was dead code that only
         # ever created (and immediately discarded) an extra copy of the
@@ -337,7 +365,7 @@ class ServiceJwtIssuer:
         key = self.keys.get(kid)
         return key.public_key if key else None
 
-    def as_verifier(self) -> "ServiceJwtVerifier":
+    def as_verifier(self) -> ServiceJwtVerifier:
         """Wrap this issuer as a `ServiceJwtVerifier` (self-verification today).
 
         Migration note: retiring hub-api issuance later means constructing
@@ -365,6 +393,19 @@ class ServiceJwtIssuer:
                 }
             )
         return {"keys": keys}
+
+
+def _validated_extra_claims(extra_claims: Mapping[str, int] | None) -> dict[str, int]:
+    """Allow-list and type-check issuer extra claims; fail loudly on anything else."""
+    if not extra_claims:
+        return {}
+    unknown = set(extra_claims) - ALLOWED_EXTRA_CLAIMS
+    if unknown:
+        raise ValueError(f"extra claim(s) not allowed: {sorted(unknown)}")
+    for name, value in extra_claims.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"extra claim {name!r} must be a non-negative integer")
+    return dict(extra_claims)
 
 
 def _b64url(raw: bytes) -> str:
