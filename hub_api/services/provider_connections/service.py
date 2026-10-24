@@ -601,6 +601,16 @@ class ProviderConnectionService:
                 return self._resolve_static(adapter, kind, state)
         with operation_span(provider, "resolve"):
             self._assert_usable(state)
+            # Reject an incomplete binding BEFORE any refresh: never rotate a row we will refuse.
+            if (
+                self.binding_metadata(
+                    provider, state.connection.resource_metadata, connection_id=connection_id
+                )
+                is None
+            ):
+                raise ConnectionNotUsable(
+                    "the connection's binding is incomplete", reason="metadata_incomplete"
+                )
             plaintext, connection = await self._fresh_token(
                 adapter, connection_id, community_id=community_id, state=state
             )
@@ -631,6 +641,8 @@ class ProviderConnectionService:
         missing: list[str] = []
         for key in spec.binding_metadata:
             value = stored.get(key.stored)
+            if isinstance(value, int) and not isinstance(value, bool):
+                value = str(value)  # e.g. a numeric channel id stored as an int
             if isinstance(value, str) and value:
                 out[key.wire] = value
             elif key.required:

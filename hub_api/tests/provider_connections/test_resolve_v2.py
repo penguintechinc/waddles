@@ -203,7 +203,48 @@ class TestResolveStaticKinds:
         assert body["accessToken"] == bot_tokens[0]
         assert body["endpoint"] == {"url": None, "region": None, "function": None, "project": None}
         assert bot_tokens[1] not in await response.get_data(as_text=True)
+        # independent full-body literal: WRITE_GOLDEN can never bless a wrong OAuth fixture
+        assert _normalised(body) == {
+            "success": True,
+            "connectionId": 12,
+            "communityId": 7,
+            "provider": "twitch",
+            "kind": 1,
+            "accessToken": "FAKE-ACCESS-TOKEN",
+            "expiresAt": FAKE_EXPIRY,
+            "endpoint": {"url": None, "region": None, "function": None, "project": None},
+            "secret": None,
+            "metadata": {
+                "channel": CHANNEL_LOGIN,
+                "bot_login": BOT.login,
+                "channel_login": CHANNEL_LOGIN,
+                "channel_id": CHANNEL_ID,
+            },
+        }
         _check_golden("oauth", body)
+
+
+class TestGoldenFixturesMatchTheDto:
+    @pytest.mark.parametrize("name", ["oauth", "http", "lambda", "gcp"])
+    def test_every_fixture_parses_against_the_dto_schema(self, name: str) -> None:
+        """A fixture can never drift from the DTO shape the Rust crate deserialises."""
+        from dataclasses import fields
+
+        from pydantic import TypeAdapter
+
+        from blueprints.v1.provider_connections import (
+            EndpointDTO,
+            ResolvedCredentialsDTO,
+            SecretDTO,
+        )
+
+        raw = json.loads((FIXTURES / f"resolve_v2_{name}.json").read_text())
+        assert set(raw) == {f.name for f in fields(ResolvedCredentialsDTO)}
+        assert set(raw["endpoint"]) == {f.name for f in fields(EndpointDTO)}
+        if raw["secret"] is not None:
+            assert set(raw["secret"]) == {f.name for f in fields(SecretDTO)}
+        parsed = TypeAdapter(ResolvedCredentialsDTO).validate_python(raw)
+        assert json.loads(TypeAdapter(ResolvedCredentialsDTO).dump_json(parsed)) == raw
 
 
 class TestResolveErrors:
@@ -375,26 +416,34 @@ class TestResolveErrors:
             assert response.headers["Cache-Control"] == "no-store"
             assert response.headers["Pragma"] == "no-cache"
 
+    @pytest.mark.parametrize(
+        ("stored", "emitted"),
+        [
+            ("secret_leak_abc", "other"),  # lowercase-underscore but not in the fixed set
+            ("Free text: SECRET-LEAK 123", "other"),
+            ("token_expired", "token_expired"),
+            ("refresh_rejected", "refresh_rejected"),
+        ],
+    )
     async def test_a_reason_is_always_a_fixed_code(
         self,
         client: Any,
         pc_db: Any,
         bot_tokens: Any,
         service_issuer: ServiceJwtIssuer,
+        stored: str,
+        emitted: str,
     ) -> None:
         conn = (await (await _create(client, pc_db, bot_tokens)).get_json())["connection"]["id"]
         await set_column(
-            pc_db,
-            "platform_connections",
-            conn,
-            status="revoked",
-            status_reason="Free text: SECRET-LEAK 123",
+            pc_db, "platform_connections", conn, status="revoked", status_reason=stored
         )
         refused = await _resolve(client, service_issuer, pc_db.seed.community_id, conn)
         assert refused.status_code == 409
         body = await refused.get_json()
-        assert body["reason"] == "other"
-        assert "SECRET-LEAK" not in json.dumps(body)
+        assert body["reason"] == emitted
+        if emitted == "other":
+            assert stored not in json.dumps(body)
 
 
 class TestListScopeSplit:
@@ -504,6 +553,42 @@ class TestTwitchBindingMetadata:
         assert lines and all(f"connection_id={conn}" in line and missing in line for line in lines)
         # never a value
         assert not any(CHANNEL_LOGIN in line or BOT.login in line for line in lines)
+
+    async def test_an_incomplete_binding_is_refused_before_any_refresh(
+        self,
+        client: Any,
+        pc_db: Any,
+        bot_tokens: Any,
+        service_issuer: ServiceJwtIssuer,
+        clock: Any,
+        fake_twitch: Any,
+    ) -> None:
+        conn = (await (await _create(client, pc_db, bot_tokens)).get_json())["connection"]["id"]
+        (row,) = await raw_rows(pc_db, "platform_connections")
+        stored = json.loads(row["resource_metadata"])
+        del stored["bot_login"]
+        await set_column(pc_db, "platform_connections", conn, resource_metadata=json.dumps(stored))
+        clock.advance(seconds=14000)  # the token is stale: a resolve WOULD refresh
+        resolved = await _resolve(client, service_issuer, pc_db.seed.community_id, conn)
+        assert resolved.status_code == 409
+        assert fake_twitch.refresh_calls == 0
+        (after,) = await raw_rows(pc_db, "platform_connections")
+        assert after["access_token"] == row["access_token"]  # nothing was rotated
+
+    async def test_a_numeric_passthrough_value_is_coerced_not_dropped(
+        self, pc_service: Any, pc_db: Any
+    ) -> None:
+        out = pc_service.binding_metadata(
+            "twitch",
+            {"channel_login": "abc", "bot_login": "bot", "channel_id": 7001},
+            connection_id=1,
+        )
+        assert out == {
+            "channel": "abc",
+            "bot_login": "bot",
+            "channel_login": "abc",
+            "channel_id": "7001",
+        }
 
     async def test_metadata_keys_are_allowlisted_per_provider(
         self, client: Any, pc_db: Any, bot_tokens: Any, service_issuer: ServiceJwtIssuer

@@ -37,7 +37,6 @@ non-secret ``endpoint`` and a structured ``secret``. It is ``Cache-Control: no-s
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -50,7 +49,7 @@ from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from pydantic import ConfigDict
 from quart import Blueprint, Response, current_app, request
-from quart_schema import validate_request, validate_response
+from quart_schema import document_response, validate_request, validate_response
 
 from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
@@ -311,7 +310,47 @@ class ResolvedCredentialsDTO:
     metadata: dict[str, str]
 
 
-_REASON_RE: Final = re.compile(r"[a-z][a-z_]{0,47}")
+#: The only ``reason`` codes a resolve 409 may carry; anything else a writer stores (or a future
+#: writer adds) is emitted as ``other`` -- a reason never leaks through by merely looking safe.
+NOT_USABLE_REASONS: Final = frozenset(
+    {
+        "pending_approval",
+        "revoked_grant",
+        "disabled",
+        "connection_expired",
+        "connection_revoked",
+        "metadata_incomplete",
+        "token_expired",
+        "refresh_rejected",
+        "refresh_not_configured",
+    }
+)
+
+
+@dataclass(slots=True, frozen=True)
+class NotUsableDTO:
+    """409 body of resolve: a flat refusal; ``reason`` is one of ``NOT_USABLE_REASONS``."""
+
+    success: bool
+    error: str
+    reason: str
+
+
+@dataclass(slots=True, frozen=True)
+class ErrorBodyDTO:
+    """The inner ``error`` object of the standard error envelope."""
+
+    message: str
+    code: str
+    timestamp: str
+
+
+@dataclass(slots=True, frozen=True)
+class ErrorEnvelopeDTO:
+    """Standard error envelope (404 not found / not granted to this community, 503 unavailable)."""
+
+    success: bool
+    error: ErrorBodyDTO
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -481,7 +520,7 @@ def _connection_err(
         log_failure(
             logger, "provider_connections.request_failed", exc, level=logging.INFO, route=event
         )
-        reason = exc.reason if _REASON_RE.fullmatch(exc.reason or "") else "other"
+        reason = exc.reason if exc.reason in NOT_USABLE_REASONS else "other"
         return {"success": False, "error": "not_usable", "reason": reason}, 409
     status, code = _STATUS_BY_ERROR.get(type(exc), (500, "INTERNAL_ERROR"))
     level = logging.ERROR if status >= 500 else logging.INFO
@@ -768,6 +807,9 @@ async def internal_list() -> DataPlaneListResponse:
 @provider_connections_internal_bp.route(_ONE + "/resolve", methods=["POST"])
 @_resolve_authenticated
 @validate_response(ResolvedCredentialsDTO)
+@document_response(NotUsableDTO, 409)
+@document_response(ErrorEnvelopeDTO, 404)
+@document_response(ErrorEnvelopeDTO, 503)
 @_guarded("internal_resolve")
 async def internal_resolve(community_id: int, connection_id: int) -> ResolvedCredentialsDTO:
     """``POST .../resolve`` -- endpoint + credential for one usable binding of the BOUND community.

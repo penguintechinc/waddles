@@ -1900,6 +1900,24 @@ components:
       - project
       title: EndpointDTO
       type: object
+    ErrorBodyDTO:
+      description: The inner ``error`` object of the standard error envelope.
+      properties:
+        code:
+          title: Code
+          type: string
+        message:
+          title: Message
+          type: string
+        timestamp:
+          title: Timestamp
+          type: string
+      required:
+      - message
+      - code
+      - timestamp
+      title: ErrorBodyDTO
+      type: object
     ExportManifestDTO:
       description: What an offline verifier needs to check an export slice (``make
         verify-audit-export``).
@@ -16378,6 +16396,68 @@ paths:
 
             Exactly one of ``accessToken`` (OAuth, kind 1) / ``secret`` (static, kinds
             2-4) is non-null.'
+        '404':
+          content:
+            application/json:
+              schema:
+                description: Standard error envelope (404 not found / not granted
+                  to this community, 503 unavailable).
+                properties:
+                  error:
+                    $ref: '#/components/schemas/ErrorBodyDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - error
+                title: ErrorEnvelopeDTO
+                type: object
+          description: Standard error envelope (404 not found / not granted to this
+            community, 503 unavailable).
+        '409':
+          content:
+            application/json:
+              schema:
+                description: '409 body of resolve: a flat refusal; ``reason`` is one
+                  of ``NOT_USABLE_REASONS``.'
+                properties:
+                  error:
+                    title: Error
+                    type: string
+                  reason:
+                    title: Reason
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - error
+                - reason
+                title: NotUsableDTO
+                type: object
+          description: '409 body of resolve: a flat refusal; ``reason`` is one of
+            ``NOT_USABLE_REASONS``.'
+        '503':
+          content:
+            application/json:
+              schema:
+                description: Standard error envelope (404 not found / not granted
+                  to this community, 503 unavailable).
+                properties:
+                  error:
+                    $ref: '#/components/schemas/ErrorBodyDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - error
+                title: ErrorEnvelopeDTO
+                type: object
+          description: Standard error envelope (404 not found / not granted to this
+            community, 503 unavailable).
       summary: '``POST .../resolve`` -- endpoint + credential for one usable binding
         of the BOUND community.'
   /api/v1/internal/dataplane/resolve-scope:
