@@ -16289,7 +16289,16 @@ paths:
 
         have to implement their own refresh-then-retry loop. Never logs a
 
-        token value on any path.'
+        token value on any path.
+
+
+        Auth: `Authorization: Bearer <community-bound machine JWT>` (scope
+
+        `connections:resolve`, `system` tenant, `community` claim equal to
+
+        `<id>`); missing/invalid -> 401, other community/tenant -> 403,
+
+        verifier unconfigured -> 503. No static shared secret is accepted.'
       operationId: get_internal_get_token
       parameters:
       - in: path
