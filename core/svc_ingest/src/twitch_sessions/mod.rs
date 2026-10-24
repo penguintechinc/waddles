@@ -7,6 +7,6 @@
 pub mod spec;
 
 pub use spec::{
-    discover, DiscoverError, Discovery, SessionSpec, SpecError, MAX_PAGES, META_BOT_LOGIN,
-    META_CHANNEL, PAGE_LIMIT,
+    discover, DiscoverError, Discovery, SessionSpec, SpecError, CAPABILITY, MAX_PAGES,
+    META_BOT_LOGIN, META_CHANNEL, PAGE_LIMIT,
 };
