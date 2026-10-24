@@ -34,10 +34,6 @@ pub const LEASE_TTL: Duration = Duration::from_secs(180);
 pub const RESTART_COOLDOWN: Duration = Duration::from_secs(120);
 /// Bound on one binding discovery (each page call is bounded by this too).
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
-/// Safety margin before lease expiry at which a session stops itself if no
-/// renew landed: sessions live at most `LEASE_TTL - LEASE_MARGIN` (120s) past
-/// the last successful acquire/renew, independent of reconcile timing.
-const LEASE_MARGIN: Duration = RECONCILE_INTERVAL;
 /// Bound on a session task finishing after its shutdown signal.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Consecutive renew errors after which a session is stopped (fail-closed).
@@ -104,9 +100,17 @@ pub struct RealRunner<R, A, M> {
     port: u16,
     use_tls: bool,
     session_metrics: Option<Arc<dyn SessionMetrics>>,
+    resolve_timeout: Duration,
 }
 
 impl<R, A, M> RealRunner<R, A, M> {
+    /// Overrides the per-call credential-resolution bound (default 10s).
+    #[must_use]
+    pub fn with_resolve_timeout(mut self, timeout: Duration) -> Self {
+        self.resolve_timeout = timeout;
+        self
+    }
+
     /// Attaches the telemetry sink that records resolve failures from every
     /// session's connector.
     #[must_use]
@@ -139,6 +143,7 @@ impl<R, A, M> RealRunner<R, A, M> {
             port,
             use_tls,
             session_metrics: None,
+            resolve_timeout: RESOLVE_TIMEOUT,
         }
     }
 }
@@ -162,13 +167,14 @@ where
         let scope = self.scope.clone();
         let (host, port, tls) = (self.host.clone(), self.port, self.use_tls);
         let session_metrics = self.session_metrics.clone();
+        let resolve_timeout = self.resolve_timeout;
         tokio::spawn(async move {
             let label = SessionLabel {
                 community_id: spec.community_id,
                 connection_id: spec.connection_id,
             };
             let mut connector =
-                ResolvingConnector::new(resolver, spec.clone(), host, port, tls, RESOLVE_TIMEOUT);
+                ResolvingConnector::new(resolver, spec.clone(), host, port, tls, resolve_timeout);
             if let Some(m) = session_metrics {
                 connector = connector.with_metrics(m);
             }
@@ -236,12 +242,14 @@ pub struct SessionManager<R: ConnectionResolve + 'static, L: SessionLease + 'sta
     resolver: Arc<R>,
     lease: Arc<L>,
     deps: SessionDeps,
+    interval: Duration,
+    discovery_timeout: Duration,
     sessions: HashMap<(i64, i64), RunningSession>,
 }
 
 /// Up to 10% of [`RECONCILE_INTERVAL`], randomized so replicas desynchronize.
-fn jitter() -> Duration {
-    let max_ms = RECONCILE_INTERVAL.as_millis() / 10;
+fn jitter(interval: Duration) -> Duration {
+    let max_ms = interval.as_millis() / 10;
     let ms = uuid::Uuid::new_v4().as_u128() % (max_ms + 1);
     Duration::from_millis(u64::try_from(ms).unwrap_or(0))
 }
@@ -263,8 +271,31 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
             resolver,
             lease,
             deps,
+            interval: RECONCILE_INTERVAL,
+            discovery_timeout: DISCOVERY_TIMEOUT,
             sessions: HashMap::new(),
         }
+    }
+
+    /// Overrides the reconcile interval and the per-call discovery bound
+    /// (defaults: [`RECONCILE_INTERVAL`], 10s). The lease TTL and the
+    /// self-stop margin scale with the interval (3x and 1x) so the renew
+    /// cadence always fits well inside the lease.
+    #[must_use]
+    pub fn with_timing(mut self, interval: Duration, discovery_timeout: Duration) -> Self {
+        self.interval = interval;
+        self.discovery_timeout = discovery_timeout;
+        self
+    }
+
+    /// Lease lifetime for the configured interval.
+    fn lease_ttl(&self) -> Duration {
+        self.interval * 3
+    }
+
+    /// How long a session may outlive its last successful acquire/renew.
+    fn session_window(&self) -> Duration {
+        self.lease_ttl().saturating_sub(self.interval)
     }
 
     /// Sessions whose task is still running.
@@ -286,7 +317,7 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
         let began = Instant::now();
         let mut rep = ReconcileReport::default();
         self.reap_finished().await;
-        match discover(&*self.resolver, DISCOVERY_TIMEOUT).await {
+        match discover(&*self.resolver, self.discovery_timeout).await {
             Err(e) => {
                 rep.discovery_failed = true;
                 self.deps.metrics.discovery(DiscoveryOutcome::Failed);
@@ -347,7 +378,7 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
             self.reconcile().await;
             tokio::select! {
                 _ = &mut shutdown => break,
-                () = tokio::time::sleep(RECONCILE_INTERVAL + jitter()) => {}
+                () = tokio::time::sleep(self.interval + jitter(self.interval)) => {}
             }
         }
         self.stop_all().await;
@@ -447,7 +478,7 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
     /// `lease_denied`) when the lease is held elsewhere or Valkey failed.
     async fn try_start(&mut self, spec: SessionSpec, rep: &mut ReconcileReport) -> bool {
         let key = spec.key();
-        match self.lease.acquire(key, LEASE_TTL).await {
+        match self.lease.acquire(key, self.lease_ttl()).await {
             Ok(true) => {
                 self.deps.metrics.lease_event(LeaseOutcome::Acquired);
                 let rs = self.launch(spec);
@@ -482,7 +513,7 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
         let (inner_tx, inner_rx) = oneshot::channel();
         let mut inner = self.deps.runner.spawn(spec.clone(), inner_rx);
         let inner_abort = inner.abort_handle();
-        let window = LEASE_TTL.saturating_sub(LEASE_MARGIN);
+        let window = self.session_window();
         let (deadline_tx, mut deadline_rx) = watch::channel(Instant::now() + window);
         let ended = Arc::new(Mutex::new(None));
         let stamp = ended.clone();
@@ -542,14 +573,14 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
     /// could not be renewed [`MAX_RENEW_FAILURES`] times in a row.
     async fn renew_one(&mut self, key: (i64, i64)) -> Renewal {
         let before = Instant::now();
-        let outcome = self.lease.renew(key, LEASE_TTL).await;
+        let window = self.session_window();
+        let outcome = self.lease.renew(key, self.lease_ttl()).await;
         let lost = match outcome {
             Ok(true) => {
                 self.deps.metrics.lease_event(LeaseOutcome::Renewed);
                 if let Some(s) = self.sessions.get_mut(&key) {
                     s.renew_failures = 0;
-                    s.deadline_tx
-                        .send_replace(before + LEASE_TTL.saturating_sub(LEASE_MARGIN));
+                    s.deadline_tx.send_replace(before + window);
                 }
                 false
             }
@@ -1248,10 +1279,23 @@ mod tests {
         assert_eq!(SessionEnd::NonRetryable.label(), "non_retryable");
     }
 
+    #[tokio::test]
+    async fn with_timing_scales_lease_ttl_and_session_window() {
+        let h = harness(vec![]);
+        assert_eq!(h.mgr.lease_ttl(), LEASE_TTL, "defaults match the consts");
+        assert_eq!(h.mgr.session_window(), Duration::from_secs(120));
+        let mgr = h
+            .mgr
+            .with_timing(Duration::from_secs(20), Duration::from_secs(3));
+        assert_eq!(mgr.lease_ttl(), Duration::from_secs(60));
+        assert_eq!(mgr.session_window(), Duration::from_secs(40));
+        assert_eq!(mgr.discovery_timeout, Duration::from_secs(3));
+    }
+
     #[test]
     fn jitter_is_bounded_to_ten_percent() {
         for _ in 0..50 {
-            assert!(jitter() <= RECONCILE_INTERVAL / 10);
+            assert!(jitter(RECONCILE_INTERVAL) <= RECONCILE_INTERVAL / 10);
         }
     }
 

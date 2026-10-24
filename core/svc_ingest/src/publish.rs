@@ -45,6 +45,12 @@ pub fn install_scope_resolver(resolver: Arc<ScopeResolver<HubScopeSource>>) -> b
     SCOPE_RESOLVER.set(resolver).is_ok()
 }
 
+/// `true` once [`install_scope_resolver`] has run -- dynamic Twitch sessions
+/// publish under per-community scope from it and refuse to start without.
+pub fn scope_resolver_installed() -> bool {
+    SCOPE_RESOLVER.get().is_some()
+}
+
 /// Fixed namespace for PA-WORKSTREAM's deterministic fixed-platform
 /// workstream ids. Generated once and never regenerated -- changing it
 /// would change every fixed-platform `workstream_id` on next deploy,

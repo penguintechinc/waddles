@@ -4,6 +4,7 @@
 //! sessions (complete-or-fail paging, deduplicated); later layers reconcile
 //! that set against running sessions.
 
+pub mod boot;
 pub mod connector;
 pub mod lease;
 pub mod manager;
