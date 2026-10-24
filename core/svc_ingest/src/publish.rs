@@ -144,10 +144,13 @@ fn assert_scope_consistent(resolved: &ResolvedScope, scope: &Scope) -> Result<()
 /// suppress this if the trait is only used in your own code" escape hatch
 /// applies literally -- `svc-ingest` is a deployed service binary, not a
 /// published library other crates implement this trait against.
-#[allow(async_fn_in_trait)]
 pub trait EventAppender: Send + Sync {
     /// Performs the `XADD`, returning the new entry id.
-    async fn append(&self, stream: &str, env: &StageEnvelope) -> Result<String, SpineError>;
+    fn append(
+        &self,
+        stream: &str,
+        env: &StageEnvelope,
+    ) -> impl std::future::Future<Output = Result<String, SpineError>> + Send;
 }
 
 impl EventAppender for SpineClient {
