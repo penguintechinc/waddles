@@ -24,7 +24,7 @@
     "helmet": "8.1.0",
     "ipaddr.js": "2.5.0",
     "jsonwebtoken": "9.0.3",
-    "multer": "2.4.0",
+    "multer": "2.5.0",
     "nodemailer": "10.0.12",
     "pg": "8.17.2",
     "socket.io": "4.8.3",
