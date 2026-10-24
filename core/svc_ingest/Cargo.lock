@@ -372,6 +372,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "connection_resolver"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2285,6 +2299,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "connection_resolver",
  "futures-util",
  "hmac",
  "http-body-util",
