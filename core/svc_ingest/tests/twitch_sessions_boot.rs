@@ -13,7 +13,9 @@ use connection_resolver::{
 };
 use svc_ingest::config::{CliConfig, TwitchMode};
 use svc_ingest::dispatch_twitch_mode;
-use svc_ingest::twitch_sessions::boot::{spawn_manager_task, validate_dynamic_prereqs};
+use svc_ingest::twitch_sessions::boot::{
+    manager_exit_is_fatal, spawn_manager_task, validate_dynamic_prereqs,
+};
 use svc_ingest::twitch_sessions::{
     DiscoveryOutcome, LeaseError, LeaseOutcome, ReconcileReport, SessionDeps, SessionEnd,
     SessionLease, SessionManager, SessionMetrics, SessionRunner, SessionSpec,
@@ -262,4 +264,17 @@ async fn manager_task_ends_on_process_shutdown() {
         .await
         .expect("manager task must end on shutdown")
         .expect("manager task must not panic");
+}
+
+#[tokio::test]
+async fn unexpected_manager_exit_is_fatal_but_clean_shutdown_is_not() {
+    // Clean shutdown after a requested stop.
+    let clean = tokio::spawn(async {}).await;
+    assert!(!manager_exit_is_fatal(&clean, true));
+    // Ended with no shutdown requested: fatal.
+    assert!(manager_exit_is_fatal(&clean, false));
+    // A panicking manager task is fatal even if shutdown was flagged.
+    let panicked = tokio::spawn(async { panic!("boom") }).await;
+    assert!(manager_exit_is_fatal(&panicked, true));
+    assert!(manager_exit_is_fatal(&panicked, false));
 }

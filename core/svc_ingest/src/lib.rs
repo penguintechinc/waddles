@@ -265,6 +265,9 @@ where
     // `None`. `flag_enabled` never performs inline network I/O (see
     // `crate::license`'s module doc), so this check never blocks startup
     // regardless of license/flag-server reachability.
+    // A contradictory Twitch config (dynamic flag ON + a static identity, or
+    // bad timing) fails loudly even when the data plane below is OFF.
+    config::validate_twitch_mode(&config)?;
     let license_client = license::build_license_client();
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
@@ -759,14 +762,14 @@ async fn try_build_eventsub_state(
     let redis_client = match outbound::build_redis_client(&spine_cfg) {
         Ok(client) => client,
         Err(err) => {
-            tracing::warn!(error = %err, "valkey client build failed; twitch eventsub receiver not started");
+            tracing::warn!(error_kind = ?err.kind(), "valkey client build failed; twitch eventsub receiver not started");
             return None;
         }
     };
     let conn = match redis_client.get_multiplexed_async_connection().await {
         Ok(conn) => conn,
         Err(err) => {
-            tracing::warn!(error = %err, "valkey connect failed; twitch eventsub receiver not started");
+            tracing::warn!(error_kind = ?err.kind(), "valkey connect failed; twitch eventsub receiver not started");
             return None;
         }
     };
