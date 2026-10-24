@@ -10,6 +10,7 @@ webui:
   # `localhost` -- the LAN-IP publicUrl above is rejected by their OAuth consent screens.
   connectionsCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud:8443"
   identityCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud:8443"
+  frontendOrigin: "https://waddles-alpha.penguintech.cloud:8443"
 
 global:
   # fix/alpha-helm-deploy -- was "" (empty), which (a) rendered every
@@ -826,6 +827,7 @@ podSecurity:
 # in waddlebot-config (hub-api envFrom). NOTE: requires configmap.yaml template line from the demo branch.
 config:
   eventDiscordSyncEnabled: true
+  communityConnectionsEnabled: true
   # Monday-demo: ENV baseline for waddles.bar_citizen.role_sync -> FLAG_WADDLES_BAR_CITIZEN_ROLE_SYNC
   # (read by hub-api + the role-sync CronJob via envFrom waddlebot-config; PostHog still overrides).
   barCitizenRoleSyncEnabled: true
