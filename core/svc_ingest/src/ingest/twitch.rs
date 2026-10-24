@@ -64,6 +64,18 @@ impl IrcConnector for TwitchIrcReceiver {
     }
 }
 
+/// Identity attached to every log/span line of one session -- numeric ids
+/// only, because a Twitch channel login is a username (PII) and must never
+/// reach a log line, span field, or `Debug` output. The static
+/// single-channel path uses `{0, 0}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionLabel {
+    /// Community (team-layer) id owning the session; 0 for the static path.
+    pub community_id: i64,
+    /// Provider-connection id backing the session; 0 for the static path.
+    pub connection_id: i64,
+}
+
 /// Runs the connect/receive/publish/reconnect loop until `shutdown`
 /// resolves. Split out from [`run`] (which builds the real connector,
 /// keyring, and `SpineClient`) so this control flow is exercised in tests
@@ -92,6 +104,7 @@ async fn run_loop<C, A, M>(
     keyring: &KeyRing,
     active_kid: &str,
     scope: &Scope,
+    label: SessionLabel,
     source_id: String,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
@@ -110,13 +123,13 @@ async fn run_loop<C, A, M>(
                     // Deliberately NOT `backoff.reset()` -- a successful
                     // connect+register+join is not evidence the session is
                     // usable. See `crate::ingest::Backoff`'s doc comment.
-                    tracing::info!(platform = "twitch", source_id = %source_id, "connected, awaiting session stability");
+                    tracing::info!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, "connected, awaiting session stability");
                     channel
                 }
                 Err(err) => {
-                    tracing::warn!(platform = "twitch", source_id = %source_id, error = %err, "connect failed, retrying");
+                    tracing::warn!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error = %err, "connect failed, retrying");
                     if !err.is_retryable() {
-                        tracing::error!(platform = "twitch", source_id = %source_id, error = %err, "non-retryable connect failure, stopping Twitch ingest");
+                        tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error = %err, "non-retryable connect failure, stopping Twitch ingest");
                         return;
                     }
                     let delay = backoff.delay();
@@ -139,14 +152,14 @@ async fn run_loop<C, A, M>(
                 () = &mut stability_timer, if !stable => {
                     stable = true;
                     backoff.reset();
-                    tracing::info!(platform = "twitch", source_id = %source_id, "session stable (stability window elapsed), backoff reset");
+                    tracing::info!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, "session stable (stability window elapsed), backoff reset");
                 }
                 recv = channel.recv() => match recv {
                     Ok(Some(msg)) => {
                         if !stable {
                             stable = true;
                             backoff.reset();
-                            tracing::info!(platform = "twitch", source_id = %source_id, "session stable (line received), backoff reset");
+                            tracing::info!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, "session stable (line received), backoff reset");
                         }
                         if crate::normalize::is_self_message(&msg.sender, configured_nick) {
                             continue;
@@ -165,11 +178,11 @@ async fn run_loop<C, A, M>(
                         )
                         .await
                         {
-                            tracing::error!(platform = "twitch", source_id = %source_id, error = %err, "failed to publish chat event");
+                            tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error = %err, "failed to publish chat event");
                         }
                     }
                     Ok(None) => {
-                        tracing::warn!(platform = "twitch", source_id = %source_id, "connection closed, reconnecting");
+                        tracing::warn!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, "connection closed, reconnecting");
                         let delay = backoff.delay();
                         tokio::select! {
                             _ = &mut shutdown => return,
@@ -178,9 +191,9 @@ async fn run_loop<C, A, M>(
                         continue 'outer;
                     }
                     Err(err) => {
-                        tracing::warn!(platform = "twitch", source_id = %source_id, error = %err, "recv error, reconnecting");
+                        tracing::warn!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error = %err, "recv error, reconnecting");
                         if !err.is_retryable() {
-                            tracing::error!(platform = "twitch", source_id = %source_id, error = %err, "non-retryable gateway error, stopping Twitch ingest");
+                            tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error = %err, "non-retryable gateway error, stopping Twitch ingest");
                             return;
                         }
                         let delay = backoff.delay();
@@ -237,10 +250,48 @@ pub fn irc_config(
     cfg
 }
 
+/// Runs one IRC session (connect/receive/publish/reconnect with backoff)
+/// for `channel` until `shutdown` resolves or a non-retryable error stops
+/// it. Reusable per community: derives `source_id`/workstream from
+/// `channel` internally (an infra key, never logged) and tags every log
+/// line with the numeric `label` instead.
+#[allow(clippy::too_many_arguments)] // mirrors run_loop's own justification
+pub async fn run_with_connector<C, A, M>(
+    connector: C,
+    configured_nick: &str,
+    channel: &str,
+    label: SessionLabel,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    shutdown: oneshot::Receiver<()>,
+) where
+    C: IrcConnector,
+    A: EventAppender,
+    M: SpineMetrics,
+{
+    run_loop(
+        connector,
+        configured_nick,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        label,
+        source_id(channel),
+        Backoff::new(Duration::from_secs(30)),
+        shutdown,
+    )
+    .await;
+}
+
 /// Connects the real Twitch IRC receiver and a real `SpineClient`-backed
-/// publisher, then runs [`run_loop`] until `shutdown` resolves. This is the
-/// function `crate::lib::try_start_twitch_irc` spawns as its own background
-/// task.
+/// publisher, then runs [`run_with_connector`] until `shutdown` resolves.
+/// This is the function `crate::lib::try_start_twitch_irc` spawns as its
+/// own background task (static single-channel path, label `{0, 0}`).
 #[allow(clippy::too_many_arguments)] // mirrors run_loop's own justification
 pub async fn run<A: EventAppender, M: SpineMetrics>(
     irc_cfg: IrcConfig,
@@ -253,19 +304,16 @@ pub async fn run<A: EventAppender, M: SpineMetrics>(
     scope: &Scope,
     shutdown: oneshot::Receiver<()>,
 ) {
-    let receiver = TwitchIrcReceiver::new(irc_cfg);
-    let sid = source_id(channel);
-    let backoff = Backoff::new(Duration::from_secs(30));
-    run_loop(
-        receiver,
+    run_with_connector(
+        TwitchIrcReceiver::new(irc_cfg),
         configured_nick,
+        channel,
+        SessionLabel::default(),
         appender,
         metrics,
         keyring,
         active_kid,
         scope,
-        sid,
-        backoff,
         shutdown,
     )
     .await;
@@ -386,6 +434,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_label_default_is_zero_for_static_path() {
+        let label = SessionLabel::default();
+        assert_eq!((label.community_id, label.connection_id), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn run_with_connector_publishes_and_stops_on_shutdown() {
+        let connector = FakeConnector::new(
+            vec![test_msg("someuser", "hello"), test_msg("someuser", "world")],
+            0,
+        );
+        let appender = RecordingAppender::default();
+        let (tx, rx) = oneshot::channel();
+        let keyring = test_keyring();
+        let scope = Scope::new("acme", None);
+        let fut = run_with_connector(
+            connector,
+            "waddlebot",
+            "#SomeChannel",
+            SessionLabel {
+                community_id: 7,
+                connection_id: 9,
+            },
+            &appender,
+            &NoopTestMetrics,
+            &keyring,
+            "k1",
+            &scope,
+            rx,
+        );
+        tokio::pin!(fut);
+        // Let the loop publish both messages, then signal shutdown.
+        let early = tokio::time::timeout(Duration::from_millis(300), &mut fut).await;
+        assert!(early.is_err(), "loop must keep running until shutdown");
+        assert_eq!(appender.calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            appender.calls.lock().unwrap()[0].0,
+            "waddles:t:acme:c:_tenant:src:twitch:tw-somechannel:events"
+        );
+        tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), &mut fut)
+            .await
+            .expect("future completes after shutdown");
+    }
+
     #[tokio::test]
     async fn publishes_every_message_before_the_reconnect_that_fails_permanently() {
         // Deliberately never sends `shutdown`: with a *pre-sent* shutdown,
@@ -416,6 +510,10 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -469,6 +567,10 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -506,6 +608,10 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -606,6 +712,10 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
                 "tw-somechannel".to_string(),
                 backoff,
                 rx,
@@ -661,6 +771,10 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -729,6 +843,10 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
                 "tw-somechannel".to_string(),
                 backoff,
                 rx,
