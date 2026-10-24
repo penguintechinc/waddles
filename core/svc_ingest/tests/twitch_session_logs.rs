@@ -25,9 +25,16 @@ impl EventAppender for NoopAppender {
 struct NoopMetrics;
 impl SpineMetrics for NoopMetrics {}
 
-struct OneMsgChannel(bool);
+struct OneMsgChannel(bool, bool);
 impl IrcChannel for OneMsgChannel {
     async fn recv(&mut self) -> Result<Option<ChatMessage>, TwitchError> {
+        if self.0 && self.1 {
+            // After the message: a recv error whose Display embeds the channel.
+            self.1 = false;
+            return Err(TwitchError::Connection(
+                "read failed on #secretchan (tw-secretchan)".to_string(),
+            ));
+        }
         if self.0 {
             return Ok(None);
         }
@@ -41,18 +48,24 @@ impl IrcChannel for OneMsgChannel {
     }
 }
 
-/// Fails the first connect, succeeds once (one message then close), then
-/// fails forever -- covers connect-fail, stable, publish, and closed logs.
+/// Fails the first connect, succeeds twice (session 2: a message then a recv
+/// error whose Display embeds the channel; session 3: a message then a clean
+/// close), then
+/// fails forever. Every error Display embeds the channel, so any
+/// `error = %err` log field would leak it.
 struct ScriptedConnector(Mutex<u32>);
 impl IrcConnector for ScriptedConnector {
     type Channel = OneMsgChannel;
     async fn connect(&self) -> Result<Self::Channel, TwitchError> {
         let mut n = self.0.lock().expect("lock");
         *n += 1;
-        if *n == 2 {
-            Ok(OneMsgChannel(false))
+        if *n == 2 || *n == 3 {
+            // Session 2 ends in a recv error, session 3 in a clean close.
+            Ok(OneMsgChannel(false, *n == 2))
         } else {
-            Err(TwitchError::Connection("simulated failure".to_string()))
+            Err(TwitchError::Connection(
+                "connect to #secretchan failed (tw-secretchan)".to_string(),
+            ))
         }
     }
 }
@@ -119,7 +132,9 @@ async fn run_loop_logs_carry_no_channel_login() {
 
     let captured = lines.lock().expect("lock").join("\n");
     assert!(
-        captured.contains("connect failed") && captured.contains("connection closed"),
+        captured.contains("connect failed")
+            && captured.contains("recv error")
+            && captured.contains("connection closed"),
         "expected connect-fail and closed paths to log, got: {captured}"
     );
     assert!(
