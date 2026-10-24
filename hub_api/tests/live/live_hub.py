@@ -27,8 +27,10 @@ import os
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -60,11 +62,25 @@ from quart_schema import QuartSchema  # noqa: E402
 import blueprints.service_jwt_bp as service_jwt_bp_module  # noqa: E402
 from blueprints.service_jwt_bp import service_jwt_bp  # noqa: E402
 from blueprints.v1.provider_connections import (  # noqa: E402
+    SERVICE_CONFIG_KEY,
     provider_connections_bp,
     provider_connections_internal_bp,
 )
 from config import HubAPIConfig  # noqa: E402
-from tests.provider_connections.conftest import hub_config  # noqa: E402
+from services.provider_connections import (  # noqa: E402
+    PlatformKeyVault,
+    ProviderConnectionService,
+)
+from tests.provider_connections.conftest import (  # noqa: E402
+    BOT,
+    CHANNEL_ID,
+    CHANNEL_LOGIN,
+    OTHER_CHANNEL_ID,
+    OTHER_CHANNEL_LOGIN,
+    hub_config,
+    make_static_registry,
+)
+from tests.provider_connections.fake_twitch import FakeTwitch  # noqa: E402
 from tests.sso.conftest import Entitlements  # noqa: E402
 
 TENANT_SLUG = "live-acme"
@@ -168,6 +184,27 @@ async def _serve(manifest_path: Path) -> None:
         install_dal = AsyncDB(pg.dsn, pool_size=4, echo=False)
         await install_dal.reflect()
 
+        # Twitch is the only substituted upstream socket: the real TwitchAdapter (SSRF guard,
+        # request construction, error mapping) runs over an in-process fake, so a Twitch OAuth
+        # binding can be created through the real admin API (svc-ingest's Twitch sessions need
+        # one). DNS for the two Twitch hosts resolves to a public address for the SSRF guard.
+        fake_twitch = FakeTwitch()
+        fake_twitch.channels = {CHANNEL_LOGIN: CHANNEL_ID, OTHER_CHANNEL_LOGIN: OTHER_CHANNEL_ID}
+        twitch_bot_tokens = []
+        for _ in range(4):
+            access, refresh = fake_twitch.mint(account=BOT)
+            twitch_bot_tokens.append({"access_token": access, "refresh_token": refresh})
+        real_getaddrinfo = socket.getaddrinfo
+
+        def _dns(host: str, *args: Any, **kwargs: Any) -> Any:
+            if host in ("id.twitch.tv", "api.twitch.tv"):
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+            return real_getaddrinfo(host, *args, **kwargs)
+
+        import services.url_guard as url_guard  # noqa: PLC0415
+
+        url_guard.socket.getaddrinfo = _dns  # type: ignore[assignment]
+
         app = Quart(__name__)
         QuartSchema(app)
         app.register_blueprint(provider_connections_bp)
@@ -181,6 +218,13 @@ async def _serve(manifest_path: Path) -> None:
             HUB_API_CONFIG=cfg,
             SERVICE_JWT_ISSUER=issuer,
             SERVICE_JWT_VERIFIER=issuer.as_verifier(),
+            **{
+                SERVICE_CONFIG_KEY: ProviderConnectionService(
+                    install_dal,
+                    make_static_registry(fake_twitch, lambda: datetime.now(UTC)),
+                    PlatformKeyVault(),
+                )
+            },
         )
 
         port = _free_port()
@@ -198,6 +242,9 @@ async def _serve(manifest_path: Path) -> None:
             "community_other_tenant": ids["c"],
             "pg_container": "waddles-migtest-connection-resolver-live",
             "sa_tokens": SA_TOKENS,
+            "twitch_bot_tokens": twitch_bot_tokens,
+            "twitch_channels": [CHANNEL_LOGIN, OTHER_CHANNEL_LOGIN],
+            "twitch_bot_login": BOT.login,
         }
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()

@@ -42,6 +42,11 @@ on:
         type: string
         default: ''
         description: 'Passed to `cargo llvm-cov --ignore-filename-regex` (e.g., a thin binary entrypoint carve-out)'
+      valkey:
+        required: false
+        type: boolean
+        default: false
+        description: 'Start a real Valkey container and export VALKEY_URL for the crate tests (lease/real-socket tests fail loudly without it, by design)'
 
 permissions:
   contents: read
@@ -162,6 +167,25 @@ jobs:
       - name: Install pip-audit 2.10.0
         if: inputs.extra_security_scanners
         run: pip install --no-cache-dir pip-audit==2.10.0
+
+      # A REAL Valkey for crates whose tests exercise a real lease/stream (svc-ingest's
+      # per-community Twitch sessions). The tests FAIL (never skip) when VALKEY_URL is unset,
+      # so a failed start here fails the job. Same digest as the chart's Valkey image.
+      - name: Start Valkey (VALKEY_URL for crate tests)
+        if: inputs.valkey
+        run: |
+          set -euo pipefail
+          docker run -d --name ci-valkey -p 127.0.0.1:6379:6379 \
+            valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+          for i in $(seq 1 30); do
+            if docker exec ci-valkey valkey-cli ping | grep -q PONG; then
+              echo "VALKEY_URL=redis://127.0.0.1:6379" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "valkey did not become ready" >&2
+          exit 1
 
       - name: cargo fmt --check
         run: cargo fmt --check

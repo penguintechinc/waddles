@@ -278,3 +278,28 @@ async fn unexpected_manager_exit_is_fatal_but_clean_shutdown_is_not() {
     assert!(manager_exit_is_fatal(&panicked, true));
     assert!(manager_exit_is_fatal(&panicked, false));
 }
+
+#[tokio::test]
+async fn try_start_with_missing_prereqs_fails_loud_and_never_marks_the_receiver_enabled() {
+    use svc_ingest::config::Config;
+    use svc_ingest::telemetry::register_ingest_metrics;
+    use svc_ingest::twitch_sessions::boot::try_start_twitch_sessions;
+    use svc_ingest::ReceiverReadiness;
+
+    // Flag ON but no SERVICE_JWT_TOKEN_ENDPOINT: the process must refuse to start.
+    let config =
+        Config::from_cli(cli(&["--hub-api-url", "https://hub.example"])).expect("config from cli");
+    let registry = prometheus::Registry::new();
+    let metrics = Arc::new(register_ingest_metrics(&registry));
+    let readiness = Arc::new(ReceiverReadiness::new());
+    let err = try_start_twitch_sessions(&config, metrics, readiness.clone())
+        .expect_err("missing prereqs must be a startup error, never a silent no-op");
+    assert!(
+        err.to_string().contains("SERVICE_JWT_TOKEN_ENDPOINT"),
+        "{err}"
+    );
+    assert!(
+        !readiness.twitch_irc.is_enabled(),
+        "a failed start must not flag the receiver as enabled"
+    );
+}

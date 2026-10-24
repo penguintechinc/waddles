@@ -327,6 +327,10 @@ pipeline:
       # (alpha only; the base values.yaml default is false so beta/prod never render them).
       dynamicConnections:
         enabled: true
+        # Per-community Twitch sessions: new/removed binding picked up within one interval.
+        # Static TWITCH_IRC_NICK/TWITCH_IRC_CHANNEL must NOT be set here (fatal with the flag on).
+        twitchReconcileIntervalSecs: 30
+        twitchResolveTimeoutSecs: 10
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }

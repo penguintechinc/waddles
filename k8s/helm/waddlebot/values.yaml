@@ -1512,6 +1512,11 @@ pipeline:
       # so NOTHING renders unless this is true. Default false; only values-alpha.yaml enables it.
       dynamicConnections:
         enabled: false
+        # Per-community Twitch session reconcile cadence (TWITCH_RECONCILE_INTERVAL_SECS, bounds
+        # 10..3600) and per-call hub-api timeout (TWITCH_RESOLVE_TIMEOUT_SECS). Rendered only while
+        # enabled. A new/removed Twitch binding takes effect within <= one reconcile interval.
+        twitchReconcileIntervalSecs: 60
+        twitchResolveTimeoutSecs: 10
       resources:
         requests:
           cpu: "100m"
