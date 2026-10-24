@@ -70,6 +70,19 @@ class MetadataField:
 
 
 @dataclass(slots=True, frozen=True)
+class BindingKey:
+    """One key of the data-plane binding metadata contract: wire name <- stored name.
+
+    ``wire`` may differ from ``stored`` (an alias applied only when projecting for the wire, never
+    in storage). A ``required`` key missing or empty on a row makes it an incomplete binding.
+    """
+
+    wire: str
+    stored: str
+    required: bool = False
+
+
+@dataclass(slots=True, frozen=True)
 class AdapterSpec:
     """Immutable description of one provider; the single source for descriptors and validation.
 
@@ -94,6 +107,9 @@ class AdapterSpec:
     kind: ConnectionKind = ConnectionKind.PLATFORM_OAUTH
     #: For static kinds: the secret schemes an admin may supply (empty for OAuth providers).
     secret_schemes: tuple[SecretScheme, ...] = ()
+    #: The data-plane metadata contract (flat string->string). Empty = the provider's facts ride
+    #: elsewhere (static kinds: the resolve ``endpoint``), so its binding metadata is ``{}``.
+    binding_metadata: tuple[BindingKey, ...] = ()
 
     def __post_init__(self) -> None:
         """Reject a malformed spec at registration time rather than at first request."""

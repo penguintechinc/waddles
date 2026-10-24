@@ -1667,8 +1667,13 @@ components:
         grantId:
           title: Grantid
           type: integer
+        kind:
+          default: 1
+          title: Kind
+          type: integer
         metadata:
-          additionalProperties: true
+          additionalProperties:
+            type: string
           title: Metadata
           type: object
         provider:
@@ -1863,6 +1868,37 @@ components:
       - userId
       - status
       title: DsarResultDTO
+      type: object
+    EndpointDTO:
+      description: Non-secret target facts of a static connection; every field null
+        for an OAuth row.
+      properties:
+        function:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Function
+        project:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Project
+        region:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Region
+        url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Url
+      required:
+      - url
+      - region
+      - function
+      - project
+      title: EndpointDTO
       type: object
     ExportManifestDTO:
       description: What an offline verifier needs to check an export slice (``make
@@ -4373,6 +4409,25 @@ components:
       - scheme
       - document
       title: SecretBody
+      type: object
+    SecretDTO:
+      description: 'A static connection''s structured credential: ``SecretScheme``
+        code + camelCase fields.'
+      properties:
+        fields:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: 'null'
+          title: Fields
+          type: object
+        scheme:
+          title: Scheme
+          type: integer
+      required:
+      - scheme
+      - fields
+      title: SecretDTO
       type: object
     Server:
       description: Response DTO -- one `server_status_configs` row, admin view (host/port
@@ -16235,7 +16290,15 @@ paths:
       summary: '`GET /api/v1/internal/communities/<id>/connections/<provider>/token`.'
   /api/v1/internal/communities/{community_id}/provider-connections/{connection_id}/resolve:
     post:
-      description: ''
+      description: '
+
+        An OAuth row refreshes under lock and returns ``accessToken``; a static row
+        returns its
+
+        ``endpoint`` + structured ``secret``. Not found or not granted to this community
+        is a 404 (never
+
+        a 403: no existence oracle).'
       operationId: post_internal_resolve
       parameters:
       - in: path
@@ -16253,31 +16316,46 @@ paths:
           content:
             application/json:
               schema:
-                description: A fresh access token for the data plane (the only secret-bearing
-                  response in this API).
+                description: 'What the data plane needs to call one connection (the
+                  only secret-bearing response here).
+
+
+                  Exactly one of ``accessToken`` (OAuth, kind 1) / ``secret`` (static,
+                  kinds 2-4) is non-null.'
                 properties:
                   accessToken:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
                     title: Accesstoken
-                    type: string
                   communityId:
                     title: Communityid
                     type: integer
                   connectionId:
                     title: Connectionid
                     type: integer
+                  endpoint:
+                    $ref: '#/components/schemas/EndpointDTO'
                   expiresAt:
                     anyOf:
                     - type: string
                     - type: 'null'
-                    default: null
                     title: Expiresat
+                  kind:
+                    title: Kind
+                    type: integer
                   metadata:
-                    additionalProperties: true
+                    additionalProperties:
+                      type: string
                     title: Metadata
                     type: object
                   provider:
                     title: Provider
                     type: string
+                  secret:
+                    anyOf:
+                    - $ref: '#/components/schemas/SecretDTO'
+                    - type: 'null'
                   success:
                     title: Success
                     type: boolean
@@ -16286,13 +16364,22 @@ paths:
                 - connectionId
                 - communityId
                 - provider
+                - kind
                 - accessToken
+                - expiresAt
+                - endpoint
+                - secret
+                - metadata
                 title: ResolvedCredentialsDTO
                 type: object
-          description: A fresh access token for the data plane (the only secret-bearing
-            response in this API).
-      summary: '``POST .../resolve`` -- a fresh access token for one usable binding
-        (refresh under lock).'
+          description: 'What the data plane needs to call one connection (the only
+            secret-bearing response here).
+
+
+            Exactly one of ``accessToken`` (OAuth, kind 1) / ``secret`` (static, kinds
+            2-4) is non-null.'
+      summary: '``POST .../resolve`` -- endpoint + credential for one usable binding
+        of the BOUND community.'
   /api/v1/internal/dataplane/resolve-scope:
     get:
       description: ''

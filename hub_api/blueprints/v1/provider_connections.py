@@ -24,21 +24,25 @@ travel in, and adapter metadata is filtered through the adapter's own public-key
 short-lived machine JWT (scope ``connections:resolve``, operator-plane ``system`` tenant), never a
 shared key:
 
-* ``GET  /provider-connections?provider=&capability=&after=&limit=`` -- what to run (no tokens)
-* ``POST /communities/<id>/provider-connections/<conn_id>/resolve``  -- a fresh access token
+* ``GET  /provider-connections?provider=&capability=&after=&limit=`` -- what to run (no secrets);
+  scope ``connections:list``, unbound
+* ``POST /communities/<id>/provider-connections/<conn_id>/resolve``  -- endpoint + credential;
+  scope ``connections:resolve``, community-bound (a token for community A cannot resolve B's)
 
-The resolve response is the only place a decrypted secret leaves hub-api, it carries the access
-token only (never the refresh token or OAuth app secret), and is ``Cache-Control: no-store``.
+The resolve response is the only place a decrypted secret leaves hub-api. An OAuth row yields the
+access token only (never the refresh token or OAuth app secret); a static-secret row yields its
+non-secret ``endpoint`` and a structured ``secret``. It is ``Cache-Control: no-store``.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
-from typing import Any, ParamSpec, TypeVar, cast
+from typing import Any, Final, ParamSpec, TypeVar, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
@@ -82,6 +86,8 @@ provider_connections_internal_bp = Blueprint(
 SCOPE_CONNECTIONS_ADMIN = "connections:admin"
 #: Machine-JWT scope the data plane's service identity must hold.
 SCOPE_CONNECTIONS_RESOLVE = "connections:resolve"
+#: Machine-JWT scope for enumerating what to run (unbound, never returns a secret).
+SCOPE_CONNECTIONS_LIST = "connections:list"
 #: Two-gate feature (PostHog flag default OFF AND Professional tier) -- see
 #: ``libs/core_platform_module/features.py`` ``integrations.provider_connections``.
 FEATURE_PROVIDER_CONNECTIONS = "waddles.integrations.provider_connections"
@@ -255,7 +261,8 @@ class DataPlaneBindingDTO:
     capabilities: list[str]
     expiresAt: str | None
     updatedAt: str | None
-    metadata: dict[str, Any]
+    metadata: dict[str, str]
+    kind: int = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -268,16 +275,43 @@ class DataPlaneListResponse:
 
 
 @dataclass(slots=True, frozen=True)
+class EndpointDTO:
+    """Non-secret target facts of a static connection; every field null for an OAuth row."""
+
+    url: str | None
+    region: str | None
+    function: str | None
+    project: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class SecretDTO:
+    """A static connection's structured credential: ``SecretScheme`` code + camelCase fields."""
+
+    scheme: int
+    fields: dict[str, str | None] = field(repr=False)
+
+
+@dataclass(slots=True, frozen=True)
 class ResolvedCredentialsDTO:
-    """A fresh access token for the data plane (the only secret-bearing response in this API)."""
+    """What the data plane needs to call one connection (the only secret-bearing response here).
+
+    Exactly one of ``accessToken`` (OAuth, kind 1) / ``secret`` (static, kinds 2-4) is non-null.
+    """
 
     success: bool
     connectionId: int
     communityId: int
     provider: str
-    accessToken: str = field(repr=False)
-    expiresAt: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    kind: int
+    accessToken: str | None = field(repr=False)
+    expiresAt: str | None
+    endpoint: EndpointDTO
+    secret: SecretDTO | None = field(repr=False)
+    metadata: dict[str, str]
+
+
+_REASON_RE: Final = re.compile(r"[a-z][a-z_]{0,47}")
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -335,7 +369,13 @@ def _connection_dto(view: ConnectionView) -> ProviderConnectionDTO:
     )
 
 
-def _dataplane_dto(item: DataPlaneBinding) -> DataPlaneBindingDTO:
+def _dataplane_dto(item: DataPlaneBinding) -> DataPlaneBindingDTO | None:
+    """One list item, or ``None`` when its metadata contract is unmet (skipped and logged)."""
+    metadata = _service().binding_metadata(
+        item.provider, item.metadata, connection_id=item.connection_id
+    )
+    if metadata is None:
+        return None
     return DataPlaneBindingDTO(
         grantId=item.grant_id,
         connectionId=item.connection_id,
@@ -347,19 +387,41 @@ def _dataplane_dto(item: DataPlaneBinding) -> DataPlaneBindingDTO:
         capabilities=item.capabilities,
         expiresAt=_iso(item.expires_at),
         updatedAt=_iso(item.updated_at),
-        metadata=item.metadata,
+        metadata=metadata,
+        kind=item.kind,
     )
 
 
 def _resolved_dto(item: ResolvedCredentials) -> ResolvedCredentialsDTO:
+    """Shape a resolved credential for the wire; a twitch row with an incomplete binding is 409."""
+    metadata = _service().binding_metadata(
+        item.provider, item.metadata, connection_id=item.connection_id
+    )
+    if metadata is None:
+        raise pc_errors.ConnectionNotUsable(
+            "the connection's binding is incomplete", reason="metadata_incomplete"
+        )
+    endpoint = item.endpoint
     return ResolvedCredentialsDTO(
         success=True,
         connectionId=item.connection_id,
         communityId=item.community_id,
         provider=item.provider,
+        kind=item.kind,
         accessToken=item.access_token,
         expiresAt=_iso(item.expires_at),
-        metadata=item.metadata,
+        endpoint=EndpointDTO(
+            url=endpoint.get("url"),
+            region=endpoint.get("region"),
+            function=endpoint.get("function"),
+            project=endpoint.get("project"),
+        ),
+        secret=(
+            SecretDTO(scheme=item.secret_scheme, fields=item.secret_fields)
+            if item.secret_scheme is not None and item.secret_fields is not None
+            else None
+        ),
+        metadata=metadata,
     )
 
 
@@ -414,6 +476,13 @@ def _connection_err(
     A refusal to hand out a connection carries a machine-readable ``reason`` in ``error.details``
     so the data plane can tell "stop" (disabled, expired) from "retry later" without parsing text.
     """
+    if event == "internal_resolve" and isinstance(exc, pc_errors.ConnectionNotUsable):
+        # The data-plane contract: a flat, fixed-code body (no free text, no envelope).
+        log_failure(
+            logger, "provider_connections.request_failed", exc, level=logging.INFO, route=event
+        )
+        reason = exc.reason if _REASON_RE.fullmatch(exc.reason or "") else "other"
+        return {"success": False, "error": "not_usable", "reason": reason}, 409
     status, code = _STATUS_BY_ERROR.get(type(exc), (500, "INTERNAL_ERROR"))
     level = logging.ERROR if status >= 500 else logging.INFO
     # The event name is a static literal (LiteralString); the route name is a bounded label.
@@ -640,8 +709,16 @@ async def delete_provider_connection(community_id: int, connection_id: int) -> D
 
 #: Requires a valid machine JWT with ``connections:resolve`` from the operator-plane tenant; the
 #: fail-closed ladder lives in :func:`services.machine_auth.machine_authenticated`.
-_service_authenticated = machine_authenticated(
+_resolve_authenticated = machine_authenticated(
     SCOPE_CONNECTIONS_RESOLVE,
+    bind_community=True,
+    unconfigured_event="provider_connections.service_auth_unconfigured",
+    rejected_event="provider_connections.service_auth_rejected",
+    wrong_tenant_event="provider_connections.service_auth_wrong_tenant",
+)
+#: The list is deliberately unbound (it enumerates every community) and carries no secret.
+_list_authenticated = machine_authenticated(
+    SCOPE_CONNECTIONS_LIST,
     unconfigured_event="provider_connections.service_auth_unconfigured",
     rejected_event="provider_connections.service_auth_rejected",
     wrong_tenant_event="provider_connections.service_auth_wrong_tenant",
@@ -670,7 +747,7 @@ def _int_arg(name: str, *, default: int, minimum: int, maximum: int) -> int:
 
 
 @provider_connections_internal_bp.route("/provider-connections", methods=["GET"])
-@_service_authenticated
+@_list_authenticated
 @validate_response(DataPlaneListResponse)
 @_guarded("internal_list")
 async def internal_list() -> DataPlaneListResponse:
@@ -684,17 +761,21 @@ async def internal_list() -> DataPlaneListResponse:
     page = await _service().list_for_dataplane(
         provider=provider, capability=capability, after=after, limit=limit
     )
-    return DataPlaneListResponse(
-        success=True, items=[_dataplane_dto(item) for item in page.items], nextAfter=page.next_after
-    )
+    items = [dto for dto in (_dataplane_dto(item) for item in page.items) if dto is not None]
+    return DataPlaneListResponse(success=True, items=items, nextAfter=page.next_after)
 
 
 @provider_connections_internal_bp.route(_ONE + "/resolve", methods=["POST"])
-@_service_authenticated
+@_resolve_authenticated
 @validate_response(ResolvedCredentialsDTO)
 @_guarded("internal_resolve")
 async def internal_resolve(community_id: int, connection_id: int) -> ResolvedCredentialsDTO:
-    """``POST .../resolve`` -- a fresh access token for one usable binding (refresh under lock)."""
+    """``POST .../resolve`` -- endpoint + credential for one usable binding of the BOUND community.
+
+    An OAuth row refreshes under lock and returns ``accessToken``; a static row returns its
+    ``endpoint`` + structured ``secret``. Not found or not granted to this community is a 404 (never
+    a 403: no existence oracle).
+    """
     resolved = await _service().resolve(community_id=community_id, connection_id=connection_id)
     return _resolved_dto(resolved)
 

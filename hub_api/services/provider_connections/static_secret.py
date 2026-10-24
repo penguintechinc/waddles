@@ -221,6 +221,24 @@ def validate_secret_document(scheme: SecretScheme, doc: Mapping[str, Any]) -> di
     return cleaned
 
 
+def _camel(name: str) -> str:
+    """``access_key_id`` -> ``accessKeyId`` (the wire spelling of a secret-document key)."""
+    head, *rest = name.split("_")
+    return head + "".join(part.capitalize() for part in rest)
+
+
+def wire_secret_fields(scheme: SecretScheme, doc: Mapping[str, str]) -> dict[str, str | None]:
+    """Map a validated secret document to its camelCase wire ``fields`` (the resolve contract).
+
+    An AWS key always carries ``sessionToken`` (``None`` for a long-lived IAM key) so the data
+    plane has one fixed field set per scheme.
+    """
+    fields: dict[str, str | None] = {_camel(key): doc[key] for key in sorted(_SCHEME_KEYS[scheme])}
+    if scheme is SecretScheme.AWS_ACCESS_KEY:
+        fields["sessionToken"] = None
+    return fields
+
+
 def infer_scheme(doc: Mapping[str, Any]) -> SecretScheme | None:
     """The scheme whose exact key set ``doc`` carries, or ``None`` (structural check helper)."""
     keys = frozenset(doc)

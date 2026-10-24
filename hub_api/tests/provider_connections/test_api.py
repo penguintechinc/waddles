@@ -531,7 +531,7 @@ class TestCrudOverHttp:
 
 def _service_token(
     issuer: ServiceJwtIssuer,
-    scope: str = "connections:resolve",
+    scope: str = "connections:list",
     service_id: str = SYSTEM_SERVICE_ID,
 ) -> str:
     return issuer.issue(service_id, scope)
@@ -539,6 +539,19 @@ def _service_token(
 
 def _svc(issuer: ServiceJwtIssuer, **kwargs: Any) -> dict[str, str]:
     return {"Authorization": f"Bearer {_service_token(issuer, **kwargs)}"}
+
+
+def _bound(
+    issuer: ServiceJwtIssuer, community_id: int, connection_id: int | None = None
+) -> dict[str, str]:
+    """Bearer for a community-bound ``connections:resolve`` token (what resolve now requires)."""
+    extra = {"community": community_id}
+    if connection_id is not None:
+        extra["conn"] = connection_id
+    token, _claims = issuer.issue_with_claims(
+        SYSTEM_SERVICE_ID, "connections:resolve", extra_claims=extra
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 INTERNAL = "/api/v1/internal"
@@ -569,6 +582,7 @@ class TestInternalApi:
             "expiresAt",
             "updatedAt",
             "metadata",
+            "kind",
         }
         assert (item["connectionId"], item["communityId"], item["resourceId"]) == (
             cid,
@@ -581,7 +595,7 @@ class TestInternalApi:
 
         resolved = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/{cid}/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         assert resolved.status_code == 200
         out = await resolved.get_json()
@@ -590,10 +604,14 @@ class TestInternalApi:
             "connectionId",
             "communityId",
             "provider",
+            "kind",
             "accessToken",
             "expiresAt",
+            "endpoint",
+            "secret",
             "metadata",
         }
+        assert (out["kind"], out["secret"]) == (1, None)
         assert out["accessToken"] == bot_tokens[0]
         assert bot_tokens[1] not in await resolved.get_data(
             as_text=True
@@ -617,7 +635,7 @@ class TestInternalApi:
         clock.advance(seconds=14000)
         resolved = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/{cid}/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         assert resolved.status_code == 200 and fake_twitch.refresh_calls == 1
         assert (await resolved.get_json())["accessToken"] != bot_tokens[0]
@@ -664,7 +682,7 @@ class TestInternalApi:
                     SYSTEM_SERVICE_ID,
                     "waddlebot",
                     "svc-ingest",
-                    frozenset({"connections:resolve"}),
+                    frozenset({"connections:list"}),
                     tenant="acme-corp",
                 )
             },
@@ -740,13 +758,16 @@ class TestInternalApi:
             headers=admin_headers(pc_db),
             data=json.dumps({"enabled": False}),
         )
-        refused = await client.post(url, headers=_svc(service_issuer))
+        refused = await client.post(url, headers=_bound(service_issuer, pc_db.seed.community_id))
         assert refused.status_code == 409
-        err = (await refused.get_json())["error"]
-        assert (err["code"], err["details"]) == ("CONNECTION_NOT_USABLE", {"reason": "disabled"})
+        assert await refused.get_json() == {
+            "success": False,
+            "error": "not_usable",
+            "reason": "disabled",
+        }
         missing = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/777/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         assert missing.status_code == 404
 
@@ -764,7 +785,7 @@ class TestInternalApi:
         fake_twitch.down = True
         response = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/{cid}/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         assert response.status_code == 502
         assert (await response.get_json())["error"]["code"] == "PROVIDER_UNAVAILABLE"
@@ -780,7 +801,7 @@ class TestInternalApi:
         )
         response = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/{cid}/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         assert response.status_code == 500
         text = await response.get_data(as_text=True)
@@ -808,7 +829,7 @@ class TestHttpDoesNotLeakIntoLogs:
         cid = (await created.get_json())["connection"]["id"]
         resolved = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/{cid}/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         await client.get(_base(pc_db), headers=admin_headers(pc_db))
         await _create(client, pc_db, ("bogus-token", None))

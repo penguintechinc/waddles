@@ -374,7 +374,7 @@ def service_issuer() -> ServiceJwtIssuer:
         service_id=SYSTEM_SERVICE_ID,
         k8s_namespace="waddlebot",
         k8s_service_account="svc-ingest",
-        allowed_scopes=frozenset({"connections:resolve", "other:scope"}),
+        allowed_scopes=frozenset({"connections:resolve", "connections:list", "other:scope"}),
         tenant="system",
     )
     return ServiceJwtIssuer(

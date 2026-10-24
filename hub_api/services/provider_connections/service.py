@@ -61,8 +61,10 @@ from services.provider_connections.errors import (
 )
 from services.provider_connections.kinds import ConnectionKind, SecretScheme, UnknownSecretScheme
 from services.provider_connections.static_secret import (
+    infer_scheme,
     reject_control_characters,
     validate_secret_document,
+    wire_secret_fields,
 )
 from services.provider_connections.store import Binding, ResolveState, SealedSecrets
 from services.provider_connections.telemetry import (
@@ -125,6 +127,7 @@ class DataPlaneBinding:
     expires_at: datetime | None
     updated_at: datetime | None
     metadata: dict[str, Any]
+    kind: int = int(ConnectionKind.PLATFORM_OAUTH)
 
 
 @dataclass(slots=True, frozen=True)
@@ -142,9 +145,15 @@ class ResolvedCredentials:
     connection_id: int
     community_id: int
     provider: str
-    access_token: str = field(repr=False)
+    kind: int = int(ConnectionKind.PLATFORM_OAUTH)
+    access_token: str | None = field(default=None, repr=False)
     expires_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Non-secret target facts of a static kind (``url`` / ``region`` / ``function`` / ``project``).
+    endpoint: dict[str, str | None] = field(default_factory=dict)
+    #: ``SecretScheme`` code + camelCase wire fields of a static secret; ``None`` for OAuth rows.
+    secret_scheme: int | None = None
+    secret_fields: dict[str, str | None] | None = field(default=None, repr=False)
 
 
 class ProviderConnectionService:
@@ -583,12 +592,13 @@ class ProviderConnectionService:
             raise ConnectionNotFound("connection not found")
         provider = state.connection.platform
         adapter = self._registry.get(provider)
-        if state.connection.connection_kind != int(ConnectionKind.PLATFORM_OAUTH):
-            # Fail loud: a static row has no OAuth token to hand out, and must never fall through
-            # to the token-opening path (its access_token is NULL by construction).
-            raise ConnectionNotUsable(
-                "a static-secret connection has no OAuth token to resolve", reason="static_secret"
-            )
+        kind = ConnectionKind.from_code(state.connection.connection_kind)
+        if kind is not ConnectionKind.PLATFORM_OAUTH:
+            # A static row never falls through to the token-opening path (its access_token is
+            # NULL by construction): it has its own branch and its own sealed document.
+            with operation_span(provider, "resolve"):
+                self._assert_usable(state)
+                return self._resolve_static(adapter, kind, state)
         with operation_span(provider, "resolve"):
             self._assert_usable(state)
             plaintext, connection = await self._fresh_token(
@@ -599,12 +609,77 @@ class ProviderConnectionService:
                 connection_id=connection_id,
                 community_id=community_id,
                 provider=provider,
+                kind=int(kind),
                 access_token=plaintext,
                 expires_at=connection.expires_at,
                 metadata={k: v for k, v in connection.resource_metadata.items() if k in allowed},
             )
 
     # -- internals -------------------------------------------------------------------------
+
+    def binding_metadata(
+        self, provider: str, stored: Mapping[str, Any], *, connection_id: int
+    ) -> dict[str, str] | None:
+        """Project stored ``resource_metadata`` to the provider's data-plane metadata contract.
+
+        Flat string->string, allow-listed by the adapter's ``binding_metadata`` (aliases applied
+        here, storage untouched). ``None`` = a required key is missing, so the row is not a
+        complete binding; the log line names the connection id and the missing *keys* only.
+        """
+        spec = self._registry.get(provider).spec
+        out: dict[str, str] = {}
+        missing: list[str] = []
+        for key in spec.binding_metadata:
+            value = stored.get(key.stored)
+            if isinstance(value, str) and value:
+                out[key.wire] = value
+            elif key.required:
+                missing.append(key.stored)
+        if missing:
+            logger.warning(
+                "provider_connections.binding_incomplete connection_id=%d missing=%s",
+                connection_id,
+                ",".join(missing),
+            )
+            return None
+        return out
+
+    def _resolve_static(
+        self, adapter: ProviderAdapter, kind: ConnectionKind, state: ResolveState
+    ) -> ResolvedCredentials:
+        """Open a static row's sealed secret document and shape it for the wire (no refresh).
+
+        Every failure is a fixed-text framework error: the document is opened with the row-bound
+        AAD, must parse to an object whose key set is exactly one of the provider's schemes, and a
+        row whose own ``expires_at`` has passed is refused like an expired OAuth link.
+        """
+        connection = state.connection
+        if connection.expires_at is not None and connection.expires_at <= self._clock():
+            raise ConnectionNotUsable("the connection has expired", reason="connection_expired")
+        plaintext = self._open(state.secrets.sealed_secret, state)
+        try:
+            doc = json.loads(plaintext)
+        except ValueError:
+            raise VaultCorrupt("a stored connection secret is malformed") from None
+        scheme = infer_scheme(doc) if isinstance(doc, dict) else None
+        if scheme is None or scheme not in adapter.spec.secret_schemes:
+            raise VaultCorrupt("a stored connection secret is malformed")
+        meta = connection.resource_metadata
+        return ResolvedCredentials(
+            connection_id=connection.id,
+            community_id=state.grant.community_id,
+            provider=connection.platform,
+            kind=int(kind),
+            access_token=None,
+            expires_at=connection.expires_at,
+            metadata={},
+            endpoint={
+                key: (str(meta[key]) if meta.get(key) is not None else None)
+                for key in ("url", "region", "function", "project")
+            },
+            secret_scheme=int(scheme),
+            secret_fields=wire_secret_fields(scheme, doc),
+        )
 
     def _needs_refresh(self, expires_at: datetime | None) -> bool:
         return expires_at is not None and expires_at <= self._clock() + self._refresh_skew
@@ -876,6 +951,7 @@ class ProviderConnectionService:
             expires_at=row.connection.expires_at,
             updated_at=row.connection.updated_at,
             metadata={k: v for k, v in meta.items() if k in spec.runtime_metadata_keys},
+            kind=row.connection.connection_kind,
         )
 
 
