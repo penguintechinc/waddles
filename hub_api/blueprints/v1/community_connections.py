@@ -168,8 +168,8 @@ def _callback_html(*, provider: str, ok: bool, error: str | None = None) -> Resp
 
 
 @connections_bp.route("/communities/<int:community_id>/connections", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.connections:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.connections:read")  # type: ignore[misc]
 async def list_connections(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/communities/<id>/connections`."""
     ctx = get_tenant_context(request)
@@ -195,8 +195,8 @@ async def list_connections(community_id: int) -> tuple[dict[str, Any], int]:
 @connections_bp.route(
     "/communities/<int:community_id>/connections/<provider>/authorize", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.connections:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.connections:write")  # type: ignore[misc]
 async def authorize_connection(community_id: int, provider: str) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/communities/<id>/connections/<provider>/authorize`.
 
@@ -307,8 +307,8 @@ async def oauth_callback(provider: str) -> tuple[Response, int] | Response:
 
 
 @connections_bp.route("/communities/<int:community_id>/connections/<provider>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.connections:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.connections:write")  # type: ignore[misc]
 async def delete_connection(community_id: int, provider: str) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/connections/<provider>`."""
     ctx = get_tenant_context(request)

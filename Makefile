@@ -1,4 +1,4 @@
-.PHONY: codemod-app-bundles-activation-only openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -34,6 +34,13 @@ lint:
 openapi-hubapi:
 	@python3 scripts/export-hubapi-openapi.py
 	@spectral lint openapi/v1.yaml --fail-severity=error
+
+# Fails when the committed openapi/v1.yaml differs from a fresh regeneration
+# (stale spec). Regenerates in place, then git-diffs; no masking -- exit status
+# propagates. Needs hub_api/requirements.txt deps (incl. defusedxml, signxml).
+check-openapi-drift:
+	@PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 scripts/export-hubapi-openapi.py
+	@git diff --exit-code -- openapi/v1.yaml || { echo "ERROR: openapi/v1.yaml is stale -- run 'make openapi-hubapi' and commit the result" >&2; exit 1; }
 
 check-docs:
 	@bash scripts/check-doc-refs.sh

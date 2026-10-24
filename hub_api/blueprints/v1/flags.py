@@ -80,8 +80,8 @@ class ResolvedFlagsResponse:
 
 
 @flags_bp.route("/flags", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("flags:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("flags:read")  # type: ignore[misc]
 @validate_response(ResolvedFlagsResponse)
 async def get_resolved_flags() -> ResolvedFlagsResponse | tuple[dict[str, object], int]:
     """Resolve `CLIENT_FLAG_KEYS` for the token's tenant -- see module docstring.

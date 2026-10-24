@@ -469,8 +469,8 @@ _ONE = _BASE + "/<int:connection_id>"
 
 
 @provider_connections_bp.route("/connection-providers", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[misc]
 @validate_response(ProviderListResponse)
 @_guarded("providers")
 async def list_connection_providers() -> ProviderListResponse:
@@ -485,8 +485,8 @@ async def list_connection_providers() -> ProviderListResponse:
 
 
 @provider_connections_bp.route(_BASE, methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[misc]
 @validate_response(ProviderConnectionListResponse)
 @_guarded("list")
 async def list_provider_connections(community_id: int) -> ProviderConnectionListResponse:
@@ -499,8 +499,8 @@ async def list_provider_connections(community_id: int) -> ProviderConnectionList
 
 
 @provider_connections_bp.route(_BASE, methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[misc]
 @validate_request(CreateConnectionRequest)
 @validate_response(ProviderConnectionResponse, 201)
 @_guarded("create")
@@ -523,8 +523,8 @@ async def create_provider_connection(
 
 
 @provider_connections_bp.route(_ONE, methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[misc]
 @validate_response(ProviderConnectionResponse)
 @_guarded("get")
 async def get_provider_connection(
@@ -539,8 +539,8 @@ async def get_provider_connection(
 
 
 @provider_connections_bp.route(_ONE, methods=["PATCH"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[misc]
 @validate_request(UpdateConnectionRequest)
 @validate_response(ProviderConnectionResponse)
 @_guarded("update")
@@ -563,8 +563,8 @@ async def update_provider_connection(
 
 
 @provider_connections_bp.route(_ONE, methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[misc]
 @validate_response(DeleteResponse)
 @_guarded("delete")
 async def delete_provider_connection(community_id: int, connection_id: int) -> DeleteResponse:
