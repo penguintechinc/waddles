@@ -157,6 +157,8 @@ pub struct IngestMetrics {
     pub scope_resolutions_total: prometheus::IntCounterVec,
     /// Live per-community Twitch IRC sessions on this replica.
     pub twitch_sessions_live: prometheus::IntGauge,
+    /// Events dropped because a session's bound community != resolved scope.
+    pub twitch_scope_mismatch_total: prometheus::IntCounter,
     /// Twitch reconcile passes, labeled by outcome (`ok`/`discovery_failed`).
     pub twitch_reconcile_total: prometheus::IntCounterVec,
     /// Twitch reconcile pass duration in seconds.
@@ -176,9 +178,9 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
     let events_published_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(
             "svc_ingest_events_published_total",
-            "Total normalized platform events XADDed onto the spine, labeled by platform/source",
+            "Total normalized platform events XADDed onto the spine, labeled by platform only (source ids embed channel logins: PII, unbounded)",
         ),
-        &["platform", "source_id"],
+        &["platform"],
     )
     .expect("valid metric definition");
     registry
@@ -301,6 +303,16 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .register(Box::new(scope_resolutions_total.clone()))
         .expect("register svc_ingest_scope_resolutions_total");
 
+    let twitch_scope_mismatch_total = prometheus::IntCounter::new(
+        "svc_ingest_twitch_scope_mismatch_total",
+        "Twitch events dropped because the session's bound community id \
+         disagreed with the scope resolved from its channel",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(twitch_scope_mismatch_total.clone()))
+        .expect("register svc_ingest_twitch_scope_mismatch_total");
+
     let twitch_sessions_live = prometheus::IntGauge::new(
         "svc_ingest_twitch_sessions_live",
         "Live per-community Twitch IRC sessions on this replica",
@@ -370,6 +382,7 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
 
     IngestMetrics {
         twitch_sessions_live,
+        twitch_scope_mismatch_total,
         twitch_reconcile_total,
         twitch_reconcile_duration_seconds,
         twitch_session_events_total,
@@ -587,6 +600,10 @@ impl crate::scope_resolver::ResolverMetrics for IngestMetrics {
             .with_label_values(&[platform, outcome])
             .inc();
     }
+
+    fn scope_mismatch(&self) {
+        self.twitch_scope_mismatch_total.inc();
+    }
 }
 
 /// Adapts [`IngestMetrics`] to [`penguin_spine::SpineMetrics`] so
@@ -594,9 +611,11 @@ impl crate::scope_resolver::ResolverMetrics for IngestMetrics {
 /// straight into this service's own Prometheus counters without
 /// `publish.rs` depending on `prometheus` types directly.
 impl penguin_spine::SpineMetrics for IngestMetrics {
-    fn stream_event_written(&self, platform: &str, source_id: &str) {
+    fn stream_event_written(&self, platform: &str, _source_id: &str) {
+        // source_id is deliberately NOT a label: for Twitch it embeds the
+        // channel login (PII) and in dynamic mode it is unbounded cardinality.
         self.events_published_total
-            .with_label_values(&[platform, source_id])
+            .with_label_values(&[platform])
             .inc();
     }
 
@@ -657,9 +676,13 @@ mod tests {
         assert_eq!(
             metrics
                 .events_published_total
-                .with_label_values(&["twitch", "tw-channelA"])
+                .with_label_values(&["twitch"])
                 .get(),
             2
+        );
+        assert!(
+            !rendered.contains("tw-channelA") && !rendered.contains("source_id"),
+            "no channel login / source_id may appear in the rendered metric"
         );
     }
 

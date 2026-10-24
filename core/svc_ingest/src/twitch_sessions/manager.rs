@@ -28,9 +28,11 @@ use crate::twitch_sessions::spec::{discover, DiscoverError, SessionSpec};
 
 /// Time between reconcile passes (plus up to 10% jitter).
 pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
-/// Default lease lifetime: `3 x RECONCILE_INTERVAL + DISCOVERY_TIMEOUT`, so
-/// two missed renews are survivable (see `SessionManager::lease_ttl`).
-pub const LEASE_TTL: Duration = Duration::from_secs(190);
+/// Default lease lifetime: `(MAX_RENEW_FAILURES + 2) x RECONCILE_INTERVAL +
+/// DISCOVERY_TIMEOUT` (window + one interval), so the failed renews the
+/// manager tolerates never outrun the session's self-stop deadline
+/// (see `SessionManager::lease_ttl`).
+pub const LEASE_TTL: Duration = Duration::from_secs(250);
 /// Wait after a session ends on its own before it is restarted.
 pub const RESTART_COOLDOWN: Duration = Duration::from_secs(120);
 /// Bound on one binding discovery (each page call is bounded by this too).
@@ -280,7 +282,7 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
 
     /// Overrides the reconcile interval and the per-call discovery bound
     /// (defaults: [`RECONCILE_INTERVAL`], 10s). The lease TTL and the
-    /// self-stop margin scale with the interval (3x and 1x) so the renew
+    /// self-stop window scale with the interval (4x and 3x, plus discovery) so the renew
     /// cadence always fits well inside the lease.
     #[must_use]
     pub fn with_timing(mut self, interval: Duration, discovery_timeout: Duration) -> Self {
@@ -296,12 +298,15 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
     }
 
     /// How long a session may outlive its last successful acquire/renew:
-    /// two intervals plus one discovery bound -- the worst healthy gap between
-    /// renews is one interval (+10% jitter) plus the discovery that precedes
-    /// each renew, so a healthy session is never self-stopped between renews.
+    /// `(MAX_RENEW_FAILURES + 1)` intervals plus one discovery bound. The
+    /// manager tolerates `MAX_RENEW_FAILURES - 1` failed renews before it
+    /// stops a session itself, so the deadline must outlast that many missed
+    /// renews plus the one that finally succeeds (each gap = interval + 10%
+    /// jitter + the discovery preceding it) -- otherwise a healthy session
+    /// self-stops as LeaseLost after one transient renew error.
     fn session_window(&self) -> Duration {
         self.interval
-            .saturating_mul(2)
+            .saturating_mul(MAX_RENEW_FAILURES.saturating_add(1))
             .saturating_add(self.discovery_timeout)
     }
 
@@ -1089,7 +1094,7 @@ mod tests {
         let mut h = harness(vec![binding(1, 10, "chan_a")]);
         h.mgr.reconcile().await;
         // No further reconcile fires: the manager "stopped renewing".
-        tokio::time::advance(Duration::from_secs(129)).await;
+        tokio::time::advance(Duration::from_secs(189)).await;
         settle().await;
         assert_eq!(h.mgr.live_session_count(), 1, "still inside the window");
         tokio::time::advance(Duration::from_secs(2)).await;
@@ -1097,9 +1102,9 @@ mod tests {
         assert_eq!(
             h.mgr.live_session_count(),
             0,
-            "stopped itself at ~130s < TTL"
+            "stopped itself at ~190s < TTL (250s)"
         );
-        assert!(LEASE_TTL > Duration::from_secs(131));
+        assert!(LEASE_TTL > Duration::from_secs(191));
         let r = h.mgr.reconcile().await;
         assert_eq!(r.restarted, 0, "cooldown still applies");
         assert_eq!(*h.metrics.ends.lock().unwrap(), vec![SessionEnd::LeaseLost]);
@@ -1113,9 +1118,9 @@ mod tests {
             tokio::time::advance(Duration::from_secs(60)).await;
             settle().await;
         }
-        // Last renew at t=180; deadline t=310; now t=240.
+        // Last renew at t=180; deadline t=370; now t=240.
         assert_eq!(h.mgr.live_session_count(), 1);
-        tokio::time::advance(Duration::from_secs(69)).await;
+        tokio::time::advance(Duration::from_secs(129)).await;
         settle().await;
         assert_eq!(h.mgr.live_session_count(), 1);
         tokio::time::advance(Duration::from_secs(2)).await;
@@ -1191,6 +1196,34 @@ mod tests {
         let r = h.mgr.reconcile().await;
         assert_eq!((r.kept, r.stopped), (0, 1), "second consecutive miss stops");
         assert_eq!(*h.metrics.ends.lock().unwrap(), vec![SessionEnd::LeaseLost]);
+    }
+
+    // regression: the self-stop window must outlast the renew errors the
+    // manager tolerates -- a healthy session that survives one transient renew
+    // error is NOT self-stopped by the deadline (and never hits the cooldown).
+    #[tokio::test(start_paused = true)]
+    async fn session_surviving_tolerated_renew_errors_is_not_self_stopped() {
+        let mut h = harness(vec![binding(1, 10, "chan_a")]);
+        assert!(h.mgr.session_window() < h.mgr.lease_ttl());
+        assert!(
+            h.mgr.session_window()
+                >= (h.mgr.interval + h.mgr.interval / 10 + h.mgr.discovery_timeout)
+                    * MAX_RENEW_FAILURES,
+            "window covers every tolerated missed renew at worst-case gap"
+        );
+        h.mgr.reconcile().await; // acquire at t=0; deadline t=190
+        tokio::time::advance(Duration::from_secs(66)).await; // interval + jitter
+        h.lease.0.lock().unwrap().renew_err.insert((1, 10));
+        let r = h.mgr.reconcile().await; // one tolerated failure; deadline unchanged
+        assert_eq!((r.kept, r.stopped), (1, 0));
+        tokio::time::advance(Duration::from_secs(76)).await; // t=142 + disc gap
+        settle().await;
+        assert_eq!(h.mgr.live_session_count(), 1, "alive before next renew");
+        h.lease.0.lock().unwrap().renew_err.clear();
+        let r = h.mgr.reconcile().await; // recovers at t=142 < 190
+        assert_eq!((r.kept, r.stopped), (1, 0));
+        assert_eq!(h.mgr.live_session_count(), 1);
+        assert!(h.metrics.ends.lock().unwrap().is_empty(), "no LeaseLost");
     }
 
     #[tokio::test]
@@ -1318,12 +1351,12 @@ mod tests {
     async fn with_timing_scales_lease_ttl_and_session_window() {
         let h = harness(vec![]);
         assert_eq!(h.mgr.lease_ttl(), LEASE_TTL, "defaults match the consts");
-        assert_eq!(h.mgr.session_window(), Duration::from_secs(130));
+        assert_eq!(h.mgr.session_window(), Duration::from_secs(190));
         let mgr = h
             .mgr
             .with_timing(Duration::from_secs(20), Duration::from_secs(3));
-        assert_eq!(mgr.session_window(), Duration::from_secs(43));
-        assert_eq!(mgr.lease_ttl(), Duration::from_secs(63));
+        assert_eq!(mgr.session_window(), Duration::from_secs(63));
+        assert_eq!(mgr.lease_ttl(), Duration::from_secs(83));
         assert_eq!(mgr.discovery_timeout, Duration::from_secs(3));
     }
 

@@ -122,14 +122,51 @@ def test_alpha_scope_matrix_still_has_both_connection_scopes(
     pytest.fail("no SERVICE_JWT_IDENTITIES rendered")
 
 
-def test_dataplane_egress_allows_hub_api_http_port_on_alpha(
+def _hub_http_rules(cnp: dict[str, Any], port: str) -> list[dict[str, Any]]:
+    """Egress rules in `cnp` that allow hub-api on the HTTP `port`."""
+    return [
+        r
+        for r in cnp["spec"]["egress"]
+        if any(
+            m.get("matchLabels", {}).get("app.kubernetes.io/component") == "hub-api"
+            for m in r.get("toEndpoints", [])
+        )
+        and any(p["port"] == port for tp in r.get("toPorts", []) for p in tp["ports"])
+    ]
+
+
+def _hub_port() -> str:
+    values = yaml.safe_load((_CHART_DIR / "values.yaml").read_text())
+    return str(values["pipeline"]["hubApi"]["port"])
+
+
+def test_hub_api_http_egress_is_scoped_to_svc_ingest_only_on_alpha(
     alpha: list[dict[str, Any]],
 ) -> None:
-    port = str(
-        yaml.safe_load((_CHART_DIR / "values.yaml").read_text())["pipeline"]["hubApi"][
-            "port"
-        ]
+    """The hub-api HTTP rule lives in its own CNP selecting ONLY svc-ingest-rust."""
+    port = _hub_port()
+    cnps = [
+        d
+        for d in alpha
+        if d.get("kind") == "CiliumNetworkPolicy"
+        and d["metadata"]["name"].endswith("-svc-ingest-hubapi-http-egress")
+    ]
+    assert len(cnps) == 1, f"expected one scoped svc-ingest egress CNP, got {len(cnps)}"
+    selector = cnps[0]["spec"]["endpointSelector"]
+    assert "matchExpressions" not in selector, "selector must not be a component set"
+    assert (
+        selector["matchLabels"]["app.kubernetes.io/component"] == "svc-ingest-rust"
     )
+    assert len(_hub_http_rules(cnps[0], port)) == 1, (
+        f"svc-ingest -> hub-api:{port} egress rule missing"
+    )
+
+
+def test_hub_api_http_egress_is_not_granted_dataplane_wide(
+    alpha: list[dict[str, Any]],
+) -> None:
+    """The shared dataplane-egress-deny CNP must NOT carry the hub-api HTTP port."""
+    port = _hub_port()
     cnps = [
         d
         for d in alpha
@@ -137,13 +174,26 @@ def test_dataplane_egress_allows_hub_api_http_port_on_alpha(
         and d["metadata"]["name"].endswith("-dataplane-egress-deny")
     ]
     assert len(cnps) == 1, f"expected one dataplane egress CNP, got {len(cnps)}"
-    hits = [
-        r
+    assert not _hub_http_rules(cnps[0], port), (
+        "hub-api HTTP egress leaked into the all-dataplane policy"
+    )
+    # the gRPC rule (different port) must still be there: guards a vacuous pass
+    assert any(
+        m.get("matchLabels", {}).get("app.kubernetes.io/component") == "hub-api"
         for r in cnps[0]["spec"]["egress"]
-        if any(
-            m.get("matchLabels", {}).get("app.kubernetes.io/component") == "hub-api"
-            for m in r.get("toEndpoints", [])
-        )
-        and any(p["port"] == port for tp in r.get("toPorts", []) for p in tp["ports"])
+        for m in r.get("toEndpoints", [])
+    ), "hub-api gRPC rule unexpectedly gone"
+
+
+def test_scoped_hub_api_egress_absent_when_flag_off() -> None:
+    """No dynamic connections -> the scoped CNP is not rendered at all."""
+    docs = _render(
+        "values-alpha.yaml",
+        "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false",
+    )
+    assert not [
+        d
+        for d in docs
+        if d.get("kind") == "CiliumNetworkPolicy"
+        and d["metadata"]["name"].endswith("-svc-ingest-hubapi-http-egress")
     ]
-    assert len(hits) == 1, f"svc-ingest -> hub-api:{port} egress rule missing"

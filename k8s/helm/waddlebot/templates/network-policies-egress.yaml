@@ -127,21 +127,6 @@ spec:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.hubApiGrpcPort | quote }}
               protocol: TCP
-    {{- if or .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled .Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled }}
-    # feature/edge-reshape-chunk2-twitch-inbound (Task 9) -- hub-api's HTTP port, the
-    # transport for the internal provider-connections routes (list bindings / resolve token)
-    # and /internal/service-token that svc-ingest's per-community Twitch sessions (and
-    # svc-action's resolver) call. Distinct from the gRPC rule above; only rendered while a
-    # dynamic-connections consumer is enabled.
-    - toEndpoints:
-        - matchLabels:
-            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
-            app.kubernetes.io/component: hub-api
-      toPorts:
-        - ports:
-            - port: {{ .Values.pipeline.hubApi.port | quote }}
-              protocol: TCP
-    {{- end }}
     # feature/alpha-localized-posthog -- in-cluster PostHog (feature-flag
     # execution plane), reached directly by svc-process-rust/svc-action-rust's
     # penguin_licensing client (POSTHOG_HOST), not proxied through
@@ -225,4 +210,36 @@ spec:
             - port: {{ . | quote }}
               protocol: TCP
             {{- end }}
+---
+{{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+# feature/edge-reshape-chunk2-twitch-inbound -- hub-api HTTP egress for svc-ingest-rust ONLY.
+# hub-api's HTTP port carries the internal provider-connections routes (list bindings /
+# resolve token) and /internal/service-token used by svc-ingest's per-community Twitch
+# sessions. Deliberately NOT part of dataplane-egress-deny (which selects every dataplane
+# component): granting it there would hand hub-api HTTP to every dataplane pod. Cilium
+# unions allows across CNPs selecting the same endpoint, so this adds to that baseline.
+# TODO(B1): when svc-action-rust's dynamic-connections flag lands, give it its OWN sibling
+# CiliumNetworkPolicy (endpointSelector component: svc-action-rust) -- do not widen this one.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-ingest-hubapi-http-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-ingest-rust
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: hub-api
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.hubApi.port | quote }}
+              protocol: TCP
+{{- end }}
 {{- end }}
