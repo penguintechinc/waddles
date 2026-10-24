@@ -188,7 +188,7 @@ Gates are `flask_core.feature_flags.feature_enabled` (PostHog flag AND license t
 - `libs/flask_core` ships no `py.typed` marker and `tenant_middleware`/
   `require_scope`'s inner wrappers are unannotated -- every consumer sees
   mypy `--strict`'s `untyped-decorator`; worked around here with scoped,
-  documented `# type: ignore[untyped-decorator]` (see `blueprints/v2/platform.py`,
+  documented `# type: ignore[misc]` (see `blueprints/v2/platform.py`,
   `openapi/routes.py`).
 - `AsyncDAL.close_async()` (`libs/flask_core/flask_core/database.py`)
   closes the underlying pydal `DAL` from a different thread than created

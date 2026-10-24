@@ -132,7 +132,7 @@ def _activation_dto(row: Any) -> ActivationDTO:
 
 
 @bundle_activation_bp.route("/<int:community_id>/activation", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ActivationListResponse)
 async def list_activation(
     community_id: int,
@@ -149,7 +149,7 @@ async def list_activation(
 
 
 @bundle_activation_bp.route("/<int:community_id>/activation", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(ActivateRequest)
 @validate_response(ActivateResponse, 201)
 async def activate(
@@ -189,7 +189,7 @@ async def activate(
 
 
 @bundle_activation_bp.route("/<int:community_id>/activation/<app_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def deactivate(
     community_id: int, app_id: str

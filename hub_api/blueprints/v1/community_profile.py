@@ -162,7 +162,7 @@ async def get_community_profile(community_id: int) -> tuple[Any, int]:
 
 
 @community_profile_bp.route("/admin/<int:community_id>/profile", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(UpdateCommunityProfileRequest)
 # NOT @validate_response -- update_community_profile() awaits update_async()
 # then returns a nested-dataclass response, hitting the crash documented in
@@ -195,7 +195,7 @@ async def update_community_profile(
 
 
 @community_profile_bp.route("/admin/<int:community_id>/logo", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(LogoResponse)
 async def upload_community_logo(community_id: int) -> LogoResponse | tuple[dict[str, object], int]:
     """Upload a community logo (moderator+)."""
@@ -223,7 +223,7 @@ async def upload_community_logo(community_id: int) -> LogoResponse | tuple[dict[
 
 
 @community_profile_bp.route("/admin/<int:community_id>/logo", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
 async def delete_community_logo(
     community_id: int,
@@ -239,7 +239,7 @@ async def delete_community_logo(
 
 
 @community_profile_bp.route("/admin/<int:community_id>/banner", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(BannerResponse)
 async def upload_community_banner(
     community_id: int,
@@ -269,7 +269,7 @@ async def upload_community_banner(
 
 
 @community_profile_bp.route("/admin/<int:community_id>/banner", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
 async def delete_community_banner(
     community_id: int,

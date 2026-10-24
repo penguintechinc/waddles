@@ -311,8 +311,8 @@ def _admin_dto(row: Any) -> TenantAdminDTO:
 
 
 @tenant_bp.route("/<tenant_slug>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(TenantResponse)
 async def get_tenant(tenant_slug: str) -> TenantResponse | tuple[dict[str, object], int]:
     """Get tenant."""
@@ -326,8 +326,8 @@ async def get_tenant(tenant_slug: str) -> TenantResponse | tuple[dict[str, objec
 
 
 @tenant_bp.route("/<tenant_slug>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(UpdateTenantRequest)
 @validate_response(MessageResponse)
 async def update_tenant(
@@ -372,8 +372,8 @@ async def update_tenant(
 
 
 @tenant_bp.route("/<tenant_slug>/settings", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(SettingsResponse)
 async def get_tenant_settings(
     tenant_slug: str,
@@ -391,8 +391,8 @@ async def get_tenant_settings(
 
 
 @tenant_bp.route("/<tenant_slug>/settings", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(UpdateSettingsRequest)
 @validate_response(MessageResponse)
 async def update_tenant_settings(
@@ -414,8 +414,8 @@ async def update_tenant_settings(
 
 
 @tenant_bp.route("/<tenant_slug>/communities", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(CommunitiesResponse)
 async def get_tenant_communities(
     tenant_slug: str,
@@ -441,8 +441,8 @@ async def get_tenant_communities(
 
 
 @tenant_bp.route("/<tenant_slug>/modules", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(ModulesResponse)
 async def get_tenant_modules(tenant_slug: str) -> ModulesResponse | tuple[dict[str, object], int]:
     """Get tenant modules."""
@@ -460,8 +460,8 @@ async def get_tenant_modules(tenant_slug: str) -> ModulesResponse | tuple[dict[s
 
 
 @tenant_bp.route("/<tenant_slug>/modules", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(UpdateModulesRequest)
 @validate_response(MessageResponse)
 async def update_tenant_modules(
@@ -480,8 +480,8 @@ async def update_tenant_modules(
 
 
 @tenant_bp.route("/<tenant_slug>/admins", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(TenantAdminsResponse)
 async def get_tenant_admins(
     tenant_slug: str,
@@ -497,8 +497,8 @@ async def get_tenant_admins(
 
 
 @tenant_bp.route("/<tenant_slug>/admins", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(AddTenantAdminRequest)
 @validate_response(MessageResponse)
 async def add_tenant_admin(
@@ -517,8 +517,8 @@ async def add_tenant_admin(
 
 
 @tenant_bp.route("/<tenant_slug>/admins/<int:user_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def remove_tenant_admin(
     tenant_slug: str, user_id: int
