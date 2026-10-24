@@ -82,4 +82,26 @@ pub trait SessionMetrics: Send + Sync {
     fn discovery(&self, outcome: DiscoveryOutcome);
     /// One reconcile pass finished in `elapsed`; `live` sessions are running.
     fn reconcile_done(&self, report: &ReconcileReport, elapsed: Duration, live: usize);
+    /// The number of live sessions changed to `n` (also drives receiver health).
+    fn set_live_sessions(&self, n: usize);
+    /// A credential/binding resolve failed; `class` is a fixed label
+    /// (`ResolveError::outcome()` or `timeout`) -- never error text.
+    fn resolve_failed(&self, class: &'static str);
+    /// `n` bindings were skipped during discovery for `why`
+    /// (`malformed`/`duplicate`).
+    fn discovery_skipped(&self, why: &'static str, n: u32);
 }
+
+/// Allow-list for the `class` label of resolve-failure metrics.
+pub const RESOLVE_CLASSES: [&str; 7] = [
+    "transient",
+    "circuit_open",
+    "auth",
+    "not_found",
+    "not_usable",
+    "malformed",
+    "timeout",
+];
+
+/// Allow-list for the `why` label of discovery-skip metrics.
+pub const SKIP_REASONS: [&str; 2] = ["malformed", "duplicate"];
