@@ -46,7 +46,7 @@ sha2 = "=0.10.9"
 hex = "=0.4.3"
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt", "rt-multi-thread"] }
 # Test-only: signs fixture JWTs to exercise `service_auth::verify` through
 # this crate's scoping layer. Same version/feature pin as
 # core/service_auth/Cargo.toml so cargo-deny sees one resolved version,
