@@ -53,7 +53,7 @@ cryptography>=44.0.1,<51.0.0
 # imports it, not just flask_core's, matching this file's own header
 # convention for httpx/redis/cryptography above.
 grpcio>=1.83.0,<1.84.0
-opentelemetry-instrumentation-grpc==0.60b1
+opentelemetry-instrumentation-grpc==0.66b1
 
 # M2b workstreams/usage-metering group (spec Sec5.11/Sec5.12, D30/D31):
 # penguin-dal (R52 coordinator ruling, "we aren't using pydal anymore for
