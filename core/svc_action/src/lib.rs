@@ -600,6 +600,54 @@ fn flag_or_closed(
     }
 }
 
+/// Derives the bundle-`kv` Valkey connection config from the spine config
+/// for the DEDICATED `noeviction` kv instance (`VALKEY_KV_URL` /
+/// `VALKEY_KV_USERNAME` / `VALKEY_KV_PASSWORD`). TLS follows the kv URL
+/// scheme, never the spine's. Returns `None` when `VALKEY_KV_URL` is
+/// unset/blank -- deliberately NO fallback to the durable spine instance.
+fn kv_instance_config(
+    spine: &penguin_spine::SpineConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<penguin_spine::SpineConfig> {
+    let non_empty = |k: &str| lookup(k).filter(|v| !v.trim().is_empty());
+    let url = non_empty("VALKEY_KV_URL")?;
+    let mut cfg = spine.clone();
+    cfg.security_transport_tls = url.starts_with("rediss://");
+    cfg.valkey_url = url;
+    cfg.valkey_username = non_empty("VALKEY_KV_USERNAME");
+    cfg.valkey_password = non_empty("VALKEY_KV_PASSWORD");
+    Some(cfg)
+}
+
+/// Surfaces "bundle-kv is unavailable" loudly: ERROR log with `reason` plus
+/// a `kv` error-counter increment (`kind="kv_instance_unavailable"`). The
+/// caller then leaves `kv` unwired, so every kv host-call denies
+/// `not_implemented` (fail-CLOSED) -- never a fallback to the durable/spine
+/// instance and never an unmetered quota bypass.
+fn kv_degraded(reason: &str, detail: &str) {
+    tracing::error!(
+        reason = %reason,
+        detail = %detail,
+        "kv capability DEGRADED: dedicated kv Valkey instance unavailable; kv disabled \
+         (fail-closed: not_implemented on every kv host-call, NO fallback to the durable instance)"
+    );
+    static COUNTER: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    COUNTER
+        .get_or_init(|| {
+            opentelemetry::global::meter("bundle_host_kv")
+                .u64_counter("waddles_bundle_kv_instance_unavailable_total")
+                .with_description(
+                    "Bundle kv disabled at startup: dedicated kv Valkey unset/unreachable/evicting",
+                )
+                .build()
+        })
+        .add(
+            1,
+            &[opentelemetry::KeyValue::new("reason", reason.to_string())],
+        );
+}
+
 /// Builds (never connects) a [`redis::Client`] from `cfg`'s `VALKEY_URL`/
 /// username/password/TLS/CA-file settings -- the same client-construction
 /// logic as `crate::usage::connect` (duplicated rather than shared: that
@@ -748,20 +796,33 @@ async fn build_stage_capabilities(
         Some(guard) => guard,
         None => return None,
     };
-    // `kv` reuses this same direct Valkey connection (cloned -- a cheap
-    // handle clone over one shared TCP connection, not a second socket)
-    // rather than opening a dedicated one: `relay_conn` already IS the
-    // "second, direct redis connection" `usage.rs`'s module doc describes,
-    // and `kv`'s isolation/quota model needs nothing about the connection
-    // itself that `relay`/usage don't already require (`crate::capabilities`'
-    // `StageCapabilities::with_kv`'s doc).
-    let mut kv_conn = relay_conn.clone();
-    // Low-severity fix, security review of PR #425: `count_key` has no
-    // TTL, so an `allkeys-*` `maxmemory-policy` can evict it under memory
-    // pressure, silently resetting the kv quota -- checked once here,
-    // never on the per-op hot path (`bundle_host_kv::policy`'s doc).
-    let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut kv_conn).await;
-    bundle_host_kv::policy::log_and_record(&policy_check);
+    // `kv` gets its OWN connection to the dedicated `noeviction` kv instance
+    // (`VALKEY_KV_URL`, see `kv_instance_config`), never `relay_conn`'s
+    // durable instance. Any unavailability (unset URL, connect failure,
+    // evicting policy) disables only `kv` LOUDLY (`kv_degraded`) and
+    // fail-CLOSED -- never a fallback to the durable instance.
+    let kv_conn = match kv_instance_config(&spine_cfg, |k| std::env::var(k).ok()) {
+        None => {
+            kv_degraded("url_unset", "VALKEY_KV_URL is unset or blank");
+            None
+        }
+        Some(kv_cfg) => match usage::connect(&kv_cfg).await {
+            Ok(mut conn) => {
+                let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut conn).await;
+                bundle_host_kv::policy::log_and_record(&policy_check);
+                if let bundle_host_kv::policy::PolicyCheck::Violation(policy) = &policy_check {
+                    kv_degraded("evicting_policy", policy);
+                    None
+                } else {
+                    Some(conn)
+                }
+            }
+            Err(err) => {
+                kv_degraded("connect_failed", &err.to_string());
+                None
+            }
+        },
+    };
     // `core/bundle_capability_gate::CapabilityGate` (spec
     // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     // SS5): `PgGrantLoader` against the RO-replica reader account when
@@ -805,8 +866,11 @@ async fn build_stage_capabilities(
     };
     let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
         relay_conn, egress, usage, gate,
-    )
-    .with_kv(kv_conn, kv_capabilities);
+    );
+    let caps = match kv_conn {
+        Some(kv_conn) => caps.with_kv(kv_conn, kv_capabilities),
+        None => caps,
+    };
     // Discord relay send (spec: relay providers, `discord`) -- graceful
     // degradation, not a startup requirement: a deployment that never sets
     // `DISCORD_BOT_TOKEN` simply never enables this provider, and a bundle
@@ -2049,6 +2113,39 @@ mod tests {
             drain_socket_timeout_s: 65,
             relay_block_timeout_s: 30,
         }
+    }
+
+    /// Wiring: bundle-kv goes to `VALKEY_KV_URL` (dedicated), the spine config
+    /// stays on the durable `VALKEY_URL`; unset kv URL => None (no fallback).
+    #[test]
+    fn kv_instance_config_routes_kv_to_dedicated_and_leaves_spine_on_durable() {
+        let mut spine = unreachable_spine_config();
+        spine.valkey_url = "rediss://durable:6380/0".to_string();
+        spine.valkey_password = Some("durable-pass".to_string());
+        spine.security_transport_tls = true;
+        let env = |k: &str| match k {
+            "VALKEY_KV_URL" => Some("rediss://infra-redis:6380/0".to_string()),
+            "VALKEY_KV_PASSWORD" => Some("cache-pass".to_string()),
+            _ => None,
+        };
+        let kv = kv_instance_config(&spine, env).expect("kv url set");
+        assert_eq!(kv.valkey_url, "rediss://infra-redis:6380/0");
+        assert_eq!(kv.valkey_password.as_deref(), Some("cache-pass"));
+        assert!(kv.security_transport_tls);
+        assert_eq!(spine.valkey_url, "rediss://durable:6380/0");
+        assert_eq!(spine.valkey_password.as_deref(), Some("durable-pass"));
+
+        let plain = kv_instance_config(&spine, |k| {
+            (k == "VALKEY_KV_URL").then(|| "redis://:p@infra-redis:6379/0".to_string())
+        })
+        .expect("kv url set");
+        assert!(!plain.security_transport_tls);
+        assert!(plain.valkey_password.is_none());
+
+        // Unset/blank: NO fallback to the durable instance.
+        assert!(kv_instance_config(&spine, |_| None).is_none());
+        assert!(kv_instance_config(&spine, |_| Some("  ".to_string())).is_none());
+        kv_degraded("test", "does not panic");
     }
 
     /// Regression coverage for the CRITICAL usage-metering finding: proves
