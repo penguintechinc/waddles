@@ -452,7 +452,6 @@ impl<R: ConnectionResolve + 'static, L: SessionLease + 'static> SessionManager<R
                 self.deps.metrics.lease_event(LeaseOutcome::Acquired);
                 let rs = self.launch(spec);
                 self.sessions.insert(key, rs);
-                self.deps.metrics.session_started();
                 tracing::info!(
                     community_id = key.0,
                     connection_id = key.1,
@@ -782,9 +781,6 @@ mod tests {
     }
 
     impl SessionMetrics for RecMetrics {
-        fn session_started(&self) {
-            *self.started.lock().unwrap() += 1;
-        }
         fn session_ended(&self, reason: SessionEnd) {
             self.ends.lock().unwrap().push(reason);
         }
@@ -794,7 +790,8 @@ mod tests {
         fn discovery(&self, outcome: DiscoveryOutcome) {
             self.discoveries.lock().unwrap().push(outcome);
         }
-        fn reconcile_done(&self, _r: &ReconcileReport, _e: Duration, _live: usize) {
+        fn reconcile_done(&self, r: &ReconcileReport, _e: Duration, _live: usize) {
+            *self.started.lock().unwrap() += r.started as usize;
             *self.reconciles.lock().unwrap() += 1;
         }
         fn set_live_sessions(&self, _n: usize) {}
@@ -904,6 +901,38 @@ mod tests {
         let text = crate::telemetry::render_metrics(&registry).unwrap();
         assert!(text.contains(r#"svc_ingest_twitch_resolve_errors_total{class="transient"} 1"#));
         assert!(text.contains(r#"svc_ingest_twitch_reconcile_total{outcome="discovery_failed"} 1"#));
+    }
+
+    #[tokio::test]
+    async fn repeated_passes_over_a_bad_binding_do_not_inflate_skip_metric() {
+        let registry = prometheus::Registry::new();
+        let metrics = Arc::new(crate::telemetry::register_ingest_metrics(&registry));
+        let mut bad = binding(3, 30, "chan_c");
+        bad.metadata.clear();
+        let resolver = Arc::new(FakeResolver {
+            bindings: Mutex::new(Some(vec![bad])),
+            resolve_transient: false,
+        });
+        let mut mgr = SessionManager::new(
+            resolver.clone(),
+            Arc::new(FakeLease::default()),
+            SessionDeps {
+                runner: Arc::new(RecRunner::default()),
+                metrics: metrics.clone(),
+            },
+        );
+        for _ in 0..3 {
+            mgr.reconcile().await;
+        }
+        let text = crate::telemetry::render_metrics(&registry).unwrap();
+        assert!(
+            text.contains(r#"svc_ingest_twitch_discovery_skipped{why="malformed"} 1"#),
+            "{text}"
+        );
+        *resolver.bindings.lock().unwrap() = Some(vec![]);
+        mgr.reconcile().await;
+        let text = crate::telemetry::render_metrics(&registry).unwrap();
+        assert!(text.contains(r#"svc_ingest_twitch_discovery_skipped{why="malformed"} 0"#));
     }
 
     #[tokio::test]

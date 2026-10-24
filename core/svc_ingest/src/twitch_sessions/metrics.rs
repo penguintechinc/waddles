@@ -72,8 +72,6 @@ impl SessionEnd {
 /// Sink for session-manager telemetry. Implementations must never block or
 /// panic: a dead exporter is never a reconcile failure.
 pub trait SessionMetrics: Send + Sync {
-    /// A session task was spawned.
-    fn session_started(&self);
     /// A session ended for `reason`.
     fn session_ended(&self, reason: SessionEnd);
     /// A lease interaction happened.
@@ -87,8 +85,8 @@ pub trait SessionMetrics: Send + Sync {
     /// A credential/binding resolve failed; `class` is a fixed label
     /// (`ResolveError::outcome()` or `timeout`) -- never error text.
     fn resolve_failed(&self, class: &'static str);
-    /// `n` bindings were skipped during discovery for `why`
-    /// (`malformed`/`duplicate`).
+    /// `n` bindings were skipped by the CURRENT discovery pass for `why`
+    /// (`malformed`/`duplicate`); a per-pass snapshot, not an increment.
     fn discovery_skipped(&self, why: &'static str, n: u32);
 }
 

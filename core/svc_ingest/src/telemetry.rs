@@ -165,8 +165,9 @@ pub struct IngestMetrics {
     pub twitch_session_events_total: prometheus::IntCounterVec,
     /// Twitch resolve failures, labeled by a fixed class set.
     pub twitch_resolve_errors_total: prometheus::IntCounterVec,
-    /// Bindings skipped during Twitch discovery, labeled by a fixed reason set.
-    pub twitch_discovery_skipped_total: prometheus::IntCounterVec,
+    /// Bindings skipped by the latest Twitch discovery pass, labeled by a
+    /// fixed reason set (a gauge: per-pass snapshots must not accumulate).
+    pub twitch_discovery_skipped: prometheus::IntGaugeVec,
 }
 
 /// Registers this service's ingest-path metrics against `registry`. Must be
@@ -355,17 +356,17 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .register(Box::new(twitch_resolve_errors_total.clone()))
         .expect("register svc_ingest_twitch_resolve_errors_total");
 
-    let twitch_discovery_skipped_total = prometheus::IntCounterVec::new(
+    let twitch_discovery_skipped = prometheus::IntGaugeVec::new(
         prometheus::Opts::new(
-            "svc_ingest_twitch_discovery_skipped_total",
-            "Bindings skipped during Twitch discovery (malformed/duplicate)",
+            "svc_ingest_twitch_discovery_skipped",
+            "Bindings skipped by the latest Twitch discovery pass (malformed/duplicate)",
         ),
         &["why"],
     )
     .expect("valid metric definition");
     registry
-        .register(Box::new(twitch_discovery_skipped_total.clone()))
-        .expect("register svc_ingest_twitch_discovery_skipped_total");
+        .register(Box::new(twitch_discovery_skipped.clone()))
+        .expect("register svc_ingest_twitch_discovery_skipped");
 
     IngestMetrics {
         twitch_sessions_live,
@@ -373,7 +374,7 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         twitch_reconcile_duration_seconds,
         twitch_session_events_total,
         twitch_resolve_errors_total,
-        twitch_discovery_skipped_total,
+        twitch_discovery_skipped,
         scope_resolutions_total,
         events_published_total,
         publish_errors_total,
@@ -501,15 +502,6 @@ impl IngestMetrics {
 }
 
 impl SessionMetrics for IngestMetrics {
-    fn session_started(&self) {
-        Self::closed_inc(
-            &self.twitch_session_events_total,
-            &SESSION_EVENTS,
-            "started",
-            1,
-        );
-    }
-
     fn session_ended(&self, reason: SessionEnd) {
         let ev = match reason {
             SessionEnd::LeaseLost => "lease_lost",
@@ -521,8 +513,11 @@ impl SessionMetrics for IngestMetrics {
     fn lease_event(&self, outcome: LeaseOutcome) {
         let ev = match outcome {
             LeaseOutcome::Denied => "lease_denied",
-            LeaseOutcome::Lost => "lease_lost",
-            LeaseOutcome::Acquired | LeaseOutcome::Error | LeaseOutcome::Renewed => return,
+            // A loss ends the session, so `session_ended(LeaseLost)` counts it.
+            LeaseOutcome::Acquired
+            | LeaseOutcome::Error
+            | LeaseOutcome::Renewed
+            | LeaseOutcome::Lost => return,
         };
         Self::closed_inc(&self.twitch_session_events_total, &SESSION_EVENTS, ev, 1);
     }
@@ -540,6 +535,15 @@ impl SessionMetrics for IngestMetrics {
             .inc();
         self.twitch_reconcile_duration_seconds
             .observe(elapsed.as_secs_f64());
+        // Disjoint counts: a restart is `restarted` only, never also `started`.
+        if report.started > 0 {
+            Self::closed_inc(
+                &self.twitch_session_events_total,
+                &SESSION_EVENTS,
+                "started",
+                u64::from(report.started),
+            );
+        }
         if report.restarted > 0 {
             Self::closed_inc(
                 &self.twitch_session_events_total,
@@ -565,14 +569,15 @@ impl SessionMetrics for IngestMetrics {
     }
 
     fn discovery_skipped(&self, why: &'static str, n: u32) {
-        if n > 0 {
-            Self::closed_inc(
-                &self.twitch_discovery_skipped_total,
-                &SKIP_REASONS,
-                why,
-                u64::from(n),
-            );
-        }
+        let label = if SKIP_REASONS.contains(&why) {
+            why
+        } else {
+            tracing::warn!("metric label outside its closed set; recorded as other");
+            "other"
+        };
+        self.twitch_discovery_skipped
+            .with_label_values(&[label])
+            .set(i64::from(n));
     }
 }
 
@@ -741,7 +746,15 @@ mod tests {
     fn session_and_lease_events_map_to_fixed_event_labels() {
         let registry = prometheus::Registry::new();
         let m = register_ingest_metrics(&registry);
-        m.session_started();
+        m.reconcile_done(
+            &ReconcileReport {
+                started: 1,
+                restarted: 1,
+                ..ReconcileReport::default()
+            },
+            Duration::ZERO,
+            1,
+        );
         m.session_ended(SessionEnd::Shutdown);
         m.session_ended(SessionEnd::NonRetryable);
         m.session_ended(SessionEnd::LeaseLost);
@@ -756,9 +769,10 @@ mod tests {
         }
         m.discovery(DiscoveryOutcome::Ok);
         let c = |e: &str| m.twitch_session_events_total.with_label_values(&[e]).get();
-        assert_eq!(c("started"), 1);
+        assert_eq!(c("started"), 1, "restart is not also a start");
+        assert_eq!(c("restarted"), 1);
         assert_eq!(c("stopped"), 2);
-        assert_eq!(c("lease_lost"), 2);
+        assert_eq!(c("lease_lost"), 1, "one loss is counted once");
         assert_eq!(c("lease_denied"), 1);
     }
 
@@ -788,7 +802,6 @@ mod tests {
         ] {
             m.lease_event(lo);
         }
-        m.session_started();
         m.reconcile_done(
             &ReconcileReport {
                 restarted: 1,
@@ -847,19 +860,20 @@ mod tests {
     }
 
     #[test]
-    fn zero_skips_record_nothing() {
+    fn discovery_skipped_is_a_per_pass_snapshot_not_an_accumulator() {
         let registry = prometheus::Registry::new();
         let m = register_ingest_metrics(&registry);
         m.discovery_skipped("malformed", 0);
         m.discovery_skipped("duplicate", 3);
+        m.discovery_skipped("duplicate", 3);
         assert_eq!(
-            m.twitch_discovery_skipped_total
+            m.twitch_discovery_skipped
                 .with_label_values(&["malformed"])
                 .get(),
             0
         );
         assert_eq!(
-            m.twitch_discovery_skipped_total
+            m.twitch_discovery_skipped
                 .with_label_values(&["duplicate"])
                 .get(),
             3
@@ -872,8 +886,14 @@ mod tests {
         let m = register_ingest_metrics(&r);
         m.set_live_sessions(2);
         m.resolve_failed("auth");
-        m.session_started();
-        m.reconcile_done(&ReconcileReport::default(), Duration::ZERO, 2);
+        m.reconcile_done(
+            &ReconcileReport {
+                started: 1,
+                ..ReconcileReport::default()
+            },
+            Duration::ZERO,
+            2,
+        );
         m.discovery_skipped("duplicate", 1);
         let text = render_metrics(&r).expect("encode");
         for series in [
@@ -882,7 +902,7 @@ mod tests {
             "svc_ingest_twitch_reconcile_duration_seconds",
             "svc_ingest_twitch_session_events_total",
             "svc_ingest_twitch_resolve_errors_total",
-            "svc_ingest_twitch_discovery_skipped_total",
+            "svc_ingest_twitch_discovery_skipped",
         ] {
             assert_eq!(
                 text.matches(&format!("# TYPE {series} ")).count(),
