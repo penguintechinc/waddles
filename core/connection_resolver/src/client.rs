@@ -135,6 +135,29 @@ fn check_transport(hub_api_url: &str, environment: &str) -> Result<(), ResolveEr
     Err(ResolveError::Malformed("hub url must be http(s)"))
 }
 
+/// Owned response body that is zeroized on drop, so every exit path (success, parse error,
+/// early `?`) wipes the plaintext secrets it may hold. reqwest's internal `Bytes` is outside
+/// our control and remains an accepted residual.
+struct ZeroizingBody(Vec<u8>);
+
+impl std::ops::Deref for ZeroizingBody {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for ZeroizingBody {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+    }
+}
+
+/// Zero every byte of the buffer's allocation and clear it.
+fn wipe(buf: &mut Vec<u8>) {
+    zeroize::Zeroize::zeroize(buf);
+}
+
 #[derive(Deserialize)]
 struct NotUsableWire {
     reason: Option<String>,
@@ -273,7 +296,7 @@ impl ConnectionResolver {
     async fn send(
         &self,
         req: reqwest::RequestBuilder,
-    ) -> Result<(reqwest::StatusCode, Vec<u8>), ResolveError> {
+    ) -> Result<(reqwest::StatusCode, ZeroizingBody), ResolveError> {
         let resp = req
             .send()
             .await
@@ -283,7 +306,7 @@ impl ConnectionResolver {
             .bytes()
             .await
             .map_err(|_| ResolveError::Transient("hub response read failed"))?;
-        Ok((status, Vec::from(body)))
+        Ok((status, ZeroizingBody(Vec::from(body))))
     }
 
     /// One page of bindings (no secrets), via the unbound `connections:list` token.
@@ -496,6 +519,20 @@ mod tests {
         let rec = Arc::new(Rec::default());
         let r = ConnectionResolver::new(cfg(server), rec.clone()).unwrap();
         (r, rec)
+    }
+
+    #[test]
+    fn wipe_zeroes_the_whole_allocation() {
+        let mut v = b"PLAIN-secret-body".to_vec();
+        let len = v.len();
+        wipe(&mut v);
+        assert!(v.is_empty());
+        assert!(v.capacity() >= len);
+        // SAFETY: the first `len` bytes of the allocation were initialised (zeroed by wipe).
+        unsafe { v.set_len(len) };
+        assert!(v.iter().all(|b| *b == 0), "{v:?}");
+        let guard = ZeroizingBody(b"abc".to_vec());
+        assert_eq!(&guard[..], b"abc");
     }
 
     #[tokio::test]
