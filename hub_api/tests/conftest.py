@@ -79,6 +79,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     MetaData,
+    SmallInteger,
     String,
     Table,
     Text,
@@ -1643,6 +1644,24 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("platform", String(50), nullable=False),
         Column("source_id", String(255), nullable=False),
         Column("created_at", DateTime),
+    )
+    # app_commands (migration 0062) -- slash-command registry, hub-api the
+    # only writer. sqlite-compatible mirror: plain types, no FKs / CHECKs
+    # (the real constraints are proven against Postgres in
+    # alembic/tests/test_0062_app_commands_registry.py).
+    Table(
+        "app_commands",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, nullable=False, server_default="0"),
+        Column("app_id", String(255), nullable=False),
+        Column("command", String(32), nullable=False),
+        Column("command_types", SmallInteger, nullable=False, server_default="1"),
+        Column("platforms", JSON, nullable=False),
+        Column("description", String(100)),
+        Column("registered_at", DateTime),
+        UniqueConstraint("tenant_id", "community_id", "app_id", "command"),
     )
     # app_global_installs / bundle_tenant_availability (migration 0027) --
     # GLOBAL and TENANT tiers of the App Bundle 3-tier split

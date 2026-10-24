@@ -90,6 +90,41 @@ Stateless flavor-text replies. Flags are `waddles.command-hug`, `-boop` and `-hi
 
 `target` may start with `@` and must be 1-32 characters of letters, digits, `_`, `.` or `-`. Anything else returns `Usage: !hug [target] -- target must look like a plausible username`.
 
+## Command registry
+
+Phase 1 of slash-command-first routing. Activation records which commands each bundle serves in `app_commands` (migration 0062; hub-api is the only writer). **Phase 1 only writes the registry -- no routing changes yet:** ingest/process still deliver events exactly as before.
+
+**`commands:` manifest field** (optional; absent = infer everything):
+
+```yaml
+commands:
+  - name: ping                 # '*' or [a-z0-9][a-z0-9_-]{0,31}
+    types: [standard, webhook] # default [standard]; '*' is standard-only
+    platforms: [discord]       # default: platforms the bundle consumes/supports
+    description: Reply pong    # optional, 1-100 chars
+```
+
+**Inference** (from `consumes` rules on supported platforms; an explicit entry replaces an inferred row of the same name):
+
+| Rule shape | Registered row |
+|---|---|
+| `filters.command_prefix: ["!ping"]` | `ping`, standard (one leading non-alphanumeric char stripped) |
+| No / empty `command_prefix` | `*` catch-all, standard |
+| Unusable prefix (no leading symbol, bad charset) | Skipped, warning logged (count only) |
+
+Same-command rows merge by platform union. Scope: `community_id = 0` means tenant-wide; community and tenant-wide rows share one ownership queue per tenant.
+
+**Ownership = first-registered.** For a contested command the owner is the earliest `(registered_at, id)` row among apps whose platforms overlap (`*` platform overlaps all). `*` command rows never conflict. Re-syncing an active app keeps its `registered_at`; deactivate + reactivate re-queues it behind the interim owner.
+
+**Activation warning contract.** Activation never fails on a registry finding; `POST /community/<id>/activation` (always 201) returns `warnings[]`:
+
+| `code` | When | Fields |
+|---|---|---|
+| `command_conflict` | Another app already owns `command` | `appId`, `command`, `ownerAppId`, `message` |
+| `no_routable_command` | Bundle has a `process` stage but registers no command | `appId`, `message` |
+
+Warnings are logged after commit by code only (no command or user text). Under READ COMMITTED, two simultaneous activations may both miss each other's uncommitted row, so a conflict warning can be lost -- ownership stays single and deterministic. The core-bundle seeder backfills rows for bundles activated before the registry existed, ordered by `activated_at`.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
