@@ -61,6 +61,7 @@ from services.provider_connections import errors as pc_errors
 from services.provider_connections.kinds import ConnectionKind
 from services.provider_connections.registry import build_default_registry
 from services.provider_connections.service import (
+    FEATURE_STATIC_CONNECTIONS,
     MAX_PAGE_SIZE,
     ConnectionView,
     DataPlaneBinding,
@@ -84,9 +85,6 @@ SCOPE_CONNECTIONS_RESOLVE = "connections:resolve"
 #: Two-gate feature (PostHog flag default OFF AND Professional tier) -- see
 #: ``libs/core_platform_module/features.py`` ``integrations.provider_connections``.
 FEATURE_PROVIDER_CONNECTIONS = "waddles.integrations.provider_connections"
-#: Extra two-gate feature (flag default OFF, Professional tier) for the static-secret kinds
-#: (external_http / aws_lambda / gcp_function): creating one needs this on top of the base feature.
-FEATURE_STATIC_CONNECTIONS = "waddles.integrations.static_connections"
 
 #: ``app.config`` key a test (or a future composition root) may pre-populate; otherwise the
 #: service is built once, lazily, from ``install_dal`` + the default registry + the platform vault.
@@ -391,6 +389,7 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
 #: 500 with the generic code -- an unmapped error is a bug to be seen, never an implicit 4xx.
 _STATUS_BY_ERROR: dict[type[pc_errors.ProviderConnectionError], tuple[int, str]] = {
     pc_errors.UnknownProvider: (400, "UNKNOWN_PROVIDER"),
+    pc_errors.FeatureNotEnabled: (402, "FEATURE_NOT_ENABLED"),
     pc_errors.InvalidConnectionInput: (400, "BAD_REQUEST"),
     pc_errors.CredentialsRejected: (422, "CREDENTIALS_REJECTED"),
     pc_errors.InsufficientScopes: (422, "INSUFFICIENT_SCOPES"),
@@ -568,6 +567,7 @@ async def create_provider_connection(
             raise pc_errors.InvalidConnectionInput("this provider takes 'secret' only")
         view = await service.create_static(
             tenant_id=tenant_id,
+            tenant_slug=ctx.tenant_slug,
             community_id=community_id,
             actor_user_id=actor,
             provider=data.provider,

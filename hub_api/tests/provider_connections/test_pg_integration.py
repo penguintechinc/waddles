@@ -625,7 +625,9 @@ class TestStaticKindsOnPostgres:
     """Migration 0064 on the real database: sealed structured secrets, CHECKs, lifecycle."""
 
     @pytest.fixture
-    def static_service(self, install_dal: AsyncDB, clock: FakeClock) -> ProviderConnectionService:
+    def static_service(
+        self, install_dal: AsyncDB, clock: FakeClock, entitlements: Any
+    ) -> ProviderConnectionService:
         from services.provider_connections.static_secret import (
             AwsLambdaAdapter,
             ExternalHttpAdapter,
@@ -643,6 +645,7 @@ class TestStaticKindsOnPostgres:
         secret = {"token": "PG-STATIC-SECRET-0123456789"}
         view = await static_service.create_static(
             tenant_id=ids.tenant,
+            tenant_slug="pc-a",
             community_id=ids.community,
             actor_user_id=None,
             provider="external_http",
@@ -701,6 +704,7 @@ class TestStaticKindsOnPostgres:
     ) -> None:
         await static_service.create_static(
             tenant_id=ids.tenant,
+            tenant_slug="pc-a",
             community_id=ids.community,
             actor_user_id=None,
             provider="aws_lambda",
@@ -711,6 +715,7 @@ class TestStaticKindsOnPostgres:
         )
         await static_service.create_static(
             tenant_id=ids.tenant,
+            tenant_slug="pc-a",
             community_id=ids.community,
             actor_user_id=None,
             provider="gcp_function",

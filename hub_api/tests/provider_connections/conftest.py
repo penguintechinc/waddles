@@ -313,9 +313,9 @@ def make_static_registry(fake: FakeTwitch, clock: Callable[[], datetime]) -> Ada
 
 @pytest.fixture
 def pc_static_service(
-    pc_db: Any, fake_twitch: FakeTwitch, clock: FakeClock
+    pc_db: Any, fake_twitch: FakeTwitch, clock: FakeClock, entitlements: Entitlements
 ) -> ProviderConnectionService:
-    """The real service with the static-secret providers registered."""
+    """The real service (real entitlement gate, Professional tier) with the static providers."""
     return ProviderConnectionService(
         pc_db.install_dal, make_static_registry(fake_twitch, clock), PlatformKeyVault(), clock=clock
     )

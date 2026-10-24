@@ -114,3 +114,9 @@ class SchemaMissing(ProviderConnectionError):
     """The connection tables or migration-0058 columns are not present."""
 
     code = "schema_missing"
+
+
+class FeatureNotEnabled(ProviderConnectionError):
+    """The tenant's plan / flag does not allow this operation (mapped to HTTP 402 by the API)."""
+
+    code = "feature_not_enabled"

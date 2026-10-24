@@ -521,3 +521,70 @@ class TestStaticStore:
             assert "sealed_secret" in info.value.message
         finally:
             await db.close()
+
+
+class TestStaticServiceHardening:
+    async def test_the_flag_is_enforced_inside_the_service_not_only_the_blueprint(
+        self,
+        pc_static_service: ProviderConnectionService,
+        pc_db: Any,
+        entitlements: Any,
+    ) -> None:
+        from services.provider_connections.errors import FeatureNotEnabled
+
+        entitlements.flag_off("waddles.integrations.static_connections")
+        with pytest.raises(FeatureNotEnabled):
+            await create_static(pc_static_service, pc_db)
+        entitlements.flag_off("waddles.integrations.provider_connections")  # unrelated flag
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_the_free_tier_is_refused_by_the_service(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any, entitlements: Any
+    ) -> None:
+        from services.provider_connections.errors import FeatureNotEnabled
+
+        entitlements.set_tier("free")
+        with pytest.raises(FeatureNotEnabled):
+            await create_static(pc_static_service, pc_db)
+
+    async def test_the_stored_url_is_the_canonical_form(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        await create_static(
+            pc_static_service, pc_db, metadata={"url": "https://OK.Example:443/Path?q=1"}
+        )
+        (row,) = await raw_rows(pc_db, "platform_connections")
+        assert _meta(row)["url"] == "https://ok.example:443/Path?q=1"
+
+    async def test_obfuscated_loopback_is_refused_and_nothing_is_stored(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        for host in ("2130706433", "0x7f.0.0.1", "127.1", "017700000001", "%31%32%37.0.0.1"):
+            with pytest.raises(InvalidConnectionInput):
+                await create_static(pc_static_service, pc_db, metadata={"url": f"https://{host}/"})
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_create_routes_through_the_adapter_credential_check(
+        self, pc_db: Any, entitlements: Any, clock: Any
+    ) -> None:
+        """The protocol methods are the single source of truth: if one rejects, nothing is stored."""
+        from services.provider_connections.adapter import AdapterRegistry
+        from services.provider_connections.errors import CredentialsRejected
+        from services.provider_connections.static_secret import ExternalHttpAdapter
+
+        class Rejecting(ExternalHttpAdapter):
+            async def validate_credentials(self, credentials: Any) -> Any:
+                raise CredentialsRejected("adapter said no")
+
+        service = ProviderConnectionService(
+            pc_db.install_dal, AdapterRegistry([Rejecting()]), PlatformKeyVault(), clock=clock
+        )
+        with pytest.raises(CredentialsRejected):
+            await create_static(service, pc_db)
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_insert_connection_requires_an_explicit_kind(self, pc_db: Any) -> None:
+        import inspect
+
+        param = inspect.signature(store.insert_connection).parameters["connection_kind"]
+        assert param.default is inspect.Parameter.empty

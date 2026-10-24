@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from uuid import UUID, uuid4
+
+from flask_core.feature_flags import feature_enabled
 
 from services.platform_integrations_crypto import platform_connection_aad
 from services.provider_connections import store
@@ -48,6 +50,7 @@ from services.provider_connections.errors import (
     ConnectionConflict,
     ConnectionNotFound,
     ConnectionNotUsable,
+    FeatureNotEnabled,
     InvalidConnectionInput,
     ProviderConnectionError,
     ProviderUnavailable,
@@ -58,7 +61,6 @@ from services.provider_connections.errors import (
 )
 from services.provider_connections.kinds import ConnectionKind, SecretScheme, UnknownSecretScheme
 from services.provider_connections.static_secret import (
-    StaticSecretAdapter,
     reject_control_characters,
     validate_secret_document,
 )
@@ -82,6 +84,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_REFRESH_SKEW: Final = timedelta(seconds=120)
 #: Hard ceiling on one data-plane list page.
 MAX_PAGE_SIZE: Final = 1000
+
+
+#: Two-gate feature (PostHog flag default OFF + Professional tier) for the static-secret kinds.
+FEATURE_STATIC_CONNECTIONS: Final = "waddles.integrations.static_connections"
+
+
+async def _default_static_gate(tenant_slug: str) -> bool:
+    """The real entitlement check for static-secret connections (flag + tier)."""
+    return bool(await feature_enabled(FEATURE_STATIC_CONNECTIONS, tenant=tenant_slug))
 
 
 @dataclass(slots=True, frozen=True)
@@ -147,8 +158,14 @@ class ProviderConnectionService:
         *,
         clock: Callable[[], datetime] | None = None,
         refresh_skew: timedelta = DEFAULT_REFRESH_SKEW,
+        static_gate: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
-        """Bind the penguin-dal handle, adapter registry and vault (all injectable for tests)."""
+        """Bind the penguin-dal handle, adapter registry and vault (all injectable for tests).
+
+        ``static_gate(tenant_slug)`` answers whether the tenant may create static-secret
+        connections; the default is the real two-gate feature check (flag + Professional tier).
+        """
+        self._static_gate = static_gate or _default_static_gate
         self._db = db
         self._registry = registry
         self._vault = vault
@@ -228,6 +245,7 @@ class ProviderConnectionService:
                 installed_by_user_id=actor_user_id,
                 enabled=enabled,
                 now=now,
+                connection_kind=int(ConnectionKind.PLATFORM_OAUTH),
             )
             if account.expires_at is not None and not credentials.refresh_token:
                 logger.info(
@@ -250,6 +268,7 @@ class ProviderConnectionService:
         self,
         *,
         tenant_id: int,
+        tenant_slug: str,
         community_id: int,
         actor_user_id: int | None,
         provider: str,
@@ -267,10 +286,12 @@ class ProviderConnectionService:
         """
         adapter = self._registry.get(provider)
         spec = adapter.spec
-        if spec.kind is ConnectionKind.PLATFORM_OAUTH or not isinstance(
-            adapter, StaticSecretAdapter
-        ):
+        if spec.kind is ConnectionKind.PLATFORM_OAUTH:
             raise InvalidConnectionInput("this provider takes OAuth credentials, not a secret")
+        # Defence in depth: the flag lives here, not only in the HTTP layer, so a CLI / internal
+        # caller of this method cannot bypass the entitlement.
+        if not await self._static_gate(tenant_slug):
+            raise FeatureNotEnabled("Static-secret connections are not enabled for this plan")
         with operation_span(provider, "create_static"):
             try:
                 scheme = SecretScheme.from_code(secret_scheme)
@@ -280,21 +301,21 @@ class ProviderConnectionService:
                 raise InvalidConnectionInput("secret scheme is not supported by this provider")
             document = validate_secret_document(scheme, secret_document)
             reject_control_characters(metadata)
-            facts = adapter.validate_target(validate_metadata(spec, metadata))
+            clean_metadata = validate_metadata(spec, metadata)
+            # One source of truth: the adapter's own structural checks run on the exact canonical
+            # document that will be sealed (no outbound call -- see static_secret module docs).
+            canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
+            credentials = adapter.normalize_credentials(Credentials(access_token=canonical))
+            account = await adapter.validate_credentials(credentials)
+            resource = await adapter.resolve_resource(credentials, account, clean_metadata)
             owner = await store.community_tenant_id(self._db, community_id)
             if owner != tenant_id:
                 raise ConnectionNotFound("community not found")
-            facts = {
-                **facts,
-                "secret_scheme": int(scheme),
-                "scopes": ["dispatch"],
-                "capabilities": ["dispatch"],
-            }
+            facts = self._compose_facts(adapter, account.scopes, resource.facts)
+            facts["secret_scheme"] = int(scheme)
             public_id = uuid4()
             aad = platform_connection_aad(public_id=public_id, platform=spec.platform)
-            sealed = self._vault.seal(
-                json.dumps(document, sort_keys=True, separators=(",", ":")), aad=aad
-            )
+            sealed = self._vault.seal(canonical, aad=aad)
             binding = await store.insert_connection(
                 self._db,
                 tenant_id=tenant_id,

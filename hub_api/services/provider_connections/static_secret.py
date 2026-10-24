@@ -17,7 +17,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from services.provider_connections.adapter import (
     INSTALL_KIND_CREDENTIALS,
@@ -40,9 +40,19 @@ MAX_URL_LENGTH: Final = 2048
 #: Longest accepted single secret-document value (a GCP private key PEM is ~1.7 KiB).
 MAX_SECRET_VALUE_LENGTH: Final = 4096
 
-#: https URL with an authority and nothing that smuggles a second one: no whitespace/control
-#: characters anywhere (``fullmatch`` also rejects a trailing newline, which ``$`` would let by).
-_URL_RE: Final = re.compile(r"https://[^\s\x00-\x1f\x7f/?#@]+(?:[/?][^\s\x00-\x1f\x7f#]*)?")
+#: RFC 3986 host/port grammar and nothing else: a DNS-ish run of ``[A-Za-z0-9.-]`` or a bracketed
+#: IPv6 literal, an optional numeric port, then path/query free of whitespace, controls, ``#`` and
+#: ``\``. No userinfo (``@``), no ``%`` in the host, no fragment. ``fullmatch`` also rejects a
+#: trailing newline, which ``$`` would let by.
+_URL_RE: Final = re.compile(
+    r"https://(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?(?:[/?][^\s\x00-\x1f\x7f#\\]*)?"
+)
+_DIGITS_AND_DOTS_RE: Final = re.compile(r"[0-9.]+")
+_DNS_LABEL_RE: Final = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+#: A real TLD starts with a letter (``com``, ``xn--p1ai``). ``0x1`` / ``017`` / ``1`` as the last
+#: label is how ``inet_aton`` spells an IPv4 address (``127.0.0.0x1`` == 127.0.0.1), so it is
+#: refused.
+_TLD_RE: Final = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 _AWS_REGION_RE: Final = re.compile(r"[a-z]{2}(?:-[a-z]+)+-\d{1,2}")
 _AWS_FUNCTION_RE: Final = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _GCP_PROJECT_RE: Final = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
@@ -51,6 +61,8 @@ _GCP_FUNCTION_RE: Final = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,62}")
 _HEADER_NAME_RE: Final = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}")
 _CONTROL_RE: Final = re.compile(r"[\x00-\x1f\x7f]")
 _CGNAT: Final = ipaddress.ip_network("100.64.0.0/10")
+#: IPv6 ranges that embed or tunnel an IPv4 address: NAT64 and 6to4 can reach a private v4 target.
+_V6_TUNNELS: Final = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("2002::/16"))
 
 #: Exact key set each scheme's secret document must carry -- nothing missing, nothing extra.
 _SCHEME_KEYS: Final[dict[SecretScheme, frozenset[str]]] = {
@@ -73,14 +85,13 @@ _MAX_LENGTHS: Final[dict[str, int]] = {
 }
 
 
-def _blocked_ip(host: str) -> bool:
-    """Whether ``host`` is an IP literal in a range an admin-supplied URL must never target."""
-    try:
-        ip = ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
-        return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether ``ip`` is in a range an admin-supplied URL must never target."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return _blocked_ip(ip.ipv4_mapped)
+        if any(ip in net for net in _V6_TUNNELS):
+            return True
     return (
         ip.is_private
         or ip.is_loopback
@@ -90,6 +101,40 @@ def _blocked_ip(host: str) -> bool:
         or ip.is_unspecified
         or (isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT)
     )
+
+
+def _canonical_host(host: str) -> str:
+    """Return the canonical host or raise: bracketed v6, canonical dotted-quad v4, or DNS name.
+
+    Anything else (``2130706433``, ``0x7f.0.0.1``, ``127.1``, ``017700000001``) is a spelling
+    ``getaddrinfo`` / ``inet_aton`` would resolve to an address the plain ``ipaddress`` parser
+    rejects, so it is refused outright rather than guessed at.
+    """
+    if host.startswith("["):
+        try:
+            v6 = ipaddress.IPv6Address(host[1:-1])
+        except ValueError:  # pragma: no cover - urlsplit already rejected a malformed literal
+            raise InvalidConnectionInput("endpoint url has an invalid host") from None
+        if _blocked_ip(v6):
+            raise InvalidConnectionInput("endpoint url must not target a private or local address")
+        return f"[{v6.compressed}]"
+    if _DIGITS_AND_DOTS_RE.fullmatch(host):
+        try:
+            v4 = ipaddress.IPv4Address(host)  # strict: four decimal octets, no leading zeros
+        except ValueError:
+            raise InvalidConnectionInput("endpoint url has an invalid host") from None
+        if _blocked_ip(v4):
+            raise InvalidConnectionInput("endpoint url must not target a private or local address")
+        return str(v4)
+    labels = host.lower().split(".")
+    if (
+        len(host) > 253
+        or len(labels) < 2
+        or not all(_DNS_LABEL_RE.fullmatch(label) for label in labels)
+        or not _TLD_RE.fullmatch(labels[-1])
+    ):
+        raise InvalidConnectionInput("endpoint url has an invalid host")
+    return ".".join(labels)
 
 
 def validate_endpoint_url(raw: str) -> str:
@@ -103,25 +148,27 @@ def validate_endpoint_url(raw: str) -> str:
         raise InvalidConnectionInput("endpoint url is required")
     if len(raw) > MAX_URL_LENGTH:
         raise InvalidConnectionInput("endpoint url is too long")
-    if not _URL_RE.fullmatch(raw):
+    if "\\" in raw or not _URL_RE.fullmatch(raw):
         raise InvalidConnectionInput("endpoint url must be a plain https url")
-    parts = urlsplit(raw)
-    if (  # pragma: no cover - defence in depth: the pattern above already excludes '@' and '#'
-        parts.username is not None or parts.password is not None or "@" in parts.netloc
-    ):
-        raise InvalidConnectionInput("endpoint url must not contain credentials")
-    if parts.fragment or "#" in raw:  # pragma: no cover - see above
-        raise InvalidConnectionInput("endpoint url must not contain a fragment")
+    try:
+        parts = urlsplit(raw)  # itself rejects a malformed bracketed IPv6 literal
+    except ValueError:
+        raise InvalidConnectionInput("endpoint url has an invalid host") from None
     host = parts.hostname
-    if not host:
+    if not host:  # pragma: no cover - defence in depth: the pattern requires a host
         raise InvalidConnectionInput("endpoint url has no host")
     try:
-        parts.port  # noqa: B018 - raises ValueError on a malformed port
-    except ValueError:
-        raise InvalidConnectionInput("endpoint url has an invalid port") from None
-    if _blocked_ip(host):
-        raise InvalidConnectionInput("endpoint url must not target a private or local address")
-    return raw
+        port = parts.port
+    except ValueError:  # > 65535 raises inside urlsplit
+        port = -1
+    if port is not None and not 1 <= port <= 65535:
+        raise InvalidConnectionInput("endpoint url has an invalid port")
+    netloc = _canonical_host(f"[{host}]" if ":" in host else host)
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    # Re-serialise from the validated components so the validator and the dispatcher read the
+    # same host: what is stored is the canonical form, never the caller's spelling.
+    return urlunsplit(("https", netloc, parts.path, parts.query, ""))
 
 
 def validate_aws_region(raw: str) -> str:

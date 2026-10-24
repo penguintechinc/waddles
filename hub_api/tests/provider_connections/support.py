@@ -11,6 +11,7 @@ from sqlalchemy import text
 from services.platform_integrations_crypto import platform_connection_aad
 from services.provider_connections.service import ConnectionView, ProviderConnectionService
 from services.provider_connections.vault import PlatformKeyVault
+from tests.conftest import TENANT_SLUG
 from tests.provider_connections.conftest import CHANNEL_LOGIN
 
 
@@ -98,11 +99,13 @@ async def create_static(
     metadata: Mapping[str, Any] | None = None,
     community_id: int | None = None,
     tenant_id: int | None = None,
+    tenant_slug: str = TENANT_SLUG,
     enabled: bool = True,
 ) -> ConnectionView:
     """Create a static-secret connection (default: external_http + bearer) for ``acme-corp``."""
     return await service.create_static(
         tenant_id=tenant_id if tenant_id is not None else db.seed.tenant_id,
+        tenant_slug=tenant_slug,
         community_id=community_id if community_id is not None else db.seed.community_id,
         actor_user_id=db.seed.admin_user_id,
         provider=provider,

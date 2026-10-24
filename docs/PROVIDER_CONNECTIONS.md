@@ -322,7 +322,7 @@ POST /api/v1/communities/{id}/provider-connections
   under the row-bound AAD (`conn:<public_id>:<platform>`), `resource_id = public_id`, `access_token` NULL.
   No admin route, DTO, list, log or span carries it; the descriptor advertises `kind` + `secretSchemes` only.
 - **Structural validation only** -- no outbound call at write time. Endpoint URLs must be https, with no
-  userinfo/fragment and no private / loopback / link-local / CGNAT IP literal (DNS-name hosts are
+  userinfo/fragment and no private / loopback / link-local / CGNAT / NAT64 / 6to4 IP literal. The host must be a bracketed IPv6, a canonical dotted-quad, or a DNS name whose last label starts with a letter (obfuscated spellings such as `2130706433`, `0x7f.0.0.1`, `127.1` are refused), and the canonical re-serialised URL is what is stored (DNS-name hosts are
   re-checked, DNS-pinned, at send time by the dispatcher). Secret documents have exact keys per scheme.
 - Gated by flag `waddles.integrations.static_connections` (Professional, default OFF) on create, on top
   of the base feature; with it off the three providers are not even listed. A static link cannot be

@@ -324,7 +324,7 @@ async def insert_connection(
     installed_by_user_id: int | None,
     enabled: bool,
     now: datetime,
-    connection_kind: int = 1,
+    connection_kind: int,
 ) -> Binding:
     """Atomically create the link (layer 2) and this community's approved grant (layer 3).
 
@@ -335,7 +335,8 @@ async def insert_connection(
 
     ``public_id`` is minted by the caller *before* sealing because it is part of the tokens' AAD
     (finding M4); the row is stored with it and with the secrets' ``seal_version``.
-    ``connection_kind`` is the ``ConnectionKind`` code; a static-secret row stores its sealed JSON
+    ``connection_kind`` (required -- a caller must say which, never silently kind 1) is the
+    ``ConnectionKind`` code; a static-secret row stores its sealed JSON
     document in ``sealed_secret`` (``secrets.sealed_secret``) and no ``access_token``.
     """
     t = _tables(db)

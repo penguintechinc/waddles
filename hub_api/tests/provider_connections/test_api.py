@@ -1032,3 +1032,50 @@ class TestStaticConnectionsApi:
         assert off.status_code == 200 and (await off.get_json())["connection"]["enabled"] is False
         deleted = await static_client.delete(url, headers=admin_headers(pc_db))
         assert deleted.status_code == 200 and (await deleted.get_json())["purged"] is True
+
+
+class TestValidationErrorsDoNotEchoSecrets:
+    """A secret in a position that fails pydantic validation must not come back in the 400 body."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            # secret string in the int `scheme` field of SecretBody
+            {
+                "provider": "external_http",
+                "secret": {"scheme": "LEAKME-secret-value", "document": {"token": "x"}},
+                "metadata": {"url": "https://a.example"},
+            },
+            # non-string document value carrying a secret-looking structure
+            {
+                "provider": "external_http",
+                "secret": {"scheme": 1, "document": {"token": {"nested": "LEAKME-secret-value"}}},
+                "metadata": {"url": "https://a.example"},
+            },
+            # unknown key whose NAME is the secret (extra=forbid reports the key)
+            {
+                "provider": "external_http",
+                "secret": {"scheme": 1, "document": {"token": "x"}, "LEAKME-secret-value": 1},
+                "metadata": {"url": "https://a.example"},
+            },
+            # CredentialsBody: secret in a position that must be str|None
+            {
+                "provider": "twitch",
+                "credentials": {"access_token": ["LEAKME-secret-value"]},
+                "metadata": {"channel_login": "x"},
+            },
+            {
+                "provider": "twitch",
+                "credentials": {"access_token": "ok", "LEAKME-secret-value": "x"},
+                "metadata": {"channel_login": "x"},
+            },
+        ],
+    )
+    async def test_the_error_body_never_contains_the_submitted_value(
+        self, static_client: Any, pc_db: Any, payload: dict[str, Any]
+    ) -> None:
+        response = await static_client.post(
+            _base(pc_db), headers=admin_headers(pc_db), data=json.dumps(payload)
+        )
+        assert response.status_code == 400
+        assert "LEAKME" not in await response.get_data(as_text=True)

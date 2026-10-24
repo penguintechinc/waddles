@@ -146,6 +146,7 @@ class TestCrossTenant:
                 installed_by_user_id=None,
                 enabled=True,
                 now=datetime.now(UTC),
+                connection_kind=1,
             )
         assert await raw_rows(pc_db, "platform_connections") == []
 

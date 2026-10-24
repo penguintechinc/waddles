@@ -72,6 +72,30 @@ class TestEndpointUrl:
             "https://",
             "https:///path",
             "https://x.example:99999/",
+            # obfuscated IPv4 spellings getaddrinfo/inet_aton resolve but ipaddress rejects
+            "https://2130706433/",
+            "https://0x7f.0.0.1/",
+            "https://127.1/",
+            "https://017700000001/",
+            "https://%31%32%37.0.0.1/",
+            "https://127.0.0.0x1/",
+            "https://017.0.0.1/",
+            "https://1.2.3/",
+            "https://a.b.1/",
+            # authority / charset tricks
+            "https://x.example\\@evil.example/",
+            "https://x.example/a\\b",
+            "https://x.example:0/",
+            "https://ok.example./",
+            "https://localhost/",
+            "https://[::1%25eth0]/",
+            "https://[::1/",
+            "https://[not-an-ip]/",
+            "https://[:::]/",
+            "https://[1:2]/",
+            # tunnelling v6 ranges that embed a private v4
+            "https://[64:ff9b::7f00:1]/",
+            "https://[2002:7f00:1::]/",
             "https://:80/",
             "https://x.example/a b",
             "https://x.example/\x00",
@@ -95,6 +119,17 @@ class TestEndpointUrl:
     )
     def test_endpoint_validation_accepts_https_dns_names_and_public_ips(self, good: str) -> None:
         assert validate_endpoint_url(good) == good
+
+    @pytest.mark.parametrize(
+        ("raw", "canonical"),
+        [
+            ("https://OK.Example:443/A?x=1", "https://ok.example:443/A?x=1"),
+            ("https://[2606:4700:0:0::1111]/x", "https://[2606:4700::1111]/x"),
+            ("https://ok.example", "https://ok.example"),
+        ],
+    )
+    def test_the_canonical_form_is_what_is_returned(self, raw: str, canonical: str) -> None:
+        assert validate_endpoint_url(raw) == canonical
 
     def test_the_error_never_echoes_the_url(self) -> None:
         with pytest.raises(InvalidConnectionInput) as info:
