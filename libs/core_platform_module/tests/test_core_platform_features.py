@@ -73,8 +73,8 @@ EXPECTED_FEATURES = {
         "professional",
         frozenset({"video_proxy.premium:write"}),
     ),
-    "auth.sso_google": (
-        "waddles.auth.sso_google",
+    "auth.sso_custom": (
+        "waddles.auth.sso_custom",
         "professional",
         frozenset({"auth.sso:admin"}),
     ),

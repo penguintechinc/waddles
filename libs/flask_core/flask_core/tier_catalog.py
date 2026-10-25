@@ -104,7 +104,7 @@ _FEATURE_MIN_TIERS: dict[str, str] = {
     "waddles.analytics.engagement_funnels": TIER_PROFESSIONAL,
     "waddles.analytics.retention_cohorts": TIER_PROFESSIONAL,
     "waddles.analytics.user_journey": TIER_PROFESSIONAL,
-    "waddles.auth.sso_google": TIER_PROFESSIONAL,
+    "waddles.auth.sso_custom": TIER_PROFESSIONAL,
     "waddles.community.inventory": TIER_PROFESSIONAL,
     "waddles.community.loyalty": TIER_PROFESSIONAL,
     "waddles.community.raffles": TIER_PROFESSIONAL,

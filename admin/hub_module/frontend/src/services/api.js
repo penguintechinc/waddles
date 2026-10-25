@@ -1005,6 +1005,12 @@ export const rconApi = {
     api.get(`/api/v1/admin/${communityId}/rcon/info/${serverId}/players`),
 };
 
+// Enterprise tenant SSO (SAML / custom OIDC / Google connections) -- public, pre-auth.
+export const ssoApi = {
+  getOptions: (tenant) => api.get('/api/v1/auth/sso/options', { params: tenant ? { tenant } : {} }),
+  start: (connectionId) => api.get(`/api/v1/auth/sso/${encodeURIComponent(connectionId)}/start`),
+};
+
 // ── Tenant API ─────────────────────────────────────────────────────
 export const tenantApi = {
   getLoginInfo: (slug) => api.get(`/api/v1/auth/tenant/${slug}`),

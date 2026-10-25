@@ -24,6 +24,7 @@ vi.mock('../../../services/api', () => ({
   passkeyApi: { startLogin: vi.fn(), finishLogin: vi.fn() },
   publicApi: { getSignupSettings: vi.fn().mockResolvedValue({ data: { signupEnabled: false } }) },
   tenantApi: { getLoginInfo: vi.fn() },
+  ssoApi: { getOptions: vi.fn().mockResolvedValue({ data: { options: [] } }), start: vi.fn() },
   oauthApi: { start },
 }));
 

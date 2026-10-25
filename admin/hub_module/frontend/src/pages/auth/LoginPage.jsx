@@ -4,7 +4,7 @@ import { LoginPageBuilder } from '@penguintechinc/react-libs';
 import SocialLoginButtons from './SocialLoginButtons';
 import { useAuth } from '../../contexts/AuthContext';
 import { KeyIcon } from '@heroicons/react/24/outline';
-import { passkeyApi, publicApi, tenantApi } from '../../services/api';
+import { passkeyApi, publicApi, ssoApi, tenantApi } from '../../services/api';
 import { resolveBranding } from './tenantBranding';
 import { useState } from 'react';
 
@@ -93,6 +93,89 @@ function PasskeyButton({ onLogin }) {
         <KeyIcon className="w-5 h-5 text-gold-400" />
         <span className="font-medium text-sky-100">
           {loading ? 'Waiting for passkey...' : 'Sign in with Passkey'}
+        </span>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Enterprise "Sign in with your organization" affordance. Lists the tenant's
+ * enabled, entitled SSO connections (GET /auth/sso/options) and starts the
+ * chosen one; renders nothing when the tenant has none or discovery fails.
+ */
+function SsoOptions({ tenantSlug }) {
+  const [options, setOptions] = useState([]);
+  const [selected, setSelected] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    ssoApi.getOptions(tenantSlug)
+      .then(({ data }) => {
+        if (cancelled) return;
+        const list = Array.isArray(data?.options) ? data.options : [];
+        setOptions(list);
+        setSelected(list[0]?.id ?? '');
+      })
+      .catch(() => {
+        if (!cancelled) setOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantSlug]);
+
+  if (options.length === 0) return null;
+
+  const handleStart = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const { data } = await ssoApi.start(selected);
+      window.location.assign(data.redirectUrl);
+    } catch (err) {
+      const apiErr = err?.response?.data?.error;
+      setError(
+        typeof apiErr === 'string' ? apiErr :
+        apiErr?.message || 'Single sign-on is unavailable right now.'
+      );
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 bg-navy-800 border border-navy-600 rounded-xl px-6 py-4" data-testid="sso-options">
+      {error && (
+        <div className="mb-2 p-3 bg-red-500/20 border border-red-500/30 rounded-lg text-red-300 text-sm">
+          {error}
+        </div>
+      )}
+      {options.length > 1 && (
+        <select
+          aria-label="Organization sign-in method"
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          className="w-full mb-3 px-3 py-2 bg-navy-900 border border-navy-600 rounded-lg text-sky-100"
+        >
+          {options.map((o) => (
+            <option key={o.id} value={o.id}>{o.displayName}</option>
+          ))}
+        </select>
+      )}
+      <button
+        type="button"
+        onClick={handleStart}
+        disabled={busy || !selected}
+        className="w-full flex items-center justify-center px-4 py-3 bg-navy-800 border border-navy-600 rounded-lg hover:bg-navy-700 hover:border-gold-500 transition-all disabled:opacity-50"
+      >
+        <span className="font-medium text-sky-100">
+          {busy
+            ? 'Redirecting...'
+            : options.length === 1
+              ? `Sign in with ${options[0].displayName}`
+              : 'Sign in with your organization (SSO)'}
         </span>
       </button>
     </div>
@@ -205,6 +288,7 @@ function LoginPage() {
           className="!rounded-t-none !border-t-0 !mt-0"
           colors={WADDLEBOT_COLORS}
         />
+        <SsoOptions tenantSlug={tenantSlug} />
         {signupEnabled && (
           <p className="mt-4 text-center text-navy-400">
             Don&apos;t have an account?{' '}
