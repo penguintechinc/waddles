@@ -40,6 +40,7 @@ from services.provider_connections.vault import open_secret, seal_secret  # noqa
 from services.schema import (  # noqa: E402
     bind_auth_tables,
     bind_bar_citizen_tables,
+    bind_marketplace_module_tables,
     bind_platform_tables,
 )
 
@@ -99,6 +100,7 @@ def adal(pg_db: PgTestDatabase) -> Iterator[AsyncDAL]:
     """A real pydal `AsyncDAL` on the migrated container (`migrate=False`: the schema is real)."""
     async_dal = AsyncDAL(pg_db.dsn.replace("postgresql://", "postgres://", 1), pool_size=1)
     bind_platform_tables(async_dal.dal, migrate=False)
+    bind_marketplace_module_tables(async_dal.dal, migrate=False)
     yield async_dal
     async_dal.dal.close()
 

@@ -96,6 +96,7 @@ from services.schema import (
     bind_community_authz_tables,
     bind_github_sync_tables,
     bind_lifecycle_tables,
+    bind_marketplace_module_tables,
     bind_music_tables,
     bind_overlay_tables,
     bind_platform_tables,
@@ -536,6 +537,7 @@ def platform_db(tmp_path: Any) -> Any:
         Field("config", "json"),
     )
     bind_platform_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
     for table_name in dal.tables:
@@ -567,6 +569,7 @@ def admin_db(tmp_path: Any) -> Any:
     )
     bind_auth_tables(dal, migrate=True)
     bind_admin_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_superadmin_tenant_fields(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
@@ -607,6 +610,7 @@ def tenant_admin_db(tmp_path: Any) -> Any:
         Field("config", "json"),
     )
     bind_auth_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_tenant_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
@@ -1012,7 +1016,7 @@ def marketplace_catalog_db(tmp_path: Any) -> Any:
     matching `community_db`'s own `(dal, community_id)` tuple-return
     convention rather than attaching ad hoc attributes to the `DAL` object.
     """
-    from services.schema import bind_marketplace_catalog_tables
+    from services.schema import bind_marketplace_module_tables
 
     dal = DAL(f"sqlite://{tmp_path / 'marketplace_catalog_test.db'}")
     dal.define_table(
@@ -1026,7 +1030,7 @@ def marketplace_catalog_db(tmp_path: Any) -> Any:
     other_id = dal.tenants.insert(slug=OTHER_TENANT_SLUG, display_name="Other Corp", is_active=True)
     dal.commit()
 
-    bind_marketplace_catalog_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
 
     now = "2026-01-01 00:00:00"
     dal.marketplace_catalog.insert(
@@ -1199,6 +1203,7 @@ def marketplace_billing_db(tenant_db: Any) -> Any:
     from services.schema import bind_marketplace_billing_tables
 
     dal = tenant_db
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_marketplace_billing_tables(dal, migrate=True)
 
     tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
@@ -1279,7 +1284,7 @@ def marketplace_db(tenant_db: Any, monkeypatch: Any) -> Any:
     Also sets `SERVICE_API_KEY` for the `internal_bp` (X-Service-Key)
     endpoint tests, matching `community_db`'s own precedent.
     """
-    from services.schema import bind_marketplace_vendor_tables
+    from services.schema import bind_marketplace_module_tables, bind_marketplace_vendor_tables
 
     monkeypatch.setenv("SERVICE_API_KEY", SERVICE_API_KEY)
     monkeypatch.setenv(
@@ -1288,6 +1293,7 @@ def marketplace_db(tenant_db: Any, monkeypatch: Any) -> Any:
     )
 
     dal = tenant_db
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_marketplace_vendor_tables(dal, migrate=True)
     return dal
 
