@@ -187,16 +187,46 @@ class TestCommunityCap:
 
 
 class TestTenantCap:
-    async def test_free_first_ok_second_blocked(
+    async def test_catch_all_counts_so_free_cannot_create_a_second_tenant(
         self, client: Any, admin_db: Any, gates: Any
     ) -> None:
-        # The seeded acme-corp tenant is itself non-reserved; swap it for `default`
-        # (the free baseline tenant) so the 1st user-created tenant is the new one.
-        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="default")
+        # Free deployment whose only tenant is the catch-all: already at the cap.
+        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="global", is_global=True)
         admin_db.dal.commit()
         headers = {
             "Authorization": "Bearer "
-            + make_user_token(user_id=1, scope="*:admin", tenant="default")
+            + make_user_token(user_id=1, scope="*:admin", tenant="global")
+        }
+        blocked = await client.post(
+            "/api/v1/superadmin/tenants", headers=headers, json={"slug": "t1", "displayName": "t1"}
+        )
+        assert blocked.status_code == 402
+        _assert_upgrade_block(await blocked.get_json(), "tenant")
+        slugs = {r.slug for r in admin_db.dal(admin_db.dal.tenants.id > 0).select()}
+        assert slugs == {"global"}  # nothing created, nothing mutated
+
+    async def test_only_system_inactive_excluded_from_count(
+        self, admin_db: Any, gates: Any
+    ) -> None:
+        dal = admin_db.dal
+        dal.tenants.insert(slug="system", display_name="System", is_active=True)
+        dal.tenants.insert(slug="gone", display_name="X", is_active=False)
+        dal.commit()
+        assert await free_tier_caps.count_user_created_tenants(admin_db, dal) == 1  # acme only
+        dal.tenants.insert(slug="global", display_name="G", is_global=True, is_active=True)
+        dal.tenants.insert(slug="default", display_name="D", is_active=True)
+        dal.commit()
+        assert await free_tier_caps.count_user_created_tenants(admin_db, dal) == 3
+
+    async def test_system_tenant_alone_leaves_first_tenant_creatable(
+        self, client: Any, admin_db: Any, gates: Any
+    ) -> None:
+        dal = admin_db.dal
+        dal.tenants.update_or_insert(dal.tenants.slug == TENANT_SLUG, slug="system")
+        dal.commit()
+        headers = {
+            "Authorization": "Bearer "
+            + make_user_token(user_id=1, scope="*:admin", tenant="system")
         }
         ok = await client.post(
             "/api/v1/superadmin/tenants", headers=headers, json={"slug": "t1", "displayName": "t1"}
@@ -206,20 +236,6 @@ class TestTenantCap:
             "/api/v1/superadmin/tenants", headers=headers, json={"slug": "t2", "displayName": "t2"}
         )
         assert blocked.status_code == 402
-        _assert_upgrade_block(await blocked.get_json(), "tenant")
-        slugs = {r.slug for r in admin_db.dal(admin_db.dal.tenants.id > 0).select()}
-        assert slugs == {"default", "t1"}
-
-    async def test_reserved_and_global_tenants_excluded(self, admin_db: Any, gates: Any) -> None:
-        dal = admin_db.dal
-        dal.tenants.insert(slug="system", display_name="System", is_active=True)
-        dal.tenants.insert(slug="default", display_name="D", is_active=True)
-        dal.tenants.insert(slug="global", display_name="Gl", is_active=True)
-        dal.tenants.insert(slug="g", display_name="G", is_global=True, is_active=True)
-        dal.tenants.insert(slug="gone", display_name="X", is_active=False)
-        dal.commit()
-        n = await free_tier_caps.count_user_created_tenants(admin_db, dal)
-        assert n == 1  # only the seeded acme-corp
 
     async def test_paid_tier_not_capped(self, client: Any, gates: Any) -> None:
         gates[1].tier = "professional"

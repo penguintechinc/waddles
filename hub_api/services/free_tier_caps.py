@@ -7,9 +7,9 @@ and Enterprise are never blocked here -- their limits come from the license
 pool, enforced elsewhere -- and an already-provisioned entity is never
 mutated or suspended: the check only refuses the NEW create.
 
-Reserved/system entities are excluded from every count so the platform's own
-scaffolding never consumes the one free slot: the ``default`` and ``system``
-tenants and any ``is_global`` tenant/community, plus the bootstrap admin
+Reserved/system entities are excluded so platform scaffolding never consumes the
+one free slot: the ``system`` tenant (tenant cap only -- the catch-all tenant
+COUNTS), any ``is_global`` community, plus the bootstrap admin
 (the lowest-id super admin -- the seeded initial admin from migration 081).
 
 Core-mechanism kill-switch ``waddles.disable-free-tier-entity-caps``:
@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.feature_flags import feature_enabled, get_tier
 from flask_core.tier_catalog import TIER_FREE, TIER_PROFESSIONAL, tier_level
 
@@ -34,11 +33,10 @@ logger = logging.getLogger(__name__)
 
 FLAG_DISABLE_FREE_TIER_CAPS = "waddles.disable-free-tier-entity-caps"
 SYSTEM_TENANT_SLUG = "system"
-# `DEFAULT_TENANT_SLUG` is the code-seeded catch-all ("global"); `default` is the
-# security.md-named catch-all -- reserve both spellings plus `system`.
-RESERVED_TENANT_SLUGS: frozenset[str] = frozenset(
-    {DEFAULT_TENANT_SLUG, "default", SYSTEM_TENANT_SLUG}
-)
+# Only the operator-plane tenant is excluded from the tenant cap. The catch-all tenant
+# (slug `global`, `is_global=TRUE` per migration 058) COUNTS: a free deployment whose
+# only tenant is the catch-all is already at the cap (multi-tenancy is paid).
+RESERVED_TENANT_SLUGS: frozenset[str] = frozenset({SYSTEM_TENANT_SLUG})
 FREE_TIER_CAP = 1
 CAP_ERROR_CODE = "FREE_TIER_CAP_REACHED"
 CAP_STATUS = 402
@@ -79,13 +77,9 @@ async def count_user_created_communities(async_dal: Any, dal: Any, *, tenant_id:
 
 
 async def count_user_created_tenants(async_dal: Any, dal: Any) -> int:
-    """Active tenants that are neither global nor the reserved default/system tenants."""
+    """Active tenants other than the operator-plane `system` tenant (catch-all counts)."""
     rows = await async_dal.select_async(dal(dal.tenants.id > 0))
-    return sum(
-        1
-        for r in rows
-        if not r.is_global and r.is_active is not False and r.slug not in RESERVED_TENANT_SLUGS
-    )
+    return sum(1 for r in rows if r.is_active is not False and r.slug not in RESERVED_TENANT_SLUGS)
 
 
 async def admin_user_ids(async_dal: Any, dal: Any) -> set[int]:
