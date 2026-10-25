@@ -521,6 +521,7 @@ async def add_tenant_admin(
             tenant_slug=tenant_slug,  # TARGET tenant (URL), not the caller's
         )
     except ApiError as exc:
+        logger.info("api_error_rejected", extra={"code": exc.code, "status": exc.status_code})
         return _err(exc)
     return MessageResponse(success=True, message="Tenant admin added")
 

@@ -340,6 +340,7 @@ async def assign_super_admin_role(
             tenant_slug=ctx.tenant_slug,
         )
     except ApiError as exc:
+        logger.info("api_error_rejected", extra={"code": exc.code, "status": exc.status_code})
         return _err(exc)
     verb = "has" if data.grant else "does not have"
     message = (

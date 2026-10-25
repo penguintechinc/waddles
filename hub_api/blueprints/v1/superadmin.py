@@ -12,6 +12,7 @@ docstring for the scope/auth rationale (`@tenant_middleware` +
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -26,6 +27,8 @@ from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
+
+logger = logging.getLogger(__name__)
 
 superadmin_bp = Blueprint("v1_superadmin_platform", __name__, url_prefix="/api/v1/superadmin")
 
@@ -538,6 +541,7 @@ async def create_community(data: CreateCommunityRequest) -> tuple[Any, int]:
             tenant_id=ctx.tenant_id,
         )
     except ApiError as exc:
+        logger.info("api_error_rejected", extra={"code": exc.code, "status": exc.status_code})
         return _err(exc)
     return jsonify_dto(
         CreateCommunityResponse(
@@ -848,6 +852,7 @@ async def create_tenant(data: CreateTenantRequest) -> tuple[Any, int]:
             caller_tenant_slug=ctx.tenant_slug,
         )
     except ApiError as exc:
+        logger.info("api_error_rejected", extra={"code": exc.code, "status": exc.status_code})
         return _err(exc)
     return jsonify_dto(
         CreateTenantResponse(
