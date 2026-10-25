@@ -26,6 +26,7 @@ WORKDIR /build
 COPY svc_ingest/Cargo.toml svc_ingest/Cargo.lock ./svc_ingest/
 COPY svc_ingest/src ./svc_ingest/src
 COPY service_auth ./service_auth
+COPY connection_resolver ./connection_resolver
 WORKDIR /build/svc_ingest
 RUN cargo build --release --locked
 
