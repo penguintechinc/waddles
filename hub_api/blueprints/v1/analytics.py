@@ -78,9 +78,11 @@ missing `tenant_id` column to the EXISTING `communities` binding --
 gap, not a new table). `communities`/`community_members` are the same M1/
 M6-owned tables every other Community-module blueprint already reads.
 
-Upstream failures (gh-894): any `analytics-core` failure (4xx/5xx, timeout,
-connection refused) is relayed as a 502 JSON envelope naming the upstream
-dependency (`services/analytics_service.py::_relay`), never a masked 500.
+Upstream failures (gh-894): `analytics-core` transport failures (timeout,
+connection refused) and upstream 5xx are relayed as a 502 JSON envelope naming
+the upstream dependency; an upstream 4xx passes through unchanged (same status
+and body) -- see `services/analytics_service.py::_upstream_error`. Never a
+masked 500.
 """
 
 from __future__ import annotations

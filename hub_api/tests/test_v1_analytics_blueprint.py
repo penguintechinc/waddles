@@ -220,6 +220,23 @@ class TestPlatformOverview:
         )
         assert response.status_code == 502
 
+    async def test_overview_upstream_4xx_passes_through(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        envelope = {"success": False, "error": {"message": "forbidden", "code": "FORBIDDEN"}}
+
+        async def fake_get(path: str, **kwargs: Any) -> ProxyResult:
+            if path.endswith("/activity"):
+                return ProxyResult(ok=False, status_code=403, body=envelope)
+            return ProxyResult(ok=True, status_code=200, body={"success": True, "data": {}})
+
+        monkeypatch.setattr(analytics_module._proxy_client, "get", AsyncMock(side_effect=fake_get))
+        response = await client.get(
+            "/api/v1/analytics/platform/overview", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 403
+        assert await response.get_json() == envelope
+
 
 # ---------------------------------------------------------------------------
 # Scenario 4 -- premium feature gate (community-health, Professional tier)
@@ -462,3 +479,47 @@ class TestMaskedFailure:
         assert response.status_code == 502
         body = await response.get_json()
         assert body["success"] is False
+
+    async def test_transport_failure_is_502(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(
+                return_value=ProxyResult(ok=False, status_code=502, body=None, transport_error=True)
+            ),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 502
+
+    async def test_upstream_4xx_passes_through_unchanged(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        envelope = {"success": False, "error": {"message": "bad period", "code": "VALIDATION"}}
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(return_value=ProxyResult(ok=False, status_code=422, body=envelope)),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 422
+        assert await response.get_json() == envelope
+
+    async def test_upstream_4xx_non_json_body_keeps_status(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(return_value=ProxyResult(ok=False, status_code=404, body=None)),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 404
+        assert (await response.get_json())["success"] is False

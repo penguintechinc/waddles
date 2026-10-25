@@ -36,7 +36,18 @@ def _unwrap(body: Any) -> dict[str, Any]:
 
 
 def _upstream_error(result: ProxyResult) -> tuple[dict[str, Any], int]:
-    """502 envelope naming `analytics-core` as the failed upstream dependency."""
+    """Map a failed `analytics-core` call to the right client-facing response.
+
+    Transport failures (connect error / timeout) and upstream 5xx are an
+    upstream-dependency fault -> 502 naming `analytics-core`. An upstream 4xx
+    is a genuine client error and passes through unchanged (same status, same
+    JSON envelope; a synthesized envelope only when the body wasn't JSON) so
+    it is never masked as a dependency failure.
+    """
+    if not result.transport_error and 400 <= result.status_code < 500:
+        if isinstance(result.body, dict):
+            return result.body, result.status_code
+        return api_error("Request rejected by analytics-core", result.status_code)
     if result.transport_error:
         message = "Upstream dependency analytics-core is unreachable or timed out"
     else:
@@ -47,10 +58,9 @@ def _upstream_error(result: ProxyResult) -> tuple[dict[str, Any], int]:
 def _relay(result: ProxyResult) -> tuple[dict[str, Any], int]:
     """Port of every simple pass-through controller action's `try/catch` -> `res.json`.
 
-    `ok=False` (downstream non-2xx, timeout, or connection failure) fails
-    LOUD as a 502 naming the upstream dependency -- never a masked 500
-    (fail-loud rule; fixes gh-894, where an unreachable analytics-core was
-    indistinguishable from a hub-api bug).
+    `ok=False` fails LOUD, never as a masked 500 (gh-894): connection/timeout
+    failures and upstream 5xx -> 502 naming the upstream dependency; an
+    upstream 4xx passes through unchanged (see `_upstream_error`).
     """
     if not result.ok:
         return _upstream_error(result)

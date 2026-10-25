@@ -13,7 +13,7 @@ import pytest
 
 from services import marketplace_review_service as review
 from services.errors import ApiError
-from services.schema import bind_marketplace_vendor_tables
+from services.schema import bind_marketplace_module_tables, bind_marketplace_vendor_tables
 
 
 @pytest.fixture
@@ -21,6 +21,7 @@ def dal() -> Any:
     from pydal import DAL
 
     db = DAL("sqlite:memory")
+    bind_marketplace_module_tables(db, migrate=True)
     bind_marketplace_vendor_tables(db, migrate=True)
     yield db
     db.close()

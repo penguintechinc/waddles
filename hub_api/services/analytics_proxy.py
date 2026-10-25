@@ -68,11 +68,10 @@ class ProxyResult:
     """Outcome of a proxied call -- either a relayed success or a masked failure.
 
     `ok=False` covers every downstream non-2xx response AND transport
-    failure (timeout/connection error) identically -- matching
-    `analyticsService.js`'s axios calls, which throw in both cases and let
-    `errorHandler.js` collapse them to the same envelope (see
-    `blueprints/v1/analytics.py`'s module docstring, "Known inherited
-    behavior").
+    failure (timeout/connection error). `transport_error` distinguishes the
+    latter (no HTTP response) so `analytics_service._upstream_error` can map
+    transport failures and upstream 5xx -> 502 while passing an upstream 4xx
+    through unchanged (gh-894).
     """
 
     ok: bool

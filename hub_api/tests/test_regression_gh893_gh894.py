@@ -4,12 +4,12 @@ gh-893: `hub_modules` was defined by several schema binders with divergent
 column lists and no per-table guards, so the startup bind order produced
 `table already defined` / missing `is_featured`, and with no app-level
 error handler Quart leaked a raw HTML 500. gh-894: `analytics_service._relay`
-masked an unreachable `analytics-core` as a generic 500.
+masked an unreachable `analytics-core` as a generic 500 (now: transport/5xx -> 502,
+4xx passthrough).
 """
 
 from __future__ import annotations
 
-import itertools
 from typing import Any
 
 import httpx
@@ -19,21 +19,19 @@ from quart import Quart
 from app import create_app
 from services import analytics_service as svc
 from services.analytics_proxy import AnalyticsCoreProxyClient, AnalyticsProxyConfig, ProxyResult
-from services.schema import (
-    bind_admin_tables,
-    bind_marketplace_billing_tables,
-    bind_marketplace_catalog_tables,
-    bind_platform_tables,
-    bind_tenant_tables,
-)
+from services.schema import bind_marketplace_module_tables
 from tests.test_app_factory import _test_config
 
-_BINDERS = [
-    bind_admin_tables,
-    bind_tenant_tables,
-    bind_marketplace_catalog_tables,
-    bind_marketplace_billing_tables,
-]
+_FAMILY = (
+    "hub_modules",
+    "hub_module_reviews",
+    "hub_module_installations",
+    "marketplace_catalog",
+    "marketplace_subscriptions",
+    "marketplace_settings",
+    "vendor_discount_codes",
+    "discount_code_redemptions",
+)
 
 _CREATE_SQL = [
     "CREATE TABLE IF NOT EXISTS hub_modules (id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -61,15 +59,26 @@ def app() -> Quart:
 
 class TestHubModulesBinding:
     # regression: gh-893
-    async def test_modules_endpoint_after_real_startup_bind_order_is_200_json(
-        self, app: Quart
+    async def test_startup_binds_every_table_exactly_once_and_modules_is_200_json(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from pydal import DAL
+
+        calls: list[str] = []
+        original = DAL.define_table
+
+        def spy(self: DAL, tablename: str, *a: Any, **kw: Any) -> Any:
+            calls.append(tablename)
+            return original(self, tablename, *a, **kw)
+
+        monkeypatch.setattr(DAL, "define_table", spy)
+        app = create_app(_test_config())
         async with app.test_app():
             dal = app.config["dal"]
-            # startup's bind_platform_tables already defined hub_modules: re-binding via the
-            # catalog binder must neither raise nor lose is_featured.
-            bind_marketplace_catalog_tables(dal)
+            for name in _FAMILY:
+                assert calls.count(name) == 1, f"{name} defined {calls.count(name)}x at startup"
             assert "is_featured" in dal.hub_modules.fields
+            assert "module_name" in dal.hub_module_installations.fields
             for sql in _CREATE_SQL:
                 dal.executesql(sql)
             response = await app.test_client().get("/api/v1/modules")
@@ -80,18 +89,31 @@ class TestHubModulesBinding:
             assert body["modules"] == []
 
     # regression: gh-893
-    @pytest.mark.parametrize("order", list(itertools.permutations(range(len(_BINDERS)))))
-    def test_every_binder_order_is_idempotent_with_one_canonical_hub_modules(
-        self, order: tuple[int, ...], tmp_path: Any
-    ) -> None:
+    def test_genuine_double_define_fails_loud(self, tmp_path: Any) -> None:
         from pydal import DAL
 
-        dal = DAL(f"sqlite://{tmp_path}/b{'_'.join(map(str, order))}.db", folder=str(tmp_path))
-        bind_platform_tables(dal)  # what app startup runs first (also defines hub_modules)
-        for i in order:
-            _BINDERS[i](dal)  # each hub_modules-bearing binder, any order, must not raise
-        fields = set(dal.hub_modules.fields)
-        assert {"is_featured", "icon_url", "author", "config_schema", "updated_at"} <= fields
+        dal = DAL(f"sqlite://{tmp_path}/dd.db", folder=str(tmp_path))
+        bind_marketplace_module_tables(dal)
+        with pytest.raises(SyntaxError, match="already defined"):
+            bind_marketplace_module_tables(dal)
+
+    # regression: gh-893
+    def test_no_domain_binder_redefines_a_family_table(self, tmp_path: Any) -> None:
+        from pydal import DAL
+
+        from services import schema
+
+        binders = [
+            schema.bind_platform_tables,
+            schema.bind_admin_tables,
+            schema.bind_tenant_tables,
+            schema.bind_marketplace_vendor_tables,
+            schema.bind_marketplace_billing_tables,
+        ]
+        for i, binder in enumerate(binders):
+            dal = DAL(f"sqlite://{tmp_path}/d{i}.db", folder=str(tmp_path))
+            bind_marketplace_module_tables(dal)
+            binder(dal)  # must not raise "table already defined" on a family table
 
 
 class TestGlobalErrorHandler:
@@ -151,6 +173,14 @@ class TestAnalyticsFailLoud:
             assert body["success"] is False
             assert "analytics-core" in body["error"]["message"]
             assert "unreachable" in body["error"]["message"]
+
+    # regression: gh-894
+    @pytest.mark.parametrize("status", [400, 404, 422, 429])
+    def test_relay_upstream_4xx_passes_through_unchanged(self, status: int) -> None:
+        envelope = {"success": False, "error": {"message": "nope", "code": "X"}}
+        body, out = svc._relay(ProxyResult(ok=False, status_code=status, body=envelope))
+        assert out == status
+        assert body == envelope
 
     # regression: gh-894
     def test_relay_downstream_5xx_is_502_naming_upstream(self) -> None:

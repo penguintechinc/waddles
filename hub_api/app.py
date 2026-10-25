@@ -62,6 +62,8 @@ from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
     bind_lifecycle_tables,
+    bind_marketplace_billing_tables,
+    bind_marketplace_module_tables,
     bind_music_tables,
     bind_platform_tables,
     bind_token_billing_tables,
@@ -131,6 +133,12 @@ def _bind_reference_tables(dal: Any) -> None:
         migrate=False,
     )
     bind_platform_tables(dal)
+    # Shared marketplace/module table family (hub_modules, reviews,
+    # installations, marketplace_catalog, subscriptions, settings, discount
+    # tables) -- defined exactly once here; domain binders never redefine them.
+    bind_marketplace_module_tables(dal)
+    # Billing-only tables (payments, premium subs) -- bound once at startup.
+    bind_marketplace_billing_tables(dal)
     # App Bundle 3-tier lifecycle (marketplace_lifecycle group) -- append-only
     # per hub_api/PORTING.md's per-group isolation note; see
     # services/schema.py::bind_lifecycle_tables's own docstring.
