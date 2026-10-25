@@ -1304,6 +1304,38 @@ def bind_admin_privacy_tables(dal: Any, *, migrate: bool = False) -> None:
     _define_audit_log(dal, migrate=migrate)
 
 
+def ensure_hub_modules_table(dal: Any, *, migrate: bool = False) -> None:
+    """Define `hub_modules` once, with the canonical (superset) column list.
+
+    Several binders (admin, tenant, marketplace-catalog, marketplace-billing)
+    all need `hub_modules` and previously each defined it with a different
+    column list -- the first to run won, so e.g. `is_featured` could be
+    missing (`AttributeError`, gh-893) or a second unguarded `define_table`
+    raised `table already defined`. Every binder now calls this one
+    idempotent helper (`dal.tables` guard) so the shape never diverges.
+    """
+    if "hub_modules" in dal.tables:
+        return
+    dal.define_table(
+        "hub_modules",
+        Field("name", "string", length=255, notnull=True, unique=True),
+        Field("display_name", "string", length=255),
+        Field("description", "text"),
+        Field("version", "string", length=50),
+        Field("author", "string", length=255),
+        Field("category", "string", length=100),
+        Field("icon_url", "text"),
+        Field("is_published", "boolean", default=False),
+        Field("is_core", "boolean", default=False),
+        # `hub_modules.is_featured` is added by alembic 0012_schema_drift_columns.
+        Field("is_featured", "boolean", default=False),
+        Field("config_schema", "json", default={}),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+
 def bind_platform_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define every table the M3 Platform-admin/Public group queries.
 
@@ -1395,22 +1427,7 @@ def bind_platform_tables(dal: Any, *, migrate: bool = False) -> None:
             migrate=migrate,
         )
 
-    dal.define_table(
-        "hub_modules",
-        Field("name", "string", length=255, notnull=True),
-        Field("display_name", "string", length=255),
-        Field("description", "text"),
-        Field("version", "string", length=50),
-        Field("author", "string", length=255),
-        Field("category", "string", length=100),
-        Field("icon_url", "text"),
-        Field("is_published", "boolean", default=False),
-        Field("is_core", "boolean", default=False),
-        Field("config_schema", "json"),
-        Field("created_at", "datetime"),
-        Field("updated_at", "datetime"),
-        migrate=migrate,
-    )
+    ensure_hub_modules_table(dal, migrate=migrate)
 
     dal.define_table(
         "hub_module_reviews",
@@ -1480,23 +1497,7 @@ def bind_admin_tables(dal: Any, *, migrate: bool = False) -> None:
     never runs DDL. Tests pass `migrate=True` against a throwaway sqlite
     file the same way `tests/conftest.py::auth_db` does.
     """
-    if "hub_modules" not in dal.tables:
-        dal.define_table(
-            "hub_modules",
-            Field("name", "string", length=255, notnull=True, unique=True),
-            Field("display_name", "string", length=255),
-            Field("description", "text"),
-            Field("version", "string", length=50),
-            Field("author", "string", length=255),
-            Field("category", "string", length=100),
-            Field("icon_url", "text"),
-            Field("is_published", "boolean", default=False),
-            Field("is_core", "boolean", default=False),
-            Field("config_schema", "json"),
-            Field("created_at", "datetime"),
-            Field("updated_at", "datetime"),
-            migrate=migrate,
-        )
+    ensure_hub_modules_table(dal, migrate=migrate)
 
     if "hub_module_installations" not in dal.tables:
         dal.define_table(
@@ -1770,18 +1771,7 @@ def bind_tenant_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
-    dal.define_table(
-        "hub_modules",
-        Field("name", "string", length=255),
-        Field("display_name", "string", length=255),
-        Field("description", "text"),
-        Field("category", "string", length=100),
-        Field("is_core", "boolean", default=False),
-        Field("is_published", "boolean", default=False),
-        Field("version", "string", length=50),
-        Field("created_at", "datetime"),
-        migrate=migrate,
-    )
+    ensure_hub_modules_table(dal, migrate=migrate)
 
 
 def bind_marketplace_catalog_tables(dal: Any, *, migrate: bool = False) -> None:
@@ -1821,99 +1811,81 @@ def bind_marketplace_catalog_tables(dal: Any, *, migrate: bool = False) -> None:
     a future group porting vendor self-service
     (`vendorController.js`) binds it then.
     """
-    if "marketplace_catalog" in dal.tables:
-        return
+    if "marketplace_catalog" not in dal.tables:
+        dal.define_table(
+            "marketplace_catalog",
+            Field("source", "string", length=20, notnull=True),
+            Field("source_id", "integer", notnull=True),
+            Field("name", "string", length=255),
+            Field("display_name", "string", length=255),
+            Field("description", "text"),
+            Field("category", "string", length=100),
+            Field("icon_url", "text"),
+            Field("is_core", "boolean", default=False),
+            Field("pricing_type", "string", length=50, default="free"),
+            Field("price_cents", "integer", default=0),
+            Field("pricing_model", "string", length=50, default="flat"),
+            Field("version", "string", length=50),
+            Field("author", "string", length=255),
+            Field("webhook_url", "text"),
+            Field("communication_model", "string", length=50),
+            Field("integration_type", "string", length=50),
+            Field("avg_rating", "double", default=0),
+            Field("review_count", "integer", default=0),
+            Field("install_count", "integer", default=0),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            # NULL for 'core' rows (always globally visible); the owning
+            # tenant for 'marketplace' rows (backfilled to the global tenant
+            # by 059's own migration when unset). Filtered by
+            # `visible_tenant_ids()` -- see marketplace_catalog_service.py's
+            # module docstring for the cross-tenant-leak fix this closes.
+            Field("tenant_id", "integer"),
+            primarykey=["source", "source_id"],
+            migrate=migrate,
+        )
 
-    dal.define_table(
-        "marketplace_catalog",
-        Field("source", "string", length=20, notnull=True),
-        Field("source_id", "integer", notnull=True),
-        Field("name", "string", length=255),
-        Field("display_name", "string", length=255),
-        Field("description", "text"),
-        Field("category", "string", length=100),
-        Field("icon_url", "text"),
-        Field("is_core", "boolean", default=False),
-        Field("pricing_type", "string", length=50, default="free"),
-        Field("price_cents", "integer", default=0),
-        Field("pricing_model", "string", length=50, default="flat"),
-        Field("version", "string", length=50),
-        Field("author", "string", length=255),
-        Field("webhook_url", "text"),
-        Field("communication_model", "string", length=50),
-        Field("integration_type", "string", length=50),
-        Field("avg_rating", "double", default=0),
-        Field("review_count", "integer", default=0),
-        Field("install_count", "integer", default=0),
-        Field("created_at", "datetime"),
-        Field("updated_at", "datetime"),
-        # NULL for 'core' rows (always globally visible); the owning
-        # tenant for 'marketplace' rows (backfilled to the global tenant
-        # by 059's own migration when unset). Filtered by
-        # `visible_tenant_ids()` -- see marketplace_catalog_service.py's
-        # module docstring for the cross-tenant-leak fix this closes.
-        Field("tenant_id", "integer"),
-        primarykey=["source", "source_id"],
-        migrate=migrate,
-    )
+    ensure_hub_modules_table(dal, migrate=migrate)
 
-    dal.define_table(
-        "hub_modules",
-        Field("name", "string", length=255, notnull=True, unique=True),
-        Field("display_name", "string", length=255),
-        Field("description", "text"),
-        Field("version", "string", length=50),
-        Field("author", "string", length=255),
-        Field("category", "string", length=100),
-        Field("icon_url", "text"),
-        Field("is_published", "boolean", default=False),
-        Field("is_core", "boolean", default=False),
-        # See module docstring gap (4) -- no numbered migration defines
-        # this column on hub_modules; bound anyway to stay byte-faithful
-        # to moduleService.js's create/update/format queries.
-        Field("is_featured", "boolean", default=False),
-        Field("config_schema", "json", default={}),
-        Field("created_at", "datetime"),
-        Field("updated_at", "datetime"),
-        migrate=migrate,
-    )
+    if "hub_module_reviews" not in dal.tables:
+        dal.define_table(
+            "hub_module_reviews",
+            Field("module_id", "integer", notnull=True),
+            Field("community_id", "integer"),
+            Field("user_id", "integer"),
+            Field("rating", "integer"),
+            Field("review_text", "text"),
+            Field("admin_notes", "text"),
+            Field("created_at", "datetime"),
+            migrate=migrate,
+        )
 
-    dal.define_table(
-        "hub_module_reviews",
-        Field("module_id", "integer", notnull=True),
-        Field("community_id", "integer"),
-        Field("user_id", "integer"),
-        Field("rating", "integer"),
-        Field("review_text", "text"),
-        Field("admin_notes", "text"),
-        Field("created_at", "datetime"),
-        migrate=migrate,
-    )
-
-    dal.define_table(
-        "hub_module_installations",
-        Field("community_id", "integer", notnull=True),
-        Field("module_id", "integer"),
-        Field("installed_by", "integer"),
-        Field("config", "json", default={}),
-        Field("is_enabled", "boolean", default=True),
-        Field("installed_at", "datetime"),
-        Field("updated_at", "datetime"),
-        migrate=migrate,
-    )
+    if "hub_module_installations" not in dal.tables:
+        dal.define_table(
+            "hub_module_installations",
+            Field("community_id", "integer", notnull=True),
+            Field("module_id", "integer"),
+            Field("installed_by", "integer"),
+            Field("config", "json", default={}),
+            Field("is_enabled", "boolean", default=True),
+            Field("installed_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
 
     # Minimal projection -- schema-owned by
     # `059_marketplace_consolidation.sql`'s extension of
     # `017_add_marketplace.sql`'s original table; only the columns the
     # catalog's install-status enrichment needs.
-    dal.define_table(
-        "marketplace_subscriptions",
-        Field("community_id", "integer", notnull=True),
-        Field("module_id", "integer", notnull=True),
-        Field("is_enabled", "boolean", default=True),
-        Field("tenant_id", "integer"),
-        migrate=migrate,
-    )
+    if "marketplace_subscriptions" not in dal.tables:
+        dal.define_table(
+            "marketplace_subscriptions",
+            Field("community_id", "integer", notnull=True),
+            Field("module_id", "integer", notnull=True),
+            Field("is_enabled", "boolean", default=True),
+            Field("tenant_id", "integer"),
+            migrate=migrate,
+        )
 
 
 def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
@@ -2303,20 +2275,7 @@ def bind_marketplace_billing_tables(dal: Any, *, migrate: bool = False) -> None:
     """
     bind_auth_tables(dal, migrate=migrate)
 
-    if "hub_modules" not in dal.tables:
-        dal.define_table(
-            "hub_modules",
-            Field("name", "string", length=255, notnull=True, unique=True),
-            Field("display_name", "string", length=255),
-            Field("description", "text"),
-            Field("version", "string", length=50),
-            Field("author", "string", length=255),
-            Field("category", "string", length=100),
-            Field("icon_url", "text"),
-            Field("is_published", "boolean", default=False),
-            Field("is_core", "boolean", default=False),
-            migrate=migrate,
-        )
+    ensure_hub_modules_table(dal, migrate=migrate)
 
     if "hub_module_installations" not in dal.tables:
         dal.define_table(

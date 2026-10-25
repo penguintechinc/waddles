@@ -206,7 +206,7 @@ class TestPlatformOverview:
             "communityTypes": [],
         }
 
-    async def test_overview_masks_downstream_failure_to_500(
+    async def test_overview_downstream_failure_is_502(
         self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def fake_get(path: str, **kwargs: Any) -> ProxyResult:
@@ -218,7 +218,7 @@ class TestPlatformOverview:
         response = await client.get(
             "/api/v1/analytics/platform/overview", headers=auth_headers(scope="analytics:read")
         )
-        assert response.status_code == 500
+        assert response.status_code == 502
 
 
 # ---------------------------------------------------------------------------
@@ -443,12 +443,12 @@ class TestCrossTenantLeak:
 
 
 # ---------------------------------------------------------------------------
-# Masked-500 -- "Known inherited behavior" (module docstring)
+# Fail-loud 502 -- upstream failure is never masked as 500 (gh-894)
 # ---------------------------------------------------------------------------
 
 
 class TestMaskedFailure:
-    async def test_downstream_failure_masks_to_500(
+    async def test_downstream_failure_is_502(
         self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
@@ -459,6 +459,6 @@ class TestMaskedFailure:
         response = await client.get(
             "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
         )
-        assert response.status_code == 500
+        assert response.status_code == 502
         body = await response.get_json()
         assert body["success"] is False

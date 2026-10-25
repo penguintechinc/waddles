@@ -20,6 +20,7 @@ privileged port, runs as `USER appuser` in the Dockerfile.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from flask_core import (
@@ -39,6 +40,7 @@ from flask_core.token_revocation import get_token_revocation
 from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
+from werkzeug.exceptions import HTTPException
 
 from blueprints import register_blueprints
 from blueprints.service_jwt_bp import service_jwt_bp
@@ -52,6 +54,7 @@ from services.ban_suppression import run_purge_loop
 from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
+from services.community_common import api_error
 from services.envelope.runtime import build_envelope_runtime
 from services.identity_resolution_service import run_uuid_availability_monitor
 from services.object_storage_kms import get_object_storage_sse
@@ -64,6 +67,26 @@ from services.schema import (
     bind_token_billing_tables,
 )
 from services.session_cookie import bearer_token_from_cookie
+
+logger = logging.getLogger(__name__)
+
+
+def _install_error_handlers(app: Quart) -> None:
+    """Install the app-wide unhandled-exception handler (gh-893 defense-in-depth).
+
+    Without it Quart answers any unhandled exception with a raw HTML 500
+    page. This logs the full exception (never swallowed) and returns the
+    standard JSON error envelope instead; the exception text is NOT echoed
+    to the client. `HTTPException`s (404/405/413/...) keep their own behavior.
+    """
+
+    @app.errorhandler(Exception)
+    async def _unhandled(exc: Exception) -> Any:
+        """Log the exception, then return the JSON 500 envelope."""
+        if isinstance(exc, HTTPException):
+            return exc
+        logger.exception("unhandled_exception path=%s method=%s", request.path, request.method)
+        return api_error("An unexpected error occurred", 500)
 
 
 def _bind_reference_tables(dal: Any) -> None:
@@ -234,6 +257,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     install_audit_hooks(app)
 
     app.before_request(bridge_session_cookie_to_bearer)
+    _install_error_handlers(app)
 
     # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- bootstrap.py's schema
     # check/fresh-install creation, exposed as a dedicated `/ready` route rather

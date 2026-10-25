@@ -78,6 +78,8 @@ class ProxyResult:
     ok: bool
     status_code: int
     body: Any
+    #: True when no HTTP response was received (connect error / timeout).
+    transport_error: bool = False
 
 
 class AnalyticsCoreProxyClient:
@@ -118,7 +120,7 @@ class AnalyticsCoreProxyClient:
             # Network failure / timeout -- axios's rejected-promise branch,
             # collapsed the same way errorHandler.js does (see module
             # docstring): no downstream status code to relay.
-            return ProxyResult(ok=False, status_code=502, body=None)
+            return ProxyResult(ok=False, status_code=502, body=None, transport_error=True)
 
         try:
             data: Any = response.json()

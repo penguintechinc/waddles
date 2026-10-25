@@ -35,15 +35,25 @@ def _unwrap(body: Any) -> dict[str, Any]:
     return {}
 
 
+def _upstream_error(result: ProxyResult) -> tuple[dict[str, Any], int]:
+    """502 envelope naming `analytics-core` as the failed upstream dependency."""
+    if result.transport_error:
+        message = "Upstream dependency analytics-core is unreachable or timed out"
+    else:
+        message = f"Upstream dependency analytics-core returned HTTP {result.status_code}"
+    return api_error(message, 502)
+
+
 def _relay(result: ProxyResult) -> tuple[dict[str, Any], int]:
     """Port of every simple pass-through controller action's `try/catch` -> `res.json`.
 
-    `ok=False` (any downstream non-2xx or transport failure) masks to a
-    generic 500 -- see `analytics_proxy.py`'s `ProxyResult` docstring for
-    why this matches Node's own inherited `errorHandler.js` behavior.
+    `ok=False` (downstream non-2xx, timeout, or connection failure) fails
+    LOUD as a 502 naming the upstream dependency -- never a masked 500
+    (fail-loud rule; fixes gh-894, where an unreachable analytics-core was
+    indistinguishable from a hub-api bug).
     """
     if not result.ok:
-        return api_error("An unexpected error occurred", 500)
+        return _upstream_error(result)
     return {"success": True, **_unwrap(result.body)}, 200
 
 
@@ -63,8 +73,9 @@ async def platform_overview(client: AnalyticsCoreProxyClient) -> tuple[dict[str,
         client.get("/api/v1/analytics/platform/reputation"),
         client.get("/api/v1/analytics/platform/activity"),
     )
-    if not (summary_result.ok and reputation_result.ok and activity_result.ok):
-        return api_error("An unexpected error occurred", 500)
+    for failed in (summary_result, reputation_result, activity_result):
+        if not failed.ok:
+            return _upstream_error(failed)
 
     summary = _unwrap(summary_result.body)
     reputation = _unwrap(reputation_result.body)
