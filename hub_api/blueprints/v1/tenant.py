@@ -57,7 +57,8 @@ def _dal() -> tuple[Any, Any]:
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     """Convert an `ApiError` into the flask_core `error_response()` JSON envelope."""
     return cast(
-        tuple[dict[str, object], int], error_response(exc.message, exc.status_code, exc.code)
+        tuple[dict[str, object], int],
+        error_response(exc.message, exc.status_code, exc.code, exc.details),
     )
 
 
@@ -506,12 +507,21 @@ async def add_tenant_admin(
 ) -> MessageResponse | tuple[dict[str, object], int]:
     """Add tenant admin."""
     async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
     try:
         tenant_id = _tenant_id(tenant_slug)
         await svc.add_tenant_admin(
-            async_dal, dal, tenant_id=tenant_id, user_id=data.userId, role=data.role
+            async_dal,
+            dal,
+            tenant_id=tenant_id,
+            user_id=data.userId,
+            role=data.role,
+            tenant_slug=tenant_slug,  # TARGET tenant (URL), not the caller's
         )
     except ApiError as exc:
+        logger.info("api_error_rejected", extra={"code": exc.code, "status": exc.status_code})
         return _err(exc)
     return MessageResponse(success=True, message="Tenant admin added")
 
