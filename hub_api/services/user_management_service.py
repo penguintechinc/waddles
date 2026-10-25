@@ -38,7 +38,7 @@ import bcrypt
 from services import session_service
 from services.community_authz import is_super_admin
 from services.errors import bad_request, conflict, forbidden, not_found
-from services.free_tier_caps import enforce_admin_cap
+from services.free_tier_caps import grant_super_admin_capped
 
 SALT_ROUNDS = (
     10  # matches userManagementController.js's own SALT_ROUNDS (distinct from auth_service's 12)
@@ -190,10 +190,17 @@ async def assign_super_admin_role(
     if bool(user.is_super_admin) == grant:
         return False
     if grant:
-        await enforce_admin_cap(async_dal, dal, tenant_slug=tenant_slug, target_user_id=user_id)
-    await async_dal.update_async(
-        dal.hub_users.id == user_id, is_super_admin=grant, updated_at=datetime.now(UTC)
-    )
+        await grant_super_admin_capped(
+            async_dal,
+            dal,
+            caller_tenant_slug=tenant_slug,
+            user_id=user_id,
+            update_fields={"is_super_admin": True, "updated_at": datetime.now(UTC)},
+        )
+    else:
+        await async_dal.update_async(
+            dal.hub_users.id == user_id, is_super_admin=False, updated_at=datetime.now(UTC)
+        )
     if not grant:
         # A demotion must not wait out the demoted admin's remaining access-token life: their
         # existing tokens still carry the admin scope bundle.

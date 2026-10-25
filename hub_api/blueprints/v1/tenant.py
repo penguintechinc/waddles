@@ -518,7 +518,7 @@ async def add_tenant_admin(
             tenant_id=tenant_id,
             user_id=data.userId,
             role=data.role,
-            caller_tenant_slug=ctx.tenant_slug,
+            tenant_slug=tenant_slug,  # TARGET tenant (URL), not the caller's
         )
     except ApiError as exc:
         return _err(exc)

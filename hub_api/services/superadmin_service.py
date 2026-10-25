@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from services.errors import bad_request, conflict, forbidden, not_found
-from services.free_tier_caps import enforce_community_cap, enforce_tenant_cap
+from services.free_tier_caps import create_community_capped, create_tenant_capped
 from services.schema import bind_admin_tables, bind_superadmin_tenant_fields
 
 VALID_COMMUNITY_TYPES = ("shared_interest_group", "gaming", "creator", "corporate", "other")
@@ -173,24 +173,28 @@ async def create_community(
     existing = await async_dal.select_async(dal(dal.communities.name == slug))
     if existing:
         raise conflict("Community name already exists")
-    await enforce_community_cap(async_dal, dal, tenant_slug=tenant_slug, tenant_id=tenant_id)
 
-    new_id = await async_dal.insert_async(
-        dal.communities,
-        name=slug,
-        display_name=display_name or name,
-        description=description or "",
-        platform=platform,
-        platform_server_id=platform_server_id,
-        owner_id=owner_id,
-        owner_name=owner_name,
-        is_public=is_public is not False,
-        community_type=validated_type,
+    new_id = await create_community_capped(
+        async_dal,
+        dal,
+        tenant_slug=tenant_slug,
         tenant_id=tenant_id,
-        member_count=1,
-        created_by=str(caller_id),
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
+        values=dict(
+            name=slug,
+            display_name=display_name or name,
+            description=description or "",
+            platform=platform,
+            platform_server_id=platform_server_id,
+            owner_id=owner_id,
+            owner_name=owner_name,
+            is_public=is_public is not False,
+            community_type=validated_type,
+            tenant_id=tenant_id,
+            member_count=1,
+            created_by=str(caller_id),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        ),
     )
     community = await get_community(async_dal, dal, community_id=new_id)
     await async_dal.insert_async(
@@ -503,18 +507,21 @@ async def create_tenant(
     existing = await async_dal.select_async(dal(dal.tenants.slug == slug))
     if existing:
         raise conflict("A tenant with that slug already exists")
-    await enforce_tenant_cap(async_dal, dal, tenant_slug=caller_tenant_slug)
 
-    new_id = await async_dal.insert_async(
-        dal.tenants,
-        slug=slug,
-        display_name=display_name.strip(),
-        description=description or "",
-        logo_url=logo_url,
-        seat_limit=seat_limit,
-        allowed_module_ids=allowed_module_ids,
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
+    new_id = await create_tenant_capped(
+        async_dal,
+        dal,
+        caller_tenant_slug=caller_tenant_slug,
+        values=dict(
+            slug=slug,
+            display_name=display_name.strip(),
+            description=description or "",
+            logo_url=logo_url,
+            seat_limit=seat_limit,
+            allowed_module_ids=allowed_module_ids,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        ),
     )
     rows = await async_dal.select_async(dal(dal.tenants.id == new_id))
     return rows.first()

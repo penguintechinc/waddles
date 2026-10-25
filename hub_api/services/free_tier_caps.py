@@ -1,5 +1,26 @@
 """Free-tier entity caps: 1 user-created community, tenant, and admin-role user.
 
+Cap scope map -- the tier is ALWAYS resolved against the SAME scope the count uses:
+
+- community: count per caller tenant; tier = that tenant; lock ``community:<tenant_id>``.
+- tenant: count platform-wide (active, non-`system`); tier = platform (catch-all tenant);
+  lock ``tenant:platform``.
+- super-admin grant: count platform-wide (super + tenant admins); tier = platform; lock
+  ``admin:platform``.
+- tenant-admin add: count ``tenant_admins`` rows of the TARGET tenant; tier = the TARGET
+  tenant (never the caller's); lock ``tenant_admin:<tenant_id>``.
+
+"Platform (catch-all tenant)" = the ``is_global`` tenant row's slug (the deployment
+baseline tier); when no such row exists it falls back to the caller's tenant.
+
+Atomicity: count-then-insert is a TOCTOU race, so each guarded create runs as ONE
+synchronous executor job on one thread-local pydal connection (the repo's
+single-job pattern, see ``AsyncDAL.transaction_async``'s caveat): take
+``pg_advisory_xact_lock(hashtext(<key>))`` first, THEN count, THEN write, THEN commit.
+Concurrent creators serialize on the DB lock (released by the commit/rollback); no
+sync lock is held across an ``await`` -- the only awaits (tier/flag resolution) happen
+before the job starts.
+
 The unlicensed/baseline (``free``) tier may hold at most ONE user-created
 community, tenant, and admin-role user (critical-rules.md Licensing Model:
 team overage / seat overage -> hard block with an upgrade path). Professional
@@ -21,7 +42,9 @@ raises either, so a license/flag-server outage can never crash a create path.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from flask_core.feature_flags import feature_enabled, get_tier
@@ -70,62 +93,184 @@ def _cap_error(kind: str, noun: str, tenant_slug: str) -> ApiError:
     )
 
 
-async def count_user_created_communities(async_dal: Any, dal: Any, *, tenant_id: int) -> int:
-    """Active, non-global communities owned by ``tenant_id``."""
-    rows = await async_dal.select_async(dal(dal.communities.tenant_id == tenant_id))
+def count_user_created_communities(dal: Any, *, tenant_id: int) -> int:
+    """Active, non-global communities owned by ``tenant_id`` (sync; runs inside the guarded job)."""
+    rows = dal(dal.communities.tenant_id == tenant_id).select()
     return sum(1 for r in rows if not r.is_global and r.is_active is not False)
 
 
-async def count_user_created_tenants(async_dal: Any, dal: Any) -> int:
+def count_user_created_tenants(dal: Any) -> int:
     """Active tenants other than the operator-plane `system` tenant (catch-all counts)."""
-    rows = await async_dal.select_async(dal(dal.tenants.id > 0))
+    rows = dal(dal.tenants.id > 0).select()
     return sum(1 for r in rows if r.is_active is not False and r.slug not in RESERVED_TENANT_SLUGS)
 
 
-async def admin_user_ids(async_dal: Any, dal: Any) -> set[int]:
+def admin_user_ids(dal: Any) -> set[int]:
     """Distinct admin-role users: super admins plus tenant admins, bootstrap admin removed.
 
     The bootstrap admin is the lowest-id super admin (migration 081's seeded
     initial admin) -- it is the allowed "1" outside the cap, never counted.
     """
-    supers = await async_dal.select_async(dal(dal.hub_users.is_super_admin == True))  # noqa: E712
+    supers = dal(dal.hub_users.is_super_admin == True).select()  # noqa: E712
     super_ids = sorted(int(r.id) for r in supers)
-    tenant_admins = await async_dal.select_async(dal(dal.tenant_admins.id > 0))
+    tenant_admins = dal(dal.tenant_admins.id > 0).select()
     ids = set(super_ids) | {int(r.user_id) for r in tenant_admins}
     if super_ids:
         ids.discard(super_ids[0])
     return ids
 
 
-async def enforce_community_cap(
-    async_dal: Any, dal: Any, *, tenant_slug: str, tenant_id: int
+def count_tenant_admins(dal: Any, *, tenant_id: int) -> int:
+    """Admin rows of one TARGET tenant (the per-tenant admin cap's count scope)."""
+    return len(dal(dal.tenant_admins.tenant_id == tenant_id).select())
+
+
+def _platform_tier_slug(dal: Any, fallback: str) -> str:
+    """Slug whose tier is the platform's: the catch-all (`is_global`) tenant, else ``fallback``."""
+    for r in dal(dal.tenants.id > 0).select():
+        if r.is_global and r.is_active is not False and r.slug:
+            return str(r.slug)
+    return fallback
+
+
+def _take_lock(dal: Any, key: str) -> None:
+    """Serialize concurrent creators on ``key`` for the rest of this transaction (Postgres).
+
+    ``pg_advisory_xact_lock`` blocks until the holder commits/rolls back, so the count
+    that follows sees every earlier creator's row. Other dialects (sqlite in tests)
+    already serialize writers at the connection level and have no such function.
+    """
+    if str(getattr(dal, "_dbname", "")).startswith("postgres"):
+        dal.executesql("SELECT pg_advisory_xact_lock(hashtext(%s))", placeholders=[key])
+
+
+async def capped_write[T](
+    async_dal: Any,
+    dal: Any,
+    *,
+    kind: str,
+    noun: str,
+    tier_slug: str,
+    lock_key: str,
+    is_full: Callable[[Any], bool],
+    write: Callable[[Any], T],
+) -> T:
+    """Atomically (lock -> count -> write -> commit) run ``write`` unless the cap is reached.
+
+    ``tier_slug`` MUST be the tenant whose scope ``is_full`` counts. Tier/kill-switch
+    are resolved first (async, outside the DB job); the guarded section is a single
+    synchronous executor job so no ``await`` can interleave between count and insert.
+    Raises the 402 ``FREE_TIER_CAP_REACHED`` ApiError from inside the job (rolled back).
+    """
+    applies = await _caps_apply(tier_slug)
+    loop = asyncio.get_running_loop()
+
+    def _job() -> T:
+        try:
+            if applies:
+                _take_lock(dal, f"free_cap:{lock_key}")
+                if is_full(dal):
+                    raise _cap_error(kind, noun, tier_slug)
+            result = write(dal)
+            dal.commit()
+            return result
+        except Exception:
+            dal.rollback()
+            raise
+
+    return await loop.run_in_executor(async_dal.executor, _job)
+
+
+async def create_community_capped(
+    async_dal: Any, dal: Any, *, tenant_slug: str, tenant_id: int, values: dict[str, Any]
+) -> int:
+    """Insert a community unless the caller's tenant already holds its 1 free community."""
+    return int(
+        await capped_write(
+            async_dal,
+            dal,
+            kind="community",
+            noun="community",
+            tier_slug=tenant_slug,
+            lock_key=f"community:{tenant_id}",
+            is_full=lambda d: (
+                count_user_created_communities(d, tenant_id=tenant_id) >= FREE_TIER_CAP
+            ),
+            write=lambda d: d.communities.insert(**values),
+        )
+    )
+
+
+async def create_tenant_capped(
+    async_dal: Any, dal: Any, *, caller_tenant_slug: str, values: dict[str, Any]
+) -> int:
+    """Insert a tenant unless the platform already holds its 1 free user-created tenant."""
+    tier_slug = await asyncio.to_thread(_platform_tier_slug, dal, caller_tenant_slug)
+    return int(
+        await capped_write(
+            async_dal,
+            dal,
+            kind="tenant",
+            noun="tenant",
+            tier_slug=tier_slug,
+            lock_key="tenant:platform",
+            is_full=lambda d: count_user_created_tenants(d) >= FREE_TIER_CAP,
+            write=lambda d: d.tenants.insert(**values),
+        )
+    )
+
+
+async def grant_super_admin_capped(
+    async_dal: Any,
+    dal: Any,
+    *,
+    caller_tenant_slug: str,
+    user_id: int,
+    update_fields: dict[str, Any],
 ) -> None:
-    """Refuse (402) a 2nd user-created community on the free tier."""
-    if not await _caps_apply(tenant_slug):
-        return
-    if await count_user_created_communities(async_dal, dal, tenant_id=tenant_id) >= FREE_TIER_CAP:
-        raise _cap_error("community", "community", tenant_slug)
-
-
-async def enforce_tenant_cap(async_dal: Any, dal: Any, *, tenant_slug: str) -> None:
-    """Refuse (402) a 2nd user-created tenant on the free tier."""
-    if not await _caps_apply(tenant_slug):
-        return
-    if await count_user_created_tenants(async_dal, dal) >= FREE_TIER_CAP:
-        raise _cap_error("tenant", "tenant", tenant_slug)
-
-
-async def enforce_admin_cap(
-    async_dal: Any, dal: Any, *, tenant_slug: str, target_user_id: int
-) -> None:
-    """Refuse (402) making a 2nd user-created admin-role user on the free tier.
+    """Grant platform super admin unless the platform already holds its 1 free admin.
 
     A target who already holds an admin role is a no-op re-grant, never blocked.
     """
-    if not await _caps_apply(tenant_slug):
-        return
-    existing = await admin_user_ids(async_dal, dal)
-    if target_user_id in existing:
-        return
-    if len(existing) >= FREE_TIER_CAP:
-        raise _cap_error("admin", "admin user", tenant_slug)
+    tier_slug = await asyncio.to_thread(_platform_tier_slug, dal, caller_tenant_slug)
+
+    def _is_full(d: Any) -> bool:
+        existing = admin_user_ids(d)
+        return user_id not in existing and len(existing) >= FREE_TIER_CAP
+
+    await capped_write(
+        async_dal,
+        dal,
+        kind="admin",
+        noun="admin user",
+        tier_slug=tier_slug,
+        lock_key="admin:platform",
+        is_full=_is_full,
+        write=lambda d: d(d.hub_users.id == user_id).update(**update_fields),
+    )
+
+
+async def add_tenant_admin_capped(
+    async_dal: Any,
+    dal: Any,
+    *,
+    target_tenant_slug: str,
+    tenant_id: int,
+    values: dict[str, Any],
+) -> int:
+    """Insert a tenant-admin row unless the TARGET tenant already holds its 1 free admin.
+
+    Tier and count are both the target tenant's -- never the caller's.
+    """
+    return int(
+        await capped_write(
+            async_dal,
+            dal,
+            kind="admin",
+            noun="admin user",
+            tier_slug=target_tenant_slug,
+            lock_key=f"tenant_admin:{tenant_id}",
+            is_full=lambda d: count_tenant_admins(d, tenant_id=tenant_id) >= FREE_TIER_CAP,
+            write=lambda d: d.tenant_admins.insert(**values),
+        )
+    )

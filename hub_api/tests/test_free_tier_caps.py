@@ -8,8 +8,11 @@ production code path. See `services/free_tier_caps.py`.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import flask_core.feature_flags as feature_flags_module
@@ -21,7 +24,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.superadmin import superadmin_bp
 from blueprints.v1.user_management import user_management_bp
-from services import free_tier_caps
+from services import free_tier_caps, tenant_service
 from services.errors import ApiError
 from tests.conftest import TENANT_SLUG, make_user_token, seed_super_admin
 
@@ -212,11 +215,11 @@ class TestTenantCap:
         dal.tenants.insert(slug="system", display_name="System", is_active=True)
         dal.tenants.insert(slug="gone", display_name="X", is_active=False)
         dal.commit()
-        assert await free_tier_caps.count_user_created_tenants(admin_db, dal) == 1  # acme only
+        assert free_tier_caps.count_user_created_tenants(dal) == 1  # acme only
         dal.tenants.insert(slug="global", display_name="G", is_global=True, is_active=True)
         dal.tenants.insert(slug="default", display_name="D", is_active=True)
         dal.commit()
-        assert await free_tier_caps.count_user_created_tenants(admin_db, dal) == 3
+        assert free_tier_caps.count_user_created_tenants(dal) == 3
 
     async def test_system_tenant_alone_leaves_first_tenant_creatable(
         self, client: Any, admin_db: Any, gates: Any
@@ -264,15 +267,21 @@ class TestAdminCap:
         assert (await _grant(client, u2)).status_code == 200
         assert (await _grant(client, u2)).status_code == 200
 
-    async def test_tenant_admin_counts_toward_cap(self, admin_db: Any, gates: Any) -> None:
+    async def test_super_and_tenant_admins_count_platform_wide_for_grant(
+        self, admin_db: Any, gates: Any
+    ) -> None:
         seed_super_admin(admin_db, user_id=1)
         u2, u3 = _seed_user(admin_db, "u2@x.io"), _seed_user(admin_db, "u3@x.io")
         admin_db.dal.tenant_admins.insert(tenant_id=1, user_id=u2, role="tenant-admin")
         admin_db.dal.commit()
-        assert await free_tier_caps.admin_user_ids(admin_db, admin_db.dal) == {u2}
+        assert free_tier_caps.admin_user_ids(admin_db.dal) == {u2}
         with pytest.raises(ApiError) as exc:
-            await free_tier_caps.enforce_admin_cap(
-                admin_db, admin_db.dal, tenant_slug=TENANT_SLUG, target_user_id=u3
+            await free_tier_caps.grant_super_admin_capped(
+                admin_db,
+                admin_db.dal,
+                caller_tenant_slug=TENANT_SLUG,
+                user_id=u3,
+                update_fields={"is_super_admin": True},
             )
         assert exc.value.status_code == 402
 
@@ -309,3 +318,147 @@ class TestKillSwitchAndOutage:
         assert (await _post_community(client, "a")).status_code == 201
         gates[1].down = True  # license server drops; last-known `professional` is served
         assert (await _post_community(client, "b")).status_code == 201
+
+
+def _seed_tenant(admin_db: Any, slug: str) -> int:
+    tid: int = admin_db.dal.tenants.insert(slug=slug, display_name=slug, is_active=True)
+    admin_db.dal.commit()
+    return tid
+
+
+class TestTargetTenantScope:
+    """regression: gate/action mismatch -- tier resolves against the TARGET, not the caller."""
+
+    @pytest.fixture
+    def tiers(self, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+        """Per-tenant tier map (``by_slug``) + every slug the cap gate resolved (``seen``)."""
+        state = SimpleNamespace(by_slug={}, seen=[])
+
+        async def fake_get_tier(*, tenant: str, community: int | None = None) -> str:
+            state.seen.append(tenant)
+            return str(state.by_slug.get(tenant, "free"))
+
+        async def no_kill_switch(flag: str, *, tenant: str, **_: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(free_tier_caps, "get_tier", fake_get_tier)
+        monkeypatch.setattr(free_tier_caps, "feature_enabled", no_kill_switch)
+        return state
+
+    async def _add(self, admin_db: Any, target: str, target_id: int, uid: int) -> None:
+        await tenant_service.add_tenant_admin(
+            admin_db,
+            admin_db.dal,
+            tenant_id=target_id,
+            user_id=uid,
+            role="tenant-admin",
+            tenant_slug=target,
+        )
+
+    async def test_paid_caller_adding_to_free_target_is_still_capped(
+        self, admin_db: Any, tiers: SimpleNamespace
+    ) -> None:
+        free_id = _seed_tenant(admin_db, "freeco")
+        tiers.by_slug[TENANT_SLUG] = "enterprise"  # the CALLER's tenant is paid
+        u1, u2 = _seed_user(admin_db, "a@x.io"), _seed_user(admin_db, "b@x.io")
+        await self._add(admin_db, "freeco", free_id, u1)
+        with pytest.raises(ApiError) as exc:
+            await self._add(admin_db, "freeco", free_id, u2)
+        assert exc.value.status_code == 402
+        assert "freeco" in tiers.seen
+        assert TENANT_SLUG not in tiers.seen
+
+    async def test_free_caller_adding_to_paid_target_is_not_capped(
+        self, admin_db: Any, tiers: SimpleNamespace
+    ) -> None:
+        paid_id = _seed_tenant(admin_db, "paidco")
+        tiers.by_slug["paidco"] = "professional"  # the TARGET is paid; caller (acme) is free
+        for i in range(3):
+            await self._add(admin_db, "paidco", paid_id, _seed_user(admin_db, f"p{i}@x.io"))
+        assert free_tier_caps.count_tenant_admins(admin_db.dal, tenant_id=paid_id) == 3
+
+    async def test_count_is_per_target_tenant(self, admin_db: Any, tiers: SimpleNamespace) -> None:
+        a, b = _seed_tenant(admin_db, "ta"), _seed_tenant(admin_db, "tb")
+        await self._add(admin_db, "ta", a, _seed_user(admin_db, "a@x.io"))
+        await self._add(admin_db, "tb", b, _seed_user(admin_db, "b@x.io"))  # own slot, not blocked
+
+
+class TestConcurrentCreatesAreAtomic:
+    """regression: TOCTOU -- racing creates at the cap yield exactly one success + one 402."""
+
+    async def test_racing_community_creates(self, client: Any, gates: Any) -> None:
+        r = await asyncio.gather(_post_community(client, "a"), _post_community(client, "b"))
+        assert sorted(x.status_code for x in r) == [201, 402]
+
+    async def test_racing_tenant_creates(
+        self, client: Any, gates: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `acme` (the caller's tenant) already counts, so raise the cap to 2: exactly one slot left.
+        monkeypatch.setattr(free_tier_caps, "FREE_TIER_CAP", 2)
+        r = await asyncio.gather(_post_tenant(client, "t1"), _post_tenant(client, "t2"))
+        assert sorted(x.status_code for x in r) == [201, 402]
+
+    async def test_racing_super_admin_grants(self, client: Any, admin_db: Any, gates: Any) -> None:
+        seed_super_admin(admin_db, user_id=1)
+        u2, u3 = _seed_user(admin_db, "u2@x.io"), _seed_user(admin_db, "u3@x.io")
+        r = await asyncio.gather(_grant(client, u2), _grant(client, u3))
+        assert sorted(x.status_code for x in r) == [200, 402]
+
+    async def test_racing_tenant_admin_adds(self, admin_db: Any, gates: Any) -> None:
+        tid = _tenant_id(admin_db)
+        u1, u2 = _seed_user(admin_db, "a@x.io"), _seed_user(admin_db, "b@x.io")
+
+        async def add(uid: int) -> str:
+            try:
+                await tenant_service.add_tenant_admin(
+                    admin_db,
+                    admin_db.dal,
+                    tenant_id=tid,
+                    user_id=uid,
+                    role="tenant-admin",
+                    tenant_slug=TENANT_SLUG,
+                )
+            except ApiError as exc:
+                return str(exc.status_code)
+            return "ok"
+
+        assert sorted(await asyncio.gather(add(u1), add(u2))) == ["402", "ok"]
+        assert free_tier_caps.count_tenant_admins(admin_db.dal, tenant_id=tid) == 1
+
+    async def test_lock_then_count_then_write_in_one_job_on_postgres(self, gates: Any) -> None:
+        events: list[str] = []
+
+        class FakeDal:
+            _dbname = "postgres"
+
+            def executesql(self, sql: str, placeholders: list[Any] | None = None) -> None:
+                events.append(f"lock:{placeholders}:{'pg_advisory_xact_lock' in sql}")
+
+            def commit(self) -> None:
+                events.append("commit")
+
+            def rollback(self) -> None:
+                events.append("rollback")
+
+        fake_async = SimpleNamespace(executor=ThreadPoolExecutor(max_workers=1))
+
+        def is_full(_: Any) -> bool:
+            events.append("count")
+            return False
+
+        def write(_: Any) -> int:
+            events.append("write")
+            return 7
+
+        out = await free_tier_caps.capped_write(
+            fake_async,
+            FakeDal(),
+            kind="community",
+            noun="community",
+            tier_slug=TENANT_SLUG,
+            lock_key="community:1",
+            is_full=is_full,
+            write=write,
+        )
+        assert out == 7
+        assert events == ["lock:['free_cap:community:1']:True", "count", "write", "commit"]
