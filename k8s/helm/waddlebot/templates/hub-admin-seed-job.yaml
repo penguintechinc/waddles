@@ -23,12 +23,14 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: hub-admin-seed
   annotations:
+    # A post-upgrade hook failure marks the Helm release FAILED even though the app already
+    # rolled -- INTENTIONAL fail-loud (we want to know the admin seed failed), not a bug.
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 2
-  activeDeadlineSeconds: 300
+  activeDeadlineSeconds: 900 # 3 attempts (backoffLimit 2) x ~240s in-script DB wait
   template:
     metadata:
       labels:
