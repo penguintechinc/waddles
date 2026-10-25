@@ -1013,6 +1013,19 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
+  # Idempotent super-admin seed (templates/hub-admin-seed-job.yaml): post-install/post-upgrade
+  # hook re-applying config/postgres/migrations/081_seed_default_hub_admin.sql (no-op once any
+  # super-admin exists) -- SQL migrations never replay on an existing DB, so without this a
+  # deploy over an existing DB never seeds the admin.
+  hubAdminSeedJob:
+    enabled: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
   # Activates first-party waddles.core.* App Bundles under the platform's SYSTEM identity at
   # deploy time (hub_api/cli/seed_core_bundles.py) -- no human global-admin approval, unlike a
   # third-party vendor bundle. `tenantSlugs` is a comma-separated CORE_BUNDLES_TENANT_SLUGS
