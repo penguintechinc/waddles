@@ -45,7 +45,7 @@ def docs() -> list[dict[str, Any]]:
 
 
 def _secret_value(d: list[dict[str, Any]]) -> str:
-    sec = _by_name(d, "Secret", "waddlebot-secrets")
+    sec = _by_name(d, "Secret", "-hub-admin-bootstrap")
     return (sec.get("stringData") or {}).get("INITIAL_ADMIN_PASSWORD") or base64.b64decode(
         (sec.get("data") or {}).get("INITIAL_ADMIN_PASSWORD", "")
     ).decode()
@@ -54,6 +54,21 @@ def _secret_value(d: list[dict[str, Any]]) -> str:
 def test_secret_has_generated_nonempty_password(docs: list[dict[str, Any]]) -> None:
     pw = _secret_value(docs)
     assert len(pw) >= 24 and pw.isalnum()
+
+
+def test_dedicated_secret_has_only_the_two_keys_and_shared_secret_has_none(docs: list[dict[str, Any]]) -> None:
+    ded = _by_name(docs, "Secret", "-hub-admin-bootstrap")
+    assert set(ded["stringData"]) == {"INITIAL_ADMIN_EMAIL", "INITIAL_ADMIN_PASSWORD"}
+    assert ded["stringData"]["INITIAL_ADMIN_PASSWORD"]
+    shared = _by_name(docs, "Secret", "waddlebot-secrets")
+    keys = set(shared.get("stringData") or {}) | set(shared.get("data") or {})
+    assert not keys & {"INITIAL_ADMIN_EMAIL", "INITIAL_ADMIN_PASSWORD"}
+
+
+def test_seed_script_has_one_time_marker(docs: list[dict[str, Any]]) -> None:
+    # Marker behaviour is runtime-only; assert the script carries the check + write.
+    script = _by_name(docs, "Job", "hub-admin-seed")["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    assert script.count("initial_admin_bootstrapped") == 2
 
 
 def test_explicit_password_wins_over_generation() -> None:
@@ -83,8 +98,8 @@ def test_seed_job_hook_annotations_image_envfrom(docs: list[dict[str, Any]]) -> 
     assert not c.get("envFrom")  # credential-separation: single-key refs only
     env = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in c["env"]}
     assert env["DATABASE_URL"]["name"].endswith("-db-migrate-secret")
-    assert env["INITIAL_ADMIN_PASSWORD"]["name"] == "waddlebot-secrets"
-    assert env["INITIAL_ADMIN_EMAIL"]["name"] == "waddlebot-secrets"
+    assert env["INITIAL_ADMIN_PASSWORD"]["name"].endswith("-hub-admin-bootstrap")
+    assert env["INITIAL_ADMIN_EMAIL"]["name"].endswith("-hub-admin-bootstrap")
     assert "081_seed_default_hub_admin.sql" in c["args"][0]
 
 

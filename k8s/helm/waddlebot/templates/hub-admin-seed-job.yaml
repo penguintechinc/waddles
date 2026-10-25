@@ -10,8 +10,8 @@
 # Weight 0 > db-migrate (-5): on post-install the schema Job has completed; on post-upgrade
 # the pre-upgrade migrate has long finished. The script additionally waits (bounded) for
 # Postgres + the hub_users table. DATABASE_URL comes from the dedicated db-migrate hook
-# Secret (migration-owner role); admin creds from waddlebot-secrets (regular Secret, which
-# exists by any post-* phase). INITIAL_ADMIN_PASSWORD in that Secret is generated once and
+# Secret (migration-owner role); admin creds from the dedicated <release>-hub-admin-bootstrap Secret
+# (regular resource, exists by any post-* phase). INITIAL_ADMIN_PASSWORD in it is generated once and
 # preserved across upgrades (secrets.yaml, waddlebot.autoSecretValue lookup-KEEP).
 {{- if and .Values.pipeline.migrationsJob.enabled .Values.pipeline.hubAdminSeedJob.enabled }}
 apiVersion: batch/v1
@@ -65,12 +65,12 @@ spec:
         - name: INITIAL_ADMIN_EMAIL
           valueFrom:
             secretKeyRef:
-              name: waddlebot-secrets
+              name: {{ include "waddlebot.fullname" . }}-hub-admin-bootstrap
               key: INITIAL_ADMIN_EMAIL
         - name: INITIAL_ADMIN_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: waddlebot-secrets
+              name: {{ include "waddlebot.fullname" . }}-hub-admin-bootstrap
               key: INITIAL_ADMIN_PASSWORD
         command: ["python3", "-c"]
         args:
@@ -96,6 +96,11 @@ spec:
                   sys.exit("hub-admin-seed: database/schema not ready before deadline")
               time.sleep(delay)
               delay = min(delay * 2, 15)
+          # One-time: once bootstrapped, never re-seed (even if every super-admin was later deleted).
+          cur.execute("SELECT 1 FROM hub_settings WHERE setting_key = 'initial_admin_bootstrapped' AND setting_value = 'true'")
+          if cur.fetchone():
+              print("initial admin already bootstrapped (marker set); skipping", flush=True)
+              sys.exit(0)
           # Same GUC handoff run-alembic.sh/the baseline migration use; 081 reads these.
           cur.execute("SELECT set_config('waddlebot.initial_admin_email', %s, false), "
                       "set_config('waddlebot.initial_admin_password', %s, false)",
@@ -107,7 +112,12 @@ spec:
           count = cur.fetchone()[0]
           print("super-admin count: %d" % count, flush=True)
           if count < 1:
-              print("WARNING: no super-admin exists (INITIAL_ADMIN_EMAIL unset or email taken)", flush=True)
+              print("WARNING: no super-admin exists (INITIAL_ADMIN_EMAIL unset or email taken); marker NOT set", flush=True)
+          else:
+              cur.execute("INSERT INTO hub_settings (setting_key, setting_value, updated_at) "
+                          "VALUES ('initial_admin_bootstrapped', 'true', NOW()) "
+                          "ON CONFLICT (setting_key) DO NOTHING")
+              print("bootstrap marker set", flush=True)
         resources:
           {{- toYaml .Values.pipeline.hubAdminSeedJob.resources | nindent 10 }}
         volumeMounts:
