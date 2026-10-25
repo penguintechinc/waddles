@@ -267,23 +267,36 @@ class TestAdminCap:
         assert (await _grant(client, u2)).status_code == 200
         assert (await _grant(client, u2)).status_code == 200
 
-    async def test_super_and_tenant_admins_count_platform_wide_for_grant(
+    async def test_tenant_admins_do_not_count_toward_super_admin_cap(
+        self, client: Any, admin_db: Any, gates: Any
+    ) -> None:
+        seed_super_admin(admin_db, user_id=1)  # bootstrap
+        t, u2, u3 = (_seed_user(admin_db, f"{n}@x.io") for n in ("t", "u2", "u3"))
+        admin_db.dal.tenant_admins.insert(tenant_id=1, user_id=t, role="tenant-admin")
+        admin_db.dal.commit()
+        assert free_tier_caps.super_admin_ids(admin_db.dal) == set()
+        assert (
+            await _grant(client, u2)
+        ).status_code == 200  # 1 global admin despite a tenant admin
+        assert (await _grant(client, u3)).status_code == 402  # 2nd global blocked
+
+    async def test_super_admins_do_not_count_toward_tenant_admin_cap(
         self, admin_db: Any, gates: Any
     ) -> None:
         seed_super_admin(admin_db, user_id=1)
         u2, u3 = _seed_user(admin_db, "u2@x.io"), _seed_user(admin_db, "u3@x.io")
-        admin_db.dal.tenant_admins.insert(tenant_id=1, user_id=u2, role="tenant-admin")
+        admin_db.dal.hub_users[u2].update_record(is_super_admin=True)
         admin_db.dal.commit()
-        assert free_tier_caps.admin_user_ids(admin_db.dal) == {u2}
-        with pytest.raises(ApiError) as exc:
-            await free_tier_caps.grant_super_admin_capped(
-                admin_db,
-                admin_db.dal,
-                caller_tenant_slug=TENANT_SLUG,
-                user_id=u3,
-                update_fields={"is_super_admin": True},
-            )
-        assert exc.value.status_code == 402
+        tid = _tenant_id(admin_db)
+        await tenant_service.add_tenant_admin(
+            admin_db,
+            admin_db.dal,
+            tenant_id=tid,
+            user_id=u3,
+            role="tenant-admin",
+            tenant_slug=TENANT_SLUG,
+        )  # 1 tenant admin allowed even though a (non-bootstrap) super admin exists
+        assert free_tier_caps.count_tenant_admins(admin_db.dal, tenant_id=tid) == 1
 
     async def test_paid_tier_not_capped(self, client: Any, admin_db: Any, gates: Any) -> None:
         gates[1].tier = "enterprise"

@@ -5,10 +5,13 @@ Cap scope map -- the tier is ALWAYS resolved against the SAME scope the count us
 - community: count per caller tenant; tier = that tenant; lock ``community:<tenant_id>``.
 - tenant: count platform-wide (active, non-`system`); tier = platform (catch-all tenant);
   lock ``tenant:platform``.
-- super-admin grant: count platform-wide (super + tenant admins); tier = platform; lock
-  ``admin:platform``.
+- super-admin grant (the GLOBAL admin cap): count platform-wide `is_super_admin` users only,
+  bootstrap excluded; tier = platform; lock ``admin:platform``.
 - tenant-admin add: count ``tenant_admins`` rows of the TARGET tenant; tier = the TARGET
   tenant (never the caller's); lock ``tenant_admin:<tenant_id>``.
+
+The two admin caps are DISTINCT and never cross-count: a free deployment may hold 1
+global/super admin AND 1 tenant admin per tenant; a 2nd of either kind is blocked alone.
 
 "Platform (catch-all tenant)" = the ``is_global`` tenant row's slug (the deployment
 baseline tier); when no such row exists it falls back to the caller's tenant.
@@ -105,19 +108,15 @@ def count_user_created_tenants(dal: Any) -> int:
     return sum(1 for r in rows if r.is_active is not False and r.slug not in RESERVED_TENANT_SLUGS)
 
 
-def admin_user_ids(dal: Any) -> set[int]:
-    """Distinct admin-role users: super admins plus tenant admins, bootstrap admin removed.
+def super_admin_ids(dal: Any) -> set[int]:
+    """Platform super admins only, bootstrap admin removed (tenant admins are NOT counted).
 
     The bootstrap admin is the lowest-id super admin (migration 081's seeded
     initial admin) -- it is the allowed "1" outside the cap, never counted.
     """
     supers = dal(dal.hub_users.is_super_admin == True).select()  # noqa: E712
     super_ids = sorted(int(r.id) for r in supers)
-    tenant_admins = dal(dal.tenant_admins.id > 0).select()
-    ids = set(super_ids) | {int(r.user_id) for r in tenant_admins}
-    if super_ids:
-        ids.discard(super_ids[0])
-    return ids
+    return set(super_ids[1:])
 
 
 def count_tenant_admins(dal: Any, *, tenant_id: int) -> int:
@@ -228,14 +227,14 @@ async def grant_super_admin_capped(
     user_id: int,
     update_fields: dict[str, Any],
 ) -> None:
-    """Grant platform super admin unless the platform already holds its 1 free admin.
+    """Grant platform super admin unless the platform already holds its 1 free super admin.
 
-    A target who already holds an admin role is a no-op re-grant, never blocked.
+    Counts super admins only (never tenant admins). Re-granting an existing one is a no-op.
     """
     tier_slug = await asyncio.to_thread(_platform_tier_slug, dal, caller_tenant_slug)
 
     def _is_full(d: Any) -> bool:
-        existing = admin_user_ids(d)
+        existing = super_admin_ids(d)
         return user_id not in existing and len(existing) >= FREE_TIER_CAP
 
     await capped_write(
