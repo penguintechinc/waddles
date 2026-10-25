@@ -38,6 +38,7 @@ import bcrypt
 from services import session_service
 from services.community_authz import is_super_admin
 from services.errors import bad_request, conflict, forbidden, not_found
+from services.free_tier_caps import enforce_admin_cap
 
 SALT_ROUNDS = (
     10  # matches userManagementController.js's own SALT_ROUNDS (distinct from auth_service's 12)
@@ -171,7 +172,7 @@ async def delete_user(async_dal: Any, dal: Any, *, user_id: int, caller_id: int)
 
 
 async def assign_super_admin_role(
-    async_dal: Any, dal: Any, *, user_id: int, grant: bool, caller_id: int
+    async_dal: Any, dal: Any, *, user_id: int, grant: bool, caller_id: int, tenant_slug: str
 ) -> bool:
     """Assign super admin role.
 
@@ -188,6 +189,8 @@ async def assign_super_admin_role(
     user = await get_user(async_dal, dal, user_id=user_id)
     if bool(user.is_super_admin) == grant:
         return False
+    if grant:
+        await enforce_admin_cap(async_dal, dal, tenant_slug=tenant_slug, target_user_id=user_id)
     await async_dal.update_async(
         dal.hub_users.id == user_id, is_super_admin=grant, updated_at=datetime.now(UTC)
     )

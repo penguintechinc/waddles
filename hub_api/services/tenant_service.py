@@ -40,6 +40,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from services.errors import bad_request, forbidden, not_found
+from services.free_tier_caps import enforce_admin_cap
 
 VALID_TENANT_ADMIN_ROLES = ("tenant-admin", "tenant-owner")
 
@@ -221,7 +222,7 @@ async def get_tenant_admins(async_dal: Any, dal: Any, *, tenant_id: int) -> list
 
 
 async def add_tenant_admin(
-    async_dal: Any, dal: Any, *, tenant_id: int, user_id: int, role: str
+    async_dal: Any, dal: Any, *, tenant_id: int, user_id: int, role: str, caller_tenant_slug: str
 ) -> None:
     """Grant (or update) a tenant admin role for a user. Raises 400/404 as Node does."""
     if role not in VALID_TENANT_ADMIN_ROLES:
@@ -240,6 +241,9 @@ async def add_tenant_admin(
             role=role,
         )
     else:
+        await enforce_admin_cap(
+            async_dal, dal, tenant_slug=caller_tenant_slug, target_user_id=user_id
+        )
         await async_dal.insert_async(
             dal.tenant_admins,
             tenant_id=tenant_id,

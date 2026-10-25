@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from services.errors import bad_request, conflict, forbidden, not_found
+from services.free_tier_caps import enforce_community_cap, enforce_tenant_cap
 from services.schema import bind_admin_tables, bind_superadmin_tenant_fields
 
 VALID_COMMUNITY_TYPES = ("shared_interest_group", "gaming", "creator", "corporate", "other")
@@ -154,8 +155,10 @@ async def create_community(
     is_public: bool | None,
     community_type: str | None,
     caller_id: int,
+    tenant_slug: str,
+    tenant_id: int,
 ) -> Any:
-    """Create a new community."""
+    """Create a new community owned by ``tenant_id`` (free tier: capped at 1)."""
     _ensure_tables(dal)
     if not name or not platform:
         raise bad_request("Name and platform are required")
@@ -170,6 +173,7 @@ async def create_community(
     existing = await async_dal.select_async(dal(dal.communities.name == slug))
     if existing:
         raise conflict("Community name already exists")
+    await enforce_community_cap(async_dal, dal, tenant_slug=tenant_slug, tenant_id=tenant_id)
 
     new_id = await async_dal.insert_async(
         dal.communities,
@@ -182,6 +186,7 @@ async def create_community(
         owner_name=owner_name,
         is_public=is_public is not False,
         community_type=validated_type,
+        tenant_id=tenant_id,
         member_count=1,
         created_by=str(caller_id),
         created_at=datetime.now(UTC),
@@ -483,8 +488,9 @@ async def create_tenant(
     logo_url: str | None,
     seat_limit: int | None,
     allowed_module_ids: list[int] | None,
+    caller_tenant_slug: str,
 ) -> Any:
-    """Create a new tenant."""
+    """Create a new tenant (free tier: capped at 1 user-created tenant)."""
     bind_superadmin_tenant_fields(dal)
     if not slug or not slug.strip():
         raise bad_request("Tenant slug is required")
@@ -497,6 +503,7 @@ async def create_tenant(
     existing = await async_dal.select_async(dal(dal.tenants.slug == slug))
     if existing:
         raise conflict("A tenant with that slug already exists")
+    await enforce_tenant_cap(async_dal, dal, tenant_slug=caller_tenant_slug)
 
     new_id = await async_dal.insert_async(
         dal.tenants,

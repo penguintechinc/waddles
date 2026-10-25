@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
-from flask_core.tenancy import tenant_middleware
+from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
@@ -39,7 +39,8 @@ def _dal() -> tuple[Any, Any]:
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     """Convert an `ApiError` into the flask_core `error_response()` JSON envelope."""
     return cast(
-        tuple[dict[str, object], int], error_response(exc.message, exc.status_code, exc.code)
+        tuple[dict[str, object], int],
+        error_response(exc.message, exc.status_code, exc.code, exc.details),
     )
 
 
@@ -325,10 +326,18 @@ async def assign_super_admin_role(
 ) -> MessageResponse | tuple[dict[str, object], int]:
     """Assign super admin role."""
     async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
     try:
         caller_id = get_current_user_id(request)
         changed = await svc.assign_super_admin_role(
-            async_dal, dal, user_id=user_id, grant=data.grant, caller_id=caller_id
+            async_dal,
+            dal,
+            user_id=user_id,
+            grant=data.grant,
+            caller_id=caller_id,
+            tenant_slug=ctx.tenant_slug,
         )
     except ApiError as exc:
         return _err(exc)

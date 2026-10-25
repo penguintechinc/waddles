@@ -17,7 +17,7 @@ from typing import Any, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
-from flask_core.tenancy import tenant_middleware
+from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
@@ -36,7 +36,8 @@ def _dal() -> tuple[Any, Any]:
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     return cast(
-        tuple[dict[str, object], int], error_response(exc.message, exc.status_code, exc.code)
+        tuple[dict[str, object], int],
+        error_response(exc.message, exc.status_code, exc.code, exc.details),
     )
 
 
@@ -516,6 +517,9 @@ async def create_community(data: CreateCommunityRequest) -> tuple[Any, int]:
     """Create a new community."""
     async_dal, dal = _dal()
     caller_id = get_current_user_id(request)
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
     try:
         community = await svc.create_community(
             async_dal,
@@ -530,6 +534,8 @@ async def create_community(data: CreateCommunityRequest) -> tuple[Any, int]:
             is_public=data.isPublic,
             community_type=data.communityType,
             caller_id=caller_id,
+            tenant_slug=ctx.tenant_slug,
+            tenant_id=ctx.tenant_id,
         )
     except ApiError as exc:
         return _err(exc)
@@ -826,6 +832,9 @@ async def list_tenants() -> TenantsResponse:
 async def create_tenant(data: CreateTenantRequest) -> tuple[Any, int]:
     """Create a new tenant."""
     async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
     try:
         tenant = await svc.create_tenant(
             async_dal,
@@ -836,6 +845,7 @@ async def create_tenant(data: CreateTenantRequest) -> tuple[Any, int]:
             logo_url=data.logoUrl,
             seat_limit=data.seatLimit,
             allowed_module_ids=data.allowedModuleIds,
+            caller_tenant_slug=ctx.tenant_slug,
         )
     except ApiError as exc:
         return _err(exc)
