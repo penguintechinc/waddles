@@ -1,74 +1,12 @@
 import { useEffect } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { LoginPageBuilder } from '@penguintechinc/react-libs';
+import SocialLoginButtons from './SocialLoginButtons';
 import { useAuth } from '../../contexts/AuthContext';
 import { KeyIcon } from '@heroicons/react/24/outline';
 import { passkeyApi, publicApi, tenantApi } from '../../services/api';
 import { resolveBranding } from './tenantBranding';
 import { useState } from 'react';
-
-// Social login providers — all route through the backend OAuth proxy.
-// The LoginPageBuilder appends client_id/state params to the authUrl,
-// but the backend ignores them and generates its own state UUID.
-const SOCIAL_PROVIDERS = [
-  { provider: 'discord', clientId: 'server-side', authUrl: '/api/v1/auth/oauth/discord' },
-  { provider: 'twitch',  clientId: 'server-side', authUrl: '/api/v1/auth/oauth/twitch' },
-  {
-    provider: 'oauth2',
-    clientId: 'server-side',
-    authUrl: '/api/v1/auth/oauth/google',
-    label: 'Sign in with Google',
-    icon: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24">
-        <path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47a5.54 5.54 0 0 1-2.4 3.63v3h3.88c2.27-2.09 3.54-5.17 3.54-8.87z"/>
-        <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.71-4.95H1.29v3.09A12 12 0 0 0 12 24z"/>
-        <path fill="#FBBC05" d="M5.29 14.3a7.2 7.2 0 0 1 0-4.6V6.61H1.29a12 12 0 0 0 0 10.78l4-3.09z"/>
-        <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0A12 12 0 0 0 1.29 6.61l4 3.09C6.23 6.86 8.88 4.75 12 4.75z"/>
-      </svg>
-    ),
-    buttonColor: '#1e293b',
-    textColor: '#f0f9ff',
-  },
-  {
-    provider: 'oauth2',
-    clientId: 'server-side',
-    authUrl: '/api/v1/auth/oauth/slack',
-    label: 'Continue with Slack',
-    icon: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="#36C5F0">
-        <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/>
-      </svg>
-    ),
-    buttonColor: '#1e293b',
-    textColor: '#f0f9ff',
-  },
-  {
-    provider: 'oauth2',
-    clientId: 'server-side',
-    authUrl: '/api/v1/auth/oauth/youtube',
-    label: 'Continue with YouTube',
-    icon: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="#FF0000">
-        <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
-      </svg>
-    ),
-    buttonColor: '#1e293b',
-    textColor: '#f0f9ff',
-  },
-  {
-    provider: 'oauth2',
-    clientId: 'server-side',
-    authUrl: '/api/v1/auth/oauth/kick',
-    label: 'Continue with KICK',
-    icon: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="#53FC18">
-        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
-      </svg>
-    ),
-    buttonColor: '#1e293b',
-    textColor: '#f0f9ff',
-  },
-];
 
 // Waddlebot color overrides — match the existing navy/gold theme palette
 const WADDLEBOT_COLORS = {
@@ -227,6 +165,7 @@ function LoginPage() {
         {/* Passkey login — shown above the OAuth/email sections */}
         <div className="bg-navy-800 border border-navy-600 border-b-0 rounded-t-xl px-6 pt-6 pb-4">
           <PasskeyButton onLogin={handlePasskeyLogin} />
+          <SocialLoginButtons />
           <div className="relative mt-2">
             <div className="absolute inset-0 flex items-center">
               <div className="w-full border-t border-navy-600" />
@@ -251,7 +190,6 @@ function LoginPage() {
             if (err?.message) return err.message;
             return 'Login failed. Please try again.';
           }}
-          socialLogins={SOCIAL_PROVIDERS}
           tenantField={{
             show: true,
             label: 'Tenant (optional)',

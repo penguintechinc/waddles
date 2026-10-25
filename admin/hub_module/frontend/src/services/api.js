@@ -51,6 +51,11 @@ api.interceptors.response.use(
 
 export default api;
 
+// Server-side OAuth login: hub-api owns client_id + redirect and returns the authorize URL.
+export const oauthApi = {
+  start: (platform) => api.get(`/api/v1/auth/oauth/${platform}`),
+};
+
 // API helper functions
 export const publicApi = {
   getStats: () => api.get('/api/v1/public/stats'),
