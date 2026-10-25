@@ -5,12 +5,12 @@
 # Usage: helm upgrade --install waddlebot . -n waddlebot -f values-dal2alpha.yaml (NO other -f needed).
 # Prereqs (operator-provisioned, never in git): Secret ghcr-pull + waddlebot-platform-credentials in ns waddlebot.
 webui:
-  publicUrl: "https://waddles-alpha.penguintech.cloud:8443"
+  publicUrl: "https://waddles-alpha.penguintech.cloud"
   # #320 Connections: Google/Spotify only accept http (non-TLS) redirect URIs on
   # `localhost` -- the LAN-IP publicUrl above is rejected by their OAuth consent screens.
-  connectionsCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud:8443"
-  identityCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud:8443"
-  frontendOrigin: "https://waddles-alpha.penguintech.cloud:8443"
+  connectionsCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud"
+  identityCallbackBaseUrl: "https://waddles-alpha.penguintech.cloud"
+  frontendOrigin: "https://waddles-alpha.penguintech.cloud"
 
 global:
   # fix/alpha-helm-deploy -- was "" (empty), which (a) rendered every
