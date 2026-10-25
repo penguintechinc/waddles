@@ -30,11 +30,14 @@ opaque reverse-proxy body that was never hub-api's row to begin with.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 #: Mirrors `config/index.js`'s `analyticsCore` -> `ANALYTICS_CORE_API_URL` env var + default.
 _DEFAULT_BASE_URL = "http://analytics-core:8040"
@@ -115,7 +118,12 @@ class AnalyticsCoreProxyClient:
         try:
             async with httpx.AsyncClient(timeout=self._config.timeout_seconds) as client:
                 response = await client.get(url, params=query, headers=headers)
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "analytics_proxy_transport_error path=%s error_type=%s",
+                path,
+                type(exc).__name__,
+            )
             # Network failure / timeout -- axios's rejected-promise branch,
             # collapsed the same way errorHandler.js does (see module
             # docstring): no downstream status code to relay.
