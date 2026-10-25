@@ -1050,7 +1050,7 @@ rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
 {{- $explicit -}}
 {{- else -}}
 {{- $tier := $ctx.Values.global.deploymentTier -}}
-{{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") -}}
+{{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") (.alwaysGenerate | default false) -}}
 {{- $existing := lookup "v1" "Secret" $ctx.Values.namespace $secretName -}}
 {{- $legacy := dict -}}
 {{- if .legacySecret -}}
