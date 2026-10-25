@@ -19,7 +19,9 @@ Core dependency introduced.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -31,6 +33,11 @@ from config import HubAPIConfig
 from services import ban_suppression, session_service
 from services.auth_service import SessionUser, create_session_token
 from services.errors import bad_request, conflict
+
+logger = logging.getLogger(__name__)
+
+#: Discord application ids are snowflakes (17-20 digit numerics); anything else is misconfig.
+_DISCORD_CLIENT_ID_RE = re.compile(r"\d{17,20}")
 
 VALID_PLATFORMS = ("discord", "twitch", "slack", "google")
 
@@ -77,6 +84,16 @@ async def _get_platform_credentials(async_dal: Any, dal: Any, platform: str) -> 
         creds["client_id"] = os.getenv(f"{prefix}_CLIENT_ID", "")
     if not creds.get("client_secret"):
         creds["client_secret"] = os.getenv(f"{prefix}_CLIENT_SECRET", "")
+    # Stray whitespace/newlines from a secret store survive the (lenient) authorize redirect but
+    # make Discord's token endpoint reject the client_id as "not snowflake".
+    creds = {k: v.strip() if isinstance(v, str) else v for k, v in creds.items()}
+    if (
+        platform == "discord"
+        and creds["client_id"]
+        and not _DISCORD_CLIENT_ID_RE.fullmatch(creds["client_id"])
+    ):
+        logger.error("oauth.discord_client_id_not_snowflake len=%d", len(creds["client_id"]))
+        raise bad_request("Discord OAuth client_id is misconfigured (must be the numeric App ID)")
     return creds
 
 
@@ -402,7 +419,16 @@ async def oauth_callback(
 
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/callback"
     creds = await _get_platform_credentials(async_dal, dal, platform)
-    user_data = await _exchange_code(platform, creds, code, redirect_uri)
+    try:
+        user_data = await _exchange_code(platform, creds, code, redirect_uri)
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "oauth.exchange_failed platform=%s status=%d body=%s",
+            platform,
+            exc.response.status_code,
+            exc.response.text[:300],
+        )
+        raise bad_request("OAuth provider rejected the login") from exc
     user = await _find_or_create_user_from_oauth(
         async_dal, dal, platform=platform, user_data=user_data
     )
