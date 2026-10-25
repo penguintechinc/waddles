@@ -6,7 +6,8 @@ Cap scope map -- the tier is ALWAYS resolved against the SAME scope the count us
 - tenant: count platform-wide (active, non-`system`); tier = platform (catch-all tenant);
   lock ``tenant:platform``.
 - super-admin grant (the GLOBAL admin cap): count platform-wide `is_super_admin` users only,
-  bootstrap excluded; tier = platform; lock ``admin:platform``.
+  the explicitly-marked bootstrap admin (``hub_users.is_bootstrap``) excluded; tier =
+  platform; lock ``admin:platform``.
 - tenant-admin add: count ``tenant_admins`` rows of the TARGET tenant; tier = the TARGET
   tenant (never the caller's); lock ``tenant_admin:<tenant_id>``.
 
@@ -33,8 +34,10 @@ mutated or suspended: the check only refuses the NEW create.
 
 Reserved/system entities are excluded so platform scaffolding never consumes the
 one free slot: the ``system`` tenant (tenant cap only -- the catch-all tenant
-COUNTS), any ``is_global`` community, plus the bootstrap admin
-(the lowest-id super admin -- the seeded initial admin from migration 081).
+COUNTS), any ``is_global`` community, plus the bootstrap admin,
+identified by the explicit ``hub_users.is_bootstrap`` marker (migration 0065 backfills it onto
+migration 081's seeded initial admin) -- never by position, so deleting/demoting it can never
+promote another super admin into the free "bootstrap" slot.
 
 Core-mechanism kill-switch ``waddles.disable-free-tier-entity-caps``:
 unseen/OFF = enforcement ON; ON = no cap (air-gapped deploys). Tier comes
@@ -97,26 +100,43 @@ def _cap_error(kind: str, noun: str, tenant_slug: str) -> ApiError:
 
 
 def count_user_created_communities(dal: Any, *, tenant_id: int) -> int:
-    """Active, non-global communities owned by ``tenant_id`` (sync; runs inside the guarded job)."""
-    rows = dal(dal.communities.tenant_id == tenant_id).select()
-    return sum(1 for r in rows if not r.is_global and r.is_active is not False)
+    """Active, non-global communities owned by ``tenant_id`` (sync; SQL ``COUNT`` in the job).
+
+    NULL ``is_global`` is NOT global (user-created) and NULL ``is_active`` is active, so both
+    are matched explicitly (a plain ``!=`` would drop NULL rows under SQL three-valued logic).
+    """
+    c = dal.communities
+    query = (
+        (c.tenant_id == tenant_id)
+        & ((c.is_global == None) | (c.is_global == False))  # noqa: E711, E712
+        & ((c.is_active == None) | (c.is_active == True))  # noqa: E711, E712
+    )
+    return int(dal(query).count())
 
 
 def count_user_created_tenants(dal: Any) -> int:
     """Active tenants other than the operator-plane `system` tenant (catch-all counts)."""
-    rows = dal(dal.tenants.id > 0).select()
-    return sum(1 for r in rows if r.is_active is not False and r.slug not in RESERVED_TENANT_SLUGS)
+    t = dal.tenants
+    query = (
+        (t.id > 0)
+        & ((t.is_active == None) | (t.is_active == True))  # noqa: E711, E712
+        & ~t.slug.belongs(sorted(RESERVED_TENANT_SLUGS))
+    )
+    return int(dal(query).count())
 
 
 def super_admin_ids(dal: Any) -> set[int]:
     """Platform super admins only, bootstrap admin removed (tenant admins are NOT counted).
 
-    The bootstrap admin is the lowest-id super admin (migration 081's seeded
-    initial admin) -- it is the allowed "1" outside the cap, never counted.
+    The bootstrap admin is the row explicitly marked ``is_bootstrap`` (migration 0065 marks
+    the 081-seeded initial admin) -- the allowed "1" outside the cap, never counted. It is
+    matched by marker, not position: removing/demoting it frees nothing.
     """
-    supers = dal(dal.hub_users.is_super_admin == True).select()  # noqa: E712
-    super_ids = sorted(int(r.id) for r in supers)
-    return set(super_ids[1:])
+    h = dal.hub_users
+    query = (h.is_super_admin == True) & (  # noqa: E712
+        (h.is_bootstrap == None) | (h.is_bootstrap == False)  # noqa: E711, E712
+    )
+    return {int(r.id) for r in dal(query).select(h.id)}
 
 
 def count_tenant_admins(dal: Any, *, tenant_id: int) -> int:
@@ -181,9 +201,27 @@ async def capped_write[T](
 
 
 async def create_community_capped(
-    async_dal: Any, dal: Any, *, tenant_slug: str, tenant_id: int, values: dict[str, Any]
+    async_dal: Any,
+    dal: Any,
+    *,
+    tenant_slug: str,
+    tenant_id: int,
+    values: dict[str, Any],
+    member_values: Callable[[int], dict[str, Any]] | None = None,
 ) -> int:
-    """Insert a community unless the caller's tenant already holds its 1 free community."""
+    """Insert a community unless the caller's tenant already holds its 1 free community.
+
+    ``member_values(new_community_id)`` (optional) builds the owner ``community_members`` row,
+    inserted in the SAME transaction as the community (all-or-nothing): a failure rolls both
+    back, so no half-created community can count toward the cap.
+    """
+
+    def _write(d: Any) -> int:
+        new_id = int(d.communities.insert(**values))
+        if member_values is not None:
+            d.community_members.insert(**member_values(new_id))
+        return new_id
+
     return int(
         await capped_write(
             async_dal,
@@ -195,7 +233,7 @@ async def create_community_capped(
             is_full=lambda d: (
                 count_user_created_communities(d, tenant_id=tenant_id) >= FREE_TIER_CAP
             ),
-            write=lambda d: d.communities.insert(**values),
+            write=_write,
         )
     )
 

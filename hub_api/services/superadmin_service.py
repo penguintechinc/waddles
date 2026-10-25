@@ -195,18 +195,16 @@ async def create_community(
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         ),
+        member_values=lambda cid: dict(
+            community_id=cid,
+            user_id=str(caller_id),
+            role="owner",
+            reputation=600,
+            is_active=True,
+            joined_at=datetime.now(UTC),
+        ),
     )
-    community = await get_community(async_dal, dal, community_id=new_id)
-    await async_dal.insert_async(
-        dal.community_members,
-        community_id=new_id,
-        user_id=str(caller_id),
-        role="owner",
-        reputation=600,
-        is_active=True,
-        joined_at=datetime.now(UTC),
-    )
-    return community
+    return await get_community(async_dal, dal, community_id=new_id)
 
 
 async def update_community(
@@ -301,7 +299,8 @@ async def get_all_modules(
 
     total = await async_dal.count_async(query)
     rows = await async_dal.select_async(
-        dal(query), orderby=~dal.hub_modules.is_core | ~dal.hub_modules.created_at,
+        dal(query),
+        orderby=~dal.hub_modules.is_core | ~dal.hub_modules.created_at,
         limitby=(offset, offset + limit),
     )
 
@@ -475,7 +474,8 @@ async def list_tenants(
         )
     total = await async_dal.count_async(query)
     rows = await async_dal.select_async(
-        dal(query), orderby=~dal.tenants.is_global | ~dal.tenants.created_at,
+        dal(query),
+        orderby=~dal.tenants.is_global | ~dal.tenants.created_at,
         limitby=(offset, offset + limit),
     )
     total_pages = math.ceil(total / limit) if limit else 0

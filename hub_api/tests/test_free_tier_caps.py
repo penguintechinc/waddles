@@ -91,9 +91,14 @@ def client(app: Quart) -> Any:
     return app.test_client()
 
 
-def _headers() -> dict[str, str]:
+def _seed_bootstrap(admin_db: Any) -> None:
+    """Seed id 1 as the migration-081 bootstrap admin (super admin + explicit marker)."""
+    seed_super_admin(admin_db, user_id=1, bootstrap=True)
+
+
+def _headers(user_id: int = 1) -> dict[str, str]:
     token = make_user_token(
-        user_id=1, scope="*:read *:write *:admin *:delete users:admin", tenant=TENANT_SLUG
+        user_id=user_id, scope="*:read *:write *:admin *:delete users:admin", tenant=TENANT_SLUG
     )
     return {"Authorization": f"Bearer {token}"}
 
@@ -126,10 +131,10 @@ def _seed_user(admin_db: Any, email: str) -> int:
     return uid
 
 
-async def _grant(client: Any, user_id: int) -> Any:
+async def _grant(client: Any, user_id: int, *, caller: int = 1) -> Any:
     return await client.post(
         f"/api/v1/superadmin/users/{user_id}/super-admin-role",
-        headers=_headers(),
+        headers=_headers(caller),
         json={"grant": True},
     )
 
@@ -187,6 +192,75 @@ class TestCommunityCap:
         gates[1].tier = tier
         for n in ("a", "b", "c"):
             assert (await _post_community(client, n)).status_code == 201
+
+
+class TestCommunityAtomicity:
+    async def test_member_insert_failure_leaves_no_counted_half_community(
+        self, client: Any, admin_db: Any, gates: Any
+    ) -> None:
+        # regression: review MED -- community row committed before the member insert, so a
+        # failure between them left a half-community that counted toward the cap (402 on retry).
+        def boom(_cid: int) -> dict[str, Any]:
+            raise RuntimeError("member insert failed")
+
+        with pytest.raises(RuntimeError):
+            await free_tier_caps.create_community_capped(
+                admin_db,
+                admin_db.dal,
+                tenant_slug=TENANT_SLUG,
+                tenant_id=_tenant_id(admin_db),
+                values={"name": "half", "display_name": "Half", "is_active": True},
+                member_values=boom,
+            )
+        assert admin_db.dal(admin_db.dal.communities.id > 0).count() == 0
+        assert (await _post_community(client, "retry")).status_code == 201
+
+    async def test_success_creates_community_and_owner_member_together(
+        self, client: Any, admin_db: Any, gates: Any
+    ) -> None:
+        assert (await _post_community(client, "first")).status_code == 201
+        members = admin_db.dal(admin_db.dal.community_members.id > 0).select()
+        assert [(m.user_id, m.role) for m in members] == [("1", "owner")]
+
+    async def test_null_is_global_counts_as_user_created(self, admin_db: Any) -> None:
+        # regression: review LOW -- NULL is_global must count (is_global IS NOT TRUE)
+        tid = _tenant_id(admin_db)
+        admin_db.dal.communities.insert(name="n", display_name="N", tenant_id=tid)
+        admin_db.dal.communities.insert(
+            name="g", display_name="G", tenant_id=tid, is_global=True, is_active=True
+        )
+        admin_db.dal.commit()
+        assert free_tier_caps.count_user_created_communities(admin_db.dal, tenant_id=tid) == 1
+
+
+class TestEveryCreationPathIsCapped:
+    def test_no_uncapped_creation_site_in_hub_api(self) -> None:
+        """Every community/tenant/tenant-admin insert + super-admin grant goes through the caps."""
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        direct = re.compile(
+            r"\b(communities|tenants|tenant_admins)\.(insert|bulk_insert|update_or_insert)\("
+            r"|INSERT\s+INTO\s+(communities|tenants|tenant_admins)\b"
+            r"|is_super_admin\"?\s*[:=]\s*True",
+            re.IGNORECASE,
+        )
+        allowed = {"services/free_tier_caps.py", "cli/seed_core_bundles.py"}
+        scanned, offenders = 0, []
+        for path in root.rglob("*.py"):
+            rel = path.relative_to(root).as_posix()
+            if rel.startswith(("tests/", ".venv", "alembic/")) or "/tests/" in rel:
+                continue
+            scanned += 1
+            text = path.read_text(encoding="utf-8")
+            if rel in allowed or not direct.search(text):
+                continue
+            if "grant_super_admin_capped" in text:
+                continue
+            offenders.append(rel)
+        assert scanned > 100, f"scanner examined only {scanned} files"
+        assert offenders == []
 
 
 class TestTenantCap:
@@ -250,7 +324,7 @@ class TestAdminCap:
     async def test_bootstrap_free_first_ok_second_blocked(
         self, client: Any, admin_db: Any, gates: Any
     ) -> None:
-        seed_super_admin(admin_db, user_id=1)  # bootstrap admin: not counted
+        _seed_bootstrap(admin_db)  # bootstrap admin: not counted
         u2, u3 = _seed_user(admin_db, "u2@x.io"), _seed_user(admin_db, "u3@x.io")
         assert (await _grant(client, u2)).status_code == 200
         blocked = await _grant(client, u3)
@@ -259,10 +333,48 @@ class TestAdminCap:
         assert bool(admin_db.dal.hub_users[u3].is_super_admin) is False
         assert bool(admin_db.dal.hub_users[u2].is_super_admin) is True  # untouched
 
+    async def test_demoting_bootstrap_does_not_free_a_super_admin_slot(
+        self, client: Any, admin_db: Any, gates: Any
+    ) -> None:
+        # regression: review HIGH -- bootstrap was min(id) among supers, so demoting it
+        # promoted the next-lowest super admin into the free "bootstrap" slot.
+        _seed_bootstrap(admin_db)
+        u2, u3 = _seed_user(admin_db, "u2@x.io"), _seed_user(admin_db, "u3@x.io")
+        assert (await _grant(client, u2)).status_code == 200
+        admin_db.dal.hub_users[1].update_record(is_super_admin=False)  # demote bootstrap
+        admin_db.dal.commit()
+        assert free_tier_caps.super_admin_ids(admin_db.dal) == {u2}  # u2 still COUNTS
+        blocked = await _grant(client, u3, caller=u2)
+        assert blocked.status_code == 402
+        _assert_upgrade_block(await blocked.get_json(), "admin")
+
+    async def test_deleting_bootstrap_cannot_grant_two_supers(
+        self, admin_db: Any, gates: Any
+    ) -> None:
+        _seed_bootstrap(admin_db)
+        u2, u3 = _seed_user(admin_db, "u2@x.io"), _seed_user(admin_db, "u3@x.io")
+        del admin_db.dal.hub_users[1]  # bootstrap deleted -> zero supers remain
+        admin_db.dal.commit()
+
+        async def grant(uid: int) -> None:
+            await free_tier_caps.grant_super_admin_capped(
+                admin_db,
+                admin_db.dal,
+                caller_tenant_slug=TENANT_SLUG,
+                user_id=uid,
+                update_fields={"is_super_admin": True},
+            )
+
+        await grant(u2)
+        with pytest.raises(ApiError) as exc:
+            await grant(u3)
+        assert exc.value.status_code == 402
+        assert bool(admin_db.dal.hub_users[u3].is_super_admin) is False
+
     async def test_regrant_of_existing_admin_not_blocked(
         self, client: Any, admin_db: Any, gates: Any
     ) -> None:
-        seed_super_admin(admin_db, user_id=1)
+        _seed_bootstrap(admin_db)
         u2 = _seed_user(admin_db, "u2@x.io")
         assert (await _grant(client, u2)).status_code == 200
         assert (await _grant(client, u2)).status_code == 200
@@ -270,7 +382,7 @@ class TestAdminCap:
     async def test_tenant_admins_do_not_count_toward_super_admin_cap(
         self, client: Any, admin_db: Any, gates: Any
     ) -> None:
-        seed_super_admin(admin_db, user_id=1)  # bootstrap
+        _seed_bootstrap(admin_db)  # bootstrap
         t, u2, u3 = (_seed_user(admin_db, f"{n}@x.io") for n in ("t", "u2", "u3"))
         admin_db.dal.tenant_admins.insert(tenant_id=1, user_id=t, role="tenant-admin")
         admin_db.dal.commit()
@@ -283,7 +395,7 @@ class TestAdminCap:
     async def test_super_admins_do_not_count_toward_tenant_admin_cap(
         self, admin_db: Any, gates: Any
     ) -> None:
-        seed_super_admin(admin_db, user_id=1)
+        _seed_bootstrap(admin_db)
         u2, u3 = _seed_user(admin_db, "u2@x.io"), _seed_user(admin_db, "u3@x.io")
         admin_db.dal.hub_users[u2].update_record(is_super_admin=True)
         admin_db.dal.commit()
@@ -300,7 +412,7 @@ class TestAdminCap:
 
     async def test_paid_tier_not_capped(self, client: Any, admin_db: Any, gates: Any) -> None:
         gates[1].tier = "enterprise"
-        seed_super_admin(admin_db, user_id=1)
+        _seed_bootstrap(admin_db)
         for i in range(3):
             assert (await _grant(client, _seed_user(admin_db, f"p{i}@x.io"))).status_code == 200
 
@@ -314,7 +426,7 @@ class TestKillSwitchAndOutage:
             assert (await _post_community(client, n)).status_code == 201
         for s in ("t1", "t2"):
             assert (await _post_tenant(client, s)).status_code == 201
-        seed_super_admin(admin_db, user_id=1)
+        _seed_bootstrap(admin_db)
         for i in range(2):
             assert (await _grant(client, _seed_user(admin_db, f"k{i}@x.io"))).status_code == 200
 
@@ -412,7 +524,7 @@ class TestConcurrentCreatesAreAtomic:
         assert sorted(x.status_code for x in r) == [201, 402]
 
     async def test_racing_super_admin_grants(self, client: Any, admin_db: Any, gates: Any) -> None:
-        seed_super_admin(admin_db, user_id=1)
+        _seed_bootstrap(admin_db)
         u2, u3 = _seed_user(admin_db, "u2@x.io"), _seed_user(admin_db, "u3@x.io")
         r = await asyncio.gather(_grant(client, u2), _grant(client, u3))
         assert sorted(x.status_code for x in r) == [200, 402]

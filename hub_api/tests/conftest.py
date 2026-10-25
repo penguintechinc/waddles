@@ -459,7 +459,9 @@ def seed_membership(
     dal.commit()
 
 
-def seed_super_admin(overlay_db: Any, *, user_id: int, username: str = "root") -> None:
+def seed_super_admin(
+    overlay_db: Any, *, user_id: int, username: str = "root", bootstrap: bool = False
+) -> None:
     """Insert one `hub_users` row with `is_super_admin=True`, at `hub_users.id == user_id`.
 
     Needed by any test asserting `services.community_authz.is_super_admin()`'s
@@ -470,9 +472,14 @@ def seed_super_admin(overlay_db: Any, *, user_id: int, username: str = "root") -
     must insert this BEFORE minting the matching token so `hub_users`' own
     autoincrement lands on the same id `user_id` expects (fixtures' `hub_users`
     table starts empty, so the first insert lands on id 1).
+
+    ``bootstrap=True`` marks it as the migration-081 seeded initial admin
+    (``hub_users.is_bootstrap``), the one super admin the free-tier cap never counts.
     """
     dal = overlay_db.dal
-    inserted_id: int = dal.hub_users.insert(username=username, is_super_admin=True)
+    inserted_id: int = dal.hub_users.insert(
+        username=username, is_super_admin=True, is_bootstrap=bootstrap
+    )
     dal.commit()
     assert inserted_id == user_id, (
         f"hub_users autoincrement landed on {inserted_id}, expected {user_id} -- "

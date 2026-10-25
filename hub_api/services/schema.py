@@ -134,6 +134,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("password_hash", "string", length=255),
         Field("avatar_url", "text"),
         Field("is_super_admin", "boolean", default=False),
+        Field("is_bootstrap", "boolean", default=False),
         Field("is_vendor", "boolean", default=False),
         Field("is_analytics_consumer", "boolean", default=False),
         Field("email_verified", "boolean", default=False),
@@ -1900,6 +1901,7 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("email", "string", length=255),
             Field("display_name", "string", length=255),
             Field("is_super_admin", "boolean", default=False),
+            Field("is_bootstrap", "boolean", default=False),
             Field("is_vendor", "boolean", default=False),
             migrate=migrate,
         )
