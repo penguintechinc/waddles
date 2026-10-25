@@ -70,8 +70,8 @@ class ProxyResult:
     `ok=False` covers every downstream non-2xx response AND transport
     failure (timeout/connection error). `transport_error` distinguishes the
     latter (no HTTP response) so `analytics_service._upstream_error` can map
-    transport failures and upstream 5xx -> 502 while passing an upstream 4xx
-    through unchanged (gh-894).
+    transport failures, upstream 5xx, and 401/403/other 4xx -> 502 while
+    re-wrapping client-meaningful 4xx {400,404,409,422,429} (gh-894).
     """
 
     ok: bool

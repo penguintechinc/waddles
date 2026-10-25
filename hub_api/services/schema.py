@@ -1346,7 +1346,7 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
 
     dal.define_table(
         "hub_module_reviews",
-        Field("module_id", "integer"),
+        Field("module_id", "integer", notnull=True),
         Field("community_id", "integer"),
         Field("user_id", "integer"),
         Field("rating", "integer"),

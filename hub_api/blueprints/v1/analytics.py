@@ -80,8 +80,9 @@ M6-owned tables every other Community-module blueprint already reads.
 
 Upstream failures (gh-894): `analytics-core` transport failures (timeout,
 connection refused) and upstream 5xx are relayed as a 502 JSON envelope naming
-the upstream dependency; an upstream 4xx passes through unchanged (same status
-and body) -- see `services/analytics_service.py::_upstream_error`. Never a
+the upstream dependency, as are upstream 401/403/other 4xx (hub-api's own
+service auth, never the client's); {400,404,409,422,429} keep their status with a
+re-wrapped `api_error` body -- see `services/analytics_service.py::_upstream_error`. Never a
 masked 500.
 """
 

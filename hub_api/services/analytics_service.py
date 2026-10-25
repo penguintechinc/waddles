@@ -35,19 +35,34 @@ def _unwrap(body: Any) -> dict[str, Any]:
     return {}
 
 
+_CLIENT_4XX_PASSTHROUGH = frozenset({400, 404, 409, 422, 429})
+_MAX_UPSTREAM_MESSAGE = 200
+
+
+def _sanitized_upstream_message(body: Any, status_code: int) -> str:
+    """Return a bounded `error.message` from an analytics-core envelope, else a generic one."""
+    if isinstance(body, dict):
+        err = body.get("error")
+        message = err.get("message") if isinstance(err, dict) else None
+        if isinstance(message, str) and message.strip():
+            return message.strip()[:_MAX_UPSTREAM_MESSAGE]
+    return f"Request rejected by analytics-core (HTTP {status_code})"
+
+
 def _upstream_error(result: ProxyResult) -> tuple[dict[str, Any], int]:
     """Map a failed `analytics-core` call to the right client-facing response.
 
-    Transport failures (connect error / timeout) and upstream 5xx are an
-    upstream-dependency fault -> 502 naming `analytics-core`. An upstream 4xx
-    is a genuine client error and passes through unchanged (same status, same
-    JSON envelope; a synthesized envelope only when the body wasn't JSON) so
-    it is never masked as a dependency failure.
+    Only {400, 404, 409, 422, 429} are client-meaningful: they pass through
+    with that status but the body is RE-WRAPPED via `api_error` from the
+    upstream `error.message` (never the raw upstream body, which could leak
+    analytics-core internals). Transport failures, 5xx, and every other 4xx
+    -- notably 401/403, which mean hub-api's OWN service-key auth failed, not
+    the end-client's token -- map to 502 naming `analytics-core`.
     """
-    if not result.transport_error and 400 <= result.status_code < 500:
-        if isinstance(result.body, dict):
-            return result.body, result.status_code
-        return api_error("Request rejected by analytics-core", result.status_code)
+    if not result.transport_error and result.status_code in _CLIENT_4XX_PASSTHROUGH:
+        return api_error(
+            _sanitized_upstream_message(result.body, result.status_code), result.status_code
+        )
     if result.transport_error:
         message = "Upstream dependency analytics-core is unreachable or timed out"
     else:
@@ -60,7 +75,7 @@ def _relay(result: ProxyResult) -> tuple[dict[str, Any], int]:
 
     `ok=False` fails LOUD, never as a masked 500 (gh-894): connection/timeout
     failures and upstream 5xx -> 502 naming the upstream dependency; an
-    upstream 4xx passes through unchanged (see `_upstream_error`).
+    upstream 401/403/other-4xx -> 502; client-meaningful 4xx re-wrapped (see `_upstream_error`).
     """
     if not result.ok:
         return _upstream_error(result)

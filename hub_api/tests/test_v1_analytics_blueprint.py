@@ -220,7 +220,7 @@ class TestPlatformOverview:
         )
         assert response.status_code == 502
 
-    async def test_overview_upstream_4xx_passes_through(
+    async def test_overview_upstream_403_is_502_not_surfaced(
         self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         envelope = {"success": False, "error": {"message": "forbidden", "code": "FORBIDDEN"}}
@@ -234,8 +234,8 @@ class TestPlatformOverview:
         response = await client.get(
             "/api/v1/analytics/platform/overview", headers=auth_headers(scope="analytics:read")
         )
-        assert response.status_code == 403
-        assert await response.get_json() == envelope
+        assert response.status_code == 502
+        assert (await response.get_json())["error"]["message"] != "forbidden"
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +495,7 @@ class TestMaskedFailure:
         )
         assert response.status_code == 502
 
-    async def test_upstream_4xx_passes_through_unchanged(
+    async def test_upstream_4xx_passes_status_with_rewrapped_body(
         self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         envelope = {"success": False, "error": {"message": "bad period", "code": "VALIDATION"}}
@@ -508,7 +508,24 @@ class TestMaskedFailure:
             "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
         )
         assert response.status_code == 422
-        assert await response.get_json() == envelope
+        payload = await response.get_json()
+        assert payload != envelope
+        assert payload["success"] is False
+        assert payload["error"]["message"] == "bad period"
+        assert payload["error"]["code"] == "ERROR_422"
+
+    async def test_upstream_401_is_502(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(return_value=ProxyResult(ok=False, status_code=401, body={"error": {}})),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 502
 
     async def test_upstream_4xx_non_json_body_keeps_status(
         self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
