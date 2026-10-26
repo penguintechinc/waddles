@@ -50,14 +50,15 @@ display name needs the PII-tokenization pipeline).
 
 Failure handling
 ----------------
-Ordering inside `transform()`: cheap head match, then the PostHog flag ``waddles.command-giveaway``
-(default OFF), then the moderator gate (fail-closed: absent or non-boolean badges deny, via the
-strict `is True` read), then `kv`. A `kv` failure or a corrupt stored value becomes a private
+Activation is enforced by the bundle runtime (installed -> tenant enabled -> community activated)
+before `transform()` is called. Inside `transform()`, the cheap head match comes first, then the
+moderator gate (fail-closed: absent or non-boolean badges deny, via the strict `is True` read),
+then `kv`. A `kv` failure or a corrupt stored value becomes a private
 `_KvError`, is logged at ERROR and answered with an explicit reply -- never a silent no-op, never
 a default substituted for a bad parse. Logs are PII-free: op names, counts and exception types
 only, never message text or the actor.
 
-`kv`, `log`, `relay`, `clock` and `feature_enabled` are imported at MODULE LOAD on purpose:
+`kv`, `log`, `relay` and `clock` are imported at MODULE LOAD on purpose:
 componentize-py only wizens a WIT host-import that is imported eagerly
 (`docs/reference/bundle-host-imports.md`).
 """
@@ -72,11 +73,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from waddle_sdk import clock, kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention (default OFF).
-FLAG_KEY = "waddles.command-giveaway"
 
 #: The single `kv` key this bundle owns (community-scoped by the host; `.`, never `:`).
 ACTIVE_KEY = "giveaway.active"
@@ -182,7 +179,7 @@ def _pick_winner(entries: list[str], now_ms: int) -> str:
     See the module docstring's Randomness section. Isolated so tests can pin the seed inputs.
     """
     digest = hashlib.sha256(f"{now_ms}|{'|'.join(entries)}".encode()).digest()
-    rng = random.Random(int.from_bytes(digest, "big"))  # noqa: S311 - a giveaway, not security
+    rng = random.Random(int.from_bytes(digest, "big"))
     return rng.choice(entries)
 
 
@@ -190,7 +187,7 @@ async def _kv_get(key: str) -> bytes | None:
     """`kv.get`, reclassifying the generated WIT `Err` into `_KvError` (fail loud)."""
     try:
         result = await kv.get(key)
-    except Exception as exc:  # noqa: BLE001 - classified like waddle_sdk.db/http
+    except Exception as exc:  # classified like waddle_sdk.db/http
         raise _KvError(f"kv.get({key!r}) failed", kind=type(exc).__name__) from exc
     # `waddle_sdk` ships no `py.typed`, so mypy sees `Any` -- cast back to the real contract.
     return cast("bytes | None", result)
@@ -200,7 +197,7 @@ async def _kv_set(key: str, value: bytes) -> None:
     """`kv.set` (no TTL -- a giveaway lives until drawn or cancelled), `Err` -> `_KvError`."""
     try:
         await kv.set(key, value, ttl_seconds=0)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise _KvError(f"kv.set({key!r}) failed", kind=type(exc).__name__) from exc
 
 
@@ -208,7 +205,7 @@ async def _kv_delete(key: str) -> None:
     """`kv.delete`, reclassifying the generated WIT `Err` into `_KvError`."""
     try:
         await kv.delete(key)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise _KvError(f"kv.delete({key!r}) failed", kind=type(exc).__name__) from exc
 
 
@@ -352,8 +349,8 @@ async def _execute(command: str, arg: str, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize the commands and build the reply.
 
-    Returns `None` for a non-chat payload, any message that is not `!giveaway`/`!enter`, and
-    while `waddles.command-giveaway` is off. Mod-only commands from a non-moderator are
+    Returns `None` for a non-chat payload or any message that is not `!giveaway`/`!enter`.
+    Activation is enforced by the runtime before this stage runs. Mod-only commands from a non-moderator are
     answered with a denial before any `kv` access. A bad duration replies with the parse error;
     a `kv` failure logs at ERROR and replies with an explicit failure notice.
     """
@@ -363,9 +360,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     head, _, rest = text.strip().partition(" ")
     head = head.lower()
     if head not in (_GIVEAWAY_HEAD, _ENTER_HEAD):
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     command, arg = _resolve(head, rest.strip())

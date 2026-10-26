@@ -36,8 +36,6 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the per-community active giveaway (giveaway.active: end time + hashed entrants)"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-giveaway feature flag"
   - id: platform.clock
     justification: "reads the current time to enforce the giveaway deadline and seed the draw"
 routes_to: []

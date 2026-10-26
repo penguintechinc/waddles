@@ -6,7 +6,7 @@ a mod runs `!giveaway draw`. First-party (`provider: builtin`,
 
 | | |
 |---|---|
-| Flag | `waddles.command-giveaway` (default OFF) |
+| Activation | Installed -> tenant enabled -> community activated |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped (one key: the active giveaway) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -21,9 +21,9 @@ a mod runs `!giveaway draw`. First-party (`provider: builtin`,
 | Concurrent | one per community (second `start` rejected) | one flat list per community |
 | Commands | `!giveaway start/draw/status/cancel`, `!enter` | `!raffle open/close/draw/list`, `!raffle`, `!enter` |
 
-**Shared command:** both bundles list `!enter` as a trigger. If both flags are ON in the same
-community, `!enter` is answered by both. Use `!giveaway enter` (identical behavior) in such a
-community, or leave one flag OFF.
+**Shared command:** both bundles list `!enter` as a trigger. If both bundles are activated in the
+same community, `!enter` is answered by both. Use `!giveaway enter` (identical behavior) in such
+a community, or activate only one of the bundles.
 
 ## Commands
 
@@ -48,7 +48,6 @@ deny. Denied before any `kv` access.
 | id | why |
 |---|---|
 | `storage.kv` | persists the per-community active giveaway |
-| `flags.read` | gates the command behind `waddles.command-giveaway` |
 | `platform.clock` | enforces the deadline and seeds the draw (`clock` is not a catalog id) |
 
 ## State
@@ -78,7 +77,7 @@ pipeline (same trade-off as `raffle`).
 - **PII-free logs.** Only op names, counts and exception types; never message text or the actor.
 - **No atomic update.** `kv` has no compare-and-swap, so two truly concurrent `!enter`s can lose
   one entry (the viewer re-enters; dedupe makes it safe).
-- Eager host imports (`kv`, `log`, `relay`, `clock`, `feature_enabled`) at module top, required
+- Eager host imports (`kv`, `log`, `relay`, `clock`) at module top, required
   for componentize-py wizening (`docs/reference/bundle-host-imports.md`).
 - `transform()` runs the command and builds the reply; `dispatch()` is a pure relay.
 

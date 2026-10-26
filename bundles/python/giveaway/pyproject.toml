@@ -23,5 +23,5 @@ strict = true
 # bundle's scope). Silencing `import-untyped` here only, so `--strict` still catches real
 # type errors in this bundle's own code (`app.py` `cast()`s the `kv.get` result).
 [[tool.mypy.overrides]]
-module = "waddle_sdk.*"
+module = ["waddle_sdk", "waddle_sdk.*"]
 ignore_missing_imports = true

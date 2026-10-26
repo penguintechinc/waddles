@@ -1,7 +1,7 @@
 """Host-native tests for the `giveaway` bundle's `transform`/`dispatch` logic.
 
-No WASM -- a fake `wit_world` stands in for the WIT host imports (`kv`/`flags`/`relay`/`log`/
-`clock`), same approach as `bundles/python/uptime/tests`.
+No WASM -- a fake `wit_world` stands in for the WIT host imports (`kv`/`relay`/`log`/`clock`),
+same approach as `bundles/python/uptime/tests`.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 from app import (
     ACTIVE_KEY,
-    FLAG_KEY,
     MAX_DURATION_MS,
     MAX_ENTRIES,
     DispatchResult,
@@ -88,8 +87,6 @@ class _Host:
         self.kv = _FakeKv()
         self.relay_calls: list[tuple[str, dict[str, Any]]] = []
         self.log_calls: list[tuple[int, str, str]] = []
-        self.flag_enabled = True
-        self.flag_keys: list[str] = []
         self.now_ms = _T0
 
     def state(self) -> dict[str, Any]:
@@ -102,16 +99,11 @@ class _Host:
 
 @pytest.fixture
 def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
-    """Fake WIT host: flag on, in-memory kv, recording relay/log, settable clock."""
+    """Fake WIT host: in-memory kv, recording relay/log, settable clock."""
     h = _Host()
-
-    def _flag(key: str, default_value: bool) -> bool:
-        h.flag_keys.append(key)
-        return h.flag_enabled
 
     wit = types.ModuleType("wit_world")
     wit.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        flags=types.SimpleNamespace(enabled=_flag),
         kv=h.kv,
         relay=types.SimpleNamespace(push=lambda p, m: h.relay_calls.append((p, json.loads(m)))),
         log=types.SimpleNamespace(
@@ -174,30 +166,20 @@ def _envelope(payload: dict[str, Any], platform: str = "twitch") -> StageEnvelop
     )
 
 
-# --- routing / flag ---------------------------------------------------------------------
+# --- routing -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "text", ["hello", "", "!raffle", "!giveaways", "giveaway", "!entering", "!enterx a"]
 )
-def test_non_matching_text_returns_none_without_flag_or_kv(text: str, host: _Host) -> None:
+def test_non_matching_text_returns_none_without_kv(text: str, host: _Host) -> None:
     assert _run(transform(_event(text))) is None
-    assert host.flag_keys == []
     assert host.kv.calls == []
 
 
 @pytest.mark.parametrize("text", [None, 42, ["!giveaway"]])
 def test_non_string_text_returns_none(text: Any, host: _Host) -> None:
     assert _run(transform(_event(text))) is None
-    assert host.kv.calls == []
-
-
-def test_flag_off_returns_none_and_touches_no_kv(host: _Host) -> None:
-    host.flag_enabled = False
-    assert _run(transform(_event("!enter"))) is None
-    assert _run(transform(_event("!giveaway start 5m", badges=_MOD))) is None
-    assert set(host.flag_keys) == {FLAG_KEY}
-    assert FLAG_KEY == "waddles.command-giveaway"
     assert host.kv.calls == []
 
 
@@ -312,7 +294,7 @@ def test_enter_adds_hashed_entry_once(host: _Host) -> None:
     reply = _say("!enter", actor="viewer-1")
     assert "entered the giveaway" in reply
     assert "(1 entered)" in reply
-    expected = hashlib.sha256("twitch\x1fviewer-1".encode()).hexdigest()
+    expected = hashlib.sha256(b"twitch\x1fviewer-1").hexdigest()
     assert host.state()["entries"] == [expected] == [_pseudonym("twitch", "viewer-1")]
     assert "viewer-1" not in host.kv.store[ACTIVE_KEY].decode()  # raw id never persisted
 
@@ -618,7 +600,7 @@ def test_logs_never_contain_message_text_or_actor(host: _Host) -> None:
 def test_host_imports_are_eager_module_attributes() -> None:
     import app
 
-    for name in ("kv", "log", "relay", "clock", "feature_enabled"):
+    for name in ("kv", "log", "relay", "clock"):
         assert hasattr(app, name), f"{name} must be imported at module top (componentize-py)"
 
 
