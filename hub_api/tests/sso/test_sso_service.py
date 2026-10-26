@@ -69,8 +69,8 @@ def _oidc_input(**kw: Any) -> ConnectionInput:
 class TestFlagMapping:
     def test_protocol_to_flag(self) -> None:
         assert flag_for_protocol("saml") == "waddles.auth.sso_saml"
-        assert flag_for_protocol("oidc") == "waddles.auth.sso_saml"
-        assert flag_for_protocol("google") == "waddles.auth.sso_google"
+        assert flag_for_protocol("oidc") == "waddles.auth.sso_custom"
+        assert flag_for_protocol("google") is None
 
     def test_unknown_protocol_is_a_loud_error(self) -> None:
         with pytest.raises(SsoConfigError) as exc:

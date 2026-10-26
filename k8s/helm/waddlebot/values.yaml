@@ -3501,7 +3501,7 @@ kms:
 # Enterprise SSO (SAML 2.0 / OIDC -- Enterprise tier, Google OAuth2 -- Professional tier).
 # Backend: hub_api/services/sso_*.py, migration 0049_sso_connections. Entitlement is
 # enforced in code by the two-gate feature check (flags `waddles.auth.sso_saml` /
-# `waddles.auth.sso_google`, both default OFF), so this subtree only provisions the
+# `waddles.auth.sso_custom`, both default OFF), so this subtree only provisions the
 # plumbing -- a deployment that never uses SSO needs nothing here.
 #
 # templates/sso.yaml owns the encryption-key Secret; templates/_sso.tpl renders the hub-api

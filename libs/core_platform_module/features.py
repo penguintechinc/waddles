@@ -28,7 +28,7 @@ TestCatalogMatchesContracts`` fails on any drift.
 | ``analytics.advanced``                  | enterprise   | ``waddles.analytics.advanced``                  |
 | ``video_proxy.streaming``               | free         | ``waddles.video_proxy.streaming``               |
 | ``video_proxy.premium_limits``          | professional | ``waddles.video_proxy.premium_limits``          |
-| ``auth.sso_google``                     | professional | ``waddles.auth.sso_google``                     |
+| ``auth.sso_custom``                     | professional | ``waddles.auth.sso_custom``                     |
 | ``auth.sso_saml``                       | enterprise   | ``waddles.auth.sso_saml``                       |
 | ``compliance.audit_logs``               | enterprise   | ``waddles.compliance.audit_logs``               |
 | ``compliance.audit_export``             | enterprise   | ``waddles.compliance.audit_export``             |
@@ -154,12 +154,12 @@ _FEATURE_DEFS: Tuple[Dict[str, Any], ...] = (
         "flag": "waddles.video_proxy.premium_limits",
     },
     {
-        "id": "auth.sso_google",
+        "id": "auth.sso_custom",
         "version": 1,
         "module": "auth",
         "requires_scopes": frozenset({"auth.sso:admin"}),
         "min_tier": "professional",
-        "flag": "waddles.auth.sso_google",
+        "flag": "waddles.auth.sso_custom",
     },
     {
         "id": "auth.sso_saml",
@@ -353,10 +353,10 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
         "is_default": True,
     },
     {
-        "app_id": "waddles.auth.sso_google.default",
-        "name": "Google SSO (default)",
+        "app_id": "waddles.auth.sso_custom.default",
+        "name": "Custom OAuth2/OIDC SSO (default)",
         "version": "1.0.0",
-        "feature": "waddles.auth.sso_google",
+        "feature": "waddles.auth.sso_custom",
         "module": "auth",
         "provider": "builtin",
         "surfaces": ("action",),
@@ -365,7 +365,7 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
     },
     {
         "app_id": "waddles.auth.sso_saml.default",
-        "name": "SAML/OIDC SSO (default)",
+        "name": "SAML SSO (default)",
         "version": "1.0.0",
         "feature": "waddles.auth.sso_saml",
         "module": "auth",
