@@ -30,6 +30,7 @@ vi.mock('../../../hooks/useCookieConsent', () => ({
 vi.mock('../../../services/api', () => ({
   passkeyApi: { startLogin: vi.fn(), finishLogin: vi.fn() },
   publicApi: { getSignupSettings: vi.fn().mockResolvedValue({ data: { signupEnabled: false } }) },
+  ssoApi: { getOptions: vi.fn().mockResolvedValue({ data: { options: [] } }), start: vi.fn() },
   tenantApi: { getLoginInfo: vi.fn().mockResolvedValue({ data: {} }) },
 }));
 
