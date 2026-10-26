@@ -280,8 +280,11 @@ function LoginPage() {
             helpText: 'Enter your organization slug, or leave blank for personal login',
             defaultValue: tenantSlug || '',
           }}
+          // Consent is owned app-wide by <CookieBanner /> (main.jsx), which records
+          // it server-side and carries the Do-Not-Sell control. Disabling the
+          // library's built-in GDPR banner prevents a second, duplicate banner.
           gdpr={{
-            enabled: true,
+            enabled: false,
             privacyPolicyUrl: '/privacy',
           }}
           showSignUp={false}
