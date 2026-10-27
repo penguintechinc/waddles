@@ -395,3 +395,84 @@ def test_denylist_clean_and_malformed(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         scan_bundle_dependencies(tmp_path)
     assert match_denylist("pypi", "Qwen_VL") == "qwen*"
+
+
+def _scan_err(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        scan_bundle_dependencies(tmp_path)
+
+
+def _names(tmp_path: Path) -> list[str]:
+    return [f.package for f in scan_bundle_dependencies(tmp_path)]
+
+
+def test_denylist_npm_alias_and_lock_name(tmp_path: Path) -> None:
+    """regression: npm alias / lockfile `name` bypass."""
+    from services.dependency_denylist import _DENYLIST
+
+    bad = next(p for p in _DENYLIST["npm"] if not p.endswith("*"))
+    (tmp_path / "package.json").write_text(f'{{"dependencies": {{"innocent": "npm:{bad}@1"}}}}')
+    assert bad in _names(tmp_path)
+    (tmp_path / "package.json").write_text('{"dependencies": {"ok": "^1.0.0"}}')
+    assert _names(tmp_path) == []
+    (tmp_path / "package-lock.json").write_text(
+        f'{{"packages": {{"node_modules/innocent": {{"name": "{bad}", "version": "1.0.0"}}}}}}'
+    )
+    assert bad in _names(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "spec", ["git+https://x/y.git", "user/repo", "file:../x", "https://x/t.tgz"]
+)
+def test_denylist_npm_non_registry_spec_rejected(tmp_path: Path, spec: str) -> None:
+    (tmp_path / "package.json").write_text(f'{{"dependencies": {{"foo": "{spec}"}}}}')
+    _scan_err(tmp_path)
+
+
+def test_denylist_requirements_include_resolved(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("-r other.txt\nclean==1\n")
+    (tmp_path / "other.txt").write_text("qwen-vl==1\n")
+    assert _names(tmp_path) == ["qwen-vl"]
+    (tmp_path / "requirements.txt").write_text("-r ../escape.txt\n")
+    _scan_err(tmp_path)
+    (tmp_path / "requirements.txt").write_text("-e .\n")
+    _scan_err(tmp_path)
+    (tmp_path / "requirements.txt").write_text("pkg @ https://evil/x.whl\n")
+    _scan_err(tmp_path)
+
+
+def test_denylist_csproj_quotes_and_update(tmp_path: Path) -> None:
+    (tmp_path / "x.csproj").write_text(
+        "<Project><ItemGroup><PackageReference Update='AlibabaCloud.SDK.Core' Version='1'/>"
+        "</ItemGroup></Project>"
+    )
+    assert _names(tmp_path) == ["AlibabaCloud.SDK.Core"]
+    (tmp_path / "x.csproj").write_text('<PackageReference Include="$(Pkg)"/>')
+    _scan_err(tmp_path)
+
+
+def test_denylist_unsupported_manifest_rejected(tmp_path: Path) -> None:
+    (tmp_path / "yarn.lock").write_text("# yarn\n")
+    _scan_err(tmp_path)
+
+
+def test_denylist_symlinked_manifest_rejected(tmp_path: Path) -> None:
+    real = tmp_path / "real.txt"
+    real.write_text("clean==1\n")
+    (tmp_path / "requirements.txt").symlink_to(real)
+    _scan_err(tmp_path)
+
+
+def test_denylist_symlinked_dir_rejected(tmp_path: Path) -> None:
+    (tmp_path / "d").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "d", target_is_directory=True)
+    _scan_err(tmp_path)
+
+
+def test_denylist_cargo_patch_and_path_dep(tmp_path: Path) -> None:
+    (tmp_path / "Cargo.toml").write_text('[patch.crates-io]\nrsmpeg = { path = "vendor/r" }\n')
+    assert "rsmpeg" in _names(tmp_path)
+    (tmp_path / "Cargo.toml").write_text('[dependencies]\nfoo = { path = "../../outside" }\n')
+    _scan_err(tmp_path)
+    (tmp_path / "Cargo.toml").write_text('[dependencies]\nfoo = { path = "sub" }\n')
+    assert _names(tmp_path) == []
