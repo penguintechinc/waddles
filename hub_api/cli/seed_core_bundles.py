@@ -59,6 +59,7 @@ import os
 import re
 import sys
 import unicodedata
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -96,6 +97,7 @@ from services.bundle_version_service import (
 )
 from services.errors import ApiError
 from services.ingest_source_service import ensure_ingest_source
+from services.marketplace_source_service import BuildMode, SourceRecord, SourceStatus
 from services.tenant_app_availability_service import set_available
 
 # Guarded the same way `services/role_sync_service.py`/`services/event_discord_sync_service.py`
@@ -112,6 +114,30 @@ logger = logging.getLogger("waddles.hub_api.core_bundle_seeder")
 #: The SYSTEM actor string persisted to `app_install_approvals.approval_source`
 #: (migration 0026) -- see this module's own docstring.
 SYSTEM_ACTOR = "system:core-seeder"
+
+#: Synthetic built-in source for the legacy seeder path (Task 7 swaps in the real DB row).
+_BUILTIN_SEEDER_SOURCE = SourceRecord(
+    public_id=uuid.UUID(int=0),
+    name="builtin",
+    is_builtin=True,
+    git_url=None,
+    ref=None,
+    pinned_commit_sha=None,
+    pending_commit_sha=None,
+    build_mode=BuildMode.BUILTIN_IMAGE,
+    publisher_key_fingerprint=None,
+    publisher_public_key=None,
+    sandbox_ack_by=None,
+    sandbox_ack_at=None,
+    sandbox_ack_text_hash=None,
+    sandbox_ack_commit_sha=None,
+    status=SourceStatus.ACTIVE,
+    last_scanned_at=None,
+    last_scan_error=None,
+    created_by=None,
+    created_at=datetime(1970, 1, 1, tzinfo=UTC),
+    updated_at=datetime(1970, 1, 1, tzinfo=UTC),
+)
 
 #: Opt-out kill-switch (critical-rules.md "Core platform mechanisms... opt-out kill-switch"):
 #: unseen/OFF performs the reconcile-uninstall sweep below (`reconcile_removed_core_bundles()`,
@@ -452,6 +478,8 @@ def _guard_core_namespace(app_id: str) -> None:
             f"{vendor_bundle_authz.CORE_NAMESPACE_PREFIX}* app_ids -- a vendor bundle must go "
             "through POST /apps/{app_id}/versions/approve (platform:admin, human-gated)"
         )
+    # Shared source-aware gate (built-in source may use waddles.core.*).
+    vendor_bundle_authz.enforce_source_namespace(app_id=app_id, source=_BUILTIN_SEEDER_SOURCE)
 
 
 async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifestV2) -> None:
@@ -898,6 +926,7 @@ async def seed_one(
             version=entry.version,
             installed_by=None,
             install_source=SYSTEM_ACTOR,
+            source=_BUILTIN_SEEDER_SOURCE,
         )
 
     # spec Sec3.6: pre-grant every permission this core bundle's manifest declares --

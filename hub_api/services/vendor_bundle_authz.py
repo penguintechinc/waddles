@@ -45,6 +45,7 @@ from flask_core.secrets import require_secret_key
 from quart import Request
 
 from services.errors import forbidden, unauthorized
+from services.marketplace_source_service import SourceRecord
 
 logger = logging.getLogger(__name__)
 
@@ -146,4 +147,64 @@ def enforce_vendor_namespace(*, app_id: str, caller_id: int) -> None:
         raise forbidden(
             f"vendors may only onboard app_id under {required_prefix!r} "
             "(waddles.core.* and other vendors' namespaces are reserved)"
+        )
+
+
+SOURCE_SHORT_LEN = 12
+
+
+def source_short(source: SourceRecord) -> str:
+    """First 12 hex chars of the source's `public_id` -- its namespace token."""
+    return source.public_id.hex[:SOURCE_SHORT_LEN]
+
+
+def source_namespace_prefix(source_short_id: str) -> str:
+    """The one `app_id` namespace an external marketplace source may publish into."""
+    return f"waddles.integrations.src-{source_short_id}."
+
+
+def enforce_source_namespace(*, app_id: str, source: SourceRecord | None) -> None:
+    """403s unless `app_id` is legal for `source` (fail-closed: None => external, no prefix).
+
+    Rules: only the `is_builtin` source may use `waddles.core.*`; an external source may
+    only use its OWN `waddles.integrations.src-{short}.` prefix -- which rejects a
+    `waddles.core.*` claim, another source's `src-{other}` prefix, and any other escape.
+    A missing/unknown source can match no prefix, so everything is refused.
+    """
+    if source is not None and source.is_builtin:
+        if app_id.startswith(CORE_NAMESPACE_PREFIX):
+            return
+        raise forbidden(f"built-in source may only publish {CORE_NAMESPACE_PREFIX}* app_ids")
+    required = source_namespace_prefix(source_short(source)) if source is not None else None
+    if required is None or not app_id.startswith(required) or app_id == required:
+        logger.warning(
+            "marketplace source: app_id outside source namespace",
+            extra={
+                "event_type": "AUTHZ",
+                "action": "enforce_source_namespace",
+                "result": "FORBIDDEN",
+                "app_id": app_id,
+                "required_prefix": required,
+            },
+        )
+        raise forbidden(
+            "external sources may only publish app_ids under their own "
+            "src-{id} namespace (waddles.core.* and other sources are reserved)"
+        )
+
+
+def require_install_authority(
+    *, source: SourceRecord | None, install_source: str, installed_by: int | None
+) -> None:
+    """Gate a GLOBAL install: SYSTEM auto-install is built-in only; external needs a human.
+
+    Fail-closed -- a missing/unknown `source` is treated as external. Non-built-in sources
+    must arrive with `install_source="human"` and a concrete `installed_by` (platform:admin).
+    """
+    if source is not None and source.is_builtin:
+        return
+    if install_source != "human" or installed_by is None:
+        raise forbidden(
+            "bundles from non-built-in (or unknown) sources require human platform:admin "
+            "approval; SYSTEM auto-install is refused"
         )

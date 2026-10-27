@@ -122,7 +122,9 @@ from services.bundle_manifest_v2 import (
 )
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, conflict, not_found
+from services.marketplace_source_service import SourceRecord
 from services.permission_summary_service import build_permission_summary, permission_hash
+from services.vendor_bundle_authz import require_install_authority
 
 logger = logging.getLogger(__name__)
 
@@ -486,6 +488,7 @@ async def install_version_globally(
     installed_by: int | None,
     expected_permission_hash: str | None = None,
     install_source: str = "human",
+    source: SourceRecord | None = None,
 ) -> Any:
     """GLOBAL tier: install `version` into the platform catalog. Does NOT activate it anywhere.
 
@@ -504,6 +507,11 @@ async def install_version_globally(
     tier), and no community runs it until a community-admin separately
     calls `activate_for_community()` (COMMUNITY tier, below).
     """
+    # Fail-closed source gate: only the built-in source may SYSTEM-install; a missing
+    # `source` is treated as external and therefore needs a human installer.
+    require_install_authority(
+        source=source, install_source=install_source, installed_by=installed_by
+    )
     upload_rows = await install_dal(
         (install_dal.app_version_uploads.app_id == app_id)
         & (install_dal.app_version_uploads.version == version)
