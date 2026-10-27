@@ -120,7 +120,7 @@ def _dto(row: object) -> IdentityDTO:
 
 
 @identity_bp.route("", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ListIdentitiesResponse)
 async def list_identities() -> ListIdentitiesResponse:
     """List identities."""
@@ -131,7 +131,7 @@ async def list_identities() -> ListIdentitiesResponse:
 
 
 @identity_bp.route("/primary", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(PrimaryIdentityResponse)
 async def get_primary_identity() -> PrimaryIdentityResponse:
     """Get primary identity."""
@@ -142,7 +142,7 @@ async def get_primary_identity() -> PrimaryIdentityResponse:
 
 
 @identity_bp.route("/primary", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(SetPrimaryIdentityRequest)
 @validate_response(MessageResponse)
 async def set_primary_identity(
@@ -161,7 +161,7 @@ async def set_primary_identity(
 
 
 @identity_bp.route("/link/<platform>", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(LinkStartResponse)
 async def start_identity_link(platform: str) -> LinkStartResponse | tuple[dict[str, object], int]:
     """Start identity link."""
@@ -205,7 +205,7 @@ async def identity_link_callback(platform: str):  # type: ignore[no-untyped-def]
 
 
 @identity_bp.route("/<platform>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def unlink_identity(platform: str) -> MessageResponse | tuple[dict[str, object], int]:
     """Unlink identity."""

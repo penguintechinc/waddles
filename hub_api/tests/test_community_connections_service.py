@@ -29,9 +29,11 @@ from services import community_connections as svc
 from services.errors import ApiError
 from services.platform_integrations_crypto import (
     PlatformCredentialCryptoError,
+    connection_aad,
     decrypt_value,
     encrypt_token,
 )
+from services.provider_connections.vault import open_secret
 from services.schema import bind_platform_tables
 
 # Fixed test-only AES key, not a real credential.
@@ -403,3 +405,105 @@ class TestEncryptTokenRoundTrip:
         tampered = ciphertext[:-4] + ("AAAA" if ciphertext[-4:] != "AAAA" else "BBBB")
         with pytest.raises(PlatformCredentialCryptoError):
             decrypt_value(tampered)
+
+
+class TestRowBoundSealing:
+    """regression: M4 -- `platform_integrations` ciphertext is bound to `community_id:provider`."""
+
+    async def _put(self, db: Any, community_id: int, provider: str, tag: str) -> None:
+        await svc.upsert_connection(
+            db,
+            community_id,
+            provider,
+            access_token=f"acc-{tag}",
+            refresh_token=f"ref-{tag}",
+            expires_at=None,
+            scopes=["s"],
+            account_label=None,
+            actor_user_id=None,
+        )
+
+    async def test_new_writes_are_version_1(self, connections_db: Any) -> None:
+        await self._put(connections_db, COMMUNITY_ID, "twitch", "w")
+        row = _row(connections_db.dal, COMMUNITY_ID, "twitch")
+        assert row.seal_version == 1
+        aad = connection_aad(community_id=COMMUNITY_ID, provider="twitch")
+        assert open_secret(row.access_token, aad=aad, seal_version=1) == "acc-w"
+        assert open_secret(row.refresh_token, aad=aad, seal_version=1) == "ref-w"
+        with pytest.raises(PlatformCredentialCryptoError):
+            decrypt_value(row.access_token)  # not openable as a no-AAD (legacy) ciphertext
+
+    async def test_ciphertext_swapped_between_rows_fails_open(self, connections_db: Any) -> None:
+        await self._put(connections_db, 1, "twitch", "one")
+        await self._put(connections_db, 2, "twitch", "two")
+        dal = connections_db.dal
+        row_one, row_two = _row(dal, 1, "twitch"), _row(dal, 2, "twitch")
+        t = dal.platform_integrations
+        dal(t.id == row_one.id).update(access_token=row_two.access_token)
+        dal(t.id == row_two.id).update(access_token=row_one.access_token)
+        dal.commit()
+        for community in (1, 2):
+            with pytest.raises(PlatformCredentialCryptoError):
+                await svc.get_decrypted_tokens(connections_db, community, "twitch")
+
+    async def test_legacy_v0_row_still_opens_then_reseals_on_read(
+        self, connections_db: Any
+    ) -> None:
+        await self._put(connections_db, COMMUNITY_ID, "twitch", "x")
+        dal = connections_db.dal
+        t = dal.platform_integrations
+        dal(t.community_id == COMMUNITY_ID).update(
+            access_token=encrypt_token("acc-legacy"),
+            refresh_token=encrypt_token("ref-legacy"),
+            seal_version=0,
+        )
+        dal.commit()
+
+        tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch")
+        assert tokens is not None
+        assert (tokens.access_token, tokens.refresh_token) == ("acc-legacy", "ref-legacy")
+        row = _row(dal, COMMUNITY_ID, "twitch")
+        assert row.seal_version == 1
+        aad = connection_aad(community_id=COMMUNITY_ID, provider="twitch")
+        assert open_secret(row.access_token, aad=aad, seal_version=1) == "acc-legacy"
+        again = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch")
+        assert again is not None and again.refresh_token == "ref-legacy"
+
+    async def test_refresh_of_a_legacy_row_keeps_the_refresh_token_readable(
+        self, connections_db: Any
+    ) -> None:
+        await self._put(connections_db, COMMUNITY_ID, "twitch", "x")
+        dal = connections_db.dal
+        t = dal.platform_integrations
+        dal(t.community_id == COMMUNITY_ID).update(
+            access_token=encrypt_token("acc-legacy"),
+            refresh_token=encrypt_token("ref-legacy"),
+            seal_version=0,
+        )
+        dal.commit()
+        await svc.store_refreshed_access_token(
+            connections_db, COMMUNITY_ID, "twitch", access_token="acc-new", expires_at=None
+        )
+        tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch")
+        assert tokens is not None
+        assert (tokens.access_token, tokens.refresh_token) == ("acc-new", "ref-legacy")
+        assert _row(dal, COMMUNITY_ID, "twitch").seal_version == 1
+
+    async def test_a_failed_lazy_reseal_never_breaks_the_read(
+        self, connections_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await self._put(connections_db, COMMUNITY_ID, "twitch", "x")
+        dal = connections_db.dal
+        t = dal.platform_integrations
+        dal(t.community_id == COMMUNITY_ID).update(
+            access_token=encrypt_token("acc-legacy"), refresh_token=None, seal_version=0
+        )
+        dal.commit()
+
+        def boom(*_a: Any, **_k: Any) -> bool:
+            raise RuntimeError("lock timeout")
+
+        monkeypatch.setattr(svc, "_sync_reseal_legacy", boom)
+        tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch")
+        assert tokens is not None and tokens.access_token == "acc-legacy"
+        assert _row(dal, COMMUNITY_ID, "twitch").seal_version == 0  # left for the reseal job

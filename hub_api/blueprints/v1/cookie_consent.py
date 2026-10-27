@@ -445,7 +445,7 @@ async def get_policy_history() -> CookiePolicyHistoryResponse:
 
 
 @cookie_consent_bp.route("/preferences", methods=["PATCH"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(UpdatePreferencesRequest)
 async def update_preferences(data: UpdatePreferencesRequest) -> tuple[Any, int]:
     """Update specific consent categories for the authenticated user.
@@ -485,7 +485,7 @@ async def update_preferences(data: UpdatePreferencesRequest) -> tuple[Any, int]:
 
 
 @cookie_consent_bp.route("", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def revoke_consent() -> tuple[Any, int]:
     """Revoke all non-essential cookies for the authenticated user."""
     async_dal, dal = _dal()
@@ -547,7 +547,7 @@ def _audit_entry_dto(entry: svc.AuditLogEntry) -> CookieAuditLogItemDTO:
 
 
 @cookie_consent_bp.route("/audit", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(CookieAuditLogResponse)
 async def get_audit_log() -> CookieAuditLogResponse | tuple[dict[str, object], int]:
     """Get the authenticated user's own consent audit trail, paginated."""
@@ -607,8 +607,8 @@ class MessageResponse:
 
 
 @cookie_consent_bp.route("/policy", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("settings:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("settings:write")  # type: ignore[misc]
 @validate_request(CreatePolicyVersionRequest)
 async def create_policy_version(data: CreatePolicyVersionRequest) -> tuple[Any, int]:
     """Create a new cookie policy version and activate it (super admin only)."""
@@ -642,8 +642,8 @@ async def create_policy_version(data: CreatePolicyVersionRequest) -> tuple[Any, 
 
 
 @cookie_consent_bp.route("/policy/<version>/activate", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("settings:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("settings:write")  # type: ignore[misc]
 async def activate_policy_version(version: str) -> tuple[Any, int]:
     """Activate an existing policy version (super admin only)."""
     async_dal, dal = _dal()

@@ -56,8 +56,8 @@ def _tenant_ok(community_id: int) -> bool:
 
 
 @inventory_bp.route("/<int:community_id>/inventory/items", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:read")  # type: ignore[misc]
 async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/items`."""
     ctx = get_tenant_context(request)
@@ -71,8 +71,8 @@ async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @inventory_bp.route("/<int:community_id>/inventory/items", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:write")  # type: ignore[misc]
 async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items`."""
     if not _tenant_ok(community_id):
@@ -86,8 +86,8 @@ async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @inventory_bp.route("/<int:community_id>/inventory/items/<int:item_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:write")  # type: ignore[misc]
 async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/inventory/items/<itemId>`."""
     if not _tenant_ok(community_id):
@@ -100,8 +100,8 @@ async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
 
 
 @inventory_bp.route("/<int:community_id>/inventory/items/<int:item_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:write")  # type: ignore[misc]
 async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/inventory/items/<itemId>`."""
     if not _tenant_ok(community_id):
@@ -112,9 +112,9 @@ async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
 
 
 @inventory_bp.route("/<int:community_id>/inventory/items/<int:item_id>/stock/add", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:write")  # type: ignore[untyped-decorator]
-@auth_required  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:write")  # type: ignore[misc]
+@auth_required  # type: ignore[misc]
 async def add_stock_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items/<itemId>/stock/add`."""
     if not _tenant_ok(community_id):
@@ -144,9 +144,9 @@ async def add_stock_route(community_id: int, item_id: int) -> tuple[dict[str, ob
 @inventory_bp.route(
     "/<int:community_id>/inventory/items/<int:item_id>/stock/remove", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:write")  # type: ignore[untyped-decorator]
-@auth_required  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:write")  # type: ignore[misc]
+@auth_required  # type: ignore[misc]
 async def remove_stock_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items/<itemId>/stock/remove`."""
     if not _tenant_ok(community_id):
@@ -174,8 +174,8 @@ async def remove_stock_route(community_id: int, item_id: int) -> tuple[dict[str,
 
 
 @inventory_bp.route("/<int:community_id>/inventory/checkouts", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:read")  # type: ignore[misc]
 async def list_checkouts_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/checkouts`."""
     if not _tenant_ok(community_id):
@@ -187,8 +187,8 @@ async def list_checkouts_route(community_id: int) -> tuple[dict[str, object], in
 
 
 @inventory_bp.route("/<int:community_id>/inventory/summary", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:read")  # type: ignore[misc]
 async def summary_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/summary`."""
     if not _tenant_ok(community_id):
@@ -197,8 +197,8 @@ async def summary_route(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @inventory_bp.route("/<int:community_id>/inventory/log", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:read")  # type: ignore[misc]
 async def audit_log_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/log`."""
     if not _tenant_ok(community_id):
@@ -221,8 +221,8 @@ async def audit_log_route(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @inventory_bp.route("/<int:community_id>/inventory/available", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:use")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:use")  # type: ignore[misc]
 async def available_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/available`."""
     if not _tenant_ok(community_id):
@@ -232,9 +232,9 @@ async def available_route(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @inventory_bp.route("/<int:community_id>/inventory/checkout", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:use")  # type: ignore[untyped-decorator]
-@auth_required  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:use")  # type: ignore[misc]
+@auth_required  # type: ignore[misc]
 async def checkout_route(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/checkout`."""
     if not _tenant_ok(community_id):
@@ -269,9 +269,9 @@ async def checkout_route(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @inventory_bp.route("/<int:community_id>/inventory/checkin", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:use")  # type: ignore[untyped-decorator]
-@auth_required  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:use")  # type: ignore[misc]
+@auth_required  # type: ignore[misc]
 async def checkin_route(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/checkin`."""
     if not _tenant_ok(community_id):
@@ -297,9 +297,9 @@ async def checkin_route(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @inventory_bp.route("/<int:community_id>/inventory/my-items", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.inventory:use")  # type: ignore[untyped-decorator]
-@auth_required  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:use")  # type: ignore[misc]
+@auth_required  # type: ignore[misc]
 async def my_items_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/my-items`."""
     if not _tenant_ok(community_id):
