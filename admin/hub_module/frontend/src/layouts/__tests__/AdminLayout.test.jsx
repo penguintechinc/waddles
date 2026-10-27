@@ -50,8 +50,8 @@ describe('AdminLayout — responsive sidebar wiring', () => {
   it('main content is offset only at lg+ and padded smaller on mobile', () => {
     const { container } = renderAt('/platform');
     const main = container.querySelector('main');
-    expect(main.className).toContain('lg:ml-64');
-    expect(main.className).not.toMatch(/(^|\s)ml-64/);
+    expect(main.className).not.toMatch(/(^|\s)(lg:)?ml-64/);
+    expect(screen.getByTestId('admin-content-shell').className).toContain('lg:pl-64');
   });
 
   it('builds a flat category for platform paths', () => {
