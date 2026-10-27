@@ -20,7 +20,7 @@ v1 scope (KV-ONLY, no `db` capability -- same deliberate scoping as
 `fish`/`slots`, not dependent on the in-flight #623 db API):
 
 - Bare `!flip` (or `!coinflip`) -- FLIP, the grammar's bare/default action.
-  Draws one 50/50 `heads`/`tails` result (`random.choice`) and replies with
+  Draws one 50/50 `heads`/`tails` result (`_RNG.choice`) and replies with
   a fun flavor line. No call was made, so there is no win/lose outcome --
   only the caller's running flip count is updated.
 - `!flip heads` / `!flip tails` -- CALL. Same 50/50 draw, but the caller's
@@ -70,10 +70,8 @@ stub:
   redeeming a payout) -- out of scope per the no-betting-ties rule above,
   not partially stubbed.
 
-Gated behind the PostHog flag ``waddles.command-coinflip`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -84,10 +82,12 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-coinflip"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 #: Chat aliases that both route to this bundle -- see module docstring's
 #: alias-normalization rationale. Compared against `head.lower()`, so both
@@ -133,7 +133,7 @@ _FLIP_FLAVORS: tuple[str, ...] = (
 
 def _flip_coin() -> str:
     """Draw one 50/50 `"heads"`/`"tails"` result."""
-    return random.choice(("heads", "tails"))  # noqa: S311 - a game, not security
+    return _RNG.choice(("heads", "tails"))
 
 
 def _evaluate_flip(call: str | None, result: str) -> bool | None:
@@ -200,8 +200,8 @@ def _normalize_alias(stripped: str, head: str) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!coinflip`/`!flip`, via `parse_command`.
 
-    Cheap-skip first (no leading alias token -- `None`, zero cost), flag
-    check second, real grammar parse last -- same ordering as `fish`'s own
+    Cheap-skip first (no leading alias token -- `None`, zero cost), real grammar parse last -- same
+    ordering as `fish`'s own
     documented rationale. A recognized-but-malformed `!flip ...` (a
     `CommandUsageError`, or an option this bundle doesn't implement, e.g.
     `!flip enable`) still produces a reply (`"usage"`) since the caller did
@@ -214,9 +214,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() not in _ALIASES:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     normalized = _normalize_alias(stripped, head)
@@ -391,7 +388,7 @@ async def _handle_flip(
     is_correct = _evaluate_flip(call, result)
 
     if is_correct is None:
-        flavor = random.choice(_FLIP_FLAVORS)  # noqa: S311 - a game, not a security decision
+        flavor = _RNG.choice(_FLIP_FLAVORS)
         return f"\U0001fa99 {username} flips a coin -- {flavor} {result.upper()}! (flip #{flips})"
 
     if is_correct:

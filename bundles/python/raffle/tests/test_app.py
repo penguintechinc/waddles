@@ -245,12 +245,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeExtras) -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(fake_host: _FakeExtras) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_sample_event("!raffle"))) is None
-    assert _run(transform(_sample_event("!enter"))) is None
-
-
 def test_transform_forwards_present_badge_fields(fake_host: _FakeExtras) -> None:
     result = _run(transform(_sample_event("!raffle open", is_mod=True, is_broadcaster=False)))
     assert result is not None
@@ -494,13 +488,13 @@ def test_draw_picks_the_only_entrant(fake_host: _FakeExtras) -> None:
 def test_draw_uses_seeded_random_choice(
     fake_host: _FakeExtras, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`_pick_winner` is a thin `random.choice` wrapper -- deterministic under a seeded fake."""
+    """`_pick_winner` is a thin `_RNG.choice` wrapper -- deterministic under a seeded fake."""
     _run(dispatch(_sample_envelope("twitch", "open", is_mod=True), {}, http_client=None))
     _run(dispatch(_sample_envelope("twitch", "enter", actor="viewer-1"), {}, http_client=None))
     _run(dispatch(_sample_envelope("twitch", "enter", actor="viewer-2"), {}, http_client=None))
 
     expected = _expected_pseudonym("viewer-2")
-    monkeypatch.setattr("app.random.choice", lambda seq: expected)
+    monkeypatch.setattr("app._RNG.choice", lambda seq: expected)
     result = _run(dispatch(_sample_envelope("twitch", "draw", is_mod=True), {}, http_client=None))
 
     assert result.detail == "draw"

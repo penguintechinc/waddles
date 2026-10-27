@@ -3,7 +3,7 @@
 schema_version: 2
 app_id: waddles.core.example.iq
 name: Fun IQ Bundle (Python)
-version: 1.0.0
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -33,6 +33,8 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-iq feature flag"
+  - id: "chat.send:discord"
+    justification: "replies to the invoking command on its origin platform via the relay host import (relay.push -> chat.send:discord); no other capability is used"
+  - id: "chat.send:twitch"
+    justification: "replies to the invoking command on its origin platform via the relay host import (relay.push -> chat.send:twitch); no other capability is used"
 routes_to: []

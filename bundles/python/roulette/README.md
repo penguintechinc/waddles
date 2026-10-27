@@ -10,7 +10,7 @@ merged in #618), same pattern as `slots`/`fish`'s own `app.py`.
 
 **No real chat timeout/ban.** An "out" outcome is flavor text and a stat increment ONLY. This
 bundle never calls a moderation/timeout/ban API on any platform -- it has no such capability
-(`permissions` in `bundle.yaml` are `storage.kv` + `flags.read` only; `relay.push` only ever
+(`permissions` in `bundle.yaml` are `storage.kv` only; `relay.push` only ever
 delivers a chat message). Actually removing a user from chat needs mod-scope capabilities this bundle does not
 request. See `src/app.py`'s own module docstring for the full rationale.
 
@@ -90,7 +90,6 @@ bot>    roulette cooldown set to 10s
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists per-community roulette tallies and the cooldown timestamps/config. |
-| `flags.read` | Gates the command behind its `waddles.command-roulette` feature flag. |
 
 No `db` (`data.tables: []`), no egress, no moderation capability (see "No real chat timeout/ban").
 Mod gate: `set cooldown` requires a real `is_mod` or `is_broadcaster` `True`; **absent** badge
@@ -118,11 +117,9 @@ Logs carry only `command`, `op`, `community`, `role_signal`, `platform` and exce
 never typed arguments, grammar text or `event.actor`. Regression:
 `tests/test_backfill.py::test_no_log_line_in_any_flow_contains_typed_text_or_the_raw_actor`.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-roulette`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!roulette` command-name match and
-before the real grammar parse.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 
@@ -156,7 +153,7 @@ pytest --cov=src --cov-branch --cov-report=term-missing   # 100% line + branch
 
 `tests/conftest.py` puts `src/` and `sdk/waddle-sdk/src` on `sys.path`, so no package install is
 needed. `test_app.py` covers grammar/game logic; `test_backfill.py` adds the mod-gate matrix,
-cooldown bounds/TTL semantics, PII-free-log regression, flag fail-closed and `_entry_wiring`.
+cooldown bounds/TTL semantics, PII-free-log regression and `_entry_wiring`.
 
 ## Activation
 

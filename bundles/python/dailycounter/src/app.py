@@ -30,7 +30,8 @@ filter). Logging is PII-free: op names, counts, exception type names -- never us
 `kv` failures are logged (`dailycounter.kv_failure`, exception type only) AND answered
 with an explicit error reply; corrupt stored data is treated as a failure, never reset.
 
-Gated behind the PostHog flag ``waddles.command-dailycounter``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -40,10 +41,8 @@ import re
 from typing import Any, cast
 
 from waddle_sdk import clock, kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-dailycounter"
 MANAGEMENT_COMMAND = "!dailycounter"
 REGISTRY_KEY = "dailycounter.registry"
 VALUE_KEY_PREFIX = "dailycounter.value."
@@ -290,8 +289,8 @@ async def _handle_counter(name: str, args: list[str], event: PlatformEvent) -> s
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!dailycounter` and registered counters.
 
-    Returns `None` for non-chat payloads, text without a leading `!` (zero kv cost), a
-    disabled flag, and `!tokens` that aren't registered counters. `kv` failures are logged
+    Returns `None` for non-chat payloads, text without a leading `!` (zero kv cost), and `!tokens`
+    that aren't registered counters. `kv` failures are logged
     and answered with an explicit error reply -- never a silent default.
     """
     text = event.payload.get("text")
@@ -299,8 +298,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     stripped = text.strip()
     if not stripped.startswith("!"):
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     parts = stripped.split()

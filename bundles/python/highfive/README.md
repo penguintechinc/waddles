@@ -37,17 +37,13 @@ Usage: !highfive [target] -- target must look like a plausible username
 
 | id | Why |
 |---|---|
-| `flags.read` | Reads the `waddles.command-highfive` flag that gates the command. |
 
 Stateless: no `storage.kv`, no `db`, no egress (`egress: []`, `data.tables: []`). A test fails if
 either `kv` or `db` host import is ever touched.
 
-## Feature flag
+## Gating
 
-`waddles.command-highfive`, default **OFF** (`critical-rules.md` Feature Flags & License Tiers).
-Order in `transform()`: cheap `!highfive` head match -> flag check -> classification, so
-unrelated chat never costs a flag lookup. Flag off, or a host with no `flags` import, => no reply
-(fails closed to the OFF default, never crashes).
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

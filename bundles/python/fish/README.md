@@ -39,7 +39,6 @@ no `is_mod`/`is_broadcaster` on the event (Discord today) `set cooldown` is deni
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-fish` |
 | `storage.kv` | persists per-community fishing state and tallies |
 
 ## State (kv, community-scoped only)
@@ -70,11 +69,9 @@ Also out of scope for this kv-only v1 (see the much larger C#/DB-backed port spe
 `docs/superpowers/specs/2026-09-28-superpenguin-fish-game-port.md`): rod/line "snap" equipment
 loss, a shop/economy, and tournaments.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-fish`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!fish` command-name match and
-before the real grammar parse.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 

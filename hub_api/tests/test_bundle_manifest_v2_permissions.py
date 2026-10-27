@@ -446,36 +446,45 @@ def test_core_kv_manifests_parse_to_structured_storage_kv_declaration() -> None:
     assert structured >= 30
 
 
+#: App bundles still carrying a flag guard (mirrors scripts/ci/tests/test_bundle_badge_gate.py's
+#: FLAG_GUARD_ALLOWLIST). Exact-match enforced -- the set can only shrink.
+_FLAG_GUARDED_APP_BUNDLES = frozenset({"secret"})
+
+
 @pytest.mark.parametrize(
     "name",
     ["chat", "choose", "eightball", "poll", "roll", "slap", "wave", "hug", "boop", "highfive"],
 )
-def test_flag_gated_python_bundles_declare_flags_read(name: str) -> None:
-    """Bundles calling `feature_enabled` must declare `flags.read` (host gate fails closed)."""
+def test_app_command_bundles_are_flag_free_and_do_not_declare_flags_read(name: str) -> None:
+    """App command bundles are activation-gated only: no flag guard, no `flags.read` grant."""
     root = pathlib.Path(__file__).resolve().parents[2] / "bundles" / "python" / name
-    assert "feature_enabled(" in (root / "src" / "app.py").read_text()
+    src = (root / "src" / "app.py").read_text()
+    assert "feature_enabled" not in src and "FLAG_KEY" not in src, f"{name}: flag guard present"
     for fname in ("bundle.yaml", "hub-manifest.yaml"):
         raw = yaml.safe_load((root / fname).read_text())
-        ids = [e["id"] for e in raw["permissions"]]
-        assert "flags.read" in ids, f"{root / fname}: missing flags.read"
+        ids = [e["id"] for e in raw.get("permissions") or []]
+        assert "flags.read" not in ids, f"{root / fname}: unused flags.read (least privilege)"
 
 
 def test_flag_reading_core_bundles_declare_flags_read() -> None:
-    """Every core bundle calling `feature_enabled` (with permissions) declares flags.read."""
-    examined = 0
+    """Bundles still calling `feature_enabled` declare `flags.read`; only the allowlist does."""
+    scanned = 0
+    readers: set[str] = set()
     missing = []
     for path in _core_hub_manifests():
         raw = yaml.safe_load(path.read_text())
         if not raw.get("permissions"):
             continue
+        scanned += 1
         src = path.parent / "src"
         if not any("await feature_enabled(" in f.read_text() for f in src.rglob("*.py")):
             continue
-        examined += 1
+        readers.add(path.parent.name)
         ids = {e["id"] for e in raw["permissions"] if isinstance(e, dict)}
         if "flags.read" not in ids:
             missing.append(str(path))
-    assert examined >= 30, f"only {examined} flag-reading bundles examined"
+    assert scanned >= 30, f"only {scanned} core bundles scanned"
+    assert readers == _FLAG_GUARDED_APP_BUNDLES, f"flag-reading bundles changed: {sorted(readers)}"
     assert missing == []
 
 

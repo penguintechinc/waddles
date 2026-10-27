@@ -20,6 +20,7 @@ from waddle_sdk.command import CommandSpec, ParsedCommand, parse_command
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+import app
 from app import (
     _NOTHING_SPUN_YET,
     _USAGE,
@@ -241,12 +242,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
         occurred_at="",
     )
     assert _run(transform(event)) is None
-
-
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _FakeHost()
-    _install(monkeypatch, host, flag_enabled=False)
-    assert _run(transform(_sample_event("!slots"))) is None
 
 
 def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:
@@ -724,7 +719,7 @@ def test_pseudonym_differs_per_actor() -> None:
 
 def test_roll_reels_uses_weighted_choice_with_replacement(monkeypatch: pytest.MonkeyPatch) -> None:
     fish = SlotSymbol("Bell", "B", 25, "bells")
-    monkeypatch.setattr("random.choices", lambda population, weights, k: [fish, fish, fish])
+    monkeypatch.setattr(app._RNG, "choices", lambda population, weights, k: [fish, fish, fish])
 
     reels = _roll_reels()
     assert reels == (fish, fish, fish)

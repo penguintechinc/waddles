@@ -26,7 +26,7 @@ from services.provider_connections.twitch import TwitchAdapter
 from tests.provider_connections.conftest import FakeClock, admin_headers
 from tests.provider_connections.fake_provider import FakeChatAdapter
 from tests.provider_connections.fake_twitch import FakeTwitch
-from tests.provider_connections.support import raw_rows
+from tests.provider_connections.support import open_row, raw_rows
 
 HUB_API = Path(__file__).resolve().parents[2]
 FRAMEWORK_MODULES = [
@@ -137,7 +137,7 @@ class TestSecondProviderThroughTheService:
         await _create_room(two_provider_service, pc_db)
         row = (await raw_rows(pc_db, "platform_connections"))[0]
         assert "tok-room-1" not in row["access_token"]
-        assert PlatformKeyVault().open(row["access_token"]) == "tok-room-1"
+        assert open_row(row) == "tok-room-1"
         assert "tok-room-1" not in pc_db.db_path.read_bytes().decode("latin-1")
 
     async def test_providers_do_not_collide_or_leak_into_each_others_lists(

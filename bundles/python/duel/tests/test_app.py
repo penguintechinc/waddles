@@ -17,6 +17,7 @@ import pytest
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+import app
 from app import (
     _NO_RECORD_YET,
     _USAGE,
@@ -184,8 +185,8 @@ def _sample_envelope(
 
 def _force_winner(monkeypatch: pytest.MonkeyPatch, *, challenger_wins: bool) -> None:
     """Seed the outcome RNG deterministically -- see `app._handle_challenge`'s own coin flip."""
-    monkeypatch.setattr("random.random", lambda: 0.0 if challenger_wins else 0.99)
-    monkeypatch.setattr("random.choice", lambda seq: seq[0])
+    monkeypatch.setattr(app._RNG, "random", lambda: 0.0 if challenger_wins else 0.99)
+    monkeypatch.setattr(app._RNG, "choice", lambda seq: seq[0])
 
 
 # -- transform() parsing -------------------------------------------------------
@@ -248,12 +249,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
         occurred_at="",
     )
     assert _run(transform(event)) is None
-
-
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _FakeHost()
-    _install(monkeypatch, host, flag_enabled=False)
-    assert _run(transform(_sample_event("!duel bob"))) is None
 
 
 def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:

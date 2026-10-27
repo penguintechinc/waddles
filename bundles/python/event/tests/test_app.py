@@ -220,11 +220,6 @@ def test_non_chat_payload_ignored(host: _Host) -> None:
     assert _run(transform(ev)) is None
 
 
-def test_flag_off_suppresses(host: _Host) -> None:
-    host.flag_enabled = False
-    assert _run(transform(_event("!event list"))) is None
-
-
 def test_none_community_is_valid_sentinel(host: _Host) -> None:
     assert "Created event #1" in _say(host, "!event create a b", mod=True, community=None)
     assert _key("event.index", None) in host.kv.store

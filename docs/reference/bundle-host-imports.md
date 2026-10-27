@@ -70,6 +70,33 @@ penguin-libs grows one.
 | Caps | catalog: 5 per call, 5 per user per rolling 24h, 50 per app per community per rolling 24h (`reputation.community.write`). Both daily caps are enforced DURABLY in the store txn from the audit ledger (a restart or second replica cannot reset or multiply them); the gate's in-memory copy is only a fast pre-filter. A zero delta is `invalid_args` |
 | Identity | targets are `community_members.user_uuid`, NULL until hub-api's IdentityService assigns it (#429). NULL means nobody is addressable: the capability is fail-closed until then |
 
+## `ai` (`ai.generate`): guarded self-hosted text generation
+
+> **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in any environment until issue #858 is resolved.** AI is gated by the default-OFF flag `waddles.bundle-ai-capability` plus the `ai.generate` 'dangerous' consent-ack. Enterprise-tier enforcement is NOT YET implemented in code (tracked in issue #858); do not rely on it.
+
+| Item | Value |
+|---|---|
+| Status | **PENDING adversarial security review** -- `world stage-next` only; `svc_process` (process-stage) only, the action stage has no handler |
+| WIT | `interface ai`: `generate(prompt: string, opts: options{max-tokens: option<u32>, temperature: option<f32>, json: bool}) -> result<string, error>`; error `variant { denied(string), too-many-tokens(u32), content-filtered, invalid(string), unavailable(string), backend(string) }` |
+| Python SDK | `waddle_sdk.ai.generate(prompt, *, max_tokens=None, temperature=None, json=False)` (async); raises `DeniedError(code)`, `TooManyTokensError(bound)`, `ContentFilteredError`, `InvalidAiArgError`, `UnavailableError`, `BackendError`. Test double: `waddle_sdk.testing.install_fake_ai_host` |
+| Permission | `ai.generate` -- Dangerous, 10 calls / 60 s (`Quota::CallsPerWindow`), consent-ack required; the stage requires flag `waddles.bundle-ai-capability` (default OFF). **Enterprise-tier enforcement is NOT YET implemented in code (issue #858); do not rely on it** |
+| Wire | like reputation/economy/identity: `capability = db`, op `ai.generate`; args are exactly `{prompt, max_tokens, temperature, json}` (any other key is `invalid_args`); result `{"text": "<completion>"}`; refusal codes `not_granted`/`rate_limited`/`quota_exceeded`/`instance_denied` (gate), `contains_pii`, `too_many_tokens` (bare decimal bound), `content_filtered`, `invalid_args`, `feature_disabled`/`not_implemented`/`unavailable`, `backend` |
+| Integration target | **Raw in-cluster Ollama (`/api/chat`), guards implemented Rust-side in `core/svc_process/src/ai.rs`.** No service-authenticated guard-applying WaddleAI endpoint exists to route through (hub-api `/ai/completions` needs an interactive user JWT and can route BYOK traffic to third parties). Config: `WADDLEAI_BASE_URL` (default `http://ollama:11434`), `WADDLEAI_MODEL` (`gemma4:e2b`), `BUNDLE_AI_JSON_MODEL` (`gemma4:e4b`, selected by `json: true`), `BUNDLE_AI_TIMEOUT_MS` (8000, clamped to 100..=10000) |
+
+### Guards (all in `core/svc_process/src/ai.rs` + `capabilities.rs::handle_ai`)
+
+| Guard | Mechanism | Tests |
+|---|---|---|
+| **Authorize first** | The gate (`ai.generate`: grant, 10/60 s quota, instance policy) runs after argument SHAPE parsing and BEFORE the flag, any content check or any model call: an ungranted call is `not_granted` whatever its prompt, and never consults the flag or the backend | `capabilities_ai_tests.rs::the_gate_authorizes_first_...`, `the_rate_quota_is_ten_calls_per_window` |
+| **PII is REJECTED, never redacted** (spec SS9; the reserved `Denied::ContainsPii`, `contains_pii`) | `ai::prepare` scans the SAME normalized text it sends (zero-width/control characters stripped, full-width ASCII and non-ASCII digits folded) for email, phone, SSN, Luhn-valid card, secret/token shapes (`sk-`, `wa-`, `Bearer`, JWT, AWS/GitHub/Slack, PEM), raw platform mentions (`<@123>`), raw `@handle`, IPv4. Ports `flask_core.ai_guard.redact_pii`'s patterns plus the identity categories. A `{user:<uuid>}` placeholder is exempt (the sanctioned token). The refusal names a closed category, never prompt text. Best-effort pattern defense: the real control is upstream tokenization | `ai.rs` tests (`pii_categories_are_each_rejected`, `pii_evasions_are_defeated_by_normalization`), `capabilities_ai_tests.rs::pii_bearing_prompts_are_rejected_before_the_model_is_reached`, `tests/ai_generate_e2e.rs` |
+| **Prompt injection** | Fixed host-authored system preamble + `UNTRUSTED_DATA_NOTICE` (ported from `flask_core.ai_guard`); the guest text goes in a `<user_input>` block with embedded boundary tags and chat-template control tokens defanged. The guest cannot name a model, system prompt, endpoint or tool. The completion is never interpreted: a tool call is refused (`content_filtered`); text is stripped of markdown-image beacons, active HTML, mass/role/user mentions and invisible characters | `ai.rs::injected_delimiters_and_control_tokens_are_defanged`, `completion_is_sanitized_and_hard_capped`, `capabilities_ai_tests.rs::a_completion_is_never_a_command_it_is_inert_text` |
+| **Token bounds** | Prompt <= 2000 tokens (conservative 3-bytes/token estimate; a raw-byte pre-cap runs before any regex), `max_tokens` <= 512 (`too_many_tokens`, the bound as the message), model context pinned (`num_ctx` 4096), completion hard-capped at 2048 chars, response body capped at 256 KiB | `capabilities_ai_tests.rs::token_bounds_are_enforced_before_the_model_is_reached`, `ai.rs::empty_and_oversized_prompts_...` |
+| **Deadline, fail loud** | The model call is wrapped in `tokio::time::timeout(min(BUNDLE_AI_TIMEOUT_MS, invocation deadline remaining - 150 ms))`; too little remaining refuses without calling; expiry is `unavailable` (never a hang, never a canned answer). No redirects, no proxy, rustls | `capabilities_ai_tests.rs::a_hung_model_fails_loud_within_the_invocation_deadline`, `real_backend::a_hung_ollama_fails_loud_at_the_ceiling_in_real_time` |
+| **Self-hosted only** | `ai::validate_base_url` refuses anything but http(s) to a single-label / `*.svc` / `*.cluster.local` / `localhost` host or a private/loopback/ULA IP literal; a bad URL leaves the capability `not_implemented` (loud startup error), never a fallback | `ai.rs::base_url_validation_enforces_self_hosted_only` |
+| **PII-free telemetry** | Only the operator-configured model name, a closed outcome vocabulary and token counts are labels; prompt/completion text is never logged. OTel: `waddles_bundle_ai_generate_total`, `waddles_bundle_ai_generate_duration_seconds`, `waddles_bundle_ai_tokens_total`; host-call timing as `capability="ai"` | `tests/ai_generate_e2e.rs` (scrape read-back, counts asserted) |
+
+Not enforced anywhere: the Enterprise tier. `gate_scope` carries a fixed `TenantTier::Free` and the gate does not read it, and hub-api does NOT refuse to grant `ai.generate` below Enterprise. AI is gated by the default-OFF flag `waddles.bundle-ai-capability` plus the `ai.generate` 'dangerous' consent-ack. Enterprise-tier enforcement is NOT YET implemented in code (tracked in issue #858); do not rely on it.
+
 ## `economy` (#714): the shared community currency
 
 Cloned from the reputation recipe above. `stage-next` only.
@@ -205,3 +232,28 @@ stop; there is no code path that substitutes the tokenized pseudonym for a UUID.
 | Scope | multi-tenant (changelog-consumer) path only; the legacy env-only single-bundle path runs at the `(0, 0)` fail-closed scope where every community-scoped capability refuses `invalid_args` |
 | Wire | like reputation/economy: `capability = db`, ops `identity.resolve_actor` / `identity.resolve_mention`; refusal codes `not_linked`, `not_a_member`, `not_found`, `ambiguous`, `invalid_args`, `unavailable`, `backend` |
 | Placeholder pseudonyms | `core/svc_process/src/pii_tokenize.rs` mints a `handle:<name>` placeholder pseudonym for every free-text `@handle` (it needs an opaque token for the text). That row is a token, not an identity: hub-api's handle matcher (`identity_resolution_service._HANDLE_CANDIDATES_SQL`) excludes `platform_user_id LIKE 'handle:%'`, otherwise every mentioned Twitch `@bob` would turn into an `ambiguous` pair next to the real chatter's row. The placeholder still detokenizes (`ResolveDisplayNames`). The tokenizer's scanner also no longer reads the digits inside a Discord `<@123>` as a second `@123` handle mention |
+
+
+## Numeric scope: `world stage-v2`
+
+`tenant-id` (s64, >= 1) and `community-id` (s32, 0 = tenant-wide) are the AUTHORITATIVE scope keys; the `tenant` slug and
+`community` name are display-only (never a lookup, cache, routing or authz key). A WIT record's layout is baked into every
+compiled component, so the ids could not be added to the frozen v1 `types.stage-envelope` / `context.bundle-context`. They live
+in parallel interfaces instead, and the executor links and serves both families on one registry:
+
+| | v1 (`stage`, `stage-next`) | v2 (`stage-v2`) |
+|---|---|---|
+| context import | `context.get-context` (strings) | `context-v2.get-context` (+ `tenant-id`, `community-id`) |
+| action export | `action-stage.dispatch(types.stage-envelope)` | `action-stage-v2.dispatch(types-v2.stage-envelope)` |
+| `process-stage`, every other import/export | shared, unchanged | shared, unchanged |
+| selected by | no `action-stage-v2` export (default) | the component exports `waddle:bundle/action-stage-v2@1.0.0` |
+
+Fail-closed behaviour (host side, `core/bundle_executor`): `context-v2.get-context` returns the empty context with
+`tenant-id == 0` (a bundle MUST treat that as "no scope" and refuse to act) when the stage supplied no valid ids; an
+`action-stage-v2` invoke frame without valid ids (`tenant_id >= 1`, `community_id >= 0`) is rejected `MALFORMED_FRAME` and the
+guest is never called. A bundle moves to v2 only when rebuilt against `world stage-v2`; extend `stage-next` and `stage-v2`
+together when adding a capability.
+
+Integrity: the spine envelope's `binding.mac` covers both ids from schema v3 (`penguin_spine::compute_binding_mac_v3`), so
+mutating either id invalidates the MAC. Schema v2 envelopes (no ids) still verify under the original formula and may not carry
+ids.

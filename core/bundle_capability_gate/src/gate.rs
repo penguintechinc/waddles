@@ -57,6 +57,16 @@ impl CapabilityGate {
         }
     }
 
+    /// Loads this scope's grant set into the cache if it is cold. Call from
+    /// the async host-call entry before the sync [`Self::authorize`] so a
+    /// valid-but-never-loaded grant is not denied as `not_granted`; a
+    /// genuinely absent grant still fails closed in `authorize`.
+    pub async fn ensure_grants_loaded(&self, scope: &InvokeScope) {
+        self.snapshot
+            .ensure_loaded(&GrantScopeKey::from_scope(scope))
+            .await;
+    }
+
     fn deny(&self, scope: &InvokeScope, permission: &PermissionId, reason: Denied) -> Denied {
         audit::record_denied(scope, permission, reason);
         reason
@@ -499,6 +509,43 @@ mod tests {
             Arc::new(InMemoryQuotaLedger::new()),
             instance_policy,
         )
+    }
+
+    /// Regression (cold grant cache): a grant present in the loader but never
+    /// refreshed is denied by bare `authorize()` today and authorized once
+    /// `ensure_grants_loaded` runs; an absent grant still denies afterward.
+    #[tokio::test]
+    async fn cold_key_in_loader_authorizes_after_ensure_loaded_and_absent_still_denies() {
+        let loader = Arc::new(InMemoryGrantLoader::new());
+        loader.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[("storage.kv", serde_json::json!({}))]),
+        );
+        let gate = gate_with(Arc::new(GrantCache::new(loader)));
+        let kv = || {
+            gate.authorize(
+                &scope(),
+                PermissionId::StorageKv,
+                ResourceRef::AppScoped(AppScopedResource::KvState),
+            )
+        };
+
+        assert_eq!(kv().unwrap_err(), Denied::NotGranted, "cold, pre-load");
+        gate.ensure_grants_loaded(&scope()).await;
+        assert!(kv().is_ok(), "valid grant must authorize on first use");
+
+        let empty = gate_with(Arc::new(GrantCache::new(Arc::new(
+            InMemoryGrantLoader::new(),
+        ))));
+        empty.ensure_grants_loaded(&scope()).await;
+        let err = empty
+            .authorize(
+                &scope(),
+                PermissionId::StorageKv,
+                ResourceRef::AppScoped(AppScopedResource::KvState),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::NotGranted, "absent grant stays denied");
     }
 
     #[test]

@@ -58,7 +58,6 @@ bot>    Poll 5 closed: Best snack?
 | Id | Why |
 |---|---|
 | `storage.kv` | The poll id counter, the id -> row index, per-option vote tallies and the one-vote-per-voter markers. |
-| `flags.read` | Reads the `waddles.command-poll` PostHog feature flag via `feature_enabled` to gate the command. |
 
 The `db` capability is granted by the manifest's `data.tables: [poll_records]`. No egress.
 
@@ -92,10 +91,9 @@ Scoping: rows and `kv` are per-community. A tenant-wide activation (`community: 
 only shape today) is scoped under the `"0"` sentinel the same way `lurk` and `community_kv` do; an
 empty-string community is a caller bug and raises.
 
-## Feature flag
+## Gating
 
-`waddles.command-poll`, **default OFF**. Registered in `bundles/core-bundles.yaml`, but the legacy
-`bot_process._FEATURE_MODULES` path is untouched -- cut-over and activation are a separate change.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

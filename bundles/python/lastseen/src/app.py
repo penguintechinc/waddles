@@ -6,20 +6,17 @@ as "no activity recorded"). `!lastseen` reports the caller's previous stamp; `!l
 <mention>` reports the mentioned user's. The command message itself is stamped AFTER the
 read, so `!lastseen` never reports "just now" for the caller.
 
-**Identity is by UUID, never by free-text username (PII rule).** The stable platform user
-id on the event (`payload.user_id` / `author_id`) is hashed with the platform into a
-UUIDv5 (same namespace as `iq`); the raw id is discarded and never stored, logged or
-echoed. Supported lookup targets are:
+**Identity is the pipeline's `{user:<id>}` PII token, never a name or a locally derived id.**
+`pii_tokenize` puts the token in `event.actor` and substitutes it for @mentions; this bundle
+parses the bare id out and uses it as the kv key, and EMITS `{user:<id>}` in replies so the
+egress detokenizer renders the display name. No uuid5 / platform-id hashing. Lookup targets:
 
-* self (no argument) -- the event's own platform user id;
-* a Discord mention `<@id>` / `<@!id>` (Discord only) -- the id inside the mention;
-* a literal UUID (as printed by this bundle's replies).
+* self (no argument) -- the token in `event.actor`;
+* an @mention -- already a `{user:<id>}` token by the time the bundle sees it.
 
-**Known limitation (documented, not hidden):** resolving a free-text name (Twitch `@name`,
-a bare handle) to an identity needs the tokenization pipeline (#429), which has not
-landed. Such targets get an explicit "can't look up by name yet" reply -- never a hashed
-guess and never a silent default. Replies identify other users by the first 8 hex chars
-of their UUID, not a name.
+A non-token actor (tokenization off, DM without actor) is not tracked and gets an explicit
+"couldn't identify you" reply; a non-token target gets the "mention them" reply -- never a
+hashed guess.
 
 kv keys use `.` never `:` (gh-631); the host scopes them per `(tenant, community,
 app_id)`, so activity never leaks between communities. kv cost: one `set` per identifiable
@@ -30,35 +27,47 @@ the command path is logged (`lastseen.kv_failure`) AND answered explicitly; on t
 recording path (no reply is possible) it is logged at ERROR and the message is otherwise
 unaffected -- never swallowed silently.
 
-Gated behind the PostHog flag ``waddles.command-lastseen``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
 
 import re
-import uuid
 from typing import Any, cast
 
 from waddle_sdk import clock, kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-lastseen"
 COMMAND = "!lastseen"
 KEY_PREFIX = "lastseen.user."
 
 #: Stamps expire after 90 days -- bounds storage; unseen-for-longer reads as no record.
 TTL_SECONDS = 90 * 24 * 60 * 60
 
-_DISCORD_MENTION_RE = re.compile(r"^<@!?(\d{1,32})>$")
-_PLATFORM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_ACTOR_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "https://waddles.penguintech.io/identity")
+_USER_TOKEN_RE = re.compile(r"^\{user:([A-Za-z0-9_:.-]+)\}$")
+
+
+def _parse_user_token(raw: object) -> str | None:
+    """Extract the bare id from a `{user:<id>}` PII token, or `None` if `raw` isn't one.
+
+    Grammar matches `core/egress_detokenizer`'s `{user:` + token chars (alphanumeric and
+    `-_:.`) + `}`. The pipeline's `pii_tokenize` pass puts this token in `event.actor` and in
+    any @mention; hub-api resolves it, so the bundle never derives its own identity.
+    """
+    if not isinstance(raw, str):
+        return None
+    match = _USER_TOKEN_RE.match(raw.strip())
+    return match.group(1) if match else None
+
+
+def _user_token(user_id: str) -> str:
+    """Render a bare id as the `{user:<id>}` placeholder the egress detokenizer resolves."""
+    return f"{{user:{user_id}}}"
+
 
 _USAGE = "Usage: !lastseen [@mention]"
-_NO_NAME_LOOKUP = (
-    "I can't look users up by name yet (needs identity tokenization, #429) - "
-    "mention them with a Discord @mention or give their UUID."
-)
+_NO_NAME_LOOKUP = "I couldn't identify that user - mention them (e.g. @name)."
 _NO_SELF_ID = "I couldn't identify you on this platform, so I can't track or look up activity."
 
 
@@ -83,41 +92,10 @@ async def _kv_set(key: str, value: bytes) -> None:
         raise _KvFailure("kv.set failed") from exc
 
 
-def _user_uuid(platform: str, platform_user_id: str) -> str:
-    """Pseudonymous UUIDv5 for a platform user id; the raw id is never kept."""
-    return str(uuid.uuid5(_ACTOR_NAMESPACE, f"{platform}:{platform_user_id}"))
-
-
-def _actor_uuid(event: PlatformEvent) -> str | None:
-    """UUID of the event's own author from its platform user id, or `None` if absent/invalid."""
-    for field in ("user_id", "author_id"):
-        value = event.payload.get(field)
-        if isinstance(value, str) and _PLATFORM_ID_RE.match(value):
-            return _user_uuid(event.platform, value)
-    return None
-
-
-def _resolve_target(raw: str, platform: str) -> str | None:
-    """Resolve a typed target to a UUID: Discord mention (Discord only) or literal UUID.
-
-    Free-text names are NOT resolved (see module docstring) -- returns `None`.
-    """
-    token = raw.strip()
-    mention = _DISCORD_MENTION_RE.match(token)
-    if mention and platform == "discord":
-        return _user_uuid("discord", mention.group(1))
-    try:
-        return str(uuid.UUID(token))
-    except ValueError:
-        # Not a UUID (free-text name or malformed): the caller answers with an explicit
-        # "can't look up by name" reply. Platform only -- the typed token is never logged.
-        log.debug("lastseen.target_not_uuid", platform=platform)
-        return None
-
-
 def _key(user: str) -> str:
     """The `kv` key one user's last-seen stamp lives under."""
-    return f"{KEY_PREFIX}{user}"
+    # kv keys can't contain ':' (host-reserved, gh-631); handle-style tokens carry them.
+    return f"{KEY_PREFIX}{user.replace(':', '.')}"
 
 
 def _event_time(event: PlatformEvent) -> str:
@@ -162,11 +140,11 @@ async def _answer(args: list[str], event: PlatformEvent, actor: str | None) -> s
     if len(args) > 1:
         return _USAGE
     if args:
-        target = _resolve_target(args[0], event.platform)
+        target = _parse_user_token(args[0])
         if target is None:
             log.info("lastseen.name_lookup_unsupported", platform=event.platform)
             return _NO_NAME_LOOKUP
-        who = f"user {target[:8]}"
+        who = f"user {_user_token(target)}"
     else:
         if actor is None:
             log.info("lastseen.no_self_identity", platform=event.platform)
@@ -177,24 +155,22 @@ async def _answer(args: list[str], event: PlatformEvent, actor: str | None) -> s
     if stamp is None:
         return f"No activity recorded for {who} yet."
     if args:
-        return f"User {target[:8]} was last seen {stamp}."
+        return f"User {_user_token(target)} was last seen {stamp}."
     return f"You were last seen {stamp}."
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: stamp activity and answer `!lastseen`.
 
-    Returns `None` for non-chat payloads, a disabled flag, and every non-command message
+    Returns `None` for non-chat payloads, and every non-command message
     (which is still stamped as a side effect). Command-path `kv` failures are logged and
     answered explicitly; passive-stamp failures are logged at ERROR (no reply possible).
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
         return None
-    if not await feature_enabled(FLAG_KEY, default=False):
-        return None
 
-    actor = _actor_uuid(event)
+    actor = _parse_user_token(event.actor)
     parts = text.strip().split()
     is_command = bool(parts) and parts[0].lower() == COMMAND
 

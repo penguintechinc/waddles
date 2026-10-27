@@ -196,12 +196,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring(fake_host: _FakeHost) 
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_every_reply(fake_host: _FakeHost) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_sample_event("!trivia start"))) is None
-    assert _run(transform(_sample_event("!trivia answer Paris"))) is None
-
-
 # ---------------------------------------------------------------------------
 # start: poses a question, never overwrites an in-progress round
 # ---------------------------------------------------------------------------
@@ -232,7 +226,7 @@ def test_start_again_does_not_overwrite_the_active_question(fake_host: _FakeHost
 def test_correct_answer_wins_increments_score_and_ends_round(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.random.choice", lambda seq: seq[0])
+    monkeypatch.setattr("app._RNG.choice", lambda seq: seq[0])
     _run(dispatch(_envelope("start"), {}, http_client=None))
 
     result = _run(
@@ -248,7 +242,7 @@ def test_correct_answer_wins_increments_score_and_ends_round(
 def test_correct_answer_is_case_and_whitespace_insensitive(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.random.choice", lambda seq: seq[0])
+    monkeypatch.setattr("app._RNG.choice", lambda seq: seq[0])
     _run(dispatch(_envelope("start"), {}, http_client=None))
     result = _run(
         dispatch(_envelope("answer", actor="viewer-1", arg="  paRIS  "), {}, http_client=None)
@@ -260,7 +254,7 @@ def test_correct_answer_is_case_and_whitespace_insensitive(
 def test_incorrect_answer_does_not_end_the_round_or_score(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.random.choice", lambda seq: seq[0])
+    monkeypatch.setattr("app._RNG.choice", lambda seq: seq[0])
     _run(dispatch(_envelope("start"), {}, http_client=None))
 
     result = _run(
@@ -275,7 +269,7 @@ def test_incorrect_answer_does_not_end_the_round_or_score(
 def test_second_correct_answerer_loses_to_the_first(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.random.choice", lambda seq: seq[0])
+    monkeypatch.setattr("app._RNG.choice", lambda seq: seq[0])
     _run(dispatch(_envelope("start"), {}, http_client=None))
     _run(dispatch(_envelope("answer", actor="viewer-1", arg="Paris"), {}, http_client=None))
 
@@ -317,7 +311,7 @@ def test_score_before_any_correct_answer(fake_host: _FakeHost) -> None:
 def test_score_reports_own_score_and_top_scorers(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.random.choice", lambda seq: seq[0])
+    monkeypatch.setattr("app._RNG.choice", lambda seq: seq[0])
     _run(dispatch(_envelope("start"), {}, http_client=None))
     _run(dispatch(_envelope("answer", actor="viewer-1", arg="Paris"), {}, http_client=None))
 
@@ -332,7 +326,7 @@ def test_score_reports_own_score_and_top_scorers(
 def test_different_communities_never_share_trivia_state(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.random.choice", lambda seq: seq[0])
+    monkeypatch.setattr("app._RNG.choice", lambda seq: seq[0])
     _run(dispatch(_envelope("start", community="comm-1"), {}, http_client=None))
     _run(dispatch(_envelope("start", community="comm-2"), {}, http_client=None))
 
@@ -499,7 +493,7 @@ def test_active_question_missing_required_fields_is_treated_as_no_active_game(
 def test_winning_twice_does_not_duplicate_the_score_registry(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.random.choice", lambda seq: seq[0])
+    monkeypatch.setattr("app._RNG.choice", lambda seq: seq[0])
     _run(dispatch(_envelope("start"), {}, http_client=None))
     _run(dispatch(_envelope("answer", actor="viewer-1", arg="Paris"), {}, http_client=None))
     _run(dispatch(_envelope("start"), {}, http_client=None))

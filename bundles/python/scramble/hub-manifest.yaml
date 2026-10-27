@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.scramble
 name: Scramble Bundle (Python)
-version: 1.0.0
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -36,6 +36,8 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the in-progress per-community scramble round (word, scrambled form, attempt count)"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-scramble feature flag"
+  - id: "chat.send:discord"
+    justification: "scramble replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "scramble replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 routes_to: []

@@ -27,6 +27,8 @@ export const apiClient: AxiosInstance = axios.create({
   },
 });
 
+const REFRESH_URL = '/api/v1/auth/refresh';
+
 apiClient.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
@@ -35,11 +37,17 @@ apiClient.interceptors.response.use(
     // Session expired -- hub-api rotates the session cookie on a successful
     // /refresh; the browser applies the new Set-Cookie automatically, so
     // the retried request needs nothing attached by hand.
-    if (error.response?.status === 401 && originalRequest && !originalRequest._retry) {
+    //
+    // The refresh call itself is never refreshed: a 401 from /auth/refresh means
+    // the refresh cookie is dead, so it rejects straight to the catch below of
+    // the request that triggered it (-> /login) instead of re-entering here and
+    // refreshing without bound.
+    const isRefreshCall = originalRequest?.url === REFRESH_URL;
+    if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !isRefreshCall) {
       originalRequest._retry = true;
 
       try {
-        const refreshResponse = await apiClient.post<{ success: boolean }>('/api/v1/auth/refresh');
+        const refreshResponse = await apiClient.post<{ success: boolean }>(REFRESH_URL);
         if (refreshResponse.data.success) {
           return apiClient(originalRequest);
         }

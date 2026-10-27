@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-guess"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!guess` -> a per-community number-guessing game (!guess start, !guess <n>, !guess giveup). Uses waddle_sdk.community_kv."
 requires-python = ">=3.13"
 dependencies = []

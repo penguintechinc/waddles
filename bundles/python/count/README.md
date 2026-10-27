@@ -6,7 +6,7 @@ exists, `!die` is a live command (read / `add` / `sub` / `set`). First-party
 
 | | |
 |---|---|
-| Flag | `waddles.command-count` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped (names + integer values) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -38,7 +38,6 @@ A `!`-token that is not `!count` and not a registered counter returns `None` (no
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-count` |
 | `storage.kv` | persists per-community named counters and their registry |
 
 ## State

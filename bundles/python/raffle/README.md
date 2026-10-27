@@ -94,17 +94,14 @@ bot>    🎉 the winner is entrant 3f2a9c1e! DM a mod to claim your prize.
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists per-community raffle entrants and state. |
-| `flags.read` | Gates the command behind its `waddles.command-raffle` feature flag. |
 
 No `db` (`data.tables: []`), no egress. Mod gate: `open`/`close`/`draw` require a real `is_mod` or
 `is_broadcaster` `True`; **absent** badge fields (e.g. the Discord normalizer today) are **denied**
 (fail closed) with zero `kv` access. `enter`/`list` are open to anyone.
 
-## Feature flag
+## Gating
 
-`waddles.command-raffle`, **default OFF** (requested with `default=False`, so a flag outage or a
-missing `wit_world` keeps both `!raffle` and `!enter` off). Checked after the cheap command-head
-match and before grammar resolution; while off nothing is parsed, stored or logged.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

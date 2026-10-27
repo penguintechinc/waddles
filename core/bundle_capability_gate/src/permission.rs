@@ -577,7 +577,7 @@ impl PermissionFamily {
                     max_calls: 10,
                     window: Duration::from_secs(60),
                 },
-                notes: "2k prompt / 512 completion tokens; Enterprise-gated at marketplace time (spec SS9), not here",
+                notes: "2k prompt / 512 completion tokens; Enterprise enforcement NOT YET implemented (issue #858)",
             },
             Self::UsersProfileRead => CatalogEntry {
                 family: *self,

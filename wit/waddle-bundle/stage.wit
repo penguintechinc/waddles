@@ -571,6 +571,77 @@ interface identity {
   resolve-mention: func(token: string) -> result<string, error>;
 }
 
+/// Host-mediated text generation against the platform's SELF-HOSTED model
+/// (never a vendor SDK or third-party endpoint inside or reachable from the
+/// bundle). Additive, `stage-next`-only: `world stage` (1.0.0) never imports
+/// this. Spec `docs/superpowers/specs/2026-09-28-bundle-permissions-and-
+/// capability-gate.md` SS9.
+///
+/// Capability: `ai.generate` (`bundle_capability_gate::permission::
+/// PermissionFamily::AiGenerate`) -- a DANGEROUS permission (consent-ack
+/// required), rate limited to 10 calls per 60 s, gated host-side like every
+/// other import; a bundle that never declared it gets `denied("not_granted")`.
+///
+/// **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in any environment until issue #858 is resolved.**
+/// AI is gated by the default-OFF flag `waddles.bundle-ai-capability` plus the `ai.generate` 'dangerous' consent-ack. Enterprise-tier enforcement is NOT YET implemented in code (tracked in issue #858); do not rely on it.
+///
+/// **The host owns the prompt, the bundle owns only the words.** The bundle
+/// supplies ONE free-text `prompt`; the host (a) refuses an over-bound prompt
+/// (`too-many-tokens`, 2000 prompt / 512 completion tokens), (b) REJECTS -- never
+/// redacts -- a prompt carrying PII or a secret-shaped string
+/// (`denied("contains_pii")`: tokenize/strip it first; a `{user:<uuid>}`
+/// placeholder is fine, a raw email/phone/card/token is not), (c) frames it as
+/// UNTRUSTED data inside a fixed host-authored system preamble, so the guest can
+/// neither replace the instructions nor name the model/endpoint/tenant, and (d)
+/// sanitizes and length-caps the completion before it is returned.
+///
+/// **The completion is untrusted text.** It is the model's output, never a
+/// command, permission decision or identity claim; a bundle must treat it as it
+/// would any other user-supplied string.
+///
+/// Wire note: like `reputation`/`economy`/`identity`, the call is carried as
+/// `capability = db`, `op = "ai.generate"`; the stage dispatches on the op
+/// prefix BEFORE the `db` (`storage.tables`) path, and the gate -- not the wire
+/// kind -- is what authorizes it.
+interface ai {
+  variant error {
+    /// The gate denied the call (not granted, rate limited, instance policy,
+    /// ...) or the host refused the prompt's content; carries the stable
+    /// denial code (`contains_pii` for a PII/secret-bearing prompt).
+    denied(string),
+    /// The prompt exceeds the 2000-token bound, or `max-tokens` exceeds the
+    /// 512-token completion bound; carries the bound that was exceeded.
+    too-many-tokens(u32),
+    /// The model produced no usable output (empty after sanitization), or the
+    /// host refused to pass it on (for example it tried to emit a tool call).
+    content-filtered,
+    /// Malformed argument (empty/oversized prompt, a non-finite or
+    /// out-of-range `temperature`, ...).
+    invalid(string),
+    /// The capability is not wired/enabled on this host (flag OFF, no model
+    /// backend provisioned) or the model backend is unreachable/timed out --
+    /// fail-loud, never a canned answer.
+    unavailable(string),
+    backend(string),
+  }
+
+  /// Per-call generation options. Every field is a REQUEST the host clamps to
+  /// its own bounds, never a grant of authority.
+  record options {
+    /// Completion length bound in tokens (1..=512); absent uses the host
+    /// default. Above 512 is `too-many-tokens(512)`.
+    max-tokens: option<u32>,
+    /// Sampling temperature (0.0..=2.0); absent uses the host default.
+    temperature: option<f32>,
+    /// `true` selects the STRUCTURED-output model and asks it for JSON; the
+    /// result is still untrusted text the bundle must parse defensively.
+    json: bool,
+  }
+
+  /// Generates a completion for `prompt`.
+  generate: func(prompt: string, opts: options) -> result<string, error>;
+}
+
 /// PostHog flag + license entitlement, two-gate, cached, fail-open to the
 /// supplied default. Capability: always granted.
 ///
@@ -685,8 +756,115 @@ world stage-next {
   import reputation;
   import economy;
   import identity;
+  import ai;
 
   export process-stage;
   export action-stage;
+  export streaming-lifecycle;
+}
+
+/// -------------------------------------------------------------------------
+/// stage-v2: NUMERIC SCOPE (data-plane numeric-id migration, slice A).
+///
+/// **Why a new interface family, not a field change.** A WIT record's layout
+/// is baked into every compiled component (Canonical ABI lift/lower), so
+/// adding or retyping a field on `types.stage-envelope` /
+/// `context.bundle-context` would make every already-compiled bundle fail to
+/// instantiate. `stage` (1.0.0) and `stage-next` are therefore FROZEN: the
+/// numeric keys live in the parallel `types-v2` / `context-v2` /
+/// `action-stage-v2` interfaces below, composed into `world stage-v2`. The
+/// executor links and serves BOTH families; a bundle moves to v2 only when it
+/// is rebuilt against `world stage-v2` (a v1 bundle keeps running untouched).
+/// This is the repo's established additive mechanism (one package version,
+/// extra worlds/interfaces -- see `world stage-next`): per-item `@version`
+/// suffixes are not parseable by the pinned wasm-tools, so the version lives
+/// in the interface/world name.
+///
+/// **Numeric ids are the AUTHORITATIVE scope keys.** `tenant-id` (s64, a real
+/// tenant is always >= 1) and `community-id` (s32; 0 is the tenant-wide
+/// sentinel, a real community is >= 1) identify scope. The `tenant` /
+/// `community` strings are carried for DISPLAY ONLY: a bundle must never use
+/// them as a lookup, cache, routing or authorization key. The envelope's
+/// `binding.mac` covers both ids (spine schema v3), so they cannot be swapped
+/// in flight.
+///
+/// `tenant-id == 0` in a `context-v2.bundle-context` means "the host could
+/// not supply a scope" (the empty-but-well-formed context the host returns on
+/// a bridge failure) -- a bundle MUST treat it as no scope and refuse to act.
+/// -------------------------------------------------------------------------
+interface types-v2 {
+  use types.{platform-event};
+
+  record stage-envelope {
+    /// Authoritative tenant key (>= 1).
+    tenant-id: s64,
+    /// Authoritative community key; 0 = tenant-wide.
+    community-id: s32,
+    /// Tenant slug -- DISPLAY ONLY, never a key.
+    tenant: string,
+    /// Community name -- DISPLAY ONLY, never a key.
+    community: option<string>,
+    app-id: string,
+    stage: string,
+    event: platform-event,
+    ts: string,
+    target-app-id: option<string>,
+    /// W3C traceparent, when the stage had one.
+    trace-context: option<string>,
+  }
+}
+
+/// `context.bundle-context` plus the authoritative numeric scope (see
+/// `types-v2`). Capability: always granted.
+interface context-v2 {
+  record bundle-context {
+    /// Authoritative tenant key (>= 1); 0 = no scope could be supplied.
+    tenant-id: s64,
+    /// Authoritative community key; 0 = tenant-wide.
+    community-id: s32,
+    /// DISPLAY ONLY.
+    tenant: string,
+    /// DISPLAY ONLY.
+    community: option<string>,
+    app-id: string,
+    feature: string,
+    version: string,
+    message-id: string,
+    config-json: string,
+  }
+
+  get-context: func() -> bundle-context;
+}
+
+interface action-stage-v2 {
+  use types.{transport-result, transport-error};
+  use types-v2.{stage-envelope};
+  /// `config` is canonical JSON object text (the resolved 3-tier config).
+  dispatch: func(envelope: stage-envelope, config: string)
+    -> result<transport-result, transport-error>;
+}
+
+/// `world stage-next` with numeric scope: `context-v2` replaces `context`,
+/// `action-stage-v2` replaces `action-stage`; every other import/export is the
+/// same interface `stage-next` uses (so one host implementation serves all
+/// three worlds). Whoever extends `stage-next` with a new capability MUST
+/// mirror it here.
+world stage-v2 {
+  import context-v2;
+  import http;
+  import kv;
+  import db;
+  import relay;
+  import %flags;
+  import log;
+  import clock;
+  import overlay;
+  import reputation;
+  import economy;
+  import identity;
+  import ai;
+
+  export process-stage;
+  export action-stage-v2;
   export streaming-lifecycle;
 }

@@ -3,7 +3,7 @@
 v1 scope (2026-10-07, feature/bundle-trivia):
 
 - `!trivia start` poses one question from an embedded Q&A bank
-  (`QUESTION_BANK`, selected via `random.choice`) and stores it as the
+  (`QUESTION_BANK`, selected via `_RNG.choice`) and stores it as the
   community's one active question in `kv`. If a question is already
   active for the community, `start` does NOT overwrite it -- it re-shows
   the existing question instead, so a careless double `start` can never
@@ -49,9 +49,8 @@ Data scoping: every kv entry here is community-scoped via
 `envelope.community` up front for a clear, command-specific error message,
 mirroring `first`'s own "Data scoping" section.
 
-Gated behind the PostHog flag ``waddles.command-trivia``, default OFF --
-see `bundles/python/first/src/app.py`'s own docstring for the flag-gate
-rationale and ordering.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -63,10 +62,12 @@ from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-trivia"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 SPEC = CommandSpec(name="trivia", sub_modules=frozenset({"start", "score"}))
 
@@ -163,8 +164,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
 
     No `kv` access here -- only command recognition and forwarding the
     normalized action signal. Returns `None` for any non-chat payload, text
-    that isn't `!trivia`-shaped (cheap-skip, zero `kv` cost), and while
-    `waddles.command-trivia` is disabled.
+    that isn't `!trivia`-shaped (cheap-skip, zero `kv` cost).
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -173,9 +173,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.split(maxsplit=1)[0].lower() if stripped else ""
     if head != f"!{SPEC.name}":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     action, arg = _classify(stripped)
@@ -355,7 +352,7 @@ async def _handle_start(*, community: str, provider: str, channel_id: str) -> st
         log.info("trivia.start_already_active", community=community)
         return f"A trivia question is already active: {existing['question']} (!trivia answer ...)"
 
-    question, answer_raw = random.choice(QUESTION_BANK)  # noqa: S311 -- a game pick, not crypto
+    question, answer_raw = _RNG.choice(QUESTION_BANK)
     active = {
         "question": question,
         "answer_raw": answer_raw,

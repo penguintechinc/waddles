@@ -186,7 +186,7 @@ def _scope_dto(row: Any) -> ScopeDTO:
 
 
 @user_tokens_bp.route("/scopes", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def user_list_scopes() -> tuple[dict[str, object], int]:
     """`GET /api/v1/user/tokens/scopes` -- catalog for the PAT scope-ceiling picker."""
     dal = current_app.config["dal"]
@@ -195,7 +195,7 @@ async def user_list_scopes() -> tuple[dict[str, object], int]:
 
 
 @user_tokens_bp.route("/pat", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_pat() -> tuple[dict[str, object], int]:
     """`GET /api/v1/user/tokens/pat` -- the caller's own PAT, scoped by their own JWT `sub`."""
     dal = current_app.config["dal"]
@@ -205,7 +205,7 @@ async def get_pat() -> tuple[dict[str, object], int]:
 
 
 @user_tokens_bp.route("/pat", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(CreatePatRequest)
 async def create_pat(data: CreatePatRequest) -> tuple[dict[str, object], int]:
     """`POST /api/v1/user/tokens/pat`."""
@@ -228,7 +228,7 @@ async def create_pat(data: CreatePatRequest) -> tuple[dict[str, object], int]:
 
 
 @user_tokens_bp.route("/pat", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def revoke_pat() -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/user/tokens/pat`."""
     dal = current_app.config["dal"]
@@ -246,8 +246,8 @@ async def revoke_pat() -> tuple[dict[str, object], int]:
 
 
 @community_tokens_bp.route("/<int:community_id>/tokens/scopes", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.tokens:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.tokens:admin")  # type: ignore[misc]
 async def community_list_scopes(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/tokens/scopes` -- catalog for the CAT scope picker."""
     if not _tenant_ok(community_id):
@@ -258,8 +258,8 @@ async def community_list_scopes(community_id: int) -> tuple[dict[str, object], i
 
 
 @community_tokens_bp.route("/<int:community_id>/tokens/cats", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.tokens:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.tokens:admin")  # type: ignore[misc]
 async def list_cats(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/tokens/cats`."""
     if not _tenant_ok(community_id):
@@ -271,8 +271,8 @@ async def list_cats(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @community_tokens_bp.route("/<int:community_id>/tokens/cats", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.tokens:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.tokens:admin")  # type: ignore[misc]
 @validate_request(CreateCatRequest)
 async def create_cat(data: CreateCatRequest, community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/tokens/cats`."""
@@ -298,8 +298,8 @@ async def create_cat(data: CreateCatRequest, community_id: int) -> tuple[dict[st
 
 
 @community_tokens_bp.route("/<int:community_id>/tokens/cats/<int:token_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.tokens:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.tokens:admin")  # type: ignore[misc]
 async def revoke_cat(community_id: int, token_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/tokens/cats/<tokenId>`."""
     if not _tenant_ok(community_id):

@@ -63,10 +63,8 @@ reserving `:` as its own server-side namespace separator. See
 rule exists to prevent; `tests/test_app.py::
 test_kv_key_constants_are_colon_free` pins it here too.
 
-Gated behind the PostHog flag ``waddles.command-compliment`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -77,10 +75,7 @@ from typing import Any, NoReturn, cast
 
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.command import VERBS, CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-compliment"
 
 #: No sub-modules declared -- `add` is already a member of the shared grammar's `VERBS`
 #: vocabulary (`waddle_sdk.command.VERBS`); the bare-target shape is handled by `_resolve()`
@@ -254,7 +249,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!compliment` and its grammar.
 
     Cheap-skip first (no leading `!compliment` token -- `None`, zero cost),
-    flag check second, real grammar resolution last -- same ordering as
+    real grammar resolution last -- same ordering as
     `eightball`/`shoutout`'s own documented rationale. A recognized-but-
     malformed `!compliment ...` still produces a reply (`"usage"`) since
     the caller did invoke this command -- never silently dropped.
@@ -266,9 +261,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head, _, rest = stripped.partition(" ")
     if head.lower() != f"!{SPEC.name}":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     command, arg = _resolve(rest.strip())

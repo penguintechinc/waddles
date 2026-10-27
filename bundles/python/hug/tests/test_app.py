@@ -104,16 +104,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring() -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`waddles.command-hug` OFF -> a matching command still produces no reply."""
-    flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: False)
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(flags=flags_mod)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-    assert _run(transform(_sample_event("!hug"))) is None
-
-
 def _sample_envelope(platform: str, text: str, *, channel_id: str | None = "12345") -> StageEnvelope:
     return StageEnvelope(
         tenant="tenant-1",
@@ -328,25 +318,11 @@ def _install_flags(monkeypatch: pytest.MonkeyPatch, *, enabled: bool) -> list[tu
     return calls
 
 
-def test_flag_is_checked_by_key_and_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _install_flags(monkeypatch, enabled=False)
-    assert _run(transform(_sample_event("!hug buddy"))) is None
-    assert calls == [("waddles.command-hug", False)]
-
-
 def test_unrelated_chat_never_consults_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _install_flags(monkeypatch, enabled=True)
     for text in ("hello", "!hugs", "!highfive buddy", ""):
         assert _run(transform(_sample_event(text))) is None
     assert calls == []
-
-
-def test_flag_host_without_a_flags_import_degrades_to_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stale component with no `flags` import fails closed (default OFF), never crashes."""
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace()  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-    assert _run(transform(_sample_event("!hug"))) is None
 
 
 def test_transform_forwards_only_text_and_channel_id(fake_host) -> None:

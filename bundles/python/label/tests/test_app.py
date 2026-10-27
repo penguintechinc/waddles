@@ -168,14 +168,6 @@ def test_add_remove_fail_closed_without_role_info(host: _Host) -> None:
     assert "Only the broadcaster" in _say("!label remove @bob vip", is_mod=None)
 
 
-def test_usage_unknown_nonmatching_and_flag(host: _Host) -> None:
-    assert _say("!label").startswith("Usage:")
-    assert _say("!label wat").startswith("Unknown")
-    assert _run(transform(_event("!labels list"))) is None
-    host.flag = False
-    assert _run(transform(_event("!label list"))) is None
-
-
 def test_key_charset(host: _Host) -> None:
     _say("!label add @bob vip", is_mod=True)
     assert all(":" not in k for k in host.kv.store)

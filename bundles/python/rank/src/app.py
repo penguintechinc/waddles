@@ -98,10 +98,8 @@ is, by that module's own docstring, pending onboarding integration --
 wiring `bundle_manifest_v2.py`/`bundle_approval_service.py` to it is a
 separate, already-tracked follow-on phase.
 
-Gated behind the PostHog flag ``waddles.command-rank`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -113,10 +111,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, db, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-rank"
 
 #: `top` is this bundle's only sub-module -- see `_resolve_command()` for the extra,
 #: documented `!rank <user>` shape the shared grammar alone cannot express.
@@ -221,8 +216,8 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!rank` and its grammar.
 
-    Cheap-skip first (no leading `!rank` token -- `None`, zero cost), flag
-    check second, real grammar parse last -- same ordering as `eightball`/
+    Cheap-skip first (no leading `!rank` token -- `None`, zero cost), real grammar parse last --
+    same ordering as `eightball`/
     `fish`/`loyalty`'s own documented rationale. A recognized-but-malformed
     `!rank ...` still produces a reply (`"usage"`) since the caller did
     invoke this command -- never silently dropped.
@@ -234,9 +229,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() != "!rank":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

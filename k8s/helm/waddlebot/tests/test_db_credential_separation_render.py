@@ -289,6 +289,10 @@ def test_production_tier_fails_closed_without_role_credentials(helm_available: N
         f"infrastructure.postgresql.readerPassword={secrets.token_hex(12)}",
         "--set-string",
         f"infrastructure.redis.password={secrets.token_hex(12)}",
+        "--set-string",
+        f"infrastructure.valkeyDurable.adminPassword={secrets.token_hex(12)}",  # get past the valkeyDurable admin guard so the ROLE-credential failure is what is asserted
+        "--set",
+        "global.valkeyTls.externalSecret=true",  # TLS now defaults on; skip the cert-secret fail so the role-credential failure is what is asserted
     )
     assert result.returncode != 0
     assert "has no value" in result.stderr and "outside alpha/local" in result.stderr

@@ -42,7 +42,7 @@ wasmtime::component::bindgen!({
 /// is remapped (`with`) onto the `stage` bindings generated above, so the
 /// one `Host` impl per shared interface on [`ExecState`] serves both worlds
 /// and only the genuinely new imports (`overlay`, `reputation`, `economy`,
-/// `identity`) get their own generated `Host` traits + `add_to_linker`.
+/// `identity`, `ai`) get their own generated `Host` traits + `add_to_linker`.
 pub mod stage_next_world {
     wasmtime::component::bindgen!({
         path: "../../wit/waddle-bundle",
@@ -66,6 +66,55 @@ pub mod stage_next_world {
     });
 }
 
+/// `world stage-v2`'s generated bindings: the numeric-scope successor to
+/// `stage-next` (data-plane numeric-id migration). WIT records are baked into
+/// every compiled component, so numeric `tenant-id`/`community-id` could not
+/// be added to the frozen `types`/`context`/`action-stage` interfaces without
+/// breaking every compiled v1 bundle; they live in the parallel `types-v2`/
+/// `context-v2`/`action-stage-v2` interfaces instead and THIS host serves both
+/// families. Every interface `stage-v2` shares with `stage`/`stage-next` is
+/// remapped (`with`) onto the existing bindings, so one `Host` impl per shared
+/// interface on [`ExecState`] serves all three worlds and only the genuinely
+/// new interfaces (`context-v2`, `types-v2`, `action-stage-v2`) are generated
+/// here.
+pub mod stage_v2_world {
+    wasmtime::component::bindgen!({
+        path: "../../wit/waddle-bundle",
+        world: "stage-v2",
+        imports: { default: async },
+        exports: { default: async },
+        additional_derives: [serde::Serialize, serde::Deserialize],
+        with: {
+            "waddle:bundle/types@1.0.0": super::waddle::bundle::types,
+            "waddle:bundle/http@1.0.0": super::waddle::bundle::http,
+            "waddle:bundle/kv@1.0.0": super::waddle::bundle::kv,
+            "waddle:bundle/db@1.0.0": super::waddle::bundle::db,
+            "waddle:bundle/relay@1.0.0": super::waddle::bundle::relay,
+            "waddle:bundle/flags@1.0.0": super::waddle::bundle::flags,
+            "waddle:bundle/log@1.0.0": super::waddle::bundle::log,
+            "waddle:bundle/clock@1.0.0": super::waddle::bundle::clock,
+            "waddle:bundle/process-stage@1.0.0": super::exports::waddle::bundle::process_stage,
+            "waddle:bundle/overlay@1.0.0": super::stage_next_world::waddle::bundle::overlay,
+            "waddle:bundle/reputation@1.0.0": super::stage_next_world::waddle::bundle::reputation,
+            "waddle:bundle/economy@1.0.0": super::stage_next_world::waddle::bundle::economy,
+            "waddle:bundle/identity@1.0.0": super::stage_next_world::waddle::bundle::identity,
+            "waddle:bundle/ai@1.0.0": super::stage_next_world::waddle::bundle::ai,
+            "waddle:bundle/streaming-lifecycle@1.0.0":
+                super::stage_next_world::exports::waddle::bundle::streaming_lifecycle,
+        },
+    });
+}
+
+/// Links the `stage-v2`-only host import (`context-v2`). Every other
+/// `stage-v2` import is already linked by [`link_stage_next_imports`] and
+/// `Stage::add_to_linker`; a v1 component never declares `context-v2`, so
+/// registering it is inert for it. Linking is reachability, never authority.
+fn link_stage_v2_imports(linker: &mut Linker<ExecState>) -> Result<(), ExecutorError> {
+    use stage_v2_world::waddle::bundle::context_v2;
+    context_v2::add_to_linker::<_, HasExecState>(linker, |s| s)?;
+    Ok(())
+}
+
 /// Marker for the `stage-next`-only interfaces' `add_to_linker` (see
 /// [`stage_next_world`]).
 struct HasStageNextState;
@@ -74,18 +123,19 @@ impl HasData for HasStageNextState {
 }
 
 /// Links the `stage-next`-only host imports (`overlay`, `reputation`, `economy`,
-/// `identity`) onto `linker`. A `stage` 1.0.0 component never declares these
+/// `identity`, `ai`) onto `linker`. A `stage` 1.0.0 component never declares these
 /// imports, so registering them is inert for it; a `stage-next` component that
 /// imports them instantiates and reaches the real `Host` impls in
 /// `crate::host::stage_next_imports` / `stage_next_economy` /
 /// `stage_next_identity`. Every call still passes through the stage-side
 /// capability gate -- linking is reachability, never authority.
 fn link_stage_next_imports(linker: &mut Linker<ExecState>) -> Result<(), ExecutorError> {
-    use stage_next_world::waddle::bundle::{economy, identity, overlay, reputation};
+    use stage_next_world::waddle::bundle::{ai, economy, identity, overlay, reputation};
     overlay::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     reputation::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     economy::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     identity::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
+    ai::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     Ok(())
 }
 
@@ -129,7 +179,7 @@ pub const EPOCH_TICK: Duration = Duration::from_millis(50);
 /// as a public constant, so this is a literal that must be bumped
 /// alongside Cargo.toml's `wasmtime`/`wasmtime-wasi` version pins --
 /// `tests` below assert it matches `Cargo.toml`.
-pub const WASMTIME_VERSION: &str = "49.0.2";
+pub const WASMTIME_VERSION: &str = "49.0.4";
 
 /// Spawns the task that advances `engine`'s epoch every [`EPOCH_TICK`].
 ///
@@ -231,6 +281,7 @@ pub fn build_linker(engine: &Engine) -> Result<Linker<ExecState>, ExecutorError>
 
     Stage::add_to_linker::<_, HasExecState>(&mut linker, |s| s)?;
     link_stage_next_imports(&mut linker)?;
+    link_stage_v2_imports(&mut linker)?;
 
     Ok(linker)
 }
@@ -268,6 +319,11 @@ pub fn build_linker_for(
         WitWorld::StageNext => {
             Stage::add_to_linker::<_, HasExecState>(&mut linker, |s| s)?;
             link_stage_next_imports(&mut linker)?;
+        }
+        WitWorld::StageV2 => {
+            Stage::add_to_linker::<_, HasExecState>(&mut linker, |s| s)?;
+            link_stage_next_imports(&mut linker)?;
+            link_stage_v2_imports(&mut linker)?;
         }
         WitWorld::Connector => {
             use connector_world::waddle::bundle::{clock, flags, http, log};
@@ -412,6 +468,14 @@ mod tests {
     fn build_linker_for_stage_next_world_succeeds() -> Result<(), ExecutorError> {
         let engine = build_engine(&test_config())?;
         let m = manifest("sha256:ee", WitWorld::StageNext, &[]);
+        let _linker = build_linker_for(&engine, &m)?;
+        Ok(())
+    }
+
+    #[test]
+    fn build_linker_for_stage_v2_world_succeeds() -> Result<(), ExecutorError> {
+        let engine = build_engine(&test_config())?;
+        let m = manifest("sha256:ff", WitWorld::StageV2, &[]);
         let _linker = build_linker_for(&engine, &m)?;
         Ok(())
     }

@@ -48,7 +48,6 @@ only moderators/broadcasters can adjust points
 | id | Why |
 |---|---|
 | `storage.kv` | `loyalty.rowid.<pseudonym> -> row_id` lookup index -- the `db` interface has no column-equality query, so this is the O(1) path to a user's balance row. |
-| `flags.read` | Reads the `waddles.command-loyalty` feature flag that gates the command. |
 
 The `db` capability itself is granted by the manifest's `data.tables: [loyalty_balances]` (not by a
 `permissions` entry). No egress (`egress: []`).
@@ -127,11 +126,9 @@ the live chat event's own actor/typed-target text is only ever echoed back into 
 never persisted -- the same convention `fish` documents ("username IS rendered in the visible
 chat reply, never logged"). See `src/app.py`'s module docstring for the full rationale.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-loyalty`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!points` command-name match and
-before the real grammar parse.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Known, pre-existing platform gap (not fixed by this PR)
 

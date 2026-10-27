@@ -62,15 +62,12 @@ instant can both read the active round before either deletes it; both are credit
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists per-community trivia scores and active-round state. |
-| `flags.read` | Gates the command behind its `waddles.command-trivia` feature flag. |
 
 No `db`, no egress, no moderator-gated verb (anyone can start, answer and read scores).
 
-## Feature flag
+## Gating
 
-`waddles.command-trivia`, **default OFF**, checked after the cheap command match and before the
-grammar parse, requested with `default=False` (flag outage / missing `wit_world` -> off). While off
-nothing is parsed, stored or logged.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

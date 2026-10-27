@@ -144,15 +144,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring() -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_every_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: False)
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(flags=flags_mod)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-    assert _run(transform(_event("!command set !greet hi $(username)"))) is None
-
-
 def test_bare_command_replies_with_usage(fake_host) -> None:
     result = _run(transform(_event("!command")))
     assert result is not None

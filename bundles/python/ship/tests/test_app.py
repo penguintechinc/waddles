@@ -107,11 +107,6 @@ def test_missing_text_ignored_and_wiring_exports(host: _Host) -> None:
     assert _entry_wiring.bundle_dispatch is dispatch
 
 
-def test_flag_off_returns_none(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!ship"))) is None
-
-
 def test_dispatch_relays_and_rejects_bad_payload(host: _Host) -> None:
     out = _run(transform(_event("!ship")))
     assert out is not None
@@ -139,20 +134,41 @@ def test_dispatch_relays_and_rejects_bad_payload(host: _Host) -> None:
         _run(dispatch(_envelope(nochan), {}, http_client=None))
 
 
+def _tok(u: str) -> str:
+    return "{user:" + u + "}"
+
+
 def test_deterministic_and_order_independent(host: _Host) -> None:
     a, b = str(uuid.uuid4()), str(uuid.uuid4())
-    first = _say(f"!ship {a} {b}")
-    assert _say(f"!ship {a} {b}") == first
+    first = _say(f"!ship {_tok(a)} {_tok(b)}")
+    assert _say(f"!ship {_tok(a)} {_tok(b)}") == first
     pct = bundle._compute_match(a, b)[0]
     assert f"= {pct}%" in first
     assert bundle._compute_match(a, b) == bundle._compute_match(b, a)
     assert 0 <= pct <= 100
 
 
+def test_tokens_round_trip_into_reply(host: _Host) -> None:
+    a, b = str(uuid.uuid4()), str(uuid.uuid4())
+    reply = _say(f"!ship {_tok(a)} {_tok(b)}")
+    assert reply.startswith(f"\U0001f498 {_tok(a)} + {_tok(b)} = ")
+
+
 def test_self_ship_is_100(host: _Host) -> None:
     a = str(uuid.uuid4())
-    assert "= 100%" in _say(f"!ship {a} {a}")
-    assert "= 100%" in _say("!ship @Bob @bob")
+    assert f"{_tok(a)} + {_tok(a)} = 100%" in _say(f"!ship {_tok(a)} {_tok(a)}")
+
+
+def test_non_token_targets_are_graceful(host: _Host) -> None:
+    assert _say("!ship @Bob @bob") == bundle._BAD_TARGET_MSG
+    assert _say(f"!ship {_tok(str(uuid.uuid4()))} @bob") == bundle._BAD_TARGET_MSG
+
+
+def test_no_local_uuid5_derivation() -> None:
+    from pathlib import Path
+
+    src = Path(bundle.__file__).read_text()
+    assert "uuid.uuid5" not in src and "_ACTOR_NAMESPACE" not in src and "_short" not in src
 
 
 def test_usage_and_bad_target_are_explicit(host: _Host) -> None:
@@ -166,7 +182,6 @@ def test_replies_and_logs_never_echo_handles(host: _Host) -> None:
     reply = _say("!ship @SecretOne @SecretTwo")
     assert "secret" not in reply.lower()
     assert "secret" not in _log_text(host)
-    assert reply.count("-") >= 1
 
 
 def test_percent_distribution_covers_range() -> None:

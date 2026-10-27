@@ -32,7 +32,8 @@ kv cost: a message without a leading `!` costs zero kv ops; every other `!token`
 `kv.get` of the registry. Failures are never swallowed: a `kv` failure is logged
 (`alias.kv_failure`, exception type only) AND answered with an explicit error reply.
 
-Gated behind the PostHog flag ``waddles.command-alias``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -41,10 +42,8 @@ import json
 from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-alias"
 MANAGEMENT_COMMAND = "!alias"
 REGISTRY_KEY = "alias.registry"
 
@@ -221,8 +220,8 @@ async def _resolve(token: str, args: list[str]) -> str | None:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!alias ...` and registered aliases.
 
-    Returns `None` for non-chat payloads, text without a leading `!` (zero kv cost),
-    a disabled flag, and `!tokens` that aren't aliases. On `kv` failure logs
+    Returns `None` for non-chat payloads, text without a leading `!` (zero kv cost), and `!tokens`
+    that aren't aliases. On `kv` failure logs
     `alias.kv_failure` and replies with an explicit error -- never a silent default.
     """
     text = event.payload.get("text")
@@ -230,8 +229,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     stripped = text.strip()
     if not stripped.startswith("!"):
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     parts = stripped.split()

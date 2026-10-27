@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from typing import Any
 
 import pytest
@@ -33,7 +32,6 @@ from app import (
     _INTERACTIONS,
     _NO_RECORD_YET,
     _SOCIAL_USAGE,
-    FLAG_KEY,
     _normalize_target,
     _pseudonym,
     _wins_style_key,
@@ -287,31 +285,6 @@ def test_kv_failure_log_carries_only_op_and_exception_type(
 
 
 # -- flag fail-closed
-@pytest.mark.parametrize("text", ["!hug bob", "!highfive bob", "!pat bob", "!social stats"])
-def test_flag_is_requested_with_a_fail_closed_default_for_every_command(
-    host: _FakeHost, text: str
-) -> None:
-    seen: list[tuple[str, bool]] = []
-    sys.modules["wit_world"].imports.flags.enabled = (
-        lambda key, default_value: seen.append((key, default_value)) or default_value
-    )
-    assert _run(transform(_sample_event(text))) is None
-    assert seen == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-social"
-
-
-def test_missing_wit_world_keeps_every_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)
-    for text in ("!hug bob", "!social stats"):
-        assert _run(transform(_sample_event(text))) is None
-
-
-def test_flag_off_does_no_io_and_logs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    state = _install(monkeypatch, flag_enabled=False)
-    assert _run(transform(_sample_event(f"!hug {CANARY}"))) is None
-    assert state.log_calls == [] and state.kv.calls == []
-
-
 # -- PII-free logs
 def test_no_log_line_or_kv_key_contains_a_typed_target_or_the_raw_actor(host: _FakeHost) -> None:
     """PII-free-log regression: typed targets / grammar text / the actor never log or persist."""

@@ -6,7 +6,8 @@ name: Song Request Queue Bundle (Python)
 # module docstring for full scope -- a request QUEUE only, no playback/external
 # music-service API call.
 # 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
-version: 1.0.3
+# 1.0.4: activation-gated only -- removed the in-bundle waddles.command-music feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.5
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -62,12 +63,14 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the per-community song-request queue, sequence and limits config"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-music feature flag"
+  - id: "chat.send:discord"
+    justification: "music replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "music replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.3"
-  min_version: "1.0.3"
+  tested_with: "1.0.5"
+  min_version: "1.0.5"
   max_version: null

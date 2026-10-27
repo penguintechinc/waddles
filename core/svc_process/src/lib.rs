@@ -38,6 +38,7 @@
 //! router and config loader directly instead of spawning a subprocess.
 
 pub mod active_digests;
+pub mod ai;
 pub mod builtins;
 pub mod bundle_loader;
 pub mod capabilities;
@@ -149,6 +150,54 @@ fn build_identity_wiring(
         flag: Arc::new(license::BundleIdentityCapabilityGate::new(Arc::clone(
             license_client,
         ))),
+    }
+}
+
+/// Builds the `ai` bundle host capability's production wiring
+/// (`spine::ProcessDeps::ai_wiring`): the self-hosted Ollama backend named by
+/// `WADDLEAI_BASE_URL` plus the `BUNDLE_AI_CAPABILITY_FLAG` gate (default OFF).
+/// No connection is opened at startup -- the HTTP client is lazy. A base URL that
+/// is not a valid self-hosted endpoint (`ai::validate_base_url`) is a LOUD
+/// startup error log and leaves the capability unwired (every `ai.generate` call
+/// then denies `not_implemented`), never a silent fallback to another endpoint.
+fn build_ai_wiring(
+    cli: &config::CliConfig,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+) -> Option<ai::AiWiring> {
+    let call_timeout = cli.ai_call_timeout();
+    let backend = ai::build_backend(&ai::OllamaConfig {
+        base_url: cli.ai_base_url.clone(),
+        model: cli.ai_model.clone(),
+        json_model: cli.ai_json_model.clone(),
+        // Transport timeout a beat above the per-call deadline clamp so the
+        // handler's own timeout is the one that fires and is reported.
+        request_timeout: call_timeout + std::time::Duration::from_secs(1),
+    });
+    match backend {
+        Ok(backend) => {
+            tracing::info!(
+                model = %cli.ai_model,
+                json_model = %cli.ai_json_model,
+                timeout_ms = call_timeout.as_millis() as u64,
+                "ai capability: self-hosted model backend configured (flag-gated, default OFF)"
+            );
+            Some(ai::AiWiring::new(
+                backend,
+                Arc::new(license::BundleAiCapabilityGate::new(Arc::clone(
+                    license_client,
+                ))),
+                call_timeout,
+                cli.ai_max_concurrency(),
+            ))
+        }
+        Err(reason) => {
+            tracing::error!(
+                reason = %reason,
+                "ai capability: WADDLEAI_BASE_URL is not a valid self-hosted endpoint -- \
+                 capability unavailable (every ai.generate host-call will report not_implemented)"
+            );
+            None
+        }
     }
 }
 
@@ -672,25 +721,88 @@ fn build_redis_client(cfg: &penguin_spine::SpineConfig) -> Option<redis::Client>
     }
 }
 
+/// Derives the bundle-`kv` Valkey connection config from the spine config
+/// for the DEDICATED `noeviction` kv instance (`VALKEY_KV_URL` /
+/// `VALKEY_KV_USERNAME` / `VALKEY_KV_PASSWORD`). TLS follows the kv URL
+/// scheme, never the spine's. Returns `None` when `VALKEY_KV_URL` is
+/// unset/blank -- deliberately NO fallback to the durable spine instance.
+fn kv_instance_config(
+    spine: &penguin_spine::SpineConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<penguin_spine::SpineConfig> {
+    let non_empty = |k: &str| lookup(k).filter(|v| !v.trim().is_empty());
+    let url = non_empty("VALKEY_KV_URL")?;
+    let mut cfg = spine.clone();
+    cfg.security_transport_tls = url.starts_with("rediss://");
+    cfg.valkey_url = url;
+    cfg.valkey_username = non_empty("VALKEY_KV_USERNAME");
+    cfg.valkey_password = non_empty("VALKEY_KV_PASSWORD");
+    Some(cfg)
+}
+
+/// Surfaces "bundle-kv is unavailable" loudly: ERROR log with `reason` plus
+/// a `kv` error-counter increment (`kind="kv_instance_unavailable"`). The
+/// caller then leaves `kv` unwired, so every kv host-call denies
+/// `not_implemented` (fail-CLOSED) -- never a fallback to the durable/spine
+/// instance and never an unmetered quota bypass.
+fn kv_degraded(reason: &str, detail: &str) {
+    tracing::error!(
+        reason = %reason,
+        detail = %detail,
+        "kv capability DEGRADED: dedicated kv Valkey instance unavailable; kv disabled \
+         (fail-closed: not_implemented on every kv host-call, NO fallback to the durable instance)"
+    );
+    static COUNTER: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    COUNTER
+        .get_or_init(|| {
+            opentelemetry::global::meter("bundle_host_kv")
+                .u64_counter("waddles_bundle_kv_instance_unavailable_total")
+                .with_description(
+                    "Bundle kv disabled at startup: dedicated kv Valkey unset/unreachable/evicting",
+                )
+                .build()
+        })
+        .add(
+            1,
+            &[opentelemetry::KeyValue::new("reason", reason.to_string())],
+        );
+}
+
 /// Opens the direct Valkey connection the `kv` host capability is backed
 /// by (`spine::ProcessDeps::kv_conn`'s doc). Never fatal on failure --
 /// returns `None` (logged) so the caller can start every other capability
 /// regardless.
-async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::MultiplexedConnection> {
-    let client = build_redis_client(cfg)?;
+async fn connect_kv(
+    spine_cfg: &penguin_spine::SpineConfig,
+) -> Option<redis::aio::MultiplexedConnection> {
+    // Dedicated kv instance, never the durable spine one -- see
+    // `kv_instance_config`. Unavailability is LOUD (`kv_degraded`) and
+    // fail-closed (kv `None` => not_implemented), never a fallback.
+    let Some(cfg) = kv_instance_config(spine_cfg, |k| std::env::var(k).ok()) else {
+        kv_degraded("url_unset", "VALKEY_KV_URL is unset or blank");
+        return None;
+    };
+    let cfg = &cfg;
+    let Some(client) = build_redis_client(cfg) else {
+        kv_degraded(
+            "client_build_failed",
+            "could not build the kv Valkey client",
+        );
+        return None;
+    };
     match client.get_multiplexed_async_connection().await {
         Ok(mut conn) => {
-            // Low-severity fix, security review of PR #425: `count_key`
-            // has no TTL, so an `allkeys-*` `maxmemory-policy` can evict it
-            // under memory pressure, silently resetting the kv quota --
-            // checked once here, never on the per-op hot path
-            // (`bundle_host_kv::policy`'s doc).
             let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut conn).await;
             bundle_host_kv::policy::log_and_record(&policy_check);
+            if let bundle_host_kv::policy::PolicyCheck::Violation(policy) = &policy_check {
+                kv_degraded("evicting_policy", policy);
+                return None;
+            }
             Some(conn)
         }
         Err(err) => {
-            tracing::warn!(error = %err, "kv capability: Valkey connection failed; kv disabled (not_implemented on every kv host-call)");
+            kv_degraded("connect_failed", &err.to_string());
             None
         }
     }
@@ -1369,6 +1481,10 @@ fn try_start_process_loop(
                 // with `invalid_args`; it is wired only on the multi-tenant
                 // path, which holds the resolved scope and the DB reader.
                 identity_wiring: None,
+                // `ai` is wired only on the multi-tenant path: this legacy
+                // path runs at the `(0, 0)` fail-closed scope, where the gate
+                // denies every non-platform permission (`ai.generate` included).
+                ai_wiring: None,
                 // Env-only legacy mode has no `BUNDLE_SCOPE_TENANT_ID`/DB
                 // reader to resolve a real tenant from -- `(0, 0)` fails
                 // closed (denies every non-platform permission) rather than
@@ -1887,6 +2003,12 @@ fn try_start_changelog_consumer(
                         )),
                         None => None,
                     };
+                    // `ai` host capability: no database -- an HTTP client to the
+                    // self-hosted model plus the opt-in flag, so the same
+                    // license-client dependency as the capabilities above.
+                    deps.ai_wiring = bundle_db_license_client
+                        .as_ref()
+                        .and_then(|client| build_ai_wiring(&config.cli, client));
                     Some(Arc::new(source_supervisor::SpineConsumerSupervisor {
                         deps: Arc::new(deps),
                     })
@@ -2003,6 +2125,7 @@ async fn build_source_supervisor_deps(
         reputation_wiring: None,
         economy_wiring: None,
         identity_wiring: None,
+        ai_wiring: None,
     })
 }
 
@@ -2064,6 +2187,55 @@ pub async fn run_healthcheck() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Wiring: bundle-kv goes to `VALKEY_KV_URL` (dedicated), the spine config
+    /// stays on the durable `VALKEY_URL`; unset kv URL => None (no fallback).
+    #[test]
+    fn kv_instance_config_routes_kv_to_dedicated_and_leaves_spine_on_durable() {
+        let spine = penguin_spine::SpineConfig {
+            valkey_url: "rediss://durable:6380/0".to_string(),
+            valkey_username: None,
+            valkey_password: Some("durable-pass".to_string()),
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: true,
+            security_transport_auth: true,
+            consumer_id: "c".to_string(),
+            stream_maxlen: 100,
+            read_count: 1,
+            block_ms: 1_000,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 100,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 65,
+            relay_block_timeout_s: 30,
+        };
+        let env = |k: &str| match k {
+            "VALKEY_KV_URL" => Some("rediss://infra-redis:6380/0".to_string()),
+            "VALKEY_KV_PASSWORD" => Some("cache-pass".to_string()),
+            _ => None,
+        };
+        let kv = kv_instance_config(&spine, env).expect("kv url set");
+        assert_eq!(kv.valkey_url, "rediss://infra-redis:6380/0");
+        assert_eq!(kv.valkey_password.as_deref(), Some("cache-pass"));
+        assert!(kv.security_transport_tls);
+        assert_eq!(spine.valkey_url, "rediss://durable:6380/0");
+        assert_eq!(spine.valkey_password.as_deref(), Some("durable-pass"));
+
+        let plain = kv_instance_config(&spine, |k| {
+            (k == "VALKEY_KV_URL").then(|| "redis://:p@infra-redis:6379/0".to_string())
+        })
+        .expect("kv url set");
+        assert!(!plain.security_transport_tls);
+        assert!(plain.valkey_password.is_none());
+
+        // Unset: NO fallback to the durable instance.
+        assert!(kv_instance_config(&spine, |_| None).is_none());
+        assert!(kv_instance_config(&spine, |_| Some("  ".to_string())).is_none());
+        kv_degraded("test", "does not panic");
+    }
+
     use super::*;
     use crate::config::{CliConfig, Config};
     use clap::Parser;
@@ -3008,6 +3180,32 @@ mod tests {
         assert!(
             !wiring.flag.enabled().await,
             "the identity capability flag must default OFF"
+        );
+    }
+
+    /// The `ai` wiring builds for a self-hosted endpoint with the flag gate
+    /// fail-closed (a never-seen opt-in flag is OFF), the configured timeout
+    /// and concurrency applied -- and is LOUDLY absent (never silently pointed
+    /// elsewhere) when `WADDLEAI_BASE_URL` names a public host.
+    #[tokio::test]
+    async fn build_ai_wiring_is_fail_closed_and_refuses_a_public_endpoint() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let wiring = build_ai_wiring(&cli, &test_license_client())
+            .expect("the default in-cluster endpoint is valid");
+        assert!(
+            !wiring.flag.enabled().await,
+            "the ai capability flag must default OFF"
+        );
+        assert_eq!(wiring.max_call_timeout, cli.ai_call_timeout());
+        assert_eq!(wiring.concurrency.available_permits(), 4);
+        assert_eq!(wiring.backend.model_for(false), "gemma4:e2b");
+        assert_eq!(wiring.backend.model_for(true), "gemma4:e4b");
+
+        let public =
+            CliConfig::parse_from(["svc-process", "--ai-base-url", "https://api.openai.com"]);
+        assert!(
+            build_ai_wiring(&public, &test_license_client()).is_none(),
+            "a public model endpoint must leave the capability unwired"
         );
     }
 

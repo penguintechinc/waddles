@@ -112,6 +112,8 @@ from .stream_pipeline import (
     Trace,
     Binding,
     ENVELOPE_SCHEMA_VERSION,
+    LEGACY_ENVELOPE_SCHEMA_VERSION,
+    TENANT_WIDE_COMMUNITY_ID,
 )
 from .circuit_breaker import (
     CircuitBreaker,
@@ -332,6 +334,8 @@ __all__ = [
     "Trace",
     "Binding",
     "ENVELOPE_SCHEMA_VERSION",
+    "LEGACY_ENVELOPE_SCHEMA_VERSION",
+    "TENANT_WIDE_COMMUNITY_ID",
     # Circuit Breaker & Resilience
     "CircuitBreaker",
     "CircuitBreakerError",

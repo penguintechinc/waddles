@@ -7,7 +7,7 @@ other stateless command bundles (`boop`, `choose`, ...) are modeled on.
 
 | | |
 |---|---|
-| Flag | `waddles.command-8ball` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | none (no `kv`, no DB, no egress) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -31,12 +31,9 @@ No verbs, so the shared `waddle_sdk.command` grammar is deliberately not used.
 
 | id | why |
 |---|---|
-| `flags.read` | reads the `waddles.command-8ball` PostHog flag to gate the command |
 
 ## Behavior notes
 
-- **Flag fails closed.** Checked only *after* the cheap command match so unrelated events never
-  pay a host round trip; queried with `default=False`. Flag OFF = no reply, no action-stage run.
 - **PII-free logs.** Only the platform is logged -- never the actor or the question text (gh-674).
 - Randomness is stdlib `random` (CPython-on-WASI seeds from `wasi:random`); a game reply, not a
   security decision.

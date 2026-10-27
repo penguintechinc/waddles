@@ -1,0 +1,60 @@
+schema_version: 2
+app_id: waddles.core.example.pronouns
+name: Pronouns Bundle (Python)
+# 1.0.0: initial kv-only v1 -- !pronouns / set <text> / @user / clear. Self-only set (NOT
+# mod-gated). See src/app.py's own module docstring for full scope.
+# 1.0.1: activation-gated only -- removed the in-bundle waddles.command-pronouns feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.2
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/pronouns
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!pronouns"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!pronouns"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- state lives in `kv` only (one hashed key per user).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists each user's own pronouns under a hashed per-user key"
+  - id: "chat.send:discord"
+    justification: "pronouns replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "pronouns replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
+  max_version: null

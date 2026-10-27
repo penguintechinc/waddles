@@ -6,7 +6,8 @@ name: Inventory Bundle (Python)
 # for the full data-model rationale (per-user kv directory + db item ledger) and the two
 # documented grammar extensions.
 # 1.0.3: integrity: lossless give (refund on failed credit), per-user directory lock (no lost updates), item-name/count/quantity bounds, normalized caller identity, strict boolean mod gate (fix/bundle-defects-wave).
-version: 1.0.3
+# 1.0.4: activation-gated only -- removed the in-bundle waddles.command-inventory feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.5
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -74,12 +75,14 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-user inventory entries keyed by pseudonym"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-inventory feature flag"
+  - id: "chat.send:discord"
+    justification: "inventory replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "inventory replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.3"
-  min_version: "1.0.3"
+  tested_with: "1.0.5"
+  min_version: "1.0.5"
   max_version: null

@@ -56,9 +56,22 @@ hub-api's own Deployment env (the only consumer):
 {{- define "waddlebot.serviceJwtIdentitiesJson" -}}
 {{- $root := . -}}
 {{- $identities := list -}}
+{{- $actionConnections := $root.Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled -}}
 {{- range $key, $identity := .Values.serviceJwt.identities }}
+{{- /* svc-ingest's grant is a cross-tenant `system` credential on an
+internet-facing pod: render the WHOLE identity ONLY when pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled (default false). */ -}}
+{{- if or (ne $key "svc-ingest") $root.Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+{{- $scopes := list -}}
+{{- range $scope := $identity.allowedScopes }}
+{{- /* svc-action keeps its other scopes always, but its `connections:*` scopes (resolve +
+resolve:static) render ONLY when pipeline.rustDataPlane.svcAction.dynamicConnections.enabled. */ -}}
+{{- if or (ne $key "svc-action") $actionConnections (not (hasPrefix "connections:" $scope)) }}
+{{- $scopes = append $scopes $scope -}}
+{{- end }}
+{{- end }}
 {{- $spiffeId := tpl $identity.spiffeId $root -}}
-{{- $identities = append $identities (dict "service_id" $spiffeId "k8s_namespace" $root.Values.namespace "k8s_service_account" $identity.serviceAccount "allowed_scopes" $identity.allowedScopes "tenant" ($identity.tenant | default "")) -}}
+{{- $identities = append $identities (dict "service_id" $spiffeId "k8s_namespace" $root.Values.namespace "k8s_service_account" $identity.serviceAccount "allowed_scopes" $scopes "tenant" ($identity.tenant | default "")) -}}
+{{- end }}
 {{- end }}
 {{- $identities | toJson -}}
 {{- end -}}

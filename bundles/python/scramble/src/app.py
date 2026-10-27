@@ -25,7 +25,8 @@ Data scoping: all state is community-scoped via `waddle_sdk.community_kv`
 (one active round per community). No player identity is stored or logged;
 logs carry only community id, op, and counts -- never guess text.
 
-Gated behind the PostHog flag ``waddles.command-scramble``, default OFF.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -35,10 +36,13 @@ import random
 from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-scramble"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 COMMAND = "scramble"
 
 #: Fixed, auditable embedded list: lowercase alphabetic words with >=2 distinct letters.
@@ -73,7 +77,7 @@ def _scramble_word(word: str) -> str:
     """Return a shuffle of `word` that differs from it (bounded retries, then a rotation)."""
     letters = list(word)
     for _ in range(20):
-        shuffled = "".join(random.sample(letters, len(letters)))
+        shuffled = "".join(_RNG.sample(letters, len(letters)))
         if shuffled != word:
             return shuffled
     return word[1:] + word[0]
@@ -97,8 +101,7 @@ def _classify(stripped: str) -> tuple[str, str | None]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!scramble` and its verbs.
 
-    No `kv` access. Returns `None` for non-chat payloads, non-`!scramble` text,
-    and while `waddles.command-scramble` is disabled.
+    No `kv` access. Returns `None` for non-chat payloads, non-`!scramble` text.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -107,9 +110,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.split(maxsplit=1)[0].lower() if stripped else ""
     if head != f"!{COMMAND}":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     action, arg = _classify(stripped)
@@ -206,7 +206,7 @@ async def _handle_start(*, community: str, provider: str, channel_id: str) -> st
         log.info("scramble.start_already_active", community=community)
         return f"A scramble is already active: {existing['scrambled']} (!scramble <word>)"
 
-    word = random.choice(WORD_BANK)  # noqa: S311 -- a game pick, not crypto
+    word = _RNG.choice(WORD_BANK)
     scrambled = _scramble_word(word)
     active = {"word": word, "scrambled": scrambled, "attempts": 0}
     await _kv_set(

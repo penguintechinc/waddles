@@ -20,6 +20,7 @@ from waddle_sdk.command import CommandSpec, ParsedCommand, parse_command
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+import app
 from app import (
     _NOTHING_CAUGHT_YET,
     _USAGE,
@@ -239,12 +240,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
         occurred_at="",
     )
     assert _run(transform(event)) is None
-
-
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _FakeHost()
-    _install(monkeypatch, host, flag_enabled=False)
-    assert _run(transform(_sample_event("!fish"))) is None
 
 
 def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:
@@ -654,8 +649,8 @@ def test_pseudonym_differs_per_actor() -> None:
 
 def test_roll_catch_uses_weighted_choice_and_variance(monkeypatch: pytest.MonkeyPatch) -> None:
     fish = FishCatch("Bass", "uncommon", 10.0, "fight")
-    monkeypatch.setattr("random.choices", lambda population, weights, k: [fish])
-    monkeypatch.setattr("random.uniform", lambda lo, hi: 1.0)
+    monkeypatch.setattr(app._RNG, "choices", lambda population, weights, k: [fish])
+    monkeypatch.setattr(app._RNG, "uniform", lambda lo, hi: 1.0)
 
     result_fish, weight = _roll_catch()
     assert result_fish is fish

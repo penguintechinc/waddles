@@ -20,6 +20,7 @@ from waddle_sdk.command import CommandSpec, ParsedCommand, parse_command
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+import app
 from app import (
     _NOTHING_FLIPPED_YET,
     _USAGE,
@@ -281,12 +282,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
         occurred_at="",
     )
     assert _run(transform(event)) is None
-
-
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _FakeHost()
-    _install(monkeypatch, host, flag_enabled=False)
-    assert _run(transform(_sample_event("!flip"))) is None
 
 
 def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:
@@ -794,7 +789,7 @@ def test_flip_coin_returns_heads_or_tails() -> None:
 
 
 def test_flip_coin_uses_random_choice(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("random.choice", lambda population: "tails")
+    monkeypatch.setattr(app._RNG, "choice", lambda population: "tails")
     assert _flip_coin() == "tails"
 
 
@@ -961,7 +956,7 @@ def test_called_flip_lifecycle_tracks_wins_only_for_correct_calls(
     import app
 
     pseudo = _expected_pseudonym("viewer-1")
-    monkeypatch.setattr(app.random, "choice", lambda seq: "heads" if "heads" in seq else seq[0])
+    monkeypatch.setattr(app._RNG, "choice", lambda seq: "heads" if "heads" in seq else seq[0])
     _run(dispatch(_sample_envelope("twitch", "flip"), {}, http_client=None))
     fake_host.advance(60)
     _run(dispatch(_sample_envelope("twitch", "flip", call="heads"), {}, http_client=None))

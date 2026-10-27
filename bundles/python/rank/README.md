@@ -80,7 +80,6 @@ bot>    only moderators/broadcasters can adjust rank XP
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists the per-user `rank.rowid.<pseudonym> -> row_id` lookup index. |
-| `flags.read` | Gates the command behind its `waddles.command-rank` feature flag. |
 
 `data.tables: [rank_progress]` additionally grants the `db` capability (derived by
 `bundle_approval_service._derive_capabilities`; no separate permission id). No egress. Mod gate:
@@ -117,11 +116,9 @@ lower-case (Twitch logins) but a mixed-case actor (`Alice`) will not see XP a mo
 `!rank add 150 Alice` (stored under `alice`). Resolved once the PII-tokenization pipeline (#429)
 supplies opaque actor tokens; until then prefer lower-case actors.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-rank`, defaulted OFF (`critical-rules.md` Feature Flags & License
-Tiers) -- checked in `transform()` after the cheap `!rank` command-name match and before the real
-grammar parse.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Follow-up (not implemented here): automatic per-message XP accrual
 
@@ -173,7 +170,7 @@ pytest --cov=src --cov-branch --cov-report=term-missing   # 100% line + branch
 
 `tests/conftest.py` puts `src/` and `sdk/waddle-sdk/src` on `sys.path`, so no package install is
 needed. `test_app.py` covers grammar/CRUD/level math; `test_backfill.py` adds the mod-gate matrix,
-amount-parsing edges, PII-free-log regression, flag fail-closed and `_entry_wiring` checks.
+amount-parsing edges, PII-free-log regression and `_entry_wiring` checks.
 
 ## Activation
 

@@ -74,7 +74,9 @@ pub mod normalize;
 pub mod outbound;
 pub mod outbound_ops;
 pub mod publish;
+pub mod scope_resolver;
 pub mod telemetry;
+pub mod twitch_sessions;
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -263,8 +265,15 @@ where
     // `None`. `flag_enabled` never performs inline network I/O (see
     // `crate::license`'s module doc), so this check never blocks startup
     // regardless of license/flag-server reachability.
+    // A contradictory Twitch config (dynamic flag ON + a static identity, or
+    // bad timing) fails loudly even when the data plane below is OFF.
+    config::validate_twitch_mode(&config)?;
     let license_client = license::build_license_client();
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
+        // Schema-v3 producer: resolver is installed BEFORE any receiver can
+        // publish. A flag that is ON but misconfigured fails the process
+        // loudly -- never a silent downgrade to the v2/static path.
+        try_install_scope_resolver(&config, ingest_metrics.clone())?;
         // Twitch IRC (primary e2e path), Discord Gateway (secondary), the
         // Twitch outbound relay drain, and the Twitch EventSub webhook
         // receiver each independently no-op with a logged reason when
@@ -272,11 +281,11 @@ where
         // YouTube/Kick receivers, the generic webhook/JWT intake, and D31
         // usage metering are `// TODO(M5)` -- not started here, see this
         // module's doc comment.
-        try_start_twitch_irc(
+        start_twitch_inbound(
             &config,
             ingest_metrics.clone(),
             Arc::clone(&receiver_readiness),
-        );
+        )?;
         try_start_discord(
             &config,
             ingest_metrics.clone(),
@@ -314,6 +323,103 @@ where
     )?;
 
     Ok(())
+}
+
+/// Installs the dataplane scope resolver when
+/// `waddles.ingest-dynamic-connections` is ON, i.e. its env baseline
+/// `INGEST_DYNAMIC_CONNECTIONS=true` (default OFF; the chart turns it on in
+/// alpha only). Deliberately NOT read through the `penguin_licensing` client:
+/// this service's hardcoded `*.waddles.app` domain bypass ([`license`]) makes
+/// that client evaluate EVERY flag ON, so it could never provide a default-OFF
+/// gate. Flag OFF is a no-op: every event keeps the unchanged v2/static envelope. Flag ON with a
+/// missing machine-JWT bootstrap config, or a plaintext
+/// `http://` hub-api outside alpha is an `Err` -- fail loud, never silently
+/// fall back.
+fn try_install_scope_resolver(
+    config: &config::Config,
+    metrics: Arc<telemetry::IngestMetrics>,
+) -> anyhow::Result<()> {
+    if !config.cli.dynamic_connections {
+        tracing::info!(
+            flag = scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG,
+            "flag is OFF; publishing schema-v2 static-scope envelopes"
+        );
+        return Ok(());
+    }
+    let cli = &config.cli;
+    if cli.service_jwt_token_endpoint.is_empty() {
+        anyhow::bail!(
+            "{} is ON but SERVICE_JWT_TOKEN_ENDPOINT is unset: no machine JWT for the resolver",
+            scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG
+        );
+    }
+    scope_resolver::check_transport(&cli.hub_api_url, &cli.environment)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let jwt = Arc::new(service_auth::MachineJwtClient::new(
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        scope_resolver::RESOLVE_SCOPE_JWT_SCOPE,
+    ));
+    let source = scope_resolver::HubScopeSource::new(&cli.hub_api_url, jwt)?;
+    let resolver = Arc::new(scope_resolver::ScopeResolver::new(
+        source,
+        scope_resolver::ResolverConfig::default(),
+        metrics,
+    ));
+    if !publish::install_scope_resolver(resolver) {
+        anyhow::bail!("scope resolver was already installed");
+    }
+    tracing::info!(
+        flag = scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG,
+        "flag is ON; publishing schema-v3 envelopes with resolver-supplied numeric scope"
+    );
+    Ok(())
+}
+
+/// Picks the Twitch inbound path from configuration
+/// ([`config::validate_twitch_mode`]) and starts it: per-community sessions
+/// (flag ON), the single-tenant static dev receiver (flag OFF + complete
+/// static env), or nothing. A flag-ON conflict with the static identity, or
+/// any dynamic-mode misconfiguration, is an `Err` that fails the process.
+fn start_twitch_inbound(
+    config: &config::Config,
+    metrics: Arc<telemetry::IngestMetrics>,
+    readiness: Arc<ReceiverReadiness>,
+) -> anyhow::Result<()> {
+    let mode = config::validate_twitch_mode(config)?;
+    dispatch_twitch_mode(
+        mode,
+        || try_start_twitch_irc(config, metrics.clone(), readiness.clone()),
+        || {
+            twitch_sessions::boot::try_start_twitch_sessions(
+                config,
+                metrics.clone(),
+                readiness.clone(),
+            )
+        },
+    )
+}
+
+/// Runs exactly the one starter matching `mode` -- `Dynamic` never starts the
+/// static receiver, `StaticDev` never starts the manager. Split from
+/// [`start_twitch_inbound`] so the dispatch is testable without sockets.
+pub fn dispatch_twitch_mode(
+    mode: config::TwitchMode,
+    static_dev: impl FnOnce(),
+    dynamic: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match mode {
+        config::TwitchMode::Dynamic => dynamic(),
+        config::TwitchMode::StaticDev => {
+            tracing::warn!("single-tenant static identity \u{2014} dev fallback");
+            static_dev();
+            Ok(())
+        }
+        config::TwitchMode::Off => {
+            tracing::info!("no twitch inbound configured; twitch receiver not started");
+            Ok(())
+        }
+    }
 }
 
 /// Attempts to start the Twitch IRC receiver (`crate::ingest::twitch::run`)
@@ -656,14 +762,14 @@ async fn try_build_eventsub_state(
     let redis_client = match outbound::build_redis_client(&spine_cfg) {
         Ok(client) => client,
         Err(err) => {
-            tracing::warn!(error = %err, "valkey client build failed; twitch eventsub receiver not started");
+            tracing::warn!(error_kind = ?err.kind(), "valkey client build failed; twitch eventsub receiver not started");
             return None;
         }
     };
     let conn = match redis_client.get_multiplexed_async_connection().await {
         Ok(conn) => conn,
         Err(err) => {
-            tracing::warn!(error = %err, "valkey connect failed; twitch eventsub receiver not started");
+            tracing::warn!(error_kind = ?err.kind(), "valkey connect failed; twitch eventsub receiver not started");
             return None;
         }
     };

@@ -63,10 +63,8 @@ when `is_mod`/`is_broadcaster` aren't present as actual `bool`s on the
 event (the same Discord-normalizer gap `count`'s own module docstring
 describes).
 
-Gated behind the PostHog flag ``waddles.command-quote`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -75,10 +73,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, db, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-quote"
 
 _COMMAND_PREFIX = "!quote"
 _SPEC = CommandSpec(name="quote", sub_modules=frozenset())
@@ -149,7 +144,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     Cheap-skip first (exact `!quote` first token -- `None`, zero cost; a
     `startswith` check alone would wrongly match `!quotex`/`!quoter`, the
     same first-token-equality guard `count`/`rank`'s own `transform()`
-    use), flag check second, real grammar parse last. Builds a normalized
+    use), real grammar parse last. Builds a normalized
     command payload for `dispatch` to act on; all `kv`/`db` I/O and
     permission checks happen there, mirroring `rank`'s own transform/
     dispatch split.
@@ -161,9 +156,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() != _COMMAND_PREFIX:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     after_prefix = stripped[len(_COMMAND_PREFIX) :].strip()

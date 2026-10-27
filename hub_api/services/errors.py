@@ -19,6 +19,7 @@ decorator without needing an error-shaped DTO registered per status code.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -28,6 +29,7 @@ class ApiError(Exception):
     message: str
     status_code: int = 400
     code: str = "BAD_REQUEST"
+    details: dict[str, Any] | None = None
 
 
 def bad_request(message: str = "Bad request") -> ApiError:

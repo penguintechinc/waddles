@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-poll"
-version = "1.0.2"
+version = "1.0.4"
 description = "`!poll` -> chat-command community polls on the structured db + community_kv APIs (one app-owned poll_records table, kv tallies and atomic one-vote markers). Extracted from the bot_process monolith (core/svc_process/builtin_handlers/community_polls_process.py) onto waddle_sdk.command."
 requires-python = ">=3.13"
 dependencies = []

@@ -38,10 +38,8 @@ string (going back to the same public chat channel it came from, same as
 target or `event.actor`, only the resolved command shape (`"solo"` /
 `"targeted"` / `"usage"`) and platform.
 
-Gated behind the PostHog flag ``waddles.command-wave`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-classification last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -51,11 +49,7 @@ import re
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention (`critical-rules.md`).
-FLAG_KEY = "waddles.command-wave"
 
 #: A plausible username/mention shape: an optional leading `@` (stripped),
 #: then 1-32 chars of letters/digits/underscore/dot/hyphen. Not a lookup
@@ -102,8 +96,7 @@ def _normalize_target(raw: str) -> str | None:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: `!wave [target]` -> a flavor-text reply.
 
-    Returns `None` (no reply, event dropped) for any non-matching payload or
-    while the `waddles.command-wave` flag is disabled -- never raises over
+    Returns `None` (no reply, event dropped) for any non-matching payload -- never raises over
     an event this bundle was never meant to react to. A recognized-but-
     malformed `!wave <bad-shape>` still produces a usage reply -- the
     command was invoked, so it is never silently dropped.
@@ -115,9 +108,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head, _, rest = stripped.partition(" ")
     if head.lower() != "!wave":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     rest = rest.strip()

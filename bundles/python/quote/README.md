@@ -67,7 +67,6 @@ can show but `<id>`/`remove` cannot reach.
 | Id | Why |
 |---|---|
 | `storage.kv` | Persists the per-community quote store index and its id sequence. |
-| `flags.read` | Gates the command behind its `waddles.command-quote` feature flag. |
 
 `data.tables: [quote_entries]` additionally grants the `db` capability (derived by
 `bundle_approval_service._derive_capabilities`; no separate permission id). No egress.
@@ -75,11 +74,9 @@ can show but `<id>`/`remove` cannot reach.
 Mod gate: `add`/`remove` require a real `is_mod` or `is_broadcaster` `True`; **absent** badge
 fields (e.g. the Discord normalizer today) are **denied** (fail closed) with zero `kv`/`db` access.
 
-## Feature flag
+## Gating
 
-`waddles.command-quote`, **default OFF** -- checked after the cheap command match and before the
-grammar parse, requested with `default=False` (flag outage / missing `wit_world` -> off). While off
-nothing is parsed, logged, or stored.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

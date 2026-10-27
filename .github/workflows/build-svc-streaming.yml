@@ -118,7 +118,9 @@ jobs:
   # then gate on Trivy by digest (never by the mutable tag).
   build-push:
     name: Build & Push (${{ matrix.variant }})
-    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'pull_request' && github.event_name != 'merge_group')
     needs: determine-version
     runs-on: ubuntu-latest
     permissions:
@@ -224,7 +226,9 @@ jobs:
   # built, loaded locally, smoke-tested and Trivy-gated.
   build-pr:
     name: Build, Smoke & Scan (PR, ${{ matrix.variant }})
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     needs: determine-version
     runs-on: ubuntu-latest
     permissions:

@@ -223,10 +223,6 @@ class TestTransform:
         event.payload["text"] = 5
         assert _run(transform(event)) is None
 
-    def test_flag_off_suppresses_everything(self, host: _Host) -> None:
-        host.flag_enabled = False
-        assert _run(transform(_event('!poll add "t" "a" "b"', is_mod=True))) is None
-
     @pytest.mark.parametrize(
         ("text", "action"),
         [

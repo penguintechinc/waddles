@@ -1,4 +1,4 @@
-.PHONY: openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -34,6 +34,13 @@ lint:
 openapi-hubapi:
 	@python3 scripts/export-hubapi-openapi.py
 	@spectral lint openapi/v1.yaml --fail-severity=error
+
+# Fails when the committed openapi/v1.yaml differs from a fresh regeneration
+# (stale spec). Regenerates in place, then git-diffs; no masking -- exit status
+# propagates. Needs hub_api/requirements.txt deps (incl. defusedxml, signxml).
+check-openapi-drift:
+	@PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 scripts/export-hubapi-openapi.py
+	@git diff --exit-code -- openapi/v1.yaml || { echo "ERROR: openapi/v1.yaml is stale -- run 'make openapi-hubapi' and commit the result" >&2; exit 1; }
 
 check-docs:
 	@bash scripts/check-doc-refs.sh
@@ -78,15 +85,26 @@ check-no-stubs:
 
 # Bundle hygiene gates (.github/workflows/bundle-hygiene.yml): raw user input in
 # bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, broad
-# silent `except` swallows, and role badges (`is_mod`, ...) read through Python
+# silent `except` swallows, role badges (`is_mod`, ...) read through Python
 # truthiness (`bool("false")` is True -> mod-gate bypass) in bundles AND the
-# legacy svc-ingest tree. Each prints the count it examined and exits non-zero on
-# a hit (or on zero examined). Needs PyYAML for the manifest check.
+# legacy svc-ingest tree, and an `ai.generate` bundle that does not guard its
+# reply lead against a completion starting with `/`, `.` or `!` (pytest gate), and a bundle
+# missing from bundles/core-bundles.yaml or built on the wrong WIT world (stage vs stage-next), an
+# economy/identity/reputation/ai host call reachable from a bundle's `dispatch` (those capabilities are
+# served to the process stage only), and a game bundle drawing outcomes from the module-level `random`
+# (componentize-py freezes its seed into the snapshot; use `random.SystemRandom()`).
+# Each prints the count it examined and exits non-zero on a hit (or on zero
+# examined). Needs PyYAML for the manifest check and pytest for the AI-lead gate.
 check-bundle-hygiene:
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check log-pii
 	@python3 scripts/ci/check-bundle-manifest-permissions.py
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
+	@python3 -m pytest scripts/ci/tests/test_ai_output_lead_gate.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_wit_world.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_stage_gate.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -q -p no:cacheprovider
 
 # builtin_handlers -> Rust-path/bundle inventory gate (gh #840 PR4): FAILS if a live Python
 # ingest/process/action handler has no mapping in .ci/builtin-handler-map.yaml, a covered
@@ -137,6 +155,16 @@ test-functional:
 
 test-security:
 	@bash scripts/security-scan.sh
+
+# Live e2e: Rust connection_resolver <-> real hub-api <-> real Postgres (docker + helm + cargo).
+# HUB_PYTHON must have hub_api/requirements*.txt installed (default python3).
+test-connection-resolver-live:
+	@bash scripts/ci/connection-resolver-live.sh
+
+# Live e2e: svc-ingest per-community Twitch sessions <-> real hub-api <-> real Postgres + Valkey
+# <-> in-process IRC server (docker + helm + cargo; HUB_PYTHON as above).
+test-svc-ingest-twitch-live:
+	@bash scripts/ci/twitch-sessions-live.sh
 
 # Seeded-failure proof that the lint/security gates can fail (crashed scanner,
 # non-numeric counter, new finding above baseline) -- Verification Integrity.
@@ -281,6 +309,14 @@ suppression-lift:
 	@test -n "$(TENANT_ID)" -a -n "$(PLATFORM)" -a -n "$$PLATFORM_USER_ID" || { echo "usage: PLATFORM_USER_ID=<id> make suppression-lift TENANT_ID=<n> PLATFORM=<name>" >&2; exit 2; }
 	@cd hub_api && printf '%s\n' "$$PLATFORM_USER_ID" | python3 -m cli.suppression lift --tenant-id "$(TENANT_ID)" --platform "$(PLATFORM)" --platform-user-id-stdin
 
+# reseal-connections: re-seal legacy (seal_version 0) connection secrets as row-bound AAD
+# ciphertexts (finding M4); examines + verifies already-sealed rows too. Run from hub_api's
+# environment (DATABASE_URL or DB_*, CREDENTIAL_ENCRYPTION_KEY). Prints
+# "examined=N resealed=M failed=K"; exit 1 = a row failed, 2 = nothing examined although rows
+# exist (add EXPECT_ROWS=1 to also fail on empty tables), 3 = could not run.
+reseal-connections:
+	@python3 scripts/reseal_connections.py $(if $(EXPECT_ROWS),--expect-rows)
+
 # verify-audit-export: verify downloaded export file(s) offline -- no server, DB or network.
 #   make verify-audit-export EXPORT="page1.json page2.json" [ANCHOR=<hash>] [HEAD_SEQ=42] [HEAD_HASH=<hash>]
 verify-audit-export:
@@ -305,6 +341,11 @@ verify-core-bundles-reproducible:
 # local/manual entry point.
 test-bundle-flag-on-command-e2e:
 	@bash scripts/test-bundle-flag-on-command-e2e.sh
+
+# Idempotent codemod: app (command) bundles are activation-gated only, not
+# flag-gated (scripts/codemod_app_bundles_activation_only.py; --apply to edit).
+codemod-app-bundles-activation-only:
+	@python3 scripts/codemod_app_bundles_activation_only.py
 
 # Generates the Ed25519 signing keypair for hub-api's per-service machine
 # JWTs (feature/eddsa-machine-jwt) and applies the resulting k8s Secret --

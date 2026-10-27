@@ -78,16 +78,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring() -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`waddles.command-8ball` OFF -> a matching command still produces no reply."""
-    flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: False)
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(flags=flags_mod)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-    assert _run(transform(_sample_event("!8ball"))) is None
-
-
 def _sample_envelope(platform: str, text: str, *, channel_id: str | None = "12345") -> StageEnvelope:
     return StageEnvelope(
         tenant="tenant-1",
@@ -153,24 +143,6 @@ def test_logs_never_contain_actor_or_question_text(fake_host) -> None:
         assert "piiquestion_secret" not in blob
 
 
-def test_flag_is_queried_default_off_so_it_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The bundle must ask the host for `waddles.command-8ball` with `default_value=False`."""
-    asked: list[tuple[str, bool]] = []
-
-    def _enabled(key: str, default_value: bool) -> bool:
-        asked.append((key, default_value))
-        return default_value
-
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        flags=types.SimpleNamespace(enabled=_enabled)
-    )
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-    assert _run(transform(_sample_event("!8ball"))) is None
-    assert asked == [("waddles.command-8ball", False)]
-
-
 def test_unmatched_text_never_consults_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cheap-skip ordering: a non-command message must not pay a flag host round trip."""
     asked: list[str] = []
@@ -190,7 +162,7 @@ def test_every_canned_answer_is_reachable_and_emoji_prefixed(
 ) -> None:
     import app
 
-    monkeypatch.setattr(app.random, "choice", lambda _seq: answer)
+    monkeypatch.setattr(app._RNG, "choice", lambda _seq: answer)
     result = _run(transform(_sample_event("!8ball ready?")))
     assert result is not None
     assert result.payload["text"] == f"\U0001f3b1 {answer}"

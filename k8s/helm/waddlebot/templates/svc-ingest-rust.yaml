@@ -56,7 +56,11 @@ spec:
         app.kubernetes.io/component: svc-ingest-rust
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      # feature/svc-ingest-connections-scope -- dedicated identity so hub-api's TokenReview-backed
+      # machine-JWT bootstrap can tell this pod from every other workload in the namespace
+      # (templates/service-jwt-rbac.yaml; serviceJwt.identities.svc-ingest, scope
+      # connections:resolve only) -- same pattern as svc-action/svc-process/svc-presentation.
+      serviceAccountName: svc-ingest
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -107,6 +111,30 @@ spec:
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        # Machine-JWT bootstrap for hub-api's internal provider-connections routes. The endpoint
+        # defaults to hub-api's own in-cluster Service (same default as svc-action/svc-process).
+        # The audience-scoped projected token is mounted below -- NOT the generic k8s SA token
+        # path (wrong audience; hub-api's TokenReview would reject it).
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        # waddles.ingest-dynamic-connections env baseline: svc-ingest resolves each event's
+        # guild/channel to a numeric scope via hub-api and stamps schema-v3 envelopes (an
+        # unresolvable source is dropped, never defaulted). Rendered only with the grant above.
+        - name: INGEST_DYNAMIC_CONNECTIONS
+          value: "true"
+        - name: WADDLES_ENVIRONMENT
+          value: {{ .Values.global.environment | default "alpha" | quote }}
+        # Per-community Twitch sessions (INGEST_DYNAMIC_CONNECTIONS ON): reconcile cadence and
+        # the per-call hub-api resolve/list timeout. The static TWITCH_IRC_NICK/TWITCH_IRC_CHANNEL
+        # pair is deliberately never rendered here -- with the flag ON it is a FATAL conflict.
+        - name: TWITCH_RECONCILE_INTERVAL_SECS
+          value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchReconcileIntervalSecs | default 60 | quote }}
+        - name: TWITCH_RESOLVE_TIMEOUT_SECS
+          value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchResolveTimeoutSecs | default 10 | quote }}
+        {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid }}
         - name: ENVELOPE_BINDING_ACTIVE_KID
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid | quote }}
@@ -124,18 +152,18 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
+              key: VALKEY_DURABLE_URL_TLS
         - name: VALKEY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: REDIS_PASSWORD
+              key: VALKEY_DURABLE_PASSWORD
         {{- else }}
         - name: VALKEY_URL
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL
+              key: VALKEY_DURABLE_URL
         {{- end }}
         - name: SECRET_KEY
           valueFrom:
@@ -204,9 +232,15 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
+      {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}

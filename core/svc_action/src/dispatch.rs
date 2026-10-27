@@ -367,7 +367,7 @@ pub async fn ensure_unloaded(
 fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, InvokeError> {
     let payload_json = serde_json::to_string(&env.event.payload)
         .map_err(|e| InvokeError::MalformedPayload(e.to_string()))?;
-    Ok(serde_json::json!({
+    let mut wire = serde_json::json!({
         "tenant": env.tenant,
         "community": env.community,
         "app_id": env.app_id,
@@ -382,7 +382,61 @@ fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, Invok
         "ts": env.ts,
         "target_app_id": env.target_app_id,
         "trace_context": env.trace.as_ref().map(|t| t.traceparent.clone()),
-    }))
+    });
+    // v2 (`stage-v2`) shape: add the authoritative numeric scope ONLY when the
+    // MAC-verified inbound envelope carries it (a v3 envelope). Copied from
+    // `env` and nowhere else; a v1/legacy envelope keeps the v1 frame
+    // unchanged (a `stage-v2` bundle then fails closed in the executor).
+    if let (Some(tenant_id), Some(community_id)) = (env.tenant_id, env.community_id) {
+        wire["tenant_id"] = serde_json::json!(tenant_id);
+        wire["community_id"] = serde_json::json!(community_id);
+    }
+    Ok(wire)
+}
+
+/// The numeric `(tenant_id, community_id)` of a MAC-verified v3 envelope,
+/// narrowed to the executor's i32 scope. `Ok(None)` for a legacy (v2-schema)
+/// envelope; `Err` when a v3 id cannot be represented (> `i32::MAX`) -- the
+/// caller dead-letters rather than letting an id silently wrap or mis-match.
+fn verified_numeric_scope(env: &StageEnvelope) -> Result<Option<(i32, i32)>, String> {
+    match (env.tenant_id, env.community_id) {
+        (Some(t), Some(c)) => {
+            // Defense in depth (independent of the MAC): real ids are
+            // `tenant_id >= 1`, `community_id >= 0` (0 = tenant-wide); never
+            // let a zero/negative id reach deps/grants.
+            if t < 1 || c < 0 {
+                return Err(format!(
+                    "envelope numeric scope out of range (tenant_id {t}, community_id {c})"
+                ));
+            }
+            let t = i32::try_from(t)
+                .map_err(|_| format!("envelope tenant_id {t} exceeds the executor's i32 scope"))?;
+            Ok(Some((t, c)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Resolves the `(tenant_id, community_id)` this entry is scoped to. A v3
+/// envelope's MAC-verified numeric ids are authoritative but must ALSO equal
+/// the ids its own tenant/community slugs resolve to (bound-scope equality,
+/// independent of the MAC); a mismatch or unresolvable slug is `Err` and the
+/// caller dead-letters `TENANT_BOUNDARY`. A legacy envelope resolves by slug
+/// alone, falling back to the fail-closed `(0, 0)` sentinel.
+async fn resolve_scope<T: TenantResolver>(
+    env: &StageEnvelope,
+    tenants: &T,
+) -> Result<(i32, i32), String> {
+    let resolved = tenants.resolve(&env.tenant, env.community.as_deref()).await;
+    match verified_numeric_scope(env)? {
+        None => Ok(resolved.map(|(t, c)| (t, c.unwrap_or(0))).unwrap_or((0, 0))),
+        Some((t, c)) => match resolved {
+            Some((rt, rc)) if rt == t && rc.unwrap_or(0) == c => Ok((t, c)),
+            other => Err(format!(
+                "envelope numeric scope ({t}, {c}) does not match the ids its slugs resolve to ({other:?})"
+            )),
+        },
+    }
 }
 
 /// Records the executor-call histogram for one `invoke` reply and, when the
@@ -963,12 +1017,31 @@ async fn handle_delivered_inner<A: AuditSink, T: TenantResolver, S: SpineOps>(
     // SS5.1) -- an unresolvable tenant/community falls back to the `(0, 0)`
     // sentinel, which fails closed (never matches a real grant row) rather
     // than skipping the gate.
-    let (tenant_id, community_id) = deps
-        .tenants
-        .resolve(&d.env.tenant, d.env.community.as_deref())
-        .await
-        .map(|(t, c)| (t, c.unwrap_or(0)))
-        .unwrap_or((0, 0));
+    // A v3 envelope's numeric ids are MAC-verified (hop check above) and
+    // authoritative AND must equal the ids their slugs resolve to (see
+    // `resolve_scope`); they scope the capabilities and are what the guest
+    // sees. A legacy envelope still resolves by slug.
+    let (tenant_id, community_id) = match resolve_scope(&d.env, &deps.tenants).await {
+        Ok(ids) => ids,
+        Err(message) => {
+            tracing::error!(app_id = %deps.app_id, %message, "numeric scope invalid or mismatched, dead-lettering");
+            deps.metrics
+                .tenant_boundary_violation("action", "numeric_scope_invalid");
+            let err = penguin_spine::DlqError {
+                kind: penguin_spine::DlqErrorKind::TenantBoundary,
+                code: "TENANT_BOUNDARY".to_string(),
+                message,
+                detail: None,
+                artifact_digest: Some(digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps
+                .spine
+                .dead_letter(d, &err)
+                .await
+                .map(|()| StageResult::DeadLettered);
+        }
+    };
 
     let (record, attempts) = dispatch_with_retry(
         |_attempt| async {
@@ -1508,6 +1581,28 @@ mod tests {
     }
 
     #[test]
+    fn wire_frame_carries_numeric_scope_only_from_a_v3_envelope() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let mut d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        // legacy envelope: the v1 frame is unchanged (no ids at all).
+        let v1 = envelope_to_wire_json(&d.env).expect("serializes");
+        assert!(v1.get("tenant_id").is_none() && v1.get("community_id").is_none());
+        assert_eq!(verified_numeric_scope(&d.env), Ok(None));
+        // v3 envelope: the v2 frame carries exactly the envelope's ids.
+        d.env.schema_version = penguin_spine::ENVELOPE_SCHEMA_VERSION;
+        d.env.tenant_id = Some(10);
+        d.env.community_id = Some(7);
+        let v2 = envelope_to_wire_json(&d.env).expect("serializes");
+        assert_eq!(v2["tenant_id"], 10);
+        assert_eq!(v2["community_id"], 7);
+        assert_eq!(verified_numeric_scope(&d.env), Ok(Some((10, 7))));
+        // an id the i32 executor scope cannot hold is refused, never wrapped.
+        d.env.tenant_id = Some(i64::from(i32::MAX) + 1);
+        assert!(verified_numeric_scope(&d.env).is_err());
+    }
+
+    #[test]
     fn interpret_success_payload() {
         let outcome = interpret_dispatch_payload(
             &serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
@@ -1662,7 +1757,7 @@ mod tests {
     }
 
     fn mac_for(ring: &KeyRing, tenant: &str) -> String {
-        crate::hop::compute_mac(
+        penguin_spine::compute_binding_mac(
             ring,
             "k1",
             tenant,
@@ -1717,6 +1812,98 @@ mod tests {
             crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
                 .is_ok()
         );
+    }
+
+    /// Builds a v3 fixture envelope with a genuine `compute_binding_mac_v3`.
+    fn v3_delivered(ring: &KeyRing, tenant_id: i64, community_id: i32) -> Delivered {
+        let mut d = fixture_delivered("acme", "waddles.bot.commands.default", "0".repeat(64), "k1");
+        let mac = penguin_spine::compute_binding_mac_v3(
+            ring,
+            "k1",
+            tenant_id,
+            community_id,
+            "acme",
+            Some("main"),
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+            None,
+        )
+        .unwrap();
+        d.env.binding.mac = mac;
+        d.env.schema_version = penguin_spine::ENVELOPE_SCHEMA_VERSION;
+        d.env.tenant_id = Some(tenant_id);
+        d.env.community_id = Some(community_id);
+        d
+    }
+
+    // regression: confused-deputy -- a v2-MAC envelope relabelled v3 with
+    // forged ids must fail hop verification (so the guest is never invoked).
+    #[test]
+    fn relabelled_v2_to_v3_envelope_with_forged_ids_fails_verify_hop() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let mut d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        d.env.schema_version = penguin_spine::ENVELOPE_SCHEMA_VERSION;
+        d.env.tenant_id = Some(99);
+        d.env.community_id = Some(98);
+        let err = crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
+            .unwrap_err();
+        assert_eq!(err.as_metric_reason(), "mac_mismatch");
+    }
+
+    #[tokio::test]
+    async fn genuine_v3_envelope_passes_hop_and_resolves_its_ids() {
+        let ring = test_ring();
+        // FixedTenantResolver resolves every slug pair to (1, Some(2)).
+        let d = v3_delivered(&ring, 1, 2);
+        assert!(
+            crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
+                .is_ok()
+        );
+        assert_eq!(
+            resolve_scope(&d.env, &FixedTenantResolver).await,
+            Ok((1, 2))
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_ids_not_matching_slug_resolved_ids_are_rejected() {
+        let ring = test_ring();
+        // genuine MAC over ids (10, 7), but the slugs resolve to (1, 2).
+        let d = v3_delivered(&ring, 10, 7);
+        assert!(
+            crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
+                .is_ok()
+        );
+        let err = resolve_scope(&d.env, &FixedTenantResolver)
+            .await
+            .unwrap_err();
+        assert!(err.contains("does not match"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn v2_envelope_still_resolves_by_slug() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        assert_eq!(
+            resolve_scope(&d.env, &FixedTenantResolver).await,
+            Ok((1, 2))
+        );
+    }
+
+    #[test]
+    fn non_positive_numeric_scope_is_rejected() {
+        let ring = test_ring();
+        let mut d = v3_delivered(&ring, 1, 2);
+        for (t, c) in [(0, 2), (-1, 2), (1, -1)] {
+            d.env.tenant_id = Some(t);
+            d.env.community_id = Some(c);
+            assert!(verified_numeric_scope(&d.env).is_err(), "({t},{c})");
+        }
+        d.env.tenant_id = Some(1);
+        d.env.community_id = Some(0);
+        assert_eq!(verified_numeric_scope(&d.env), Ok(Some((1, 0))));
     }
 
     #[test]

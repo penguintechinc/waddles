@@ -59,15 +59,12 @@ only moderators/broadcasters can manage the joke pool
 | id | Why |
 |---|---|
 | `storage.kv` | Persists the community's custom joke registry, its id counter, and the last-served joke pointer. |
-| `flags.read` | Reads the `waddles.command-joke` feature flag that gates the command. |
 
 No `db`, no egress (`egress: []`, `data.tables: []`).
 
-## Feature flag
+## Gating
 
-`waddles.command-joke`, default **OFF** (`critical-rules.md` Feature Flags & License Tiers).
-`transform()` order: cheap `!joke` head match -> flag check -> grammar parse, so unrelated chat
-costs nothing. Flag off => no reply.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Platforms
 

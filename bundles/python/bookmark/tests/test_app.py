@@ -129,11 +129,6 @@ def test_usage_unknown_and_nonmatching(host: _Host) -> None:
     assert host.kv.calls == []
 
 
-def test_flag_off_suppresses(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!bookmark list"))) is None
-
-
 def test_kv_keys_dot_separated(host: _Host) -> None:
     _say("!bookmark add https://example.com/a")
     assert all(":" not in k for k in host.kv.store)

@@ -225,12 +225,6 @@ def test_non_string_text_is_ignored(fake_host: _Host) -> None:
     assert _run(transform(event)) is None
 
 
-@pytest.mark.parametrize("text", ["!love bob", "!ship alice bob"])
-def test_disabled_flag_suppresses_the_reply(text: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    _Host(monkeypatch, flag_enabled=False)
-    assert _run(transform(_sample_event(text))) is None
-
-
 # -- _resolve_love() / _resolve_ship() / _normalize_target() direct unit coverage ----
 
 
@@ -957,15 +951,3 @@ def test_transform_forwards_only_the_fields_dispatch_needs(
     assert set(result.payload) == keys
 
 
-def test_flag_is_checked_by_key_and_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _Host(monkeypatch)
-    seen: list[tuple[str, bool]] = []
-
-    def _enabled(key: str, default_value: bool) -> bool:
-        seen.append((key, default_value))
-        return False
-
-    sys.modules["wit_world"].imports.flags = types.SimpleNamespace(enabled=_enabled)
-    assert _run(transform(_sample_event("!love bob"))) is None
-    assert seen == [("waddles.command-love", False)]
-    assert host.kv_calls == []

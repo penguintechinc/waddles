@@ -5,7 +5,8 @@ name: Loyalty Points Bundle (Python)
 # !points add|sub <amount> <user>. See src/app.py's own module docstring for the full
 # data-model rationale (kv index + db ledger) and the leaderboard-display-name limitation.
 # 1.0.3: integrity: atomic first-grant claim (no lost/duplicate rows), bounded amounts + balance cap, accurate clamped replies, no junk rows from sub, normalized caller identity, strict boolean mod gate (fix/bundle-defects-wave).
-version: 1.0.3
+# 1.0.4: activation-gated only -- removed the in-bundle waddles.command-loyalty feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.5
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -72,12 +73,14 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-user loyalty points keyed by pseudonym row id"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-loyalty feature flag"
+  - id: "chat.send:discord"
+    justification: "loyalty replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "loyalty replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.3"
-  min_version: "1.0.3"
+  tested_with: "1.0.5"
+  min_version: "1.0.5"
   max_version: null

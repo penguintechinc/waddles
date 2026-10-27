@@ -80,10 +80,8 @@ stub:
 - Wagers/stakes, a ranking ladder, and tournaments -- out of scope for this
   kv-only v1 entirely, not partially stubbed.
 
-Gated behind the PostHog flag ``waddles.command-duel`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -95,10 +93,12 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-duel"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 #: No sub-modules declared for v1 -- every `VERBS` token other than
 #: `list`/`set` resolves to a usage reply (see `_resolve_command`), never a
@@ -240,8 +240,8 @@ def _resolve_command(stripped: str) -> tuple[str, str | None]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!duel` and its grammar.
 
-    Cheap-skip first (no leading `!duel` token -- `None`, zero cost), flag
-    check second, real grammar classification last -- same ordering as
+    Cheap-skip first (no leading `!duel` token -- `None`, zero cost), real grammar classification
+    last -- same ordering as
     `fish`/`eightball`'s own documented rationale. A recognized-but-malformed
     `!duel ...` still produces a reply (`"usage"`) since the caller did
     invoke this command -- never silently dropped.
@@ -253,9 +253,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() != "!duel":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     command, arg = _resolve_command(stripped)
@@ -418,7 +415,7 @@ async def _handle_challenge(
     )
 
     opponent_pseudonym = _pseudonym(normalized.lower())
-    challenger_wins = random.random() < 0.5  # noqa: S311 -- a game, not a security decision
+    challenger_wins = _RNG.random() < 0.5
 
     if challenger_wins:
         winner_name, winner_pseudonym, loser_pseudonym = username, pseudonym, opponent_pseudonym
@@ -442,7 +439,7 @@ async def _handle_challenge(
         channel_id=channel_id,
     )
 
-    flavor = random.choice(_OUTCOME_FLAVOR)  # noqa: S311 -- a game, not a security decision
+    flavor = _RNG.choice(_OUTCOME_FLAVOR)
     reply = f"⚔️ {username} challenges {normalized} to a duel... {flavor}! {winner_name} wins!"
     return reply, "resolved"
 

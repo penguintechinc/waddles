@@ -3,7 +3,7 @@
 schema_version: 2
 app_id: waddles.core.example.label
 name: User Label Bundle (Python)
-version: 1.0.1
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -35,6 +35,8 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-community labels keyed by user UUID (never a raw username)"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-label feature flag"
+  - id: "chat.send:discord"
+    justification: "label replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "label replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 routes_to: []

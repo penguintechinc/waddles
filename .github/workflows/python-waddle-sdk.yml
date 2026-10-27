@@ -12,8 +12,10 @@ on:
       - 'core/bundle_host_economy/src/lib.rs'
       - 'core/bundle_executor/src/host/stage_next_economy.rs'
       - 'core/bundle_executor/src/host/stage_next_identity.rs'
+      - 'core/bundle_executor/src/host/stage_next_ai.rs'
       - 'core/svc_process/src/capabilities.rs'
       - 'core/svc_process/src/identity.rs'
+      - 'core/svc_process/src/ai.rs'
       - '.github/workflows/python-waddle-sdk.yml'
   pull_request:
     branches: [main, 'release/**']
@@ -26,8 +28,10 @@ on:
       - 'core/bundle_host_economy/src/lib.rs'
       - 'core/bundle_executor/src/host/stage_next_economy.rs'
       - 'core/bundle_executor/src/host/stage_next_identity.rs'
+      - 'core/bundle_executor/src/host/stage_next_ai.rs'
       - 'core/svc_process/src/capabilities.rs'
       - 'core/svc_process/src/identity.rs'
+      - 'core/svc_process/src/ai.rs'
   workflow_dispatch:
 
 permissions:

@@ -19,8 +19,9 @@
 use std::fmt;
 
 /// The tenant's licensed tier, resolved host-side at connection setup --
-/// gates `storage.objects`' bucket topology (spec SS6) the same way it
-/// already gates `ai.generate`'s marketplace-time availability (spec SS9).
+/// gates `storage.objects`' bucket topology (spec SS6). NOTE: it does NOT yet
+/// gate `ai.generate` -- Enterprise enforcement for that permission is not
+/// implemented in code (issue #858).
 /// Never guest-suppliable; carried on [`InvokeScope`] as one more piece of
 /// the server-side envelope.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]

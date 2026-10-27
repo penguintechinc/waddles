@@ -192,6 +192,21 @@ check "wit_world/imports/identity.py" "class Error_Backend:" "identity.Error_Bac
 check "wit_world/imports/identity.py" "def resolve_actor() -> str:" "identity.resolve_actor signature"
 check "wit_world/imports/identity.py" "def resolve_mention(token: str) -> str:" "identity.resolve_mention signature"
 
+# ---- world stage-next: waddle_sdk/ai.py (ai.generate) ----
+# Same second bindings run as reputation/economy/identity above; every assertion
+# confirmed against a real `componentize-py==0.25.1 -w stage-next bindings` run.
+check "wit_world/imports/ai.py" "class Error_Denied:" "ai.Error_Denied"
+check "wit_world/imports/ai.py" "class Error_TooManyTokens:" "ai.Error_TooManyTokens"
+check "wit_world/imports/ai.py" "class Error_ContentFiltered:" "ai.Error_ContentFiltered"
+check "wit_world/imports/ai.py" "class Error_Invalid:" "ai.Error_Invalid"
+check "wit_world/imports/ai.py" "class Error_Unavailable:" "ai.Error_Unavailable"
+check "wit_world/imports/ai.py" "class Error_Backend:" "ai.Error_Backend"
+check "wit_world/imports/ai.py" "class Options:" "ai.Options record"
+check "wit_world/imports/ai.py" "    max_tokens: Optional[int]" "ai.Options.max_tokens"
+check "wit_world/imports/ai.py" "    temperature: Optional[float]" "ai.Options.temperature"
+check "wit_world/imports/ai.py" "    json: bool" "ai.Options.json"
+check "wit_world/imports/ai.py" "def generate(prompt: str, opts: Options) -> str:" "ai.generate signature"
+
 echo ""
 echo "Checked ${CHECKS} binding-shape assertions against componentize-py's real generated output."
 if [ "${FAILURES}" -gt 0 ]; then

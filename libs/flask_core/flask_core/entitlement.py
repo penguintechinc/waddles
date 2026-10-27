@@ -161,7 +161,9 @@ def build_waddles_license_client() -> "LicenseClient":
     unavailable or if the constructed client does not carry `LICENSE_PRODUCT`.
     """
     if LicenseClient is None:
-        raise RuntimeError("penguin_licensing is not installed; cannot build the Waddles license client")
+        raise RuntimeError(
+            "penguin_licensing is not installed; cannot build the Waddles license client"
+        )
     base_url = os.getenv("LICENSE_SERVER_URL") or _DEFAULT_LICENSE_SERVER_URL
     client = LicenseClient(
         license_key=os.getenv("LICENSE_KEY") or None,
@@ -254,7 +256,9 @@ _normalize_tier = normalize_tier
 _tier_level = tier_level
 _required_level = required_level
 
-_DEFAULT_CACHE_TTL_SECONDS = 300.0  # matches penguin_licensing's own validate() cache window
+_DEFAULT_CACHE_TTL_SECONDS = (
+    300.0  # matches penguin_licensing's own validate() cache window
+)
 
 # How long a *last-known* tier may be reused while the license gate is
 # unreachable. Matches penguin_licensing's own 72h offline grace so the two
@@ -290,10 +294,14 @@ def resolve_bypass_depth(hostname: Optional[str]) -> BypassDepth:
         return "none"
     host = hostname.split(":", 1)[0].strip().lower()
     if any(
-        fnmatch.fnmatchcase(host, pattern) for pattern in _GLOBAL_COMMUNITY_BYPASS_HOSTNAME_PATTERNS
+        fnmatch.fnmatchcase(host, pattern)
+        for pattern in _GLOBAL_COMMUNITY_BYPASS_HOSTNAME_PATTERNS
     ):
         return "global_community"
-    if any(fnmatch.fnmatchcase(host, pattern) for pattern in _GLOBAL_ONLY_BYPASS_HOSTNAME_PATTERNS):
+    if any(
+        fnmatch.fnmatchcase(host, pattern)
+        for pattern in _GLOBAL_ONLY_BYPASS_HOSTNAME_PATTERNS
+    ):
         return "global"
     return "none"
 
@@ -372,6 +380,31 @@ class CommunityTierSource(Protocol):
         ...
 
 
+def env_flag_var_name(flag_key: str) -> str:
+    """Env var for a flag key: `FLAG_` + upper-cased key, `.`/`-` -> `_` (matches the Rust services)."""
+    return "FLAG_" + flag_key.upper().replace(".", "_").replace("-", "_")
+
+
+def env_flag_value(flag_key: str) -> Optional[bool]:
+    """
+    Docker ENV baseline for a FEATURE flag, or None if unset/unrecognised.
+
+    Makes PostHog optional (alpha has no key). Truthy: true/1/on/yes; falsy:
+    false/0/off/no -- same parsing as svc_action/svc_process. Callers must
+    only use this for non-licensed flags; see `EntitlementClient._evaluate`.
+    """
+    raw = os.getenv(env_flag_var_name(flag_key))
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value in ("true", "1", "on", "yes"):
+        return True
+    if value in ("false", "0", "off", "no"):
+        return False
+    logger.debug("entitlement.env_flag_unrecognized", extra={"flag_key": flag_key})
+    return None
+
+
 class PostHogFlagGate:
     """Wraps the published `posthog` SDK -- the only place this module calls it."""
 
@@ -392,7 +425,9 @@ class PostHogFlagGate:
         """
         api_key = os.getenv("POSTHOG_API_KEY") or os.getenv("POSTHOG_KEY", "")
         host = os.getenv("POSTHOG_HOST", "https://license.penguintech.io")
-        client = Posthog(project_api_key=api_key or "disabled", host=host, disabled=not api_key)
+        client = Posthog(
+            project_api_key=api_key or "disabled", host=host, disabled=not api_key
+        )
         return cls(client)
 
     def is_enabled(
@@ -505,7 +540,9 @@ class EntitlementClient:
     """
 
     flag_gate: FlagGate = field(default_factory=lambda: PostHogFlagGate.from_env())
-    license_gate: LicenseGate = field(default_factory=lambda: PenguinLicenseGate.from_env())
+    license_gate: LicenseGate = field(
+        default_factory=lambda: PenguinLicenseGate.from_env()
+    )
     tier_requirements: Mapping[str, str] = field(default_factory=dict)
     community_tier_source: Optional[CommunityTierSource] = None
     feature_registry: Optional[FeatureRegistry] = None
@@ -516,10 +553,14 @@ class EntitlementClient:
     )
     tier_grace_seconds: float = field(
         default_factory=lambda: float(
-            os.getenv("ENTITLEMENT_TIER_GRACE_SECONDS", str(_DEFAULT_TIER_GRACE_SECONDS))
+            os.getenv(
+                "ENTITLEMENT_TIER_GRACE_SECONDS", str(_DEFAULT_TIER_GRACE_SECONDS)
+            )
         )
     )
-    _cache: dict[CacheKey, _CacheEntry] = field(default_factory=dict, init=False, repr=False)
+    _cache: dict[CacheKey, _CacheEntry] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _tier_cache: dict[TierCacheKey, _TierEntry] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -551,7 +592,9 @@ class EntitlementClient:
         any source wins (it is unsatisfiable -- see `tier_catalog.required_level`).
         """
         registry = (
-            self.feature_registry if self.feature_registry is not None else get_feature_registry()
+            self.feature_registry
+            if self.feature_registry is not None
+            else get_feature_registry()
         )
         contract: Optional[FeatureContract] = registry.by_flag(flag_key)
         candidates: list[str] = [TIER_FREE]
@@ -610,7 +653,9 @@ class EntitlementClient:
         try:
             return required_level(self.required_tier(flag_key)) > _FREE_LEVEL
         except Exception:  # noqa: BLE001 - fail closed: unknown requirement == licensed
-            logger.exception("entitlement.required_tier_unresolvable flag_key=%s", flag_key)
+            logger.exception(
+                "entitlement.required_tier_unresolvable flag_key=%s", flag_key
+            )
             return True
 
     async def _evaluate(
@@ -643,7 +688,9 @@ class EntitlementClient:
         tier_result: Optional[bool] = (
             True
             if tier_check_bypassed(request_host, community)
-            else await self._check_tier(flag_key, required, tenant=tenant, community=community)
+            else await self._check_tier(
+                flag_key, required, tenant=tenant, community=community
+            )
         )
 
         # LICENSING ENFORCEMENT. A known-insufficient tier is a hard veto: it
@@ -675,12 +722,30 @@ class EntitlementClient:
             self._record_decision(False, "tier_unverifiable", required)
             return False
 
+        # ENV BASELINE (PostHog -> ENV -> default). Only when PostHog could not
+        # define the flag AND the flag is a plain FEATURE flag (free tier, no
+        # licence requirement). Licensed/tiered flags never reach this branch's
+        # result: `licensed` is True for them, so they stay licence-server-only.
+        if flag_result is None and not licensed:
+            env_value = env_flag_value(flag_key)
+            if env_value is not None:
+                logger.info(
+                    "entitlement.env_baseline",
+                    extra={"flag_key": flag_key, "tenant": tenant, "value": env_value},
+                )
+                self._record_decision(env_value, "env_baseline", required)
+                return env_value
+
         if flag_result is None or tier_result is None:
             cached = self._cache.get(cache_key)
             if cached is not None and cached.expires_at > now:
                 logger.info(
                     "entitlement.degraded_cache_hit",
-                    extra={"flag_key": flag_key, "tenant": tenant, "value": cached.value},
+                    extra={
+                        "flag_key": flag_key,
+                        "tenant": tenant,
+                        "value": cached.value,
+                    },
                 )
                 self._record_decision(cached.value, "degraded_cache", required)
                 return cached.value
@@ -692,7 +757,9 @@ class EntitlementClient:
             return default
 
         enabled = bool(flag_result) and bool(tier_result)
-        self._cache[cache_key] = _CacheEntry(value=enabled, expires_at=now + self.cache_ttl_seconds)
+        self._cache[cache_key] = _CacheEntry(
+            value=enabled, expires_at=now + self.cache_ttl_seconds
+        )
         self._record_decision(enabled, "granted" if enabled else "flag_off", required)
         return enabled
 
@@ -718,14 +785,18 @@ class EntitlementClient:
                 self.flag_gate.is_enabled, flag_key, distinct_id, groups=groups
             )
         except Exception:  # noqa: BLE001 - defense in depth atop the adapter's own try/except
-            logger.warning("entitlement.flag_gate_unreachable", extra={"flag_key": flag_key})
+            logger.warning(
+                "entitlement.flag_gate_unreachable", extra={"flag_key": flag_key}
+            )
             return None
 
     async def _check_tier(
         self, flag_key: str, required: str, *, tenant: str, community: Optional[int]
     ) -> Optional[bool]:
         """Does the effective tier meet `required`? None if the tier can't be determined."""
-        effective = await self.effective_tier(tenant=tenant, community=community, flag_key=flag_key)
+        effective = await self.effective_tier(
+            tenant=tenant, community=community, flag_key=flag_key
+        )
         if effective is None:
             return None
         satisfied = tier_level(effective) >= required_level(required)
@@ -764,7 +835,9 @@ class EntitlementClient:
         if community is None or self.community_tier_source is None:
             return tenant_tier
         community_tier = await self._community_tier(flag_key, tenant, community)
-        if community_tier is not None and tier_level(community_tier) > tier_level(tenant_tier):
+        if community_tier is not None and tier_level(community_tier) > tier_level(
+            tenant_tier
+        ):
             return community_tier
         return tenant_tier
 
@@ -791,10 +864,14 @@ class EntitlementClient:
         self._tier_cache[key] = _TierEntry(tier=tier, observed_at=time.monotonic())
         return tier
 
-    async def _community_tier(self, flag_key: str, tenant: str, community: int) -> Optional[str]:
+    async def _community_tier(
+        self, flag_key: str, tenant: str, community: int
+    ) -> Optional[str]:
         """Resolve a community's allocated tier; None means no uplift (none, or source down)."""
         source = self.community_tier_source
-        if source is None:  # pragma: no cover - guarded by the caller; kept for type narrowing
+        if (
+            source is None
+        ):  # pragma: no cover - guarded by the caller; kept for type narrowing
             return None
         key: TierCacheKey = (_SCOPE_COMMUNITY, tenant, community)
         started = time.monotonic()

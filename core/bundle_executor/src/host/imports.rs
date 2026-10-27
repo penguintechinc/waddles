@@ -13,6 +13,7 @@
 use penguin_bundle_host::wire::CapabilityKind;
 use tracing::{debug, error, warn};
 
+use crate::engine::stage_v2_world::waddle::bundle::context_v2;
 use crate::engine::waddle::bundle::{clock, context, db, flags, http, kv, log, relay, types};
 use crate::error::ExecutorError;
 use crate::host::http_wire;
@@ -100,6 +101,118 @@ struct BundleContextWire {
     message_id: String,
     #[serde(default)]
     config_json: String,
+    /// Authoritative numeric scope, supplied by the stage for `stage-v2`
+    /// bundles. Absent from a stage that predates numeric scope; the v1
+    /// `context.get-context` ignores it, `context-v2.get-context` treats
+    /// absence as "no scope" (fail closed).
+    #[serde(default)]
+    tenant_id: Option<i64>,
+    #[serde(default)]
+    community_id: Option<i32>,
+}
+
+/// `context-v2`: identical host-call (`context`/`get-context`) as v1, plus the
+/// authoritative numeric scope the stage now supplies. Fails CLOSED: a
+/// missing or out-of-range id (`tenant_id < 1`, `community_id < 0`) -- a stage
+/// that has not been taught to resolve numeric scope, or a tampered frame --
+/// is logged at ERROR and answered with the empty context (`tenant-id == 0`,
+/// which a bundle must treat as "no scope"), never with a fabricated or
+/// string-derived id. The string fields stay display-only.
+impl context_v2::Host for ExecState {
+    async fn get_context(&mut self) -> context_v2::BundleContext {
+        let wire = match call(
+            self,
+            CapabilityKind::Context,
+            "get-context",
+            serde_json::json!({}),
+        )
+        .await
+        {
+            Ok(value) => match serde_json::from_value::<BundleContextWire>(value) {
+                Ok(w) => w,
+                Err(e) => {
+                    error!(error = %e, "get-context-v2: malformed host-result, using empty context");
+                    BundleContextWire::default()
+                }
+            },
+            Err(e) => {
+                error!(error = %e, "get-context-v2 host-call failed, using empty context");
+                BundleContextWire::default()
+            }
+        };
+        // Ids are i64 on the wire but the executor/Load scope is i32: an id
+        // above i32::MAX can never match a loaded scope, so it fails closed.
+        let wire_scope = match (wire.tenant_id, wire.community_id) {
+            (Some(t), Some(c)) if t >= 1 && c >= 0 => i32::try_from(t).ok().map(|t| (t, c)),
+            _ => None,
+        };
+        let Some(scope) = wire_scope else {
+            error!(
+                tenant_id = ?wire.tenant_id,
+                community_id = ?wire.community_id,
+                "get-context-v2: stage did not supply a valid numeric scope \
+                 (1 <= tenant_id <= i32::MAX, community_id >= 0); returning the empty context"
+            );
+            return BundleContextWire::default().into_v2();
+        };
+        // Unify the id source: the host-call reply must equal the ids the
+        // dispatch frame was verified with, and be a scope this bundle was
+        // loaded under -- else the guest would see a scope the capabilities
+        // are not bound to.
+        if let Some(guard) = &self.v2_scope {
+            let frame_ok = guard.frame.is_none_or(|f| f == scope);
+            if !frame_ok || !guard.allowed.contains(&scope) {
+                error!(
+                    ?scope,
+                    frame = ?guard.frame,
+                    "get-context-v2: scope disagrees with the verified frame / loaded scope; \
+                     returning the empty context"
+                );
+                return BundleContextWire::default().into_v2();
+            }
+        } else {
+            error!("get-context-v2: no scope guard on a v2 instance; returning the empty context");
+            return BundleContextWire::default().into_v2();
+        }
+        context_v2::BundleContext {
+            tenant_id: i64::from(scope.0),
+            community_id: scope.1,
+            tenant: wire.tenant,
+            community: wire.community,
+            app_id: wire.app_id,
+            feature: wire.feature,
+            version: wire.version,
+            message_id: wire.message_id,
+            config_json: if wire.config_json.is_empty() {
+                "{}".to_string()
+            } else {
+                wire.config_json
+            },
+        }
+    }
+}
+
+impl BundleContextWire {
+    /// The empty-but-well-formed v2 context: `tenant-id == 0` (no scope).
+    fn into_v2(self) -> context_v2::BundleContext {
+        context_v2::BundleContext {
+            tenant_id: 0,
+            community_id: 0,
+            // No-scope context is genuinely empty: the display strings are
+            // blanked too so a bundle cannot fall back to them as keys.
+            tenant: String::new(),
+            community: None,
+            app_id: self.app_id,
+            feature: self.feature,
+            version: self.version,
+            message_id: String::new(),
+            config_json: if self.config_json.is_empty() {
+                "{}".to_string()
+            } else {
+                self.config_json
+            },
+        }
+    }
 }
 
 impl From<BundleContextWire> for context::BundleContext {
@@ -1217,5 +1330,33 @@ pub(crate) mod tests {
                 _ => panic!("round trip changed variant: {v:?} -> {back:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod no_scope_tests {
+    use super::*;
+
+    /// The no-scope context carries no display strings a bundle could key on.
+    #[test]
+    fn no_scope_context_is_fully_blanked() {
+        let wire = BundleContextWire {
+            tenant: "acme".into(),
+            community: Some("main".into()),
+            app_id: "a".into(),
+            feature: "f".into(),
+            version: "1".into(),
+            message_id: "m1".into(),
+            config_json: String::new(),
+            tenant_id: Some(5),
+            community_id: Some(2),
+        };
+        let c = wire.into_v2();
+        assert_eq!(c.tenant_id, 0);
+        assert_eq!(c.community_id, 0);
+        assert!(c.tenant.is_empty());
+        assert!(c.community.is_none());
+        assert!(c.message_id.is_empty());
+        assert_eq!(c.config_json, "{}");
     }
 }

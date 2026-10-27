@@ -1,0 +1,58 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
+# waddles.core.example.jackpot -- see bundles/python/pyping/hub-manifest.yaml's header for why
+# this is separate from `bundle.yaml`.
+schema_version: 2
+app_id: waddles.core.example.jackpot
+name: Jackpot Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: "SuperPenguinTV (Psychoboy)"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/jackpot
+notice: |
+  Inspired by PenguinTwitchBot by SuperPenguinTV (with permission) -- ideas/design only,
+  no code copied (https://github.com/Psychoboy/PenguinTwitchBot). The accumulating-pot
+  mechanic, odds, flavor text and all code are written fresh for this bundle.
+language: python
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!jackpot"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!jackpot"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists the community's accumulated pot and per-actor cooldown counters (pseudonymous keys)"
+  - id: economy.read
+    justification: "reads the actor's balance and max stake to fail loud on insufficient funds"
+  - id: economy.wager
+    justification: "atomically debits the actor's stake and credits a win payout (the pot) in one host call"
+    params:
+      max_bet: 500
+  - id: identity.resolve
+    justification: "resolves the triggering actor's community uuid, which the economy import requires"
+  - id: "chat.send:discord"
+    justification: "jackpot replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "jackpot replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+routes_to: []

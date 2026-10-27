@@ -262,12 +262,13 @@ pub async fn run_many_detailed(
                     Message::HostCall(call)
                         if call.op.starts_with("reputation.")
                             || call.op.starts_with("economy.")
-                            || call.op.starts_with("identity.") =>
+                            || call.op.starts_with("identity.")
+                            || call.op.starts_with("ai.") =>
                     {
                         assert_eq!(
                             call.capability,
                             CapabilityKind::Db,
-                            "reputation/economy/identity ride the db wire kind"
+                            "reputation/economy/identity/ai ride the db wire kind"
                         );
                         let body = scenario.answer.body_for(&call.op);
                         write_frame(&mut io, &Frame::new(frame.id, Message::HostResult(body)))

@@ -7,7 +7,7 @@ component. No scheduler: "remaining" is recomputed from the host clock on every 
 
 | | |
 |---|---|
-| Flag | `waddles.command-countdown` (default OFF) |
+| Gating | Activation only (installed -> enabled -> activated); no feature flag |
 | Platforms | Twitch, Discord (`chat.message`) |
 | State | `kv`, community-scoped; **community is required** (no tenant-wide fallback) |
 | Catalog | registered in `bundles/core-bundles.yaml` |
@@ -36,7 +36,6 @@ reported as already happened.
 
 | id | why |
 |---|---|
-| `flags.read` | gates the command behind `waddles.command-countdown` |
 | `storage.kv` | persists the per-community countdown target time |
 
 ## State

@@ -25,7 +25,6 @@ from app import (
     _PERMISSION_DENIED_MSG,
     _RULES_KEY,
     _USAGE,
-    FLAG_KEY,
     MAX_RULES_LEN,
     dispatch,
     transform,
@@ -217,27 +216,6 @@ def test_every_kv_key_written_passes_the_host_charset_check(fake_host: _FakeHost
 
 
 # -- flag fail-closed
-def test_flag_is_requested_with_a_fail_closed_default(fake_host: _FakeHost) -> None:
-    seen: list[tuple[str, bool]] = []
-    sys.modules["wit_world"].imports.flags.enabled = (
-        lambda key, default_value: seen.append((key, default_value)) or default_value
-    )
-    assert _run(transform(_event("!rules"))) is None
-    assert seen == [(FLAG_KEY, False)]
-    assert FLAG_KEY == "waddles.command-rules"
-
-
-def test_missing_wit_world_keeps_the_command_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "wit_world", None)
-    assert _run(transform(_event("!rules"))) is None
-
-
-def test_flag_off_does_no_io_and_logs_nothing(fake_host: _FakeHost) -> None:
-    fake_host.flag_state["enabled"] = False
-    assert _run(transform(_event(f"!rules set {CANARY}", is_mod=True))) is None
-    assert fake_host.log_calls == [] and fake_host.kv.calls == []
-
-
 # -- PII-free logs
 def test_no_log_line_in_any_flow_contains_rules_text_or_user_input(fake_host: _FakeHost) -> None:
     """PII-free-log regression: the rules body and any typed grammar text never reach the sink."""
