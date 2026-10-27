@@ -7,11 +7,11 @@ roll back and surface, never be swallowed) execute for real.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from pydal import DAL
 
 from services import event_discord_sync_service as svc
 from tests.test_event_discord_sync_service import (
@@ -21,6 +21,7 @@ from tests.test_event_discord_sync_service import (
     _make_pairing,
     _targets,
 )
+from tests.test_sync_worker_dal import block_penguin_dal_asyncdb, fake_worker_dal
 
 
 class _CommitFailsDal:
@@ -185,20 +186,50 @@ class TestBatchBackoffAndMain:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         fake_dal = object()
-
-        async def _install() -> Any:
-            return SimpleNamespace(dal=fake_dal)
+        monkeypatch.setenv("DATABASE_URL", "sqlite://unused")
+        # regression: main() once read `.dal` off a penguin-dal AsyncDB (TableNotFoundError:
+        # Table 'dal' not found). Any return to `build_install_dal` now dies with that real error.
+        block_penguin_dal_asyncdb(monkeypatch)
+        monkeypatch.setattr(svc, "open_worker_dal", fake_worker_dal(fake_dal))
 
         async def _batch(dal: Any, **kw: Any) -> svc.ReconcileSummary:
             assert dal is fake_dal
             return svc.ReconcileSummary(events_examined=5, events_synced=4, events_failed=1)
 
-        monkeypatch.setattr(svc, "_build_install_dal", _install)
         monkeypatch.setattr(svc, "run_event_sync_reconcile_batch", _batch)
         assert await svc.main() == 0
         out = capsys.readouterr().out
         assert "events_examined=5" in out
         assert "events_failed=1" in out
+
+    async def test_main_runs_on_a_real_pydal_dal_not_an_asyncdb_attribute(
+        self,
+        event_sync_db: Any,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """regression: main() read `.dal` off a penguin-dal AsyncDB -> `TableNotFoundError`.
+
+        Nothing about the DAL layer is faked: the real `main()` opens a real sqlite file
+        through the real `init_database` seam and the real batch queries it with raw pydal.
+        A reintroduced `build_install_dal(...).dal` dies here with the production error.
+        """
+        _dal, _c, _t, _g, _event_id = event_sync_db  # one approved/pending event, no pairing
+        monkeypatch.setenv("DATABASE_URL", f"sqlite://{tmp_path / 'event_sync_test.db'}")
+        seen: dict[str, Any] = {}
+        real_batch = svc.run_event_sync_reconcile_batch
+
+        async def _spy(batch_dal: Any, **kw: Any) -> svc.ReconcileSummary:
+            seen["dal"] = batch_dal
+            return await real_batch(batch_dal, **kw)
+
+        monkeypatch.setattr(svc, "run_event_sync_reconcile_batch", _spy)
+        assert await svc.main() == 0
+
+        assert isinstance(seen["dal"], DAL)
+        out = capsys.readouterr().out
+        assert "events_examined=1" in out  # the pending event was found by a real raw-pydal query
 
     async def test_batch_default_http_client_path_with_no_events(self, event_sync_db: Any) -> None:
         dal, _c, _t, _g, event_id = event_sync_db
