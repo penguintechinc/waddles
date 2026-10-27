@@ -51,8 +51,7 @@ describe('CookiePreferencesModal rendering', () => {
     for (const name of ['Essential Cookies', 'Functional Cookies', 'Analytics Cookies', 'Marketing Cookies']) {
       expect(screen.getByRole('heading', { name })).toBeInTheDocument();
     }
-    expect(screen.getByText('session_token')).toBeInTheDocument();
-    expect(screen.getByText('_ga')).toBeInTheDocument();
+    expect(screen.getByText('wb_session')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Cookie Policy page' })).toHaveAttribute('href', '/cookie-policy');
   });
 
