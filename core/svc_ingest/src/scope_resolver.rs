@@ -218,6 +218,10 @@ pub trait ResolverMetrics: Send + Sync {
     /// Records one resolution outcome: `hit`, `resolved`, or an
     /// [`Unresolved::label`] (each of which means the event is dropped).
     fn scope_resolution(&self, platform: &str, outcome: &'static str);
+    /// Records one event dropped because a session's bound community
+    /// disagreed with the scope resolved from its source (no labels: the
+    /// counter is fixed-cardinality by construction).
+    fn scope_mismatch(&self);
 }
 
 /// `(lowercased platform, source id)`.
@@ -299,6 +303,11 @@ impl<S: ScopeSource> ScopeResolver<S> {
             }),
             inflight: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Records one binding-vs-resolved community mismatch drop.
+    pub fn record_scope_mismatch(&self) {
+        self.metrics.scope_mismatch();
     }
 
     /// Records that an event carried no resolvable source (e.g. a Discord DM)
@@ -546,6 +555,7 @@ mod tests {
         fn scope_resolution(&self, platform: &str, outcome: &'static str) {
             self.0.lock().unwrap().push((platform.to_string(), outcome));
         }
+        fn scope_mismatch(&self) {}
     }
     impl Rec {
         fn count(&self, outcome: &str) -> usize {

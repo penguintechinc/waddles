@@ -73,7 +73,7 @@ path = "src/main.rs"
 # `deny.toml`'s `[sources]` `allow-git` must list this exact repository URL
 # or `cargo deny check` fails closed on `unknown-git`.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 axum = "=0.8.9"
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace"] }
@@ -91,7 +91,7 @@ reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-
 # `penguin-logging` owns the tracing-subscriber/OTel/OTLP stack internally
 # (spec S4.9) -- no direct `tracing-subscriber`/`opentelemetry*` dependency
 # here anymore; only the `tracing` macros crate above is kept.
-penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0a320ba2b08a6850b66e3062f6a9dfb44fec6950", package = "penguin-logging", version = "=0.1.0" }
 # `penguin-spine`: the D30 envelope/binding types and the `XADD` produce
 # side (spec S4.7/S5.11) -- see `src/publish.rs`. Ingest MINTS via
 # `penguin_spine::KeyRing`/`compute_binding_mac`; it never verifies and
@@ -101,11 +101,11 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # constructs a `Delivered` (it never reads a stage stream), so this bump
 # is a pure no-op for this crate's own call sites; taken anyway to stay on
 # the same finalized spine rev as svc_process/svc_action.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ce638ec24f0bca0e2afd7655b99d1f9162030156", package = "penguin-spine", version = "=0.2.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "90060a93925c50668cc1c6dd47a4ae24a7b4e321", package = "penguin-spine", version = "=0.2.0" }
 # `penguin-licensing`: the `waddles.core.rust-data-plane` feature-flag gate
 # on the receive/produce/outbound-drain loops (spec S13.5) -- see
 # `try_start_license_client`/`rust_data_plane_enabled` in `src/lib.rs`.
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "7110125df28045322e7c4c527d1d1be806f2f086", package = "penguin-licensing", version = "=0.1.0" }
 # `penguin-connector-twitch`: IRC chat receive (`src/ingest/twitch.rs`) and
 # the outbound relay sender (`src/outbound.rs`, `TwitchIrcSender`) -- rev
 # fast-forwarded to penguin-libs PR #129 (real Discord `OP_RESUME`, see the
@@ -118,7 +118,7 @@ penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git"
 # `Cargo.lock` -- pinning twitch's own `rev` here keeps the lockfile
 # internally consistent instead of relying on that resolver side effect.
 # EventSub webhook verification remains a separate `// TODO(M5)` seam.
-penguin-connector-twitch = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "79a32e9676dfa55e9561b7bf94cb7f69023b393c", package = "penguin-connector-twitch", version = "=0.1.0" }
+penguin-connector-twitch = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ecf906a326dfd41ef65e9a2fcb3daf9633cba7ec", package = "penguin-connector-twitch", version = "=0.1.0" }
 # `penguin-connector-discord`: Gateway chat receive (`src/ingest/discord.rs`).
 # rev carries penguin-libs PR #129 (`release/rust-connectors/v0.1.x`,
 # commit 79a32e9676dfa55e9561b7bf94cb7f69023b393c): real `OP_RESUME`,
@@ -129,7 +129,7 @@ penguin-connector-twitch = { git = "https://github.com/penguintechinc/penguin-li
 # to these directly instead of defaulting to "not supported" (see that
 # module's doc comment). Still carries PR #103's `GatewayClosed`
 # classification and PR #102's lenient `MESSAGE_CREATE` field parsing.
-penguin-connector-discord = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "79a32e9676dfa55e9561b7bf94cb7f69023b393c", package = "penguin-connector-discord", version = "=0.1.0" }
+penguin-connector-discord = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ecf906a326dfd41ef65e9a2fcb3daf9633cba7ec", package = "penguin-connector-discord", version = "=0.1.0" }
 # Named directly (not just transitive via penguin-connector-discord) only
 # because `src/ingest/discord.rs`'s `GatewayConnector for
 # DiscordGatewayReceiver` impl names `tokio_tungstenite::MaybeTlsStream` in
@@ -190,6 +190,11 @@ subtle = "=2.6.1"
 # (see Dockerfile.rust) exactly like core/svc_process.
 service_auth = { path = "../service_auth", version = "=0.1.0" }
 
+# Per-community Twitch inbound (`src/twitch_sessions/`): pages hub-api's
+# data-plane binding list via `ConnectionResolve::list_bindings`. Same-repo
+# path dependency (Docker build context is `core/`), like `service_auth`.
+connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
+
 [dev-dependencies]
 http-body-util = "=0.1.3"
 # Already resolved transitively (tokio-tungstenite's own dependency) at
@@ -205,7 +210,7 @@ futures-util = "=0.3.34"
 # virtual-time reconnect cycles instead of a real multi-minute sleep in the
 # suite. Never linked into the release binary. Matches
 # `core/svc_streaming/Cargo.toml`'s own precedent/comment.
-tokio = { version = "=1.53.1", features = ["test-util"] }
+tokio = { version = "=1.53.3", features = ["test-util"] }
 # Already resolved transitively (tokio's unix signal support) at this exact
 # version -- promoted to a direct dev-dependency only so
 # `tests/main_binary.rs` can send a real SIGTERM to a spawned child process
@@ -215,7 +220,7 @@ libc = "=0.2.189"
 # `[dev-dependencies]`'s `testing` feature gives every unit test its own
 # in-memory OTel sink (`penguin_logging::testing::init_test_telemetry`)
 # instead, matching `core/svc_process`'s own test convention.
-penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0", features = [
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0a320ba2b08a6850b66e3062f6a9dfb44fec6950", package = "penguin-logging", version = "=0.1.0", features = [
     "testing",
 ] }
 # `ingest::discord::RestPermissionsResolver`'s guild/member REST lookups are

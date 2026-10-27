@@ -1,7 +1,7 @@
 """Enterprise SSO: per-tenant IdP connections + external-identity links.
 
 Backs the SAML 2.0 / OIDC (Enterprise tier, `waddles.auth.sso_saml`) and
-Google OAuth2 (Professional tier, `waddles.auth.sso_google`) login flows in
+custom OAuth2/OIDC (Professional tier, `waddles.auth.sso_custom`) login flows in
 `hub_api/services/sso_service.py`.
 
 Tables:

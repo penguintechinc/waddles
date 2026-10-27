@@ -117,8 +117,8 @@ async def _admin_gate(community_id: int) -> tuple[dict[str, object], int] | None
 @event_discord_sync_admin_bp.route(
     "/communities/<int:community_id>/calendar/event-sync", methods=["GET"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:read")  # type: ignore[misc]
 @validate_response(EventSyncStateResponse)
 async def get_event_sync(
     community_id: int,
@@ -133,8 +133,8 @@ async def get_event_sync(
 @event_discord_sync_admin_bp.route(
     "/communities/<int:community_id>/calendar/event-sync", methods=["PUT"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 @validate_response(EventSyncStateResponse)
 async def put_event_sync(
     community_id: int,

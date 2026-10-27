@@ -84,7 +84,7 @@ class ListCredentialsResponse:
 
 
 @passkey_bp.route("/register/start", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(PasskeyOptionsResponse)
 async def start_registration() -> PasskeyOptionsResponse | tuple[dict[str, object], int]:
     """Start registration."""
@@ -98,7 +98,7 @@ async def start_registration() -> PasskeyOptionsResponse | tuple[dict[str, objec
 
 
 @passkey_bp.route("/register/finish", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(FinishRegistrationRequest)
 @validate_response(SimpleSuccessResponse)
 async def finish_registration(
@@ -117,7 +117,7 @@ async def finish_registration(
 
 
 @passkey_bp.route("/credentials", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ListCredentialsResponse)
 async def list_credentials() -> ListCredentialsResponse:
     """List credentials."""
@@ -139,7 +139,7 @@ async def list_credentials() -> ListCredentialsResponse:
 
 
 @passkey_bp.route("/credentials/<int:credential_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
 async def remove_credential(
     credential_id: int,

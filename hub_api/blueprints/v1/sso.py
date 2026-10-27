@@ -575,8 +575,8 @@ async def sso_saml_metadata(public_id: str) -> tuple[Response, int] | tuple[dict
 
 
 @sso_admin_bp.route("/connections", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_SSO_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_SSO_ADMIN)  # type: ignore[misc]
 @validate_response(SsoConnectionListResponse)
 async def list_sso_connections() -> SsoConnectionListResponse | tuple[dict[str, object], int]:
     """`GET /connections` -- the caller's tenant's connections (no secrets)."""
@@ -600,8 +600,8 @@ async def list_sso_connections() -> SsoConnectionListResponse | tuple[dict[str, 
 
 
 @sso_admin_bp.route("/connections", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_SSO_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_SSO_ADMIN)  # type: ignore[misc]
 @validate_request(CreateConnectionRequest)
 @validate_response(SsoConnectionResponse, 201)
 async def create_sso_connection(
@@ -634,8 +634,8 @@ async def create_sso_connection(
 
 
 @sso_admin_bp.route("/connections/<public_id>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_SSO_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_SSO_ADMIN)  # type: ignore[misc]
 @validate_response(SsoConnectionResponse)
 async def get_sso_connection(
     public_id: str,
@@ -661,8 +661,8 @@ async def get_sso_connection(
 
 
 @sso_admin_bp.route("/connections/<public_id>", methods=["PATCH"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_SSO_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_SSO_ADMIN)  # type: ignore[misc]
 @validate_request(UpdateConnectionRequest)
 @validate_response(SsoConnectionResponse)
 async def update_sso_connection(
@@ -695,8 +695,8 @@ async def update_sso_connection(
 
 
 @sso_admin_bp.route("/connections/<public_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_SSO_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_SSO_ADMIN)  # type: ignore[misc]
 @validate_response(SsoDeleteResponse)
 async def delete_sso_connection(
     public_id: str,

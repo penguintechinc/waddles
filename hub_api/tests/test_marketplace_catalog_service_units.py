@@ -15,7 +15,7 @@ import pytest
 from pydal import DAL, Field
 
 from services.marketplace_catalog_service import _tenant_scope_query, visible_tenant_ids
-from services.schema import bind_marketplace_catalog_tables
+from services.schema import bind_marketplace_module_tables
 
 
 class _FakeRequest:
@@ -32,7 +32,7 @@ def bare_dal(tmp_path: Any) -> Any:
     """
     dal = DAL(f"sqlite://{tmp_path / 'bare_test.db'}")
     dal.define_table("tenants", Field("slug", unique=True), Field("is_active", "boolean"))
-    bind_marketplace_catalog_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
     dal.marketplace_catalog.insert(
         source="core",
         source_id=1,

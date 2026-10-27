@@ -127,6 +127,7 @@ from services.credential_resolver import (
 )
 from services.guild_pairing import list_bindings
 from services.schema import bind_auth_tables, bind_bar_citizen_tables
+from services.sync_worker_dal import open_worker_dal
 
 try:
     from flask_core.feature_flags import feature_enabled
@@ -1240,31 +1241,26 @@ async def run_role_sync_reconcile_batch(
             await bound_http_client.aclose()
 
 
-async def _build_install_dal() -> Any:
-    """Open this standalone CronJob process's own penguin-dal connection.
-
-    Same DSN as the app, a separate pool -- mirrors `usage_aggregator_
-    service.py::_build_install_dal`.
-    """
-    from services.bundle_install_dal import build_install_dal
-
-    return await build_install_dal(os.environ["DATABASE_URL"], pool_size=1)
-
-
 async def main() -> int:
-    """CronJob entrypoint: one reconcile pass, denominators printed, never a silent zero."""
+    """CronJob entrypoint: one reconcile pass, denominators printed, never a silent zero.
+
+    The engine queries the RAW pydal DAL (`async_dal.dal`) and token lookup takes the
+    flask_core `AsyncDAL` itself (`get_decrypted_tokens` calls `.dal` + `.select_async`) --
+    exactly the objects hub-api builds in `app.py::startup`. Neither is a penguin-dal
+    `AsyncDB`: that has no `.dal`, and reading one raises `TableNotFoundError: Table 'dal'
+    not found` (see `services/sync_worker_dal.py`).
+    """
     from services.community_connections import get_decrypted_tokens
 
-    install_dal = await _build_install_dal()
-    dal = install_dal.dal
+    with open_worker_dal(os.environ["DATABASE_URL"]) as async_dal:
 
-    async def _get_broadcaster_user_token(community_id: int) -> str | None:
-        tokens = await get_decrypted_tokens(install_dal, community_id, "twitch")
-        return tokens.access_token if tokens else None
+        async def _get_broadcaster_user_token(community_id: int) -> str | None:
+            tokens = await get_decrypted_tokens(async_dal, community_id, "twitch")
+            return tokens.access_token if tokens else None
 
-    summary = await run_role_sync_reconcile_batch(
-        dal, get_broadcaster_user_token=_get_broadcaster_user_token
-    )
+        summary = await run_role_sync_reconcile_batch(
+            async_dal.dal, get_broadcaster_user_token=_get_broadcaster_user_token
+        )
     print(
         f"role_sync: pairings_examined={summary.pairings_examined} "
         f"pairings_synced={summary.pairings_synced} "

@@ -241,3 +241,82 @@ async def test_list_happy_path_after_activation(app: Quart, install_dal: Any) ->
     assert response.status_code == 200
     body = await response.get_json()
     assert body["bundles"][0]["appId"] == "waddles.socials.music.default"
+
+
+def _ping_manifest(app_id: str) -> dict[str, Any]:
+    """v2 manifest consuming twitch chat filtered by `!ping` -- infers a `ping` command."""
+    return {
+        "schema_version": 2,
+        "app_id": app_id,
+        "name": "Ping Test",
+        "version": "1.0.0",
+        "feature": app_id.rsplit(".", 1)[0],
+        "module": "socials",
+        "provider": "builtin",
+        "language": "python",
+        "artifact": "source",
+        "stages": {
+            "process": {
+                "entry": "x:y",
+                "consumes": [
+                    {
+                        "platform": "twitch",
+                        "event_types": ["chat.message"],
+                        "filters": {"command_prefix": ["!ping"]},
+                    }
+                ],
+            },
+        },
+    }
+
+
+async def test_activate_response_has_empty_warnings_by_default(
+    app: Quart, install_dal: Any
+) -> None:
+    """Exact response field set (security.md Output Validation) -- no extra fields leak."""
+    from tests.test_bundle_activation_service import _install_and_make_available
+
+    app_id = "waddles.socials.solo.default"
+    await _install_and_make_available(install_dal, manifest=_ping_manifest(app_id))
+    community_id = await _seed_community(install_dal)
+    token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
+    response = await app.test_client().post(
+        f"/api/v1/apps/community/{community_id}/activation",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"appId": app_id},
+    )
+    assert response.status_code == 201
+    body = await response.get_json()
+    assert set(body) == {"success", "message", "warnings"}
+    assert body["warnings"] == []
+
+
+async def test_activate_conflict_warning_names_owner_and_is_still_201(
+    app: Quart, install_dal: Any
+) -> None:
+    """A conflicting `!ping` is surfaced as a warning with an exact field set; status stays 201."""
+    from tests.test_bundle_activation_service import _install_and_make_available
+
+    app_a = "waddles.socials.alpha.default"
+    app_b = "waddles.socials.beta.default"
+    await _install_and_make_available(install_dal, manifest=_ping_manifest(app_a))
+    await _install_and_make_available(install_dal, manifest=_ping_manifest(app_b))
+    community_id = await _seed_community(install_dal)
+    token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
+    client = app.test_client()
+    url = f"/api/v1/apps/community/{community_id}/activation"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    first = await client.post(url, headers=headers, json={"appId": app_a})
+    assert first.status_code == 201
+    assert (await first.get_json())["warnings"] == []
+
+    second = await client.post(url, headers=headers, json={"appId": app_b})
+    assert second.status_code == 201
+    body = await second.get_json()
+    assert set(body) == {"success", "message", "warnings"}
+    warning = body["warnings"][0]
+    assert set(warning) == {"code", "appId", "command", "ownerAppId", "message"}
+    assert warning["code"] == "command_conflict"
+    assert warning["appId"] == app_b
+    assert warning["ownerAppId"] == app_a

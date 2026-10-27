@@ -1,0 +1,22 @@
+{
+  "accessToken": "FAKE-ACCESS-TOKEN",
+  "communityId": 7,
+  "connectionId": 12,
+  "endpoint": {
+    "function": null,
+    "project": null,
+    "region": null,
+    "url": null
+  },
+  "expiresAt": "2026-10-10T16:00:00+00:00",
+  "kind": 1,
+  "metadata": {
+    "bot_login": "waddlebots",
+    "channel": "penguinzplays",
+    "channel_id": "7001",
+    "channel_login": "penguinzplays"
+  },
+  "provider": "twitch",
+  "secret": null,
+  "success": true
+}
