@@ -434,13 +434,17 @@ async def scan_source(
             extra={"source_public_id": str(source.public_id), "reason": exc.reason},
         )
         if dal is not None:
-            await update_status(
-                dal,
-                source.public_id,
-                SourceStatus.ERROR,
-                last_scan_error=str(exc)[:500],
-                scanned=True,
-            )
+            try:
+                await update_status(
+                    dal,
+                    source.public_id,
+                    SourceStatus.ERROR,
+                    last_scan_error=str(exc)[:500],
+                    scanned=True,
+                )
+            except ApiError as status_exc:
+                if status_exc.status_code != 409:  # disabled source: drop the status write
+                    raise
         raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

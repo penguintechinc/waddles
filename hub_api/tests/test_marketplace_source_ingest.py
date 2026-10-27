@@ -21,6 +21,7 @@ from services.bundle_manifest_v2 import parse_bundle_manifest_v2
 from services.errors import ApiError
 from services.marketplace_publisher_attestation import build_attestation_payload
 from services.marketplace_source_scanner import BundleCandidate, ScanResult
+from services.marketplace_source_service import SourceStatus
 from services.vendor_bundle_authz import source_namespace_prefix, source_short
 from tests.malicious_source_fixtures import make_source, manifest
 
@@ -28,6 +29,9 @@ WASM = b"\x00asm-fake-component"
 DIGEST = hashlib.sha256(WASM).hexdigest()
 _PUB = Ed25519PrivateKey.generate()
 _PUB_B64 = base64.b64encode(_PUB.public_key().public_bytes_raw()).decode()
+
+
+_DISABLED: set[str] = set()
 
 
 @pytest.fixture
@@ -48,6 +52,7 @@ async def env(install_dal: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         "BUNDLE_SIGNING_PRIVATE_KEY", base64.b64encode(platform.private_bytes_raw()).decode()
     )
     monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", "k1")
+    _DISABLED.clear()
     src = dataclasses.replace(make_source("a" * 40), publisher_public_key=_PUB_B64)
     await install_dal.marketplace_sources.async_insert(public_id=str(src.public_id))
 
@@ -57,7 +62,18 @@ async def env(install_dal: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         row = rows.first()
         return None if row is None else int(row.id)
 
+    async def _get(dal: Any, public_id: uuid.UUID) -> Any:
+        rows = await dal(dal.marketplace_sources.public_id == str(public_id)).select()
+        row = rows.first()
+        if row is None:
+            return None
+        disabled = str(public_id) in _DISABLED  # sqlite mirror has no status column
+        return dataclasses.replace(
+            src, status=SourceStatus.DISABLED if disabled else SourceStatus.ACTIVE
+        )
+
     monkeypatch.setattr(ing, "get_source_pk", _pk)
+    monkeypatch.setattr(ing, "get_source", _get)
     return src, platform, sidecar
 
 
@@ -287,3 +303,47 @@ async def test_approve_by_wrong_source_forbidden(install_dal: Any, env: Any) -> 
             approved_by=7,
             expected_permission_hash=None,
         )
+
+
+async def _disable(install_dal: Any, src: Any) -> None:
+    _DISABLED.add(str(src.public_id))
+
+
+async def test_disabled_source_ingest_and_approve_refused(install_dal: Any, env: Any) -> None:
+    src, _, _ = env
+    cand = _candidate(src)
+    b = (await _ingest(install_dal, src, cand)).bundles[0]  # active: normal ingest works
+    await _disable(install_dal, src)
+    with pytest.raises(ApiError) as exc:
+        await _ingest(install_dal, src, _candidate(src, name="other"))
+    assert exc.value.status_code == 409
+    assert await _vrow(install_dal, _candidate(src, name="other").assigned_app_id) is None
+    with pytest.raises(ApiError) as exc2:
+        await ing.approve_source_version(
+            install_dal,
+            src,
+            app_id=cand.assigned_app_id,
+            version="1.0.0",
+            approved_by=7,
+            expected_permission_hash=b.permission_hash,
+        )
+    assert exc2.value.status_code == 409
+    assert (await approvals.list_global_installs(install_dal)) == []
+
+
+async def test_source_disabled_mid_ingest_creates_no_version(
+    install_dal: Any, env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src, _, _ = env
+    cand = _candidate(src)
+
+    async def _fetch_then_disable(c: BundleCandidate) -> bytes:
+        await _disable(install_dal, src)  # disabled after the entry check, before create_version
+        return WASM
+
+    summary = await ing.ingest_candidates(
+        install_dal, src, _scan(src, cand), fetch_wasm=_fetch_then_disable,
+        tenant_id=1, tenant_slug="acme", valkey_client=AsyncMock(),
+    )  # fmt: skip
+    assert (summary.created, summary.rejected) == (0, 1)
+    assert await _vrow(install_dal, cand.assigned_app_id) is None

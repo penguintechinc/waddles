@@ -314,3 +314,21 @@ async def test_deactivate_source_bundles_revokes_install_keeps_versions(pg_dal: 
     assert n_versions == 1  # version history retained
     # idempotent: already-revoked bundle is skipped, not an error
     assert await deactivate_source_bundles(pg_dal, rec.public_id, revoked_by=None) == ()
+
+
+async def test_disabled_is_terminal_for_update_status(pg_dal: Any) -> None:
+    """A scanner status write (ACTIVE/ERROR) must never resurrect a DISABLED source."""
+    from services.marketplace_source_service import get_source
+
+    live = await _prebuilt(pg_dal, pinned_commit_sha=SHA)
+    out = await update_status(pg_dal, live.public_id, SourceStatus.ERROR, last_scan_error="x")
+    assert out.status == SourceStatus.ERROR  # non-disabled still updates
+
+    dis = await _prebuilt(pg_dal, pinned_commit_sha=SHA)
+    await disable_source(pg_dal, dis.public_id)
+    for target in (SourceStatus.ACTIVE, SourceStatus.ERROR, SourceStatus.NEEDS_APPROVAL):
+        with pytest.raises(ApiError) as ei:
+            await update_status(pg_dal, dis.public_id, target, scanned=True)
+        assert ei.value.status_code == 409
+    after = await get_source(pg_dal, dis.public_id)
+    assert after is not None and after.status == SourceStatus.DISABLED

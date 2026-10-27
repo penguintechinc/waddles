@@ -30,7 +30,7 @@ from services.bundle_version_service import (
     create_version,
     process_prebuilt_component,
 )
-from services.errors import ApiError, bad_request
+from services.errors import ApiError, bad_request, conflict
 from services.marketplace_publisher_attestation import (
     AttestationError,
     VerifiedPrebuilt,
@@ -40,6 +40,8 @@ from services.marketplace_source_scanner import BundleCandidate, ScanResult
 from services.marketplace_source_service import (
     BuildMode,
     SourceRecord,
+    SourceStatus,
+    get_source,
     get_source_pk,
 )
 from services.vendor_bundle_authz import INSTALL_SOURCE_HUMAN, enforce_source_namespace
@@ -134,6 +136,10 @@ async def _ingest_one(
             app_id, candidate.version, OUTCOME_REFUSED_CONFLICT, "digest_differs_for_version"
         )
 
+    current = await get_source(install_dal, source.public_id)
+    if current is None or current.status == SourceStatus.DISABLED:
+        return _reject(candidate, "source_disabled")  # re-check: disabled mid-ingest
+
     await create_version(
         install_dal,
         tenant_id=tenant_id,
@@ -212,6 +218,9 @@ async def ingest_candidates(
     source_pk = await get_source_pk(install_dal, source.public_id)
     if source_pk is None:
         raise ApiError("marketplace source not found", 404, "source_not_found")
+    fresh = await get_source(install_dal, source.public_id)
+    if fresh is None or fresh.status == SourceStatus.DISABLED:
+        raise conflict("marketplace source is disabled")
     out: list[IngestedBundle] = []
     async with bundle_span("marketplace.source.ingest", source_public_id=str(source.public_id)):
         for candidate in result.bundles:
@@ -274,6 +283,9 @@ async def approve_source_version(
     vrow = versions.first()
     if vrow is None:
         raise ApiError(f"version {version} of {app_id} not found", 404, "version_not_found")
+    fresh = await get_source(install_dal, source.public_id)
+    if fresh is None or fresh.status == SourceStatus.DISABLED:
+        raise conflict("marketplace source is disabled")
     source_pk = await get_source_pk(install_dal, source.public_id)
     if source_pk is None or vrow.source_id != source_pk:
         raise ApiError("version does not belong to this source", 403, "FORBIDDEN")

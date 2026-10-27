@@ -279,16 +279,31 @@ async def update_status(
     }
     if scanned:
         values["last_scanned_at"] = now
+    # DISABLED is terminal: a non-DISABLED target never overwrites a DISABLED row (a concurrent
+    # scan must not resurrect a disabled source). Only an explicit disable/target-DISABLED wins.
+    conditions = [table.c.public_id == public_id]
+    if status != SourceStatus.DISABLED:
+        conditions.append(table.c.status != int(SourceStatus.DISABLED))
     async with dal.engine.begin() as conn:
         row = (
             await conn.execute(
-                update(table)
-                .where(table.c.public_id == public_id)
-                .values(**values)
-                .returning(*table.c)
+                update(table).where(*conditions).values(**values).returning(*table.c)
             )
         ).first()
+        exists = (
+            row is not None
+            or (
+                await conn.execute(select(table.c.id).where(table.c.public_id == public_id))
+            ).first()
+            is not None
+        )
     if row is None:
+        if exists:
+            logger.warning(
+                "marketplace source: status update dropped (source disabled)",
+                extra={"source_public_id": str(public_id), "status": int(status)},
+            )
+            raise conflict("marketplace source is disabled")
         raise not_found("marketplace source not found")
     logger.info(
         "marketplace source: status",
