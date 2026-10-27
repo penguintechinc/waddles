@@ -5,6 +5,17 @@
 # rootless/restricted, own egress policy (same-namespace: git-proxy + DB, DNS) via workloadPolicies.
 # Needs gitProxy.enabled (the proxy URL is the only egress route; absent => every check fails closed).
 {{- if and .Values.sourceAutoUpdate.enabled .Values.gitProxy.enabled }}
+# Dedicated, token-less identity: the rescan CLI only talks to the DB + git-proxy, never the K8s API.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-marketplace-rescan
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: marketplace-source-rescan
+automountServiceAccountToken: false
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -29,7 +40,8 @@ spec:
             app.kubernetes.io/component: marketplace-source-rescan
         spec:
           restartPolicy: Never
-          serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+          serviceAccountName: {{ include "waddlebot.fullname" . }}-marketplace-rescan
+          automountServiceAccountToken: false
           {{- include "waddlebot.imagePullSecrets" . | nindent 10 }}
           securityContext:
             runAsNonRoot: true
@@ -57,11 +69,16 @@ spec:
             envFrom:
             - configMapRef:
                 name: {{ include "waddlebot.fullname" . }}-config
-            - secretRef:
-                name: {{ include "waddlebot.fullname" . }}-secrets
             env:
+            # Whole-secret envFrom dropped (least privilege): only the vars the CLI reads are pulled
+            # individually. HubAPIConfig.from_env() fail-closes without SECRET_KEY, so it stays.
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "waddlebot.fullname" . }}-secrets
+                  key: SECRET_KEY
             # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
-            # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+            # config/postgres/service-roles.yaml). Supplies DB creds; the database
             # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 12 }}
             - name: MODULE_NAME
