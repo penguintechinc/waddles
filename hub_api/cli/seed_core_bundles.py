@@ -97,7 +97,12 @@ from services.bundle_version_service import (
 )
 from services.errors import ApiError
 from services.ingest_source_service import ensure_ingest_source
-from services.marketplace_source_service import BuildMode, SourceRecord, SourceStatus
+from services.marketplace_source_service import (
+    BuildMode,
+    SourceRecord,
+    SourceStatus,
+    get_builtin_source,
+)
 from services.tenant_app_availability_service import set_available
 
 # Guarded the same way `services/role_sync_service.py`/`services/event_discord_sync_service.py`
@@ -115,7 +120,16 @@ logger = logging.getLogger("waddles.hub_api.core_bundle_seeder")
 #: (migration 0026) -- see this module's own docstring.
 SYSTEM_ACTOR = "system:core-seeder"
 
-#: Synthetic built-in source for the legacy seeder path (Task 7 swaps in the real DB row).
+#: Opt-out kill-switch (unseen/OFF = unified built-in-source path ON; ON = legacy path restored).
+FLAG_DISABLE_BUILTIN_SOURCE = "waddles.disable-builtin-source"
+#: Operator-plane tenant the platform-level kill-switch is evaluated under.
+_BUILTIN_FLAG_TENANT = "system"
+#: Env var carrying the baked image's 40-hex commit SHA (the built-in source's pinned SHA).
+COMMIT_SHA_ENV = "CORE_BUNDLES_COMMIT_SHA"
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+#: Synthetic built-in source used ONLY on the legacy path (kill-switch ON, or a pre-0067
+#: schema with no `marketplace_sources` table); the unified path passes the REAL DB row.
 _BUILTIN_SEEDER_SOURCE = SourceRecord(
     public_id=uuid.UUID(int=0),
     name="builtin",
@@ -371,6 +385,14 @@ class ConnectionResult:
     outcome: str
 
 
+@dataclass(slots=True, frozen=True)
+class BuiltinSource:
+    """The REAL `is_builtin` `marketplace_sources` row plus its internal numeric FK id."""
+
+    record: SourceRecord
+    pk: int
+
+
 class CoreBundleSeederError(RuntimeError):
     """Raised for a non-retriable seeder-level failure (bad catalog, non-core app_id, ...)."""
 
@@ -444,7 +466,7 @@ def _resolve_activation_targets(entry: CatalogEntry) -> tuple[ActivationTarget, 
     return tuple(ActivationTarget(tenant_slug=slug) for slug in slugs)
 
 
-def _guard_core_namespace(app_id: str) -> None:
+def _guard_core_namespace(app_id: str, source: SourceRecord | None = None) -> None:
     """Refuse an `app_id` outside the reserved `waddles.core.*` namespace (see module docstring).
 
     Hardened against lookalike/homoglyph app_ids (security review, 2026-09-27): two checks run
@@ -479,10 +501,14 @@ def _guard_core_namespace(app_id: str) -> None:
             "through POST /apps/{app_id}/versions/approve (platform:admin, human-gated)"
         )
     # Shared source-aware gate (built-in source may use waddles.core.*).
-    vendor_bundle_authz.enforce_source_namespace(app_id=app_id, source=_BUILTIN_SEEDER_SOURCE)
+    vendor_bundle_authz.enforce_source_namespace(
+        app_id=app_id, source=source if source is not None else _BUILTIN_SEEDER_SOURCE
+    )
 
 
-async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifestV2) -> None:
+async def _ensure_app_catalog_row(
+    install_dal: AsyncDB, manifest: BundleManifestV2, source_id: int | None = None
+) -> None:
     """Idempotent `app_catalog` upsert -- the FK target `app_version_uploads`/`app_versions` need.
 
     Mirrors `config/postgres/migrations/071_app_catalog_stages.sql`'s own seeded
@@ -508,10 +534,10 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
         """
         INSERT INTO app_catalog (
             app_id, name, manifest_version, module, feature, provider,
-            execution_model, is_default, platform_compatibility, status
+            execution_model, is_default, platform_compatibility, status, source_id
         ) VALUES (
             :app_id, :name, :manifest_version, :module, :feature, :provider,
-            :execution_model, :is_default, :platform_compatibility, :status
+            :execution_model, :is_default, :platform_compatibility, :status, :source_id
         )
         """,
         {
@@ -527,6 +553,7 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
                 {"tested_with": manifest.version, "min_version": None, "max_version": None}
             ),
             "status": "active",
+            "source_id": source_id,
         },
     )
     logger.info(
@@ -608,6 +635,7 @@ async def _resolve_or_publish_version(
     publish_tenant_id: int,
     publish_tenant_slug: str,
     valkey_client: Any | None = None,
+    source_id: int | None = None,
 ) -> int:
     """The `app_versions.id` for `(entry.app_id, entry.version)`, publishing it if not yet present.
 
@@ -705,6 +733,7 @@ async def _resolve_or_publish_version(
         component_bytes=component_bytes,
         tenant_slug=publish_tenant_slug,
         valkey_client=valkey_client,
+        source_id=source_id,
     )
     if published.app_version_id is None:  # pragma: no cover - defensive, see bundle_version_service
         raise ApiError(
@@ -860,6 +889,91 @@ async def seed_platform_connection(
     return ConnectionResult(platform=connection.platform, source_id=ingest_id, outcome=outcome)
 
 
+def _require_real_bundle(entry: CatalogEntry, bundles_dir: Path) -> None:
+    """Fail loud unless the yaml overlay entry matches a real bundle on disk (spec 4.6).
+
+    `core-bundles.yaml` is only the activation-policy overlay; discovery is what is actually
+    present. A missing manifest/artifact, or a manifest naming a different `app_id`, is a
+    refusal -- never a silent skip.
+    """
+    manifest_file = bundles_dir / entry.manifest_path
+    artifact_file = bundles_dir / entry.artifact_path
+    if not manifest_file.is_file() or not artifact_file.is_file():
+        raise CoreBundleSeederError(
+            f"catalog entry {entry.app_id}@{entry.version} names no real bundle on disk "
+            f"(manifest={entry.manifest_path!r}, artifact={entry.artifact_path!r})"
+        )
+    declared = yaml.safe_load(manifest_file.read_bytes())
+    if not isinstance(declared, dict) or declared.get("app_id") != entry.app_id:
+        raise CoreBundleSeederError(
+            f"catalog entry {entry.app_id}@{entry.version} names no real bundle on disk: "
+            f"{entry.manifest_path!r} declares a different app_id"
+        )
+
+
+async def _builtin_source_disabled() -> bool:
+    """Whether `FLAG_DISABLE_BUILTIN_SOURCE` is ON (legacy path restored).
+
+    Unseen/OFF -- including no PostHog reachable, where `feature_enabled()` degrades to its
+    default -- means the unified built-in-source path stays ON.
+    """
+    if feature_enabled is None:  # pragma: no cover -- only in a flask_core-less environment
+        return False
+    return bool(await feature_enabled(FLAG_DISABLE_BUILTIN_SOURCE, tenant=_BUILTIN_FLAG_TENANT))
+
+
+async def resolve_builtin_source(install_dal: AsyncDB) -> BuiltinSource | None:
+    """The real built-in source row, or `None` on a pre-0067 schema (legacy path).
+
+    A 0067 schema with no built-in row raises `CoreBundleSeederError` -- never a silent fallback.
+    """
+    try:
+        found = await get_builtin_source(install_dal)
+    except RuntimeError as exc:
+        raise CoreBundleSeederError(str(exc)) from exc
+    return None if found is None else BuiltinSource(record=found[0], pk=found[1])
+
+
+async def sync_builtin_pinned_sha(install_dal: AsyncDB, builtin: BuiltinSource) -> bool:
+    """Record the baked image's commit SHA (`CORE_BUNDLES_COMMIT_SHA`) as the pinned SHA.
+
+    Returns whether a write happened. An unset/non-40-hex value writes nothing (logged).
+    """
+    sha = os.getenv(COMMIT_SHA_ENV, "")
+    if not _COMMIT_SHA_RE.fullmatch(sha):
+        logger.warning(
+            "core-bundle-seeder: built-in pinned SHA not recorded (env unset/not 40-hex)",
+            extra={"source_public_id": str(builtin.record.public_id), "env": COMMIT_SHA_ENV},
+        )
+        return False
+    rows = await raw_sql_write(
+        install_dal,
+        "UPDATE marketplace_sources SET pinned_commit_sha = :sha WHERE id = :pk "
+        "AND is_builtin AND (pinned_commit_sha IS NULL OR pinned_commit_sha <> :sha) "
+        "RETURNING id",
+        {"sha": sha, "pk": builtin.pk},
+    )
+    return len(rows) > 0
+
+
+async def backfill_builtin_source_id(install_dal: AsyncDB, builtin: BuiltinSource) -> int:
+    """Stamp NULL `source_id` on `waddles.core.*` `app_catalog`/`app_versions` rows.
+
+    Idempotent: only NULL rows are touched, so a re-run returns 0 and a row already owned by
+    another source is never re-stamped. Returns the number of rows stamped.
+    """
+    stamped = 0
+    for table in ("app_catalog", "app_versions"):
+        rows = await raw_sql_write(
+            install_dal,
+            f"UPDATE {table} SET source_id = :pk "  # noqa: S608 -- fixed table names above
+            "WHERE source_id IS NULL AND app_id LIKE :prefix RETURNING 1",
+            {"pk": builtin.pk, "prefix": f"{vendor_bundle_authz.CORE_NAMESPACE_PREFIX}%"},
+        )
+        stamped += len(rows)
+    return stamped
+
+
 async def seed_one(
     install_dal: AsyncDB,
     entry: CatalogEntry,
@@ -867,6 +981,7 @@ async def seed_one(
     *,
     valkey_client: Any | None = None,
     connection_scopes: Mapping[str, TenantConnectionScope] | None = None,
+    builtin: BuiltinSource | None = None,
 ) -> list[SeedResult]:
     """Seed one catalog entry: publish (if new) + activate for every resolved target.
 
@@ -880,9 +995,15 @@ async def seed_one(
     (tests only), is forwarded to `process_prebuilt_component()`/`approve_version()` as-is --
     same convention those functions already use; `None` (the real call site) lets each build
     its own client.
-    """
-    _guard_core_namespace(entry.app_id)
 
+    `builtin` (the unified path, kill-switch OFF) is the REAL built-in source row: it replaces
+    the synthetic gate placeholder, stamps `source_id` on the rows created here, and makes a
+    catalog entry with no real bundle on disk fail loud. `None` = the legacy path, unchanged.
+    """
+    _guard_core_namespace(entry.app_id, builtin.record if builtin is not None else None)
+
+    if builtin is not None:
+        _require_real_bundle(entry, bundles_dir)
     manifest_bytes = (bundles_dir / entry.manifest_path).read_bytes()
     component_bytes = (bundles_dir / entry.artifact_path).read_bytes()
     digest_hex = hashlib.sha256(component_bytes).hexdigest()
@@ -899,7 +1020,8 @@ async def seed_one(
             f"{manifest.version!r} for {entry.app_id}"
         )
 
-    await _ensure_app_catalog_row(install_dal, manifest)
+    source_pk = builtin.pk if builtin is not None else None
+    await _ensure_app_catalog_row(install_dal, manifest, source_pk)
 
     targets = _resolve_activation_targets(entry)
     publish_target = targets[0]
@@ -914,6 +1036,7 @@ async def seed_one(
         publish_tenant_id=publish_tenant_id,
         publish_tenant_slug=publish_target.tenant_slug,
         valkey_client=valkey_client,
+        source_id=source_pk,
     )
 
     already_installed = await _already_installed_globally(
@@ -926,7 +1049,7 @@ async def seed_one(
             version=entry.version,
             installed_by=None,
             install_source=SYSTEM_ACTOR,
-            source=_BUILTIN_SEEDER_SOURCE,
+            source=builtin.record if builtin is not None else _BUILTIN_SEEDER_SOURCE,
         )
 
     # spec Sec3.6: pre-grant every permission this core bundle's manifest declares --
@@ -1263,10 +1386,27 @@ async def _reconcile_uninstall_disabled(tenant_slug: str) -> bool:
     return bool(await feature_enabled(FLAG_DISABLE_SEEDER_UNINSTALL_RECONCILE, tenant=tenant_slug))
 
 
+async def _owned_by_other_source(
+    install_dal: AsyncDB, *, app_id: str, builtin_source_pk: int, cache: dict[str, bool]
+) -> bool:
+    """Whether `app_id`'s `app_catalog.source_id` is a NON-builtin source (NULL = builtin)."""
+    if app_id not in cache:
+        row = (await install_dal(install_dal.app_catalog.app_id == app_id).select()).first()
+        owner = None if row is None else row.source_id
+        cache[app_id] = owner is not None and int(owner) != builtin_source_pk
+    return cache[app_id]
+
+
 async def reconcile_removed_core_bundles(
-    install_dal: AsyncDB, *, catalog_app_ids: frozenset[str]
+    install_dal: AsyncDB,
+    *,
+    catalog_app_ids: frozenset[str],
+    builtin_source_pk: int | None = None,
 ) -> tuple[list[SeedResult], int]:
     """Hard-delete every SYSTEM-seeded `app_active_versions` row dropped from the catalog.
+
+    `builtin_source_pk` (unified path) scopes the sweep to the built-in source: an app whose
+    `app_catalog.source_id` names any OTHER source is never touched. `None` = legacy, unscoped.
 
     Requirement (Justin): "uninstall should delete them just like install adds them, otherwise
     our scale will get out of sync" -- the Rust data plane (`core/bundle_active_set/src/
@@ -1305,10 +1445,19 @@ async def reconcile_removed_core_bundles(
     failures = 0
     seen: set[tuple[int, int | None, str]] = set()
     flag_cache: dict[str, bool] = {}
+    owner_cache: dict[str, bool] = {}
 
     for row in rows:
         app_id = str(row.app_id)
         if app_id in catalog_app_ids:
+            continue
+        if builtin_source_pk is not None and await _owned_by_other_source(
+            install_dal, app_id=app_id, builtin_source_pk=builtin_source_pk, cache=owner_cache
+        ):
+            logger.info(
+                "core-bundle-seeder: reconcile skipped (owned by a non-builtin source)",
+                extra={"app_id": app_id},
+            )
             continue
         tenant_id = int(row.tenant_id)
         community_id = int(row.community_id) if row.community_id is not None else None
@@ -1417,6 +1566,29 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
     try:
         entries = load_catalog(catalog_path)
         connections = load_platform_connections(catalog_path)
+
+        # Unified path: the seeder runs as the built-in source adapter. Kill-switch ON, or a
+        # pre-0067 schema, restores the legacy (source-less) path exactly.
+        builtin: BuiltinSource | None = None
+        if await _builtin_source_disabled():
+            logger.warning("core-bundle-seeder: built-in source disabled (kill-switch ON); legacy")
+        else:
+            try:
+                builtin = await resolve_builtin_source(install_dal)
+            except CoreBundleSeederError as exc:
+                logger.error(
+                    f"core-bundle-seeder: built-in source unresolved: {exc}", exc_info=True
+                )
+                return 1
+            if builtin is None:
+                logger.warning("core-bundle-seeder: no marketplace_sources schema; legacy path")
+            else:
+                await sync_builtin_pinned_sha(install_dal, builtin)
+                stamped = await backfill_builtin_source_id(install_dal, builtin)
+                logger.info(
+                    "core-bundle-seeder: built-in source active",
+                    extra={"source_public_id": str(builtin.record.public_id), "stamped": stamped},
+                )
         logger.info(
             "core-bundle-seeder: starting",
             extra={
@@ -1498,7 +1670,11 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
         for entry in entries:
             try:
                 results = await seed_one(
-                    install_dal, entry, bundles_dir, connection_scopes=connection_scopes
+                    install_dal,
+                    entry,
+                    bundles_dir,
+                    connection_scopes=connection_scopes,
+                    builtin=builtin,
                 )
             except CoreBundleSeederError as exc:
                 logger.error(
@@ -1639,7 +1815,9 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
         reconcile_results: list[SeedResult] = []
         try:
             reconcile_results, reconcile_failures = await reconcile_removed_core_bundles(
-                install_dal, catalog_app_ids=catalog_app_ids
+                install_dal,
+                catalog_app_ids=catalog_app_ids,
+                builtin_source_pk=builtin.pk if builtin is not None else None,
             )
         except Exception as exc:  # noqa: BLE001 -- the sweep itself must not abort the summary/exit code
             logger.error(

@@ -99,6 +99,12 @@ spec:
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
         - name: MODULE_NAME
           value: "core-bundle-seeder"
+{{- if regexMatch "^[0-9a-f]{40}$" (toString .Values.global.imageTag) }}
+        # Marketplace built-in source: the baked image's commit SHA (CI tags images by commit).
+        # Only set when imageTag IS a 40-hex SHA; otherwise the pinned SHA is left unrecorded.
+        - name: CORE_BUNDLES_COMMIT_SHA
+          value: {{ .Values.global.imageTag | quote }}
+{{- end }}
         # PR #870 -- the seeder now signs bundles on activation (activate_for_community ->
         # bundle_signing_service.sign_and_record_version -> PlatformSigner.from_env()), which
         # fail-closes without this pair. Same secretKeyRef pair as templates/hub-api.yaml.

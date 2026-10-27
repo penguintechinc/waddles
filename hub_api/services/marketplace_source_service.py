@@ -357,6 +357,24 @@ async def get_source_pk(dal: AsyncDB, public_id: uuid.UUID) -> int | None:
     return None if row is None else int(row[0])
 
 
+async def get_builtin_source(dal: AsyncDB) -> tuple[SourceRecord, int] | None:
+    """Return the built-in source and its internal numeric id, or `None` on a pre-0067 schema.
+
+    The id is for FK stamping (`app_versions.source_id` / `app_catalog.source_id`) only and is
+    never exposed. `None` means the table/`is_builtin` column is not present (a pre-0067
+    schema). A present schema with no built-in row is an integrity error: raises
+    `RuntimeError` (migration 0067 seeds exactly one).
+    """
+    table = dal.metadata.tables.get(_TABLE)
+    if table is None or "is_builtin" not in table.c:
+        return None
+    async with dal.engine.connect() as conn:
+        row = (await conn.execute(select(table).where(table.c.is_builtin.is_(True)))).first()
+    if row is None:
+        raise RuntimeError("marketplace_sources has no is_builtin row; migration 0067 seeds it")
+    return _to_record(row), int(row.id)
+
+
 async def approve_update(
     dal: AsyncDB,
     public_id: uuid.UUID,
