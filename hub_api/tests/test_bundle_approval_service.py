@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from cli import seed_core_bundles as seeder
 from services.bundle_approval_service import (
     KV_PERMISSION_ID,
     _derive_capabilities,
@@ -111,6 +112,7 @@ async def test_install_version_globally_system_actor_has_no_installed_by(install
         version="3.0.1",
         installed_by=None,
         install_source="system:core-seeder",
+        source=seeder._BUILTIN_SEEDER_SOURCE,  # SYSTEM install now requires the built-in source
     )
     assert row.installed_by is None
     assert row.install_source == "system:core-seeder"
