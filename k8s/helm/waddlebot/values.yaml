@@ -1428,10 +1428,13 @@ pipeline:
   #   - Connector bundles (#840 B0): the executor library can now invoke connector exports
   #     (core/bundle_executor/src/connector.rs ConnectorHost) and svc_ingest has the host-side
   #     Transport/driver skeleton (core/svc_ingest/src/connector), proven end to end by
-  #     core/connector_e2e. The deployed pods cannot yet run a connector: the executor host-API
-  #     wire (penguin-libs ExportKind) has no connector export kinds, so svc_ingest's production
-  #     invoker is UnwiredInvoker, which fails every call loudly. No real platform Transport exists yet.
-  #   - svc_ingest has no host-API listener.
+  #     core/connector_e2e over the real host-API wire (penguin-bundle-host 0.3.0
+  #     ExportKind::Connector*; svc_ingest's production invoker is WireConnectorInvoker). The
+  #     deployed pods still cannot run a connector: no real platform Transport exists yet, no
+  #     ConnectorDriver is constructed by svc_ingest's main, and the executor pins no connector at
+  #     startup. With no executor attached every connector call fails loudly (typed Unavailable).
+  #   - svc_ingest has no host-API listener (WireConnectorInvoker's ExecutorLink::attach takes an
+  #     accepted stream; the mTLS accept loop lands with the first real transport).
   #
   # HIDDEN SECOND GATE -- read before enabling (src/license.rs:32 flag key, :115 check):
   #   core/svc_ingest only starts its receivers and outbound drains when the PostHog flag

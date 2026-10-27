@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-keyed table/column has no rule, so a future table cannot silently regress erasure. See `docs/PRIVACY.md`.
 
 ### Changed
+- Connector host (#840 step 2): `penguin-bundle-host` bumped `0.2.0` -> `0.3.0` (penguin-libs `eef86927`, PR #135) in
+  `bundle_executor`, `bundle_host_http`, `svc_action`, `svc_process`, and added to `svc_ingest`. The inert `UnwiredInvoker` is
+  replaced by `WireConnectorInvoker` (+ `ExecutorLink`), which carries connector `receiver` exports over the executor host-API
+  wire as `ExportKind::Connector*`; the executor routes them to an always-pinned `ConnectorRouter` (`Executor::pin_connector`).
+  `core/connector_e2e` now drives the Echo/fault connectors through the real wire. No deployed behavior change: svc_ingest
+  still constructs no `ConnectorDriver` and the executor pins no connector at startup.
 - Docs (no code or behavior change): corrected stale "M5-blocked skeleton" / "TODO(M4)" claims in `k8s/helm/waddlebot/values.yaml`
   (`pipeline.rustDataPlane`) and the `templates/svc-{ingest,process,action}-rust.yaml` and `templates/bundle-executor.yaml` headers.
   The Rust data plane is implemented: svc_ingest has native Twitch IRC, Discord Gateway, Twitch EventSub and outbound drains;

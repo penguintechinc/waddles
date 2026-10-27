@@ -892,9 +892,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.4"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
+checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
 dependencies = [
  "cmov",
 ]
@@ -1105,7 +1105,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2330,8 +2330,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.2.1"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=17cd3956808e425e9710245dedde69aca7969d9a#17cd3956808e425e9710245dedde69aca7969d9a"
+version = "0.3.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=eef86927d015f530c14d8ed54d311494c1a8000d#eef86927d015f530c14d8ed54d311494c1a8000d"
 dependencies = [
  "regex",
  "serde",
@@ -2344,7 +2344,7 @@ dependencies = [
 [[package]]
 name = "penguin-licensing"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=7110125df28045322e7c4c527d1d1be806f2f086#7110125df28045322e7c4c527d1d1be806f2f086"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=f642e0695046386ca674e47eb9e6f7d6283ac531#f642e0695046386ca674e47eb9e6f7d6283ac531"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -2361,7 +2361,7 @@ dependencies = [
 [[package]]
 name = "penguin-logging"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=0a320ba2b08a6850b66e3062f6a9dfb44fec6950#0a320ba2b08a6850b66e3062f6a9dfb44fec6950"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=69e740ce5411d8cd005241fbd829c62e68efb96e#69e740ce5411d8cd005241fbd829c62e68efb96e"
 dependencies = [
  "axum",
  "opentelemetry",
@@ -2382,8 +2382,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-spine"
-version = "0.2.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=90060a93925c50668cc1c6dd47a4ae24a7b4e321#90060a93925c50668cc1c6dd47a4ae24a7b4e321"
+version = "0.1.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=586b8dadfcad26f2e8207b91cd2deb81afb6630f#586b8dadfcad26f2e8207b91cd2deb81afb6630f"
 dependencies = [
  "chrono",
  "hex",
@@ -2688,7 +2688,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3030,14 +3030,14 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
 name = "rustls"
-version = "0.23.46"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -3089,7 +3089,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3100,9 +3100,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.16"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -3329,7 +3329,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -3780,6 +3780,7 @@ dependencies = [
  "egress_detokenizer",
  "futures-util",
  "hex",
+ "hmac 0.12.1",
  "hub_client",
  "metrics",
  "opentelemetry",
@@ -3799,6 +3800,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "socket2",
+ "subtle",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
@@ -3871,7 +3873,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3980,9 +3982,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.3"
+version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
+checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
  "bytes",
  "libc",
@@ -4557,18 +4559,18 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.10"
+version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
+checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.10"
+version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
+checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -4601,7 +4603,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
