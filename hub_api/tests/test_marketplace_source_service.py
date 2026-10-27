@@ -7,6 +7,7 @@ A SKIP means docker is absent -- treat it as a gate FAILURE, never a pass.
 
 from __future__ import annotations
 
+import base64
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +16,7 @@ import pytest
 from sqlalchemy import text
 
 from services.errors import ApiError
+from services.marketplace_publisher_attestation import fingerprint_publisher_key
 from services.marketplace_source_service import (
     BuildMode,
     SandboxAck,
@@ -39,6 +41,10 @@ def _url() -> str:
     return f"https://github.com/acme/{uuid.uuid4().hex[:10]}"
 
 
+_PK = base64.b64encode(b"\x07" * 32).decode()
+_FP = fingerprint_publisher_key(_PK)
+
+
 async def _prebuilt(dal: Any, **kw: Any) -> SourceRecord:
     return await create_source(
         dal,
@@ -46,8 +52,8 @@ async def _prebuilt(dal: Any, **kw: Any) -> SourceRecord:
         git_url=kw.pop("git_url", _url()),
         ref="main",
         build_mode=BuildMode.PREBUILT,
-        publisher_key_fingerprint="fp",
-        publisher_public_key="pk",
+        publisher_key_fingerprint=_FP,
+        publisher_public_key=_PK,
         **kw,
     )
 
@@ -113,8 +119,8 @@ async def test_create_validation_rejects(pg_dal: Any, kwargs: dict[str, Any]) ->
         "git_url": _url(),
         "ref": "main",
         "build_mode": BuildMode.PREBUILT,
-        "publisher_key_fingerprint": "fp",
-        "publisher_public_key": "pk",
+        "publisher_key_fingerprint": _FP,
+        "publisher_public_key": _PK,
     }
     with pytest.raises(ApiError) as ei:
         await create_source(pg_dal, **{**base, **kwargs})

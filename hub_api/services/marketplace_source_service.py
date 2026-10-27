@@ -27,6 +27,7 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from services.errors import bad_request, conflict, not_found
+from services.marketplace_publisher_attestation import validate_publisher_key
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +146,13 @@ def _validate_create(
         raise bad_request("git_url must be an https:// URL without credentials")
     if not ref.strip() or len(ref) > 255:
         raise bad_request("ref is required (<=255 characters)")
-    if build_mode == BuildMode.PREBUILT and not (
-        publisher_key_fingerprint and publisher_public_key
-    ):
-        raise bad_request("prebuilt sources require a registered publisher key")
+    if build_mode == BuildMode.PREBUILT:
+        if not (publisher_key_fingerprint and publisher_public_key):
+            raise bad_request("prebuilt sources require a registered publisher key")
+        if validate_publisher_key(publisher_public_key) != publisher_key_fingerprint:
+            raise bad_request("publisher key fingerprint does not match the key")
+    elif publisher_public_key or publisher_key_fingerprint:
+        raise bad_request("only prebuilt sources take a publisher key")
     if build_mode == BuildMode.SANDBOX:
         if sandbox_ack is None:
             raise bad_request("sandbox sources require a trust acknowledgement")
