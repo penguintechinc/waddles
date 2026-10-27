@@ -358,10 +358,10 @@ async def remove_source(public_id: str) -> SourceRemoveResponse | tuple[dict[str
         except ApiError as exc:
             if exc.status_code != 409:
                 raise
-            # Disable FIRST (blocks rescan/approve), then stop its installed bundles running.
-            await svc.disable_source(dal, record.public_id, actor_id=get_current_user_id(request))
-            await svc.deactivate_source_bundles(
-                dal, record.public_id, revoked_by=get_current_user_id(request)
+            # Disable FIRST (blocks rescan/approve), then stop its installed bundles running;
+            # a failed audit write is raised only AFTER deactivation completes.
+            await svc.disable_and_deactivate_source(
+                dal, record.public_id, actor_id=get_current_user_id(request)
             )
             disposition = "disabled"
     except ApiError as exc:

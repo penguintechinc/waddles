@@ -86,11 +86,14 @@ class Store:
             raise conflict("still has bundle versions")
         del self.rows[pid]
 
-    async def disable_source(self, dal: Any, pid: uuid.UUID, **kw: Any) -> SourceRecord:
+    async def disable_and_deactivate_source(
+        self, dal: Any, pid: uuid.UUID, *, actor_id: int | None = None
+    ) -> tuple[SourceRecord, tuple[str, ...]]:
         import dataclasses
 
         self.rows[pid] = dataclasses.replace(self.rows[pid], status=SourceStatus.DISABLED)
-        return self.rows[pid]
+        self.deactivated.append(pid)
+        return self.rows[pid], ("app.one",)
 
     async def approve_update(
         self,
@@ -121,12 +124,6 @@ class Store:
         )  # fmt: skip
         return self.rows[pid]
 
-    async def deactivate_source_bundles(
-        self, dal: Any, pid: uuid.UUID, *, revoked_by: int | None
-    ) -> tuple[str, ...]:
-        self.deactivated.append(pid)
-        return ("app.one",)
-
 
 class Env:
     """Mutable test knobs: flag + tier."""
@@ -139,7 +136,7 @@ class Env:
 def store(monkeypatch: pytest.MonkeyPatch) -> Store:
     s = Store()
     for name in ("create_source", "get_source", "list_sources", "delete_source",
-                 "disable_source", "approve_update", "deactivate_source_bundles"):  # fmt: skip
+                 "disable_and_deactivate_source", "approve_update"):  # fmt: skip
         monkeypatch.setattr(bp.svc, name, getattr(s, name))
     return s
 

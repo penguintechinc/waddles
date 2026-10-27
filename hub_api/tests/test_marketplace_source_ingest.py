@@ -72,6 +72,11 @@ async def env(install_dal: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             src, status=SourceStatus.DISABLED if disabled else SourceStatus.ACTIVE
         )
 
+    async def _by_pk(dal: Any, pk: int) -> Any:
+        row = (await dal(dal.marketplace_sources.id == pk).select()).first()
+        return None if row is None else await _get(dal, uuid.UUID(str(row.public_id)))
+
+    monkeypatch.setattr(ing, "get_source_by_pk", _by_pk)
     monkeypatch.setattr(ing, "get_source_pk", _pk)
     monkeypatch.setattr(ing, "get_source", _get)
     return src, platform, sidecar
@@ -347,3 +352,170 @@ async def test_source_disabled_mid_ingest_creates_no_version(
     )  # fmt: skip
     assert (summary.created, summary.rejected) == (0, 1)
     assert await _vrow(install_dal, cand.assigned_app_id) is None
+
+
+# --- generic /bundle_approvals approve route must be source-aware (bypass regression) ---------
+
+
+@pytest.fixture
+async def route_app(bundle_install_db: Any, install_dal: Any) -> Any:
+    """Quart app serving the GENERIC approve route against the sqlite install DAL."""
+    from quart import Quart
+    from quart_schema import QuartSchema
+
+    from blueprints.v1.bundle_approvals import BLUEPRINTS
+
+    app = Quart(__name__)
+    QuartSchema(app)
+    app.config["async_dal"] = bundle_install_db
+    app.config["dal"] = bundle_install_db.dal
+    app.config["install_dal"] = install_dal
+    for bp in BLUEPRINTS:
+        app.register_blueprint(bp)
+    return app
+
+
+async def _route_approve(app: Any, app_id: str, version: str = "1.0.0", **body: Any) -> Any:
+    from tests.conftest import make_token
+
+    token = make_token(scope="platform:admin", user_id="7")
+    return await app.test_client().post(
+        f"/api/v1/apps/{app_id}/versions/{version}/approve",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"permissionHash": body.get("permissionHash")},
+    )
+
+
+async def _audit_actions(install_dal: Any) -> list[str]:
+    return [r.action for r in await install_dal(install_dal.audit_log.id > 0).select()]
+
+
+async def test_generic_route_runs_marketplace_gates_for_sourced_version(
+    install_dal: Any, env: Any, route_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: the generic approve route skipped every marketplace gate for source_id rows."""
+    src, platform, sidecar = env
+    cand = _candidate(src)
+    b = (await _ingest(install_dal, src, cand)).bundles[0]
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        ing.mkt_telemetry, "record_approval", lambda *, outcome: recorded.append(outcome)
+    )
+    sign_calls = AsyncMock(wraps=signing.sign_and_record_version)
+    monkeypatch.setattr(signing, "sign_and_record_version", sign_calls)
+
+    resp = await _route_approve(route_app, cand.assigned_app_id, permissionHash=b.permission_hash)
+    assert resp.status_code == 200, await resp.get_json()
+
+    installs = await approvals.list_global_installs(install_dal)
+    assert len(installs) == 1 and installs[0].install_source == "human"
+    assert installs[0].installed_by == 7
+    actions = await _audit_actions(install_dal)
+    assert "marketplace_version_approved" in actions
+    assert "marketplace_signature_issued" in actions
+    assert recorded == ["signed"]
+    # signed EXACTLY once, bound to the global-install id the executor verifies
+    assert sign_calls.await_count == 1
+    assert sign_calls.await_args.kwargs["approval_id"] == installs[0].id
+    sidecar.assert_awaited_once()
+    row = await _vrow(install_dal, cand.assigned_app_id)
+    assert row.artifact_signature_key_id == "k1"
+    # no auto-grant of permissions for a non-builtin source
+    assert list(await install_dal(install_dal.app_permission_grant_versions.id > 0).select()) == []
+
+
+async def test_generic_route_refuses_disabled_source_version(
+    install_dal: Any, env: Any, route_app: Any
+) -> None:
+    src, _, _ = env
+    cand = _candidate(src)
+    await _ingest(install_dal, src, cand)
+    await _disable(install_dal, src)
+    resp = await _route_approve(route_app, cand.assigned_app_id)
+    assert resp.status_code == 409
+    assert await approvals.list_global_installs(install_dal) == []
+    assert "marketplace_version_approved" not in await _audit_actions(install_dal)
+
+
+async def test_generic_route_sourced_requires_platform_key_before_install(
+    install_dal: Any, env: Any, route_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src, _, _ = env
+    cand = _candidate(src)
+    await _ingest(install_dal, src, cand)
+    monkeypatch.delenv("BUNDLE_SIGNING_PRIVATE_KEY")
+    resp = await _route_approve(route_app, cand.assigned_app_id)
+    assert resp.status_code >= 400
+    assert await approvals.list_global_installs(install_dal) == []
+
+
+async def test_generic_route_sourced_namespace_enforced(
+    install_dal: Any, env: Any, route_app: Any
+) -> None:
+    """A sourced version whose app_id left its source namespace is refused at install."""
+    src, _, _ = env
+    cand = _candidate(src)
+    await _ingest(install_dal, src, cand)
+    await install_dal(install_dal.app_versions.app_id == cand.assigned_app_id).update(
+        app_id="waddles.core.evil"
+    )
+    await install_dal(install_dal.app_version_uploads.app_id == cand.assigned_app_id).update(
+        app_id="waddles.core.evil"
+    )
+    resp = await _route_approve(route_app, "waddles.core.evil")
+    assert resp.status_code in (403, 409)
+    assert await approvals.list_global_installs(install_dal) == []
+
+
+async def test_generic_route_legacy_version_unchanged(
+    install_dal: Any, env: Any, route_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """source_id NULL: legacy branch -- no marketplace audit/metric, no signing at approve."""
+    src, _, _ = env
+    cand = _candidate(src)
+    await _ingest(install_dal, src, cand)
+    await install_dal(install_dal.app_versions.app_id == cand.assigned_app_id).update(
+        source_id=None
+    )
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        ing.mkt_telemetry, "record_approval", lambda *, outcome: recorded.append(outcome)
+    )
+    sign_calls = AsyncMock(wraps=signing.sign_and_record_version)
+    monkeypatch.setattr(signing, "sign_and_record_version", sign_calls)
+    resp = await _route_approve(route_app, cand.assigned_app_id)
+    assert resp.status_code == 200
+    installs = await approvals.list_global_installs(install_dal)
+    assert len(installs) == 1 and installs[0].install_source == "human"
+    actions = await _audit_actions(install_dal)
+    assert "app_installed_globally" in actions
+    assert "marketplace_version_approved" not in actions
+    assert "marketplace_signature_issued" not in actions
+    assert recorded == [] and sign_calls.await_count == 0  # legacy signs at activation, not here
+
+
+async def test_resolve_approval_source_routing(
+    install_dal: Any, env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src, _, _ = env
+    cand = _candidate(src)
+    await _ingest(install_dal, src, cand)
+    app_id = cand.assigned_app_id
+    got = await ing.resolve_approval_source(install_dal, app_id=app_id, version="1.0.0")
+    assert got is not None and got.public_id == src.public_id
+    # unknown version -> legacy path (which 404s itself)
+    assert await ing.resolve_approval_source(install_dal, app_id=app_id, version="9.9.9") is None
+
+    async def _builtin(dal: Any, pk: int) -> Any:
+        return dataclasses.replace(src, is_builtin=True)
+
+    monkeypatch.setattr(ing, "get_source_by_pk", _builtin)
+    assert await ing.resolve_approval_source(install_dal, app_id=app_id, version="1.0.0") is None
+
+    async def _missing(dal: Any, pk: int) -> None:
+        return None
+
+    monkeypatch.setattr(ing, "get_source_by_pk", _missing)
+    with pytest.raises(ApiError) as exc:  # fail closed, never the ungated legacy path
+        await ing.resolve_approval_source(install_dal, app_id=app_id, version="1.0.0")
+    assert exc.value.status_code == 409

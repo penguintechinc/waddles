@@ -46,6 +46,7 @@ from services.marketplace_source_service import (
     SourceStatus,
     audit_source_event,
     get_source,
+    get_source_by_pk,
     get_source_pk,
 )
 from services.vendor_bundle_authz import INSTALL_SOURCE_HUMAN, enforce_source_namespace
@@ -300,6 +301,33 @@ async def ingest_candidates(
     )
 
 
+async def resolve_approval_source(
+    install_dal: AsyncDB, *, app_id: str, version: str
+) -> SourceRecord | None:
+    """Return the EXTERNAL source a version belongs to, or `None` for the legacy path.
+
+    The single decision point that makes the generic approve route source-aware: a version with
+    a non-null, non-built-in `source_id` MUST be approved through `approve_source_version` (all
+    marketplace gates). `None` (no version row, `source_id` NULL, or the built-in source) keeps
+    the legacy `install_version_globally` path. A `source_id` whose source row is missing is an
+    integrity error and fails closed rather than falling through to the ungated legacy path.
+    """
+    rows = await install_dal(
+        (install_dal.app_versions.app_id == app_id) & (install_dal.app_versions.version == version)
+    ).select()
+    vrow = rows.first()
+    if vrow is None or vrow.source_id is None:
+        return None
+    source = await get_source_by_pk(install_dal, int(vrow.source_id))
+    if source is None:
+        raise ApiError(
+            f"version {version} of {app_id} references an unknown marketplace source",
+            409,
+            "unknown_source",
+        )
+    return None if source.is_builtin else source
+
+
 async def approve_source_version(
     install_dal: AsyncDB,
     source: SourceRecord,
@@ -405,4 +433,5 @@ __all__ = [
     "approve_source_version",
     "create_unapproved_version",
     "ingest_candidates",
+    "resolve_approval_source",
 ]

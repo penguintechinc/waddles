@@ -332,6 +332,74 @@ async def test_deactivate_source_bundles_revokes_install_keeps_versions(pg_dal: 
     assert await deactivate_source_bundles(pg_dal, rec.public_id, revoked_by=None) == ()
 
 
+async def test_disable_and_deactivate_survives_audit_failure(
+    pg_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: a failed (fail-loud) audit write must not skip bundle deactivation."""
+    from services import bundle_audit
+    from services.audit_service import AuditWriteError
+    from services.marketplace_source_service import (
+        ACTION_REMOVED,
+        disable_and_deactivate_source,
+    )
+
+    rec = await _prebuilt(pg_dal, pinned_commit_sha=SHA)
+    app_id = f"app-{uuid.uuid4().hex[:8]}"
+    async with pg_dal.engine.begin() as conn:
+        pk = (
+            await conn.execute(
+                text("SELECT id FROM marketplace_sources WHERE public_id = :p"),
+                {"p": rec.public_id},
+            )
+        ).scalar_one()
+        await conn.execute(
+            text("INSERT INTO app_catalog (app_id, source_id) VALUES (:a, :s)"),
+            {"a": app_id, "s": pk},
+        )
+        vid = (
+            await conn.execute(
+                text(
+                    "INSERT INTO app_versions (app_id, version, language, artifact_kind, "
+                    "source_id) VALUES (:a, '1.0.0', 'rust', 'prebuilt', :s) RETURNING id"
+                ),
+                {"a": app_id, "s": pk},
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO app_global_installs (app_id, version, version_id, "
+                "permission_hash, summary_json, install_source, installed_at) "
+                "VALUES (:a, '1.0.0', :v, 'h', '{}', 'human', now())"
+            ),
+            {"a": app_id, "v": vid},
+        )
+
+    real_record = bundle_audit.record
+
+    async def _failing(dal: Any, **kw: Any) -> None:
+        if kw.get("action") == ACTION_REMOVED:
+            raise AuditWriteError("audit down")
+        await real_record(dal, **kw)
+
+    monkeypatch.setattr(bundle_audit, "record", _failing)
+    with pytest.raises(AuditWriteError):  # still fail-loud ...
+        await disable_and_deactivate_source(pg_dal, rec.public_id)
+    async with pg_dal.engine.connect() as conn:  # ... but only AFTER the security action ran
+        status = (
+            await conn.execute(
+                text("SELECT status FROM marketplace_sources WHERE public_id = :p"),
+                {"p": rec.public_id},
+            )
+        ).scalar_one()
+        revoked = (
+            await conn.execute(
+                text("SELECT revoked_at IS NOT NULL FROM app_global_installs WHERE app_id = :a"),
+                {"a": app_id},
+            )
+        ).scalar_one()
+    assert status == int(SourceStatus.DISABLED) and revoked is True
+
+
 async def test_disabled_is_terminal_for_update_status(pg_dal: Any) -> None:
     """A scanner status write (ACTIVE/ERROR) must never resurrect a DISABLED source."""
     from services.marketplace_source_service import get_source

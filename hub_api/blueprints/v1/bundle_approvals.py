@@ -24,6 +24,7 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import bundle_approval_service as svc
+from services import marketplace_source_ingest as mkt_ingest
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 
@@ -130,6 +131,18 @@ async def get_permissions(
     return PermissionSummaryResponse(success=True, summary=summary, permissionHash=computed_hash)
 
 
+async def _approved_response(install_dal: AsyncDB, app_id: str) -> tuple[ApproveResponse, int]:
+    """Build the approve response from the CURRENT global-install row (post gated approval)."""
+    rows = await install_dal(
+        (install_dal.app_global_installs.app_id == app_id)
+        & (install_dal.app_global_installs.superseded_by == None)  # noqa: E711
+    ).select()
+    row = rows.first()
+    if row is None:  # approve just succeeded: a missing install row is an integrity failure
+        raise ApiError(f"{app_id} has no current global install", 500, "missing_install")
+    return ApproveResponse(success=True, permissionHash=row.permission_hash), 200
+
+
 @bundle_approvals_bp.route("/<app_id>/versions/<version>/approve", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
@@ -142,6 +155,22 @@ async def post_approve(
     install_dal = _install_dal()
     caller_id = get_current_user_id(request)
     try:
+        # A version from an external marketplace source MUST go through the gated approval
+        # (namespace, disabled/source-match, platform re-sign, human installer, audit +
+        # telemetry); only source-less / built-in versions take the legacy path below.
+        source = await mkt_ingest.resolve_approval_source(
+            install_dal, app_id=app_id, version=version
+        )
+        if source is not None:
+            await mkt_ingest.approve_source_version(
+                install_dal,
+                source,
+                app_id=app_id,
+                version=version,
+                approved_by=caller_id,
+                expected_permission_hash=data.permissionHash,
+            )
+            return await _approved_response(install_dal, app_id)
         row = await svc.install_version_globally(
             install_dal,
             app_id=app_id,

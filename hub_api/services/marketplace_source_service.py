@@ -393,6 +393,30 @@ async def disable_source(
     return record
 
 
+async def disable_and_deactivate_source(
+    dal: AsyncDB, public_id: uuid.UUID, *, actor_id: int | None = None
+) -> tuple[SourceRecord, tuple[str, ...]]:
+    """Disable a source AND stop its installed bundles running, audit-failure-safe.
+
+    Security order: status -> DISABLED, then bundle deactivation, and only THEN does a failed
+    (fail-loud) audit write surface -- an audit outage must never leave a DISABLED source whose
+    bundles keep serving. The audit error is deferred, never swallowed.
+    """
+    record = await update_status(dal, public_id, SourceStatus.DISABLED)
+    deferred = bundle_audit.DeferredAudit()
+    await deferred.record(
+        dal,
+        actor_id=actor_id,
+        action=ACTION_REMOVED,
+        target_type=TARGET_TYPE,
+        target_id=str(public_id),
+        details={"disposition": "disabled"},
+    )
+    deactivated = await deactivate_source_bundles(dal, public_id, revoked_by=actor_id)
+    deferred.raise_if_failed()
+    return record, deactivated
+
+
 async def delete_source(dal: AsyncDB, public_id: uuid.UUID, *, actor_id: int | None = None) -> None:
     """Hard-delete an external source. The built-in row is refused; referenced sources conflict."""
     existing = await get_source(dal, public_id)
@@ -418,6 +442,17 @@ async def get_source_pk(dal: AsyncDB, public_id: uuid.UUID) -> int | None:
     async with dal.engine.connect() as conn:
         row = (await conn.execute(select(table.c.id).where(table.c.public_id == public_id))).first()
     return None if row is None else int(row[0])
+
+
+async def get_source_by_pk(dal: AsyncDB, source_pk: int) -> SourceRecord | None:
+    """Return the source whose internal numeric id is `source_pk`, or `None`.
+
+    Internal use only (resolving an `app_versions.source_id` FK back to its source record).
+    """
+    table = _table(dal)
+    async with dal.engine.connect() as conn:
+        row = (await conn.execute(select(table).where(table.c.id == source_pk))).first()
+    return None if row is None else _to_record(row)
 
 
 async def get_builtin_source(dal: AsyncDB) -> tuple[SourceRecord, int] | None:
