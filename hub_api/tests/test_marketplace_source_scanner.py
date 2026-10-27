@@ -719,3 +719,101 @@ def test_denylist_clean_lockfiles_pass(tmp_path: Path) -> None:
     )
     (tmp_path / "poetry.lock").write_text('[[package]]\nname = "a"\nversion = "1"\n')
     assert _names(tmp_path) == []
+
+
+_PYPI_URL = "https://files.pythonhosted.org/packages/ab/cd/x-1.tar.gz"
+
+
+def _uv_lock(sdist: str = "", wheel: str = "") -> str:
+    return (
+        '[[package]]\nname = "clean"\nversion = "1"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        + (f"sdist = {sdist}\n" if sdist else "")
+        + (f"wheels = [{wheel}]\n" if wheel else "")
+    )
+
+
+@pytest.mark.parametrize(
+    ("sdist", "wheel"),
+    [
+        ('{ url = "https://evil.example/x.tar.gz", hash = "sha256:a" }', ""),
+        ("", '{ url = "https://files.pythonhosted.org.evil.example/x.whl", hash = "sha256:a" }'),
+        ("", '{ url = "http://files.pythonhosted.org/x.whl", hash = "sha256:a" }'),
+        ('{ path = "../outside.tar.gz", hash = "sha256:a" }', ""),
+        ('{ git = "https://x/y", hash = "sha256:a" }', ""),
+        ('{ hash = "sha256:a" }', ""),
+    ],
+)
+def test_uv_lock_bad_artifact_rejected(tmp_path: Path, sdist: str, wheel: str) -> None:
+    (tmp_path / "uv.lock").write_text(_uv_lock(sdist, wheel))
+    _scan_err(tmp_path)
+
+
+def test_uv_lock_artifact_allowed(tmp_path: Path) -> None:
+    (tmp_path / "w.whl").write_bytes(b"x")
+    good = f'{{ url = "{_PYPI_URL}", hash = "sha256:a", size = 1 }}'
+    (tmp_path / "uv.lock").write_text(_uv_lock(good, good))
+    assert _names(tmp_path) == []
+    (tmp_path / "uv.lock").write_text(_uv_lock("", '{ path = "w.whl", hash = "sha256:a" }'))
+    assert _names(tmp_path) == []
+
+
+def test_uv_lock_artifact_checked_without_source(tmp_path: Path) -> None:
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "clean"\nwheels = [{ url = "https://evil.example/x.whl" }]\n'
+    )
+    _scan_err(tmp_path)
+
+
+@pytest.mark.parametrize("prop", ["RestoreConfigFile", "RestoreSources", "RestoreFoo"])
+def test_msbuild_unknown_restore_prop_rejected(tmp_path: Path, prop: str) -> None:
+    (tmp_path / "x.csproj").write_text(
+        f"<Project><PropertyGroup><{prop}>x</{prop}></PropertyGroup></Project>"
+    )
+    _scan_err(tmp_path)
+
+
+def test_msbuild_safe_restore_prop_allowed(tmp_path: Path) -> None:
+    (tmp_path / "x.csproj").write_text(
+        "<Project><PropertyGroup><RestoreLockedMode>true</RestoreLockedMode>"
+        "</PropertyGroup></Project>"
+    )
+    assert _names(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["bunfig.toml", ".condarc", "pnpm-workspace.yaml", ".pnpmfile.cjs", "sub/.npmrc",
+     "x/NuGet.Config", ".cargo/config.toml", ".cargo/config", "pip.conf", ".mambarc", ".pypirc"],
+)  # fmt: skip
+def test_config_files_denied_by_default(tmp_path: Path, name: str) -> None:
+    f = tmp_path / name
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("x")
+    _scan_err(tmp_path)
+
+
+def test_unrelated_config_names_not_rejected(tmp_path: Path) -> None:
+    (tmp_path / "bundle.toml").write_text("x")
+    (tmp_path / "config.toml").write_text("x")
+    assert _names(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["python-install-mirror", "pypy-install-mirror", "python-downloads-json-url", "index",
+     "sources", "some-future-key"],
+)  # fmt: skip
+def test_uv_unknown_key_rejected(tmp_path: Path, key: str) -> None:
+    (tmp_path / "pyproject.toml").write_text(f'[tool.uv]\n{key} = "x"\n')
+    _scan_err(tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[tool.uv.pip]\nindex-url = "x"\n')
+    _scan_err(tmp_path)
+
+
+def test_uv_safe_keys_pass(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.uv]\ndev-dependencies = ["pytest"]\nmanaged = true\nexclude-newer = "2026-01-01"\n'
+        '[tool.uv.pip]\noverride-dependencies = ["foo"]\n'
+    )
+    assert _names(tmp_path) == []

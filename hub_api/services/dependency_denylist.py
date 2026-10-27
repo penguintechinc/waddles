@@ -13,6 +13,11 @@ rejected); and fail-closed behaviour on anything unsupported or unparseable (unk
 like yarn.lock/go.mod, and package-manager config files that can redirect sources such as
 .npmrc, .cargo/config.toml, pip.conf, uv.toml, nuget.config reject the whole bundle).
 
+The denylist is DENY-BY-DEFAULT for config/source-redirection surfaces: any package-manager
+config file (basename pattern match, any directory), any MSBuild `<Restore*>` property outside a
+tiny inert allowlist, any `[tool.uv]` key outside a safe allowlist, and any uv.lock sdist/wheel
+artifact not pinned to https://files.pythonhosted.org/ (or an in-bundle path) rejects the bundle.
+
 Does NOT cover: transitive dependencies absent from a lockfile, binary/vendored code, or
 dependencies fetched at runtime. This is DEFENSE-IN-DEPTH, not the sole supply-chain gate: it
 sits behind human platform:admin approval, the WASM sandbox, publisher attestation and
@@ -56,13 +61,22 @@ _NUGET_ELEMENTS = frozenset(
         "packagedownload", "frameworkreference",
     }
 )  # fmt: skip
-_NUGET_BAD_PROPS = frozenset(
-    {"restoresources", "restoreadditionalprojectsources", "restorefallbackfolders"}
+# MSBuild `<Restore*>` properties are DENIED BY DEFAULT (they steer NuGet restore sources/config);
+# only clearly inert ones may appear. Lower-cased local names.
+_NUGET_SAFE_RESTORE_PROPS = frozenset({"restorelockedmode"})
+# Package-manager config files (source/registry/mirror redirecting) are DENIED BY DEFAULT by
+# basename pattern, regardless of directory: `<tool>rc`, `<tool>.{conf,ini,toml,yml,yaml,cfg,
+# config,json}` for the known tool families, plus a few fixed names.
+_CONFIG_NAME_RE = re.compile(
+    r"^\.?(?:npm|yarn|pnpm|bun|bunfig|pip|uv|poetry|pdm|conda|mamba|nuget|gem|pypi"
+    r"|pydistutils|pipenv|rye)"
+    r"(?:rc|\.(?:conf|ini|toml|ya?ml|cfg|config|json|cjs|mjs|js))?$",
+    re.I | re.ASCII,
 )
-# Package-manager config files that can redirect sources: presence rejects the bundle.
-_CONFIG_FILES = frozenset(
-    {"uv.toml", "pip.conf", "pip.ini", ".npmrc", ".yarnrc", ".yarnrc.yml", "poetry.toml",
-     "nuget.config"}
+_CONFIG_FIXED = frozenset(
+    {"pnpm-workspace.yaml", "pnpm-workspace.yml", ".pnpmfile.cjs", "pnpmfile.cjs", ".pypirc",
+     ".condarc", "condarc", "bunfig.toml", ".bunfig.toml", ".yarnrc.yml", ".yarnrc", "pip.conf",
+     "pip.ini", "uv.toml", "poetry.toml", "nuget.config", ".npmrc"}
 )  # fmt: skip
 _CARGO_CONFIG_NAMES = frozenset({"config", "config.toml"})
 _NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -145,7 +159,7 @@ def _is_manifest_name(lower: str) -> bool:
 def _is_config_file(path: Path) -> bool:
     """True for a source-redirecting package-manager config (path-aware for `.cargo/config*`)."""
     lower = path.name.lower()
-    if lower in _CONFIG_FILES:
+    if lower in _CONFIG_FIXED or _CONFIG_NAME_RE.match(lower):
         return True
     return lower in _CARGO_CONFIG_NAMES and path.parent.name.lower() == ".cargo"
 
@@ -261,7 +275,15 @@ def _cargo_spec(dep_name: str, spec: Any, manifest_dir: Path, root: Path, names:
 
 
 _PY_BAD_SPEC_KEYS = frozenset({"git", "url", "source", "rev", "branch", "tag"})
-_UV_BAD_KEYS = frozenset({"sources", "index", "index-url", "extra-index-url", "find-links"})
+# `[tool.uv]` is an ALLOWLIST: only these keys pass; every other key (mirrors, indexes, sources,
+# python-install-mirror, python-downloads-json-url, future additions...) rejects the bundle.
+_UV_SAFE_KEYS = frozenset(
+    {"dev-dependencies", "override-dependencies", "constraint-dependencies", "default-groups",
+     "environments", "required-environments", "conflicts", "managed", "package", "resolution",
+     "prerelease", "exclude-newer", "compile-bytecode", "link-mode", "required-version",
+     "cache-keys", "workspace"}
+)  # fmt: skip
+_UV_SAFE_PIP_KEYS = frozenset({"override-dependencies", "constraint-dependencies"})
 
 
 def _poetry_spec(spec: Any, manifest_dir: Path, root: Path) -> None:
@@ -274,20 +296,17 @@ def _poetry_spec(spec: Any, manifest_dir: Path, root: Path) -> None:
         _within(root, manifest_dir / str(spec["path"]))
 
 
-def _has_bad_key(obj: Any) -> bool:
-    """True if any (recursively nested) mapping key is a custom index/source key."""
-    if isinstance(obj, dict):
-        return bool(_UV_BAD_KEYS & obj.keys()) or any(_has_bad_key(v) for v in obj.values())
-    if isinstance(obj, list):
-        return any(_has_bad_key(v) for v in obj)
-    return False
-
-
 def _reject_py_sources(tool: dict[str, Any]) -> None:
-    """Fail closed on custom indexes/sources in `[tool.uv]` and `[tool.poetry.source]`."""
+    """Fail closed on any non-allowlisted `[tool.uv]` key and on `[tool.poetry.source]`."""
     uv = tool.get("uv", {})
-    if isinstance(uv, dict) and (_UV_BAD_KEYS & uv.keys() or _has_bad_key(uv.get("pip", {}))):
-        raise ValueError("custom uv index/source configuration")
+    if isinstance(uv, dict):
+        pip = uv.get("pip", {})
+        if set(uv) - _UV_SAFE_KEYS - {"pip"} or (
+            "pip" in uv and (not isinstance(pip, dict) or set(pip) - _UV_SAFE_PIP_KEYS)
+        ):
+            raise ValueError("non-allowlisted uv configuration key (custom index/source/mirror)")
+    elif uv:
+        raise ValueError("malformed [tool.uv] table")
     if tool.get("poetry", {}).get("source"):
         raise ValueError("custom poetry package source")
 
@@ -347,9 +366,40 @@ def _toml_deps(doc: dict[str, Any], ecosystem: str, manifest_dir: Path, root: Pa
     return names
 
 
+_PYPI_FILES_PREFIX = "https://files.pythonhosted.org/"
+_UV_ARTIFACT_KEYS = frozenset({"url", "path", "hash", "size", "upload-time"})
+
+
+def _uv_artifact_ok(art: Any, base: Path, root: Path) -> None:
+    """Require a uv.lock sdist/wheel entry to be a pinned PyPI-files URL or an in-bundle path."""
+    if not isinstance(art, dict) or set(art) - _UV_ARTIFACT_KEYS:
+        raise ValueError("lockfile artifact with unrecognised source keys")
+    url, path = art.get("url"), art.get("path")
+    if (url is None) == (path is None):
+        raise ValueError("lockfile artifact must have exactly one of url/path")
+    if url is not None:
+        if not isinstance(url, str) or not url.startswith(_PYPI_FILES_PREFIX):
+            raise ValueError("lockfile artifact URL outside files.pythonhosted.org")
+    else:
+        _within(root, base / str(path))
+
+
+def _check_uv_artifacts(pkg: dict[str, Any], base: Path, root: Path) -> None:
+    """Validate every sdist/wheel artifact of one uv.lock package (deny by default)."""
+    if "sdist" in pkg:
+        _uv_artifact_ok(pkg["sdist"], base, root)
+    wheels = pkg.get("wheels", [])
+    if not isinstance(wheels, list):
+        raise ValueError("malformed uv.lock wheels")
+    for wheel in wheels:
+        _uv_artifact_ok(wheel, base, root)
+
+
 def _check_lock_sources(kind: str, pkgs: list[Any], base: Path, root: Path) -> None:
     """Reject Cargo/uv/poetry lock packages sourced from anything but the default registry."""
     for pkg in pkgs:
+        if kind == "uv.lock":
+            _check_uv_artifacts(pkg, base, root)
         src = pkg.get("source")
         if src is None:
             continue
@@ -506,8 +556,8 @@ def _nuget_names(text: str, lower: str, path: Path, root: Path) -> list[str]:
         if lower == "packages.config":
             if tag == "package" and "id" in attrs:
                 found.append(attrs["id"].strip())
-        elif tag in _NUGET_BAD_PROPS:
-            raise ValueError("custom NuGet restore source configuration")
+        elif tag.startswith("restore") and tag not in _NUGET_SAFE_RESTORE_PROPS:
+            raise ValueError("MSBuild Restore* property denied by default")
         elif tag == "project" and "sdk" in attrs:
             found += [x.strip().split("/", 1)[0] for x in attrs["sdk"].split(";") if x.strip()]
         elif tag == "sdk" and "name" in attrs:
