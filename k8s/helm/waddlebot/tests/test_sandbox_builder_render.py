@@ -141,6 +141,37 @@ def test_launcher_bound_only_to_dedicated_hub_api_sa_and_admission_policy() -> N
     ]
 
 
+def test_vap_requires_full_selector_set_and_privilege_denylist() -> None:
+    """VAP must require name+instance+component (== CNP/Tetragon selectors) and deny privilege fields."""
+    docs = _render("--set", "sandboxBuilder.enabled=true")
+    kinds = _by_kind(docs)
+    vap = kinds["ValidatingAdmissionPolicy"]["spec"]
+    exprs = [v["expression"] for v in vap["validations"]]
+    sel = kinds["CiliumNetworkPolicy"]["spec"]["endpointSelector"]["matchLabels"]
+    tpl = "object.spec.template.metadata.labels"
+    for key in ("app.kubernetes.io/name", "app.kubernetes.io/instance"):
+        want = f"{tpl}['{key}'] == '{sel[key]}'"
+        assert any(want in e for e in exprs), want  # literal rendered value == CNP selector
+    pod_labels = [e for e in exprs if tpl in e]
+    assert any(
+        "app.kubernetes.io/name" in e and "app.kubernetes.io/instance" in e
+        for e in pod_labels
+    )
+    joined = " ".join(exprs)
+    for needle in (
+        "variables.pod.hostIPC",
+        "variables.pod.shareProcessNamespace",
+        "!has(variables.pod.nodeName)",
+        "securityContext.privileged",
+        "allowPrivilegeEscalation == false",
+        "runAsNonRoot == true",
+        "'ALL' in c.securityContext.capabilities.drop",
+        "!has(c.securityContext.capabilities.add)",
+    ):
+        assert needle in joined, needle
+    assert all(v.get("message") for v in vap["validations"])
+
+
 def test_hub_api_uses_dedicated_sa_with_tokenreview() -> None:
     dep = next(
         d
