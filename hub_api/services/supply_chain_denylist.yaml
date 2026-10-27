@@ -1,0 +1,59 @@
+# Supply-chain denylist (general.md Supply Chain Security): PRC-origin / sanctioned-entity
+# packages that external marketplace bundles may not depend on. Names are matched
+# case-insensitively after ecosystem normalisation; a trailing "*" is a prefix match.
+# Extend by adding entries -- no code change needed.
+pypi:
+  - dashscope
+  - qwen*
+  - alibabacloud*
+  - aliyun*
+  - alibaba-cloud*
+  - oss2
+  - baidu*
+  - paddlepaddle*
+  - paddle*
+  - tencentcloud*
+  - qcloud*
+  - cos-python-sdk-v5
+  - huaweicloud*
+  - volcengine*
+  - bytedance*
+  - zhipuai
+  - deepseek*
+  - moonshot*
+  - kaspersky*
+npm:
+  - "@alicloud/*"
+  - "@ali/*"
+  - "@alipay/*"
+  - "@tencent/*"
+  - "@tencent-*"
+  - "@baidu/*"
+  - "@bytedance/*"
+  - "@byted/*"
+  - "@huaweicloud/*"
+  - "@volcengine/*"
+  - ali-oss
+  - tencentcloud-sdk-nodejs*
+  - baidu-aip-sdk
+  - dingtalk*
+  - kaspersky*
+cargo:
+  - rsmpeg
+  - aliyun*
+  - alibabacloud*
+  - tencent*
+  - baidu*
+  - huaweicloud*
+  - volcengine*
+  - bytedance*
+  - kaspersky*
+nuget:
+  - AlibabaCloud.*
+  - Aliyun.*
+  - TencentCloud*
+  - Tencent.*
+  - Baidu.*
+  - Huawei*
+  - Volcengine.*
+  - Kaspersky*
