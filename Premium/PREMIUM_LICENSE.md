@@ -1,4 +1,4 @@
-# WADDLES PREMIUM LICENSE AGREEMENT
+# WADDLES PREMIUM LICENSE AGREEMENT (COMMERCIAL)
 
 **Version 1.0**
 **Effective Date: January 1, 2024**
@@ -7,7 +7,7 @@
 
 **THIS APPLICATION IS EXCLUSIVELY FOR WADDLES PREMIUM SUBSCRIBERS**
 
-This Waddles Premium mobile application is proprietary software that requires an active Waddles Premium subscription to access and use. By installing, accessing, or using this application, you acknowledge that you have read, understood, and agree to be bound by the terms and conditions set forth in this Premium License Agreement.
+This Waddles Premium software (the Premium desktop and mobile clients, including mobile apps distributed from the separate `penguinm` mobile repository) is proprietary commercial software that requires an active Waddles Premium subscription to access and use. By installing, accessing, or using this software, you acknowledge that you have read, understood, and agree to be bound by the terms and conditions set forth in this Premium License Agreement.
 
 ## 1. PREMIUM SUBSCRIPTION REQUIRED
 

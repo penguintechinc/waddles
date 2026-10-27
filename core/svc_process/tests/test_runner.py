@@ -125,7 +125,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -168,7 +168,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -201,7 +201,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -227,7 +227,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -270,7 +270,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -296,7 +296,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.no_such_module:transform",
+                    "entrypoint": "builtin_handlers.no_such_module:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -367,7 +367,7 @@ class TestActivityFeedEmit:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -400,7 +400,7 @@ class TestActivityFeedEmit:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -434,7 +434,7 @@ class TestActivityFeedEmit:
                     {
                         "appId": APP_ID,
                         "communityId": 42,
-                        "entrypoint": "bundles.echo_process:transform",
+                        "entrypoint": "builtin_handlers.echo_process:transform",
                         "spec": {},
                         "config": {},
                     }
@@ -465,7 +465,7 @@ class TestActivityFeedEmit:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -488,8 +488,8 @@ class TestBundleContextWiring:
 
     Monkeypatches `runner.load_entrypoint` (the name imported into
     `runner.py`'s own namespace) to return a stub `transform`, rather than
-    touching any real `core/svc_process/bundles/*.py` file. This is the
-    fix for the gap `bundles/social_welcome_process.py` worked around by
+    touching any real `core/svc_process/builtin_handlers/*.py` file. This is the
+    fix for the gap `builtin_handlers/social_welcome_process.py` worked around by
     reading `event.payload["community_id"]` -- `transform(event)`'s own
     frozen signature never receives the envelope, so this is the only way
     a process bundle reaches its tenant/community scope.
@@ -519,7 +519,7 @@ class TestBundleContextWiring:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -554,7 +554,7 @@ class TestBundleContextWiring:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -600,7 +600,7 @@ class TestBundleContextWiring:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -637,7 +637,7 @@ class TestCrossAppRouting:
         Uses a stub transform (not `community_forums_process`) to isolate the
         runner's routing behavior from the forum bundle's own parsing logic --
         that logic is covered separately in
-        `test_bundles_community_forums_process.py`.
+        `test_builtin_community_forums_process.py`.
         """
 
         async def _stub_transform(event: PlatformEvent) -> PlatformEvent | None:
@@ -656,7 +656,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -697,7 +697,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -748,7 +748,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -787,7 +787,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -821,7 +821,7 @@ class TestCrossAppRouting:
 
         Proves the fix for `community_forums_action.create_forum_post`,
         which reads `envelope.community` directly (`community_id=envelope.
-        community`, `core/svc_action/bundles/community_forums_action.py`) --
+        community`, `core/svc_action/builtin_handlers/community_forums_action.py`) --
         before the fix this landed a `None` `community_id` in
         `hub_forum_posts` for every tenant-wide activation.
         """
@@ -831,7 +831,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -858,7 +858,7 @@ class TestCrossAppRouting:
 
         Community-scoped counterpart to the forum tests above, mirroring
         `!sr`'s real routing shape (`_MUSIC_APP_ID =
-        "waddles.social.music.default"`, `bundles/social_music_process.py`).
+        "waddles.social.music.default"`, `builtin_handlers/social_music_process.py`).
         """
         music_app_id = "waddles.social.music.default"
         poller = _make_poller(
@@ -867,7 +867,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -908,7 +908,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -929,6 +929,277 @@ class TestCrossAppRouting:
         assert env_out.community == str(Config.DEMO_ACTIVITY_COMMUNITY_ID)
         assert env_out.community is not None
         assert env_out.event.payload["music_query"] == "some great song"
+
+
+class TestActivationGate:
+    """P4: `app_activations` now gates live dispatch, not just loading.
+
+    `_transform_and_enqueue` checks `services.activation_gate.is_app_
+    activated` against the envelope's resolved community before invoking
+    `transform_fn` -- this class proves the gate actually routes/blocks, and
+    that the fail-open defaults keep every currently-working, never-onboarded
+    bundle (e.g. this file's own `APP_ID`, which has no `app_activations`
+    row anywhere) dispatching exactly as before.
+    """
+
+    async def test_activated_bundle_in_community_is_routed(
+        self, redis_client: Any, http_client_factory: Any
+    ) -> None:
+        """A real `app_activations` row with `enabled=True` -- dispatch proceeds, reply enqueued."""
+        from flask_core import reset_bundle_dal_for_tests, set_bundle_dal
+
+        class _FakeDal:
+            async def execute(self, sql: str, params: list[Any] | None = None) -> list[Any]:
+                assert "FROM app_activations" in sql
+                assert params == [42, APP_ID]
+                return [{"enabled": True}]
+
+        set_bundle_dal(_FakeDal())
+        try:
+            poller = _make_poller(
+                http_client_factory,
+                [
+                    {
+                        "appId": APP_ID,
+                        "communityId": 42,
+                        "entrypoint": "builtin_handlers.echo_process:transform",
+                        "spec": {},
+                        "config": {},
+                    }
+                ],
+            )
+            runner = ProcessRunner(poller=poller, redis_client=redis_client, tenant_slug=TENANT)
+            process_key = bundle_stream_key(TENANT, "42", APP_ID, "process")
+            env_in = _envelope(community="42", stage="process", text="hello there")
+            await redis_client.lpush(process_key, json.dumps(env_in.to_dict()))
+
+            assert await runner.run_once() == 1
+
+            action_key = bundle_stream_key(TENANT, "42", APP_ID, "action")
+            assert await redis_client.rpop(action_key) is not None
+        finally:
+            reset_bundle_dal_for_tests()
+
+    async def test_non_activated_bundle_in_community_is_not_routed(
+        self, redis_client: Any, http_client_factory: Any
+    ) -> None:
+        """A real `app_activations` row with `enabled=False` -- skipped, no reply, no error."""
+        from flask_core import reset_bundle_dal_for_tests, set_bundle_dal
+
+        class _FakeDal:
+            async def execute(self, sql: str, params: list[Any] | None = None) -> list[Any]:
+                assert "FROM app_activations" in sql
+                assert params == [42, APP_ID]
+                return [{"enabled": False}]
+
+        set_bundle_dal(_FakeDal())
+        try:
+            poller = _make_poller(
+                http_client_factory,
+                [
+                    {
+                        "appId": APP_ID,
+                        "communityId": 42,
+                        "entrypoint": "builtin_handlers.echo_process:transform",
+                        "spec": {},
+                        "config": {},
+                    }
+                ],
+            )
+            runner = ProcessRunner(poller=poller, redis_client=redis_client, tenant_slug=TENANT)
+            process_key = bundle_stream_key(TENANT, "42", APP_ID, "process")
+            env_in = _envelope(community="42", stage="process", text="hello there")
+            await redis_client.lpush(process_key, json.dumps(env_in.to_dict()))
+
+            # Not activated -> not dispatched: `run_once()` must not raise,
+            # must not count this event as processed, and must enqueue nothing.
+            assert await runner.run_once() == 0
+
+            action_key = bundle_stream_key(TENANT, "42", APP_ID, "action")
+            assert await redis_client.rpop(action_key) is None
+        finally:
+            reset_bundle_dal_for_tests()
+
+    async def test_toggling_the_activation_row_flips_routing(
+        self, redis_client: Any, http_client_factory: Any
+    ) -> None:
+        """The exact webui #586 toggle shape: same `(community, app_id)`, `enabled` flips."""
+        from flask_core import reset_bundle_dal_for_tests, set_bundle_dal
+
+        enabled_flag = {"value": True}
+
+        class _FakeDal:
+            async def execute(self, sql: str, params: list[Any] | None = None) -> list[Any]:
+                return [{"enabled": enabled_flag["value"]}]
+
+        set_bundle_dal(_FakeDal())
+        try:
+            poller = _make_poller(
+                http_client_factory,
+                [
+                    {
+                        "appId": APP_ID,
+                        "communityId": 42,
+                        "entrypoint": "builtin_handlers.echo_process:transform",
+                        "spec": {},
+                        "config": {},
+                    }
+                ],
+            )
+            runner = ProcessRunner(poller=poller, redis_client=redis_client, tenant_slug=TENANT)
+            process_key = bundle_stream_key(TENANT, "42", APP_ID, "process")
+            action_key = bundle_stream_key(TENANT, "42", APP_ID, "action")
+
+            # Activated: routed.
+            await redis_client.lpush(
+                process_key,
+                json.dumps(_envelope(community="42", stage="process").to_dict()),
+            )
+            assert await runner.run_once() == 1
+            assert await redis_client.rpop(action_key) is not None
+
+            # Toggled off: not routed.
+            enabled_flag["value"] = False
+            await redis_client.lpush(
+                process_key,
+                json.dumps(_envelope(community="42", stage="process").to_dict()),
+            )
+            assert await runner.run_once() == 0
+            assert await redis_client.rpop(action_key) is None
+
+            # Toggled back on: routed again.
+            enabled_flag["value"] = True
+            await redis_client.lpush(
+                process_key,
+                json.dumps(_envelope(community="42", stage="process").to_dict()),
+            )
+            assert await runner.run_once() == 1
+            assert await redis_client.rpop(action_key) is not None
+        finally:
+            reset_bundle_dal_for_tests()
+
+    async def test_unonboarded_bundle_with_no_activation_row_still_dispatches(
+        self, redis_client: Any, http_client_factory: Any
+    ) -> None:
+        """Fail-open default: no `app_activations` row at all.
+
+        E.g. `bot_process`'s own app_id, which has never been seeded into
+        `app_catalog`/`app_activations` (see `services/activation_gate.py`'s
+        module docstring) -- must keep dispatching exactly as before this
+        gate existed.
+        """
+        from flask_core import reset_bundle_dal_for_tests, set_bundle_dal
+
+        class _FakeDal:
+            async def execute(self, sql: str, params: list[Any] | None = None) -> list[Any]:
+                return []  # no row
+
+        set_bundle_dal(_FakeDal())
+        try:
+            poller = _make_poller(
+                http_client_factory,
+                [
+                    {
+                        "appId": APP_ID,
+                        "communityId": 42,
+                        "entrypoint": "builtin_handlers.echo_process:transform",
+                        "spec": {},
+                        "config": {},
+                    }
+                ],
+            )
+            runner = ProcessRunner(poller=poller, redis_client=redis_client, tenant_slug=TENANT)
+            process_key = bundle_stream_key(TENANT, "42", APP_ID, "process")
+            env_in = _envelope(community="42", stage="process", text="hello there")
+            await redis_client.lpush(process_key, json.dumps(env_in.to_dict()))
+
+            assert await runner.run_once() == 1
+
+            action_key = bundle_stream_key(TENANT, "42", APP_ID, "action")
+            assert await redis_client.rpop(action_key) is not None
+        finally:
+            reset_bundle_dal_for_tests()
+
+    async def test_no_dal_bound_at_all_still_dispatches(
+        self, redis_client: Any, http_client_factory: Any
+    ) -> None:
+        """Fail-open default: no DAL ever bound in this process.
+
+        Same as every pre-existing `TestRunOnce`/`TestCrossAppRouting` test
+        in this file, none of which bind one.
+        """
+        poller = _make_poller(
+            http_client_factory,
+            [
+                {
+                    "appId": APP_ID,
+                    "communityId": 42,
+                    "entrypoint": "builtin_handlers.echo_process:transform",
+                    "spec": {},
+                    "config": {},
+                }
+            ],
+        )
+        runner = ProcessRunner(poller=poller, redis_client=redis_client, tenant_slug=TENANT)
+        process_key = bundle_stream_key(TENANT, "42", APP_ID, "process")
+        env_in = _envelope(community="42", stage="process", text="hello there")
+        await redis_client.lpush(process_key, json.dumps(env_in.to_dict()))
+
+        assert await runner.run_once() == 1
+
+    async def test_tenant_wide_envelope_with_no_community_fails_open(
+        self, redis_client: Any, http_client_factory: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`community_for_context=None` (truly unresolved) -- nothing to gate on, always allow.
+
+        This is `resolve_community`'s own last-resort "none" outcome, not
+        just "no explicit community on the envelope" -- the gate must never
+        even issue a DB query for it.
+        """
+        from flask_core import reset_bundle_dal_for_tests, set_bundle_dal
+
+        import runner as runner_module
+
+        async def _unresolved(**kwargs: Any) -> ResolvedCommunity:
+            return ResolvedCommunity(community_id=None, source="none")
+
+        monkeypatch.setattr(runner_module, "resolve_community", _unresolved)
+
+        # A list (not a raise-inside-the-fake) -- `is_app_activated` catches
+        # every exception from `dal.execute()` and fails open regardless, so
+        # raising here would prove nothing; recording calls and asserting
+        # the list stays empty is the only way to actually prove the gate's
+        # `community is None` branch short-circuits before any DB query.
+        calls: list[tuple[str, list[Any] | None]] = []
+
+        class _FakeDal:
+            async def execute(self, sql: str, params: list[Any] | None = None) -> list[Any]:
+                calls.append((sql, params))
+                return []
+
+        set_bundle_dal(_FakeDal())
+        try:
+            poller = _make_poller(
+                http_client_factory,
+                [
+                    {
+                        "appId": APP_ID,
+                        "communityId": None,
+                        "entrypoint": "builtin_handlers.echo_process:transform",
+                        "spec": {},
+                        "config": {},
+                    }
+                ],
+            )
+            runner = ProcessRunner(poller=poller, redis_client=redis_client, tenant_slug=TENANT)
+            process_key = bundle_stream_key(TENANT, None, APP_ID, "process")
+            env_in = _envelope(community=None, stage="process", text="still works")
+            await redis_client.lpush(process_key, json.dumps(env_in.to_dict()))
+
+            assert await runner.run_once() == 1
+            assert calls == [], "community=None must short-circuit before any DB query"
+        finally:
+            reset_bundle_dal_for_tests()
 
 
 class TestModerationGateWiring:
@@ -961,7 +1232,7 @@ class TestModerationGateWiring:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -998,7 +1269,7 @@ class TestModerationGateWiring:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1079,7 +1350,7 @@ class TestModerationEnforcementRouting:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1289,7 +1560,7 @@ class TestCommunityResolution:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1341,7 +1612,7 @@ class TestCommunityResolution:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1385,7 +1656,7 @@ class TestCommunityResolution:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1429,7 +1700,7 @@ class TestCommunityResolution:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1472,7 +1743,7 @@ class TestActivityAccrualHook:
         *,
         text: str,
         event_type: str = "message",
-        entrypoint: str = "bundles.echo_process:transform",
+        entrypoint: str = "builtin_handlers.echo_process:transform",
         raise_error: Exception | None = None,
     ) -> tuple[int, list[dict[str, Any]]]:
         import runner as runner_module
@@ -1568,7 +1839,7 @@ class TestActivityAccrualHook:
             http_client_factory,
             monkeypatch,
             text="just chatting about the game",
-            entrypoint="bundles.bot_process:transform",
+            entrypoint="builtin_handlers.bot_process:transform",
         )
         assert processed == 0  # no reply enqueued
         assert len(calls) == 1
@@ -1612,7 +1883,7 @@ class TestActivityAccrualHook:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1647,7 +1918,7 @@ class TestActivityAccrualHook:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1695,7 +1966,7 @@ class TestActivityAccrualHook:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1797,7 +2068,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1858,7 +2129,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1894,7 +2165,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1937,7 +2208,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1975,7 +2246,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2022,7 +2293,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2067,6 +2338,12 @@ class TestRaidAutoShoutout:
                             "vso_enabled": False,
                         }
                     ]
+                if "FROM app_activations" in sql:
+                    # P4 activation gate's own lookup, run before `transform_fn` --
+                    # no row means "unonboarded app_id", the gate's documented
+                    # fail-open default (see `services/activation_gate.py`), so
+                    # this test's shoutout dispatch is unaffected either way.
+                    return []
                 raise AssertionError(f"unexpected SQL: {sql}")
 
         async def _flag_on(*args: Any, **kwargs: Any) -> bool:
@@ -2083,7 +2360,7 @@ class TestRaidAutoShoutout:
                     {
                         "appId": APP_ID,
                         "communityId": 42,
-                        "entrypoint": "bundles.bot_process:transform",
+                        "entrypoint": "builtin_handlers.bot_process:transform",
                         "spec": {},
                         "config": {},
                     }
@@ -2174,7 +2451,7 @@ class TestLiveStatusHook:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2213,7 +2490,7 @@ class TestLiveStatusHook:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2253,7 +2530,7 @@ class TestLiveStatusHook:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2290,7 +2567,7 @@ class TestLiveStatusHook:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2334,7 +2611,7 @@ class TestLiveStatusHook:
                     {
                         "appId": APP_ID,
                         "communityId": 42,
-                        "entrypoint": "bundles.bot_process:transform",
+                        "entrypoint": "builtin_handlers.bot_process:transform",
                         "spec": {},
                         "config": {},
                     }

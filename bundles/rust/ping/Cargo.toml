@@ -1,9 +1,20 @@
 [package]
 name = "waddle-bundle-ping-rust"
-version = "0.1.0"
+# Bumped 0.1.0 -> 0.1.1 (fix/seeder-activate-tenant-wide, alpha 2026-10-02) purely to force
+# cargo-component to embed a different package-version string in the rebuilt component
+# (`[package.metadata.component] package = "waddle:bundle-ping-rust"` below has no explicit
+# version override, so it defaults to this field) -- the bundle's own hub-manifest.yaml/
+# bundle.yaml version (1.0.2 -> 1.0.3, a SEPARATE number this crate version never tracked
+# before) is a manifest-only change (added a `discord` consumes rule) with zero Rust source
+# diff, and app_versions.artifact_digest (hub_api migration 0022) is immutable AND globally
+# UNIQUE -- publishing 1.0.3 with the exact same compiled bytes as the already-published
+# 1.0.2 would collide with that constraint. This crate version has no other meaning and is
+# never read by hub-api; bump it again whenever a manifest-only bundle release needs new
+# bytes without an actual logic change.
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Minimal real Twitch `!ping` -> `pong` process/action-stage bundle, compiled to a WASI 0.2 component with cargo-component. Exists as the e2e test's deployable fixture -- the executor loads this component and drives it through svc-process/svc-action end to end. Mirrors bundles/rust/example's structure and pins."
 

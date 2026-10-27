@@ -161,8 +161,8 @@ async def get_pricing() -> svc.PricingConfigDTO:
 
 
 @premium_bp.route("/status/<int:community_id>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.premium:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.premium:admin")  # type: ignore[misc]
 async def get_premium_status(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /status/<communityId>` -- community-admin only (IDOR-checked)."""
     denied = _require_community_admin(community_id)
@@ -197,8 +197,8 @@ class PremiumSubscribeRequest:
 
 
 @premium_bp.route("/subscribe", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.premium:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.premium:admin")  # type: ignore[misc]
 @validate_request(PremiumSubscribeRequest)
 async def subscribe_premium(data: PremiumSubscribeRequest) -> tuple[dict[str, object], int]:
     """`POST /subscribe` -- price is SERVER-computed (see `calculate_monthly_bill`'s docstring)."""
@@ -264,8 +264,8 @@ class PremiumCancelRequest:
 
 
 @premium_bp.route("/cancel", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.premium:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.premium:admin")  # type: ignore[misc]
 @validate_request(PremiumCancelRequest)
 async def cancel_premium(data: PremiumCancelRequest) -> tuple[dict[str, object], int]:
     """`POST /cancel`."""
@@ -296,8 +296,8 @@ async def cancel_premium(data: PremiumCancelRequest) -> tuple[dict[str, object],
 
 
 @discount_bp.route("", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.discount:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.discount:read")  # type: ignore[misc]
 async def list_discount_codes() -> tuple[dict[str, object], int]:
     """`GET /vendor/discount-codes` -- codes owned by the CALLER (vendor self-service)."""
     vendor_id = get_current_user_id(request)
@@ -336,8 +336,8 @@ class CreateDiscountCodeRequest:
 
 
 @discount_bp.route("", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.discount:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.discount:write")  # type: ignore[misc]
 @validate_request(CreateDiscountCodeRequest)
 async def create_discount_code(data: CreateDiscountCodeRequest) -> tuple[dict[str, object], int]:
     """`POST /vendor/discount-codes`."""
@@ -364,8 +364,8 @@ async def create_discount_code(data: CreateDiscountCodeRequest) -> tuple[dict[st
 
 
 @discount_bp.route("/<int:code_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.discount:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.discount:write")  # type: ignore[misc]
 async def update_discount_code(code_id: int) -> tuple[dict[str, object], int]:
     """`PUT /vendor/discount-codes/<id>` -- ownership-checked (IDOR-safe)."""
     import dataclasses
@@ -385,8 +385,8 @@ async def update_discount_code(code_id: int) -> tuple[dict[str, object], int]:
 
 
 @discount_bp.route("/<int:code_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.discount:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.discount:write")  # type: ignore[misc]
 async def delete_discount_code(code_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /vendor/discount-codes/<id>` -- soft delete, ownership-checked."""
     import dataclasses
@@ -408,8 +408,8 @@ class ValidateDiscountCodeRequest:
 
 
 @discount_bp.route("/validate", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.discount:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.discount:read")  # type: ignore[misc]
 @validate_request(ValidateDiscountCodeRequest)
 @validate_response(svc.DiscountValidationDTO)
 async def validate_discount_code(
@@ -438,8 +438,8 @@ class RedeemDiscountCodeRequest:
 
 
 @discount_bp.route("/redeem", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.discount:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.discount:admin")  # type: ignore[misc]
 @validate_request(RedeemDiscountCodeRequest)
 async def redeem_discount_code(data: RedeemDiscountCodeRequest) -> tuple[dict[str, object], int]:
     """`POST /vendor/discount-codes/redeem` -- community-admin-gated + server-priced (IDOR fix)."""
@@ -463,8 +463,8 @@ async def redeem_discount_code(data: RedeemDiscountCodeRequest) -> tuple[dict[st
 
 
 @subscriptions_bp.route("/<int:community_id>/subscriptions", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.subscription:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.subscription:read")  # type: ignore[misc]
 async def list_subscriptions(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /communities/<id>/subscriptions`."""
     denied = _require_community_admin(community_id)
@@ -488,8 +488,8 @@ class SubscribeModuleRequest:
 
 
 @subscriptions_bp.route("/<int:community_id>/subscriptions", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.subscription:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.subscription:write")  # type: ignore[misc]
 @validate_request(SubscribeModuleRequest)
 async def subscribe_module(
     community_id: int, data: SubscribeModuleRequest
@@ -511,8 +511,8 @@ async def subscribe_module(
 
 
 @subscriptions_bp.route("/<int:community_id>/subscriptions/<int:subscription_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.subscription:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.subscription:write")  # type: ignore[misc]
 async def update_subscription(
     community_id: int, subscription_id: int
 ) -> tuple[dict[str, object], int]:
@@ -537,8 +537,8 @@ async def update_subscription(
 @subscriptions_bp.route(
     "/<int:community_id>/subscriptions/<int:subscription_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.subscription:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.subscription:write")  # type: ignore[misc]
 async def unsubscribe_module(
     community_id: int, subscription_id: int
 ) -> tuple[dict[str, object], int]:
@@ -566,8 +566,8 @@ def _provider_secret_key(provider: str) -> str:
 
 
 @payments_bp.route("/checkout", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.payment:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.payment:write")  # type: ignore[misc]
 async def create_checkout() -> tuple[dict[str, object], int]:
     """`POST /payments/checkout`."""
     payload = await request.get_json(force=True, silent=True) or {}
@@ -617,8 +617,8 @@ async def create_checkout() -> tuple[dict[str, object], int]:
 
 
 @payments_bp.route("/subscriptions/<provider>/<sub_id>/cancel", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.payment:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.payment:write")  # type: ignore[misc]
 async def cancel_payment_subscription(provider: str, sub_id: str) -> tuple[dict[str, object], int]:
     """`POST /payments/subscriptions/<provider>/<id>/cancel`."""
     payload = await request.get_json(force=True, silent=True) or {}
@@ -641,8 +641,8 @@ async def cancel_payment_subscription(provider: str, sub_id: str) -> tuple[dict[
 
 
 @payments_bp.route("/refunds", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.payment:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.payment:write")  # type: ignore[misc]
 async def create_refund() -> tuple[dict[str, object], int]:
     """`POST /payments/refunds` -- admin OR the original payment's owner only, never any caller."""
     payload = await request.get_json(force=True, silent=True) or {}
@@ -687,8 +687,8 @@ async def create_refund() -> tuple[dict[str, object], int]:
 
 
 @payments_bp.route("/providers", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace.payment:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace.payment:read")  # type: ignore[misc]
 async def get_supported_providers() -> tuple[dict[str, object], int]:
     """`GET /payments/providers`."""
     return {"success": True, "providers": ["stripe", "paypal"], "defaultProvider": "stripe"}, 200

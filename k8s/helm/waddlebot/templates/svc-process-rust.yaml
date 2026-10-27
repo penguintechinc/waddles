@@ -4,12 +4,12 @@
 # .enabled sub-flag. See templates/svc-ingest-rust.yaml's header for the full `-rust`
 # resource-naming-vs-shared-image-tag rationale (identical here) -- not repeated per file.
 #
-# fix/svc-process-host-api-wiring-alpha -- core/svc_process/src/config.rs now HAS
+# fix/svc-process-host-api-wiring-alpha -- core/svc_process/src/config.rs HAS
 # HOST_API_PORT/HOST_API_SERVER_CERT_FILE/HOST_API_SERVER_KEY_FILE/HOST_API_CLIENT_CA_FILE
-# fields (the M4 host-API server landed; the prior "KNOWN GAP" comment here was stale) --
-# wired the same way templates/svc-action-rust.yaml's own server-role host-API env/volume
-# already is. bundleExecutor.stageTarget must point at svc-process-rust (not its
-# svc-action-rust default) for the ping-bundle e2e proof, since PROCESS_BUNDLE_* above is
+# fields and src/host_api.rs (~2.1k lines) implements the host-API server, wired the same way
+# templates/svc-action-rust.yaml's server-role host-API env/volume is --
+# bundleExecutor.stageTarget must point at svc-process-rust (not its svc-action-rust
+# default) for the ping-bundle e2e proof, since PROCESS_BUNDLE_* above is
 # what drives the `load`/`invoke` calls this connection carries. CACHE_HOST/CACHE_PORT are
 # wired explicitly below (not envFrom'd) because the shared ConfigMap only exposes
 # REDIS_HOST/REDIS_PORT, a different name than this crate's CliConfig reads.
@@ -23,32 +23,61 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-process-rust
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcProcessRust")) }}
   replicas: {{ .Values.pipeline.rustDataPlane.svcProcess.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: svc-process-rust
   template:
     metadata:
+      annotations:
+        # fix/cert-regen-on-identity-change -- rolls every pod when the desired
+        # host-api-tls identity/SANs change, even though the Secret object itself is
+        # reused by name when kept (see templates/host-api-tls-secret.yaml's policy
+        # comment); derived from identity+SANs only, never key material.
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        checksum/host-api-tls: {{ include "waddlebot.hostApiTlsPodChecksum" . | quote }}
+        {{- end }}
+        # fix/valkey-cert-rollout-and-migrate-wait -- see templates/infrastructure/
+        # redis.yaml's identical annotation comment; rolls this client pod in lockstep
+        # with the Valkey server on any identity/SAN change.
+        # regression: valkey cert regenerated but server pod not rolled; clients BadSignature (alpha 2026-10-02)
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}
+        {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-process-rust
     spec:
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      # Dedicated identity (feature/eddsa-machine-jwt, security review HIGH
+      # finding) -- distinguishes this deployment's pods from every other
+      # workload in the namespace for `flask_core.service_jwt`'s TokenReview
+      # bootstrap; see templates/service-jwt-rbac.yaml. Shared with the
+      # Python svc-process Deployment above -- both are the same logical
+      # caller identity, never both running against hub-api at once in a
+      # given environment.
+      serviceAccountName: svc-process
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own
+      # /ready instead of re-running migrations per-pod (see _helpers.tpl).
       initContainers:
-      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-process-rust
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process-rust") "imageTag" .Values.global.imageTag) }}"
-        # Hardcoded Always (not .Values.global.imagePullPolicy) -- this Rust data-plane image
-        # iterates rapidly against the mutable `alpha` tag on the in-cluster registry and the
-        # node's containerd IfNotPresent cache was proven to serve a stale binary after a
-        # same-tag push (alpha deploy retro). Always guarantees the running pod matches the
-        # registry's current digest for this actively-iterating tag.
-        imagePullPolicy: Always
+        # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Deploys carry
+        # a unique per-deploy global.imageTag, so a stale same-tag node cache can no longer
+        # occur -- the old hardcoded Always was unnecessary and fatal for locally-loaded
+        # images (kind e2e, alpha local builds: Always forces a registry pull the node cannot
+        # satisfy, so the pod never becomes Ready). Set global.imagePullPolicy=Always per-env
+        # only when deploying a mutable tag.
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_process/
         # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
         # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
@@ -75,23 +104,82 @@ spec:
             name: {{ include "waddlebot.fullname" . }}-config
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
+        # feature/alpha-localized-posthog -- POSTHOG_KEY for
+        # penguin_licensing::LicenseConfig::from_env's flag_enabled() calls
+        # (core/svc_process/src/license.rs), auto-provisioned by
+        # templates/infrastructure/posthog/bootstrap.yaml. optional: true --
+        # safe before the bootstrap Job runs or when posthog.enabled=false.
+        - secretRef:
+            name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
+            optional: true
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_process;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.port | quote }}
         - name: METRICS_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.metricsPort | quote }}
         - name: HOST_API_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.hostApiPort | quote }}
+        # fix/executor-link-heartbeat (alpha 2026-10-02 incident): how often
+        # this stage pings each connected executor session -- see
+        # `core/svc_process/src/host_api.rs`.
+        - name: HEARTBEAT_INTERVAL_MS
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.heartbeatIntervalMs | default 5000 | quote }}
+        # regression: readiness gated on executor connection deadlocked
+        # rollouts (alpha 2026-10-02) -- NO LONGER wired into `/healthz`/
+        # `/health` (a bundle-executor dials this service through its
+        # ClusterIP Service, which only routes to Ready pods, so gating
+        # readiness/liveness on executor presence deadlocked rollouts). Now
+        # only the threshold for the periodic zero-executor ERROR log
+        # (`crate::host_api::run_zero_executor_watchdog`).
+        - name: EXECUTOR_GRACE_SECONDS
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.executorGraceSeconds | default 60 | quote }}
+        # Security review fix (PR #468, MEDIUM): the bundle `http` egress guard's
+        # cluster-CIDR denylist and instance-wide private-IP policy
+        # (bundle_host_http::egress::{ClusterCidrDenylist,InstanceEgressPolicy}) -- shared
+        # across every Rust data-plane stage so pod/Service/node ranges are declared once.
+        # DEPLOYMENT_TIER itself comes from the shared ConfigMap (envFrom above,
+        # global.deploymentTier) -- CliConfig::validate hard-fails startup if this list is
+        # empty outside alpha/local. See values.yaml's own comment on this key for the
+        # "OVERRIDE REQUIRED in beta/gamma/production" note.
+        - name: EGRESS_CLUSTER_CIDR_DENYLIST
+          value: {{ .Values.pipeline.rustDataPlane.egressClusterCidrDenylist | join "," | quote }}
+        - name: INSTANCE_EGRESS_ALLOW_PRIVATE_IP
+          value: {{ .Values.pipeline.rustDataPlane.instanceEgressAllowPrivateIp | quote }}
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}
         {{- end }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
-        - name: DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: DB_PASSWORD
+        # feature/hub-grpc-env-wiring (closes #569's startup seam) -- core/hub_client::
+        # HubClient needs hub-api's internal gRPC endpoint (TLS mandatory, see
+        # hub_api/grpc_internal/server.py) and its machine-JWT bootstrap endpoint
+        # (hub_api/blueprints/service_jwt_bp.py POST /internal/service-token). Both
+        # default to hub-api's own in-cluster Service, computed here rather than
+        # requiring a per-environment override (see values.yaml's own comment on this
+        # key, incl. the KNOWN GAP note on hub-api's TLS wiring + hub_client's CA trust).
+        - name: HUB_API_GRPC_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        # Matches the audience-scoped projected token this pod already mounts via
+        # waddlebot.serviceJwtBootstrapVolume(Mount) below -- NOT the generic default
+        # k8s SA token path (wrong audience, hub-api's TokenReview call would reject
+        # it with "missing required audience").
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        # fix/pii-tokenization-env-override -- plain env off-switch, independent of the
+        # waddles.core.disable-pii-tokenization PostHog kill-switch (unusable in an
+        # environment with no in-cluster PostHog, e.g. alpha). Only rendered when
+        # pipeline.piiTokenization.enabled is false (see values.yaml's own comment);
+        # omitted entirely otherwise, so the default PostHog-gated behavior is unchanged.
+        {{- if not .Values.pipeline.piiTokenization.enabled }}
+        - name: PII_TOKENIZATION_ENABLED
+          value: "false"
+        {{- end }}
         - name: SERVICE_API_KEY
           valueFrom:
             secretKeyRef:
@@ -108,6 +196,8 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: REDIS_PASSWORD
+        {{- /* Durable VALKEY_URL override below is TLS-only: fail the render rather than leave the spine on the cache/plaintext envFrom VALKEY_URL. */}}
+        {{- include "waddlebot.assertDurableTls" . }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # fix/valkey-tls-alpha -- overrides the plaintext VALKEY_URL this container would
         # otherwise inherit via envFrom's secretRef (templates/secrets.yaml) with the
@@ -126,29 +216,72 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
+              key: VALKEY_DURABLE_URL_TLS
         - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_DURABLE_PASSWORD
+        # bundle-kv rides its OWN dedicated noeviction kv Valkey (valkey-kv): quota counters are
+        # integrity-critical (eviction = quota bypass) and must not share the delivery (durable)
+        # instance. Credential-free URL + password via secretKeyRef from the dedicated
+        # <fullname>-valkey-kv Secret (not the shared envFrom'd one). Kv disabled (local) falls
+        # back to the cache instance. Rust builds the kv conn from these.
+        {{- if eq (include "waddlebot.valkeyKvEnabled" .) "true" }}
+        - name: VALKEY_KV_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-valkey-kv
+              key: VALKEY_KV_URL_TLS
+        - name: VALKEY_KV_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-valkey-kv
+              key: VALKEY_KV_PASSWORD
+        {{- else }}
+        - name: VALKEY_KV_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_URL_TLS
+        - name: VALKEY_KV_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: REDIS_PASSWORD
         {{- end }}
-        # Empty (default) disables the spine drain loop entirely -- see config.rs.
+        {{- end }}
+        # fix/alpha-deploy-executor-and-failfast -- the legacy single-app selection env
+        # below (PROCESS_APP_ID, PROCESS_INGEST_*, PROCESS_BUNDLE_*) now renders ONLY
+        # when an operator explicitly sets the driving value -- never unconditionally
+        # with an empty string. Default posture (unset): the DB-driven multi-tenant
+        # active-bundle loader further below is the sole bundle-selection path. Empty
+        # (default) previously disabled the spine drain loop/executor load path the
+        # same way, functionally, but left a stale digest/app_id one `helm upgrade` away
+        # from silently winning back if the DB-driven path is ever disabled -- see
+        # values-alpha.yaml's own comment on this change.
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.processAppId }}
         - name: PROCESS_APP_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processAppId | default "" | quote }}
-        # fix/process-bundle-wiring-alpha -- see values.yaml's comment on these fields.
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processAppId | quote }}
+        {{- end }}
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.processIngestPlatform }}
         - name: PROCESS_INGEST_PLATFORM
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processIngestPlatform | default "" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processIngestPlatform | quote }}
+        {{- end }}
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId }}
         - name: PROCESS_INGEST_SOURCE_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId | default "" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId | quote }}
+        {{- end }}
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.processBundleDigest }}
         - name: PROCESS_BUNDLE_DIGEST
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleDigest | default "" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleDigest | quote }}
         - name: PROCESS_BUNDLE_VERSION
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleVersion | default "1" | quote }}
         - name: PROCESS_BUNDLE_COMPONENT_KEY
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleComponentKey | default "" | quote }}
         - name: PROCESS_BUNDLE_SIDECAR_KEY
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleSidecarKey | default "" | quote }}
+        {{- end }}
         # DB-driven active-bundle loader (core/svc_process/src/config.rs,
         # core/bundle_active_set) -- see values.yaml's comment on this block. Reader
         # host/port/name default to the SAME primary Postgres this pod's DB_* above
@@ -161,8 +294,18 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderPort | default .Values.infrastructure.postgresql.service.port | quote }}
         - name: DB_READER_NAME
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderName | default .Values.infrastructure.postgresql.database | quote }}
+        # fix/helm-apply-errors -- see templates/svc-action-rust.yaml's identical comment
+        # on this same env var name for the full rationale (identical here): never
+        # switch DB_READER_USER back to valueFrom, a retired chart revision's
+        # valueFrom(waddlebot-bundle-reader/...) for this exact name is why a live
+        # upgrade fails with "env[N].valueFrom: ... may not be specified when value is
+        # not empty" (kubectl's merge-by-name deep-merges the old and new field sets).
+        # feature/bundle-reader-role -- default changed from "svc_process_ro" (never
+        # backed by any migration) to "waddles_bundle_reader" (alembic/versions/
+        # 0032_bundle_reader_role.py), the role name migrations 0025/0028 already
+        # grant SELECT to.
         - name: DB_READER_USER
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderUser | default "svc_process_ro" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderUser | default "waddles_bundle_reader" | quote }}
         - name: DB_READER_PASSWORD
           valueFrom:
             secretKeyRef:
@@ -184,6 +327,27 @@ spec:
           # 1m) -- bounds the blast radius of any change-log defect to one
           # interval, independent of the change-log's own correctness.
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.bundleConfigFullReconcileMinutes | default 15 | quote }}
+        {{- if .Values.pipeline.hubApi.enabled }}
+        # fix/hub-grpc-tls-and-ca-trust (PR #570 review blocker 2) -- the CA that signed
+        # hub-api's internal gRPC server cert, so core/hub_client::HubClient::connect can
+        # verify it (rustls client root store) instead of trusting only system/webpki
+        # roots, which never includes this chart's self-signed/internal CA.
+        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        {{- end }}
+        # feature/alpha-command-flag-envs -- Docker ENV baseline for data-plane feature
+        # flags, keyed `FLAG_<KEY>` (flag key uppercased, `.`/`-` -> `_`), e.g.
+        # `waddles.command-8ball` -> `FLAG_WADDLES_COMMAND_8BALL`. waddle_sdk's
+        # feature_enabled() reads this as the baseline and PostHog overrides it when
+        # connected -- lets alpha run command bundles with posthog.enabled=false. NOT
+        # usable for license-gated flags (Enterprise/Professional entitlements) -- those
+        # resolve against license.penguintech.io only, no env override, by design.
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.extraEnv }}
+        {{- range $key, $value := .Values.pipeline.rustDataPlane.svcProcess.extraEnv }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
+        {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -211,14 +375,22 @@ spec:
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- if .Values.pipeline.hubApi.enabled }}
+        {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
+        {{- end }}
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
       {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.pipeline.hubApi.enabled }}
+      {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
       {{- end }}
 ---
 apiVersion: v1
@@ -246,4 +418,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-process-rust
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-process-rust" "ports" (list $.Values.pipeline.rustDataPlane.svcProcess.port $.Values.pipeline.rustDataPlane.svcProcess.metricsPort $.Values.pipeline.rustDataPlane.svcProcess.hostApiPort) "runtime" "rust" "binaries" (list "/app/svc-process")) }}
 {{- end }}

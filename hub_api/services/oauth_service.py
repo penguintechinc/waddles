@@ -19,7 +19,9 @@ Core dependency introduced.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -28,10 +30,16 @@ from urllib.parse import urlencode
 import httpx
 
 from config import HubAPIConfig
+from services import ban_suppression, session_service
 from services.auth_service import SessionUser, create_session_token
 from services.errors import bad_request, conflict
 
-VALID_PLATFORMS = ("discord", "twitch", "slack")
+logger = logging.getLogger(__name__)
+
+#: Discord application ids are snowflakes (17-20 digit numerics); anything else is misconfig.
+_DISCORD_CLIENT_ID_RE = re.compile(r"\d{17,20}")
+
+VALID_PLATFORMS = ("discord", "twitch", "slack", "google")
 
 #: TTL for the opaque OAuth exchange code minted by `oauth_callback` --
 #: long enough for the frontend's own redirect+fetch round trip, short
@@ -43,16 +51,25 @@ _AUTHORIZE_URLS = {
     "discord": "https://discord.com/api/oauth2/authorize",
     "twitch": "https://id.twitch.tv/oauth2/authorize",
     "slack": "https://slack.com/oauth/v2/authorize",
+    "google": "https://accounts.google.com/o/oauth2/v2/auth",
 }
 _TOKEN_URLS = {
     "discord": "https://discord.com/api/oauth2/token",
     "twitch": "https://id.twitch.tv/oauth2/token",
     "slack": "https://slack.com/api/oauth.v2.access",
+    "google": "https://oauth2.googleapis.com/token",
 }
+_GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 _SCOPES = {
     "discord": "identify email",
     "twitch": "user:read:email",
     "slack": "identity.basic,identity.email,identity.avatar",
+    "google": "openid email profile",
+}
+#: Extra authorize-URL params per provider (Google: no offline refresh token,
+#: always show the account chooser).
+_EXTRA_AUTHORIZE_PARAMS = {
+    "google": {"access_type": "online", "prompt": "select_account"},
 }
 
 
@@ -67,6 +84,16 @@ async def _get_platform_credentials(async_dal: Any, dal: Any, platform: str) -> 
         creds["client_id"] = os.getenv(f"{prefix}_CLIENT_ID", "")
     if not creds.get("client_secret"):
         creds["client_secret"] = os.getenv(f"{prefix}_CLIENT_SECRET", "")
+    # Stray whitespace/newlines from a secret store survive the (lenient) authorize redirect but
+    # make Discord's token endpoint reject the client_id as "not snowflake".
+    creds = {k: v.strip() if isinstance(v, str) else v for k, v in creds.items()}
+    if (
+        platform == "discord"
+        and creds["client_id"]
+        and not _DISCORD_CLIENT_ID_RE.fullmatch(creds["client_id"])
+    ):
+        logger.error("oauth.discord_client_id_not_snowflake len=%d", len(creds["client_id"]))
+        raise bad_request("Discord OAuth client_id is misconfigured (must be the numeric App ID)")
     return creds
 
 
@@ -82,6 +109,7 @@ def _generate_authorize_url(platform: str, client_id: str, redirect_uri: str, st
         "response_type": "code",
         "scope": _SCOPES[platform],
         "state": state,
+        **_EXTRA_AUTHORIZE_PARAMS.get(platform, {}),
     }
     return f"{_AUTHORIZE_URLS[platform]}?{urlencode(params)}"
 
@@ -140,7 +168,7 @@ async def start_oauth(
 async def _exchange_code(
     platform: str, creds: dict[str, str], code: str, redirect_uri: str
 ) -> dict[str, Any]:
-    """Exchange an authorization code for platform user info. Discord/Twitch/Slack only."""
+    """Exchange an authorization code for platform user info. Discord/Twitch/Slack/Google only."""
     async with httpx.AsyncClient(timeout=15.0) as client:
         if platform == "discord":
             token_resp = await client.post(
@@ -238,6 +266,38 @@ async def _exchange_code(
                 "avatar_url": identity.get("image_192") or identity.get("image_72"),
             }
 
+        if platform == "google":
+            token_resp = await client.post(
+                _TOKEN_URLS["google"],
+                content=urlencode(
+                    {
+                        "client_id": creds["client_id"],
+                        "client_secret": creds["client_secret"],
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": redirect_uri,
+                    }
+                ),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            token_resp.raise_for_status()
+            access_token = token_resp.json()["access_token"]
+            user_resp = await client.get(
+                _GOOGLE_USERINFO_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            user_resp.raise_for_status()
+            u = user_resp.json()
+            # Only trust an email Google has verified; otherwise treat as absent
+            # (caller falls back to a synthetic `<name>@google.local`).
+            email = u.get("email") if u.get("email_verified") else None
+            return {
+                "id": u["sub"],
+                "username": u.get("name") or (u.get("email") or u["sub"]).split("@")[0],
+                "email": email,
+                "avatar_url": u.get("picture"),
+            }
+
         raise bad_request(f"OAuth exchange not implemented for {platform}")
 
 
@@ -328,6 +388,10 @@ async def _find_or_create_user_from_oauth(
         avatar_url=user_data.get("avatar_url"),
         linked_at=datetime.now(UTC),
     )
+    # The global-community membership above was created before this identity existed, so
+    # re-check suppression now that the platform id is known (ban-evasion: an erased, banned
+    # user signing up again with the same platform account).
+    await ban_suppression.reapply_for_hub_user_async(async_dal, dal, hub_user_id=user.id)
     return user
 
 
@@ -355,17 +419,26 @@ async def oauth_callback(
 
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/callback"
     creds = await _get_platform_credentials(async_dal, dal, platform)
-    user_data = await _exchange_code(platform, creds, code, redirect_uri)
+    try:
+        user_data = await _exchange_code(platform, creds, code, redirect_uri)
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "oauth.exchange_failed platform=%s status=%d body=%s",
+            platform,
+            exc.response.status_code,
+            exc.response.text[:300],
+        )
+        raise bad_request("OAuth provider rejected the login") from exc
     user = await _find_or_create_user_from_oauth(
         async_dal, dal, platform=platform, user_data=user_data
     )
 
-    return await create_session_token(async_dal, dal, cfg, user=user)
+    return await create_session_token(
+        async_dal, dal, cfg, user=user, auth_method=f"oauth_{platform}"
+    )
 
 
-async def create_oauth_exchange_code(
-    async_dal: Any, dal: Any, *, token: str, platform: str
-) -> str:
+async def create_oauth_exchange_code(async_dal: Any, dal: Any, *, token: str, platform: str) -> str:
     """Mint a short-lived, single-use opaque code standing in for a just-issued session JWT.
 
     Used by `blueprints/v1/auth.py::oauth_callback` to hand the session off
@@ -466,7 +539,11 @@ async def link_callback(
     if existing and existing.first().hub_user_id != user_id:
         raise bad_request("Platform account already linked to another user")
     if existing:
-        return  # already linked to this same user
+        # Already linked to this same user -- but a previous attempt may have inserted the link and
+        # then failed inside the suppression re-check (e.g. key outage): re-run it so a retry can
+        # never leave a banned person's memberships un-flipped.
+        await ban_suppression.reapply_for_hub_user_async(async_dal, dal, hub_user_id=user_id)
+        return
 
     await async_dal.insert_async(
         dal.hub_user_identities,
@@ -478,10 +555,25 @@ async def link_callback(
         linked_at=datetime.now(UTC),
         last_used=datetime.now(UTC),
     )
+    # A banned person may join a community first and link the banned platform account later:
+    # re-apply any matching suppression to this user's memberships now that the id is known.
+    await ban_suppression.reapply_for_hub_user_async(async_dal, dal, hub_user_id=user_id)
 
 
-async def unlink_account(async_dal: Any, dal: Any, *, user_id: int, platform: str) -> None:
-    """Unlink account."""
+async def unlink_account(
+    async_dal: Any,
+    dal: Any,
+    *,
+    user_id: int,
+    platform: str,
+    keep_session_id: int | None = None,
+) -> None:
+    """Unlink a linked platform identity and sign the user out everywhere else.
+
+    A login method removed because it is compromised (a hijacked Discord account) must not leave
+    the sessions that method opened alive, so every OTHER login session ends -- `keep_session_id`
+    (the caller's own) stays signed in.
+    """
     user_rows = await async_dal.select_async(dal(dal.hub_users.id == user_id))
     has_password = bool(user_rows) and user_rows.first().password_hash
 
@@ -492,7 +584,15 @@ async def unlink_account(async_dal: Any, dal: Any, *, user_id: int, platform: st
                 "Cannot unlink last platform without a password. Please set a password first."
             )
 
-    await async_dal.delete_async(
+    removed = await async_dal.delete_async(
         (dal.hub_user_identities.hub_user_id == user_id)
         & (dal.hub_user_identities.platform == platform)
     )
+    if removed:
+        await session_service.revoke_other_sessions(
+            async_dal,
+            dal,
+            user_id=user_id,
+            keep_session_id=keep_session_id,
+            reason="identity_unlinked",
+        )

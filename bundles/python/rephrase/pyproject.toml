@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-rephrase"
+version = "1.0.0"
+description = "`!rephrase <text>` -> AI: reword the caller's short text more clearly and politely via the ai.generate host capability."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

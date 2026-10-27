@@ -1,0 +1,39 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "frame": "@user-id=5 :alice!alice@alice.tmi.twitch.tv PRIVMSG #somechannel :a :b :c: d",
+  "golden": {
+    "platform": "twitch",
+    "event_type": "message",
+    "actor": "alice",
+    "payload": {
+      "text": "a :b :c: d",
+      "channel_name": "somechannel",
+      "author": "alice",
+      "author_id": "5",
+      "user_id": "5",
+      "display_name": null,
+      "message_id": null,
+      "room_id": null,
+      "badges": [],
+      "is_mod": false,
+      "is_subscriber": false,
+      "is_vip": false,
+      "is_broadcaster": false
+    },
+    "source": {
+      "platform": "twitch",
+      "account_id": "somechannel",
+      "channel_id": "somechannel"
+    }
+  },
+  "golden_origin": "rust",
+  "id": "twitch/irc_text_with_colons",
+  "outcome": "event",
+  "path": "twitch_irc",
+  "pii_classifier": "pass",
+  "platform": "twitch",
+  "python_divergences": [],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_receivers_twitch_irc.py"
+}

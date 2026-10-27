@@ -25,6 +25,7 @@ takes the lazy path.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -39,8 +40,13 @@ from flask_core.app_installations_db import (
 )
 from flask_core.app_manifest import AppManifest, ManifestError, parse_manifest
 from flask_core.app_registry import AppRegistry, RegistryError, get_registry
+from penguin_dal import AsyncDB
 
+from services import bundle_audit
+from services import bundle_permission_service as perm_svc
 from services.errors import ApiError, conflict, not_found
+
+logger = logging.getLogger(__name__)
 
 #: Statuses that still count as "installed" for downstream tier writes --
 #: a `yanked`/`deprecated` app_id remains a valid app_catalog FK target (its
@@ -53,6 +59,119 @@ _ACTIVE_STATUS = "active"
 def _from_tier_error(exc: AppTierError) -> ApiError:
     """Convert a `flask_core` `AppTierError` (subset-invariant violation) into a 409 `ApiError`."""
     return conflict(exc.detail)
+
+
+async def _guard_community_reconsent(
+    install_dal: AsyncDB | None,
+    *,
+    tenant_id: int,
+    community_id: int,
+    app_id: str,
+    new_version: str,
+) -> None:
+    """Block a silent permission-widening (re-)activation for one community.
+
+    Wires `bundle_permission_service.check_upgrade_reconsent()` (spec
+    Sec3.4, Gemini condition 6) into the real activation path -- prior to
+    this, that function had zero production callers. No-op when
+    `install_dal` is not supplied (legacy call sites/tests that predate
+    the Android-style permission catalog) or when the community has no
+    EXISTING `community_permission_grants` row for `app_id` yet -- a
+    first-ever grant goes through `bundle_permission_service.
+    grant_community_permissions()`'s own mandatory full-consent gate
+    instead, so there is nothing to reconsent to here. Otherwise, an
+    add/broadened permission set for `new_version` blocks the
+    (re-)activation outright: the community's existing grant is left
+    untouched (it stays on its current permission set) and the block is
+    both audit-logged (admin-visible) and raised as a 409 to the caller.
+    """
+    if install_dal is None:
+        return
+    current_granted = await perm_svc.get_community_granted_ids(
+        install_dal, community_id=community_id, app_id=app_id
+    )
+    if not current_granted:
+        return
+    may_auto_upgrade = await perm_svc.check_upgrade_reconsent(
+        install_dal,
+        tenant_id=tenant_id,
+        community_id=community_id,
+        app_id=app_id,
+        # This pipeline (`app_catalog`) does not pin a per-activation
+        # version -- `check_upgrade_reconsent()` never reads `old_version`
+        # itself, only `new_version` (compared against the community's
+        # CURRENT granted set, version-agnostic).
+        old_version="",
+        new_version=new_version,
+    )
+    if may_auto_upgrade:
+        return
+    await bundle_audit.record(
+        install_dal,
+        actor_id=None,
+        action="bundle_upgrade_pending_reconsent",
+        target_type="community_permission_grants",
+        target_id=f"{app_id}@{new_version}",
+        details={"tenant_id": tenant_id, "community_id": community_id},
+    )
+    logger.warning(
+        "bundle upgrade blocked: widened permission set requires community re-consent",
+        extra={"app_id": app_id, "community_id": community_id, "new_version": new_version},
+    )
+    raise conflict(
+        f"{app_id!r} at {new_version!r} widens permissions beyond the community's current "
+        "grant -- re-consent is required before it can be (re-)activated"
+    )
+
+
+async def _guard_tenant_reconsent_before_available(
+    async_dal: Any,
+    dal: Any,
+    install_dal: AsyncDB | None,
+    *,
+    tenant_id: int,
+    app_id: str,
+    new_version: str,
+) -> None:
+    """Refuse to (re-)affirm tenant-wide availability while a community is pending re-consent.
+
+    Sweeps every currently-ENABLED `app_activations` row under
+    `tenant_id` for `app_id` and re-runs the same
+    `_guard_community_reconsent()` gate `activate_bundle()` uses -- a
+    tenant admin re-`make_available()`-ing an app whose catalog version
+    has moved must not silently carry every already-activated community
+    forward onto a widened permission set. Every pending community is
+    collected (not just the first) so the caller/admin sees the full set
+    that needs to re-consent.
+    """
+    if install_dal is None:
+        return
+    rows = await async_dal.select_async(
+        dal(
+            (dal.app_activations.tenant_id == tenant_id)
+            & (dal.app_activations.app_id == app_id)
+            & (dal.app_activations.enabled == True)  # noqa: E712
+        ),
+        dal.app_activations.community_id,
+    )
+    pending: list[int] = []
+    for row in rows:
+        community_id = int(row.community_id)
+        try:
+            await _guard_community_reconsent(
+                install_dal,
+                tenant_id=tenant_id,
+                community_id=community_id,
+                app_id=app_id,
+                new_version=new_version,
+            )
+        except ApiError:
+            pending.append(community_id)
+    if pending:
+        raise conflict(
+            f"{app_id!r} cannot be made available at {new_version!r}: "
+            f"communities pending re-consent: {sorted(pending)}"
+        )
 
 
 def _manifest_dict_from_row(row: Any) -> dict[str, Any]:
@@ -294,6 +413,7 @@ async def make_available(
     tenant_id: int,
     app_id: str,
     config_defaults: dict[str, Any] | None,
+    install_dal: AsyncDB | None = None,
 ) -> Any:
     """Make an installed bundle available to `tenant_id`. Upserts on `(tenant_id, app_id)`.
 
@@ -303,6 +423,12 @@ async def make_available(
     (a `yanked`/`deprecated` app_id still satisfies "exists in app_catalog"
     -- see this module's own docstring on `_ACTIVE_STATUS`) -- 409 if the
     bundle was uninstalled.
+
+    `install_dal` (optional, penguin-dal `AsyncDB`) additionally gates a
+    tenant-wide widened-permission re-consent check
+    (`_guard_tenant_reconsent_before_available`) -- omitted only by
+    legacy/test call sites that predate the Android-style permission
+    catalog.
     """
     try:
         await check_availability_insert_allowed(dal, app_id)
@@ -312,6 +438,15 @@ async def make_available(
     catalog_row = dal(dal.app_catalog.app_id == app_id).select().first()
     if catalog_row is None or catalog_row.status != _ACTIVE_STATUS:
         raise conflict(f"Bundle {app_id!r} is not currently installed/active")
+
+    await _guard_tenant_reconsent_before_available(
+        async_dal,
+        dal,
+        install_dal,
+        tenant_id=tenant_id,
+        app_id=app_id,
+        new_version=str(catalog_row.manifest_version),
+    )
 
     defaults = config_defaults if config_defaults is not None else {}
     loop = asyncio.get_running_loop()
@@ -463,6 +598,7 @@ async def activate_bundle(
     config: dict[str, Any] | None,
     activated_by: int,
     registry: AppRegistry | None = None,
+    install_dal: AsyncDB | None = None,
 ) -> Any:
     """Activate `app_id` for `community_id`. Upserts on `(community_id, app_id)`.
 
@@ -471,7 +607,12 @@ async def activate_bundle(
     (`flask_core.app_binding.detect_conflict`, design doc Sec7.3) against
     every OTHER currently-enabled activation for this community -- 409
     naming the conflicting `app_id` if `candidate` cannot coexist with an
-    already-active App.
+    already-active App. `install_dal` (optional, penguin-dal `AsyncDB`)
+    additionally gates `_guard_community_reconsent()` -- a widened
+    permission set for `candidate.version` blocks a RE-activation of an
+    app this community already has an existing grant for (omitted only by
+    legacy/test call sites that predate the Android-style permission
+    catalog).
     """
     try:
         await check_activation_insert_allowed(dal, tenant_id, app_id)
@@ -479,6 +620,14 @@ async def activate_bundle(
         raise _from_tier_error(exc) from exc
 
     candidate = await ensure_registered(dal, app_id, registry=registry)
+
+    await _guard_community_reconsent(
+        install_dal,
+        tenant_id=tenant_id,
+        community_id=community_id,
+        app_id=app_id,
+        new_version=candidate.version,
+    )
 
     active_rows = await async_dal.select_async(
         dal(

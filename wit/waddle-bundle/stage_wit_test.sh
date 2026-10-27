@@ -20,4 +20,33 @@ for exp in process-stage action-stage; do
   grep -q "export $exp;" "$FILE"
 done
 
-echo "PASS: stage.wit declares 8 imports + 2 exports"
+# `db` is structured ops (insert/get/query/update/delete), never raw SQL --
+# design doc SS1 round-1 CRITICAL finding. Assert the structured ops exist
+# and the retired raw-SQL `execute` shape is gone.
+for op in insert get query update delete; do
+  grep -q "  $op:" "$FILE"
+done
+! grep -q "execute: func(statement" "$FILE"
+
+# `world stage-v2` (numeric scope): the numeric ids live in NEW interfaces --
+# the frozen v1 records (`types.stage-envelope`, `context.bundle-context`) must
+# NOT have grown a numeric field (WIT records are binary-breaking).
+grep -q "^world stage-v2 {" "$FILE"
+grep -q "export action-stage-v2;" "$FILE"
+grep -q "import context-v2;" "$FILE"
+for iface in types-v2 context-v2 action-stage-v2; do
+  grep -q "^interface $iface {" "$FILE"
+done
+# Extract the v1 record bodies and prove they carry no numeric-scope field.
+for rec in "record stage-envelope {" "record bundle-context {"; do
+  first=$(grep -n "$rec" "$FILE" | head -1 | cut -d: -f1)
+  body=$(sed -n "${first},/^  }/p" "$FILE")
+  if printf '%s' "$body" | grep -q "tenant-id\|community-id"; then
+    echo "FAIL: frozen v1 '$rec' (first occurrence) grew a numeric-scope field" >&2
+    exit 1
+  fi
+done
+grep -q "tenant-id: s64" "$FILE"
+grep -q "community-id: s32" "$FILE"
+
+echo "PASS: stage.wit declares 8 imports + 2 exports, db is structured (no raw SQL), stage-v2 carries numeric scope without touching v1 records"

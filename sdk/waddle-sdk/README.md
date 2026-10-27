@@ -4,6 +4,11 @@ Python SDK for Waddles app bundles: a `penguin_dal`-compatible database facade
 plus `flask_core` compatibility shims, implemented over the
 `waddle:bundle/stage@1.0.0` WIT world (`wit/waddle-bundle/stage.wit`).
 
+See [`AUTHORING.md`](AUTHORING.md) for the standard `!<command>` grammar
+(`waddle_sdk.command`), default-OFF sub-modules (`waddle_sdk.sub_modules`),
+and community-scoped state (`waddle_sdk.community_kv`). Any bundle that echoes user-derived
+text into a reply must wrap it in `waddle_sdk.safe_text.sanitize_user_text` (AUTHORING.md §5).
+
 ## Writing a bundle
 
 A bundle author writes only plain, testable module-level coroutines and

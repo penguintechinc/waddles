@@ -59,7 +59,7 @@ core/svc_process/
     social_quote_process.py              MODIFY (Task 6)
     social_shoutout_process.py           MODIFY (Task 14)
     social_welcome_process.py            MODIFY (Task 5)
-  tests/  (one test_bundles_*.py per bundle above)   MODIFY
+  tests/  (one test_builtin_*.py per bundle above)   MODIFY
 
 core/svc_action/
   requirements.in                MODIFY — +penguin-dal, +asyncpg, +aiosqlite (test)
@@ -73,9 +73,9 @@ core/svc_action/
     social_quote_action.py               MODIFY (Task 6)
     streaming_stream_action.py           MODIFY (Task 18)
     twitch_shoutout_action.py            MODIFY (Task 19)
-  tests/  (one test_bundles_*.py per bundle above)   MODIFY
+  tests/  (one test_builtin_*.py per bundle above)   MODIFY
 
-core/svc_ingest/bundles/
+core/svc_ingest/builtin_handlers/
   twitch_ingest.py, twitch_eventsub_ingest.py, discord_ingest.py,
   slack_ingest.py, youtube_live_ingest.py, kick_ingest.py, echo_ingest.py    MODIFY (Task 22)
 
@@ -135,9 +135,9 @@ The only per-bundle work under Pattern B is: rewrite `$1, $2, $3` positional pla
 - Test: `scripts/ci/tests/test_check_bundle_dal_imports.sh` (a small bats-free shell self-test)
 
 **Interfaces:**
-- Produces: `scripts/ci/check_bundle_dal_imports.sh` — exit 0 with `files_scanned=N legacy_hits=0` printed when clean; exit 1 and print every offending `path:line` when not. Scans exactly `core/svc_process/bundles`, `core/svc_action/bundles`, `core/svc_ingest/bundles` (today's real bundle locations — `bundles/python/` does not exist until M2/M6's directory move).
+- Produces: `scripts/ci/check_bundle_dal_imports.sh` — exit 0 with `files_scanned=N legacy_hits=0` printed when clean; exit 1 and print every offending `path:line` when not. Scans exactly `core/svc_process/builtin_handlers`, `core/svc_action/builtin_handlers`, `core/svc_ingest/builtin_handlers` (today's real bundle locations — `bundles/python/` does not exist until M2/M6's directory move).
 
-This task also fixes the milestone's own inventory number: a naive `grep -rl "get_bundle_dal"` over the bundle directories returns 17 files, but `core/svc_process/bundles/community_context_process.py` only *mentions* `get_bundle_dal()` inside a docstring comparing itself to a sibling bundle (line 12: "`community_reputation_process` calling `get_bundle_dal()` directly instead") — it never imports or calls it. The real, verified count is **16 bundles** (11 in `core/svc_process/bundles/`, 5 in `core/svc_action/bundles/`, 0 in `core/svc_ingest/bundles/`):
+This task also fixes the milestone's own inventory number: a naive `grep -rl "get_bundle_dal"` over the bundle directories returns 17 files, but `core/svc_process/builtin_handlers/community_context_process.py` only *mentions* `get_bundle_dal()` inside a docstring comparing itself to a sibling bundle (line 12: "`community_reputation_process` calling `get_bundle_dal()` directly instead") — it never imports or calls it. The real, verified count is **16 bundles** (11 in `core/svc_process/builtin_handlers/`, 5 in `core/svc_action/builtin_handlers/`, 0 in `core/svc_ingest/builtin_handlers/`):
 
 | # | Bundle | Service | Legacy call sites |
 |---|---|---|---|
@@ -170,9 +170,9 @@ cat > scripts/ci/check_bundle_dal_imports.sh <<'SCRIPT_EOF'
 set -euo pipefail
 
 BUNDLE_DIRS=(
-    "core/svc_process/bundles"
-    "core/svc_action/bundles"
-    "core/svc_ingest/bundles"
+    "core/svc_process/builtin_handlers"
+    "core/svc_action/builtin_handlers"
+    "core/svc_ingest/builtin_handlers"
 )
 
 files_scanned=0
@@ -215,8 +215,8 @@ chmod +x scripts/ci/check_bundle_dal_imports.sh
 
 - [ ] **Step 2: Run it now to prove it fails loud on a moved path (verification-integrity self-check)**
 
-Run: `mv core/svc_process/bundles /tmp/bd-moved-check && bash scripts/ci/check_bundle_dal_imports.sh; echo "exit=$?"; mv /tmp/bd-moved-check core/svc_process/bundles`
-Expected: `check_bundle_dal_imports: expected directory missing: core/svc_process/bundles` then `exit=1`.
+Run: `mv core/svc_process/builtin_handlers /tmp/bd-moved-check && bash scripts/ci/check_bundle_dal_imports.sh; echo "exit=$?"; mv /tmp/bd-moved-check core/svc_process/builtin_handlers`
+Expected: `check_bundle_dal_imports: expected directory missing: core/svc_process/builtin_handlers` then `exit=1`.
 
 - [ ] **Step 3: Run it against the current (unmigrated) tree — expect exactly 16 legacy files**
 
@@ -714,14 +714,14 @@ EOF
 ### Task 5: Migrate `social_welcome_process.py` (establishes the Pattern B upsert idiom)
 
 **Files:**
-- Modify: `core/svc_process/bundles/social_welcome_process.py`
-- Modify: `core/svc_process/tests/test_bundles_social_welcome_process.py`
+- Modify: `core/svc_process/builtin_handlers/social_welcome_process.py`
+- Modify: `core/svc_process/tests/test_builtin_social_welcome_process.py`
 
 **Interfaces:**
 - Consumes: `flask_core.bundle_runtime.raw_sql_rows`/`raw_sql_write` (Task 3), `penguin_dal.AsyncDB` reflected at startup (Task 4).
 - Depends on: Task 4.
 
-- [ ] **Step 1: Edit `core/svc_process/bundles/social_welcome_process.py` imports**
+- [ ] **Step 1: Edit `core/svc_process/builtin_handlers/social_welcome_process.py` imports**
 
 Old: `from flask_core import PlatformEvent, get_bundle_context, get_bundle_dal`
 New:
@@ -802,7 +802,7 @@ New:
 
 - [ ] **Step 4: Rewrite the test file's DAL fixture from an `AsyncMock`-based fake executor to a real in-memory `penguin_dal.AsyncDB`**
 
-Replace the `_mock_executor` helper and every `set_bundle_dal(_mock_executor(...))`/`set_bundle_dal(AsyncMock())` call in `core/svc_process/tests/test_bundles_social_welcome_process.py` with this fixture (delete `_mock_executor` and the `from unittest.mock import AsyncMock` import — no longer used):
+Replace the `_mock_executor` helper and every `set_bundle_dal(_mock_executor(...))`/`set_bundle_dal(AsyncMock())` call in `core/svc_process/tests/test_builtin_social_welcome_process.py` with this fixture (delete `_mock_executor` and the `from unittest.mock import AsyncMock` import — no longer used):
 
 ```python
 from penguin_dal import AsyncDB
@@ -950,7 +950,7 @@ Every other `TestTransform` test (`test_welcome_claims_and_modifies_event`, `tes
 
 - [ ] **Step 5: Run the test file**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_social_welcome_process.py -v 2>&1 | tail -40`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_social_welcome_process.py -v 2>&1 | tail -40`
 Expected: every test passes (same test count as before the rewrite — no test was deleted, two were added: `test_scopes_by_community_platform_and_user`, `test_scopes_conflict_by_community_platform_and_user`).
 
 - [ ] **Step 6: Run the import gate + full service suite + coverage**
@@ -958,14 +958,14 @@ Expected: every test passes (same test count as before the rewrite — no test w
 Run: `bash scripts/ci/check_bundle_dal_imports.sh`
 Expected: unchanged (`legacy_hits=0` — this bundle never imported `flask_core.database`/`pydal` directly; it used the `get_bundle_dal()` facade throughout, gated by the inventory table, not this script).
 
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.social_welcome_process --cov-fail-under=90 tests/test_bundles_social_welcome_process.py`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.social_welcome_process --cov-fail-under=90 tests/test_builtin_social_welcome_process.py`
 Expected: `Required test coverage of 90% reached`.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add core/svc_process/bundles/social_welcome_process.py \
-        core/svc_process/tests/test_bundles_social_welcome_process.py
+git add core/svc_process/builtin_handlers/social_welcome_process.py \
+        core/svc_process/tests/test_builtin_social_welcome_process.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate social_welcome_process to penguin-dal
 
@@ -988,10 +988,10 @@ EOF
 ### Task 6: Migrate `social_quote_process.py` + `social_quote_action.py`
 
 **Files:**
-- Modify: `core/svc_process/bundles/social_quote_process.py`
-- Modify: `core/svc_process/tests/test_bundles_social_quote_process.py`
-- Modify: `core/svc_action/bundles/social_quote_action.py`
-- Modify: `core/svc_action/tests/test_bundles_social_quote_action.py`
+- Modify: `core/svc_process/builtin_handlers/social_quote_process.py`
+- Modify: `core/svc_process/tests/test_builtin_social_quote_process.py`
+- Modify: `core/svc_action/builtin_handlers/social_quote_action.py`
+- Modify: `core/svc_action/tests/test_builtin_social_quote_action.py`
 
 **Interfaces:** Consumes `raw_sql_rows`/`raw_sql_write` (Task 3). Depends on: Task 4.
 
@@ -1091,7 +1091,7 @@ New:
         return raw_id if isinstance(raw_id, int) else None
 ```
 
-- [ ] **Step 6: Rewrite `test_bundles_social_quote_process.py`'s DAL fixture**
+- [ ] **Step 6: Rewrite `test_builtin_social_quote_process.py`'s DAL fixture**
 
 ```python
 from penguin_dal import AsyncDB
@@ -1130,25 +1130,25 @@ For a "quote found" test, seed one row before calling the function under test:
 ```
 For a "not found"/"no quotes" test, run against the fixture's empty table with no seed. Apply the same `dal`-fixture-parameter swap (drop `set_bundle_dal(_mock_executor(...))`/`AsyncMock` usage) to every other test in the file, matching Task 5 Step 4's pattern.
 
-- [ ] **Step 7: Rewrite `test_bundles_social_quote_action.py`'s DAL fixture** identically (same `quotes` table DDL as Step 6), and for the "insert succeeds" test assert `await send_quote(...)` (or whatever the entrypoint is named) returns an `int`, then verify via a follow-up `raw_sql_rows(dal, "SELECT * FROM quotes")`-style read (or a direct `conn.execute(sa_text("SELECT COUNT(*) FROM quotes"))`) that exactly one row now exists.
+- [ ] **Step 7: Rewrite `test_builtin_social_quote_action.py`'s DAL fixture** identically (same `quotes` table DDL as Step 6), and for the "insert succeeds" test assert `await send_quote(...)` (or whatever the entrypoint is named) returns an `int`, then verify via a follow-up `raw_sql_rows(dal, "SELECT * FROM quotes")`-style read (or a direct `conn.execute(sa_text("SELECT COUNT(*) FROM quotes"))`) that exactly one row now exists.
 
 - [ ] **Step 8: Run both test files, the import gate, and coverage**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_social_quote_process.py -v 2>&1 | tail -30`
-Run: `env -C core/svc_action python3 -m pytest tests/test_bundles_social_quote_action.py -v 2>&1 | tail -30`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_social_quote_process.py -v 2>&1 | tail -30`
+Run: `env -C core/svc_action python3 -m pytest tests/test_builtin_social_quote_action.py -v 2>&1 | tail -30`
 Expected: all green in both.
 
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.social_quote_process --cov-fail-under=90 tests/test_bundles_social_quote_process.py`
-Run: `env -C core/svc_action python3 -m pytest --cov=bundles.social_quote_action --cov-fail-under=90 tests/test_bundles_social_quote_action.py`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.social_quote_process --cov-fail-under=90 tests/test_builtin_social_quote_process.py`
+Run: `env -C core/svc_action python3 -m pytest --cov=builtin_handlers.social_quote_action --cov-fail-under=90 tests/test_builtin_social_quote_action.py`
 Expected: both report `Required test coverage of 90% reached`.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add core/svc_process/bundles/social_quote_process.py \
-        core/svc_process/tests/test_bundles_social_quote_process.py \
-        core/svc_action/bundles/social_quote_action.py \
-        core/svc_action/tests/test_bundles_social_quote_action.py
+git add core/svc_process/builtin_handlers/social_quote_process.py \
+        core/svc_process/tests/test_builtin_social_quote_process.py \
+        core/svc_action/builtin_handlers/social_quote_action.py \
+        core/svc_action/tests/test_builtin_social_quote_action.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate social_quote_process/social_quote_action to penguin-dal
 
@@ -1168,8 +1168,8 @@ EOF
 ### Task 7: Migrate `community_reputation_process.py`
 
 **Files:**
-- Modify: `core/svc_process/bundles/community_reputation_process.py`
-- Modify: `core/svc_process/tests/test_bundles_community_reputation_process.py`
+- Modify: `core/svc_process/builtin_handlers/community_reputation_process.py`
+- Modify: `core/svc_process/tests/test_builtin_community_reputation_process.py`
 
 **Interfaces:** Consumes `raw_sql_rows` (Task 3). Depends on: Task 4.
 
@@ -1312,16 +1312,16 @@ Seed rows per test with `async with dal.engine.begin() as conn: await conn.execu
 
 - [ ] **Step 7: Run tests, gate, coverage**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_community_reputation_process.py -v 2>&1 | tail -30`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_community_reputation_process.py -v 2>&1 | tail -30`
 Expected: all green, including the byte-identical-tier-table test (`test_tier_table_matches_hub_api`, untouched — it parses `hub_api`'s source file directly, no DAL involved).
 
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.community_reputation_process --cov-fail-under=90 tests/test_bundles_community_reputation_process.py`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.community_reputation_process --cov-fail-under=90 tests/test_builtin_community_reputation_process.py`
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add core/svc_process/bundles/community_reputation_process.py \
-        core/svc_process/tests/test_bundles_community_reputation_process.py
+git add core/svc_process/builtin_handlers/community_reputation_process.py \
+        core/svc_process/tests/test_builtin_community_reputation_process.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate community_reputation_process to penguin-dal
 
@@ -1340,8 +1340,8 @@ EOF
 ### Task 8: Migrate `inventory_process.py`
 
 **Files:**
-- Modify: `core/svc_process/bundles/inventory_process.py`
-- Modify: `core/svc_process/tests/test_bundles_inventory_process.py`
+- Modify: `core/svc_process/builtin_handlers/inventory_process.py`
+- Modify: `core/svc_process/tests/test_builtin_inventory_process.py`
 
 **Interfaces:** Consumes `raw_sql_rows`/`raw_sql_write` (Task 3). Depends on: Task 4.
 
@@ -1480,14 +1480,14 @@ async def dal():
 
 - [ ] **Step 6: Run tests, gate, coverage**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_inventory_process.py -v 2>&1 | tail -30`
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.inventory_process --cov-fail-under=90 tests/test_bundles_inventory_process.py`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_inventory_process.py -v 2>&1 | tail -30`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.inventory_process --cov-fail-under=90 tests/test_builtin_inventory_process.py`
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add core/svc_process/bundles/inventory_process.py \
-        core/svc_process/tests/test_bundles_inventory_process.py
+git add core/svc_process/builtin_handlers/inventory_process.py \
+        core/svc_process/tests/test_builtin_inventory_process.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate inventory_process to penguin-dal
 
@@ -1507,8 +1507,8 @@ EOF
 ### Task 9: Migrate `community_polls_process.py` (11 call sites — the largest single bundle)
 
 **Files:**
-- Modify: `core/svc_process/bundles/community_polls_process.py`
-- Modify: `core/svc_process/tests/test_bundles_community_polls_process.py`
+- Modify: `core/svc_process/builtin_handlers/community_polls_process.py`
+- Modify: `core/svc_process/tests/test_builtin_community_polls_process.py`
 
 **Interfaces:** Consumes `raw_sql_rows`/`raw_sql_write` (Task 3). Depends on: Task 4.
 
@@ -1803,14 +1803,14 @@ Seed `community_polls`/`poll_options`/`poll_votes` rows per existing test scenar
 
 - [ ] **Step 8: Run tests, gate, coverage**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_community_polls_process.py -v 2>&1 | tail -40`
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.community_polls_process --cov-fail-under=90 tests/test_bundles_community_polls_process.py`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_community_polls_process.py -v 2>&1 | tail -40`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.community_polls_process --cov-fail-under=90 tests/test_builtin_community_polls_process.py`
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add core/svc_process/bundles/community_polls_process.py \
-        core/svc_process/tests/test_bundles_community_polls_process.py
+git add core/svc_process/builtin_handlers/community_polls_process.py \
+        core/svc_process/tests/test_builtin_community_polls_process.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate community_polls_process to penguin-dal
 
@@ -1830,8 +1830,8 @@ EOF
 ### Task 10: Migrate `community_chat_process.py`
 
 **Files:**
-- Modify: `core/svc_process/bundles/community_chat_process.py`
-- Modify: `core/svc_process/tests/test_bundles_community_chat_process.py`
+- Modify: `core/svc_process/builtin_handlers/community_chat_process.py`
+- Modify: `core/svc_process/tests/test_builtin_community_chat_process.py`
 
 **Interfaces:** Consumes `raw_sql_rows` (Task 3). Depends on: Task 4.
 
@@ -1944,14 +1944,14 @@ Seed `communities`/`tenants`/`hub_chat_messages` rows matching each existing tes
 
 - [ ] **Step 5: Run tests, gate, coverage**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_community_chat_process.py -v 2>&1 | tail -30`
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.community_chat_process --cov-fail-under=90 tests/test_bundles_community_chat_process.py`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_community_chat_process.py -v 2>&1 | tail -30`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.community_chat_process --cov-fail-under=90 tests/test_builtin_community_chat_process.py`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/svc_process/bundles/community_chat_process.py \
-        core/svc_process/tests/test_bundles_community_chat_process.py
+git add core/svc_process/builtin_handlers/community_chat_process.py \
+        core/svc_process/tests/test_builtin_community_chat_process.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate community_chat_process to penguin-dal
 
@@ -1971,8 +1971,8 @@ EOF
 ### Task 11: Migrate `community_loyalty_process.py` (establishes the shared permission-check pattern)
 
 **Files:**
-- Modify: `core/svc_process/bundles/community_loyalty_process.py`
-- Modify: `core/svc_process/tests/test_bundles_community_loyalty_process.py`
+- Modify: `core/svc_process/builtin_handlers/community_loyalty_process.py`
+- Modify: `core/svc_process/tests/test_builtin_community_loyalty_process.py`
 
 **Interfaces:** Consumes `raw_sql_rows` (Task 3). Depends on: Task 4. This task's `_caller_is_moderator_or_admin` translation is byte-for-byte identical to Tasks 12–14's own copies of the same helper (`social_alias_process`, `social_music_process`, `social_shoutout_process` each carry their own independently-replicated copy, per those files' own docstrings — "replicated locally rather than imported").
 
@@ -2074,14 +2074,14 @@ Seed one `community_members` row per permission-check test scenario (admin by pl
 
 - [ ] **Step 5: Run tests, gate, coverage**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_community_loyalty_process.py -v 2>&1 | tail -30`
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.community_loyalty_process --cov-fail-under=90 tests/test_bundles_community_loyalty_process.py`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_community_loyalty_process.py -v 2>&1 | tail -30`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.community_loyalty_process --cov-fail-under=90 tests/test_builtin_community_loyalty_process.py`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/svc_process/bundles/community_loyalty_process.py \
-        core/svc_process/tests/test_bundles_community_loyalty_process.py
+git add core/svc_process/builtin_handlers/community_loyalty_process.py \
+        core/svc_process/tests/test_builtin_community_loyalty_process.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate community_loyalty_process to penguin-dal
 
@@ -2101,12 +2101,12 @@ EOF
 ### Task 12: Migrate `social_alias_process.py` (also removes its `asyncio.to_thread` wrapping — spec Assumption A20)
 
 **Files:**
-- Modify: `core/svc_process/bundles/social_alias_process.py`
-- Modify: `core/svc_process/tests/test_bundles_social_alias_process.py`
+- Modify: `core/svc_process/builtin_handlers/social_alias_process.py`
+- Modify: `core/svc_process/tests/test_builtin_social_alias_process.py`
 
 **Interfaces:** Consumes `raw_sql_rows` (Task 3), `penguin_dal.AsyncDB`'s native `Query`/`TableProxy` builder (Pattern A). Depends on: Task 4.
 
-- [ ] **Step 1: Imports** — add `from flask_core.bundle_runtime import raw_sql_rows`. Remove `import asyncio` if this file's only use of it was the four `asyncio.to_thread(...)` calls this task deletes (`grep -n "asyncio\." core/svc_process/bundles/social_alias_process.py` after Steps 2–5 to confirm before removing the import).
+- [ ] **Step 1: Imports** — add `from flask_core.bundle_runtime import raw_sql_rows`. Remove `import asyncio` if this file's only use of it was the four `asyncio.to_thread(...)` calls this task deletes (`grep -n "asyncio\." core/svc_process/builtin_handlers/social_alias_process.py` after Steps 2–5 to confirm before removing the import).
 
 - [ ] **Step 2: Replace the two SQL constants and `_caller_is_moderator_or_admin`'s body** — identical translation to Task 11:
 
@@ -2367,14 +2367,14 @@ Seed `command_aliases`/`community_members` rows per existing test scenario (look
 
 - [ ] **Step 7: Run tests, gate, coverage**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_social_alias_process.py -v 2>&1 | tail -40`
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.social_alias_process --cov-fail-under=90 tests/test_bundles_social_alias_process.py`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_social_alias_process.py -v 2>&1 | tail -40`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.social_alias_process --cov-fail-under=90 tests/test_builtin_social_alias_process.py`
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add core/svc_process/bundles/social_alias_process.py \
-        core/svc_process/tests/test_bundles_social_alias_process.py
+git add core/svc_process/builtin_handlers/social_alias_process.py \
+        core/svc_process/tests/test_builtin_social_alias_process.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate social_alias_process to penguin-dal
 
@@ -2396,8 +2396,8 @@ EOF
 ### Task 13: Migrate `social_music_process.py`
 
 **Files:**
-- Modify: `core/svc_process/bundles/social_music_process.py`
-- Modify: `core/svc_process/tests/test_bundles_social_music_process.py`
+- Modify: `core/svc_process/builtin_handlers/social_music_process.py`
+- Modify: `core/svc_process/tests/test_builtin_social_music_process.py`
 
 **Interfaces:** Consumes `raw_sql_rows` (Task 3). Depends on: Task 4. This bundle's only DB call site is its own copy of the `_caller_is_moderator_or_admin` helper (guards `!sr set youtube-labels`/`!sr pause`/`!sr resume`) — identical translation to Task 11.
 
@@ -2470,14 +2470,14 @@ New (identical shape to Task 11 Step 3):
 
 - [ ] **Step 5: Run tests, gate, coverage**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_social_music_process.py -v 2>&1 | tail -30`
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.social_music_process --cov-fail-under=90 tests/test_bundles_social_music_process.py`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_social_music_process.py -v 2>&1 | tail -30`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.social_music_process --cov-fail-under=90 tests/test_builtin_social_music_process.py`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/svc_process/bundles/social_music_process.py \
-        core/svc_process/tests/test_bundles_social_music_process.py
+git add core/svc_process/builtin_handlers/social_music_process.py \
+        core/svc_process/tests/test_builtin_social_music_process.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate social_music_process to penguin-dal
 
@@ -2497,8 +2497,8 @@ EOF
 ### Task 14: Migrate `social_shoutout_process.py`
 
 **Files:**
-- Modify: `core/svc_process/bundles/social_shoutout_process.py`
-- Modify: `core/svc_process/tests/test_bundles_social_shoutout_process.py`
+- Modify: `core/svc_process/builtin_handlers/social_shoutout_process.py`
+- Modify: `core/svc_process/tests/test_builtin_social_shoutout_process.py`
 
 **Interfaces:** Consumes `raw_sql_rows` (Task 3). Depends on: Task 4.
 
@@ -2645,14 +2645,14 @@ Seed rows per existing test scenario (config row present/absent → default `"mo
 
 - [ ] **Step 6: Run tests, gate, coverage**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_social_shoutout_process.py -v 2>&1 | tail -30`
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.social_shoutout_process --cov-fail-under=90 tests/test_bundles_social_shoutout_process.py`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_social_shoutout_process.py -v 2>&1 | tail -30`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.social_shoutout_process --cov-fail-under=90 tests/test_builtin_social_shoutout_process.py`
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add core/svc_process/bundles/social_shoutout_process.py \
-        core/svc_process/tests/test_bundles_social_shoutout_process.py
+git add core/svc_process/builtin_handlers/social_shoutout_process.py \
+        core/svc_process/tests/test_builtin_social_shoutout_process.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate social_shoutout_process to penguin-dal
 
@@ -2670,8 +2670,8 @@ EOF
 ### Task 15: Migrate `community_announcements_process.py` (Pattern A — deletes its own `_ensure_announcements_table` stub)
 
 **Files:**
-- Modify: `core/svc_process/bundles/community_announcements_process.py`
-- Modify: `core/svc_process/tests/test_bundles_community_announcements_process.py`
+- Modify: `core/svc_process/builtin_handlers/community_announcements_process.py`
+- Modify: `core/svc_process/tests/test_builtin_community_announcements_process.py`
 
 **Interfaces:** Consumes `penguin_dal.AsyncDB`'s native `Query` builder (Pattern A). Depends on: Task 4 (`await dal.reflect()` already discovers the real `announcements` table — this bundle's own pydal-stub definition is now redundant).
 
@@ -2767,14 +2767,14 @@ Seed an `announcements` row (id, community_id, title, etc.) per existing test sc
 
 - [ ] **Step 4: Run tests, gate, coverage**
 
-Run: `env -C core/svc_process python3 -m pytest tests/test_bundles_community_announcements_process.py -v 2>&1 | tail -30`
-Run: `env -C core/svc_process python3 -m pytest --cov=bundles.community_announcements_process --cov-fail-under=90 tests/test_bundles_community_announcements_process.py`
+Run: `env -C core/svc_process python3 -m pytest tests/test_builtin_community_announcements_process.py -v 2>&1 | tail -30`
+Run: `env -C core/svc_process python3 -m pytest --cov=builtin_handlers.community_announcements_process --cov-fail-under=90 tests/test_builtin_community_announcements_process.py`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add core/svc_process/bundles/community_announcements_process.py \
-        core/svc_process/tests/test_bundles_community_announcements_process.py
+git add core/svc_process/builtin_handlers/community_announcements_process.py \
+        core/svc_process/tests/test_builtin_community_announcements_process.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate community_announcements_process to penguin-dal
 
@@ -2794,8 +2794,8 @@ EOF
 ### Task 16: Migrate `community_announcements_action.py` (Pattern A — deletes its own `_ensure_announcement_tables` stub)
 
 **Files:**
-- Modify: `core/svc_action/bundles/community_announcements_action.py`
-- Modify: `core/svc_action/tests/test_bundles_community_announcements_action.py`
+- Modify: `core/svc_action/builtin_handlers/community_announcements_action.py`
+- Modify: `core/svc_action/tests/test_builtin_community_announcements_action.py`
 
 **Interfaces:** Consumes `penguin_dal.AsyncDB`'s native `Query`/`TableProxy` builder. Depends on: Task 4.
 
@@ -2894,14 +2894,14 @@ Seed `community_servers` rows for the fan-out scenarios (multiple platforms, no 
 
 - [ ] **Step 4: Run tests, gate, coverage**
 
-Run: `env -C core/svc_action python3 -m pytest tests/test_bundles_community_announcements_action.py -v 2>&1 | tail -30`
-Run: `env -C core/svc_action python3 -m pytest --cov=bundles.community_announcements_action --cov-fail-under=90 tests/test_bundles_community_announcements_action.py`
+Run: `env -C core/svc_action python3 -m pytest tests/test_builtin_community_announcements_action.py -v 2>&1 | tail -30`
+Run: `env -C core/svc_action python3 -m pytest --cov=builtin_handlers.community_announcements_action --cov-fail-under=90 tests/test_builtin_community_announcements_action.py`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add core/svc_action/bundles/community_announcements_action.py \
-        core/svc_action/tests/test_bundles_community_announcements_action.py
+git add core/svc_action/builtin_handlers/community_announcements_action.py \
+        core/svc_action/tests/test_builtin_community_announcements_action.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate community_announcements_action to penguin-dal
 
@@ -2922,8 +2922,8 @@ EOF
 ### Task 17: Migrate `community_forums_action.py` (Pattern A — deletes its own `_ensure_forum_tables` stub)
 
 **Files:**
-- Modify: `core/svc_action/bundles/community_forums_action.py`
-- Modify: `core/svc_action/tests/test_bundles_community_forums_action.py`
+- Modify: `core/svc_action/builtin_handlers/community_forums_action.py`
+- Modify: `core/svc_action/tests/test_builtin_community_forums_action.py`
 
 **Interfaces:** Consumes `penguin_dal.AsyncDB`'s native `Query`/`TableProxy` builder. Depends on: Task 4.
 
@@ -3110,14 +3110,14 @@ Seed `hub_channels`/`hub_forum_posts` rows per existing scenario (post creation 
 
 - [ ] **Step 5: Run tests, gate, coverage**
 
-Run: `env -C core/svc_action python3 -m pytest tests/test_bundles_community_forums_action.py -v 2>&1 | tail -40`
-Run: `env -C core/svc_action python3 -m pytest --cov=bundles.community_forums_action --cov-fail-under=90 tests/test_bundles_community_forums_action.py`
+Run: `env -C core/svc_action python3 -m pytest tests/test_builtin_community_forums_action.py -v 2>&1 | tail -40`
+Run: `env -C core/svc_action python3 -m pytest --cov=builtin_handlers.community_forums_action --cov-fail-under=90 tests/test_builtin_community_forums_action.py`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/svc_action/bundles/community_forums_action.py \
-        core/svc_action/tests/test_bundles_community_forums_action.py
+git add core/svc_action/builtin_handlers/community_forums_action.py \
+        core/svc_action/tests/test_builtin_community_forums_action.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate community_forums_action to penguin-dal
 
@@ -3139,8 +3139,8 @@ EOF
 ### Task 18: Migrate `streaming_stream_action.py` (Pattern B — the two-table JOIN queries)
 
 **Files:**
-- Modify: `core/svc_action/bundles/streaming_stream_action.py`
-- Modify: `core/svc_action/tests/test_bundles_streaming_stream_action.py`
+- Modify: `core/svc_action/builtin_handlers/streaming_stream_action.py`
+- Modify: `core/svc_action/tests/test_builtin_streaming_stream_action.py`
 
 **Interfaces:** Consumes `raw_sql_rows` (Task 3) — this bundle's `coordination JOIN community_servers` filter cannot be expressed by penguin-dal's single-table `Query` builder (see the Pattern A/B table above). Depends on: Task 4.
 
@@ -3291,14 +3291,14 @@ Seed matching `community_servers`/`coordination` row pairs (same `platform`/`pla
 
 - [ ] **Step 5: Run tests, gate, coverage**
 
-Run: `env -C core/svc_action python3 -m pytest tests/test_bundles_streaming_stream_action.py -v 2>&1 | tail -40`
-Run: `env -C core/svc_action python3 -m pytest --cov=bundles.streaming_stream_action --cov-fail-under=90 tests/test_bundles_streaming_stream_action.py`
+Run: `env -C core/svc_action python3 -m pytest tests/test_builtin_streaming_stream_action.py -v 2>&1 | tail -40`
+Run: `env -C core/svc_action python3 -m pytest --cov=builtin_handlers.streaming_stream_action --cov-fail-under=90 tests/test_builtin_streaming_stream_action.py`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/svc_action/bundles/streaming_stream_action.py \
-        core/svc_action/tests/test_bundles_streaming_stream_action.py
+git add core/svc_action/builtin_handlers/streaming_stream_action.py \
+        core/svc_action/tests/test_builtin_streaming_stream_action.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate streaming_stream_action to penguin-dal
 
@@ -3321,8 +3321,8 @@ EOF
 ### Task 19: Migrate `twitch_shoutout_action.py` (Pattern A — deletes its own `_ensure_shoutout_tables` stub)
 
 **Files:**
-- Modify: `core/svc_action/bundles/twitch_shoutout_action.py`
-- Modify: `core/svc_action/tests/test_bundles_twitch_shoutout_action.py`
+- Modify: `core/svc_action/builtin_handlers/twitch_shoutout_action.py`
+- Modify: `core/svc_action/tests/test_builtin_twitch_shoutout_action.py`
 
 **Interfaces:** Consumes `penguin_dal.AsyncDB`'s native `Query`/`TableProxy` builder. Depends on: Task 4.
 
@@ -3437,15 +3437,15 @@ Seed `shoutout_config`/`shoutout_history` rows per existing test scenario (defau
 
 - [ ] **Step 6: Run tests, gate, coverage**
 
-Run: `env -C core/svc_action python3 -m pytest tests/test_bundles_twitch_shoutout_action.py -v 2>&1 | tail -40`
-Run: `env -C core/svc_action python3 -m pytest --cov=bundles.twitch_shoutout_action --cov-fail-under=90 tests/test_bundles_twitch_shoutout_action.py`
+Run: `env -C core/svc_action python3 -m pytest tests/test_builtin_twitch_shoutout_action.py -v 2>&1 | tail -40`
+Run: `env -C core/svc_action python3 -m pytest --cov=builtin_handlers.twitch_shoutout_action --cov-fail-under=90 tests/test_builtin_twitch_shoutout_action.py`
 
 - [ ] **Step 7: Run the full import gate + both services' complete suites — every bundle in Tasks 5–19 is now migrated**
 
 Run: `bash scripts/ci/check_bundle_dal_imports.sh`
 Expected: `check_bundle_dal_imports: files_scanned=<N> legacy_hits=0`.
 
-Run: `grep -rln "flask_core.database\|AsyncDAL\|get_bundle_dal" core/svc_process/bundles/*.py core/svc_action/bundles/*.py | xargs grep -l "AsyncDAL\b" || echo "NONE — all 16 migrated"`
+Run: `grep -rln "flask_core.database\|AsyncDAL\|get_bundle_dal" core/svc_process/builtin_handlers/*.py core/svc_action/builtin_handlers/*.py | xargs grep -l "AsyncDAL\b" || echo "NONE — all 16 migrated"`
 Expected: `NONE — all 16 migrated` (no bundle file references the `AsyncDAL` type name anymore; `get_bundle_dal()`/`get_bundle_context()` calls remain, which is correct — the facade name didn't change, Task 3).
 
 Run: `env -C core/svc_process python3 -m pytest -v 2>&1 | tail -10` and `env -C core/svc_action python3 -m pytest -v 2>&1 | tail -10`
@@ -3454,8 +3454,8 @@ Expected: both fully green.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add core/svc_action/bundles/twitch_shoutout_action.py \
-        core/svc_action/tests/test_bundles_twitch_shoutout_action.py
+git add core/svc_action/builtin_handlers/twitch_shoutout_action.py \
+        core/svc_action/tests/test_builtin_twitch_shoutout_action.py
 git commit -m "$(cat <<'EOF'
 refactor(bundles): migrate twitch_shoutout_action to penguin-dal
 
@@ -3527,7 +3527,7 @@ INGEST stage) -- this migration writes an ADDITIONAL, unread-by-current-code
 (M4/M5) to read. Idempotent: `jsonb_set` unconditionally overwrites the key
 on every re-run; the three new rows use `ON CONFLICT ... DO UPDATE`.
 
-Command-word source: `core/svc_process/bundles/bot_process.py`'s own
+Command-word source: `core/svc_process/builtin_handlers/bot_process.py`'s own
 `_FEATURE_MODULES` dict (the single source of truth for which `!word`
 routes to which sibling bundle) plus each bundle's own module docstring for
 non-command (event-type-driven) bundles. Platform reach: today's
@@ -3636,7 +3636,7 @@ _CONSUMES_BY_APP_ID: dict[str, str] = {
 }
 
 # Three process bundles that ship real, tested code
-# (core/svc_process/bundles/{community_reputation_process,
+# (core/svc_process/builtin_handlers/{community_reputation_process,
 # community_context_process,inventory_process}.py) but never got an
 # app_catalog row -- dispatched today only via bot_process.py's in-process
 # _FEATURE_MODULES router. Same "close the routability gap" precedent
@@ -3758,7 +3758,7 @@ Same harness convention as test_0019_kick_app.py: mocks alembic.op.execute
 and asserts (a) every one of the 16 on-disk process bundles gets exactly
 one consumes-bearing statement, (b) every consumes JSON blob is valid JSON
 once combined, (c) the three new-row entrypoints resolve to real files
-under core/svc_process/bundles/, (d) downgrade() removes exactly what
+under core/svc_process/builtin_handlers/, (d) downgrade() removes exactly what
 upgrade() added.
 """
 
@@ -3776,7 +3776,7 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0020_bundle_consumes_v2.py"
 )
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_PROCESS_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_process" / "bundles"
+_PROCESS_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_process" / "builtin_handlers"
 
 
 def _load_migration():
@@ -4200,9 +4200,9 @@ EOF
 **Files:**
 - Modify: `libs/flask_core/flask_core/stream_pipeline.py`
 - Modify: `libs/flask_core/tests/test_stream_pipeline.py`
-- Modify: `core/svc_ingest/bundles/twitch_ingest.py`, `core/svc_ingest/config.py`
-- Modify: `core/svc_ingest/bundles/discord_ingest.py`, `core/svc_ingest/config.py`
-- Modify: `core/svc_ingest/bundles/slack_ingest.py`, `youtube_live_ingest.py`, `kick_ingest.py`, `echo_ingest.py`
+- Modify: `core/svc_ingest/builtin_handlers/twitch_ingest.py`, `core/svc_ingest/config.py`
+- Modify: `core/svc_ingest/builtin_handlers/discord_ingest.py`, `core/svc_ingest/config.py`
+- Modify: `core/svc_ingest/builtin_handlers/slack_ingest.py`, `youtube_live_ingest.py`, `kick_ingest.py`, `echo_ingest.py`
 
 **Interfaces:** No dependency on Tasks 1–21. **Produces:** `flask_core.stream_pipeline.SourceRef` (frozen dataclass: `platform: str`, `account_id: str`, `channel_id: str | None`), `PlatformEvent.source: SourceRef | None = None` with strict (de)serialization (`source.platform` must equal the top-level `platform`, or `EnvelopeError`).
 
@@ -4411,7 +4411,7 @@ and, wherever `Config` reads its `_REF`-suffixed env vars into a plain attribute
     TWITCH_BOT_ACCOUNT_ID = os.getenv(TWITCH_BOT_ACCOUNT_ID_REF, "waddlesbot")
 ```
 
-Edit `core/svc_ingest/bundles/twitch_ingest.py`:
+Edit `core/svc_ingest/builtin_handlers/twitch_ingest.py`:
 ```python
 from flask_core import PlatformEvent, SourceRef
 
@@ -4456,7 +4456,7 @@ Add to `core/svc_ingest/config.py`:
     DISCORD_BOT_ACCOUNT_ID = os.getenv(DISCORD_BOT_ACCOUNT_ID_REF, "waddles-discord-bot")
 ```
 
-Edit `core/svc_ingest/bundles/discord_ingest.py`:
+Edit `core/svc_ingest/builtin_handlers/discord_ingest.py`:
 ```python
 from flask_core import PlatformEvent, SourceRef
 
@@ -4507,10 +4507,10 @@ New:
 
 Run (repeat for each of the four files):
 ```bash
-grep -n "PlatformEvent(\|raw.get(" core/svc_ingest/bundles/slack_ingest.py
-grep -n "PlatformEvent(\|raw.get(" core/svc_ingest/bundles/youtube_live_ingest.py
-grep -n "PlatformEvent(\|raw.get(" core/svc_ingest/bundles/kick_ingest.py
-grep -n "PlatformEvent(\|raw.get(" core/svc_ingest/bundles/echo_ingest.py
+grep -n "PlatformEvent(\|raw.get(" core/svc_ingest/builtin_handlers/slack_ingest.py
+grep -n "PlatformEvent(\|raw.get(" core/svc_ingest/builtin_handlers/youtube_live_ingest.py
+grep -n "PlatformEvent(\|raw.get(" core/svc_ingest/builtin_handlers/kick_ingest.py
+grep -n "PlatformEvent(\|raw.get(" core/svc_ingest/builtin_handlers/echo_ingest.py
 ```
 
 For each file: (1) import `SourceRef` from `flask_core` and `Config` from `config` (same two-line addition as Steps 6–7); (2) hoist the existing `platform=raw.get("platform", "<default>")` expression (or whichever literal the file already passes as the `platform=` kwarg) into a local `platform = ...` variable reused by both the `PlatformEvent(platform=platform, ...)` kwarg and the new `source=SourceRef(platform=platform, ...)` kwarg; (3) add a `source=SourceRef(platform=platform, account_id=Config.<PLATFORM>_BOT_ACCOUNT_ID, channel_id=<the file's own channel-identifying raw field, per the spec's own mapping table: Slack -> the channel id; YouTube -> the live chat's video/broadcast id; Kick -> the channel slug; the echo demo bundle -> `None`, it has no real channel>)` kwarg to the `PlatformEvent(...)` call, following Steps 6–7's exact shape; (4) add the matching `<PLATFORM>_BOT_ACCOUNT_ID_REF`/`<PLATFORM>_BOT_ACCOUNT_ID` pair to `core/svc_ingest/config.py`, naming the `_REF` env var after whatever credential/identity env var that platform's own receiver (`receivers/slack_socket.py`/`receivers/youtube_poll.py`/`receivers/kick_*.py`) already reads for its own app/client identity (grep `core/svc_ingest/receivers/` for the platform's existing `_REF`/`os.getenv` constants first — reuse the existing one if an app/client-id env var is already read there, rather than inventing a second name for the same value).
@@ -4529,9 +4529,9 @@ Run: `env -C core/svc_ingest python3 -m pytest --cov=bundles --cov-fail-under=90
 - [ ] **Step 11: Commit**
 
 ```bash
-git add core/svc_ingest/bundles/twitch_ingest.py core/svc_ingest/bundles/discord_ingest.py \
-        core/svc_ingest/bundles/slack_ingest.py core/svc_ingest/bundles/youtube_live_ingest.py \
-        core/svc_ingest/bundles/kick_ingest.py core/svc_ingest/bundles/echo_ingest.py \
+git add core/svc_ingest/builtin_handlers/twitch_ingest.py core/svc_ingest/builtin_handlers/discord_ingest.py \
+        core/svc_ingest/builtin_handlers/slack_ingest.py core/svc_ingest/builtin_handlers/youtube_live_ingest.py \
+        core/svc_ingest/builtin_handlers/kick_ingest.py core/svc_ingest/builtin_handlers/echo_ingest.py \
         core/svc_ingest/config.py core/svc_ingest/tests/
 git commit -m "$(cat <<'EOF'
 feat(ingest): populate PlatformEvent.source in every normalize()
@@ -4986,7 +4986,7 @@ Expected: `Suite: bundle-dal-import-gate` appears in the output, followed by `Un
 
 - [ ] **Step 4: Prove the gate can actually fail (verification integrity — `critical-rules.md`)**
 
-Run: `echo "from flask_core.database import AsyncDAL" >> core/svc_process/bundles/echo_process.py && bash scripts/ci/check_bundle_dal_imports.sh; echo "exit=$?"; git checkout -- core/svc_process/bundles/echo_process.py`
+Run: `echo "from flask_core.database import AsyncDAL" >> core/svc_process/builtin_handlers/echo_process.py && bash scripts/ci/check_bundle_dal_imports.sh; echo "exit=$?"; git checkout -- core/svc_process/builtin_handlers/echo_process.py`
 Expected: the script reports `legacy_hits=1`, prints the offending `path:line`, and `exit=1` — then the temporary line is reverted.
 
 - [ ] **Step 5: Commit**
@@ -5020,14 +5020,14 @@ EOF
 Run: `bash scripts/ci/check_bundle_dal_imports.sh`
 Expected: `check_bundle_dal_imports: files_scanned=<N> legacy_hits=0`, `N` ≥ 32 (16 process + 18 action + 12 ingest bundle files minus `__init__.py`s — the exact count printed is the evidence, not a guessed number).
 
-Run: `grep -rl "get_bundle_dal()" core/svc_process/bundles/*.py core/svc_action/bundles/*.py | wc -l`
+Run: `grep -rl "get_bundle_dal()" core/svc_process/builtin_handlers/*.py core/svc_action/builtin_handlers/*.py | wc -l`
 Expected: `16` — the exact count Task 1's inventory established, now all migrated (verify none still reference `AsyncDAL` as a type):
-Run: `grep -rl "AsyncDAL" core/svc_process/bundles/*.py core/svc_action/bundles/*.py; echo "exit=$?"`
+Run: `grep -rl "AsyncDAL" core/svc_process/builtin_handlers/*.py core/svc_action/builtin_handlers/*.py; echo "exit=$?"`
 Expected: no output, `exit=1` (grep found nothing).
 
 - [ ] **Step 2: Confirm the `consumes` count matches the on-disk process-bundle count**
 
-Run: `find core/svc_process/bundles -maxdepth 1 -name '*_process.py' -o -maxdepth 1 -name 'echo_process.py' | sort -u | wc -l`
+Run: `find core/svc_process/builtin_handlers -maxdepth 1 -name '*_process.py' -o -maxdepth 1 -name 'echo_process.py' | sort -u | wc -l`
 Expected: `16`.
 
 Run: `env -C alembic python3 -m pytest tests/test_0020_bundle_consumes_v2.py -v 2>&1 | tail -20`

@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, date
 from decimal import Decimal
 from dateutil.relativedelta import relativedelta
+from .log_safety import log_failure
 
 
 class RetentionService:
@@ -60,12 +61,13 @@ class RetentionService:
             await self._store_cohort_data(community_id, cohorts, cohort_period)
 
             self.logger.audit(
-                "Retention cohorts calculated",
-                community_id=community_id,
                 action="calculate_retention",
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Retention cohorts calculated",
                 cohort_period=cohort_period,
-                cohort_count=len(cohorts),
-                result="SUCCESS"
+                cohort_count=len(cohorts)
             )
 
             return {
@@ -77,7 +79,7 @@ class RetentionService:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate retention: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate retention", e, community_id=community_id)
             raise
 
     async def _calculate_cohorts(
@@ -165,7 +167,7 @@ class RetentionService:
             return cohorts
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate cohorts: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate cohorts", e, community_id=community_id)
             return []
 
     async def _store_cohort_data(
@@ -210,7 +212,7 @@ class RetentionService:
             self.dal.commit()
 
         except Exception as e:
-            self.logger.error(f"Failed to store cohort data: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to store cohort data", e, community_id=community_id)
 
     def _summarize_retention(self, cohorts: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Generate summary retention metrics."""
@@ -246,7 +248,7 @@ class RetentionService:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to summarize retention: {e}")
+            log_failure(self.logger, "Failed to summarize retention", e)
             return {}
 
     def _calculate_trend(self, cohorts: List[Dict[str, Any]]) -> str:
@@ -283,5 +285,5 @@ class RetentionService:
                 return {'is_premium': result[0][0]}
             return {'is_premium': False}
         except Exception as e:
-            self.logger.error(f"Failed to get config: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to get config", e, community_id=community_id)
             return {'is_premium': False}

@@ -116,6 +116,7 @@ RUN mkdir -p /var/log/waddlebotlog
 CMD ["hypercorn", "app:app", "--bind", "0.0.0.0:{port}", "--workers", "4"]
 '''
 
+
 def create_module(module_name, port, desc):
     """Create a complete module structure"""
     base_path = Path(f'/home/penguin/code/WaddleBot/{module_name}')
@@ -149,6 +150,7 @@ def create_module(module_name, port, desc):
         f.write(f'"""Services for {module_name}"""\n')
 
     print(f"✓ Created {module_name}")
+
 
 if __name__ == '__main__':
     print("Generating all Waddles Flask modules...")

@@ -1,6 +1,6 @@
 # Build from parent directory: docker build -f core/workflow_core_module/Dockerfile -t waddlebot/workflow-core:latest .
 
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 
 # uv replaces pip for dependency installation (pinned by digest)
 COPY --from=ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa /uv /usr/local/bin/uv
@@ -18,8 +18,6 @@ COPY core/workflow_core_module/requirements.txt /app/
 COPY core/workflow_core_module /app/
 
 # Install module dependencies
-RUN uv pip install --system --no-cache -r requirements.txt
-
 # Compile Protobuf messages. Output MUST land in ./proto (not repo root) --
 # services/grpc_handler.py does `sys.path.insert(0, ".../proto")` then a
 # bare `import workflow_pb2`/`import workflow_pb2_grpc`; generating into
@@ -28,7 +26,8 @@ RUN uv pip install --system --no-cache -r requirements.txt
 # fallback (`workflow_pb2 = None`) on every container start, which then
 # crashed `class WorkflowGrpcService(workflow_pb2_grpc.WorkflowServiceServicer)`
 # at import time with AttributeError -- the gRPC service never actually ran.
-RUN python -m grpc_tools.protoc -I./proto --python_out=./proto --grpc_python_out=./proto ./proto/workflow.proto
+RUN uv pip install --system --no-cache -r requirements.txt && \
+    python -m grpc_tools.protoc -I./proto --python_out=./proto --grpc_python_out=./proto ./proto/workflow.proto
 
 # Create non-root user
 RUN useradd -m -u 1000 waddlebot && \
@@ -36,6 +35,16 @@ RUN useradd -m -u 1000 waddlebot && \
     chown -R waddlebot:waddlebot /app /var/log/waddlebotlog
 
 # Switch to non-root user
+# Remove base image's own bundled pip + ensurepip wheel: pip vendors an
+# outdated msgpack (GHSA-6v7p-g79w-8964) and pkg_resources/setuptools
+# (CVE-2025-47273) that the upstream python:3.13-slim-bookworm rebuild
+# hasn't picked up yet. Neither pip nor its vendor tree is imported by
+# any service at runtime (installs happen at build time via uv/pip
+# above), so removing them is a real fix, not a suppression.
+RUN rm -rf /usr/local/lib/python3.13/site-packages/pip \
+    /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
+    /usr/local/lib/python3.13/ensurepip
+
 USER waddlebot
 
 # Expose port

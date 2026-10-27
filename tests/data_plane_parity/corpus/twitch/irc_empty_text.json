@@ -1,0 +1,46 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "frame": "@user-id=10;display-name=Empty :empty!empty@empty.tmi.twitch.tv PRIVMSG #somechannel :",
+  "golden": {
+    "platform": "twitch",
+    "event_type": "message",
+    "actor": "empty",
+    "payload": {
+      "text": "",
+      "channel_name": "somechannel",
+      "author": "empty",
+      "author_id": "10",
+      "user_id": "10",
+      "display_name": "Empty",
+      "message_id": null,
+      "room_id": null,
+      "badges": [],
+      "is_mod": false,
+      "is_subscriber": false,
+      "is_vip": false,
+      "is_broadcaster": false
+    },
+    "source": {
+      "platform": "twitch",
+      "account_id": "somechannel",
+      "channel_id": "somechannel"
+    }
+  },
+  "golden_origin": "rust",
+  "id": "twitch/irc_empty_text",
+  "outcome": "event",
+  "path": "twitch_irc",
+  "pii_classifier": "pass",
+  "platform": "twitch",
+  "python_divergences": [
+    {
+      "path": "<outcome>",
+      "python": "raises ValueError",
+      "reason": "Python normalize() rejects an empty content string (the runner drops it); Rust emits an event with text \"\"",
+      "tracking": "#840"
+    }
+  ],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_receivers_twitch_irc.py"
+}

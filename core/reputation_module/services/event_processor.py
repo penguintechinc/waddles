@@ -365,9 +365,11 @@ class EventProcessor:
 
         # Log moderation action
         self.logger.audit(
-            f"Moderation action processed: {action}",
-            community_id=community_id,
-            moderator_id=moderator_id,
+            action="process_moderation_action",
+            user=str(moderator_id),
+            community=str(community_id),
+            result="SUCCESS" if result.success else "FAILED",
+            detail=f"Moderation action processed: {action}",
             target_user_id=target_user_id,
             platform=platform,
             score_change=result.score_change if result.success else 0

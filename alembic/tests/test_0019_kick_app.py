@@ -11,8 +11,8 @@ once its `||`-joined literals are combined (the exact bug `0014_wave1a_bundle_se
 own test suite was authored to catch: a bare `... || '...'::jsonb` casts
 only the LAST literal unless the whole concatenation is wrapped in
 `(...)::jsonb`); (c) both ingest and action entrypoints resolve to real,
-already-shipped module files under `core/svc_ingest/bundles/` /
-`core/svc_action/bundles/` (the "coded but not routable" guard `0014`'s
+already-shipped module files under `core/svc_ingest/builtin_handlers/` /
+`core/svc_action/builtin_handlers/` (the "coded but not routable" guard `0014`'s
 own test establishes); (d) the `app_tenant_availability` row is upserted
 with the app-specific `config_defaults` secret refs set directly; (e) both
 upgrade()/downgrade() are idempotent (`ON CONFLICT ... DO UPDATE`) and
@@ -33,8 +33,8 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0019_kick_app.py"
 )
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_INGEST_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_ingest" / "bundles"
-_ACTION_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_action" / "bundles"
+_INGEST_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_ingest" / "builtin_handlers"
+_ACTION_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_action" / "builtin_handlers"
 
 KICK_APP_ID = "waddles.bot.kick.default"
 TENANT_SLUG = "global"

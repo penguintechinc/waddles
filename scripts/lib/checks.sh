@@ -49,7 +49,42 @@ discover() {
 # count_lines <string> — number of non-empty lines.
 count_lines() {
   [ -z "$1" ] && { echo 0; return; }
-  printf '%s\n' "$1" | grep -c . || true
+  printf '%s\n' "$1" | awk 'NF { n++ } END { print n + 0 }'
+}
+
+# tool_capture <ok-exit-codes> <command...>
+#
+# Runs a scanner and prints its stdout. Linters exit non-zero BY DESIGN when
+# they find something, so "non-zero" cannot mean "crashed" -- the caller names
+# the exit codes that mean "ran to completion" (e.g. "0 1" for shellcheck). Any other exit code means the scanner itself failed
+# (traceback, bad config, OOM, usage error) and is returned as 1 with the
+# stderr tail printed, so a crashed scanner can never masquerade as "0
+# findings". This is the replacement for `tool 2>/dev/null | grep -c . || true`,
+# under which a scanner that died on startup reported a clean run.
+tool_capture() {
+  local ok="$1" out rc errf
+  shift
+  errf=$(mktemp)
+  set +e
+  out=$("$@" 2>"$errf")
+  rc=$?
+  set -e
+  case " $ok " in
+    *" $rc "*)
+      rm -f "$errf"
+      printf '%s\n' "$out"
+      return 0
+      ;;
+  esac
+  printf '  CRASH   %s exited %s (expected one of: %s):\n' "$1" "$rc" "$ok" >&2
+  tail -n 5 "$errf" | sed 's/^/          /' >&2
+  rm -f "$errf"
+  return 1
+}
+
+# count_matching <ERE> — reads stdin, prints how many lines match.
+count_matching() {
+  awk -v re="$1" '$0 ~ re { n++ } END { print n + 0 }'
 }
 
 # run_check <label> <tool> <file-count> <command...>
@@ -132,10 +167,27 @@ run_counted_check() {
 
   local budget findings
   budget=$(baseline_for "$label")
-  findings=$("$@" || true)
-  case "$findings" in ''|*[!0-9]*) findings=0 ;; esac
-
   CHECKS_RAN=$((CHECKS_RAN + 1))
+
+  # The counter must succeed AND print an integer. A non-zero exit or a
+  # non-numeric result is a broken scanner, never "0 findings" -- defaulting
+  # either to 0 is exactly the mask this gate exists to remove.
+  if ! findings=$("$@"); then
+    printf '  FAIL    %-16s scanner crashed or counter failed — result is unknown, not clean\n' "$label"
+    CHECKS_FAILED=$((CHECKS_FAILED + 1))
+    CHECKS_FAILED_NAMES="$CHECKS_FAILED_NAMES $label"
+    return 0
+  fi
+  case "$findings" in
+    ''|*[!0-9]*)
+      printf '  FAIL    %-16s counter printed non-numeric output (%s) — result is unknown, not clean\n' \
+        "$label" "$findings"
+      CHECKS_FAILED=$((CHECKS_FAILED + 1))
+      CHECKS_FAILED_NAMES="$CHECKS_FAILED_NAMES $label"
+      return 0
+      ;;
+  esac
+
   if [ "$findings" -gt "$budget" ]; then
     printf '  FAIL    %-16s %s finding(s), baseline %s — %s new\n' \
       "$label" "$findings" "$budget" "$((findings - budget))"

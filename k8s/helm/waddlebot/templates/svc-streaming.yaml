@@ -6,6 +6,11 @@
 # `localhost:32000/waddlebot/svc-streaming:alpha-<epoch>` in alpha (CI beta/gamma/prod builds
 # follow the standard ghcr.io tag convention — see `streaming.image` below).
 #
+# Image variant: `streaming.gpuVariant` (cpu|amd|nvidia) appends `-<variant>` to the tag and
+# selects the per-variant wiring (amd: device-plugin /dev/dri + render GID; nvidia: runtimeClass +
+# GPU limit + tolerations). Inside the pod, a missing GPU means CPU encoders (trial-encode gate); the
+# scheduler-side gates (hostPath, GPU limit, runtimeClass) are what can keep a pod from starting.
+#
 # Unlike the old placeholder (control-only, no media ports declared), this pod now listens
 # directly on RTMP (1935/tcp), SRT (9000/udp), and a WebRTC UDP media range
 # (40000-40100/udp) in addition to the HTTP control/health port, gRPC (reserved, still
@@ -20,6 +25,24 @@
 # (runAsUser 1000) — the Rust image's Dockerfile creates a dedicated non-root `appuser` at
 # uid 10001, so this container pins that uid explicitly instead.
 {{- if .Values.pipeline.svcStreaming.enabled }}
+{{- /* Image variant (streaming.gpuVariant) selects the image tag suffix and per-variant pod wiring. */}}
+{{- $variant := .Values.streaming.gpuVariant | default "cpu" | toString }}
+{{- if not (has $variant (list "cpu" "amd" "nvidia")) }}
+{{- fail (printf "streaming.gpuVariant must be one of cpu|amd|nvidia, got %q" $variant) }}
+{{- end }}
+{{- if and (eq $variant "amd") (not .Values.streaming.amd.supplementalGroups) }}
+{{- fail "streaming.amd.supplementalGroups must list the host render GID(s) when streaming.gpuVariant=amd (see `getent group render`)" }}
+{{- end }}
+{{- $amdDevDri := and (eq $variant "amd") (eq (toString .Values.streaming.amd.devDri) "true") (not .Values.streaming.amd.deviceResource) }}
+{{- $gpuResource := "" }}
+{{- $gpuCount := 0 }}
+{{- if and (eq $variant "amd") .Values.streaming.amd.deviceResource }}
+{{- $gpuResource = .Values.streaming.amd.deviceResource }}
+{{- $gpuCount = 1 }}
+{{- else if and (eq $variant "nvidia") (gt (int .Values.streaming.nvidia.gpuLimit) 0) }}
+{{- $gpuResource = "nvidia.com/gpu" }}
+{{- $gpuCount = int .Values.streaming.nvidia.gpuLimit }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -30,6 +53,13 @@ metadata:
     app.kubernetes.io/component: svc-streaming
 spec:
   replicas: {{ .Values.pipeline.svcStreaming.replicas }}
+  # Recreate, never RollingUpdate: svc-streaming is a stateful singleton (owns the RTMP 1935 /
+  # SRT 9000 listeners, the WebRTC UDP range, and the local stream data dir). A RollingUpdate
+  # surge starts the replacement while the old pod still holds those ports/dir -- two writers
+  # on one stream dir and a bind collision on the media listeners, then the old pod is killed
+  # mid-stream. Same data-integrity rationale as postgres.yaml's Recreate. Keep replicas: 1.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -40,16 +70,36 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-streaming
     spec:
+      {{- include "waddlebot.terminationGracePeriod" (dict "root" $ "seconds" $.Values.pipeline.svcStreaming.terminationGracePeriodSeconds) | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- if and (eq $variant "nvidia") .Values.streaming.nvidia.runtimeClassName }}
+      # NVIDIA container runtime -- injects host-matched libcuda/libnvidia-encode into the pod.
+      runtimeClassName: {{ .Values.streaming.nvidia.runtimeClassName | quote }}
+      {{- end }}
+      {{- with .Values.streaming.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if eq $variant "nvidia" }}
+      tolerations:
+        {{- toYaml .Values.streaming.nvidia.tolerations | nindent 8 }}
+      {{- end }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
+        {{- if eq $variant "amd" }}
+        # Render-node access without root: the host render GID as a supplemental group.
+        {{- toYaml (merge (dict "supplementalGroups" .Values.streaming.amd.supplementalGroups) (deepCopy .Values.podSecurityContext)) | nindent 8 }}
+        {{- else }}
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- end }}
       initContainers:
-      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own /ready.
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-streaming
-        image: "{{ .Values.streaming.image.repository }}:{{ .Values.streaming.image.tag | default .Values.global.imageTag }}"
+        image: "{{ .Values.streaming.image.repository }}:{{ printf "%s-%s" (.Values.streaming.image.tag | default .Values.global.imageTag | toString) $variant }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         # Pinned to the Rust image's own `appuser` (uid 10001), not the chart-wide
         # `.Values.securityContext` (uid 1000) every Python-base placeholder uses.
         securityContext:
@@ -94,6 +144,10 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_streaming;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_streaming") | nindent 8 }}
         - name: MODULE_NAME
           value: "svc-streaming"
         - name: PIPELINE_STAGE
@@ -110,28 +164,46 @@ spec:
           value: {{ .Values.pipeline.svcStreaming.streamDataDir | quote }}
         - name: FFMPEG_PATH
           value: "/usr/bin/ffmpeg"
+        # auto = GPU encoder only when the trial encode proves it usable, else CPU (core/svc_streaming/README.md).
+        - name: STREAM_ENCODER
+          value: {{ .Values.streaming.encoder | default "auto" | quote }}
         {{- if .Values.pipeline.svcStreaming.publicBaseUrl }}
         - name: PUBLIC_BASE_URL
           value: {{ .Values.pipeline.svcStreaming.publicBaseUrl | quote }}
+        {{- else if .Values.pipeline.svcStreaming.publicBaseUrlFromNodeIP }}
+        {{- if not .Values.pipeline.svcStreaming.nodePort.enabled }}
+        {{- fail "pipeline.svcStreaming.publicBaseUrlFromNodeIP requires pipeline.svcStreaming.nodePort.enabled=true (the URL is <node hostIP>:<nodePort.httpPort>); set an explicit publicBaseUrl otherwise" }}
         {{- end }}
-        # Recordings land in MinIO (S3-compatible) instead of pod-lifetime emptyDir storage
-        # -- see infrastructure.minio and templates/infrastructure/minio.yaml. Creds reuse
-        # the existing minio Secret keys (MINIO_ROOT_USER/MINIO_ROOT_PASSWORD) rather than
-        # minting new ones.
+        # No literal host in values: the node this pod landed on, via the downward API.
+        # $(NODE_HOST_IP) is kubelet env expansion -- NODE_HOST_IP must be declared first.
+        - name: NODE_HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: PUBLIC_BASE_URL
+          value: {{ printf "http://$(NODE_HOST_IP):%v" .Values.pipeline.svcStreaming.nodePort.httpPort | quote }}
+        {{- end }}
+        # Recordings land in SeaweedFS (S3-compatible, was MinIO) instead of pod-lifetime
+        # emptyDir storage -- see infrastructure.seaweedfs and
+        # templates/infrastructure/seaweedfs.yaml. Dedicated "svc-streaming" identity
+        # (Read/Write, scoped to the "recordings" bucket only -- see
+        # infrastructure.seaweedfs.identities.streaming), replacing the former
+        # unscoped "waddlebot"/MINIO_ROOT_* admin credential.
         - name: RECORDINGS_BUCKET
           value: "recordings"
         - name: S3_ENDPOINT
-          value: {{ printf "http://%s:%v" .Values.infrastructure.minio.service.name .Values.infrastructure.minio.service.apiPort | quote }}
+          value: {{ printf "http://%s:%v" .Values.infrastructure.seaweedfs.service.name .Values.infrastructure.seaweedfs.service.s3Port | quote }}
         - name: S3_ACCESS_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_USER
+              key: STREAMING_S3_ACCESS_KEY_ID
         - name: S3_SECRET_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_PASSWORD
+              key: STREAMING_S3_SECRET_ACCESS_KEY
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -149,7 +221,11 @@ spec:
           timeoutSeconds: 3
           failureThreshold: 3
         resources:
-          {{- toYaml .Values.pipeline.svcStreaming.resources | nindent 10 }}
+          {{- $limits := deepCopy (.Values.pipeline.svcStreaming.resources.limits | default (dict)) }}
+          {{- if $gpuResource }}
+          {{- $_ := set $limits $gpuResource $gpuCount }}
+          {{- end }}
+          {{- toYaml (dict "requests" .Values.pipeline.svcStreaming.resources.requests "limits" $limits) | nindent 10 }}
         volumeMounts:
         # HLS segment scratch space -- tmpfs-backed (Memory medium) since segments are
         # short-lived and this keeps transcode I/O off the node's disk. Not a durable store;
@@ -159,6 +235,11 @@ spec:
           mountPath: {{ .Values.pipeline.svcStreaming.streamDataDir }}
         - name: tmp
           mountPath: /tmp
+        {{- if $amdDevDri }}
+        # amd variant, hostPath fallback (streaming.amd.deviceResource empty). See values.yaml.
+        - name: dri
+          mountPath: /dev/dri
+        {{- end }}
       volumes:
       - name: stream-data
         emptyDir:
@@ -166,6 +247,12 @@ spec:
           sizeLimit: 512Mi
       - name: tmp
         emptyDir: {}
+      {{- if $amdDevDri }}
+      - name: dri
+        hostPath:
+          path: /dev/dri
+          type: Directory
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -230,4 +317,6 @@ spec:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-streaming
 {{- end }}
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-streaming" "ports" (list $.Values.pipeline.svcStreaming.port $.Values.pipeline.svcStreaming.metricsPort $.Values.pipeline.svcStreaming.grpcPort $.Values.pipeline.svcStreaming.rtmpPort (printf "%v/UDP" $.Values.pipeline.svcStreaming.srtPort) (printf "%v-%v/UDP" $.Values.pipeline.svcStreaming.webrtcRangeStart $.Values.pipeline.svcStreaming.webrtcRangeEnd)) "runtime" "rust" "binaries" (list "/app/svc-streaming" "/usr/bin/ffmpeg" "/usr/bin/ffprobe") "egress" "world") }}
 {{- end }}

@@ -191,7 +191,7 @@ class TestRunOnce:
             captured["json"] = json
             return httpx.Response(200, json={"id": "42424242"})
 
-        import bundles.discord_send_action as discord_bundle
+        import builtin_handlers.discord_send_action as discord_bundle
 
         monkeypatch.setattr(discord_bundle, "guarded_request", _fake_guarded_request)
 
@@ -201,7 +201,7 @@ class TestRunOnce:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.discord_send_action:send_message",
+                    "entrypoint": "builtin_handlers.discord_send_action:send_message",
                     "spec": {},
                     "config": {
                         "channel_id": "555",
@@ -253,7 +253,7 @@ class TestRunOnce:
             captured["url"] = url
             return httpx.Response(200, json={"id": "1"})
 
-        import bundles.discord_send_action as discord_bundle
+        import builtin_handlers.discord_send_action as discord_bundle
 
         monkeypatch.setattr(discord_bundle, "guarded_request", _fake_guarded_request)
 
@@ -263,7 +263,7 @@ class TestRunOnce:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.discord_send_action:send_message",
+                    "entrypoint": "builtin_handlers.discord_send_action:send_message",
                     "spec": {},
                     "config": {
                         "channel_id": "from-config-fallback",
@@ -300,7 +300,7 @@ class TestRunOnce:
         ):
             return httpx.Response(200, json={"id": "1"})
 
-        import bundles.discord_send_action as discord_bundle
+        import builtin_handlers.discord_send_action as discord_bundle
 
         monkeypatch.setattr(discord_bundle, "guarded_request", _fake_guarded_request)
 
@@ -310,7 +310,7 @@ class TestRunOnce:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.discord_send_action:send_message",
+                    "entrypoint": "builtin_handlers.discord_send_action:send_message",
                     "spec": {},
                     "config": {
                         "channel_id": "555",
@@ -339,7 +339,7 @@ class TestRunOnce:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.no_such_module:send",
+                    "entrypoint": "builtin_handlers.no_such_module:send",
                     "spec": {},
                     "config": {},
                 }
@@ -390,7 +390,7 @@ class TestRunOnce:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.discord_send_action:send_message",
+                    "entrypoint": "builtin_handlers.discord_send_action:send_message",
                     "spec": {},
                     "config": {
                         "channel_id": "555",
@@ -427,7 +427,7 @@ class TestRunOnce:
         ):
             return httpx.Response(503)
 
-        import bundles.discord_send_action as discord_bundle
+        import builtin_handlers.discord_send_action as discord_bundle
 
         monkeypatch.setattr(discord_bundle, "guarded_request", _fake_guarded_request)
 
@@ -437,7 +437,7 @@ class TestRunOnce:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.discord_send_action:send_message",
+                    "entrypoint": "builtin_handlers.discord_send_action:send_message",
                     "spec": {},
                     "config": {
                         "channel_id": "555",
@@ -482,7 +482,7 @@ class TestTenantSlugResolution:
         ):
             return httpx.Response(200, json={"id": "1"})
 
-        import bundles.discord_send_action as discord_bundle
+        import builtin_handlers.discord_send_action as discord_bundle
 
         monkeypatch.setattr(discord_bundle, "guarded_request", _fake_guarded_request)
 
@@ -494,7 +494,7 @@ class TestTenantSlugResolution:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.discord_send_action:send_message",
+                    "entrypoint": "builtin_handlers.discord_send_action:send_message",
                     "spec": {},
                     "config": {
                         "channel_id": "555",
@@ -562,7 +562,7 @@ class TestTenantSlugResolution:
         ):
             return httpx.Response(200, json={"id": "1"})
 
-        import bundles.discord_send_action as discord_bundle
+        import builtin_handlers.discord_send_action as discord_bundle
 
         monkeypatch.setattr(discord_bundle, "guarded_request", _fake_guarded_request)
 
@@ -572,7 +572,7 @@ class TestTenantSlugResolution:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.discord_send_action:send_message",
+                    "entrypoint": "builtin_handlers.discord_send_action:send_message",
                     "spec": {},
                     "config": {
                         "channel_id": "555",
@@ -613,7 +613,7 @@ class TestTenantSlugResolution:
         ):
             return httpx.Response(200, json={"id": "1"})
 
-        import bundles.discord_send_action as discord_bundle
+        import builtin_handlers.discord_send_action as discord_bundle
 
         monkeypatch.setattr(discord_bundle, "guarded_request", _fake_guarded_request)
 
@@ -623,7 +623,7 @@ class TestTenantSlugResolution:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.discord_send_action:send_message",
+                    "entrypoint": "builtin_handlers.discord_send_action:send_message",
                     "spec": {},
                     "config": {
                         "channel_id": "555",
@@ -664,7 +664,7 @@ class TestBundleContextWiring:
 
     Monkeypatches `runner.load_entrypoint` (the name imported into
     `runner.py`'s own namespace) to return a stub entrypoint, rather than
-    touching any real `core/svc_action/bundles/*.py` file.
+    touching any real `core/svc_action/builtin_handlers/*.py` file.
     """
 
     async def test_entrypoint_sees_envelope_tenant_community_app_id(
@@ -695,7 +695,7 @@ class TestBundleContextWiring:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:fn",
+                    "entrypoint": "builtin_handlers.stub:fn",
                     "spec": {},
                     "config": {},
                 }
@@ -734,7 +734,7 @@ class TestBundleContextWiring:
                 {
                     "appId": DISCORD_APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:fn",
+                    "entrypoint": "builtin_handlers.stub:fn",
                     "spec": {},
                     "config": {},
                 }

@@ -720,7 +720,7 @@ class CommandProcessor:
                     "success": False,
                     "error": f"Unknown command: {command}",
                     "session_id": session_id,
-                    "help_url": f"/commands"
+                    "help_url": "/commands"
                 }
 
             # Check if module is enabled for this community

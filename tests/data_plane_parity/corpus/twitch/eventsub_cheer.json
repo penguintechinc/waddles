@@ -1,0 +1,53 @@
+{
+  "context": {
+    "message_type": "notification"
+  },
+  "frame": {
+    "event": {
+      "bits": 500,
+      "broadcaster_user_id": "111",
+      "broadcaster_user_login": "somechannel",
+      "is_anonymous": false,
+      "user_id": "222",
+      "user_login": "cheerer",
+      "user_name": "Cheerer"
+    },
+    "subscription": {
+      "condition": {
+        "broadcaster_user_id": "111"
+      },
+      "id": "sub-1",
+      "type": "channel.cheer",
+      "version": "1"
+    }
+  },
+  "golden": {
+    "platform": "twitch",
+    "event_type": "channel.cheer",
+    "actor": "cheerer",
+    "payload": {
+      "broadcaster_id": "111",
+      "broadcaster_login": "somechannel",
+      "user_id": "222",
+      "user_login": "cheerer",
+      "user_display_name": "Cheerer",
+      "metadata": {
+        "bits": 500,
+        "is_anonymous": false
+      }
+    },
+    "source": {
+      "platform": "twitch",
+      "account_id": "111",
+      "channel_id": "111"
+    }
+  },
+  "golden_origin": "rust",
+  "id": "twitch/eventsub_cheer",
+  "outcome": "event",
+  "path": "twitch_eventsub",
+  "pii_classifier": "pass",
+  "platform": "twitch",
+  "python_divergences": [],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_eventsub.py + test_builtin_twitch_eventsub_ingest.py"
+}

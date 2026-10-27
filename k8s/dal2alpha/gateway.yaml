@@ -1,0 +1,161 @@
+# dal2-alpha SHARED cluster-wide Cilium Gateway (platform infra for ALL apps, not Waddles-specific).
+# Apply order: see APPLY.md. Waddles HTTPRoute hardcodes Gateway `shared` / ns gateway-system /
+# sectionName `https` -- do NOT rename the listener below.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Cilium LB IPAM + L2 announcements are the MetalLB-equivalent on bare metal (no MetalLB needed).
+# The Gateway Service (gateway-system/cilium-gateway-shared) gets the fixed LAN VIP 192.168.8.60,
+# announced via ARP on eth0 by whichever node holds the L2 lease (HA across both nodes). The NAT
+# forwards public:443 -> 192.168.8.60:443. Prereqs (Cilium agent config) are in APPLY.md step 0.
+#
+# VIP pool: ONE address, bound ONLY to the gateway Service. serviceSelector matches Cilium's
+# built-in virtual labels io.kubernetes.service.{namespace,name} (no dependency on labels Cilium
+# may or may not propagate onto the generated Service). The Gateway also requests .60 explicitly
+# via spec.addresses below, so the Service ends up with external IP .60 deterministically.
+# Keep .60 OUTSIDE the router DHCP range / not used by any other LAN host.
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: dal2alpha-gateway-vip
+spec:
+  blocks:
+    - cidr: 192.168.8.60/32
+  serviceSelector:
+    matchLabels:
+      io.kubernetes.service.namespace: gateway-system
+      io.kubernetes.service.name: cilium-gateway-shared
+---
+# Announce the gateway's LoadBalancer IP on the LAN (ARP) from eth0 on every node; exactly one node
+# (lease holder) answers at a time, another takes over if it goes down. NOTE: L2 announcement is
+# incompatible with externalTrafficPolicy: Local (traffic drops on nodes without local backends)
+# -- the GatewayClassConfig below keeps Cluster. CiliumL2AnnouncementPolicy is still
+# cilium.io/v2alpha1 in Cilium 1.20.1 (no v2 yet), unlike the LB IPAM pool above.
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: dal2alpha-gateway-l2
+spec:
+  # Both dal2-alpha nodes (.41/.51, linux/amd64) are eligible announcers.
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/os: linux
+  serviceSelector:
+    matchLabels:
+      io.kubernetes.service.namespace: gateway-system
+      io.kubernetes.service.name: cilium-gateway-shared
+  loadBalancerIPs: true
+  interfaces:
+    - ^eth0$
+---
+# Gateway Service type LoadBalancer (VIP from the pool above). Do NOT set loadBalancerClass: LB IPAM
+# and the L2 announcer only act on Services with a nil class (or their own io.cilium/* class).
+apiVersion: cilium.io/v2alpha1
+kind: CiliumGatewayClassConfig
+metadata:
+  name: cilium-shared-config
+  namespace: gateway-system
+spec:
+  service:
+    type: LoadBalancer
+    externalTrafficPolicy: Cluster
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: cilium-shared
+spec:
+  controllerName: io.cilium/gateway-controller
+  parametersRef:
+    group: cilium.io
+    kind: CiliumGatewayClassConfig
+    name: cilium-shared-config
+    namespace: gateway-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shared
+  namespace: gateway-system
+spec:
+  gatewayClassName: cilium-shared
+  # Static VIP request. Cilium 1.20.1 translates this onto the Service as the lb-ipam IP annotation
+  # (the deprecated spec.infrastructure.annotations route is NOT used). If .60 cannot be assigned
+  # (pool missing/selector mismatch) the Gateway reports Programmed=False reason AddressNotUsable.
+  addresses:
+    - type: IPAddress
+      value: 192.168.8.60
+  listeners:
+    # Listener name MUST be `https` (HTTPRoute sectionName). 443 only: port 80 is not reachable
+    # (443-only NAT), so no HTTP->HTTPS redirect listener.
+    - name: https
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: cloudflare-origin-wildcard
+      # FINDING 3: only namespaces labeled `gateway-access: shared-dal2a` (set by the platform
+      # admin, never by app teams) may attach HTTPRoutes -- blocks hostname/route hijack from
+      # arbitrary namespaces. Label the waddlebot ns (see APPLY.md). Hostname scoping per app is
+      # enforced by ownership of the label; add per-listener `hostname:` listeners if apps need
+      # hard hostname isolation.
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: shared-dal2a
+---
+# FINDING 2: origin authentication (edge-bypass). Cilium Gateway traffic is enforced on the
+# `reserved:ingress` identity (envoy); allow world->gateway ONLY from Cloudflare ranges so
+# direct-to-origin hits from non-Cloudflare IPs are dropped. Ranges from
+# https://www.cloudflare.com/ips-v4 and /ips-v6 (fetched 2026-10-21) -- THEY CHANGE; refresh
+# periodically (APPLY.md). Stronger follow-up: Cloudflare Authenticated Origin Pulls (mTLS client
+# cert on the 443 listener) needs CF-side enablement -- see APPLY.md.
+# Intra-cluster/node health traffic is intentionally not allowed here; add explicit entities
+# (cluster/health) if east-west access to the gateway is later required.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: shared-gateway-cloudflare-only
+spec:
+  description: Restrict shared gateway (envoy ingress) to Cloudflare edge IPs only
+  endpointSelector:
+    matchLabels:
+      reserved:ingress: ""
+  ingress:
+    - fromCIDR:
+        - 173.245.48.0/20
+        - 103.21.244.0/22
+        - 103.22.200.0/22
+        - 103.31.4.0/22
+        - 141.101.64.0/18
+        - 108.162.192.0/18
+        - 190.93.240.0/20
+        - 188.114.96.0/20
+        - 197.234.240.0/22
+        - 198.41.128.0/17
+        - 162.158.0.0/15
+        - 104.16.0.0/13
+        - 104.24.0.0/14
+        - 172.64.0.0/13
+        - 131.0.72.0/22
+        - 2400:cb00::/32
+        - 2606:4700::/32
+        - 2803:f800::/32
+        - 2405:b500::/32
+        - 2405:8100::/32
+        - 2a06:98c0::/29
+        - 2c0f:f248::/32
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

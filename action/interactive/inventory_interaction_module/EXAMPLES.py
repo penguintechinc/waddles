@@ -122,7 +122,7 @@ class InventoryExamples:
             item_id: Item to checkout
             user_id: User checking out the item
         """
-        print(f"\n=== Checkout Workflow ===\n")
+        print("\n=== Checkout Workflow ===\n")
 
         try:
             # Step 1: Check item availability
@@ -185,7 +185,7 @@ class InventoryExamples:
             checkout_id: Checkout ID to return
             returned_condition: Condition of returned item
         """
-        print(f"\n=== Return Workflow ===\n")
+        print("\n=== Return Workflow ===\n")
 
         try:
             # Process return
@@ -197,7 +197,7 @@ class InventoryExamples:
                 returned_by_user_id=None  # Use checkout user
             )
 
-            print(f"✓ Return processed successfully")
+            print("✓ Return processed successfully")
             print(f"  Status: {returned['status']}")
             print(f"  Returned at: {returned['returned_at']}")
             print(f"  Item ID: {returned['item_id']}")
@@ -375,7 +375,7 @@ class InventoryExamples:
             quantity: Quantity to add
             admin_user_id: Admin user performing restock
         """
-        print(f"\n=== Restocking Item ===\n")
+        print("\n=== Restocking Item ===\n")
 
         try:
             # Get current item
@@ -400,7 +400,7 @@ class InventoryExamples:
                 added_by_user_id=admin_user_id
             )
 
-            print(f"✓ Restock successful")
+            print("✓ Restock successful")
             print(f"New quantity: {updated['quantity']}")
             print(f"New available: {updated['available_quantity']}")
 
@@ -488,7 +488,7 @@ class InventoryExamples:
             community_id: Community ID
             action: Optional specific action to filter
         """
-        print(f"\n=== Audit Log ===\n")
+        print("\n=== Audit Log ===\n")
 
         try:
             logs = await self.service.get_audit_log(

@@ -4,7 +4,7 @@
 # python:3.13-slim-bookworm tag). Build from parent (repo root):
 #   docker build -f core/svc_ingest/Dockerfile -t waddlebot/svc-ingest:local .
 
-FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7 AS builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 WORKDIR /app
 
 COPY core/svc_ingest/requirements.txt .
@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir /app/libs/flask_core
 COPY libs/waddle_transports /app/libs/waddle_transports
 RUN pip install --no-cache-dir /app/libs/waddle_transports
 
-FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
@@ -30,7 +30,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY core/svc_ingest/app.py core/svc_ingest/config.py core/svc_ingest/runner.py \
      core/svc_ingest/supervisor.py core/svc_ingest/fanout.py core/svc_ingest/socket_lease.py \
      core/svc_ingest/eventsub.py core/svc_ingest/outbound_drain.py ./
-COPY core/svc_ingest/bundles ./bundles
+COPY core/svc_ingest/builtin_handlers ./builtin_handlers
 COPY core/svc_ingest/receivers ./receivers
 
 EXPOSE 8210
@@ -40,6 +40,16 @@ HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
 RUN mkdir -p /var/log/waddlebotlog \
     && groupadd -r appuser && useradd -r -g appuser -m appuser \
     && chown -R appuser:appuser /app /var/log/waddlebotlog
+
+# Remove base image's own bundled pip + ensurepip wheel: pip vendors an
+# outdated msgpack (GHSA-6v7p-g79w-8964) and pkg_resources/setuptools
+# (CVE-2025-47273) that the upstream python:3.13-slim-bookworm rebuild
+# hasn't picked up yet. Neither pip nor its vendor tree is imported by
+# any service at runtime (installs happen at build time via uv/pip
+# above), so removing them is a real fix, not a suppression.
+RUN rm -rf /usr/local/lib/python3.13/site-packages/pip \
+    /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
+    /usr/local/lib/python3.13/ensurepip
 
 USER appuser
 

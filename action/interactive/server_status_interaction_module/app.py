@@ -159,9 +159,10 @@ async def add_config(community_id: int):
 
         logger.audit(
             action="add_config",
+            user="system",
             community=community_id,
-            game=game_name,
             result="SUCCESS",
+            game=game_name,
         )
 
         return success_response(config)
@@ -188,9 +189,10 @@ async def remove_config(community_id: int, game_name: str):
 
         logger.audit(
             action="remove_config",
+            user="system",
             community=community_id,
-            game=game_name,
             result="SUCCESS",
+            game=game_name,
         )
 
         return success_response({'message': 'Config removed'})

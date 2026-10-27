@@ -22,6 +22,9 @@ hub_api/
       passkey.py             v1 `user passkey` group (M1): WebAuthn credential management
       profile.py              v1 `user profile` group (M1): self-service profile + avatar
       user_management.py       v1 `superadmin users` group (M1): platform user CRUD
+      compliance_audit.py      v1 `compliance audit` group: Enterprise read/verify/export of the audit chain
+      sso.py                    v1 enterprise SSO: public login flows (SAML/OIDC/Google) + tenant-admin connection CRUD
+      provider_connections.py    v1 provider connections: per-community CRUD + data-plane list/resolve (machine JWT)
     v2/
       platform.py          example v2 group: tenant -> scope -> DTO chain, exposes BLUEPRINTS
   routers/
@@ -35,9 +38,18 @@ hub_api/
     identity_service.py      linked-identity CRUD + identity-linking OAuth flow
     passkey_service.py       WebAuthn registration/authentication
     profile_service.py       self-service profile CRUD + avatar
-    storage_service.py       S3/MinIO avatar object storage (no local-disk fallback)
+    storage_service.py       S3-compatible avatar object storage (no local-disk fallback)
     user_management_service.py  superadmin user CRUD
+    sso_service.py           enterprise SSO orchestration: entitlement-gated connection CRUD, login start/complete, JIT provisioning
+    sso_oidc.py / sso_saml.py  protocol layers: OIDC code+PKCE with local ID-token validation; SAML 2.0 SP (XSW/replay/XXE defences)
+    sso_http.py / sso_state.py / sso_crypto.py / sso_settings.py / sso_telemetry.py / sso_types.py  SSRF-guarded IdP HTTP, Redis single-use state, AES-GCM secrets, operator settings, OTel + PII-safe logging, shared types
+    provider_connections/   standard provider/connection framework: adapter contract, Twitch adapter, registry, vault, store, service
     current_user.py         resolve the caller's user id from the bearer JWT
+    audit_chain.py          tamper-evident audit hash chain: canonical form, seal, verify (stdlib only)
+    audit_events.py         audit vocabulary, PII-free event validation, request classification
+    audit_service.py        append / list / verify the chain (entitlement-gated, fail-loud, OTel)
+    audit_http.py           after_request hook + session-issuance hook (HTTP audit coverage)
+    bundle_audit.py         bundle-lifecycle audit helper: legacy `audit_log` row + chain bridge
     dto_response.py         jsonify_dto() -- workaround for a quart-schema/pydantic-core crash
     errors.py              ApiError + bad_request()/unauthorized()/etc factories
   openapi/
@@ -90,6 +102,50 @@ Most tests use `sqlite:memory` (pydal). The M1 group's own tests
 gotcha for why `sqlite:memory` breaks once a route calls
 `async_dal.select_async`/`insert_async`/etc.
 
+## Enterprise audit logging (tamper-evident)
+
+Security-relevant events (authz denials, tenant/role changes, DSAR/erasure, logins incl. SSO and
+passkey, admin actions, license changes) are appended to a per-tenant **SHA-256 hash chain**
+(`audit_events`, alembic `0053_audit_events_hash_chain`): altering, removing, inserting or
+re-ordering any record is detected by re-verification. Recording and reading are an **Enterprise**
+feature (flags `waddles.compliance.audit_logs` / `audit_export`, default OFF); the legacy
+`audit_log` basic trail and the statutory DSAR/erasure rights are never gated. A failed audit write
+is never swallowed -- it logs at ERROR with a traceback, bumps `waddles.audit.write_failures`, and
+fails the request (entitled tenants only).
+
+```bash
+make verify-audit-chain                   # recompute every chain from the DB (exit 1 = tampering)
+make verify-audit-export EXPORT="a.json"  # verify a downloaded export offline, no server needed
+```
+
+API: `GET /api/v1/compliance/audit/{events,head,verify,export}` (scope `compliance.audit:admin`).
+Full design, threat model and operating guide: [`docs/compliance/audit-logging.md`](../docs/compliance/audit-logging.md).
+
+## Enterprise SSO (SAML 2.0 / OIDC / Google)
+
+Tier-gated by connection type: `waddles.auth.sso_saml` Enterprise, `waddles.auth.sso_custom` (custom OAuth2/OIDC) Professional, both default OFF; named Google is ungated.
+Full deployment, configuration, security model and troubleshooting guide:
+[`docs/SSO.md`](../docs/SSO.md). Tests live in `tests/sso/` (OIDC/SAML run against protocol-faithful fake
+IdPs -- only the IdP socket and Redis are replaced) plus a real-Postgres migration test in
+`alembic/tests/test_0049_sso_connections.py`; run with
+`python3 -m pytest tests/sso -q --cov=services --cov=blueprints.v1.sso`.
+
+## Provider connections (Twitch first)
+
+One adapter interface, one connection API and one encrypted per-community token store for every
+external platform. Builds on the three-layer connection tables from migration 0035 (adds
+`0058_provider_connections`: per-link `resource_metadata` / `expires_at` / `status_reason`, per-grant
+`enabled`). Gated by scope `connections:admin`, flag `waddles.integrations.provider_connections`
+(default OFF) and the Professional tier. Tokens are AES-256-GCM ciphertext under
+`CREDENTIAL_ENCRYPTION_KEY` and are decrypted only at the point of use; the data plane
+(`svc-ingest`) gets a fresh access token through machine-JWT-authenticated `/api/v1/internal/...`
+routes. Full guide, API, security model, data-plane contract and "adding a provider" checklist:
+[`docs/PROVIDER_CONNECTIONS.md`](../docs/PROVIDER_CONNECTIONS.md). Tests: `tests/provider_connections/`
+(only the Twitch socket is faked) plus real-Postgres tests in `tests/provider_connections/
+test_pg_integration.py` and `alembic/tests/test_0058_provider_connections.py`; run with
+`python3 -m pytest tests/provider_connections -q --cov=services.provider_connections
+--cov=blueprints.v1.provider_connections --cov-branch`.
+
 ## OpenAPI (two documents, per backend.md)
 
 - `GET /openapi/v1-public.json` -- unauthenticated, exactly one path (`POST /api/v1/auth/login`).
@@ -98,6 +154,24 @@ gotcha for why `sqlite:memory` breaks once a route calls
   any other protected route. The default `quart-schema` doc routes
   (`/openapi.json`, `/docs`) are disabled in `app.py` -- they are
   unauthenticated by default and would otherwise expose the whole surface.
+
+## Tier-gated surfaces
+
+Gates are `flask_core.feature_flags.feature_enabled` (PostHog flag AND license tier, fail-closed), keyed on contracts in `libs/core_platform_module/features.py`.
+
+- **Admin/bulk DSAR console (Enterprise, `compliance.bulk_dsar`)** -- `blueprints/v1/admin_data_privacy.py` + `services/admin_data_privacy_service.py`, mounted at `/api/v1/tenant/<slug>/privacy/*`. The statutory self-service DSAR (`/api/v1/user/me/data`) stays ungated in every tier. See `docs/PRIVACY.md` "Admin / Bulk DSAR Console".
+- **Whitelabel branding (Professional, `tenancy.whitelabel`)** -- `services/branding_service.py`, applied in `GET /api/v1/auth/tenant/<slug>` and gated on write in `PUT /api/v1/tenant/<slug>`. See `docs/features/whitelabel-branding.md`.
+
+## Data-subject erasure (GDPR Art. 17)
+
+`services/data_privacy_service.py::anonymize_user_data` is the single erasure core, shared by self-service (`DELETE /api/v1/user/me/data`) and the Enterprise admin console.
+
+- **All-or-nothing** -- every delete, the `hub_users` anonymization and the `completed` `data_deletion_requests` row run as ONE executor job with ONE commit (rollback on any failure). `AsyncDAL.delete_async()` & co. commit per call, so they are deliberately not used here. A failed erasure leaves the account untouched, records a `failed` ledger row (exception type only) and re-raises.
+- **Erases `hub_chat_messages`** the user sent (previously exported, never deleted -- GRC#1).
+- **Deletes everything, reputation included -- suppression-only retention.** The subject's `community_members` rows (every community; hub-linked and platform-keyed arms), `reputation_events` / `reputation_tenant`, the bundle reputation (`bundle_reputation_scores` / `_adjustments`, keyed on the subject's `user_uuid`s), the `ephemeral_pseudonyms` mapping and the `hub_user_identities` links are all hard-deleted (no tombstone, no "identity anchor"). Counted individually in the ledger and the `hub.dsar.erase` span; `communities.member_count` is decremented for the active rows removed.
+- **Active ban -> exactly one keyed `suppression_records` row per (tenant, platform account), in the SAME transaction** (`services/ban_suppression.py`, `services/suppression_keys.py`, migration `0059`): `HMAC-SHA256(HKDF(K_master, tenant_id), platform || platform_user_id)` + closed `reason_enum` (`ban`/`auto_ban`) + expiry; no platform id, no offence text. `K_master` is the platform tenant KEK (`TENANT_KEK_HEX` / `TENANT_KEK_HEX_PREVIOUS`, mounted into hub-api only). A user with no active ban never touches the key; a banned user's erasure with no key aborts and rolls back. A return (join approval, OAuth signup, either identity-link callback) recomputes the code in the DESTINATION tenant and re-applies the restriction; per tenant only, expiry honoured at lookup, hourly purge loop. Operator tooling: `make suppression-check|lift|purge|stats` (`cli/suppression.py`). Draft legal artifacts: `docs/compliance/suppression-LIA.md`, `suppression-DPIA.md` (counsel to verify).
+- **Telemetry (OTLP via the standard `OTEL_*` env vars)** -- span `hub.dsar.erase`, counter `waddles_hub_dsar_erasure_total{result}`, histograms `waddles_hub_dsar_erasure_duration_ms` / `waddles_hub_dsar_erasure_rows`. Labels/attributes carry no user id; failure spans carry the exception type only (never the driver message). A broken exporter is logged, never fails an erasure.
+- **Retains consent + audit evidence** (`cookie_consent`, `cookie_audit_log`, `audit_log`, `data_deletion_requests`; `ERASURE_RETAINED_TABLES`) for GDPR Art. 5(2). See `docs/PRIVACY.md` "Data Deletion". Regression tests: `tests/test_data_privacy_erasure.py`.
 
 ## API versions
 
@@ -114,7 +188,7 @@ gotcha for why `sqlite:memory` breaks once a route calls
 - `libs/flask_core` ships no `py.typed` marker and `tenant_middleware`/
   `require_scope`'s inner wrappers are unannotated -- every consumer sees
   mypy `--strict`'s `untyped-decorator`; worked around here with scoped,
-  documented `# type: ignore[untyped-decorator]` (see `blueprints/v2/platform.py`,
+  documented `# type: ignore[misc]` (see `blueprints/v2/platform.py`,
   `openapi/routes.py`).
 - `AsyncDAL.close_async()` (`libs/flask_core/flask_core/database.py`)
   closes the underlying pydal `DAL` from a different thread than created

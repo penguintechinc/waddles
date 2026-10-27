@@ -24,10 +24,11 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  # Empty on fork PRs / repos without the secret configured -- `if:` can't
-  # read `secrets` directly, so it's routed through env. See docs/WORKFLOWS.md
-  # "Docker Hub credentials".
-  DOCKERHUB_LOGIN_ENABLED: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+  # TEMPORARY amd64-only (user-approved 2026-10-03). Re-enable arm64 near
+  # release / for the mixed-arch Minisforum alpha cluster by setting
+  # BUILD_PLATFORMS=linux/amd64,linux/arm64 (this is the single toggle --
+  # every build-*.yml workflow that builds images keys off the same name).
+  BUILD_PLATFORMS: linux/amd64
 
 jobs:
   determine-version:
@@ -37,6 +38,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       suffix: ${{ steps.version.outputs.suffix }}
       is_release: ${{ steps.version.outputs.is_release }}
+      multi_arch: ${{ steps.version.outputs.multi_arch }}
+      matrix: ${{ steps.version.outputs.matrix }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -46,46 +49,83 @@ jobs:
       - name: Determine version and suffix
         id: version
         run: |
-          if [ -f .version ]; then
-            VERSION=$(cat .version | tr -d '[:space:]')
+          set -euo pipefail
+          # Five-tier tag scheme (devops.md CI/CD Tag Naming) -- tier -> tag -> trigger:
+          #   alpha : any non-release branch push / dispatch -> alpha-<epoch>
+          #   beta  : push to release/v*.X (or main)         -> beta-<epoch>
+          #   gamma : GitHub release flagged pre-release     -> gamma-<epoch>   (release: prereleased)
+          #   prod  : GitHub release published as release    -> v{Major}.{Minor}.{Patch} + latest (release: released)
+          # <epoch> = unix seconds, computed once here so every matrix job shares it.
+          # .version is NOT used for tags. `suffix` is kept (always empty) so
+          # downstream ${version}${suffix} references keep resolving.
+          EPOCH="$(date +%s)"
+          IS_RELEASE=false
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            ACTION="$(jq -r '.action' "$GITHUB_EVENT_PATH")"
+            case "$ACTION" in
+              released)
+                SEMVER_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
+                if ! [[ "$GITHUB_REF_NAME" =~ $SEMVER_RE ]]; then
+                  echo "::error::release tag '$GITHUB_REF_NAME' is not v{Major}.{Minor}.{Patch}" >&2
+                  exit 1
+                fi
+                TAG="$GITHUB_REF_NAME"
+                IS_RELEASE=true
+                ;;
+              prereleased)
+                TAG="gamma-${EPOCH}"
+                ;;
+              *)
+                echo "::error::unsupported release action '$ACTION'" >&2
+                exit 1
+                ;;
+            esac
+          elif [[ "$GITHUB_REF" == refs/heads/release/v* ]] || [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            TAG="beta-${EPOCH}"
           else
-            VERSION="0.0.0"
+            TAG="alpha-${EPOCH}"
+          fi
+          {
+            echo "version=${TAG}"
+            echo "suffix="
+            echo "is_release=${IS_RELEASE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${TAG} (release=${IS_RELEASE})"
+
+          # Derive the whole matrix object + multi_arch flag from the single
+          # BUILD_PLATFORMS toggle (env, top of file). A comma means more
+          # than one platform is requested -- restore arm64 by flipping that
+          # one value back to "linux/amd64,linux/arm64".
+          #
+          # The matrix is emitted as one complete JSON object (not a static
+          # "include:" list plus a dynamic "exclude:" expression) because
+          # mixing a static matrix key with a fromJSON(...)-driven sibling
+          # key resolves to an empty job set -- see gh-577. This is GitHub's
+          # documented "defining a matrix dynamically" pattern instead:
+          # https://docs.github.com/actions/how-tos/write-workflows/choose-what-workflows-do/run-variations-of-jobs-in-a-workflow#defining-a-matrix-dynamically
+          if [[ "${BUILD_PLATFORMS}" == *,* ]]; then
+            echo "multi_arch=true" >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[{"platform":"linux/amd64","runner":"ubuntu-latest"},{"platform":"linux/arm64","runner":"ubuntu-24.04-arm"}]}' >> $GITHUB_OUTPUT
+          else
+            echo "multi_arch=false" >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[{"platform":"linux/amd64","runner":"ubuntu-latest"}]}' >> $GITHUB_OUTPUT
           fi
 
-          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
-
-          # Check if .version file changed (indicates a release)
-          if git diff HEAD^ HEAD --name-only | grep -q "^.version$"; then
-            IS_RELEASE="true"
-          else
-            IS_RELEASE="false"
-          fi
-
-          if [ "$IS_RELEASE" = "true" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "suffix=" >> $GITHUB_OUTPUT
-            echo "is_release=true" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == refs/heads/v* ]]; then
-            echo "suffix=-beta" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "suffix=-gamma" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-          else
-            echo "suffix=-alpha" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-          fi
-
-  # Build each platform in parallel on native runners
+  # Build each platform in parallel on native runners. Push-path only --
+  # pull_request/merge_group is handled entirely by build-pr below so this
+  # job's packages:write permission (needed for the real registry push) is
+  # never live during a PR run.
   build-platform:
     name: Build (${{ matrix.platform }})
+    if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'pull_request' && github.event_name != 'merge_group')
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+      # Whole matrix object computed by determine-version (see that job's
+      # comment) -- a static `include:` plus dynamic `exclude:` resolved to
+      # zero jobs, see gh-577.
+      matrix: ${{ fromJSON(needs.determine-version.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     needs: determine-version
     steps:
@@ -107,20 +147,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Pull-only: authenticates the base-image pulls (python/rust/debian/node
-      # etc.) that `docker buildx build` below performs, to avoid Docker Hub's
-      # anonymous-pull rate limit. Never used to push. Runs on every event
-      # type (including PRs from the same repo) since base images are pulled
-      # regardless of push/load; empty on fork PRs, where secrets are unset,
-      # so those fall back to anonymous pulls instead of failing.
-      - name: Log in to Docker Hub
-        if: env.DOCKERHUB_LOGIN_ENABLED == 'true'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
-        with:
-          registry: docker.io
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Extract architecture suffix
         id: arch
         run: |
@@ -130,6 +156,33 @@ jobs:
             echo "suffix=arm64" >> $GITHUB_OUTPUT
           fi
 
+      # Single-platform builds (BUILD_PLATFORMS has no comma) skip the
+      # "Merge Multi-Arch Manifest" job below entirely, so this step must
+      # also publish the plain (and, on release, :latest) tag that job
+      # would otherwise create -- a single-arch build ends up pushing a
+      # normal image, never a manifest list.
+      - name: Compute image tags
+        id: tags
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ inputs.module_name }}
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+          IS_RELEASE: ${{ needs.determine-version.outputs.is_release }}
+          MULTI_ARCH: ${{ needs.determine-version.outputs.multi_arch }}
+          ARCH_SUFFIX: ${{ steps.arch.outputs.suffix }}
+        run: |
+          TAGS="${IMAGE}:${VERSION}-${ARCH_SUFFIX}"
+          if [ "${MULTI_ARCH}" != "true" ]; then
+            TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:${VERSION}")
+            if [ "${IS_RELEASE}" = "true" ]; then
+              TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:latest")
+            fi
+          fi
+          {
+            echo "list<<TAGEOF"
+            echo "${TAGS}"
+            echo "TAGEOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push image (${{ matrix.platform }})
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
@@ -137,7 +190,7 @@ jobs:
           file: ./${{ inputs.module_path }}/Dockerfile
           push: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           load: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64' }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ inputs.module_name }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.arch.outputs.suffix }}
+          tags: ${{ steps.tags.outputs.list }}
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=${{ inputs.module_name }}-${{ steps.arch.outputs.suffix }}
           cache-to: type=gha,mode=max,scope=${{ inputs.module_name }}-${{ steps.arch.outputs.suffix }}
@@ -145,12 +198,64 @@ jobs:
             MODULE_NAME=${{ inputs.module_name }}
             MODULE_PORT=${{ inputs.module_port }}
 
+  # PR/merge_group path: single-arch build, no registry credentials, gated
+  # Trivy scan against the locally loaded (never pushed) image. Runs in a
+  # dedicated job (not build-platform) so packages:write is never granted
+  # to a job executing an untrusted PR's Dockerfile.
+  build-pr:
+    name: Build & Scan (PR)
+    if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-latest
+    needs: determine-version
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+
+      - name: Build image (amd64 only, not pushed)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
+        with:
+          context: .
+          file: ./${{ inputs.module_path }}/Dockerfile
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ inputs.module_name }}:pr-${{ github.run_id }}
+          cache-from: type=gha,scope=${{ inputs.module_name }}-amd64
+          build-args: |
+            MODULE_NAME=${{ inputs.module_name }}
+            MODULE_PORT=${{ inputs.module_port }}
+
+      - name: Trivy vulnerability scan (gated, local image)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ inputs.module_name }}:pr-${{ github.run_id }}
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
   # Merge amd64 + arm64 into a single multi-arch OCI index manifest
   merge:
     name: Merge Multi-Arch Manifest
     runs-on: ubuntu-latest
     needs: [determine-version, build-platform]
-    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    # No-ops cleanly when BUILD_PLATFORMS is amd64-only -- build-platform's
+    # "Compute image tags" step already pushed the plain/:latest tags
+    # directly in that case, so there is nothing to merge.
+    if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+      github.event_name != 'pull_request' &&
+      github.event_name != 'merge_group' &&
+      needs.determine-version.outputs.multi_arch == 'true'
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4

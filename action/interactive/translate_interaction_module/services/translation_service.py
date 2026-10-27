@@ -513,8 +513,8 @@ class TranslationService:
                 else:
                     # Ensemble was more confident, but mark as uncertain
                     logger.debug(
-                        f"AI disagrees but less confident - keeping ensemble result "
-                        f"with reduced confidence"
+                        "AI disagrees but less confident - keeping ensemble result "
+                        "with reduced confidence"
                     )
                     # Reduce confidence due to disagreement
                     return detected_lang, ensemble_confidence * 0.9

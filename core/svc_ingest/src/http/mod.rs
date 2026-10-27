@@ -46,6 +46,12 @@ pub struct AppState {
     /// unconditionally and responds `503` in that case, matching every
     /// other fixed-platform receiver's graceful-degradation contract.
     pub eventsub: Option<Arc<eventsub::EventSubState>>,
+    /// Per-receiver spine-connect readiness, shared with `crate::lib`'s
+    /// `try_start_twitch_irc`/`try_start_discord`/`try_start_twitch_outbound`
+    /// -- backs `GET /readyz` (`crate::http::health::readyz`). Regression:
+    /// one-shot valkey probe disabled discord receiver while the pod stayed
+    /// Ready forever (alpha 2026-10-02).
+    pub receiver_readiness: Arc<crate::ReceiverReadiness>,
 }
 
 impl AppState {
@@ -63,6 +69,7 @@ impl AppState {
             request_metrics,
             started_at: Instant::now(),
             eventsub: None,
+            receiver_readiness: Arc::new(crate::ReceiverReadiness::new()),
         }
     }
 }
@@ -103,6 +110,7 @@ pub fn router(state: AppState) -> Router {
     let base = Router::new()
         .route("/health", get(health::liveness))
         .route("/healthz", get(health::healthz))
+        .route("/readyz", get(health::readyz))
         .with_state(state.clone());
 
     // `eventsub::router` mounts `POST /eventsub/twitch/webhook` -- see

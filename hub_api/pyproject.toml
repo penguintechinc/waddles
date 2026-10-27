@@ -9,6 +9,11 @@ select = ["E", "W", "F", "I", "N", "D", "UP", "B", "ASYNC", "S"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
+# grpc_tools.protoc-generated stubs (proto/waddles/hub/internal/v1/*.proto
+# -> scripts/compile_protos_v1.sh) -- never hand-edited, so ruff's D/N/E
+# rules on generated PascalCase RPC method names and missing docstrings
+# don't apply. Regenerate, don't reformat, on a proto change.
+"grpc_internal/pb/**" = ["D", "N802", "E501", "I001", "UP", "B"]
 # Test names are self-documenting (pytest convention); S105/S106/S107 flag
 # fixed test-only passwords/JWT secrets (e.g. mirroring flask_core's own
 # `os.getenv("SECRET_KEY", "change-me-in-production")` default, or seed-user
@@ -25,6 +30,16 @@ convention = "google"
 # `get_tenant_context()` -- the pattern every ported controller group
 # was documented to repeat (see platform.py's own per-file-ignore above).
 "blueprints/v1/community_*.py" = ["S101"]
+# Bar Citizen guild-pairing/role-sync group (migration 0034) -- same
+# `_feature_gate_and_tenant_check()` tenant_middleware postcondition assert
+# (`get_tenant_context()` always non-None after `tenant_middleware` already
+# ran) as the `community_*.py` glob above.
+"blueprints/v1/guild_pairing.py" = ["S101"]
+# Bar Citizen Twitch bot-install flow (migration 0034) -- same
+# tenant_middleware postcondition assert (`get_tenant_context()` always
+# non-None after `tenant_middleware` already ran) as the `guild_pairing.py`
+# entry above.
+"blueprints/v1/tenant_twitch_install.py" = ["S101"]
 # Bot module (M5): DTO/service-dataclass field names are deliberately
 # camelCase to byte-match admin/hub_module/frontend/src/services/api.js's
 # frozen /api/v1 JSON contract (soEnabled, platformUsername, createdAt,
@@ -46,6 +61,7 @@ convention = "google"
 # opt in), not a naming-convention slip.
 "blueprints/v1/auth.py" = ["S101", "N815"]
 "blueprints/v1/identity.py" = ["N815"]
+"blueprints/v1/dataplane_scope.py" = ["N815"]  # wire DTOs are camelCase by API contract
 "blueprints/v1/passkey.py" = ["N815"]
 "blueprints/v1/profile.py" = ["N815"]
 "blueprints/v1/user_management.py" = ["N815"]
@@ -60,6 +76,11 @@ convention = "google"
 # always non-None on the success path), N815 is the camelCase DTO wire
 # contract pinned to frontend/src/services/api.js's tenantApi.
 "blueprints/v1/tenant.py" = ["S101", "N815"]
+# Enterprise tenant-admin DSAR console + whitelabel branding endpoint: same
+# tenant_middleware postcondition assert and camelCase wire DTOs
+# (userIds/userId, logoUrl/primaryColor) as `blueprints/v1/tenant.py` above.
+"blueprints/v1/admin_data_privacy.py" = ["S101", "N815"]
+"blueprints/v1/branding.py" = ["N815"]
 # Support/access-token port group -- same `_tenant_ok()` postcondition
 # assert (`get_tenant_context()` always non-None after `tenant_middleware`
 # has already run) as `blueprints/v1/community_*.py` above. No N815: this
@@ -107,6 +128,9 @@ convention = "google"
 "blueprints/v1/platform.py" = ["N815"]
 "blueprints/v1/platform_config.py" = ["N815"]
 "blueprints/v1/public.py" = ["N815"]
+# `installUrl` -- camelCase DTO wire-contract field matching `public.py`'s
+# own convention (this blueprint shares its `/api/v1/public` prefix).
+"blueprints/v1/discord_bot_install.py" = ["N815"]
 # M2 Core Tenancy-Misc group (communityProfileController.js /
 # joinRequestController.js) -- same N815 rationale as the M1 entries
 # above (`avatarUrl`/`socialLinks`/etc are wire-contract field names, not
@@ -127,6 +151,30 @@ convention = "google"
 # assert as blueprints/v2/platform.py above (`get_tenant_context` always
 # non-None on the success path for Scenario 2/4 routes).
 "blueprints/v1/analytics.py" = ["S101"]
+# Enterprise SSO (SAML/OIDC/Google, migration 0049) -- request/response DTO
+# field names are camelCase to match every other v1 blueprint's JSON contract
+# with `frontend/src/services/api.js`; S101 is the standard tenant_middleware
+# postcondition assert. No per-class suppression exists for N815, hence the
+# file-level entry (same as blueprints/v1/auth.py above).
+"blueprints/v1/sso.py" = ["N815", "S101"]
+# SSO test suite: embedded SAML/XML payload strings and long assertion messages read better
+# unwrapped (same rationale as the per-file test ignores above).
+"tests/sso/*" = ["E501"]
+# Ban-suppression suite re-imports the shared erasure fixtures (`db`, `module_db`, `otel`,
+# `block_anonymization`) from `tests/test_data_privacy_erasure.py`; a pytest fixture used as a
+# test parameter is, to ruff, a redefinition of the imported name.
+"tests/test_ban_suppression.py" = ["F811"]
+# Provider/connection framework (migration 0058) -- request/response DTO fields are camelCase to
+# match every other v1 blueprint's JSON contract (security.md Output Validation: the JSON key IS
+# the field name); S101 is the standard tenant_middleware postcondition assert.
+"blueprints/v1/provider_connections.py" = ["N815", "S101"]
+# The framework's error classes are domain nouns mapped one-to-one onto HTTP statuses in the
+# blueprint (`UnknownProvider`, `ConnectionNotFound`, ...) -- an `Error` suffix on every one would
+# only add noise to `except` clauses (same rationale as services/music_providers/errors.py).
+"services/provider_connections/errors.py" = ["N818"]
+# Its test suite: fake-socket fixtures, secret-shaped literals built at runtime, long scenario
+# assertions and private-attribute pokes (SLF001 is not selected) read better unwrapped.
+"tests/provider_connections/*" = ["E501", "N818", "S105", "S106", "S107", "S608"]
 # Marketplace-catalog port group: `CatalogEntry`/`ModuleEntry`/`ModuleDetail`/
 # `ModuleSubscription`/etc DTO fields are deliberately camelCase to byte-match
 # `catalogService.js`'s `formatCatalogEntry`/`moduleService.js`'s `formatModule`
@@ -214,15 +262,31 @@ convention = "google"
 # bundle_approvals.py above.
 "blueprints/v1/bundle_tenant_availability.py" = ["N815", "S101"]
 "blueprints/v1/bundle_activation.py" = ["N815", "S101"]
+# Bundle Permissions & Capability Gate consent flow -- same camelCase DTO
+# wire contract + tenant_middleware postcondition assert rationale.
+"blueprints/v1/bundle_permissions.py" = ["N815", "S101"]
+# `assert risk is not None` after `_require(risk is not None, ...)` already
+# raised otherwise -- a narrowing assert for mypy, not a runtime guard.
+"services/bundle_manifest_v2.py" = ["S101"]
 # Tenant ingest_sources registry (spec Sec5.2, Sec10.3) -- camelCase DTO
 # fields (sourceId, communityId, nextCursor, ...) match the wire contract
 # every other v1 blueprint's DTOs already use; S101 is the same
 # tenant_middleware postcondition assert as workstream_usage.py above.
 "blueprints/v1/ingest_sources.py" = ["N815", "S101"]
+# One-time secrets (feature #684) -- same camelCase wire DTOs + tenant_middleware postcondition assert.
+"blueprints/v1/one_time_secrets.py" = ["N815", "S101"]
 # Same camelCase-DTO-wire-contract rationale as bundle_versions.py/
 # bundle_approvals.py above -- no tenant_middleware assert here (this
 # endpoint is deliberately cross-tenant), so only N815 is needed.
 "blueprints/v1/bundle_admin.py" = ["N815"]
+# Enterprise external KMS / BYOK (services/envelope/) -- camelCase DTO fields
+# (keyRef, externalId, dekVersion, ...) follow the v1 wire contract every other
+# blueprint's DTOs use; S101 is the same tenant_middleware postcondition assert
+# as bundle_tenant_availability.py above.
+"blueprints/v1/tenant_kms.py" = ["N815", "S101"]
+# Opt-in real-SeaweedFS E2E (`make test-seaweedfs-sse-kms`): drives docker/helm through
+# fixed-argv subprocess calls (no shell, no untrusted input) -- S603/S607 are noise here.
+"tests/envelope/test_seaweedfs_sse_kms_e2e.py" = ["S603", "S607", "D107"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -244,8 +308,8 @@ module = ["flask_core.*", "pydal.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
 
-# boto3/botocore/webauthn ship no py.typed marker either -- same boundary
+# boto3/botocore/webauthn/defusedxml (SAML XML parsing, services/sso_saml.py) ship no py.typed marker either -- same boundary
 # override, third-party-import only, not a relaxation of hub-api's own bar.
 [[tool.mypy.overrides]]
-module = ["boto3.*", "botocore.*", "webauthn.*"]
+module = ["boto3.*", "botocore.*", "webauthn.*", "defusedxml.*"]
 ignore_missing_imports = true

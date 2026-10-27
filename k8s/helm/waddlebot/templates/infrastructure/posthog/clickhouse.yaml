@@ -84,4 +84,6 @@ spec:
         resources:
           requests:
             storage: {{ .Values.posthog.clickhouse.storage }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "database" "name" "posthog-clickhouse" "selector" (dict "app.kubernetes.io/name" "posthog-clickhouse") "ports" (list 8123 9000) "egress" "internal" "tetragon" false) }}
 {{- end }}

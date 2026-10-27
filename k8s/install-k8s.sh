@@ -299,7 +299,7 @@ redis:
   persistence:
     storageClass: ${STORAGE_CLASS}
 
-minio:
+seaweedfs:
   persistence:
     storageClass: ${STORAGE_CLASS}
 

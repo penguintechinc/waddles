@@ -34,8 +34,28 @@ class Config:  # noqa: E302
         'LABELS_API_URL',
         'http://labels-core-service:8025'
     )
+    HUB_API_URL = os.getenv('HUB_API_URL', 'http://hub-api:8204')
+    # Service-to-service shared secret -- same `SERVICE_API_KEY` convention
+    # every other internal caller in this port uses (`core/svc_process/
+    # services/reputation_gate_client.py`, `hub_api/services/community_
+    # common.py::is_valid_service_key`). Used BOTH ways here: outbound, as
+    # the `X-Service-Key` header on calls to hub-api's `/api/v1/internal/
+    # calendar/...` Discord event-sync endpoints (services/event_discord_
+    # sync_client.py), and inbound once #636 (fix/calendar-auth-bypass)
+    # merges and starts validating it on requests into this module.
+    SERVICE_API_KEY = os.getenv('SERVICE_API_KEY', '')
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     SECRET_KEY = require_secret_key()
+
+    # Service-to-service auth: hub-api's `EventCalendarProxyClient`
+    # (hub_api/services/event_calendar_proxy.py) is the only legitimate
+    # caller of this module and sends this key as `X-API-Key` alongside
+    # the post-JWT `X-User-Context` it builds. Empty default is
+    # intentional -- `flask_core.auth.verify_service_key` fails CLOSED
+    # (rejects every request) when the expected key is falsy, so an
+    # unconfigured deployment never silently accepts unauthenticated
+    # calendar requests.
+    SERVICE_API_KEY = os.getenv('SERVICE_API_KEY', '')
 
     # Redis Configuration (for credential refresh notifications)
     REDIS_URL: str = os.getenv('REDIS_URL', '')

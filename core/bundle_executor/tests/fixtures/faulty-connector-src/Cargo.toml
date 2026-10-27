@@ -1,0 +1,25 @@
+[package]
+name = "faulty-connector"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "waddle:faulty-connector"
+
+[package.metadata.component.target]
+world = "connector"
+path = "wit"
+
+[package.metadata.component.dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

@@ -13,9 +13,13 @@ Features:
 - Comprehensive error handling and timeouts
 - Processing time tracking
 - Token usage monitoring
+- Capability-aware output mode: a text-only model (the default) is always sent
+  a plain-text request; JSON mode is used only when OLLAMA_SUPPORTS_JSON is set
+  for the configured model, and AIResponse.json_mode reports which one ran
 """
 
 import asyncio
+import json
 import httpx
 import ssl
 import logging
@@ -25,8 +29,21 @@ from typing import Optional, Any
 from dataclasses import dataclass, field
 
 from config import Config
+from flask_core import describe_db_error
+from flask_core.ai_guard import (
+    RetrievedItem,
+    render_retrieved_data,
+    sanitize_model_output,
+    with_untrusted_notice,
+)
+from flask_core.ai_telemetry import AITelemetry
+from flask_core.ai_tool_authz import reject_unsolicited_tool_calls
 
 logger = logging.getLogger(__name__)
+
+# Spans + duration/token/error metrics for every model call (PII-free; no-op
+# unless an OTel provider is configured via the standard OTLP env vars).
+telemetry = AITelemetry("waddles.ai_researcher.ai_provider")
 
 
 class AIProvider(Enum):
@@ -34,6 +51,18 @@ class AIProvider(Enum):
     OLLAMA = "ollama"
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+
+
+class AIProviderError(RuntimeError):
+    """The provider answered, but not with a usable completion."""
+
+
+class EmptyCompletionError(AIProviderError):
+    """The model returned no visible text (e.g. a reasoning model spent its whole budget thinking)."""
+
+
+class InvalidJSONError(AIProviderError):
+    """JSON mode was used but the completion did not parse as JSON."""
 
 
 @dataclass(slots=True)
@@ -46,11 +75,14 @@ class AIResponse:
         model: Model used for generation
         tokens_used: Number of tokens consumed
         processing_time_ms: Time taken to generate (milliseconds)
+        json_mode: True only if the provider was put in JSON mode for this
+            call and `content` was validated as JSON; False means plain text
     """
     content: str
     model: str
     tokens_used: int
     processing_time_ms: int
+    json_mode: bool = False
 
 
 class AIProviderService:
@@ -83,9 +115,20 @@ class AIProviderService:
         # Provider-specific setup
         self._setup_provider()
 
+        # Capability flags describe the configured model (env, never inferred
+        # from a model name). Text-only is the default and always works.
+        self.supports_json = (
+            self.provider is AIProvider.OLLAMA
+            and bool(getattr(config, 'OLLAMA_SUPPORTS_JSON', False))
+        )
+        self.disable_thinking = bool(
+            getattr(config, 'OLLAMA_DISABLE_THINKING', True)
+        )
+
         logger.info(
             f"Initialized AIProviderService: provider={self.provider.value}, "
-            f"max_concurrent={config.MAX_CONCURRENT_LLM_CALLS}"
+            f"max_concurrent={config.MAX_CONCURRENT_LLM_CALLS}, "
+            f"supports_json={self.supports_json}"
         )
 
     def _setup_provider(self):
@@ -133,7 +176,7 @@ class AIProviderService:
                         f"Loaded SSL cert: {self.config.OLLAMA_CERT_PATH}"
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to load SSL cert: {e}")
+                    logger.warning(f"Failed to load SSL cert: {describe_db_error(e)}")
 
             return context
         else:
@@ -176,7 +219,8 @@ class AIProviderService:
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 500
+        max_tokens: int = 500,
+        want_json: bool = False
     ) -> AIResponse:
         """
         Generate AI response with concurrency limiting.
@@ -186,37 +230,49 @@ class AIProviderService:
             system_prompt: Optional system instruction
             temperature: Generation temperature (0.0-2.0)
             max_tokens: Maximum tokens to generate
+            want_json: Ask for JSON output. A request, not a guarantee: only
+                honoured when the configured model `supports_json`; otherwise
+                the call is plain text and `AIResponse.json_mode` is False.
 
         Returns:
             AIResponse with content and metadata
 
         Raises:
-            Exception: On generation failure
+            EmptyCompletionError: The model returned no visible text
+            InvalidJSONError: JSON mode was used but the output isn't JSON
+            Exception: On any other generation failure
         """
+        model_label = (
+            self.config.OLLAMA_MODEL
+            if self.provider is AIProvider.OLLAMA
+            else self.provider.value
+        )
+        mode_label = "json" if want_json and self.supports_json else "text"
+
         async with self.semaphore:
             start_time = time.perf_counter()
 
             try:
-                # Route to provider-specific implementation
-                match self.provider:
-                    case AIProvider.OLLAMA:
-                        response = await self._generate_ollama(
-                            prompt, system_prompt, temperature, max_tokens
-                        )
-                    case AIProvider.OPENAI:
-                        response = await self._generate_openai(
-                            prompt, system_prompt, temperature, max_tokens
-                        )
-                    case AIProvider.ANTHROPIC:
-                        response = await self._generate_anthropic(
-                            prompt, system_prompt, temperature, max_tokens
-                        )
-                    case _:
-                        raise ValueError(f"Unknown provider: {self.provider}")
+                with telemetry.span(
+                    provider=self.provider.value,
+                    model=model_label,
+                    mode=mode_label
+                ):
+                    response = await self._dispatch(
+                        prompt, system_prompt, temperature, max_tokens,
+                        want_json
+                    )
 
                 processing_time = int((time.perf_counter() - start_time) * 1000)
                 response.processing_time_ms = processing_time
 
+                telemetry.record_call(
+                    provider=self.provider.value,
+                    model=model_label,
+                    mode=mode_label,
+                    duration_ms=processing_time,
+                    output_tokens=response.tokens_used
+                )
                 logger.info(
                     f"Generated response: provider={self.provider.value}, "
                     f"model={response.model}, tokens={response.tokens_used}, "
@@ -227,12 +283,43 @@ class AIProviderService:
 
             except Exception as e:
                 processing_time = int((time.perf_counter() - start_time) * 1000)
+                telemetry.record_call(
+                    provider=self.provider.value,
+                    model=model_label,
+                    mode=mode_label,
+                    duration_ms=processing_time,
+                    error_code=type(e).__name__
+                )
                 logger.error(
                     f"Generation failed: provider={self.provider.value}, "
-                    f"error={e}, time={processing_time}ms",
-                    exc_info=True
+                    f"error={describe_db_error(e)}, time={processing_time}ms"
                 )
                 raise
+
+    async def _dispatch(
+        self,
+        prompt: str,
+        system_prompt: Optional[str],
+        temperature: float,
+        max_tokens: int,
+        want_json: bool
+    ) -> AIResponse:
+        """Route one generation to the configured provider's implementation."""
+        match self.provider:
+            case AIProvider.OLLAMA:
+                return await self._generate_ollama(
+                    prompt, system_prompt, temperature, max_tokens, want_json
+                )
+            case AIProvider.OPENAI:
+                return await self._generate_openai(
+                    prompt, system_prompt, temperature, max_tokens
+                )
+            case AIProvider.ANTHROPIC:
+                return await self._generate_anthropic(
+                    prompt, system_prompt, temperature, max_tokens
+                )
+            case _:
+                raise ValueError(f"Unknown provider: {self.provider}")
 
     async def generate_with_context(
         self,
@@ -251,13 +338,19 @@ class AIProviderService:
         Returns:
             AIResponse with content and metadata
         """
-        # Build contextualized prompt
-        context_text = "\n".join([
-            f"{msg.get('role', 'user')}: {msg.get('content', '')}"
-            for msg in context[-10:]  # Last 10 messages
-        ])
+        # Each prior turn is untrusted DATA (it may carry text from other users or
+        # earlier model output): render it delimited and labelled, with the role as
+        # a title -- never as a `role:` line the model could mistake for a turn.
+        history = render_retrieved_data(
+            [
+                RetrievedItem(text=str(msg.get('content', '')), title=str(msg.get('role', 'user')))
+                for msg in context[-10:]  # Last 10 messages
+            ],
+            source="conversation_history",
+            max_items=10,
+        )
 
-        full_prompt = f"{context_text}\n\nCurrent query: {prompt}"
+        full_prompt = f"{history.text}\n\nCurrent query: {prompt}"
 
         return await self.generate(
             prompt=full_prompt,
@@ -304,7 +397,7 @@ class AIProviderService:
                     return False
 
         except Exception as e:
-            logger.error(f"Health check failed: {e}")
+            logger.error(f"Health check failed: {describe_db_error(e)}")
             return False
 
     # ========================================================================
@@ -316,25 +409,38 @@ class AIProviderService:
         prompt: str,
         system_prompt: Optional[str],
         temperature: float,
-        max_tokens: int
+        max_tokens: int,
+        want_json: bool = False
     ) -> AIResponse:
-        """Generate response using Ollama"""
+        """Generate response using Ollama (native /api/generate)"""
         client = await self._get_client()
 
-        # Build full prompt with system instruction
-        full_prompt = prompt
-        if system_prompt:
-            full_prompt = f"{system_prompt}\n\n{prompt}"
-
+        # Real system/user split (Ollama's `system` field) rather than gluing the
+        # standing instructions onto the prompt: whatever the caller embedded in
+        # `prompt` (chat, memories, search snippets) is never in the instruction
+        # turn. The untrusted-data notice is ALWAYS appended -- it tells the model
+        # what the delimited blocks in `prompt` are. regression: sec-llm01-hardening
+        json_mode = want_json and self.supports_json
         payload = {
             "model": self.config.OLLAMA_MODEL,
-            "prompt": full_prompt,
-            "temperature": temperature,
+            "prompt": prompt,
+            "system": with_untrusted_notice(system_prompt),
+            "stream": False,
+            # temperature belongs under `options`; a top-level key is ignored
             "options": {
+                "temperature": temperature,
                 "num_predict": max_tokens
-            },
-            "stream": False
+            }
         }
+        if self.disable_thinking:
+            payload["think"] = False
+        if json_mode:
+            payload["format"] = "json"
+        elif want_json:
+            logger.info(
+                f"JSON requested but model {self.config.OLLAMA_MODEL} is "
+                f"configured text-only; using plain-text mode"
+            )
 
         try:
             response = await client.post(
@@ -346,14 +452,46 @@ class AIProviderService:
             response.raise_for_status()
             data = response.json()
 
-            content = data.get('response', '')
+            # No tools are ever offered on this surface: a tool call in the answer
+            # is a hijacked/misbehaving model and is refused, never ignored.
+            reject_unsolicited_tool_calls(data, provider="ollama", surface="research")
+
+            # Strip exfiltration channels (remote-image beacons, active HTML, mass
+            # mentions, invisible characters) before the text is cached, stored in
+            # memory or posted to chat.
+            content = sanitize_model_output(data.get('response') or '')
             tokens = data.get('eval_count', 0)
+
+            if not content.strip():
+                raise EmptyCompletionError(
+                    f"Ollama returned an empty completion "
+                    f"(model={self.config.OLLAMA_MODEL}, "
+                    f"done_reason={data.get('done_reason')!r}, "
+                    f"thinking_present={bool(data.get('thinking'))})"
+                )
+
+            if json_mode:
+                try:
+                    json.loads(content)
+                except ValueError as exc:
+                    raise InvalidJSONError(
+                        f"Ollama JSON mode returned non-JSON output "
+                        f"(model={self.config.OLLAMA_MODEL}, "
+                        f"done_reason={data.get('done_reason')!r})"
+                    ) from exc
+
+            logger.debug(
+                f"Ollama generate ok: model={self.config.OLLAMA_MODEL}, "
+                f"mode={'json' if json_mode else 'text'}, "
+                f"done_reason={data.get('done_reason')!r}, tokens={tokens}"
+            )
 
             return AIResponse(
                 content=content,
                 model=self.config.OLLAMA_MODEL,
                 tokens_used=tokens,
-                processing_time_ms=0  # Will be set by caller
+                processing_time_ms=0,  # Will be set by caller
+                json_mode=json_mode
             )
 
         except httpx.TimeoutException:
@@ -363,7 +501,10 @@ class AIProviderService:
             logger.error(f"Ollama HTTP error: {e.response.status_code}")
             raise
         except Exception as e:
-            logger.error(f"Ollama generation error: {e}", exc_info=True)
+            logger.error(
+                f"Ollama generation error: {type(e).__name__}: "
+                f"{describe_db_error(e)}"
+            )
             raise
 
     async def _embed_ollama(self, text: str) -> list[float]:
@@ -388,7 +529,7 @@ class AIProviderService:
             return data.get('embedding', [])
 
         except Exception as e:
-            logger.error(f"Ollama embedding error: {e}", exc_info=True)
+            logger.error(f"Ollama embedding error: {describe_db_error(e)}")
             raise
 
     async def _health_check_ollama(self) -> bool:
@@ -405,7 +546,7 @@ class AIProviderService:
             logger.error(f"Cannot connect to Ollama at {self.base_url}")
             return False
         except Exception as e:
-            logger.error(f"Ollama health check failed: {e}")
+            logger.error(f"Ollama health check failed: {describe_db_error(e)}")
             return False
 
     # ========================================================================

@@ -31,6 +31,8 @@ triggers/tables/grants.
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -39,7 +41,8 @@ import sys
 import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +54,29 @@ _STAMP_REVISION = "0019_kick_app"
 
 DOCKER_AVAILABLE = shutil.which("docker") is not None
 
+_SERVICE_ROLES_PATH = REPO_ROOT / "scripts" / "db" / "service_roles.py"
+
+
+def load_service_roles_module():  # type: ignore[no-untyped-def]
+    """Import `scripts/db/service_roles.py` by path (shared with 0055 and run-alembic.sh)."""
+    spec = importlib.util.spec_from_file_location("waddles_service_roles_tests", _SERVICE_ROLES_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def throwaway_service_role_passwords() -> dict[str, str]:
+    """Random per-role passwords for a disposable test database -- never a real credential."""
+    roles = load_service_roles_module()
+    return dict(roles.generate_passwords(roles.load_catalog()))
+
+
+def _default_service_role_passwords_json() -> str:
+    return json.dumps(throwaway_service_role_passwords())
+
+
 _BOOTSTRAP_SQL = """
 CREATE TABLE tenants (
     id SERIAL PRIMARY KEY,
@@ -61,13 +87,93 @@ CREATE TABLE tenants (
 );
 CREATE TABLE communities (
     id SERIAL PRIMARY KEY,
-    name TEXT
+    name TEXT,
+    tenant_id INTEGER,  -- 0045 trigger reads it (legacy NOT NULL column)
+    -- identity_resolution_service's "current member" predicate reads these two
+    -- (config/postgres/migrations/000_create_base_schema.sql)
+    is_active BOOLEAN DEFAULT TRUE,
+    deleted_at TIMESTAMP
 );
 CREATE TABLE hub_users (
+    id SERIAL PRIMARY KEY,
+    -- identity_resolution_service never returns a deactivated (erased) hub user
+    is_active BOOLEAN DEFAULT TRUE,
+    -- a PII column outside 0043's column-scoped reader grant (uuid, id), so
+    -- `SELECT *` as waddles_bundle_reader is still denied (test_0032).
+    username TEXT,
+    -- identity_resolution_service.resolve_display_names reads it (hub profile name)
+    display_name TEXT
+);
+-- 0044_connector_pii_reader_role column-grants on this legacy table
+-- (config/postgres/migrations/000_create_base_schema.sql); only the
+-- columns it grants/joins on.
+CREATE TABLE hub_user_identities (
+    id SERIAL PRIMARY KEY,
+    hub_user_id INTEGER NOT NULL REFERENCES hub_users(id) ON DELETE CASCADE,
+    platform VARCHAR(50) NOT NULL,
+    platform_user_id VARCHAR(255) NOT NULL,
+    platform_username VARCHAR(255)
+);
+-- `stages` (legacy SQL 071): 0047_builtin_handler_paths rewrites the per-stage
+-- `entrypoint` strings inside it, so the bootstrap table needs the column
+-- (same JSONB type/default as 071). Mirrored in pr-validation.yml's bootstrap.
+CREATE TABLE app_catalog (
+    app_id VARCHAR(255) PRIMARY KEY,
+    stages JSONB DEFAULT '{}'::jsonb
+);
+-- 0043_hub_users_identity_uuid creates a view over community_members (a
+-- legacy config/postgres table, same minimal-bootstrap convention): only the
+-- columns the view projects/joins on. 0050_bundle_reputation_store also ALTERs
+-- this table -- is_active/left_at/removed_at are the columns it, its grants
+-- and its tests touch.
+CREATE TABLE community_members (
+    id SERIAL PRIMARY KEY,
+    community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
+    user_id VARCHAR(255),
+    platform VARCHAR(50),
+    platform_user_id VARCHAR(255),
+    display_name VARCHAR(255),
+    -- identity_resolution_service's "current member" predicate (not left, not removed):
+    -- 000_create_base_schema.sql (is_active, left_at) + 0012_schema_drift_columns (removed_at)
+    is_active BOOLEAN DEFAULT TRUE,
+    left_at TIMESTAMP,
+    removed_at TIMESTAMP
+);
+-- 0039_event_sync_enabled is the first Alembic migration to FK into
+-- calendar_events -- a legacy table owned by config/postgres/migrations/
+-- (never Alembic, see this module's own docstring on why the full legacy
+-- baseline isn't replayed here). Same minimal-bootstrap convention as
+-- tenants/communities/hub_users/app_catalog above: only the column(s)
+-- migrations 0020+ actually FK against (just `id`), not the real table's
+-- full column set.
+CREATE TABLE calendar_events (
     id SERIAL PRIMARY KEY
 );
-CREATE TABLE app_catalog (
-    app_id VARCHAR(255) PRIMARY KEY
+-- 0063_seal_aad_version ALTERs this legacy table (config/postgres/migrations/
+-- 030_platform_integrations.sql, never Alembic): same columns as the real DDL minus its
+-- indexes/scope CHECK. Mirrored in pr-validation.yml's bootstrap -- keep both in sync.
+CREATE TABLE platform_integrations (
+    id SERIAL PRIMARY KEY,
+    platform VARCHAR(50) NOT NULL,
+    integration_type VARCHAR(20) NOT NULL,
+    community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES hub_users(id) ON DELETE CASCADE,
+    access_token TEXT,
+    refresh_token TEXT,
+    client_id VARCHAR(255),
+    client_secret TEXT,
+    token_type VARCHAR(50) DEFAULT 'Bearer',
+    expires_at TIMESTAMP WITH TIME ZONE,
+    scopes TEXT[],
+    config_data JSONB,
+    is_active BOOLEAN DEFAULT TRUE,
+    is_encrypted BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    created_by_user_id INTEGER REFERENCES hub_users(id) ON DELETE SET NULL,
+    updated_by_user_id INTEGER REFERENCES hub_users(id) ON DELETE SET NULL,
+    CONSTRAINT platform_integrations_unique_bot
+        UNIQUE (platform, integration_type, community_id, user_id)
 );
 """
 
@@ -81,6 +187,9 @@ class PgTestDatabase:
     user: str
     password: str
     dbname: str
+    #: Per-service LOGIN role passwords this container was migrated with (role -> password),
+    #: so a test can authenticate AS a service role. Empty when the caller never migrated.
+    service_role_passwords: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def dsn(self) -> str:
@@ -129,8 +238,14 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
     """
     container = f"waddles-migtest-{name_suffix}"
     port = _free_port()
+    service_role_passwords = throwaway_service_role_passwords()
     db = PgTestDatabase(
-        host="127.0.0.1", port=port, user="waddlebot", password="testpass123", dbname="waddlebot"
+        host="127.0.0.1",
+        port=port,
+        user="waddlebot",
+        password="testpass123",
+        dbname="waddlebot",
+        service_role_passwords=service_role_passwords,
     )
     subprocess.run(  # noqa: S603 -- fixed argv, no shell
         ["docker", "rm", "-f", container], capture_output=True, check=False
@@ -156,17 +271,33 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
             capture_output=True,
             check=True,
         )
+        # fix/no-empty-kept-secrets -- 0032_bundle_reader_role.py's upgrade() now
+        # refuses an empty DB_READER_PASSWORD (previously silently provisioned
+        # waddles_bundle_reader with no usable password). Most callers of this
+        # harness (every real-Postgres test outside alembic/tests/
+        # test_0032_bundle_reader_role.py itself) don't care about this role at
+        # all, so `setdefault` supplies a throwaway value here -- never a real
+        # credential, this container is destroyed at context-manager exit --
+        # while still letting a caller that DOES care (stages its own value in
+        # `os.environ` beforehand) override it, same as every other env var.
+        migration_env = {**os.environ, "DATABASE_URL": db.dsn}
+        migration_env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
+        # 0055_per_service_db_roles refuses to provision service roles without
+        # credentials (fail loud) -- supply a disposable per-role set.
+        migration_env.setdefault(
+            "WADDLES_DB_SERVICE_ROLE_PASSWORDS", json.dumps(service_role_passwords)
+        )
         subprocess.run(  # noqa: S603 -- fixed argv, no shell
             [sys.executable, "-m", "alembic", "stamp", _STAMP_REVISION],
             cwd=REPO_ROOT,
-            env={**os.environ, "DATABASE_URL": db.dsn},
+            env=migration_env,
             capture_output=True,
             check=True,
         )
         upgrade = subprocess.run(  # noqa: S603 -- fixed argv, no shell
             [sys.executable, "-m", "alembic", "upgrade", "head"],
             cwd=REPO_ROOT,
-            env={**os.environ, "DATABASE_URL": db.dsn},
+            env=migration_env,
             capture_output=True,
             check=False,
         )
@@ -181,12 +312,80 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
         )
 
 
-def alembic_cli(*args: str, dsn: str) -> subprocess.CompletedProcess[str]:
-    """Run one `alembic` subcommand against `dsn`, repo root as cwd. Raises on nonzero exit."""
+@contextmanager
+def empty_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
+    """Start a genuinely empty Postgres 17 container (no bootstrap SQL, no stamp, no
+    migrations) -- used only by `hub_api/tests/test_bootstrap_schema_drift.py` to measure
+    what `hub_api/bootstrap.py`'s `create_all()` path alone produces on a truly fresh
+    database, as opposed to `migrated_postgres()`'s full Alembic-chain result above.
+    """
+    container = f"waddles-migtest-{name_suffix}"
+    port = _free_port()
+    db = PgTestDatabase(
+        host="127.0.0.1", port=port, user="waddlebot", password="testpass123", dbname="waddlebot"
+    )
+    subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        ["docker", "rm", "-f", container], capture_output=True, check=False
+    )
+    subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        [
+            "docker", "run", "-d", "--name", container,
+            "-e", f"POSTGRES_USER={db.user}",
+            "-e", f"POSTGRES_PASSWORD={db.password}",
+            "-e", f"POSTGRES_DB={db.dbname}",
+            "-p", f"{port}:5432",
+            "postgres:17-bookworm",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    try:
+        _wait_ready(container, db.user, db.dbname)
+        yield db
+    finally:
+        subprocess.run(  # noqa: S603 -- fixed argv, no shell
+            ["docker", "rm", "-f", container], capture_output=True, check=False
+        )
+
+
+def bootstrap_minimal_schema(name_suffix: str, db: PgTestDatabase) -> None:
+    """Load the minimal FK bootstrap into an `empty_postgres(name_suffix)` container + stamp.
+
+    Same shape `migrated_postgres` uses (and the CI alembic-migration-chain job): enough
+    legacy tables for migrations 0020+ without replaying the 96-file SQL baseline -- for
+    tests that only need to reach (or fail at) a late revision quickly.
+    """
+    subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        [
+            "docker", "exec", "-i", f"waddles-migtest-{name_suffix}",
+            "psql", "-U", db.user, "-d", db.dbname,
+        ],
+        input=_BOOTSTRAP_SQL,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    alembic_cli("stamp", _STAMP_REVISION, dsn=db.dsn)
+
+
+def alembic_cli(
+    *args: str, dsn: str, env_overrides: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run one `alembic` subcommand against `dsn`, repo root as cwd. Raises on nonzero exit.
+
+    Same `DB_READER_PASSWORD` default as `migrated_postgres` above -- an
+    `upgrade`/`downgrade` round-trip that crosses 0032_bundle_reader_role.py
+    re-runs its (now fail-loud-on-empty) `upgrade()`, and most callers of this
+    helper don't stage their own value. `WADDLES_DB_SERVICE_ROLE_PASSWORDS` (0055)
+    is defaulted the same way; pass `env_overrides` to stage specific values.
+    """
+    env = {**os.environ, "DATABASE_URL": dsn, **(env_overrides or {})}
+    env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
+    env.setdefault("WADDLES_DB_SERVICE_ROLE_PASSWORDS", _default_service_role_passwords_json())
     result = subprocess.run(  # noqa: S603 -- fixed argv, no shell
         [sys.executable, "-m", "alembic", *args],
         cwd=REPO_ROOT,
-        env={**os.environ, "DATABASE_URL": dsn},
+        env=env,
         capture_output=True,
         text=True,
         check=False,

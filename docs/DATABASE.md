@@ -41,6 +41,24 @@ WaddleBot uses a **dual approach** for schema management:
 - **Database**: Uses raw `pg` (node-postgres) client
 - **Initialization**: Inherits schema from SQL migrations; no separate initialization required
 
+#### SQL vs Alembic ownership (existing databases)
+
+The numbered SQL files are replayed **only** by `0001_baseline` on a *fresh* database; once `schema_migrations` has rows the baseline no-ops forever. A SQL file added after a DB was baselined therefore **never reaches an existing DB (alpha, beta, prod) by itself** -- the gap that left 097/099-102 unapplied until `0060` bridged them.
+
+- **Prefer an Alembic revision** for any new schema change: it reaches every database.
+- **If you add a numbered SQL file anyway** (legacy-table changes still do), ship in the same PR an Alembic revision that (1) re-applies the DDL idempotently (`IF NOT EXISTS`, `to_regclass`, a `pg_constraint` probe -- it must be a no-op on a fresh DB, where the baseline already ran the file) and (2) lists the file's version in a module-level `LEGACY_VERSIONS` tuple and inserts it into `schema_migrations(version)` (`ON CONFLICT DO NOTHING`).
+- **Enforced**: `alembic/tests/test_legacy_sql_ownership.py` (no docker) fails for any SQL file numbered 084+ with no bridge. Known follow-ups sit in its `PENDING_PORT` list and must be removed when ported.
+- **Ledger rule**: a DB with a populated `schema_migrations` is a real legacy DB -- a missing pre-097 table raises, ledger rows are written. A DB without one is the minimal CI bootstrap (`alembic/tests/pg_docker.py`): only self-contained DDL applies and no ledger is invented.
+- **Downgrade** of a port removes its ledger rows only; the DDL stays (on a fresh DB it belongs to the baseline replay, and dropping tables would lose data).
+- **Per-service DB roles** (`0055`) skip catalog tables that do not exist yet. After `alembic upgrade head`, the deploy-time `python3 scripts/db/service_roles.py reconcile --strict` grants the tables a port creates (097 `reputation_tenant`, 100 `overlay_view_credentials`, 101 `overlay_images`, 102 `caption_events`) and fails loud if any is still missing.
+- **Overlay credentials write-through**: hub-api's overlay mint/rotate/disable (`hub_api/services/overlay_service.py`) writes `community_overlay_tokens` AND `overlay_view_credentials` (SHA-256 of the key, previous hash + `rotated_at` on rotate) in one transaction, and ensures `communities.overlay_code` (0057) is set -- svc-presentation only validates against `overlay_view_credentials`, so a mint that skips it hands out a dead key.
+
+| SQL files | Alembic bridge |
+|---|---|
+| 084-096 | `0014_wave1a_bundle_seeds` |
+| 097, 099-102 (098: ledger row only -- DDL is `0039_event_sync_enabled`) | `0060_port_legacy_sql_097_102` |
+| 103 `streaming_codec_columns` | `0061_port_legacy_sql_103_codec` (downgrade drops the 5 columns + ledger row) |
+
 ### Initialization Flow
 
 ```

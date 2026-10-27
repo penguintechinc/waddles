@@ -120,11 +120,12 @@ class ContentFilter:
             self.dal.commit()
 
             self.logger.audit(
-                "Blocked words added",
-                community_id=community_id,
-                words_count=len(words),
                 action="add_blocked_words",
-                result="SUCCESS"
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Blocked words added",
+                words_count=len(words)
             )
 
             return {
@@ -159,11 +160,12 @@ class ContentFilter:
             self.dal.commit()
 
             self.logger.audit(
-                "Blocked words removed",
-                community_id=community_id,
-                words_count=len(words),
                 action="remove_blocked_words",
-                result="SUCCESS"
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Blocked words removed",
+                words_count=len(words)
             )
 
             return {

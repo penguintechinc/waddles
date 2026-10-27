@@ -53,18 +53,38 @@ check() {
     fi
 }
 
-# wit_world/imports/db.py -- waddle_sdk/db.py's _to_wit_value/_from_wit_value
+# wit_world/imports/db.py -- waddle_sdk/db.py's structured insert/get/query/
+# update/delete ops (the earlier raw-SQL execute()/Rows shape is retired --
+# see db.py's own module docstring).
 check "wit_world/imports/db.py" "class Value_NullValue:" "db.Value_NullValue"
 check "wit_world/imports/db.py" "class Value_BoolValue:" "db.Value_BoolValue"
 check "wit_world/imports/db.py" "class Value_IntValue:" "db.Value_IntValue"
 check "wit_world/imports/db.py" "class Value_FloatValue:" "db.Value_FloatValue"
 check "wit_world/imports/db.py" "class Value_TextValue:" "db.Value_TextValue"
 check "wit_world/imports/db.py" "class Value_BytesValue:" "db.Value_BytesValue"
-check "wit_world/imports/db.py" "class Rows:" "db.Rows"
-check "wit_world/imports/db.py" "columns: List[str]" "db.Rows.columns"
-check "wit_world/imports/db.py" "rows: List[List[Value]]" "db.Rows.rows"
-check "wit_world/imports/db.py" "rows_affected: int" "db.Rows.rows_affected"
-check "wit_world/imports/db.py" "def execute(statement: str, params: List[Value]) -> Rows:" "db.execute signature"
+check "wit_world/imports/db.py" "class ColumnValue:" "db.ColumnValue"
+check "wit_world/imports/db.py" "    column: str" "db.ColumnValue.column"
+check "wit_world/imports/db.py" "    value: Value" "db.ColumnValue.value"
+check "wit_world/imports/db.py" "class OrderColumn:" "db.OrderColumn"
+check "wit_world/imports/db.py" "class OrderBy_Column:" "db.OrderBy_Column"
+check "wit_world/imports/db.py" "class OrderBy_Random:" "db.OrderBy_Random"
+check "wit_world/imports/db.py" "class Row:" "db.Row"
+check "wit_world/imports/db.py" "    row_id: str" "db.Row.row_id"
+check "wit_world/imports/db.py" "    version: int" "db.Row.version"
+check "wit_world/imports/db.py" "    columns: List[ColumnValue]" "db.Row.columns"
+check "wit_world/imports/db.py" "class Error_Denied:" "db.Error_Denied"
+check "wit_world/imports/db.py" "class Error_InvalidColumn:" "db.Error_InvalidColumn"
+check "wit_world/imports/db.py" "class Error_InvalidValue:" "db.Error_InvalidValue"
+check "wit_world/imports/db.py" "class Error_NotFound:" "db.Error_NotFound"
+check "wit_world/imports/db.py" "class Error_Conflict:" "db.Error_Conflict"
+check "wit_world/imports/db.py" "class Error_QuotaExceeded:" "db.Error_QuotaExceeded"
+check "wit_world/imports/db.py" "class Error_Timeout:" "db.Error_Timeout"
+check "wit_world/imports/db.py" "class Error_Backend:" "db.Error_Backend"
+check "wit_world/imports/db.py" "def insert(column_values: List[ColumnValue]) -> Row:" "db.insert signature"
+check "wit_world/imports/db.py" "def get(row_id: str) -> Row:" "db.get signature"
+check "wit_world/imports/db.py" "def query(limit: int, offset: int, order_by: Optional[OrderBy]) -> List[Row]:" "db.query signature"
+check "wit_world/imports/db.py" "def update(row_id: str, expected_version: int, column_values: List[ColumnValue]) -> Row:" "db.update signature"
+check "wit_world/imports/db.py" "def delete(row_id: str, expected_version: int) -> None:" "db.delete signature"
 
 # wit_world/imports/http.py -- waddle_sdk/http.py's Request/Response/error classification
 check "wit_world/imports/http.py" "class Request:" "http.Request"
@@ -120,6 +140,72 @@ check "wit_world/exports/__init__.py" "class ProcessStage(Protocol):" "exports.P
 check "wit_world/exports/__init__.py" "class ActionStage(Protocol):" "exports.ActionStage class"
 check "wit_world/exports/__init__.py" "def transform(self, event: types.PlatformEvent) -> Optional[types.PlatformEvent]:" "exports.transform signature"
 check "wit_world/exports/__init__.py" "def dispatch(self, envelope: types.StageEnvelope, config: str) -> types.TransportResult:" "exports.dispatch signature"
+
+# ---- world stage-next: waddle_sdk/reputation.py (issue #726) ----
+# `reputation` exists ONLY in `world stage-next`, so it is generated and
+# checked from a second, separate bindings run. Every assertion below was
+# confirmed against a real `componentize-py==0.25.1 -w stage-next bindings`
+# run, not guessed.
+NEXT_OUT_DIR="$(mktemp -d)"
+trap 'rm -rf "${OUT_DIR}" "${NEXT_OUT_DIR}"' EXIT
+echo "Generating stage-next bindings from ${WIT_DIR}/stage.wit into ${NEXT_OUT_DIR} ..."
+componentize-py -d "${WIT_DIR}" -w stage-next bindings "${NEXT_OUT_DIR}"
+OUT_DIR="${NEXT_OUT_DIR}"
+
+check "wit_world/imports/reputation.py" "class Error_Denied:" "reputation.Error_Denied"
+check "wit_world/imports/reputation.py" "class Error_NotAMember:" "reputation.Error_NotAMember"
+check "wit_world/imports/reputation.py" "class Error_DailyCapExceeded:" "reputation.Error_DailyCapExceeded"
+check "wit_world/imports/reputation.py" "class Error_Invalid:" "reputation.Error_Invalid"
+check "wit_world/imports/reputation.py" "class Error_Unavailable:" "reputation.Error_Unavailable"
+check "wit_world/imports/reputation.py" "class Error_Backend:" "reputation.Error_Backend"
+check "wit_world/imports/reputation.py" "def get(user: str) -> int:" "reputation.get signature"
+check "wit_world/imports/reputation.py" "def adjust(user: str, delta: int, reason: str) -> int:" "reputation.adjust signature"
+
+# ---- world stage-next: waddle_sdk/economy.py (issue #714) ----
+# Same second bindings run as reputation above; every assertion confirmed
+# against a real `componentize-py==0.25.1 -w stage-next bindings` run.
+check "wit_world/imports/economy.py" "class Error_Denied:" "economy.Error_Denied"
+check "wit_world/imports/economy.py" "class Error_InsufficientFunds:" "economy.Error_InsufficientFunds"
+check "wit_world/imports/economy.py" "class Error_OverCap:" "economy.Error_OverCap"
+check "wit_world/imports/economy.py" "class Error_NotAMember:" "economy.Error_NotAMember"
+check "wit_world/imports/economy.py" "class Error_Invalid:" "economy.Error_Invalid"
+check "wit_world/imports/economy.py" "class Error_Unavailable:" "economy.Error_Unavailable"
+check "wit_world/imports/economy.py" "class Error_Backend:" "economy.Error_Backend"
+check "wit_world/imports/economy.py" "class Entry:" "economy.Entry record"
+check "wit_world/imports/economy.py" "def balance(user: str) -> int:" "economy.balance signature"
+check "wit_world/imports/economy.py" "def wager(user: str, stake: int, payout: int) -> int:" "economy.wager signature"
+check "wit_world/imports/economy.py" "def transfer(from_user: str, to_user: str, amount: int) -> None:" "economy.transfer signature"
+check "wit_world/imports/economy.py" "def max_bet(user: str) -> int:" "economy.max_bet signature"
+check "wit_world/imports/economy.py" "def leaderboard(limit: int) -> List[Entry]:" "economy.leaderboard signature"
+
+# ---- world stage-next: waddle_sdk/identity.py (actor/mention -> user_uuid) ----
+# Same second bindings run as reputation/economy above; every assertion
+# confirmed against a real `componentize-py==0.25.1 -w stage-next bindings` run.
+check "wit_world/imports/identity.py" "class Error_Denied:" "identity.Error_Denied"
+check "wit_world/imports/identity.py" "class Error_NotLinked:" "identity.Error_NotLinked"
+check "wit_world/imports/identity.py" "class Error_NotAMember:" "identity.Error_NotAMember"
+check "wit_world/imports/identity.py" "class Error_NotFound:" "identity.Error_NotFound"
+check "wit_world/imports/identity.py" "class Error_Ambiguous:" "identity.Error_Ambiguous"
+check "wit_world/imports/identity.py" "class Error_Invalid:" "identity.Error_Invalid"
+check "wit_world/imports/identity.py" "class Error_Unavailable:" "identity.Error_Unavailable"
+check "wit_world/imports/identity.py" "class Error_Backend:" "identity.Error_Backend"
+check "wit_world/imports/identity.py" "def resolve_actor() -> str:" "identity.resolve_actor signature"
+check "wit_world/imports/identity.py" "def resolve_mention(token: str) -> str:" "identity.resolve_mention signature"
+
+# ---- world stage-next: waddle_sdk/ai.py (ai.generate) ----
+# Same second bindings run as reputation/economy/identity above; every assertion
+# confirmed against a real `componentize-py==0.25.1 -w stage-next bindings` run.
+check "wit_world/imports/ai.py" "class Error_Denied:" "ai.Error_Denied"
+check "wit_world/imports/ai.py" "class Error_TooManyTokens:" "ai.Error_TooManyTokens"
+check "wit_world/imports/ai.py" "class Error_ContentFiltered:" "ai.Error_ContentFiltered"
+check "wit_world/imports/ai.py" "class Error_Invalid:" "ai.Error_Invalid"
+check "wit_world/imports/ai.py" "class Error_Unavailable:" "ai.Error_Unavailable"
+check "wit_world/imports/ai.py" "class Error_Backend:" "ai.Error_Backend"
+check "wit_world/imports/ai.py" "class Options:" "ai.Options record"
+check "wit_world/imports/ai.py" "    max_tokens: Optional[int]" "ai.Options.max_tokens"
+check "wit_world/imports/ai.py" "    temperature: Optional[float]" "ai.Options.temperature"
+check "wit_world/imports/ai.py" "    json: bool" "ai.Options.json"
+check "wit_world/imports/ai.py" "def generate(prompt: str, opts: Options) -> str:" "ai.generate signature"
 
 echo ""
 echo "Checked ${CHECKS} binding-shape assertions against componentize-py's real generated output."

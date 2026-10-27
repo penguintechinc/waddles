@@ -38,7 +38,7 @@ class Config:
     # WaddleAI (local AI fallback)
     WADDLEAI_BASE_URL = os.getenv('WADDLEAI_BASE_URL', 'http://ollama:11434')
     WADDLEAI_API_KEY = os.getenv('WADDLEAI_API_KEY', '')
-    WADDLEAI_MODEL = os.getenv('WADDLEAI_MODEL', 'qwen2.5:1.5b')
+    WADDLEAI_MODEL = os.getenv('WADDLEAI_MODEL', 'gemma4:e2b')
     WADDLEAI_TEMPERATURE = float(os.getenv('WADDLEAI_TEMPERATURE', '0.1'))
     WADDLEAI_MAX_TOKENS = int(os.getenv('WADDLEAI_MAX_TOKENS', '500'))
     WADDLEAI_TIMEOUT = int(os.getenv('WADDLEAI_TIMEOUT', '30'))

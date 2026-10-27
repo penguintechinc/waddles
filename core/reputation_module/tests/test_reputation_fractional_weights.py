@@ -1,7 +1,8 @@
 """Regression coverage: gh-310 -- reputation accrual invisible on INTEGER score columns.
 
-`community_members.reputation` and `reputation_global.score` are `INTEGER`
-columns (`config/postgres/migrations/080_add_reputation_tables.sql`).
+`community_members.reputation` and `reputation_tenant.score` are `INTEGER`
+columns (`config/postgres/migrations/080_add_reputation_tables.sql` /
+`097_reputation_tenant_scope.sql`).
 `WeightManager`'s defaults were ``chat_message = 0.01`` /
 ``command_usage = -0.1`` (`services/weight_manager.py`), and
 `ReputationService._clamp_score()` re-rounded the already-STORED integer on
@@ -50,10 +51,18 @@ class _InMemoryReputationDal:
 
     Unlike `tests/test_reputation_service_audit.py`'s `_FakeReputationDal`
     (every SELECT empty, every write a no-op -- fine for a single-call
-    signature check), this one keeps `community_members` / `reputation_global`
+    signature check), this one keeps `community_members` / `reputation_tenant`
     state between repeated `adjust()` calls in the same test -- gh-310's bug
     only shows up across REPEATED events, never within a single call.
+
+    Every `community_id` maps to a single fixed fake tenant (`_FAKE_TENANT_ID`)
+    -- this suite is about weight-accrual arithmetic, not tenant isolation
+    (see `test_reputation_tables.py::
+    test_tenant_reputation_never_leaks_across_tenants` for that), so a
+    fixed 1:1 community->tenant mapping is sufficient here.
     """
+
+    _FAKE_TENANT_ID = 1
 
     def __init__(
         self,
@@ -61,7 +70,7 @@ class _InMemoryReputationDal:
     ) -> None:
         self._community_config = community_config
         self._members: dict[tuple[int, str, str], dict[str, Any]] = {}
-        self._global: dict[int, dict[str, Any]] = {}
+        self._tenant: dict[tuple[int, int], dict[str, Any]] = {}
         self.reputation_events: list[dict[str, Any]] = []
 
     def executesql(self, sql: str, params: list[Any] | None = None) -> list[Any]:
@@ -70,6 +79,9 @@ class _InMemoryReputationDal:
 
         if "FROM community_reputation_config" in sql:
             return [self._community_config] if self._community_config else []
+
+        if stripped.startswith("SELECT tenant_id FROM communities"):
+            return [(self._FAKE_TENANT_ID,)]
 
         if "SELECT cm.id, cm.reputation, cm.user_id" in sql:
             community_id, platform, platform_user_id = params
@@ -107,20 +119,21 @@ class _InMemoryReputationDal:
             })
             return []
 
-        if "SELECT score FROM reputation_global" in sql:
-            row = self._global.get(params[0])
+        if stripped.startswith("SELECT score FROM reputation_tenant"):
+            tenant_id, hub_user_id = params
+            row = self._tenant.get((tenant_id, hub_user_id))
             return [(row["score"],)] if row else []
 
-        if stripped.startswith("UPDATE reputation_global"):
-            score, hub_user_id = params
-            entry = self._global[hub_user_id]
+        if stripped.startswith("UPDATE reputation_tenant"):
+            score, tenant_id, hub_user_id = params
+            entry = self._tenant[(tenant_id, hub_user_id)]
             entry["score"] = score
             entry["total_events"] += 1
             return []
 
-        if stripped.startswith("INSERT INTO reputation_global"):
-            hub_user_id, score = params[0], params[1]
-            self._global[hub_user_id] = {"score": score, "total_events": 1}
+        if stripped.startswith("INSERT INTO reputation_tenant"):
+            tenant_id, hub_user_id, score = params[0], params[1], params[2]
+            self._tenant[(tenant_id, hub_user_id)] = {"score": score, "total_events": 1}
             return []
 
         raise AssertionError(f"unexpected SQL in fake DAL: {sql!r}")
@@ -131,8 +144,8 @@ class _InMemoryReputationDal:
     def member_reputation(self, community_id: int, platform: str, platform_user_id: str) -> int:
         return int(self._members[(community_id, platform, platform_user_id)]["reputation"])
 
-    def global_score(self, hub_user_id: int) -> int:
-        return int(self._global[hub_user_id]["score"])
+    def tenant_score(self, hub_user_id: int) -> int:
+        return int(self._tenant[(self._FAKE_TENANT_ID, hub_user_id)]["score"])
 
 
 async def _seed_member(
@@ -180,7 +193,7 @@ class TestChatMessageAccrualRegression:
             assert result.success, result.error
 
         assert dal.member_reputation(community_id, platform, platform_user_id) == 700
-        assert dal.global_score(hub_user_id) == Config.REPUTATION_DEFAULT + 100
+        assert dal.tenant_score(hub_user_id) == Config.REPUTATION_DEFAULT + 100
 
     async def test_single_chat_message_moves_both_scopes_by_one(self) -> None:
         dal = _InMemoryReputationDal()
@@ -204,7 +217,7 @@ class TestChatMessageAccrualRegression:
         assert result.score_before == 600
         assert result.score_after == 601
         assert dal.member_reputation(community_id, platform, platform_user_id) == 601
-        assert dal.global_score(hub_user_id) == Config.REPUTATION_DEFAULT + 1
+        assert dal.tenant_score(hub_user_id) == Config.REPUTATION_DEFAULT + 1
 
 
 class TestFractionalOverrideTruncationRule:
@@ -253,7 +266,7 @@ class TestFractionalOverrideTruncationRule:
             assert result.score_after == expected
 
         assert dal.member_reputation(community_id, platform, platform_user_id) == 603
-        assert dal.global_score(hub_user_id) == Config.REPUTATION_DEFAULT + 3
+        assert dal.tenant_score(hub_user_id) == Config.REPUTATION_DEFAULT + 3
 
     async def test_sub_half_magnitude_override_never_moves_score(self) -> None:
         dal = _InMemoryReputationDal(community_config=self._premium_config_row(0.3))
@@ -278,7 +291,7 @@ class TestFractionalOverrideTruncationRule:
             assert result.score_after == 600
 
         assert dal.member_reputation(community_id, platform, platform_user_id) == 600
-        assert dal.global_score(hub_user_id) == Config.REPUTATION_DEFAULT
+        assert dal.tenant_score(hub_user_id) == Config.REPUTATION_DEFAULT
 
 
 class TestModerationWeightAndClampBounds:
@@ -305,7 +318,7 @@ class TestModerationWeightAndClampBounds:
         assert result.score_before == 600
         assert result.score_after == 575
         assert dal.member_reputation(community_id, platform, platform_user_id) == 575
-        assert dal.global_score(hub_user_id) == Config.REPUTATION_DEFAULT - 25
+        assert dal.tenant_score(hub_user_id) == Config.REPUTATION_DEFAULT - 25
 
     async def test_repeated_bans_clamp_to_min_score(self) -> None:
         dal = _InMemoryReputationDal()
@@ -329,7 +342,7 @@ class TestModerationWeightAndClampBounds:
         assert result.score_after == Config.REPUTATION_MIN
         member_score = dal.member_reputation(community_id, platform, platform_user_id)
         assert member_score == Config.REPUTATION_MIN
-        assert dal.global_score(hub_user_id) == Config.REPUTATION_MIN
+        assert dal.tenant_score(hub_user_id) == Config.REPUTATION_MIN
 
     async def test_repeated_subscriptions_clamp_to_max_score(self) -> None:
         dal = _InMemoryReputationDal()
@@ -353,7 +366,7 @@ class TestModerationWeightAndClampBounds:
         assert result.score_after == Config.REPUTATION_MAX
         member_score = dal.member_reputation(community_id, platform, platform_user_id)
         assert member_score == Config.REPUTATION_MAX
-        assert dal.global_score(hub_user_id) == Config.REPUTATION_MAX
+        assert dal.tenant_score(hub_user_id) == Config.REPUTATION_MAX
 
 
 class TestRoundHalfAwayFromZero:

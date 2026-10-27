@@ -19,16 +19,19 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: marketplace
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
-      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own /ready.
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: marketplace
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "marketplace" "imageTag" .Values.modules.marketplace.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -47,6 +50,10 @@ spec:
             name: {{ include "waddlebot.fullname" . }}-marketplace-secret
             optional: true
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_legacy_marketplace;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_legacy_marketplace") | nindent 8 }}
         - name: MODULE_NAME
           value: "marketplace"
         - name: MODULE_PORT
@@ -100,4 +107,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: marketplace
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "marketplace" "ports" (list 8100) "runtime" "node" "egress" "https") }}
 {{- end }}

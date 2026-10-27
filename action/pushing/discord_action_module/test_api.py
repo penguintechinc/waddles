@@ -23,7 +23,7 @@ def generate_token(base_url: str, secret_key: str, client_id: str = "test_client
 
 def test_health(base_url: str):
     """Test health endpoint"""
-    print(f"\n=== Testing Health Check ===")
+    print("\n=== Testing Health Check ===")
     response = requests.get(f"{base_url}/health")
     print(f"Status: {response.status_code}")
     print(f"Response: {json.dumps(response.json(), indent=2)}")
@@ -32,7 +32,7 @@ def test_health(base_url: str):
 
 def test_send_message(base_url: str, token: str, channel_id: str):
     """Test send message endpoint"""
-    print(f"\n=== Testing Send Message ===")
+    print("\n=== Testing Send Message ===")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     data = {
         "channel_id": channel_id,
@@ -46,7 +46,7 @@ def test_send_message(base_url: str, token: str, channel_id: str):
 
 def test_send_embed(base_url: str, token: str, channel_id: str):
     """Test send embed endpoint"""
-    print(f"\n=== Testing Send Embed ===")
+    print("\n=== Testing Send Embed ===")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     data = {
         "channel_id": channel_id,
@@ -68,7 +68,7 @@ def test_send_embed(base_url: str, token: str, channel_id: str):
 
 def test_add_reaction(base_url: str, token: str, channel_id: str, message_id: str):
     """Test add reaction endpoint"""
-    print(f"\n=== Testing Add Reaction ===")
+    print("\n=== Testing Add Reaction ===")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     data = {"channel_id": channel_id, "message_id": message_id, "emoji": "👍"}
     response = requests.post(f"{base_url}/api/v1/reaction", headers=headers, json=data)
@@ -79,7 +79,7 @@ def test_add_reaction(base_url: str, token: str, channel_id: str, message_id: st
 
 def test_manage_role(base_url: str, token: str, guild_id: str, user_id: str, role_id: str):
     """Test manage role endpoint"""
-    print(f"\n=== Testing Manage Role ===")
+    print("\n=== Testing Manage Role ===")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     data = {
         "guild_id": guild_id,
@@ -142,7 +142,7 @@ def main():
         return
 
     # Generate JWT token
-    print(f"\n=== Generating JWT Token ===")
+    print("\n=== Generating JWT Token ===")
     token = generate_token(args.base_url, args.secret_key)
     print(f"Token generated: {token[:50]}...")
 

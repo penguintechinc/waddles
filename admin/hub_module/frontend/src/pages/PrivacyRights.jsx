@@ -169,9 +169,11 @@ export default function PrivacyRights() {
         <section className="mt-6 rounded-lg border border-red-800 bg-slate-800 p-5">
           <h2 className="text-xl font-semibold text-red-400">Delete my data</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Removes your profile, activity and sessions. Your linked platform identities and
-            reputation history are kept so an account cannot be abandoned and re-created to
-            escape it — this is described in the privacy policy.
+            Permanently removes your profile, activity, sessions, community memberships, linked
+            platform accounts and reputation. The one exception: if you are under an active ban
+            in a community, a one-way coded record of that ban (never your platform ID) is kept
+            until it expires or a moderator lifts it, so the ban cannot be evaded. You can object
+            to this — see the privacy policy.
           </p>
 
           {!confirmingDelete ? (

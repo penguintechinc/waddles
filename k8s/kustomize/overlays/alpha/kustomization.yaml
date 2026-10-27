@@ -96,9 +96,9 @@ images:
   - name: infra-redis
     newName: redis
     newTag: 7-bookworm@sha256:33d7c9a245edd95e6703a0addbeaa48fe40c3b3b4783627a72085155462ebfdb
-  - name: infra-minio
-    newName: minio/minio
-    newTag: latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+  - name: infra-seaweedfs
+    newName: chrislusf/seaweedfs
+    newTag: "4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d"
   - name: infra-qdrant
     newName: qdrant/qdrant
     newTag: latest@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c

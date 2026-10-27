@@ -7,6 +7,8 @@ on:
       - 'core/svc_ingest/**'
       - '.github/workflows/rust-svc-ingest.yml'
       - '.github/workflows/rust-crate-ci.yml'
+      - 'hub_api/tests/live/**'
+      - 'scripts/ci/twitch-sessions-live.sh'
   pull_request:
     branches: [main, 'release/**']
     paths:
@@ -16,6 +18,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint-test:
     name: fmt + clippy + deny + coverage
@@ -23,3 +29,50 @@ jobs:
     with:
       crate_name: svc-ingest
       working_directory: core/svc_ingest
+      # The lease + real-socket + live-hub tests fail loudly without a real Valkey.
+      valkey: true
+
+  # Per-community Twitch sessions against a REAL hub-api + Postgres + Valkey + IRC test server
+  # (scripts/ci/twitch-sessions-live.sh -- fails on zero tests run / zero telemetry).
+  twitch-live:
+    name: twitch sessions live e2e (real hub-api)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install hub-api + flask_core deps (hash-verified)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/hub-venv"
+          "$RUNNER_TEMP/hub-venv/bin/pip" install --require-hashes -r hub_api/requirements-dev.txt
+          "$RUNNER_TEMP/hub-venv/bin/pip" install --require-hashes -r libs/flask_core/requirements.txt
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
+        with:
+          toolchain: "1.97.1"
+
+      - name: Install build deps (C toolchain, cmake, protoc)
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo -E apt-get -y -o Dpkg::Use-Pty=0 update
+          sudo -E apt-get -y -o Dpkg::Use-Pty=0 install --no-install-recommends build-essential cmake protobuf-compiler
+
+      - name: Live e2e (starts its own Valkey + Postgres containers)
+        env:
+          HUB_PYTHON: ${{ runner.temp }}/hub-venv/bin/python
+        run: |
+          set -euo pipefail
+          helm version --short
+          make test-svc-ingest-twitch-live

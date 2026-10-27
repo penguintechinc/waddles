@@ -3,7 +3,7 @@ name = "waddle-sdk-rs"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "MIT"
 publish = false
 description = "Tier-1 Rust SDK for Waddles app bundles -- idiomatic bindings over the normative waddle:bundle/stage@1.0.0 WIT world (wit/waddle-bundle/stage.wit). Thinner than waddle-sdk (Python): no penguin-dal facade, no compatibility obligation to a prior API -- see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md SS4.12/SS6.5."
 

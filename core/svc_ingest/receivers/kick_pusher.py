@@ -55,7 +55,7 @@ receiver normalizes -- `Subscription`/`GiftedSubscription`/`UserBanned`/
 `MessageDeleted` etc., which the legacy `chat_client.py` also bound
 handlers for, are out of scope for a chat-message receiver; Kick's own
 sub/mod/stream lifecycle events arrive over a separate webhook path --
-see `bundles/kick_ingest.py`'s own module docstring for the verification
+see `builtin_handlers/kick_ingest.py`'s own module docstring for the verification
 helper + handler function this repo's HTTP surface can mount).
 """
 
@@ -78,10 +78,12 @@ from waddle_transports import (
 from waddle_transports.url_guard import SSRFError, guarded_request, is_private_host
 from websockets.exceptions import ConnectionClosed, InvalidURI, WebSocketException
 
+from receivers.badge_flags import strict_flag
+
 logger = logging.getLogger(__name__)
 
 #: The `consumes` tag every ingest bundle wanting a raw Kick chat message
-#: declares (`bundles/kick_gateway_manifest.py`'s own `stages.ingest.
+#: declares (`builtin_handlers/kick_gateway_manifest.py`'s own `stages.ingest.
 #: consumes`) -- this receiver's half of that contract.
 CONSUMES_TAG = "kick.message"
 
@@ -202,7 +204,7 @@ class KickPusherReceiver(Transport):  # type: ignore[misc]
         client" testing convention for this same underlying library).
 
         Real transform (not a stub) of each `App\\Events\\ChatMessageEvent`
-        frame into the raw event dict `bundles/kick_ingest.py::normalize()`
+        frame into the raw event dict `builtin_handlers/kick_ingest.py::normalize()`
         consumes -- field names here are this receiver's own contract with
         that entrypoint, matching `receivers/twitch_irc.py`'s own
         precedent (no repo-wide "raw platform event" schema exists yet).
@@ -371,9 +373,16 @@ class KickPusherReceiver(Transport):  # type: ignore[misc]
             "author_id": str(sender_id) if has_sender_id else None,
             "display_name": sender.get("username") or None,
             "badges": badges,
-            "is_mod": bool(sender.get("is_moderator")) or "moderator" in badges,
-            "is_subscriber": bool(sender.get("is_subscriber")) or "subscriber" in badges,
-            "is_owner": bool(sender.get("is_channel_owner")) or "broadcaster" in badges,
+            "is_mod": strict_flag(sender.get("is_moderator"), field="is_moderator", platform="kick")
+            or "moderator" in badges,
+            "is_subscriber": strict_flag(
+                sender.get("is_subscriber"), field="is_subscriber", platform="kick"
+            )
+            or "subscriber" in badges,
+            "is_owner": strict_flag(
+                sender.get("is_channel_owner"), field="is_channel_owner", platform="kick"
+            )
+            or "broadcaster" in badges,
             "message_id": data.get("id") or None,
             "created_at": data.get("created_at") or None,
         }

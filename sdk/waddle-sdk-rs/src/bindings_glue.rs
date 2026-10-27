@@ -41,7 +41,7 @@ use self::waddle::bundle::relay as wit_relay;
 use self::waddle::bundle::types as wit_types;
 
 use crate::context::BundleContext;
-use crate::db::{Rows, Value as DbValue};
+use crate::db::{ColumnValue, OrderBy, OrderColumn, Row, Value as DbValue};
 use crate::error::{DbError, HttpError, KvError, RelayError, SdkError};
 use crate::http::{Header, Request, Response};
 use crate::log::Level;
@@ -135,19 +135,76 @@ fn convert_kv_error(err: wit_kv::Error) -> KvError {
 
 // -- db -------------------------------------------------------------------
 
-pub(crate) fn db_execute(statement: &str, params: &[DbValue]) -> Result<Rows, SdkError> {
-    let wit_params: Vec<wit_db::Value> = params.iter().map(value_to_wit).collect();
-    wit_db::execute(statement, &wit_params)
-        .map(|rows| Rows {
-            columns: rows.columns,
-            rows: rows
-                .rows
-                .into_iter()
-                .map(|row| row.into_iter().map(value_from_wit).collect())
-                .collect(),
-            rows_affected: rows.rows_affected,
-        })
+pub(crate) fn db_insert(column_values: Vec<ColumnValue>) -> Result<Row, SdkError> {
+    let wit_column_values: Vec<wit_db::ColumnValue> =
+        column_values.iter().map(column_value_to_wit).collect();
+    wit_db::insert(&wit_column_values)
+        .map(row_from_wit)
         .map_err(|err| SdkError::Db(convert_db_error(err)))
+}
+
+pub(crate) fn db_get(row_id: &str) -> Result<Row, SdkError> {
+    wit_db::get(row_id)
+        .map(row_from_wit)
+        .map_err(|err| SdkError::Db(convert_db_error(err)))
+}
+
+pub(crate) fn db_query(
+    limit: u32,
+    offset: u32,
+    order_by: Option<OrderBy>,
+) -> Result<Vec<Row>, SdkError> {
+    let wit_order_by = order_by.map(order_by_to_wit);
+    wit_db::query(limit, offset, wit_order_by.as_ref())
+        .map(|rows| rows.into_iter().map(row_from_wit).collect())
+        .map_err(|err| SdkError::Db(convert_db_error(err)))
+}
+
+pub(crate) fn db_update(
+    row_id: &str,
+    expected_version: u64,
+    column_values: Vec<ColumnValue>,
+) -> Result<Row, SdkError> {
+    let wit_column_values: Vec<wit_db::ColumnValue> =
+        column_values.iter().map(column_value_to_wit).collect();
+    wit_db::update(row_id, expected_version, &wit_column_values)
+        .map(row_from_wit)
+        .map_err(|err| SdkError::Db(convert_db_error(err)))
+}
+
+pub(crate) fn db_delete(row_id: &str, expected_version: u64) -> Result<(), SdkError> {
+    wit_db::delete(row_id, expected_version).map_err(|err| SdkError::Db(convert_db_error(err)))
+}
+
+fn column_value_to_wit(cv: &ColumnValue) -> wit_db::ColumnValue {
+    wit_db::ColumnValue {
+        column: cv.column.clone(),
+        value: value_to_wit(&cv.value),
+    }
+}
+
+fn row_from_wit(row: wit_db::Row) -> Row {
+    Row {
+        row_id: row.row_id,
+        version: row.version,
+        columns: row
+            .columns
+            .into_iter()
+            .map(|cv| ColumnValue {
+                column: cv.column,
+                value: value_from_wit(cv.value),
+            })
+            .collect(),
+    }
+}
+
+fn order_by_to_wit(order_by: OrderBy) -> wit_db::OrderBy {
+    match order_by {
+        OrderBy::Random => wit_db::OrderBy::Random,
+        OrderBy::Column(OrderColumn { name, descending }) => {
+            wit_db::OrderBy::Column(wit_db::OrderColumn { name, descending })
+        }
+    }
 }
 
 fn value_to_wit(v: &DbValue) -> wit_db::Value {
@@ -175,8 +232,11 @@ fn value_from_wit(v: wit_db::Value) -> DbValue {
 fn convert_db_error(err: wit_db::Error) -> DbError {
     match err {
         wit_db::Error::Denied(s) => DbError::Denied(s),
-        wit_db::Error::Syntax(s) => DbError::Syntax(s),
+        wit_db::Error::InvalidColumn(s) => DbError::InvalidColumn(s),
+        wit_db::Error::InvalidValue(s) => DbError::InvalidValue(s),
+        wit_db::Error::NotFound => DbError::NotFound,
         wit_db::Error::Conflict(s) => DbError::Conflict(s),
+        wit_db::Error::QuotaExceeded(s) => DbError::QuotaExceeded(s),
         wit_db::Error::Timeout => DbError::Timeout,
         wit_db::Error::Backend(s) => DbError::Backend(s),
     }

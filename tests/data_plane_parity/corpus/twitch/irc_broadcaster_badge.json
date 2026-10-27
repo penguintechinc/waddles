@@ -1,0 +1,41 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "frame": "@badges=broadcaster/1;display-name=SomeChannel;user-id=111;room-id=111;mod=0;subscriber=1 :somechannel!somechannel@somechannel.tmi.twitch.tv PRIVMSG #somechannel :stream starting",
+  "golden": {
+    "platform": "twitch",
+    "event_type": "message",
+    "actor": "somechannel",
+    "payload": {
+      "text": "stream starting",
+      "channel_name": "somechannel",
+      "author": "somechannel",
+      "author_id": "111",
+      "user_id": "111",
+      "display_name": "SomeChannel",
+      "message_id": null,
+      "room_id": "111",
+      "badges": [
+        "broadcaster"
+      ],
+      "is_mod": false,
+      "is_subscriber": true,
+      "is_vip": false,
+      "is_broadcaster": true
+    },
+    "source": {
+      "platform": "twitch",
+      "account_id": "somechannel",
+      "channel_id": "somechannel"
+    }
+  },
+  "golden_origin": "rust",
+  "id": "twitch/irc_broadcaster_badge",
+  "outcome": "event",
+  "path": "twitch_irc",
+  "pii_classifier": "pass",
+  "platform": "twitch",
+  "python_divergences": [],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_receivers_twitch_irc.py"
+}

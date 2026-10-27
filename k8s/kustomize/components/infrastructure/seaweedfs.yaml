@@ -1,0 +1,153 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: infra-seaweedfs-pvc
+  labels:
+    app: infra-seaweedfs
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infra-seaweedfs
+  labels:
+    app: infra-seaweedfs
+    app.kubernetes.io/component: storage
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: infra-seaweedfs
+  template:
+    metadata:
+      labels:
+        app: infra-seaweedfs
+        app.kubernetes.io/component: storage
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      # chrislusf/seaweedfs (Apache-2.0) -- mirrors k8s/helm/waddlebot's
+      # infrastructure.seaweedfs image/command (S3 gateway replaces MinIO).
+      - name: seaweedfs
+        image: docker.io/chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          mkdir -p /etc/seaweedfs
+          cat > /etc/seaweedfs/s3-identities.json <<EOF
+          {
+            "identities": [
+              {
+                "name": "waddlebot",
+                "credentials": [
+                  {"accessKey": "${S3_ACCESS_KEY_ID}", "secretKey": "${S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": ["Read", "Write", "List", "Tagging", "Admin"]
+              }
+            ]
+          }
+          EOF
+          exec weed server \
+            -dir=/data \
+            -s3 \
+            -s3.port=8333 \
+            -s3.config=/etc/seaweedfs/s3-identities.json \
+            -master.port=9333 \
+            -volume.port=8080 \
+            -filer=true \
+            -filer.port=8888 \
+            -ip=0.0.0.0
+        env:
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: S3_ACCESS_KEY_ID
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: S3_SECRET_ACCESS_KEY
+        ports:
+        - name: s3
+          containerPort: 8333
+          protocol: TCP
+        - name: master
+          containerPort: 9333
+          protocol: TCP
+        livenessProbe:
+          tcpSocket:
+            port: s3
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 20
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: s3
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 20
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        volumeMounts:
+        - name: seaweedfs-storage
+          mountPath: /data
+        - name: seaweedfs-etc
+          mountPath: /etc/seaweedfs
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: seaweedfs-storage
+        persistentVolumeClaim:
+          claimName: infra-seaweedfs-pvc
+      - name: seaweedfs-etc
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: infra-seaweedfs
+  labels:
+    app: infra-seaweedfs
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8333
+    targetPort: s3
+    protocol: TCP
+    name: s3
+  - port: 9333
+    targetPort: master
+    protocol: TCP
+    name: master
+  selector:
+    app: infra-seaweedfs

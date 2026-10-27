@@ -28,7 +28,10 @@ from tests.conftest import TENANT_SLUG, make_token
 
 @pytest.fixture
 def reputation_db(tmp_path: Any) -> Any:
-    """`(async_dal, community_id)` -- file-backed `AsyncDAL` with auth + reputation_global bound."""
+    """`(async_dal, community_id, tenant_id)`.
+
+    File-backed `AsyncDAL` with auth + `reputation_tenant` bound.
+    """
     async_dal = AsyncDAL(f"sqlite://{tmp_path / 'reputation_bp_test.db'}", pool_size=1)
     dal = async_dal.dal
     dal.define_table(
@@ -50,13 +53,13 @@ def reputation_db(tmp_path: Any) -> Any:
     dal.commit()
     for table_name in dal.tables:
         dal(dal[table_name]).count()
-    yield async_dal, community_id
+    yield async_dal, community_id, tenant_id
     dal.close()
 
 
 @pytest.fixture
 def app(reputation_db: Any) -> Quart:
-    async_dal, _community_id = reputation_db
+    async_dal, _community_id, _tenant_id = reputation_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(reputation_bp)
@@ -94,19 +97,21 @@ def _seed_member(
     dal.commit()
 
 
-def _seed_global(dal: Any, *, hub_user_id: int, score: int) -> None:
-    dal.reputation_global.insert(hub_user_id=hub_user_id, score=score, total_events=3)
+def _seed_tenant(dal: Any, *, tenant_id: int, hub_user_id: int, score: int) -> None:
+    dal.reputation_tenant.insert(
+        tenant_id=tenant_id, hub_user_id=hub_user_id, score=score, total_events=3
+    )
     dal.commit()
 
 
 class TestAuthAndTenant:
     async def test_no_token_is_401(self, client: Any, reputation_db: Any) -> None:
-        _, community_id = reputation_db
+        _, community_id, _tenant_id = reputation_db
         response = await client.get(f"/api/v1/community/{community_id}/reputation/me")
         assert response.status_code == 401
 
     async def test_wrong_scope_is_403(self, client: Any, reputation_db: Any) -> None:
-        _, community_id = reputation_db
+        _, community_id, _tenant_id = reputation_db
         response = await client.get(
             f"/api/v1/community/{community_id}/reputation/me",
             headers=_headers(scope="community.loyalty:read"),
@@ -126,7 +131,7 @@ class TestAuthAndTenant:
     async def test_feature_disabled_is_402(
         self, client: Any, reputation_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _, community_id = reputation_db
+        _, community_id, _tenant_id = reputation_db
         monkeypatch.setattr(reputation_module, "feature_enabled", AsyncMock(return_value=False))
         response = await client.get(
             f"/api/v1/community/{community_id}/reputation/me", headers=_headers()
@@ -138,7 +143,7 @@ class TestGetMyReputation:
     async def test_shape_and_defaults_when_new_member(
         self, client: Any, reputation_db: Any
     ) -> None:
-        _, community_id = reputation_db
+        _, community_id, _tenant_id = reputation_db
         response = await client.get(
             f"/api/v1/community/{community_id}/reputation/me", headers=_headers()
         )
@@ -150,19 +155,19 @@ class TestGetMyReputation:
         assert data == {
             "community_score": 600,
             "community_tier": "Trusted",
-            "global_score": 600,
-            "global_tier": "Trusted",
+            "tenant_score": 600,
+            "tenant_tier": "Trusted",
             "total_events": 0,
             "last_event_at": None,
         }
 
     async def test_reflects_seeded_scores_and_tiers(self, client: Any, reputation_db: Any) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, tenant_id = reputation_db
         dal = async_dal.dal
         _seed_member(
             dal, community_id=community_id, hub_user_id=7, display_name="alice", reputation=850
         )
-        _seed_global(dal, hub_user_id=7, score=300)
+        _seed_tenant(dal, tenant_id=tenant_id, hub_user_id=7, score=300)
 
         response = await client.get(
             f"/api/v1/community/{community_id}/reputation/me", headers=_headers(user_id="7")
@@ -171,13 +176,35 @@ class TestGetMyReputation:
         data = body["data"]
         assert data["community_score"] == 850
         assert data["community_tier"] == "Legend"
-        assert data["global_score"] == 300
-        assert data["global_tier"] == "Newcomer"
+        assert data["tenant_score"] == 300
+        assert data["tenant_tier"] == "Newcomer"
+
+    async def test_tenant_score_never_leaks_from_another_tenant(
+        self, client: Any, reputation_db: Any
+    ) -> None:
+        """A `reputation_tenant` row seeded under a DIFFERENT tenant_id must never surface here."""
+        async_dal, community_id, _tenant_id = reputation_db
+        dal = async_dal.dal
+        other_tenant_id = dal.tenants.insert(
+            slug="other-tenant-v1", display_name="Other Tenant", is_active=True
+        )
+        dal.commit()
+        _seed_tenant(dal, tenant_id=other_tenant_id, hub_user_id=7, score=850)
+
+        response = await client.get(
+            f"/api/v1/community/{community_id}/reputation/me", headers=_headers(user_id="7")
+        )
+        body = await response.get_json()
+        data = body["data"]
+        # Caller's own tenant (seeded by the `reputation_db` fixture) has no
+        # row for hub_user_id=7 -- baseline, not the other tenant's 850.
+        assert data["tenant_score"] == 600
+        assert data["tenant_tier"] == "Trusted"
 
 
 class TestGetLeaderboard:
     async def test_empty_leaderboard(self, client: Any, reputation_db: Any) -> None:
-        _, community_id = reputation_db
+        _, community_id, _tenant_id = reputation_db
         response = await client.get(
             f"/api/v1/community/{community_id}/reputation/leaderboard", headers=_headers()
         )
@@ -186,7 +213,7 @@ class TestGetLeaderboard:
         assert body["data"]["entries"] == []
 
     async def test_orders_and_shapes_entries(self, client: Any, reputation_db: Any) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         dal = async_dal.dal
         _seed_member(
             dal, community_id=community_id, hub_user_id=1, display_name="low", reputation=400
@@ -205,7 +232,7 @@ class TestGetLeaderboard:
         assert set(entries[0].keys()) == {"display_name", "score", "tier"}
 
     async def test_limit_query_param_respected(self, client: Any, reputation_db: Any) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         dal = async_dal.dal
         for i in range(3):
             _seed_member(

@@ -102,7 +102,21 @@ async def sync_bindings(
         the caller passes this to `provision_source_stream_groups()`
         AFTER the transaction commits.
     """
-    platforms = sorted({rule.platform for rule in manifest.consumes})
+    consumed = sorted({rule.platform for rule in manifest.consumes})
+    platforms = [p for p in consumed if manifest.supports_platform(p)]
+    # Issue #685 fail-loud gate: never grant a bundle a source stream on a
+    # platform it does not support -- no grant, no events. PII-free log.
+    for skipped in sorted(set(consumed) - set(platforms)):
+        logger.warning(
+            "app source binding: platform not in supported_platforms, skipping",
+            extra={
+                "app_id": app_id,
+                "tenant_id": tenant_id,
+                "community_id": community_id,
+                "platform": skipped,
+                "op": "sync_bindings",
+            },
+        )
     active_community_id = TENANT_WIDE_COMMUNITY_SENTINEL if community_id is None else community_id
 
     await conn.execute(

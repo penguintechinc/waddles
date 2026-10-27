@@ -322,22 +322,27 @@ class TestRefresh:
         assert response.status_code == 400
 
     async def test_refresh_valid_session_returns_new_token(self, client: Any, auth_db: Any) -> None:
-        user_id = _seed_user(auth_db)
-        token = make_user_token(user_id=user_id, tenant=TENANT_SLUG)
-        auth_db.dal.hub_sessions.insert(
-            session_token=token,
-            user_id=user_id,
-            is_active=True,
-            expires_at=datetime.now(UTC) + timedelta(hours=1),
-            created_at=datetime.now(UTC),
+        """The refresh cookie `login` set rides in the client's jar; no Authorization header."""
+        _seed_user(auth_db, email="rita@example.com", password="correcthorse")
+        login = await client.post(
+            "/api/v1/auth/login", json={"email": "rita@example.com", "password": "correcthorse"}
         )
-        auth_db.dal.commit()
-        response = await client.post(
-            "/api/v1/auth/refresh", headers={"Authorization": f"Bearer {token}"}
-        )
+        token = (await login.get_json())["token"]
+        response = await client.post("/api/v1/auth/refresh")
         assert response.status_code == 200
         body = await response.get_json()
         assert body["token"] and body["token"] != token
+
+    async def test_an_access_token_is_not_a_refresh_credential(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        """The old contract refreshed from the (long-lived) access token; that door is closed."""
+        user_id = _seed_user(auth_db)
+        token = make_user_token(user_id=user_id, tenant=TENANT_SLUG)
+        response = await client.post(
+            "/api/v1/auth/refresh", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert response.status_code == 400  # no refresh cookie -> "Refresh token required"
 
 
 class TestSessionCookie:
@@ -352,11 +357,11 @@ class TestSessionCookie:
     """
 
     @staticmethod
-    def _cookie_attrs(response: Any) -> str:
+    def _cookie_attrs(response: Any, name: str = "wb_session") -> str:
         for raw in response.headers.getlist("Set-Cookie"):
-            if raw.startswith("wb_session="):
+            if raw.startswith(f"{name}="):
                 return raw
-        raise AssertionError("wb_session cookie not set")
+        raise AssertionError(f"{name} cookie not set")
 
     async def test_login_sets_httponly_secure_samesite_lax_cookie(
         self, client: Any, auth_db: Any
@@ -378,25 +383,20 @@ class TestSessionCookie:
         # field is kept rather than ripped out of the wire contract).
         assert body["token"] in cookie
 
-    async def test_refresh_rotates_the_cookie(self, client: Any, auth_db: Any) -> None:
-        user_id = _seed_user(auth_db)
-        token = make_user_token(user_id=user_id, tenant=TENANT_SLUG)
-        auth_db.dal.hub_sessions.insert(
-            session_token=token,
-            user_id=user_id,
-            is_active=True,
-            expires_at=datetime.now(UTC) + timedelta(hours=1),
-            created_at=datetime.now(UTC),
+    async def test_refresh_rotates_both_cookies(self, client: Any, auth_db: Any) -> None:
+        _seed_user(auth_db, email="ria@example.com", password="correcthorse")
+        login = await client.post(
+            "/api/v1/auth/login", json={"email": "ria@example.com", "password": "correcthorse"}
         )
-        auth_db.dal.commit()
-        response = await client.post(
-            "/api/v1/auth/refresh", headers={"Authorization": f"Bearer {token}"}
-        )
+        old_access = (await login.get_json())["token"]
+        old_refresh = self._cookie_attrs(login, "wb_refresh")
+        response = await client.post("/api/v1/auth/refresh")
         assert response.status_code == 200
         body = await response.get_json()
         cookie = self._cookie_attrs(response)
         assert body["token"] in cookie
-        assert token not in cookie
+        assert old_access not in cookie
+        assert self._cookie_attrs(response, "wb_refresh") != old_refresh
 
     async def test_logout_clears_the_cookie(self, client: Any) -> None:
         response = await client.post("/api/v1/auth/logout")

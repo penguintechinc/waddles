@@ -57,6 +57,64 @@ pub async fn healthz() -> &'static str {
     "ok"
 }
 
+/// Per-receiver readiness status reported on `/readyz`.
+#[derive(Debug, Serialize)]
+pub struct ReceiverReadinessStatus {
+    pub name: &'static str,
+    pub enabled: bool,
+    pub ready: bool,
+}
+
+/// `GET /readyz` response body.
+#[derive(Debug, Serialize)]
+pub struct ReadyBody {
+    pub status: &'static str,
+    pub receivers: Vec<ReceiverReadinessStatus>,
+}
+
+/// `GET /readyz` -- real Kubernetes readiness: `503` while any *enabled*
+/// receiver (one that passed its own config checks and started attempting a
+/// spine connect, `crate::lib::try_start_twitch_irc`/`try_start_discord`/
+/// `try_start_twitch_outbound`) has not yet connected. Closes the "pod
+/// stayed Running 1/1 forever with the Discord/Twitch receivers permanently
+/// disabled" gap -- regression: one-shot valkey probe disabled discord
+/// receiver (alpha 2026-10-02). Unlike `/healthz` (always `ok`, the cheap
+/// liveness target), this is the endpoint the Kubernetes readinessProbe
+/// must point at.
+pub async fn readyz(State(state): State<AppState>) -> (axum::http::StatusCode, Json<ReadyBody>) {
+    let r = &state.receiver_readiness;
+    let receivers = vec![
+        ReceiverReadinessStatus {
+            name: "twitch_irc",
+            enabled: r.twitch_irc.is_enabled(),
+            ready: r.twitch_irc.is_ready(),
+        },
+        ReceiverReadinessStatus {
+            name: "discord_gateway",
+            enabled: r.discord.is_enabled(),
+            ready: r.discord.is_ready(),
+        },
+        ReceiverReadinessStatus {
+            name: "twitch_outbound",
+            enabled: r.twitch_outbound.is_enabled(),
+            ready: r.twitch_outbound.is_ready(),
+        },
+    ];
+    let ok = r.all_ready();
+    let code = if ok {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(ReadyBody {
+            status: if ok { "ok" } else { "degraded" },
+            receivers,
+        }),
+    )
+}
+
 /// `GET /metrics` (secondary router, `METRICS_PORT`) -- Prometheus text
 /// exposition. A registry gather/encode failure returns 500 rather than
 /// panicking; a scrape failure must never crash the process.
@@ -89,6 +147,43 @@ mod tests {
     #[tokio::test]
     async fn healthz_returns_bare_ok() {
         assert_eq!(healthz().await, "ok");
+    }
+
+    // regression: one-shot valkey probe disabled discord receiver (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readyz_is_ready_when_no_receiver_is_enabled() {
+        let (code, Json(body)) = readyz(State(test_state())).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert_eq!(body.status, "ok");
+        assert!(body.receivers.iter().all(|r| !r.enabled));
+    }
+
+    // regression: one-shot valkey probe disabled discord receiver (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readyz_is_not_ready_when_an_enabled_receiver_has_not_connected() {
+        let state = test_state();
+        state.receiver_readiness.discord.mark_enabled();
+        let (code, Json(body)) = readyz(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "degraded");
+        let discord = body
+            .receivers
+            .iter()
+            .find(|r| r.name == "discord_gateway")
+            .unwrap();
+        assert!(discord.enabled);
+        assert!(!discord.ready);
+    }
+
+    // regression: one-shot valkey probe disabled discord receiver (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readyz_is_ready_once_the_enabled_receiver_connects() {
+        let state = test_state();
+        state.receiver_readiness.discord.mark_enabled();
+        state.receiver_readiness.discord.set_ready(true);
+        let (code, Json(body)) = readyz(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert_eq!(body.status, "ok");
     }
 
     #[tokio::test]

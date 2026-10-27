@@ -19,78 +19,363 @@
 //!   `crate::invoke::UnimplementedBucketSource` this production path used
 //!   before this pass -- that stub now backs only the tests exercising its
 //!   own fail-closed behavior; see `crate::bucket`'s doc for why not
-//!   `object_store`).
+//!   `object_store`); the sidecar's Ed25519 signature verification against
+//!   `BUNDLE_SIGNING_PUBLIC_KEYS` (`crate::signing`, spec SS5.6/Gemini
+//!   review condition 9) -- `BucketComponentSource` now fetches the
+//!   sidecar alongside the component, and `Executor::on_load` refuses to
+//!   instantiate a component whose sidecar signature doesn't verify.
 //! - **Scaffolded with a `TODO`**: precompiled `.cwasm`
 //!   caching under `EXECUTOR_PRECOMPILE_DIR` (every `load` JIT-compiles
 //!   fresh); the mTLS peer-identity (SPIFFE ID / pinned CN) check on top
-//!   of the base rustls handshake in `crate::tls`; the sidecar's Ed25519
-//!   signature verification (spec SS7.6 step 4), which
-//!   `BucketComponentSource` does not itself fetch or check.
+//!   of the base rustls handshake in `crate::tls`.
 
 pub mod bucket;
 pub mod config;
+pub mod connector;
+pub mod connector_wire;
 pub mod engine;
 pub mod error;
+pub mod heartbeat;
 pub mod host;
 pub mod invoke;
+pub mod manifest;
+pub mod metrics;
+pub mod probe;
+pub mod signing;
+pub mod telemetry;
 pub mod tls;
 pub mod wire;
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::bucket::BucketComponentSource;
 use crate::config::CliConfig;
 use crate::error::ExecutorError;
-use crate::invoke::{ComponentSource, Executor};
+use crate::heartbeat::{Heartbeat, HeartbeatConfig, HeartbeatMetrics};
+use crate::invoke::{ComponentSource, DrainOutcome, Executor};
 
 /// `tracing`/OTel service name (spec SS12.7's `OTEL_SERVICE_NAME`
 /// fallback).
 pub const SERVICE_NAME: &str = "bundle-executor";
 
-/// Runs the executor: loads config, bootstraps telemetry, then dials the
-/// stage and services connections until the process is asked to stop.
-/// Reconnects with exponential backoff on any connection failure (spec
-/// SS4.5) rather than exiting -- a stage restart or network blip is not
-/// fatal.
-pub async fn run() -> Result<(), ExecutorError> {
-    let cfg = <CliConfig as clap::Parser>::parse();
-    cfg.validate()?;
-    cfg.validate_host_api_tls()?;
+/// SIGTERM/SIGINT listeners, installed eagerly (at startup, before the first
+/// dial) so a signal arriving at any point -- including mid-handshake -- is
+/// observed instead of killing the process via the default disposition.
+/// Install failure is fatal at startup (fail loud), never a silent "no
+/// graceful shutdown" fallback.
+struct ShutdownSignals {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
 
-    init_telemetry();
+impl ShutdownSignals {
+    /// Registers the SIGTERM (Kubernetes rollout/eviction) and SIGINT
+    /// (local ^C) handlers.
+    fn install() -> Result<Self, ExecutorError> {
+        use tokio::signal::unix::{signal, SignalKind};
+        let io_err = |name: &str, e: std::io::Error| {
+            ExecutorError::Config(format!("failed to install {name} handler: {e}"))
+        };
+        Ok(Self {
+            term: signal(SignalKind::terminate()).map_err(|e| io_err("SIGTERM", e))?,
+            int: signal(SignalKind::interrupt()).map_err(|e| io_err("SIGINT", e))?,
+        })
+    }
 
-    let source = BucketComponentSource::from_cli(&cfg)?;
-    let executor = Arc::new(Executor::new(&cfg, source)?);
-
-    let mut backoff = std::time::Duration::from_secs(1);
-    let backoff_cap = std::time::Duration::from_secs(30);
-    loop {
-        match connect_and_serve(&cfg, &executor).await {
-            Ok(()) => {
-                info!("host-api connection closed cleanly, reconnecting");
-                backoff = std::time::Duration::from_secs(1);
-            }
-            Err(e) => {
-                warn!(error = %e, backoff_s = backoff.as_secs(), "host-api connection failed, retrying");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(backoff_cap);
-            }
+    /// Resolves with the name of the first signal received.
+    async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.term.recv() => "SIGTERM",
+            _ = self.int.recv() => "SIGINT",
         }
     }
 }
 
+/// Runs `serve` (the never-ending dial/reconnect loop) until `shutdown`
+/// resolves, then drains `executor` for up to `drain_deadline` and returns.
+/// `serve` keeps being polled DURING the drain on purpose: in-flight
+/// invokes make host calls whose replies are delivered by the connection's
+/// read loop, so dropping it first would deadlock exactly the work being
+/// drained. If `serve` ends on its own first, returns immediately.
+async fn serve_until_shutdown<S, Sv, Sd>(
+    serve: Sv,
+    shutdown: Sd,
+    executor: &Executor<S>,
+    drain_deadline: Duration,
+) -> DrainOutcome
+where
+    S: ComponentSource,
+    Sv: Future<Output = ()>,
+    Sd: Future<Output = &'static str>,
+{
+    tokio::pin!(serve);
+    let signal = tokio::select! {
+        _ = &mut serve => return DrainOutcome::Drained,
+        signal = shutdown => signal,
+    };
+    info!(
+        signal,
+        drain_deadline_s = drain_deadline.as_secs(),
+        "shutdown requested; refusing new work and draining in-flight invokes"
+    );
+    let outcome = tokio::select! {
+        _ = &mut serve => DrainOutcome::Drained,
+        outcome = executor.drain(drain_deadline) => outcome,
+    };
+    match outcome {
+        DrainOutcome::Drained => info!("drain complete; exiting"),
+        DrainOutcome::TimedOut {
+            in_flight_calls,
+            in_flight_compiles,
+        } => warn!(
+            in_flight_calls,
+            in_flight_compiles, "drain deadline reached with work still in flight; exiting anyway"
+        ),
+    }
+    outcome
+}
+
+/// A tiny, dependency-free xorshift64* PRNG for jittering `crate::run`'s
+/// host-api reconnect backoff -- regression: readiness gated on executor
+/// connection deadlocked rollouts (alpha 2026-10-02): without jitter,
+/// every executor replica that lost its connection when a svc pod was
+/// replaced reconnects on the exact same exponential schedule, producing a
+/// thundering herd against the replacement pod the instant it comes up.
+/// Cryptographic randomness is not required -- jitter only needs to avoid
+/// a thundering herd, not resist an adversary -- so this mirrors
+/// `core/svc_action/src/retry.rs::Jitter` (same rationale: avoid adding a
+/// `rand` dependency to a crate that otherwise pins tightly) rather than
+/// pulling in a new crate.
+struct Jitter(std::sync::atomic::AtomicU64);
+
+impl Jitter {
+    /// Seeds from a mix of wall-clock nanos and this process's PID. Never
+    /// zero (xorshift's one fixed point) -- falls back to a fixed odd
+    /// constant if the clock read is exactly zero.
+    fn from_entropy() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let seed = nanos ^ (u64::from(std::process::id()) << 32) ^ 0x9E37_79B9_7F4A_7C15;
+        Self(std::sync::atomic::AtomicU64::new(if seed == 0 {
+            0xDEAD_BEEF_CAFE_F00D
+        } else {
+            seed
+        }))
+    }
+
+    /// Deterministic constructor for tests.
+    #[cfg(test)]
+    fn seeded(seed: u64) -> Self {
+        Self(std::sync::atomic::AtomicU64::new(if seed == 0 {
+            1
+        } else {
+            seed
+        }))
+    }
+
+    fn next_u64(&self) -> u64 {
+        let mut x = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0.store(x, std::sync::atomic::Ordering::Relaxed);
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// Pseudo-random value in `0..=max` inclusive (`max = 0` always `0`).
+    fn uniform(&self, max: u64) -> u64 {
+        if max == 0 {
+            0
+        } else {
+            self.next_u64() % (max + 1)
+        }
+    }
+}
+
+/// Half-jitter applied to the reconnect backoff: `base/2 +
+/// uniform(0..=base/2)`. Keeps the exponential schedule's growth shape
+/// (so the backoff still ramps up on repeated failures) while randomizing
+/// enough across concurrently-reconnecting executor replicas to break a
+/// thundering herd.
+fn jittered_backoff(jitter: &Jitter, base: std::time::Duration) -> std::time::Duration {
+    let half_ms = u64::try_from(base.as_millis()).unwrap_or(u64::MAX) / 2;
+    std::time::Duration::from_millis(half_ms + jitter.uniform(half_ms))
+}
+
+/// Runs the executor: loads config, bootstraps telemetry, then dials the
+/// stage and services connections until the process is asked to stop.
+/// Reconnects with jittered exponential backoff (see [`jittered_backoff`])
+/// on any connection failure (spec SS4.5) rather than exiting -- a stage
+/// restart or network blip is not fatal.
+pub async fn run() -> Result<(), ExecutorError> {
+    let cfg = <CliConfig as clap::Parser>::parse();
+    cfg.validate()?;
+    // Fails closed at startup if no platform signing key is configured --
+    // spec SS5.6 has no supported "verification off" mode in production;
+    // `Executor::new`'s own (lenient) derivation from the same field is
+    // only ever reached with an empty key set in a test that never called
+    // this function. See `crate::signing::PlatformPublicKeys::from_cli_required`.
+    crate::signing::PlatformPublicKeys::from_cli_required(&cfg)?;
+    cfg.validate_host_api_tls()?;
+
+    init_telemetry();
+    // Metrics pipeline (OTLP export only when `OTEL_EXPORTER_OTLP_ENDPOINT` is
+    // set -- see `crate::telemetry`). Held for the life of `run` so the final
+    // export interval is flushed on an orderly stop, and built strictly
+    // BEFORE the first `executor_metrics()` call so the instruments bind to
+    // the provider it installs rather than the no-op default.
+    let _metrics_guard = telemetry::init_metrics(SERVICE_NAME);
+    let _ = metrics::executor_metrics();
+
+    // Marks "the long-running process started trying to connect now" --
+    // `crate::probe::check_session`'s startup-grace window is measured
+    // from this, not from the probe file itself (which doesn't exist
+    // until the first successful connection).
+    if let Err(e) = probe::record_start(&cfg.executor_probe_file) {
+        warn!(error = %e, probe_file = ?cfg.executor_probe_file, "failed to record liveness probe start marker");
+    }
+
+    let mut signals = ShutdownSignals::install()?;
+    let source = BucketComponentSource::from_cli(&cfg)?;
+    let executor = Arc::new(Executor::new(&cfg, source)?);
+    let heartbeat_cfg = HeartbeatConfig::from_cli(&cfg);
+    let heartbeat_metrics = Arc::new(HeartbeatMetrics::default());
+    info!(
+        heartbeat_interval_secs = heartbeat_cfg.interval.as_secs(),
+        self_ping_enabled = heartbeat_cfg.self_ping_enabled,
+        heartbeat_enabled = heartbeat_cfg.enabled,
+        "host-api session liveness configured"
+    );
+
+    let serve = async {
+        let mut backoff = std::time::Duration::from_secs(1);
+        let backoff_cap = std::time::Duration::from_secs(30);
+        let mut attempt: u32 = 0;
+        let mut disconnected_at: Option<Instant> = None;
+        let jitter = Jitter::from_entropy();
+        loop {
+            attempt += 1;
+            match connect_and_serve(
+                &cfg,
+                &executor,
+                attempt,
+                heartbeat_cfg,
+                Arc::clone(&heartbeat_metrics),
+                disconnected_at,
+            )
+            .await
+            {
+                Ok(()) => {
+                    info!(attempt, "host-api connection closed cleanly, reconnecting");
+                    backoff = std::time::Duration::from_secs(1);
+                }
+                Err(e) => {
+                    let sleep_for = jittered_backoff(&jitter, backoff);
+                    error!(
+                        error = %e,
+                        attempt,
+                        backoff_s = backoff.as_secs(),
+                        sleep_s = sleep_for.as_secs_f64(),
+                        "host-api connection failed, retrying"
+                    );
+                    tokio::time::sleep(sleep_for).await;
+                    backoff = (backoff * 2).min(backoff_cap);
+                }
+            }
+            disconnected_at = Some(Instant::now());
+            heartbeat_metrics.record_reconnect();
+        }
+    };
+    serve_until_shutdown(
+        serve,
+        signals.recv(),
+        &executor,
+        Duration::from_secs(cfg.executor_shutdown_drain_secs),
+    )
+    .await;
+    Ok(())
+}
+
+/// Dials the stage and runs one connection to completion (spec SS4.5).
+/// `attempt` is this process's monotonically increasing connection-attempt
+/// counter (1 on the very first dial, logged alongside the peer address so
+/// an operator can tell "first connect" from "the Nth reconnect" at a
+/// glance). `disconnected_at`, when set, is when the PREVIOUS connection
+/// ended -- used only to log how long the host-api link was down once this
+/// one's handshake completes (`crate::heartbeat::Heartbeat::on_connected`).
 async fn connect_and_serve<S: ComponentSource>(
     cfg: &CliConfig,
     executor: &Arc<Executor<S>>,
+    attempt: u32,
+    heartbeat_cfg: HeartbeatConfig,
+    heartbeat_metrics: Arc<HeartbeatMetrics>,
+    disconnected_at: Option<Instant>,
 ) -> Result<(), ExecutorError> {
-    let io = tls::dial_stage(cfg).await?;
+    let metrics = metrics::executor_metrics();
+    let io = match tls::dial_stage(cfg).await {
+        Ok(io) => io,
+        Err(err) => {
+            metrics.record_connection_attempt("failed");
+            return Err(err);
+        }
+    };
+    let peer = io
+        .get_ref()
+        .0
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| cfg.stage_host_api_addr.clone());
+    info!(peer = %peer, attempt, "host-api connecting");
+
     let hello = executor.hello(
         cfg.sandbox_gvisor,
         if cfg.sandbox_gvisor { "gvisor" } else { "runc" },
     );
-    wire::run_connection(io, hello, Arc::clone(executor)).await
+    let probe_file = cfg.executor_probe_file.clone();
+    let on_connected_peer = peer.clone();
+    // Set once, when the hello/hello-ok handshake completes: distinguishes a
+    // session that was established (and has a length) from a dial that never
+    // got that far (a failed attempt).
+    let connected_at: Arc<std::sync::OnceLock<Instant>> = Arc::new(std::sync::OnceLock::new());
+    let on_connected_metrics = Arc::clone(&metrics);
+    let on_connected_at = Arc::clone(&connected_at);
+    let heartbeat = Heartbeat {
+        cfg: heartbeat_cfg,
+        metrics: heartbeat_metrics,
+        probe_file: probe_file.clone(),
+        probe_grace: std::time::Duration::from_secs(cfg.executor_grace_secs),
+        on_connected: Some(Box::new(move || {
+            on_connected_metrics.record_connection_attempt("connected");
+            on_connected_metrics.set_connection_up(true);
+            let _ = on_connected_at.set(Instant::now());
+            if let Some(since) = disconnected_at {
+                on_connected_metrics.record_outage(since.elapsed());
+                info!(
+                    peer = %on_connected_peer,
+                    attempt,
+                    outage_ms = since.elapsed().as_millis() as u64,
+                    "host-api reconnected"
+                );
+            }
+            if let Err(e) = probe::touch(&probe_file) {
+                warn!(error = %e, probe_file = ?probe_file, "failed to refresh liveness probe file on connect");
+            }
+        })),
+    };
+    let outcome = wire::run_connection(io, hello, Arc::clone(executor), &peer, heartbeat).await;
+    metrics.set_connection_up(false);
+    match connected_at.get() {
+        Some(connected) => metrics.record_session(connected.elapsed()),
+        // The dial succeeded but the handshake never completed.
+        None => metrics.record_connection_attempt("failed"),
+    }
+    outcome
 }
 
 /// Installs this binary's `tracing` subscriber: JSON to stdout, level
@@ -151,6 +436,34 @@ pub async fn run_healthcheck() -> Result<(), ExecutorError> {
     Ok(())
 }
 
+/// `--healthcheck=session [--max-age <secs>]`: checks `crate::probe`'s
+/// on-disk liveness file rather than building a wasmtime engine. This is
+/// the check that actually proves the long-running process's host-API
+/// session is alive (`run_healthcheck` above only proves the engine/linker
+/// still build -- it says nothing about whether `crate::run`'s dial loop
+/// is stuck on a half-open connection, the exact incident this subcommand
+/// exists to catch). Reads `EXECUTOR_PROBE_FILE`/`EXECUTOR_GRACE_SECONDS`
+/// directly from the environment rather than the full `CliConfig::parse`
+/// every other entry point uses: this is invoked as a brand new, short-
+/// lived process by Kubernetes' exec probe, sharing nothing with the
+/// long-running process but the filesystem and environment, and should not
+/// need `STAGE_HOST_API_ADDR`/mTLS material to be set just to check a
+/// file.
+pub async fn run_session_healthcheck(
+    max_age: Option<std::time::Duration>,
+) -> Result<(), ExecutorError> {
+    let probe_file = std::env::var("EXECUTOR_PROBE_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(probe::DEFAULT_PROBE_FILE_PATH));
+    let grace_secs = std::env::var("EXECUTOR_GRACE_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(probe::DEFAULT_GRACE_SECS);
+    let grace = std::time::Duration::from_secs(grace_secs);
+    let max_age = max_age.unwrap_or(grace);
+    probe::check_session(&probe_file, max_age, grace).map_err(ExecutorError::Config)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -162,6 +475,104 @@ mod tests {
         run_healthcheck().await
     }
 
+    /// SIGTERM is actually observed (not the default kill): sends a real
+    /// SIGTERM to this test process and expects `ShutdownSignals::recv` to
+    /// resolve -- the process surviving at all proves the handler replaced
+    /// the default disposition.
+    #[tokio::test]
+    async fn a_real_sigterm_resolves_the_shutdown_signal() {
+        let mut signals = ShutdownSignals::install().expect("install handlers");
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .expect("spawn kill");
+        assert!(status.success(), "kill -TERM failed: {status:?}");
+        let got = tokio::time::timeout(Duration::from_secs(5), signals.recv())
+            .await
+            .expect("SIGTERM must be delivered to the handler");
+        assert_eq!(got, "SIGTERM");
+    }
+
+    fn shutdown_test_executor() -> Executor<UnimplementedBucketSource> {
+        let mut cfg = CliConfig::for_healthcheck();
+        cfg.executor_max_concurrent_calls = 2;
+        Executor::new(&cfg, UnimplementedBucketSource).expect("executor")
+    }
+
+    /// SIGTERM triggers a graceful drain: after the signal, the loop waits
+    /// for the in-flight call to finish, and returns `Drained` (so `run`
+    /// returns `Ok` and the process exits 0) only once it has.
+    #[tokio::test]
+    async fn shutdown_signal_drains_in_flight_calls_before_returning() {
+        let executor = shutdown_test_executor();
+        let in_flight = executor.test_hold_call_slot();
+        let serve = std::future::pending::<()>();
+        let shutdown = async { "SIGTERM" };
+
+        let mut outcome = Box::pin(serve_until_shutdown(
+            serve,
+            shutdown,
+            &executor,
+            Duration::from_secs(10),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut outcome)
+                .await
+                .is_err(),
+            "must keep waiting while a call is still in flight"
+        );
+        drop(in_flight);
+        assert_eq!(outcome.await, DrainOutcome::Drained);
+    }
+
+    /// A stuck guest cannot block a rollout: past the drain deadline the
+    /// loop returns anyway, reporting what was abandoned.
+    #[tokio::test]
+    async fn shutdown_signal_gives_up_at_the_drain_deadline() {
+        let executor = shutdown_test_executor();
+        let _stuck = executor.test_hold_call_slot();
+        let outcome = serve_until_shutdown(
+            std::future::pending::<()>(),
+            async { "SIGTERM" },
+            &executor,
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            DrainOutcome::TimedOut {
+                in_flight_calls: 1,
+                in_flight_compiles: 0
+            }
+        );
+    }
+
+    /// The serve loop keeps running (so in-flight host-call replies still
+    /// get delivered) until the signal arrives.
+    #[tokio::test]
+    async fn serve_keeps_running_until_the_shutdown_signal() {
+        let executor = shutdown_test_executor();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown = async move {
+            let _ = rx.await;
+            "SIGTERM"
+        };
+        let mut fut = Box::pin(serve_until_shutdown(
+            std::future::pending::<()>(),
+            shutdown,
+            &executor,
+            Duration::from_secs(1),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut fut)
+                .await
+                .is_err(),
+            "must not exit before a signal"
+        );
+        tx.send(()).expect("signal");
+        assert_eq!(fut.await, DrainOutcome::Drained);
+    }
+
     #[test]
     fn init_telemetry_is_safe_to_call_more_than_once() {
         // Exercises both the successful-install branch (whichever call
@@ -170,6 +581,55 @@ mod tests {
         // either way.
         init_telemetry();
         init_telemetry();
+    }
+
+    // regression: readiness gated on executor connection deadlocked
+    // rollouts (alpha 2026-10-02) -- `crate::run`'s reconnect backoff must
+    // be jittered so every executor replica reconnecting to a replaced svc
+    // pod doesn't hit it on the exact same schedule.
+    #[test]
+    fn jittered_backoff_stays_within_the_half_jitter_window() {
+        let jitter = Jitter::seeded(42);
+        let base = std::time::Duration::from_secs(8);
+        for _ in 0..100 {
+            let got = jittered_backoff(&jitter, base);
+            assert!(got >= base / 2, "{got:?} below half-jitter floor");
+            assert!(got <= base, "{got:?} above base ceiling");
+        }
+    }
+
+    #[test]
+    fn jittered_backoff_varies_across_successive_calls() {
+        // A fixed, non-jittered delay would return the exact same value on
+        // every call for a constant `base` -- jitter must actually vary it.
+        let jitter = Jitter::seeded(7);
+        let base = std::time::Duration::from_secs(4);
+        let samples: std::collections::HashSet<_> =
+            (0..20).map(|_| jittered_backoff(&jitter, base)).collect();
+        assert!(
+            samples.len() > 1,
+            "expected varying jittered delays, got a single repeated value"
+        );
+    }
+
+    #[test]
+    fn jittered_backoff_handles_zero_base_without_panicking() {
+        let jitter = Jitter::seeded(1);
+        assert_eq!(
+            jittered_backoff(&jitter, std::time::Duration::ZERO),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn jitter_seeded_zero_does_not_get_stuck_at_the_fixed_point() {
+        // xorshift64*'s one fixed point is state == 0; `Jitter::seeded(0)`
+        // must not silently produce an all-zero stream.
+        let jitter = Jitter::seeded(0);
+        let first = jitter.next_u64();
+        let second = jitter.next_u64();
+        assert_ne!(first, 0);
+        assert_ne!(first, second);
     }
 
     fn test_config_for(addr: std::net::SocketAddr) -> CliConfig {
@@ -256,9 +716,170 @@ mod tests {
         cfg.host_api_ca_file = Some(ca_path.clone());
         let executor = Arc::new(Executor::new(&cfg, UnimplementedBucketSource)?);
 
-        connect_and_serve(&cfg, &executor).await?;
+        connect_and_serve(
+            &cfg,
+            &executor,
+            1,
+            crate::heartbeat::HeartbeatConfig::disabled(),
+            Arc::new(crate::heartbeat::HeartbeatMetrics::default()),
+            None,
+        )
+        .await?;
         stage_task.await?;
         let _ = std::fs::remove_file(&ca_path);
+        Ok(())
+    }
+
+    /// The OTel series this module's connect tests touch are label-light and
+    /// shared with every other test in the process, so they assert on deltas
+    /// against the process-wide harness.
+    fn shared_count(name: &str, filter: &[(&str, &str)]) -> f64 {
+        crate::metrics::test_support::shared().count(name, filter)
+    }
+
+    /// A dial that never reaches a stage must be counted as a failed attempt
+    /// (not silently skipped) and must not mark the session up.
+    #[tokio::test]
+    async fn a_failed_dial_is_counted_as_a_failed_connection_attempt() -> Result<(), ExecutorError>
+    {
+        // Bind then drop: a port nothing is listening on.
+        let addr = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .map_err(ExecutorError::Io)?;
+            listener.local_addr().map_err(ExecutorError::Io)?
+        };
+        let cfg = test_config_for(addr);
+        let executor = Arc::new(Executor::new(&cfg, UnimplementedBucketSource)?);
+        let before = shared_count(
+            "waddles_executor_connection_attempts_total",
+            &[("result", "failed")],
+        );
+
+        let outcome = connect_and_serve(
+            &cfg,
+            &executor,
+            1,
+            crate::heartbeat::HeartbeatConfig::disabled(),
+            Arc::new(crate::heartbeat::HeartbeatMetrics::default()),
+            None,
+        )
+        .await;
+
+        assert!(outcome.is_err(), "nothing is listening, the dial must fail");
+        assert!(
+            shared_count(
+                "waddles_executor_connection_attempts_total",
+                &[("result", "failed")]
+            ) >= before + 1.0
+        );
+        Ok(())
+    }
+
+    /// A full session against a local TLS stage: the handshake is counted as a
+    /// connected attempt, the prior outage is recorded, the session length is
+    /// recorded when it ends. (The up-gauge's down transition is asserted in
+    /// `tests/metrics_emission.rs`, which owns its process; here the gauge is
+    /// shared with a concurrently running connect test.)
+    #[tokio::test]
+    async fn a_completed_session_records_attempt_outage_and_session(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloLimits, HelloOkBody, Message, ShutdownBody,
+        };
+
+        let ca_key = rcgen::KeyPair::generate()?;
+        let ca_params = rcgen::CertificateParams::new(vec!["bundle-executor-test-ca".to_string()])?;
+        let ca_cert = ca_params.self_signed(&ca_key)?;
+        let issuer = rcgen::Issuer::from_params(&ca_params, ca_key);
+        let server_key = rcgen::KeyPair::generate()?;
+        let server_params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()])?;
+        let server_cert = server_params.signed_by(&server_key, &issuer)?;
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls_pki_types::CertificateDer::from(
+                    server_cert.der().to_vec(),
+                )],
+                rustls_pki_types::PrivateKeyDer::try_from(server_key.serialize_der())
+                    .map_err(|e| e.to_string())?,
+            )?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let ca_path = std::env::temp_dir().join(format!(
+            "bundle-executor-test-{}-session-metrics-ca.pem",
+            std::process::id()
+        ));
+        std::fs::write(&ca_path, ca_cert.pem())?;
+
+        let stage_task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("accept");
+            let mut tls = acceptor.accept(tcp).await.expect("server tls handshake");
+            let hello = read_frame(&mut tls).await.expect("hello");
+            write_frame(
+                &mut tls,
+                &Frame::new(
+                    hello.id,
+                    Message::HelloOk(HelloOkBody {
+                        stage: "svc-process".to_string(),
+                        protocol_version: 1,
+                        limits: HelloLimits {
+                            call_timeout_ms: 2000,
+                            memory_mb: 64,
+                            max_concurrent_calls: 32,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .expect("write hello-ok");
+            write_frame(
+                &mut tls,
+                &Frame::new(1, Message::Shutdown(ShutdownBody { grace_ms: 10 })),
+            )
+            .await
+            .expect("write shutdown");
+        });
+
+        let mut cfg = test_config_for(addr);
+        cfg.host_api_ca_file = Some(ca_path.clone());
+        let executor = Arc::new(Executor::new(&cfg, UnimplementedBucketSource)?);
+        let connected_before = shared_count(
+            "waddles_executor_connection_attempts_total",
+            &[("result", "connected")],
+        );
+        let sessions_before = shared_count("waddles_executor_session_seconds", &[]);
+        let outages_before = shared_count("waddles_executor_outage_seconds", &[]);
+
+        connect_and_serve(
+            &cfg,
+            &executor,
+            2,
+            crate::heartbeat::HeartbeatConfig::disabled(),
+            Arc::new(crate::heartbeat::HeartbeatMetrics::default()),
+            Some(Instant::now() - std::time::Duration::from_secs(5)),
+        )
+        .await?;
+        stage_task.await?;
+        let _ = std::fs::remove_file(&ca_path);
+
+        assert!(
+            shared_count(
+                "waddles_executor_connection_attempts_total",
+                &[("result", "connected")]
+            ) >= connected_before + 1.0
+        );
+        assert!(shared_count("waddles_executor_session_seconds", &[]) >= sessions_before + 1.0);
+        assert!(shared_count("waddles_executor_outage_seconds", &[]) >= outages_before + 1.0);
+        let outage = crate::metrics::test_support::shared()
+            .last("waddles_executor_outage_seconds", &[])
+            .expect("outage exported");
+        assert!(
+            outage.sum >= 5.0,
+            "the injected 5s outage must be reflected in the histogram sum, got {}",
+            outage.sum
+        );
         Ok(())
     }
 }

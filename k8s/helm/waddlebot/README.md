@@ -141,9 +141,20 @@ The following table lists the main configurable parameters of the WaddleBot char
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `global.imageRegistry` | Global Docker image registry | `docker.io/waddlebot` |
-| `global.imagePullPolicy` | Global image pull policy | `IfNotPresent` |
+| `global.imagePullPolicy` | Image pull policy for **every** workload container, including `hub-api`, `svc-{action,ingest,process}-rust`, `svc-presentation` and both `bundle-executor` Deployments (no template hardcodes a policy) | `IfNotPresent` |
 | `global.imagePullSecrets` | Global image pull secrets | `[]` |
 | `global.storageClass` | Global storage class for PVCs | `standard` |
+
+#### Image pull policy
+
+Every deploy carries a unique per-deploy `global.imageTag` (alpha SHA8, beta `beta-<epoch>`,
+gamma `gamma-<epoch>`, production digest), so `IfNotPresent` is correct in every environment
+(`values-alpha.yaml`, `-beta`, `-gamma`, `-production` all declare it). `Always` is **not** safe
+as a blanket default: for locally-loaded images (kind e2e, alpha local builds) the node already
+has the image, `Always` forces a registry pull that fails, and the pod never becomes Ready.
+Set `--set global.imagePullPolicy=Always` per deployment only when deploying a mutable tag
+(e.g. `latest`); `values-local.yaml` keeps `Always` for that reason.
+`tests/test_image_pull_policy_render.py` pins this behavior.
 
 ### Namespace
 
@@ -193,6 +204,9 @@ The following table lists the main configurable parameters of the WaddleBot char
 | `infrastructure.redis.port` | Redis port | `6379` |
 | `infrastructure.redis.persistence.enabled` | Enable persistence | `true` |
 | `infrastructure.redis.persistence.size` | PVC size | `5Gi` |
+| `infrastructure.redis.maxMemoryPolicy` | Eviction policy | `allkeys-lru` |
+
+**`maxMemoryPolicy` and the bundle `storage.kv` capability (PR #425 security review):** the Rust data plane's per-app `storage.kv` live-key-count quota counter (`bundlekv:...:count`) is stored with no TTL. An `allkeys-*` policy (the default above) can evict that counter under memory pressure, silently resetting the quota — `svc-process-rust`/`svc-action-rust` detect this at startup (`CONFIG GET maxmemory-policy`) and log `ERROR` + emit a metric if so, and self-heal the counter via a bounded `SCAN` on the next write, but the right fix is the policy itself. If this instance is used for `storage.kv`, set `maxMemoryPolicy` to `noeviction` or a `volatile-*` policy — both are safe for `storage.kv`'s own (non-volatile) keys; only switch off `allkeys-*` here if no *other* consumer of this same instance (spine streams, usage metering, relay queues) genuinely needs size-bounded eviction, since the policy is instance-wide, not per-key-pattern.
 
 #### MinIO
 
@@ -372,6 +386,48 @@ MinIO's own KMS backend configuration.
 | `securityContext.allowPrivilegeEscalation` | Allow privilege escalation | `false` |
 | `securityContext.readOnlyRootFilesystem` | Read-only root filesystem | `false` |
 
+### Cluster security posture (R5: securityContext / PSA / Tetragon / egress / port-scoped ingress)
+
+Shipping (beta/gamma/production) baseline; alpha is exempt from the cluster-level controls. Helpers:
+`templates/_networkpolicy.tpl` (`waddlebot.workloadPolicies`, included at the end of every workload
+template so the policies exist exactly when the workload does). Tests:
+`tests/test_security_posture_r5_render.py`.
+
+| Control | What the chart renders | Knobs |
+|---|---|---|
+| securityContext | Every container (init containers too) of every Deployment/StatefulSet/Job/CronJob: non-root, no privilege escalation, `drop: [ALL]`, `RuntimeDefault` seccomp. Collectors, postgres (uid 999), redis/valkey (uid 999), qdrant and ollama (uid 1000, model store moved to `$HOME/.ollama` on the same PVC) are now rootless with a **read-only root filesystem** (emptyDirs for `/tmp`, socket/snapshot dirs) | `infrastructure.{postgresql,redis,qdrant,ollama}.{podSecurityContext,securityContext}`; app pods use the global `podSecurityContext`/`securityContext` |
+| Pod Security Admission | `pod-security.kubernetes.io/{enforce,audit,warn}: restricted` (+ `-version: latest`) on the chart-managed Namespace. **Only when `namespaceCreate: true`** -- operators who pre-create the namespace must apply the same labels. beta enforces `privileged` (audit/warn stay `restricted`) because the SPIRE agent is an approved ROOT EXCEPTION (uid 0 + hostPath) that PSA rejects at every level; the chart `fail`s if you set restricted/baseline with `spire.enabled=true`. local enforces `baseline` | `podSecurity.{enabled,enforce,audit,warn,version}` |
+| Tetragon | One `TracingPolicyNamespaced` per app workload: `sys_execve` kprobe, **Sigkill** on any binary outside the workload's runtime allowlist (interpreter/entrypoint only; shells only for the documented legacy `sh -c` images). Needs the Tetragon agent + CRD in the cluster. Infra images (postgres/redis/qdrant/ollama/seaweedfs/posthog) are not covered (multi-process entrypoints). alpha/local/ci: off | `tetragon.{enabled,action,commonBinaries,runtimes,shellBinaries,runcInit}`; per-workload `binaries`/`shell` args at the include. `runcInit` (default on) keeps exec probes + `kubectl exec` working: runc >= 1.2 execs `/proc/self/fd/<N>` for `runc init`, so a second selector exempts that prefix ONLY when the caller binary is in `runcInit.callerBinaries` (runc paths) and SIGKILLs it from anything else (no fileless memfd exec) -- the allowlist itself gains no binaries. `action: Post` is an audit-only escape hatch for validating a new image's exec set -- never ship it |
+| Default-deny egress | Every long-running workload is selected by a `CiliumNetworkPolicy` with an `egress` section: DNS + own namespace (the destination's ingress policy scopes the port) + one outbound profile -- `internal` (nothing else), `https` (TCP/443 to public addresses, or pinned FQDNs), `world` (any port, public only: svc-streaming, svc-rtc). Data-plane pods stay governed by `<release>-dataplane-egress-deny` (egress-proxy only). **RFC1918, CGNAT, link-local/169.254.169.254, loopback and the cluster CIDRs are never reachable** through the world rules; only the egress-proxy's per-tenant private-ip grants reach private space. Jobs/CronJobs are not covered (no long-running listener) | `egressPolicy.{workloadEgress.enabled,privateCidrs,httpsFqdns}`, `networkPolicy.egressProfileOverrides.<component>` (e.g. `seaweedfs: https` with an external KMS) |
+| Port-scoped ingress | `default-deny-ingress` CNP for the namespace, plus a per-workload CNP admitting only that workload's declared `containerPort`(s) from the same namespace. `networkPolicy.externalIngressComponents` additionally admit the ingress controller (and Gateway API, when `httproute.enabled`) **on those ports only**. hub-api's internal gRPC port is deliberately not in the namespace-wide rule: only the callers in `<release>-hub-api-grpc` reach it (this closes the previously documented gap) | `networkPolicy.{enabled,ingressNamespace,externalIngressComponents}` |
+| Cilium only | No plain `NetworkPolicy` is rendered anywhere (the old `default-deny-ingress` / `allow-same-namespace-and-ingress` pair is replaced) | -- |
+
+- **Alpha** (`values-alpha.yaml`): `networkPolicy.enabled=false`, `egressPolicy.workloadEgress.enabled=false`, `tetragon.enabled=false` -- NodePort Services are reached from the host and the cluster has no Tetragon. Pod specs are still PSA-restricted-compliant.
+- **First rollout of a new image:** the Tetragon allowlists are derived from each image's `ENTRYPOINT`/`CMD`. Roll out beta with `--set tetragon.action=Post`, read Tetragon's events for unexpected `execve`s, add them to `tetragon.runtimes.*`/the include's `binaries`, then ship `Sigkill`.
+- **Upgrading from a pre-R5 release (redis):** the old pod ran as root and left root-owned AOF/RDB files in `/data`; volumes without fsGroup support (kind/local-path, MicroK8s hostpath) never chown them, so the rootless pod crash-looped. valkey now persists under `/data/valkey`, created by a non-root `migrate-data-dir` initContainer that copies any pre-R5 `appendonlydir`/`dump.rdb` across once (loud on failure). Verified on a kind merge-base -> PR upgrade (key written pre-upgrade is readable after). postgres needs no migration (its entrypoint already owned PGDATA as uid 999).
+- **Extending exposure:** add the component to `networkPolicy.externalIngressComponents` to publish it through the ingress/Gateway; never widen the same-namespace rule.
+- **Known follow-ups:** the SPIRE subchart (`charts/spire`, packaged as a tracked `.tgz`) ships its own CNPs with an unscoped `host/remote-node` ingress rule and a root hostPath agent; moving SPIRE to its own namespace would let beta enforce `restricted`.
+
+### Availability: shutdown, startup, autoscaling, disruption budgets
+
+Helpers: `templates/_resilience.tpl`, `templates/_autoscaling.tpl`; HPA/PDB: `templates/autoscaling.yaml`.
+Tests: `tests/test_scale_and_shutdown_hardening_render.py`.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `shutdown.terminationGracePeriodSeconds` | Pod drain budget before SIGKILL, every Deployment (must exceed the preStop sleep) | `30` |
+| `shutdown.preStopSleepSeconds` | `preStop` sleep so the pod leaves Service endpoints before SIGTERM (`0` = off). Native `sleep` action on k8s >= 1.30, `exec sleep` below | `5` |
+| `startupProbe.periodSeconds` / `.failureThreshold` | Startup budget (30 x 5s = 150s) for hub-api, the Rust data-plane stages, the Python pipeline stages, svc-streaming, svc-presentation | `5` / `30` |
+| `autoscaling.defaults.*` | HPA defaults: `enabled` (off), `minReplicas`, `maxReplicas`, `targetCPUUtilizationPercentage`, optional `targetMemoryUtilizationPercentage` / `behavior` | off, `2`, `10`, `70` |
+| `autoscaling.services.<key>.*` | Per-service override (field-by-field over `defaults`); production enables it for hub-api, hub-webui, svc-{action,process}-rust, both bundle-executors, reputation | `{}` |
+| `podDisruptionBudget.enabled` / `.minAvailable` / `.maxUnavailable` | PDB for every registered service that effectively runs >1 replica (`services.<key>` overrides) | `true` / `1` / `""` |
+
+- HPA keys: `hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor bundleExecutorAction reputation router`. PDB-only (never an HPA): `svcIngest svcIngestRust egressProxy`. Needs metrics-server + container resource requests.
+- When a service's HPA is enabled its Deployment omits `spec.replicas`, so `helm upgrade` never resets the autoscaler.
+- A PDB is skipped for a single effective replica (it would block node drains), so alpha/beta/gamma render none.
+- **Singletons are never autoscaled or budgeted:** `svc-streaming` (stateful RTMP/SRT + stream dir, `strategy: Recreate`, replicas 1, 60s grace) and `svc-presentation` (overlay fan-out is in-process).
+- **svc-presentation must stay at 1 replica.** With >1, a pushed frame only reaches clients on the pod that received it. The chart fails the render for `pipeline.svcPresentation.replicas > 1` unless `pipeline.svcPresentation.sharedFanout.enabled=true` -- the shared fan-out backend is not built yet (roadmap), so do not set it.
+
 ## Installation
 
 ### Install from local chart
@@ -476,6 +532,17 @@ kubectl delete pvc -n waddlebot --all
 kubectl delete namespace waddlebot
 ```
 
+## Database accounts (per-service roles)
+
+No workload connects as the database owner/superuser. Every Deployment/Job/CronJob gets its own
+least-privilege Postgres role through `{{ include "waddlebot.dbEnv" (dict "root" . "role" "<role>") }}`;
+role names/grants live in `config/postgres/service-roles.yaml` and are mirrored in
+`infrastructure.postgresql.serviceRoles.roles`. Passwords are generated in alpha/local and **required**
+(`serviceRoles.existingSecret`, or `serviceRoles.passwords` from an out-of-git file) in beta/gamma/
+production. The owner credential is a separate Secret (`<release>-db-admin`) read only by Postgres and
+the db-migrate hook. See [`docs/DATABASE_CREDENTIALS.md`](../../../docs/DATABASE_CREDENTIALS.md) for rotation,
+the burned-credential list, and the upgrade path.
+
 ## Self-provisioned platform keys (feature/helm-auto-provision-keys)
 
 Deploys must never require a human to run a script before `helm install`/`helm upgrade`
@@ -529,6 +596,53 @@ runs will in fact mint two *different* random secret values each time, since bot
 independently take the "generate" branch -- that's expected, not a bug). Real
 keep/idempotency is exercised by `lookup` against the live cluster during an actual
 `helm install`/`helm upgrade`, i.e. it is proven at deploy time, not template time.
+
+### Enterprise SSO key (`sso.*`, `templates/sso.yaml`)
+
+hub-api's enterprise SSO (SAML 2.0 / OIDC / Google; see `docs/SSO.md`) needs one more symmetric
+key, `SSO_ENCRYPTION_KEY` (64 lowercase hex chars) in Secret `waddlebot-sso-encryption-key`. It follows the
+same keep/generate mechanism as `tenantKek`/`oneTimeSecret` above -- `lookup` + `randBytes`, generated
+in `alpha`/`local` only, `helm.sh/resource-policy: keep`, never rotated by the chart -- with one
+deliberate difference: **a miss in beta/gamma/production does NOT fail the release.** SSO is
+entitlement-gated, so a deployment that never enables it must still install. hub-api consumes the key
+through an `optional: true` `secretKeyRef` (one `include "waddlebot.sso.hubApiEnv"` in
+`templates/hub-api.yaml`; the env block lives in `templates/_sso.tpl`), and SSO fails loudly at request
+time (HTTP 503 `SSO_UNAVAILABLE`) until the Secret exists. Enable SSO outside alpha/local by
+pre-creating the Secret, or by pointing an ExternalSecret at it and setting
+`sso.encryptionKey.externalSecret=true`. Other values: `sso.allowedPrivateHosts` (operator allowlist for
+on-prem IdPs behind the SSRF guard), `sso.stateTtlSeconds`, `sso.clockSkewSeconds`, and
+`sso.google.existingSecret` (optional shared Google OAuth client -- never inline the values).
+Tests: `tests/test_sso_render.py`.
+
+## Enterprise external KMS / BYOK (`kms:`, default OFF)
+
+Customer-managed encryption keys, **on top of** the platform-managed at-rest baseline (never a substitute).
+`kms.enabled=false` renders nothing, so the zero-config baseline is unchanged. Full guide, per-provider
+setup (AWS KMS / Google Cloud KMS / Azure Key Vault), failure behaviour and the object-storage exit ramp:
+[`docs/guides/external-kms-byok.md`](../../../docs/guides/external-kms-byok.md). Templates:
+`templates/kms.yaml` (non-secret `-kms` ConfigMap + validation), `templates/_kms.tpl` (helpers; the only
+edits to shared templates are one-line `include` hooks in `hub-api.yaml` and `infrastructure/seaweedfs.yaml`).
+
+| Value | Description | Default |
+|-------|-------------|---------|
+| `kms.enabled` | Master switch; required by both sub-features (a sub-feature without it **fails the render**) | `false` |
+| `kms.tenantKeys.enabled` | hub-api accepts per-tenant customer keys (tenants opt in over `/api/v1/tenant/<slug>/kms`) | `false` |
+| `kms.tenantKeys.providers` | Any of `aws_kms`, `gcp_kms`, `azure_key_vault`; unlisted providers are refused | `[]` |
+| `kms.tenantKeys.aws.credentialsSecret` | Optional Secret (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`); empty = IRSA / Pod Identity | `""` |
+| `kms.tenantKeys.gcp.credentialsSecret` | Optional Secret (`ENVELOPE_GCP_CREDENTIALS_JSON`); empty = Workload Identity | `""` |
+| `kms.tenantKeys.azure.credentialsSecret` | **Required** with `azure_key_vault` (`ENVELOPE_AZURE_CLIENT_ID`/`ENVELOPE_AZURE_CLIENT_SECRET`) | `""` |
+| `kms.tenantKeys.{aws,gcp}.platformPrincipal` | Public identity customers must trust/grant (shown by `GET .../kms`) | `""` |
+| `kms.tenantKeys.aws.{kms,sts}EndpointUrl`, `gcp.kmsEndpoint`, `azure.authority` | Optional `https://` overrides | `""` |
+| `kms.objectStorage.mode` | SeaweedFS SSE-KMS: `off` \| `kms` \| `drain` (the ungated exit ramp) | `off` |
+| `kms.objectStorage.provider` / `keyId` | `aws_kms` \| `gcp_kms` (no native Azure provider in SeaweedFS) / key ARN, alias or CryptoKey name | `""` |
+| `kms.objectStorage.entitlementTenant` | Tenant whose Enterprise entitlement gates hub-api's `kms`-mode writes | `system` |
+| `kms.objectStorage.aws.{region,endpoint,credentialsSecret.*}` | AWS KMS client for SeaweedFS (credentials from an existing Secret) | `""` |
+| `kms.objectStorage.gcp.{projectId,credentialsSecret.*}` | Google Cloud KMS client for SeaweedFS (key file mounted read-only 0400) | `""` |
+
+Helm cannot ask the licence server: the Enterprise entitlement is enforced at runtime by hub-api (per tenant
+for tenant keys; at startup and on its own writes for object storage). Treat `kms.objectStorage.mode: kms`
+as an Enterprise-only setting. Opt-in end-to-end check of the rendered SeaweedFS mapping against the pinned
+image: `make test-seaweedfs-sse-kms`.
 
 ## SPIRE (optional, disabled pending #437)
 
@@ -798,6 +912,38 @@ ingress:
       hosts:
         - waddlebot.yourdomain.com
 ```
+
+### Bundle Artifact Signing Rollout Order
+
+`feature/bundle-artifact-signing`: hub-api signs each approved bundle with a
+platform Ed25519 key; the bundle-executor(s) verify that signature before
+instantiating any component and fail closed with no configured key.
+
+**fix/chart-autogen-bundle-signing-key: steps 1 and 4 below are now automatic in
+every environment** -- `templates/auto-provisioned-keys-job.yaml`'s pre-install/
+pre-upgrade hook keeps the `<release>-bundle-signing` Secret and
+`<release>-bundle-signing-public` ConfigMap in sync on every `helm install`/
+`helm upgrade` (generating the Secret itself on a miss in alpha/local; requiring
+a pre-created Secret or `externalSecret: true` elsewhere), and
+`bundle-executor`/`bundle-executor-action` now source `BUNDLE_SIGNING_PUBLIC_KEYS`
+from that ConfigMap by default -- see "Self-provisioned platform keys" above.
+`make generate-bundle-signing-key` and
+`pipeline.rustDataPlane.bundleSigningPublicKeys` remain available as an explicit
+override (multi-key rotation, or pre-creating the Secret yourself in beta/
+gamma/production), but a plain `helm upgrade` with no manual step now succeeds
+end-to-end. Remaining manual step, per environment:
+
+1. **Run the backfill Job once**, for any already-approved version signed
+   before this feature existed:
+   ```bash
+   helm upgrade <release> . -f values-<env>.yaml --set pipeline.hubApi.bundleSigningBackfill.enabled=true
+   # then flip it back to false for the next normal upgrade
+   ```
+   Idempotent -- a stray extra run is a no-op for every already-signed row.
+
+The `<release>-bundle-signing-reconciler` CronJob (enabled by default, every 30
+minutes) separately catches a signed-in-Postgres row whose bucket sidecar
+upload failed after the fact -- no manual step required for that one.
 
 ### Backup and Recovery
 

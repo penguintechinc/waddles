@@ -97,6 +97,42 @@ impl HlsOutputTarget {
         self.output_dir.join(MEDIA_PLAYLIST_NAME)
     }
 
+    /// The hls muxer options for this target as ordered `(name, value)`
+    /// pairs (names without the leading dash): the single source of truth
+    /// for both the standalone argv ([`Self::ffmpeg_output_args`]) and the
+    /// per-slave option list inside `-f tee` (`pipeline::ffmpeg`'s
+    /// `tee_slave`), so the two shapes cannot drift apart.
+    pub fn muxer_options(&self) -> Vec<(&'static str, String)> {
+        let dir = self.output_dir.display().to_string();
+        let mut hls_flags = "delete_segments+independent_segments".to_string();
+        let is_ll = self.variant == HlsVariant::Ll;
+
+        let mut options: Vec<(&'static str, String)> = vec![
+            ("hls_time", SEGMENT_TIME_SECONDS.into()),
+            ("hls_list_size", PLAYLIST_WINDOW_SEGMENTS.into()),
+        ];
+
+        if is_ll {
+            options.push(("hls_playlist_type", "event".into()));
+            options.push(("hls_part_time", LL_PART_TIME_SECONDS.into()));
+            hls_flags.push_str("+program_date_time");
+        }
+
+        options.push(("hls_flags", hls_flags));
+        options.push(("hls_segment_type", "fmp4".into()));
+        options.push(("hls_fmp4_init_filename", INIT_SEGMENT_NAME.into()));
+        options.push((
+            "hls_segment_filename",
+            format!("{dir}/{SEGMENT_FILENAME_PATTERN}"),
+        ));
+        options.push(("master_pl_name", MASTER_PLAYLIST_NAME.into()));
+
+        if is_ll {
+            options.push(("lhls", "1".into()));
+        }
+        options
+    }
+
     /// Builds the `ffmpeg` argv fragment for this target per spec §4 -- std
     /// HLS (fmp4 segments, 4s/6-segment rolling window) or LL-HLS (adds
     /// partial segments + `program_date_time` + `-lhls 1`) depending on
@@ -105,44 +141,12 @@ impl HlsOutputTarget {
     /// positional output path (the media playlist), matching ffmpeg's argv
     /// convention of a trailing output file.
     pub fn ffmpeg_output_args(&self) -> Vec<String> {
-        let dir = self.output_dir.display().to_string();
-        let mut hls_flags = "delete_segments+independent_segments".to_string();
-        let is_ll = self.variant == HlsVariant::Ll;
-
-        let mut args: Vec<String> = vec![
-            "-f".into(),
-            "hls".into(),
-            "-hls_time".into(),
-            SEGMENT_TIME_SECONDS.into(),
-            "-hls_list_size".into(),
-            PLAYLIST_WINDOW_SEGMENTS.into(),
-        ];
-
-        if is_ll {
-            args.push("-hls_playlist_type".into());
-            args.push("event".into());
-            args.push("-hls_part_time".into());
-            args.push(LL_PART_TIME_SECONDS.into());
-            hls_flags.push_str("+program_date_time");
+        let mut args: Vec<String> = vec!["-f".into(), "hls".into()];
+        for (name, value) in self.muxer_options() {
+            args.push(format!("-{name}"));
+            args.push(value);
         }
-
-        args.push("-hls_flags".into());
-        args.push(hls_flags);
-        args.push("-hls_segment_type".into());
-        args.push("fmp4".into());
-        args.push("-hls_fmp4_init_filename".into());
-        args.push(INIT_SEGMENT_NAME.into());
-        args.push("-hls_segment_filename".into());
-        args.push(format!("{dir}/{SEGMENT_FILENAME_PATTERN}"));
-        args.push("-master_pl_name".into());
-        args.push(MASTER_PLAYLIST_NAME.into());
-
-        if is_ll {
-            args.push("-lhls".into());
-            args.push("1".into());
-        }
-
-        args.push(format!("{dir}/{MEDIA_PLAYLIST_NAME}"));
+        args.push(self.media_playlist_path().display().to_string());
         args
     }
 }
@@ -193,6 +197,51 @@ mod tests {
             .iter()
             .any(|a| a == "delete_segments+independent_segments+program_date_time"));
         assert!(args.windows(2).any(|w| w == ["-lhls", "1"]));
+    }
+
+    #[test]
+    fn muxer_options_and_argv_never_drift() {
+        for variant in [HlsVariant::Std, HlsVariant::Ll] {
+            let t = target(variant);
+            let args = t.ffmpeg_output_args();
+            let rebuilt: Vec<String> = ["-f".to_string(), "hls".to_string()]
+                .into_iter()
+                .chain(
+                    t.muxer_options()
+                        .into_iter()
+                        .flat_map(|(k, v)| [format!("-{k}"), v]),
+                )
+                .chain(std::iter::once(
+                    t.media_playlist_path().display().to_string(),
+                ))
+                .collect();
+            assert_eq!(args, rebuilt);
+        }
+    }
+
+    #[test]
+    fn muxer_options_are_named_without_a_dash_and_keep_the_documented_order() {
+        let names: Vec<&str> = target(HlsVariant::Std)
+            .muxer_options()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "hls_time",
+                "hls_list_size",
+                "hls_flags",
+                "hls_segment_type",
+                "hls_fmp4_init_filename",
+                "hls_segment_filename",
+                "master_pl_name"
+            ]
+        );
+        assert!(target(HlsVariant::Ll)
+            .muxer_options()
+            .iter()
+            .any(|(k, v)| *k == "lhls" && v == "1"));
     }
 
     #[test]

@@ -22,13 +22,20 @@ spec:
         app.kubernetes.io/component: teams-collector
         tier: trigger
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
-      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 8 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own /ready.
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 8 }}
       containers:
         - name: teams-collector
           image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.modules.collectors.teams.image) "imageTag" .Values.modules.collectors.teams.imageTag) }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          {{- include "waddlebot.preStop" $ | nindent 10 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
             - name: http
               containerPort: 8008
@@ -39,6 +46,10 @@ spec:
             - secretRef:
                 name: {{ include "waddlebot.fullname" . }}-secrets
           env:
+            # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_legacy_teams_collector;
+            # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+            # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_legacy_teams_collector") | nindent 12 }}
             - name: PORT
               value: "8008"
             - name: MODULE_NAME
@@ -78,6 +89,17 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.modules.collectors.teams.resources | nindent 12 }}
+          # readOnlyRootFilesystem: log + scratch dirs are the only writable paths.
+          volumeMounts:
+          - name: logs
+            mountPath: /var/log/waddlebotlog
+          - name: tmp
+            mountPath: /tmp
+      volumes:
+      - name: logs
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -109,4 +131,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: teams-collector
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "teams-collector" "ports" (list 8008) "runtime" "python") }}
 {{- end }}

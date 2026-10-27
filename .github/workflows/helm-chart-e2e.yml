@@ -34,11 +34,20 @@ env:
   KIND_NODE_IMAGE: "kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a" # v1.34.0
   CHART_DIR: "k8s/helm/waddlebot"
   NAMESPACE: "waddlebot"
-  HELM_TIMEOUT: "5m"
-  # Empty on fork PRs / repos without the secret configured -- `if:` can't
-  # read `secrets` directly, so it's routed through env. See docs/WORKFLOWS.md
-  # "Docker Hub credentials".
-  DOCKERHUB_LOGIN_ENABLED: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+  # Helm always waits on hook Jobs for up to --timeout. core-bundle-seeder does real
+  # per-bundle work (~39 core bundles, 13+ min per k8s/helm/waddlebot/values.yaml
+  # pipeline.coreBundleSeeder.activeDeadlineSeconds) -- a 5m default could never cover
+  # it. Mirrors scripts/alpha-deploy.sh's own HELM_ARGS (--timeout 60m).
+  HELM_TIMEOUT: "60m"
+  # Pinned to the v1.16.5 tag commit (GPG-signature-verified against cilium/cilium),
+  # checksum-verified below -- kind ships kindnet, not Cilium, so every
+  # CiliumNetworkPolicy the chart renders (security.md Kubernetes Network
+  # Security: mandatory, every product) needs its CRD registered or `helm
+  # install` fails with "no matches for kind CiliumNetworkPolicy" before a
+  # single pod is even scheduled. CRD-only (no cilium-agent) is sufficient here:
+  # this workflow validates install/upgrade/hook lifecycle, not policy enforcement.
+  CILIUM_CRD_COMMIT: "ad6882773c5f89feda9c295276707f01de269296"
+  CILIUM_CRD_SHA256: "60606cb4060a25a2131461773939714d1c0dbd910273449e68d0caf39927249c"
 
 jobs:
   lint-workflow:
@@ -49,23 +58,11 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-
-      # Pull-only: authenticates the `docker run rhysd/actionlint` pull below
-      # to avoid Docker Hub's anonymous rate limit. Never used to push. Empty
-      # on fork PRs (secrets unset), which fall back to anonymous pulls.
-      - name: Log in to Docker Hub
-        if: env.DOCKERHUB_LOGIN_ENABLED == 'true'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
-        with:
-          registry: docker.io
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: actionlint
         run: |
           set -euo pipefail
           docker run --rm -v "${PWD}:/repo" -w /repo \
-            rhysd/actionlint@sha256:6e7f81c2d3617f8a95bd68d2fd8de2c6da5eb87f66d67f30f8bdfd7d5e4f7dc7 \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
             -color .github/workflows/helm-chart-e2e.yml
       - name: zizmor
         run: |
@@ -75,9 +72,10 @@ jobs:
 
   chart-e2e:
     name: kind install/upgrade
+    if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     needs: lint-workflow
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - name: Checkout PR head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -85,57 +83,57 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Pull-only: authenticates the kind node image pull, the `docker build`
-      # base-image pulls below, and the bitnami/kubectl pre-pull further down,
-      # to avoid Docker Hub's anonymous rate limit. Never used to push. Empty
-      # on fork PRs (secrets unset), which fall back to anonymous pulls. Note
-      # this only authenticates the runner's own docker daemon -- kind's node
-      # containerd is separate, which is why external images are pre-pulled
-      # here and `kind load docker-image`d rather than pulled from inside
-      # the kind node.
-      - name: Log in to Docker Hub
-        if: env.DOCKERHUB_LOGIN_ENABLED == 'true'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
-        with:
-          registry: docker.io
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Install kind (checksum-verified)
         run: |
           set -euo pipefail
-          curl -fsSL -o /usr/local/bin/kind \
+          # ubuntu-latest images ship a pre-installed /usr/local/bin/kind owned by
+          # root; downloading straight to that path lets curl overwrite the file's
+          # *content* (world-writable dir) but a plain `chmod` on it then fails with
+          # "Operation not permitted" since the runner user isn't the file's owner.
+          # Download + verify to a runner-owned temp path, install with sudo instead.
+          curl -fsSL -o "${RUNNER_TEMP}/kind" \
             "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
-          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  /usr/local/bin/kind" | sha256sum -c -
-          chmod +x /usr/local/bin/kind
+          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  ${RUNNER_TEMP}/kind" | sha256sum -c -
+          sudo install -m 0755 -o root -g root "${RUNNER_TEMP}/kind" /usr/local/bin/kind
+          rm -f "${RUNNER_TEMP}/kind"
           kind version
-
-      - name: Pull kind node image (authenticated)
-        run: |
-          set -euo pipefail
-          docker pull "${KIND_NODE_IMAGE}"
 
       - name: Create kind cluster
         run: |
           set -euo pipefail
           kind create cluster --name waddlebot-e2e --image "${KIND_NODE_IMAGE}" --wait 120s
 
+      - name: Install CiliumNetworkPolicy CRD (kind has no Cilium CNI)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" \
+            "https://raw.githubusercontent.com/cilium/cilium/${CILIUM_CRD_COMMIT}/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumnetworkpolicies.yaml"
+          echo "${CILIUM_CRD_SHA256}  ${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" | sha256sum -c -
+          kubectl apply -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+          rm -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+
       - name: Build + kind-load images
         run: |
           set -euo pipefail
+          # Build context per Dockerfile's own COPY paths, not a blanket root/subdir
+          # guess: hub_api/Dockerfile COPYs "hub_api/..." + "libs/flask_core" (root
+          # context); svc_ingest's Dockerfile.rust COPYs "svc_ingest/..." + sibling
+          # "service_auth" (the "core" dir, like svc_process); svc_process/svc_action COPY "svc_process/..." + sibling
+          # "bundle_active_set"/"bundle_host_http" (the shared "core" dir, one level up).
           declare -a IMAGES=(
             "waddlebot-migrations:ci:migrations/Dockerfile:."
-            "waddlebot-hub-api:ci:hub_api/Dockerfile:hub_api"
+            "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
             "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
-            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:."
-            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:."
-            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:."
+            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core"
+            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:core"
+            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:core"
           )
           built=0
           for entry in "${IMAGES[@]}"; do
             IFS=":" read -r name tag dockerfile context <<< "${entry}"
             echo "::group::build ${name}:${tag}"
-            docker build -f "${dockerfile}" -t "${name}:${tag}" "${context}"
+            # --build-context proto=proto: svc_process/svc_action Dockerfile.rust COPY --from=proto (repo-root proto/ is outside their core/ context), same as build-svc-*.yml
+            docker build --build-context proto=proto -f "${dockerfile}" -t "${name}:${tag}" "${context}"
             kind load docker-image "${name}:${tag}" --name waddlebot-e2e
             built=$((built + 1))
             echo "::endgroup::"
@@ -146,39 +144,12 @@ jobs:
             exit 1
           fi
 
-      - name: Pre-pull + kind-load external hook images (bitnami/kubectl)
-        # The chart's hook Jobs (spire auto-enroll, auto-provisioned-keys) run
-        # bitnami/kubectl by pinned digest. kind's node containerd is separate
-        # from this runner's docker daemon, so an unauthenticated pull would
-        # happen from inside the kind node at `helm install` time regardless
-        # of the login above. Pre-pulling here (authenticated) and kind-loading
-        # keeps the token off the kind node's disk entirely, per
-        # docs/WORKFLOWS.md "Docker Hub credentials". Digests are discovered
-        # from the chart source rather than hardcoded, so this tracks whatever
-        # the chart currently pins.
-        run: |
-          set -euo pipefail
-          count=0
-          while IFS= read -r img; do
-            [ -z "${img}" ] && continue
-            echo "::group::pre-pull ${img}"
-            docker pull "docker.io/${img}"
-            kind load docker-image "docker.io/${img}" --name waddlebot-e2e
-            count=$((count + 1))
-            echo "::endgroup::"
-          done < <(grep -rhoE 'bitnami/kubectl@sha256:[0-9a-f]{64}' "${CHART_DIR}" | sort -u)
-          echo "external hook images pre-pulled and loaded: ${count}"
-          if [ "${count}" -eq 0 ]; then
-            echo "::error::zero external hook images found - denominator check failed"
-            exit 1
-          fi
-
       - name: Install Helm v4
         run: |
           set -euo pipefail
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
           chmod +x get_helm.sh
-          DESIRED_VERSION=v4.0.0 ./get_helm.sh
+          DESIRED_VERSION=v4.3.0 ./get_helm.sh
           rm -f get_helm.sh
           helm version
 
@@ -202,11 +173,28 @@ jobs:
         id: install
         run: |
           set -euo pipefail
+          # NO --wait/--atomic on the helm call below, exactly like scripts/alpha-deploy.sh
+          # (load-bearing -- see its HELM_ARGS comment + scripts/check_alpha_deploy_no_wait.py):
+          # db-migrate is a post-install hook and hub-api only becomes Ready after it ran, so
+          # --wait (Helm blocks on Deployment readiness BEFORE post-install hooks) deadlocks a
+          # fresh install. Helm still awaits hook Jobs via --timeout; Deployment readiness is
+          # verified explicitly AFTER the hook phase by wait_rollouts.
+          wait_rollouts() {
+            local names count
+            names=$(kubectl get deployments -n "${NAMESPACE}" -o name)
+            count=$(echo "${names}" | grep -c . || true)
+            echo "deployments to wait on: ${count}"
+            [ "${count}" -gt 0 ] || { echo "::error::zero deployments found - denominator check failed"; exit 1; }
+            for d in ${names}; do
+              kubectl rollout status "${d}" -n "${NAMESPACE}" --timeout=15m
+            done
+          }
           helm install waddlebot "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
             -f "${CHART_DIR}/values-alpha.yaml" \
             -f "${CHART_DIR}/values-ci.yaml" \
-            --wait --timeout "${HELM_TIMEOUT}"
+            --timeout "${HELM_TIMEOUT}"
+          wait_rollouts
           status=$(helm status waddlebot -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
           echo "release status: ${status}"
           [ "${status}" = "deployed" ] || { echo "::error::release not deployed after install"; exit 1; }
@@ -214,10 +202,18 @@ jobs:
       - name: Assert hook Jobs succeeded + pods Ready
         run: |
           set -euo pipefail
+          # Every hook Job carries `helm.sh/hook-delete-policy: hook-succeeded`, so Helm
+          # DELETES a hook Job once it succeeds: a clean install leaves zero live Jobs, and
+          # only a failed/incomplete hook survives. The denominator is therefore the hook
+          # Jobs the release DECLARES (`helm get hooks`) -- Helm itself awaited each one
+          # (the install would have failed otherwise) -- and the assertion is that no
+          # surviving Job is failed/incomplete. Zero declared hooks is still a FAIL.
+          declared=$(helm get hooks waddlebot -n "${NAMESPACE}" | grep -c '^kind: Job$' || true)
+          echo "hook Jobs declared by the release: ${declared}"
+          [ "${declared}" -gt 0 ] || { echo "::error::zero hook Jobs declared - denominator check failed"; exit 1; }
           hooks=$(kubectl get jobs -n "${NAMESPACE}" -o json)
-          hook_count=$(echo "${hooks}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["items"]))')
-          echo "hook/job count examined: ${hook_count}"
-          [ "${hook_count}" -gt 0 ] || { echo "::error::zero Jobs examined - denominator check failed"; exit 1; }
+          surviving=$(echo "${hooks}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["items"]))')
+          echo "surviving (not hook-succeeded-deleted) Jobs examined: ${surviving}"
           echo "${hooks}" | python3 -c '
           import json, sys
           d = json.load(sys.stdin)
@@ -247,7 +243,7 @@ jobs:
             echo "::error::pods not Ready: ${not_ready}"
             exit 1
           fi
-          echo "all ${pod_count} pods Ready or Completed; all ${hook_count} hook Jobs succeeded"
+          echo "all ${pod_count} pods Ready or Completed; all ${declared} declared hook Jobs completed (no failed/incomplete survivors)"
 
       - name: Snapshot Secret hashes (pre-upgrade)
         run: |
@@ -272,11 +268,28 @@ jobs:
       - name: helm upgrade (same chart, no-op)
         run: |
           set -euo pipefail
+          # NO --wait/--atomic on the helm call below, exactly like scripts/alpha-deploy.sh
+          # (load-bearing -- see its HELM_ARGS comment + scripts/check_alpha_deploy_no_wait.py):
+          # db-migrate is a post-install hook and hub-api only becomes Ready after it ran, so
+          # --wait (Helm blocks on Deployment readiness BEFORE post-install hooks) deadlocks a
+          # fresh install. Helm still awaits hook Jobs via --timeout; Deployment readiness is
+          # verified explicitly AFTER the hook phase by wait_rollouts.
+          wait_rollouts() {
+            local names count
+            names=$(kubectl get deployments -n "${NAMESPACE}" -o name)
+            count=$(echo "${names}" | grep -c . || true)
+            echo "deployments to wait on: ${count}"
+            [ "${count}" -gt 0 ] || { echo "::error::zero deployments found - denominator check failed"; exit 1; }
+            for d in ${names}; do
+              kubectl rollout status "${d}" -n "${NAMESPACE}" --timeout=15m
+            done
+          }
           helm upgrade waddlebot "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
             -f "${CHART_DIR}/values-alpha.yaml" \
             -f "${CHART_DIR}/values-ci.yaml" \
-            --wait --timeout "${HELM_TIMEOUT}"
+            --timeout "${HELM_TIMEOUT}"
+          wait_rollouts
           status=$(helm status waddlebot -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
           [ "${status}" = "deployed" ] || { echo "::error::release not deployed after same-chart upgrade"; exit 1; }
 
@@ -292,9 +305,16 @@ jobs:
           before = json.load(open("/tmp/secret-hashes-before.json"))
           after_raw = json.load(open("/tmp/secrets-after.json"))
           compared = 0
+          helm_records = 0
           changed = []
           for s in after_raw["items"]:
               name = s["metadata"]["name"]
+              if s.get("type") == "helm.sh/release.v1":
+                  # Helm own release record (sh.helm.release.v1.<rel>.vN): an upgrade
+                  # rewrites the PREVIOUS revision record (deployed -> superseded), so
+                  # its data legitimately changes. Not a chart-managed Secret.
+                  helm_records += 1
+                  continue
               if name not in before:
                   continue  # new secret introduced by upgrade - not a regression signal here
               compared += 1
@@ -302,7 +322,7 @@ jobs:
               digest = hashlib.sha256(blob).hexdigest()
               if digest != before[name]["sha256"]:
                   changed.append(name)
-          print(f"secrets compared: {compared}")
+          print(f"secrets compared: {compared} (excluded {helm_records} helm release record(s))")
           if compared == 0:
               print("::error::zero secrets compared - denominator check failed")
               sys.exit(1)
@@ -317,15 +337,48 @@ jobs:
           '
           rm -f /tmp/secrets-after.json /tmp/secret-hashes-before.json
 
-      - name: Verify alembic head + seeder Job
+      - name: Assert auto-provisioned signing keys exist
         run: |
           set -euo pipefail
-          migrate_job=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=db-migrate -o jsonpath='{.items[0].status.succeeded}' 2>/dev/null || echo "")
-          seeder_job=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=core-bundle-seeder -o jsonpath='{.items[0].status.succeeded}' 2>/dev/null || echo "")
-          echo "migrations job succeeded flag: ${migrate_job:-<not found>}"
-          echo "seeder job succeeded flag: ${seeder_job:-<not found>}"
-          [ "${migrate_job}" = "1" ] || { echo "::error::migrations hook Job did not report succeeded"; exit 1; }
-          [ "${seeder_job}" = "1" ] || { echo "::error::core-bundle-seeder hook Job did not report succeeded"; exit 1; }
+          # autoProvisionedKeys.enabled:true -- the keys hook must have produced the
+          # bundle-signing Secret (private key) and the public-key ConfigMap that
+          # bundle-executor reads BUNDLE_SIGNING_PUBLIC_KEYS from. Unchanged-across-upgrade
+          # for the Secret is asserted by the hash comparison step above.
+          priv=$(kubectl get secret waddlebot-bundle-signing -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("data") or {}))')
+          pub=$(kubectl get configmap waddlebot-bundle-signing-public -n "${NAMESPACE}" -o jsonpath='{.data.BUNDLE_SIGNING_PUBLIC_KEYS}')
+          echo "bundle-signing Secret data keys: ${priv}"
+          echo "bundle-signing-public key set length: ${#pub}"
+          [ "${priv}" -gt 0 ] || { echo "::error::waddlebot-bundle-signing Secret empty/missing"; exit 1; }
+          [ -n "${pub}" ] || { echo "::error::BUNDLE_SIGNING_PUBLIC_KEYS empty in waddlebot-bundle-signing-public"; exit 1; }
+
+      - name: Verify migrations + seeder results (real DB state)
+        run: |
+          set -euo pipefail
+          # db-migrate, core-bundle-seeder and auto-provision-keys all use
+          # hook-delete-policy hook-succeeded, so their Jobs are GONE after a clean
+          # run -- helm already failed the install/upgrade if any of them failed.
+          # Prove they actually did their work by reading the resulting DB state
+          # instead of a Job flag that can never exist. If a Job DID survive it is by
+          # definition not a clean success, so it must report succeeded.
+          if kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=db-migrate -o name | grep -q .; then
+            migrate_job=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=db-migrate -o jsonpath='{.items[0].status.succeeded}')
+            echo "migrations job survived; succeeded flag: ${migrate_job:-<unset>}"
+            [ "${migrate_job}" = "1" ] || { echo "::error::migrations hook Job present but not succeeded"; exit 1; }
+          fi
+          if kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=core-bundle-seeder -o name | grep -q .; then
+            seeder_ok=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=core-bundle-seeder -o jsonpath='{.items[0].status.succeeded}')
+            [ "${seeder_ok}" = "1" ] || { echo "::error::core-bundle-seeder Job present but not succeeded"; exit 1; }
+          fi
+          psql_q() {
+            kubectl exec -n "${NAMESPACE}" deploy/postgres -- \
+              sh -c "psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc \"$1\""
+          }
+          alembic_rows=$(psql_q "select count(*) from alembic_version")
+          bundle_versions=$(psql_q "select count(*) from app_versions")
+          echo "alembic_version rows: ${alembic_rows}"
+          echo "app_versions rows (seeded core bundles): ${bundle_versions}"
+          [ "${alembic_rows}" -ge 1 ] || { echo "::error::alembic_version empty - migrations did not stamp a head"; exit 1; }
+          [ "${bundle_versions}" -ge 1 ] || { echo "::error::app_versions empty - core-bundle-seeder seeded nothing"; exit 1; }
 
       - name: Dump events/describe on failure
         if: failure()
@@ -333,6 +386,10 @@ jobs:
           kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp || true
           for p in $(kubectl get pods -n "${NAMESPACE}" -o name); do
             kubectl describe "${p}" -n "${NAMESPACE}" || true
+            # Container logs (incl. init + crashed-previous) are what actually name a
+            # hook Job's failure -- events alone only say "BackoffLimitExceeded".
+            kubectl logs "${p}" -n "${NAMESPACE}" --all-containers --tail=200 --prefix || true
+            kubectl logs "${p}" -n "${NAMESPACE}" --all-containers --previous --tail=100 --prefix 2>/dev/null || true
           done
           # Never dump Secret data.
 
@@ -342,28 +399,16 @@ jobs:
 
   upgrade-path-e2e:
     name: kind upgrade-path (merge-base -> PR)
+    if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     needs: chart-e2e
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - name: Checkout PR head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      # Pull-only: authenticates the kind node image pull, the `docker build`
-      # base-image pulls below, and the bitnami/kubectl pre-pull further down.
-      # See the identical step in the chart-e2e job above for the full
-      # rationale; empty on fork PRs (secrets unset), which fall back to
-      # anonymous pulls.
-      - name: Log in to Docker Hub
-        if: env.DOCKERHUB_LOGIN_ENABLED == 'true'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
-        with:
-          registry: docker.io
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Determine merge-base ref
         id: mergebase
@@ -390,93 +435,156 @@ jobs:
       - name: Install kind (checksum-verified)
         run: |
           set -euo pipefail
-          curl -fsSL -o /usr/local/bin/kind \
+          # See identical step in the chart-e2e job above for why this installs via
+          # a runner-owned temp path + sudo instead of a direct chmod in-place.
+          curl -fsSL -o "${RUNNER_TEMP}/kind" \
             "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
-          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  /usr/local/bin/kind" | sha256sum -c -
-          chmod +x /usr/local/bin/kind
+          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  ${RUNNER_TEMP}/kind" | sha256sum -c -
+          sudo install -m 0755 -o root -g root "${RUNNER_TEMP}/kind" /usr/local/bin/kind
+          rm -f "${RUNNER_TEMP}/kind"
 
       - name: Install Helm v4
         run: |
           set -euo pipefail
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
           chmod +x get_helm.sh
-          DESIRED_VERSION=v4.0.0 ./get_helm.sh
+          DESIRED_VERSION=v4.3.0 ./get_helm.sh
           rm -f get_helm.sh
-
-      - name: Pull kind node image (authenticated)
-        run: |
-          set -euo pipefail
-          docker pull "${KIND_NODE_IMAGE}"
 
       - name: Create kind cluster
         run: kind create cluster --name waddlebot-upgrade --image "${KIND_NODE_IMAGE}" --wait 120s
 
+      - name: Install CiliumNetworkPolicy CRD (kind has no Cilium CNI)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" \
+            "https://raw.githubusercontent.com/cilium/cilium/${CILIUM_CRD_COMMIT}/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumnetworkpolicies.yaml"
+          echo "${CILIUM_CRD_SHA256}  ${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" | sha256sum -c -
+          kubectl apply -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+          rm -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+
       - name: Build + kind-load images (PR ref; base ref reuses same tags)
         run: |
           set -euo pipefail
+          # Build context per Dockerfile's own COPY paths, not a blanket root/subdir
+          # guess: hub_api/Dockerfile COPYs "hub_api/..." + "libs/flask_core" (root
+          # context); svc_ingest's Dockerfile.rust COPYs "svc_ingest/..." + sibling
+          # "service_auth" (the "core" dir, like svc_process); svc_process/svc_action COPY "svc_process/..." + sibling
+          # "bundle_active_set"/"bundle_host_http" (the shared "core" dir, one level up).
           declare -a IMAGES=(
             "waddlebot-migrations:ci:migrations/Dockerfile:."
-            "waddlebot-hub-api:ci:hub_api/Dockerfile:hub_api"
+            "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
             "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
-            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:."
-            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:."
-            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:."
+            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core"
+            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:core"
+            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:core"
           )
           built=0
           for entry in "${IMAGES[@]}"; do
             IFS=":" read -r name tag dockerfile context <<< "${entry}"
-            docker build -f "${dockerfile}" -t "${name}:${tag}" "${context}"
+            # --build-context proto=proto: svc_process/svc_action Dockerfile.rust COPY --from=proto (repo-root proto/ is outside their core/ context), same as build-svc-*.yml
+            docker build --build-context proto=proto -f "${dockerfile}" -t "${name}:${tag}" "${context}"
             kind load docker-image "${name}:${tag}" --name waddlebot-upgrade
             built=$((built + 1))
           done
           echo "images built and loaded: ${built}"
           [ "${built}" -gt 0 ] || { echo "::error::zero images built"; exit 1; }
 
-      - name: Pre-pull + kind-load external hook images (bitnami/kubectl)
-        # Scans both the base-ref chart (installed first, below) and the PR
-        # chart (upgraded to, further below) -- see the identical step in the
-        # chart-e2e job above for the full rationale.
-        run: |
-          set -euo pipefail
-          count=0
-          while IFS= read -r img; do
-            [ -z "${img}" ] && continue
-            echo "::group::pre-pull ${img}"
-            docker pull "docker.io/${img}"
-            kind load docker-image "docker.io/${img}" --name waddlebot-upgrade
-            count=$((count + 1))
-            echo "::endgroup::"
-          done < <(grep -rhoE 'bitnami/kubectl@sha256:[0-9a-f]{64}' "${CHART_DIR}" "/tmp/base-chart/${CHART_DIR}" | sort -u)
-          echo "external hook images pre-pulled and loaded: ${count}"
-          if [ "${count}" -eq 0 ]; then
-            echo "::error::zero external hook images found - denominator check failed"
-            exit 1
-          fi
+          # The BASE chart must run against the base ref's OWN DB-coupled images, never the PR's.
+          # A PR that adds an alembic revision needing chart-provided env/Secret keys (e.g.
+          # 0055_per_service_db_roles + WADDLES_DB_SERVICE_ROLE_PASSWORDS) makes the PR's
+          # migrations image refuse to run under the base chart's db-migrate Job -- the base
+          # install itself failed that way (run 38093158814) and the upgrade step never ran,
+          # i.e. the harness, not the live upgrade, was the thing under test. migrations and
+          # hub-api are the only images that bake in alembic/ revisions (hub_api/Dockerfile
+          # COPYs alembic/versions for its head check), so rebuild just those two from the
+          # merge-base worktree as :ci-base. Every other image is retagged :ci-base from the PR
+          # build (same layers, no rebuild -- the Rust builds are the 25+ min cost); a PR that
+          # changes those images' behaviour against the base chart is outside this job's scope.
+          declare -a BASE_DB_IMAGES=(
+            "waddlebot-migrations:ci-base:migrations/Dockerfile:."
+            "hub-api:ci-base:hub_api/Dockerfile:."
+          )
+          base_built=0
+          for entry in "${BASE_DB_IMAGES[@]}"; do
+            IFS=":" read -r name tag dockerfile context <<< "${entry}"
+            (cd /tmp/base-chart && docker build -f "${dockerfile}" -t "${name}:${tag}" "${context}")
+            kind load docker-image "${name}:${tag}" --name waddlebot-upgrade
+            base_built=$((base_built + 1))
+          done
+          retagged=0
+          for entry in "${IMAGES[@]}"; do
+            IFS=":" read -r name tag _ _ <<< "${entry}"
+            case "${name}" in waddlebot-migrations|hub-api) continue ;; esac
+            docker tag "${name}:${tag}" "${name}:ci-base"
+            kind load docker-image "${name}:ci-base" --name waddlebot-upgrade
+            retagged=$((retagged + 1))
+          done
+          echo "base-ref images built: ${base_built}, PR images retagged ci-base: ${retagged}"
+          [ "${base_built}" -eq "${#BASE_DB_IMAGES[@]}" ] || { echo "::error::base-ref DB images not all built"; exit 1; }
+          [ "$((base_built + retagged))" -eq "${built}" ] || { echo "::error::ci-base image set does not cover the ci set (${base_built}+${retagged} != ${built})"; exit 1; }
 
       - name: helm install base ref chart
         run: |
           set -euo pipefail
+          # NO --wait/--atomic on the helm call below, exactly like scripts/alpha-deploy.sh
+          # (load-bearing -- see its HELM_ARGS comment + scripts/check_alpha_deploy_no_wait.py):
+          # db-migrate is a post-install hook and hub-api only becomes Ready after it ran, so
+          # --wait (Helm blocks on Deployment readiness BEFORE post-install hooks) deadlocks a
+          # fresh install. Helm still awaits hook Jobs via --timeout; Deployment readiness is
+          # verified explicitly AFTER the hook phase by wait_rollouts.
+          wait_rollouts() {
+            local names count
+            names=$(kubectl get deployments -n "${NAMESPACE}" -o name)
+            count=$(echo "${names}" | grep -c . || true)
+            echo "deployments to wait on: ${count}"
+            [ "${count}" -gt 0 ] || { echo "::error::zero deployments found - denominator check failed"; exit 1; }
+            for d in ${names}; do
+              kubectl rollout status "${d}" -n "${NAMESPACE}" --timeout=15m
+            done
+          }
           kubectl create namespace "${NAMESPACE}"
           kubectl create secret generic waddlebot-platform-credentials \
             --namespace "${NAMESPACE}" \
             --from-literal=DISCORD_BOT_TOKEN="ci-dummy-discord-bot-token-never-real" \
             --from-literal=TWITCH_OAUTH_TOKEN="oauth:ci-dummy-twitch-irc-token-never-real"
           helm dependency build "/tmp/base-chart/${CHART_DIR}"
+          # global.imageTag=ci-base: the base-ref images built/retagged in the step above (the
+          # PR's values-ci.yaml otherwise pins every image to the PR-built :ci tag).
           helm install waddlebot "/tmp/base-chart/${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
             -f "/tmp/base-chart/${CHART_DIR}/values-alpha.yaml" \
             -f "${CHART_DIR}/values-ci.yaml" \
-            --wait --timeout "${HELM_TIMEOUT}"
+            --set global.imageTag=ci-base \
+            --timeout "${HELM_TIMEOUT}"
+          wait_rollouts
 
       - name: helm upgrade to PR chart
         run: |
           set -euo pipefail
+          # NO --wait/--atomic on the helm call below, exactly like scripts/alpha-deploy.sh
+          # (load-bearing -- see its HELM_ARGS comment + scripts/check_alpha_deploy_no_wait.py):
+          # db-migrate is a post-install hook and hub-api only becomes Ready after it ran, so
+          # --wait (Helm blocks on Deployment readiness BEFORE post-install hooks) deadlocks a
+          # fresh install. Helm still awaits hook Jobs via --timeout; Deployment readiness is
+          # verified explicitly AFTER the hook phase by wait_rollouts.
+          wait_rollouts() {
+            local names count
+            names=$(kubectl get deployments -n "${NAMESPACE}" -o name)
+            count=$(echo "${names}" | grep -c . || true)
+            echo "deployments to wait on: ${count}"
+            [ "${count}" -gt 0 ] || { echo "::error::zero deployments found - denominator check failed"; exit 1; }
+            for d in ${names}; do
+              kubectl rollout status "${d}" -n "${NAMESPACE}" --timeout=15m
+            done
+          }
           helm dependency build "${CHART_DIR}"
           helm upgrade waddlebot "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
             -f "${CHART_DIR}/values-alpha.yaml" \
             -f "${CHART_DIR}/values-ci.yaml" \
-            --wait --timeout "${HELM_TIMEOUT}"
+            --timeout "${HELM_TIMEOUT}"
+          wait_rollouts
           status=$(helm status waddlebot -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
           echo "release status after upgrade-path: ${status}"
           [ "${status}" = "deployed" ] || { echo "::error::release not deployed after base->PR upgrade"; exit 1; }
@@ -487,6 +595,10 @@ jobs:
           kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp || true
           for p in $(kubectl get pods -n "${NAMESPACE}" -o name); do
             kubectl describe "${p}" -n "${NAMESPACE}" || true
+            # Container logs (incl. init + crashed-previous) are what actually name a
+            # hook Job's failure -- events alone only say "BackoffLimitExceeded".
+            kubectl logs "${p}" -n "${NAMESPACE}" --all-containers --tail=200 --prefix || true
+            kubectl logs "${p}" -n "${NAMESPACE}" --all-containers --previous --tail=100 --prefix 2>/dev/null || true
           done
 
       - name: Cleanup

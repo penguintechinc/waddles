@@ -105,4 +105,60 @@ if missing:
 print("Post-migration schema: required tables present")
 PY
 
+# ── Reconcile waddles_bundle_reader role password ───────────────────────────
+# fix/no-empty-kept-secrets -- 0032_bundle_reader_role.py only sets this role's
+# password the ONE TIME it creates the role; a DB already at/past that revision
+# never re-runs it. The chart's lookup-KEEP bug (now fixed) could otherwise mint
+# a brand-new DB_READER_PASSWORD on some later `helm upgrade` with the role's
+# actual Postgres password never updated to match. Reconcile unconditionally on
+# every migration-job run, after `alembic upgrade head`, via the shared
+# scripts/db/bundle_reader_role.py module (same GRANT list 0032 provisions --
+# never a second, independently-maintained copy). FAIL LOUD on an empty
+# password: never silently leave/set an empty password on this role.
+echo "Reconciling waddles_bundle_reader role password..."
+if [ -z "${DB_READER_PASSWORD:-}" ]; then
+    echo "ERROR: DB_READER_PASSWORD is empty -- refusing to leave/set an empty password on waddles_bundle_reader (this role gates the DB-driven multi-app active-bundle path)." >&2
+    exit 1
+fi
+python3 - <<'PY'
+import os
+import sys
+
+import sqlalchemy as sa
+
+sys.path.insert(0, "/app/scripts/db")
+import bundle_reader_role  # noqa: E402
+
+url = os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+psycopg2://", 1)
+engine = sa.create_engine(url)
+with engine.begin() as conn:
+    exists = conn.execute(
+        sa.text("SELECT 1 FROM pg_roles WHERE rolname = :role"),
+        {"role": bundle_reader_role.ROLE},
+    ).scalar()
+    if not exists:
+        print(
+            f"Role {bundle_reader_role.ROLE} does not exist yet "
+            "(0032_bundle_reader_role has not run on this database) -- skipping reconcile."
+        )
+        sys.exit(0)
+    bundle_reader_role.reconcile_role_and_grants(
+        conn, os.environ[bundle_reader_role.PASSWORD_ENV]
+    )
+print(f"Reconciled {bundle_reader_role.ROLE} password and grants.")
+PY
+
+# ── Reconcile per-service LOGIN roles (H-1 / H-3) ────────────────────────────
+# config/postgres/service-roles.yaml is the single catalog of the least-privilege
+# role each chart workload connects as (never the database owner/superuser this
+# Job runs as). 0055_per_service_db_roles creates them once; this step re-asserts
+# the EXACT catalog on every migrate Job run so (a) a rotated password in the
+# Secret reaches Postgres, (b) tables added by later migrations are granted to the
+# roles that need them, and (c) out-of-band grant drift is repaired. --strict makes
+# a catalog table that does not exist FAIL the Job (never a silent skip); a missing
+# / weak WADDLES_DB_SERVICE_ROLE_PASSWORDS fails it too. Passwords are read from the
+# environment only -- never an argv, never echoed.
+echo "Reconciling per-service DB roles..."
+python3 /app/scripts/db/service_roles.py reconcile --strict
+
 echo "=== All migrations complete ==="

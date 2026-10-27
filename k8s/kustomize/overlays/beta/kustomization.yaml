@@ -127,8 +127,8 @@ images:
   - name: infra-redis
     newName: ghcr.io/penguintechinc/waddlebot/infra-redis
     newTag: latest
-  - name: infra-minio
-    newName: ghcr.io/penguintechinc/waddlebot/infra-minio
+  - name: infra-seaweedfs
+    newName: ghcr.io/penguintechinc/waddlebot/infra-seaweedfs
     newTag: latest
   - name: infra-qdrant
     newName: ghcr.io/penguintechinc/waddlebot/infra-qdrant

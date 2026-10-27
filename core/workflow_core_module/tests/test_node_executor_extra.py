@@ -8,7 +8,6 @@ handler -- paths the original moved-in suite didn't reach.
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -32,7 +31,7 @@ from models.nodes import (
     OperatorType,
     TriggerCommandConfig,
 )
-from services.node_executor import NodeExecutionResult, NodeExecutor
+from services.node_executor import NodeExecutor
 
 
 def _context(**overrides: Any) -> ExecutionContext:
@@ -56,7 +55,7 @@ class _FakeResponse:
     async def text(self) -> str:
         return self._text_body
 
-    async def __aenter__(self) -> "_FakeResponse":
+    async def __aenter__(self) -> _FakeResponse:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -119,7 +118,9 @@ class TestExecuteActionModule:
         ctx.set_variable("msg", "hello")
         await executor._ensure_http_session()
         executor._http_session.post = MagicMock(
-            return_value=_FakeResponse(200, json_body={"output": {"sent_id": "abc"}, "message": "OK"})
+            return_value=_FakeResponse(
+                200, json_body={"output": {"sent_id": "abc"}, "message": "OK"}
+            )
         )
         result = await executor.execute_action_module(node, ctx, {})
         assert result.success is True
@@ -144,11 +145,11 @@ class TestExecuteActionModule:
         await executor._ensure_http_session()
 
         class _Raiser:
-            def __call__(self, *a: Any, **k: Any) -> "_Raiser":
+            def __call__(self, *a: Any, **k: Any) -> _Raiser:
                 return self
 
             async def __aenter__(self) -> Any:
-                raise asyncio.TimeoutError()
+                raise TimeoutError()
 
             async def __aexit__(self, *exc: Any) -> None:
                 return None
@@ -170,6 +171,16 @@ class TestExecuteActionModule:
 
 
 class TestExecuteActionWebhook:
+    @pytest.fixture(autouse=True)
+    def _stub_egress_preflight(self) -> Any:
+        """Stub the egress pre-flight for tests that mock the HTTP layer.
+
+        These tests use fake hosts ('https://x'); the real SSRF guard is
+        covered in tests/test_egress_guard.py.
+        """
+        with patch("services.node_executor.validate_egress_url", new=AsyncMock()):
+            yield
+
     @pytest.mark.asyncio
     async def test_success_with_json_body_template(self) -> None:
         executor = NodeExecutor()
@@ -183,8 +194,8 @@ class TestExecuteActionWebhook:
         ctx.set_variable("path", "hook")
         ctx.set_variable("token", "abc")
         ctx.set_variable("val", "1")
-        await executor._ensure_http_session()
-        executor._http_session.request = MagicMock(
+        await executor._ensure_webhook_session()
+        executor._webhook_session.request = MagicMock(
             return_value=_FakeResponse(200, text_body='{"ok": true}')
         )
         result = await executor.execute_action_webhook(node, ctx, {})
@@ -198,8 +209,8 @@ class TestExecuteActionWebhook:
         node = ActionWebhookConfig(
             node_id="w1", label="W", position={"x": 0, "y": 0}, url="https://x",
         )
-        await executor._ensure_http_session()
-        executor._http_session.request = MagicMock(
+        await executor._ensure_webhook_session()
+        executor._webhook_session.request = MagicMock(
             return_value=_FakeResponse(200, text_body="not json")
         )
         result = await executor.execute_action_webhook(node, _context(), {})
@@ -213,14 +224,14 @@ class TestExecuteActionWebhook:
             node_id="w1", label="W", position={"x": 0, "y": 0}, url="https://x",
             body_template="not { json",
         )
-        await executor._ensure_http_session()
+        await executor._ensure_webhook_session()
         captured: dict[str, Any] = {}
 
         def _request(**kwargs: Any) -> _FakeResponse:
             captured.update(kwargs)
             return _FakeResponse(200, text_body="ok")
 
-        executor._http_session.request = _request
+        executor._webhook_session.request = _request
         await executor.execute_action_webhook(node, _context(), {})
         assert captured["data"] == "not { json"
         await executor.close()
@@ -231,8 +242,10 @@ class TestExecuteActionWebhook:
         node = ActionWebhookConfig(
             node_id="w1", label="W", position={"x": 0, "y": 0}, url="https://x", retry_count=1,
         )
-        await executor._ensure_http_session()
-        executor._http_session.request = MagicMock(return_value=_FakeResponse(500, text_body="err"))
+        await executor._ensure_webhook_session()
+        executor._webhook_session.request = MagicMock(
+            return_value=_FakeResponse(500, text_body="err")
+        )
         with patch("services.node_executor.asyncio.sleep", new=AsyncMock()):
             result = await executor.execute_action_webhook(node, _context(), {})
         assert result.success is False
@@ -245,19 +258,19 @@ class TestExecuteActionWebhook:
         node = ActionWebhookConfig(
             node_id="w1", label="W", position={"x": 0, "y": 0}, url="https://x", retry_count=0,
         )
-        await executor._ensure_http_session()
+        await executor._ensure_webhook_session()
 
         class _Raiser:
-            def __call__(self, **k: Any) -> "_Raiser":
+            def __call__(self, **k: Any) -> _Raiser:
                 return self
 
             async def __aenter__(self) -> Any:
-                raise asyncio.TimeoutError()
+                raise TimeoutError()
 
             async def __aexit__(self, *exc: Any) -> None:
                 return None
 
-        executor._http_session.request = _Raiser()
+        executor._webhook_session.request = _Raiser()
         result = await executor.execute_action_webhook(node, _context(), {})
         assert "Timeout" in result.error
         await executor.close()
@@ -394,7 +407,7 @@ class TestExecuteDataTransform:
         )
         with patch.object(
             NodeExecutor, "_execute_restricted_python",
-            AsyncMock(side_effect=asyncio.TimeoutError()),
+            AsyncMock(side_effect=TimeoutError()),
         ):
             result = await executor.execute_data_transform(node, _context(), {})
         assert result.error_type == "timeout"
@@ -432,7 +445,6 @@ class TestEvaluateOperator:
     )
     async def test_operators(self, operator, left, right, expected) -> None:
         executor = NodeExecutor()
-        node = None
         result = executor._evaluate_operator(left, operator, right)
         assert result is expected
 

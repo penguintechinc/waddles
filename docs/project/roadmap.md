@@ -283,7 +283,7 @@ analytics_core_module/
 ```
 
 **Deployment Strategy**:
-- **Model Storage**: MinIO (S3-compatible) for model artifacts
+- **Model Storage**: SeaweedFS (S3-compatible) for model artifacts
 - **Model Format**: ONNX for cross-platform inference
 - **Inference Service**: FastAPI endpoint for real-time scoring
 - **Batch Jobs**: Nightly recalculation for all users
@@ -357,7 +357,7 @@ CREATE TABLE analytics_ml_models (
     id SERIAL PRIMARY KEY,
     model_name VARCHAR(255) NOT NULL,
     version VARCHAR(50) NOT NULL,
-    model_artifact_url TEXT NOT NULL,      -- MinIO URL
+    model_artifact_url TEXT NOT NULL,      -- SeaweedFS URL
     metrics JSONB,                          -- Precision, recall, F1, AUC
     training_date TIMESTAMP DEFAULT NOW(),
     deployed_at TIMESTAMP,
@@ -396,7 +396,7 @@ CREATE TABLE analytics_ml_feedback (
 - Batch scoring: 10-20 workers for parallel feature extraction
 
 **Storage**:
-- MinIO bucket for model artifacts (1-10 GB per model)
+- SeaweedFS bucket for model artifacts (1-10 GB per model)
 - PostgreSQL for features, predictions, feedback (100 MB - 10 GB)
 
 **Libraries**:

@@ -8,6 +8,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from flask_core.secrets import require_secret_key
+from services.log_safety import log_failure
 
 load_dotenv()
 
@@ -112,8 +113,11 @@ class Config:
                 )
                 return True
         except Exception as e:
-            logger.warning(
-                "Failed to load credentials from DB, using env vars: %s", e
+            log_failure(
+                logger,
+                "Failed to load credentials from DB, using env vars",
+                e,
+                level=logging.WARNING,
             )
         return False
 
@@ -148,7 +152,7 @@ class Config:
                         with cls._credential_lock:
                             cls._credentials_loaded = False
             except Exception as e:
-                logger.error("Credential listener error: %s", e)
+                log_failure(logger, "Credential listener error", e)
 
         thread = threading.Thread(
             target=_listen, daemon=True, name="credential-listener"

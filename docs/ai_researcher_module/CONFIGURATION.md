@@ -74,6 +74,8 @@ OLLAMA_TIMEOUT=60
 OLLAMA_USE_TLS=false
 OLLAMA_VERIFY_SSL=true
 OLLAMA_CERT_PATH=/path/to/cert.pem
+OLLAMA_SUPPORTS_JSON=false
+OLLAMA_DISABLE_THINKING=true
 ```
 
 | Variable | Default | Type | Range | Description |
@@ -87,6 +89,13 @@ OLLAMA_CERT_PATH=/path/to/cert.pem
 | OLLAMA_USE_TLS | false | bool | - | Use TLS for connection |
 | OLLAMA_VERIFY_SSL | true | bool | - | Verify SSL certificate |
 | OLLAMA_CERT_PATH | empty | string | - | Path to SSL certificate |
+| OLLAMA_SUPPORTS_JSON | false | bool | - | Declare that `OLLAMA_MODEL` handles JSON/structured output. `false` = **text-only path**: no `format` is ever sent and summaries use plain labeled-text prompts. Set `true` only for a JSON-capable model (e.g. gemma4:e4b+) |
+| OLLAMA_DISABLE_THINKING | true | bool | - | Send `think: false` so reasoning models (e.g. gemma4) answer directly instead of spending the token budget on hidden reasoning and returning an empty reply |
+
+Capability flags describe whatever model `OLLAMA_MODEL` names; there is no built-in model-to-capability
+map. Booleans are parsed strictly (`true/false/1/0/yes/no/on/off`) - a typo fails at startup. An empty
+completion is a hard error (`EmptyCompletionError`), never a blank success. See
+`docs/testing/ollama-realpath.md` for the env-gated real-Ollama test suite.
 
 **Model Recommendations:**
 - **Fast:** tinyllama, mistral
@@ -505,3 +514,13 @@ Database per-community settings (lowest priority)
 ```
 
 Settings are evaluated in order, with higher priority values overriding lower priority.
+
+## Prompt-Injection Hardening (OWASP LLM01)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AI_MAX_UNTRUSTED_CHARS` | `4000` | Upper bound on the characters of any single user-supplied value (topic, question) embedded in a prompt |
+
+Everything else is always on (fail-closed): untrusted-data delimiting, injection screening of
+retrieved search results / memories / chat logs, tool-call refusal and reply sanitising. See
+[`docs/security/ai-prompt-injection-hardening.md`](../security/ai-prompt-injection-hardening.md).

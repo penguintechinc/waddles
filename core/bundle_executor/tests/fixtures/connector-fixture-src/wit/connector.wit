@@ -1,0 +1,99 @@
+// Test-fixture-only trimmed copy of `wit/waddle-connector/connector.wit`
+// (identity/receiver/sender interfaces byte-for-byte identical, so the
+// canonical ABI this compiles to matches what
+// `crate::engine::connector_world` bindgen'd against the real file) --
+// `http`/`log`/`clock`/`%flags` are omitted here because this fixture never
+// calls them (`src/lib.rs` only exercises `identity.lookup`), which avoids
+// this standalone `cargo-component` package needing its own
+// `waddle:bundle@1.0.0` dependency resolution. The real, normative
+// `connector.wit` (with those reused imports) is what
+// `core/bundle_executor`'s own `Linker` is built against; this fixture
+// exists only to prove the `identity.lookup` link-gate, per this crate's
+// `tests/linker_isolation.rs`.
+package waddle:connector@1.0.0;
+
+interface types {
+  record connection-ctx {
+    platform: string,
+    source-id: string,
+    connection-id: string,
+    session-token: option<string>,
+  }
+
+  record raw-frame {
+    ctx: connection-ctx,
+    bytes: list<u8>,
+    received-at: string,
+  }
+
+  record normalized-event {
+    platform: string,
+    event-type: string,
+    actor: option<string>,
+    payload-json: string,
+    occurred-at: string,
+  }
+
+  record handshake-payload {
+    bytes: list<u8>,
+    secret-refs: list<tuple<string, string>>,
+  }
+
+  variant frame-error { unsupported(string), malformed(string), backend(string) }
+}
+
+interface identity {
+  variant identity-key {
+    uuid(string),
+    platform-identity(tuple<string, string>),
+  }
+
+  record identity-record {
+    uuid: string,
+    linked: bool,
+    handle: option<string>,
+    display-name: option<string>,
+  }
+
+  variant error { denied(string), not-found, rate-limited(u32), backend(string) }
+
+  lookup: func(key: identity-key) -> result<identity-record, error>;
+}
+
+interface receiver {
+  use types.{connection-ctx, raw-frame, normalized-event, handshake-payload, frame-error};
+
+  on-connect: func(ctx: connection-ctx) -> result<handshake-payload, frame-error>;
+  on-frame: func(frame: raw-frame) -> result<list<normalized-event>, frame-error>;
+  on-heartbeat-due: func(ctx: connection-ctx) -> result<option<list<u8>>, frame-error>;
+  on-disconnect: func(ctx: connection-ctx, reason: string);
+}
+
+interface sender {
+  use types.{frame-error};
+
+  record header { name: string, value: string }
+
+  record action {
+    kind: string,
+    target-source-id: string,
+    payload-json: string,
+  }
+
+  record http-request-tpl {
+    method: string,
+    url: string,
+    headers: list<header>,
+    body: option<list<u8>>,
+    secret-refs: list<tuple<string, string>>,
+  }
+
+  build-request: func(action: action) -> result<http-request-tpl, frame-error>;
+}
+
+world connector {
+  import identity;
+
+  export receiver;
+  export sender;
+}

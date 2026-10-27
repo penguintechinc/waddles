@@ -1,7 +1,15 @@
-.PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
-        seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
-        verify-csping-fixture verify-ping-bundle-reproducible generate-minio-kms-key alpha-deploy
+        seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
+        verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
+        build-superpenguin-roll-bundle test-csharp-bundle-compile \
+        verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
+        test-bundle-flag-on-command-e2e \
+        check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        test-seaweedfs-sse-kms test-helm-pending-recover \
+        verify-audit-chain verify-audit-export test-supply-chain \
+        suppression-stats suppression-purge suppression-lift suppression-check \
+        test-data-plane-parity check-builtin-handler-inventory
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -23,6 +31,17 @@ docker-push:
 lint:
 	@bash scripts/lint.sh
 
+openapi-hubapi:
+	@python3 scripts/export-hubapi-openapi.py
+	@spectral lint openapi/v1.yaml --fail-severity=error
+
+# Fails when the committed openapi/v1.yaml differs from a fresh regeneration
+# (stale spec). Regenerates in place, then git-diffs; no masking -- exit status
+# propagates. Needs hub_api/requirements.txt deps (incl. defusedxml, signxml).
+check-openapi-drift:
+	@PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 scripts/export-hubapi-openapi.py
+	@git diff --exit-code -- openapi/v1.yaml || { echo "ERROR: openapi/v1.yaml is stale -- run 'make openapi-hubapi' and commit the result" >&2; exit 1; }
+
 check-docs:
 	@bash scripts/check-doc-refs.sh
 
@@ -33,12 +52,93 @@ check-docs:
 check-bundle-dal:
 	@bash scripts/check-bundle-dal-imports.sh
 
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- regression gates for the
+# fresh-install hook-ordering bug (migrate ran pre-install before postgres
+# existed) and its fix (every non-hub-api workload waits on hub-api's /ready).
+check-helm-hook-phases:
+	@python3 scripts/check_helm_hook_phases.py
+
+check-wait-for-hub-api:
+	@python3 scripts/check_wait_for_hub_api.py
+
+# USER DECISION (2026-10-01, fix/chart-fresh-install-hooks): db-migrate now runs
+# post-install -- helm upgrade --install in alpha-deploy.sh must never pass
+# --wait/--atomic, or a fresh install deadlocks (Deployments wait on hub-api,
+# hub-api waits on db-migrate, db-migrate waits on Helm to stop waiting on
+# Deployments). See scripts/check_alpha_deploy_no_wait.py's module docstring.
+check-alpha-deploy-no-wait:
+	@python3 scripts/check_alpha_deploy_no_wait.py
+
+# alpha-deploy.sh self-heals a release stuck in pending-* (interrupted upgrade);
+# stub-driven test of that recovery logic, no cluster touched.
+test-helm-pending-recover:
+	@bash scripts/test-helm-pending-recover.sh
+
+# No-stubs / no-silent-fallbacks gate (gh-regression: a `flags capability not
+# wired -- TODO(M4+)` stub returned a silent default and shipped as "done",
+# causing a multi-hour alpha outage). Scans non-test core/hub_api/sdk/bundles/
+# frontend source for stub markers + semgrep silent-fallback patterns against
+# .ci/stub-allowlist.yml + .ci/silent-fallback-baseline.json. Requires
+# `semgrep` on PATH (pinned in CI; see scripts/ci/semgrep-silent-fallback.yml).
+check-no-stubs:
+	@bash scripts/ci/check-no-stubs.sh
+
+# Bundle hygiene gates (.github/workflows/bundle-hygiene.yml): raw user input in
+# bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, broad
+# silent `except` swallows, role badges (`is_mod`, ...) read through Python
+# truthiness (`bool("false")` is True -> mod-gate bypass) in bundles AND the
+# legacy svc-ingest tree, and an `ai.generate` bundle that does not guard its
+# reply lead against a completion starting with `/`, `.` or `!` (pytest gate), and a bundle
+# missing from bundles/core-bundles.yaml or built on the wrong WIT world (stage vs stage-next), an
+# economy/identity/reputation/ai host call reachable from a bundle's `dispatch` (those capabilities are
+# served to the process stage only), and a game bundle drawing outcomes from the module-level `random`
+# (componentize-py freezes its seed into the snapshot; use `random.SystemRandom()`).
+# Each prints the count it examined and exits non-zero on a hit (or on zero
+# examined). Needs PyYAML for the manifest check and pytest for the AI-lead gate.
+check-bundle-hygiene:
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check log-pii
+	@python3 scripts/ci/check-bundle-manifest-permissions.py
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
+	@python3 -m pytest scripts/ci/tests/test_ai_output_lead_gate.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_wit_world.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_stage_gate.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -q -p no:cacheprovider
+	@python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -q -p no:cacheprovider
+
+# builtin_handlers -> Rust-path/bundle inventory gate (gh #840 PR4): FAILS if a live Python
+# ingest/process/action handler has no mapping in .ci/builtin-handler-map.yaml, a covered
+# mapping's evidence is stale, a pending handler was removed, or a stage entrypoint dangles.
+# `make check-builtin-handler-inventory STRICT=1` also fails on any pending (Python-removal mode).
+check-builtin-handler-inventory:
+	@python3 -m pytest scripts/ci/tests/test_check_builtin_handler_inventory.py -q -p no:cacheprovider
+	@python3 scripts/ci/check-builtin-handler-inventory.py $(if $(STRICT),--strict,)
+
+# Data-plane golden-vector parity harness (gh #840 PR4): Rust normalize.rs oracle vs committed
+# goldens (svc_ingest), legacy Python normalize path vs the same goldens (tests/data_plane_parity),
+# every corpus event through svc_process's closed-schema pii_tokenize classifier, then the
+# inventory gate. Real paths, no mocked capability boundaries. Needs the repo .venv/py deps
+# (scripts/ci/install-unit-test-deps.sh) + the pinned Rust toolchain; see tests/data_plane_parity/README.md.
+test-data-plane-parity:
+	@bash scripts/ci/data-plane-parity.sh
+
 test:
 	@$(MAKE) test-unit
 
 test-unit:
 	@echo "Running unit tests..."
 	@bash tests/k8s/alpha/05-unit-tests.sh
+
+# Env-gated REAL-endpoint Ollama tests (hub-api router, AI Researcher, AI Interaction) --
+# LAN-only lab endpoint, never run in CI. The lab GPU is shared with the live WaddleAI, so the
+# three suites run strictly one after another (and each serializes its own requests). Needs each
+# module's test deps installed -- see docs/testing/ollama-realpath.md.
+#   make test-ollama-realpath WADDLE_TEST_OLLAMA_URL=http://192.168.2.105:11434/
+test-ollama-realpath:
+	@test -n "$(WADDLE_TEST_OLLAMA_URL)" || { echo "WADDLE_TEST_OLLAMA_URL is required (e.g. http://192.168.2.105:11434/)" >&2; exit 1; }
+	cd hub_api && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_routing_ollama_realpath.py -v -rs
+	cd core/ai_researcher_module && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_researcher_ollama_realpath.py -v -rs
+	cd action/interactive/ai_interaction_module && WADDLE_TEST_OLLAMA_URL="$(WADDLE_TEST_OLLAMA_URL)" python3 -m pytest tests/test_ai_interaction_ollama_realpath.py -v -rs
 
 test-integration:
 	@echo "Running integration tests..."
@@ -56,6 +156,28 @@ test-functional:
 test-security:
 	@bash scripts/security-scan.sh
 
+# Live e2e: Rust connection_resolver <-> real hub-api <-> real Postgres (docker + helm + cargo).
+# HUB_PYTHON must have hub_api/requirements*.txt installed (default python3).
+test-connection-resolver-live:
+	@bash scripts/ci/connection-resolver-live.sh
+
+# Live e2e: svc-ingest per-community Twitch sessions <-> real hub-api <-> real Postgres + Valkey
+# <-> in-process IRC server (docker + helm + cargo; HUB_PYTHON as above).
+test-svc-ingest-twitch-live:
+	@bash scripts/ci/twitch-sessions-live.sh
+
+# Seeded-failure proof that the lint/security gates can fail (crashed scanner,
+# non-numeric counter, new finding above baseline) -- Verification Integrity.
+test-gate-integrity:
+	@bash scripts/ci/tests/test_checks_gate_integrity.sh
+
+# Supply-chain signing self-test (scripts/ci/supply-chain.sh) against a throwaway local
+# registry + ephemeral keys, plus the Kyverno admission render tests. Needs cosign, syft,
+# jq, docker, helm and pytest on PATH; a missing tool fails loudly, it never skips.
+test-supply-chain:
+	@bash scripts/ci/test-supply-chain.sh
+	@python3 -m pytest -q k8s/helm/waddlebot/tests/test_supply_chain_verify_images_render.py
+
 smoke-test:
 	@echo "Running smoke tests..."
 	@test -f tests/alpha-smoke-test.sh || { echo "tests/alpha-smoke-test.sh not found" >&2; exit 1; }
@@ -64,7 +186,19 @@ smoke-test:
 seed-mock-data:
 	@echo "Seeding mock data..."
 	@test -f scripts/seed-admin.sh || { echo "scripts/seed-admin.sh not found" >&2; exit 1; }
-	@bash scripts/seed-admin.sh
+	@bash scripts/seed-admin.sh $(SEED_ARGS)
+	@$(MAKE) --no-print-directory seed-ui-mock-data
+
+# UI content seed (communities, members, leaderboard, overlays, chat, bundles)
+# so marketing screenshots are not empty-state. SEED_ARGS e.g. --docker.
+seed-ui-mock-data:
+	@bash scripts/seed-ui-mock-data.sh $(filter --docker,$(SEED_ARGS))
+
+# Marketing screenshots -> docs/screenshots/ (pinned Playwright, see
+# tests/screenshots). Needs a running hub-webui at BASE_URL and seeded data;
+# SCREENSHOT_EMAIL/SCREENSHOT_PASSWORD from env (never committed).
+screenshots:
+	@bash scripts/screenshots.sh
 
 clean:
 	docker-compose down -v
@@ -79,6 +213,16 @@ deploy-dev:
 deploy-prod:
 	$(error deploy-prod requires CI — tag a release to trigger the production pipeline)
 
+# Generates a fresh Ed25519 platform bundle-signing keypair and creates/updates the
+# BUNDLE_SIGNING_PRIVATE_KEY/BUNDLE_SIGNING_KEY_ID Secret hub-api reads -- see
+# scripts/generate-bundle-signing-key.sh and the chart README's rollout-order section.
+# Usage: make generate-bundle-signing-key KEY_ID=2026-09-key1 KUBE_CONTEXT=dal2-beta NAMESPACE=waddlebot
+generate-bundle-signing-key:
+	@test -n "$(KEY_ID)" || { echo "KEY_ID is required" >&2; exit 1; }
+	@test -n "$(KUBE_CONTEXT)" || { echo "KUBE_CONTEXT is required" >&2; exit 1; }
+	@test -n "$(NAMESPACE)" || { echo "NAMESPACE is required" >&2; exit 1; }
+	@bash scripts/generate-bundle-signing-key.sh "$(KEY_ID)" "$(KUBE_CONTEXT)" "$(NAMESPACE)" $(SECRET_NAME)
+
 run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 worker)
 	docker build -f action/interactive/ai_interaction_module/Dockerfile -t waddlebot/ai-interaction:local . && \
 	docker run --rm \
@@ -89,35 +233,168 @@ run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 work
 	  -p 8005:8005 \
 	  waddlebot/ai-interaction:local
 
-# C#-toolchain spike (spec S18 R13): rebuilds bundles/csharp/csping from
-# source in its pinned, checksum-verified, rootless Dockerfile and asserts
-# byte-identical output against the committed
+# C#-toolchain spike (spec S18 R13), now ported onto waddle-sdk-cs: rebuilds
+# bundles/csharp/csping from source in its pinned, checksum-verified,
+# rootless Dockerfile and asserts byte-identical output against the committed
 # core/bundle_executor/tests/fixtures/csping.wasm + .sha256 -- makes that
 # committed binary auditable instead of a trust-me blob.
 verify-csping-fixture:
 	@bash scripts/verify-csping-fixture.sh
 
-# Proves bundles/rust/ping's WASI 0.2 component build (bundles/Dockerfile.core-bundles's
-# rust-bundle-builder stage) is byte-reproducible -- two independent --no-cache builds must
-# produce an identical sha256. See scripts/verify-ping-bundle-reproducible.sh for why.
-verify-ping-bundle-reproducible:
-	@bash scripts/verify-ping-bundle-reproducible.sh
+# csping: ported onto waddle-sdk-cs (bundles/csharp/csping/CspingLogic.cs/
+# CspingDispatch.cs) -- xUnit tests run in the same pinned containerized
+# .NET SDK image as every other C# build in this repo.
+test-csping:
+	@bash scripts/test-csping.sh
 
-# Generates a MinIO static KMS key and applies it as a Secret so at-rest
-# encryption (security.md Encryption: Storage) works outside alpha -- see
-# k8s/helm/waddlebot's infrastructure.minio.kms.secretName fail guard.
-# Usage: make generate-minio-kms-key KUBE_CONTEXT=dal2-beta [NAMESPACE=waddlebot]
-generate-minio-kms-key:
-	@test -n "$(KUBE_CONTEXT)" || { echo "ERROR: KUBE_CONTEXT is required, e.g. make generate-minio-kms-key KUBE_CONTEXT=dal2-beta" >&2; exit 1; }
-	@bash scripts/generate-minio-kms-key.sh --context "$(KUBE_CONTEXT)" $(if $(NAMESPACE),--namespace "$(NAMESPACE)",)
+# waddle-sdk-cs: shared C# SDK for Waddles app bundles (sdk/waddle-sdk-cs) --
+# xUnit tests run in the same pinned containerized .NET SDK image as every
+# other C# build in this repo (see scripts/test-waddle-sdk-cs.sh).
+test-waddle-sdk-cs:
+	@bash scripts/test-waddle-sdk-cs.sh
+
+# superpenguin-roll: first C# bundle built on waddle-sdk-cs, ported from
+# PenguinTwitchBot's PastyGames/Roll.cs (MIT, used with permission -- see
+# bundles/csharp/superpenguin-roll/bundle.yaml `notice`).
+test-superpenguin-roll:
+	@bash scripts/test-superpenguin-roll.sh
+
+# Rebuilds bundles/csharp/superpenguin-roll to a real .wasm component and
+# reports its size/sha256 -- see scripts/verify-superpenguin-roll-fixture.sh
+# for why no committed fixture is byte-identity-checked here (unlike
+# verify-csping-fixture, this component is not committed to
+# core/bundle_executor/tests/fixtures/).
+build-superpenguin-roll-bundle:
+	@bash scripts/verify-superpenguin-roll-fixture.sh
+
+# End-to-end: builds the real bundles/csharp/csping spike bundle through
+# CSharpBuilder (core/bundle_compiler/src/build/csharp.rs), the
+# builder_for("csharp") arm now returns -- ignored by default cargo test
+# (needs docker + network, ~1-2 minutes), so this is its only run path.
+test-csharp-bundle-compile:
+	@cd core/bundle_compiler && cargo test --locked builds_csping_via_docker -- --ignored --nocapture
+
+# Tamper-evident audit log (GRC audit finding #3, docs/compliance/audit-logging.md).
+# verify-audit-chain: recompute every audit chain straight from the database (DATABASE_URL / DB_*
+# env, run from hub_api so `cli.*` resolves). Exits 1 on tampering, 2 if zero records were
+# examined (a check over nothing is not a pass; add ALLOW_EMPTY=1 for deployments with no
+# Enterprise tenant), 3 if it could not run. Pin heads with EXPECT="tenant:1=42:<hash>".
+verify-audit-chain:
+	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \
+		$(foreach e,$(EXPECT),--expect $(e))
+
+# Ban-evasion suppression list (docs/compliance/suppression-LIA.md, hub_api/cli/suppression.py).
+# Run from hub_api so `cli.*` resolves; DATABASE_URL / DB_* env, TENANT_KEK_HEX for `lift`.
+#   suppression-stats: live/expired rows per tenant, type and key version (when can
+#                      TENANT_KEK_HEX_PREVIOUS be dropped after a KEK rotation?).
+#   suppression-purge: delete every expired row now (hub-api also does this hourly).
+#   suppression-lift:  delete one identity's row in one tenant (restriction lifted / objection
+#                      upheld). The platform id goes in via the PLATFORM_USER_ID environment
+#                      variable and stdin -- never argv, so it stays out of shell history/ps.
+#   make suppression-lift TENANT_ID=3 PLATFORM=discord PLATFORM_USER_ID=<id>
+#   suppression-check: read-only -- is there a live row for this identity in this tenant?
+#                      (the answer to an Art. 15 access request / an Art. 21 objection).
+#   make suppression-check TENANT_ID=3 PLATFORM=discord PLATFORM_USER_ID=<id>
+suppression-stats:
+	@cd hub_api && python3 -m cli.suppression stats
+
+suppression-purge:
+	@cd hub_api && python3 -m cli.suppression purge
+
+suppression-check:
+	@test -n "$(TENANT_ID)" -a -n "$(PLATFORM)" -a -n "$$PLATFORM_USER_ID" || { echo "usage: PLATFORM_USER_ID=<id> make suppression-check TENANT_ID=<n> PLATFORM=<name>" >&2; exit 2; }
+	@cd hub_api && printf '%s\n' "$$PLATFORM_USER_ID" | python3 -m cli.suppression check --tenant-id "$(TENANT_ID)" --platform "$(PLATFORM)" --platform-user-id-stdin
+
+suppression-lift:
+	@test -n "$(TENANT_ID)" -a -n "$(PLATFORM)" -a -n "$$PLATFORM_USER_ID" || { echo "usage: PLATFORM_USER_ID=<id> make suppression-lift TENANT_ID=<n> PLATFORM=<name>" >&2; exit 2; }
+	@cd hub_api && printf '%s\n' "$$PLATFORM_USER_ID" | python3 -m cli.suppression lift --tenant-id "$(TENANT_ID)" --platform "$(PLATFORM)" --platform-user-id-stdin
+
+# reseal-connections: re-seal legacy (seal_version 0) connection secrets as row-bound AAD
+# ciphertexts (finding M4); examines + verifies already-sealed rows too. Run from hub_api's
+# environment (DATABASE_URL or DB_*, CREDENTIAL_ENCRYPTION_KEY). Prints
+# "examined=N resealed=M failed=K"; exit 1 = a row failed, 2 = nothing examined although rows
+# exist (add EXPECT_ROWS=1 to also fail on empty tables), 3 = could not run.
+reseal-connections:
+	@python3 scripts/reseal_connections.py $(if $(EXPECT_ROWS),--expect-rows)
+
+# verify-audit-export: verify downloaded export file(s) offline -- no server, DB or network.
+#   make verify-audit-export EXPORT="page1.json page2.json" [ANCHOR=<hash>] [HEAD_SEQ=42] [HEAD_HASH=<hash>]
+verify-audit-export:
+	@test -n "$(EXPORT)" || { echo "usage: make verify-audit-export EXPORT=\"page1.json [page2.json ...]\"" >&2; exit 2; }
+	@python3 scripts/verify_audit_export.py $(EXPORT) $(if $(ANCHOR),--anchor-hash $(ANCHOR)) \
+		$(if $(HEAD_SEQ),--expect-head-seq $(HEAD_SEQ)) $(if $(HEAD_HASH),--expect-head-hash $(HEAD_HASH))
+
+# Proves bundles/Dockerfile.core-bundles's two example-bundle artifacts (ping.wasm from the
+# rust-bundle-builder stage, pyping.wasm from the python-bundle-builder stage) are both
+# byte-reproducible -- two independent --no-cache builds of the full image must produce
+# identical sha256 for each. See scripts/verify-core-bundles-reproducible.sh for why.
+verify-core-bundles-reproducible:
+	@bash scripts/verify-core-bundles-reproducible.sh
+
+# Real-path "flag ON -> command replies, flag OFF -> no reply" regression
+# gate (core/bundle_executor/tests/flag_on_command_e2e.rs): freshly compiles
+# bundles/python/eightball to wasm, loads it into the real bundle-executor
+# wasmtime host with the real `flags` capability wired, drives it through
+# the Docker-ENV flag baseline -- no mocking at the WIT/flags/wasm boundary.
+# Already FATAL via this crate's own `cargo test` gate
+# (.github/workflows/rust-bundle-executor.yml); this target is the direct
+# local/manual entry point.
+test-bundle-flag-on-command-e2e:
+	@bash scripts/test-bundle-flag-on-command-e2e.sh
+
+# Idempotent codemod: app (command) bundles are activation-gated only, not
+# flag-gated (scripts/codemod_app_bundles_activation_only.py; --apply to edit).
+codemod-app-bundles-activation-only:
+	@python3 scripts/codemod_app_bundles_activation_only.py
+
+# Generates the Ed25519 signing keypair for hub-api's per-service machine
+# JWTs (feature/eddsa-machine-jwt) and applies the resulting k8s Secret --
+# private key never printed/argv'd/persisted. Usage:
+#   KID=2026-09-28 NAMESPACE=waddlebot make generate-service-jwt-key
+generate-service-jwt-key:
+	@bash scripts/generate-service-jwt-key.sh
+
+# Generates a SeaweedFS SSE-S3 key-encryption-key and applies it as a Secret
+# so at-rest encryption (security.md Encryption: Storage) works outside alpha
+# -- see k8s/helm/waddlebot's infrastructure.seaweedfs.encryption.secretName
+# fail guard.
+# Usage: make generate-seaweedfs-sse-key KUBE_CONTEXT=dal2-beta [NAMESPACE=waddlebot]
+generate-seaweedfs-sse-key:
+	@test -n "$(KUBE_CONTEXT)" || { echo "ERROR: KUBE_CONTEXT is required, e.g. make generate-seaweedfs-sse-key KUBE_CONTEXT=dal2-beta" >&2; exit 1; }
+	@bash scripts/generate-seaweedfs-sse-key.sh --context "$(KUBE_CONTEXT)" $(if $(NAMESPACE),--namespace "$(NAMESPACE)",)
+
+# Enterprise external KMS: the chart's rendered SeaweedFS KMS mapping against the REAL pinned `weed`
+# image (docker + helm required; the image must already be pulled -- this target never pulls
+# implicitly). A missing prerequisite FAILS the target, it is never a skip. See
+# hub_api/tests/envelope/test_seaweedfs_sse_kms_e2e.py and docs/guides/external-kms-byok.md.
+test-seaweedfs-sse-kms:
+	@cd hub_api && WADDLES_E2E_SEAWEEDFS=1 python3 -m pytest tests/envelope/test_seaweedfs_sse_kms_e2e.py -v -p no:cacheprovider
 
 # Builds+pushes images at HEAD's SHA (Rust svc-ingest/svc-process/svc-action into their
 # own "*-rust" repositories), then `helm upgrade --install` with only the image tag set --
 # no secret/TLS material, ever: k8s/helm/waddlebot self-provisions everything alpha needs
 # (fix/helm-alpha-self-provisioning). Waits on migrations + rollout, re-runs the seeder,
-# verifies. Requires kube context local-alpha. Usage: make alpha-deploy [ARGS="--skip-build"]
+# verifies. Requires kube context local-alpha or microk8s (validated by the script,
+# rejects any other KUBE_CONTEXT before build/push/helm run). Usage: make alpha-deploy [ARGS="--skip-build"]
 alpha-deploy:
 	@bash scripts/alpha-deploy.sh $(ARGS)
+
+# resolve-433 -- alpha-deploy.sh's registry-backed build cache
+# (localhost:32000/waddlebot/buildcache/*) shares disk with the MicroK8s
+# registry's PVC, which was evicted once under DiskPressure. This runs the
+# registry's own garbage-collect (distribution/distribution's
+# `registry garbage-collect`) inside the registry pod via kubectl exec --
+# it does NOT touch alpha-deploy.sh's cache tags themselves (those are
+# already bounded to one overwritten tag per image; this reclaims the
+# now-unreferenced blobs those overwrites leave behind). Never run
+# automatically -- always explicit, always local-alpha only.
+# Usage: make alpha-registry-gc
+alpha-registry-gc:
+	@echo "Running MicroK8s registry garbage collection (context: local-alpha, namespace: container-registry)..."
+	@echo "NOTE: confirm the registry Deployment/config path first if this differs from the microk8s registry addon default:"
+	@echo "  kubectl --context local-alpha get pods -n container-registry"
+	kubectl --context local-alpha exec -n container-registry deploy/registry -- \
+		registry garbage-collect /etc/docker/registry/config.yml
 
 pre-commit:
 	@echo "=== Pre-commit checks ==="

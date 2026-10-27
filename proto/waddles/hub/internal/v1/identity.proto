@@ -1,0 +1,122 @@
+// IdentityService: internal gRPC contract for the PII boundary hub-api
+// owns (security.md PII Tokenization). Called only by svc-ingest,
+// svc-process and svc-action over the mTLS-ready internal gRPC port --
+// see k8s/helm/waddlebot NetworkPolicy scoping and
+// hub_api/grpc_internal/interceptors.py's per-RPC scope enforcement.
+//
+// Every RPC requires a hub-api-issued EdDSA machine JWT (feature/eddsa-
+// machine-jwt, libs/flask_core/flask_core/service_jwt.py) in the
+// `authorization` gRPC metadata key, scoped per method below.
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+// Mints and resolves ephemeral, per-tenant pseudonyms so svc-ingest/
+// svc-process/svc-action never handle raw platform identifiers or hub
+// user PII directly (security.md PII Tokenization: "the API server is
+// the PII boundary").
+service IdentityService {
+  // Batch-mints (or returns the existing) ephemeral pseudonym for each
+  // (tenant_id, platform, platform_user_id) tuple. Required scope:
+  // "identity:ephemeral:mint".
+  rpc MintEphemeralPseudonyms(MintEphemeralPseudonymsRequest) returns (MintEphemeralPseudonymsResponse);
+
+  // Resolves up to 100 UUIDs (hub_users.uuid OR ephemeral pseudonyms) to
+  // display names in one call, so callers batch instead of N+1. Required
+  // scope: "identity:displayname:read".
+  rpc ResolveDisplayNames(ResolveDisplayNamesRequest) returns (ResolveDisplayNamesResponse);
+
+  // Resolves ONE raw user reference as a chat user typed it -- a platform
+  // handle ("@bob", "bob") or a Discord mention ("<@123>", "<@!123>") -- to
+  // the stable UUID of that identity, entirely inside the hub-api PII
+  // boundary: the raw handle is matched here and never stored, echoed or
+  // logged; only the UUID comes back. The result is where a secret lands, so
+  // matching is conservative: a handle matches only a VERIFIED, platform-unique
+  // login (the OAuth-verified platform username of a linked user, or -- on
+  // Twitch, where the chat handle is the login -- the handle a pseudonym was
+  // minted with), NEVER a mutable display name / server nickname (Discord);
+  // and every match, handle or mention, requires CURRENT community membership
+  // in the tenant (a left/removed/erased identity is never returned, and a
+  // mention never mints a pseudonym for a non-member). NOT_FOUND = no such
+  // verified, current-member identity in the tenant (or tenant unknown, or a
+  // display-name-only reference on a platform that does not accept them --
+  // ask the user for a real mention), FAILED_PRECONDITION = the handle
+  // matches more than one identity (never guessed), INVALID_ARGUMENT =
+  // malformed or non-user reference (role/channel mention, @everyone, zero-
+  // width/format characters). Required scope: "identity:handle:resolve".
+  rpc ResolveHandle(ResolveHandleRequest) returns (ResolveHandleResponse);
+}
+
+message MintEphemeralPseudonymRequest {
+  string tenant_id = 1;
+  string platform = 2;
+  string platform_user_id = 3;
+  // Display handle at time of mint -- stored only inside the hub-api PII
+  // boundary, never returned to the caller in this response.
+  string handle = 4;
+}
+
+message MintEphemeralPseudonymsRequest {
+  // Bounded the same as ResolveDisplayNames (<=100) so one abusive batch
+  // can't force an unbounded transaction inside the PII boundary.
+  repeated MintEphemeralPseudonymRequest items = 1;
+}
+
+message EphemeralPseudonym {
+  string platform_user_id = 1;
+  string pseudonym = 2;
+}
+
+message MintEphemeralPseudonymsResponse {
+  repeated EphemeralPseudonym pseudonyms = 1;
+}
+
+message ResolveDisplayNamesRequest {
+  string tenant_id = 1;
+  // Max 100 per call (security.md PII Tokenization / batch-not-N+1)
+  // -- enforced server-side; a larger batch fails with INVALID_ARGUMENT.
+  repeated string uuids = 2;
+}
+
+message ResolvedDisplayName {
+  string uuid = 1;
+  string display_name = 2;
+  // True if `uuid` resolved against hub_users.uuid; false if it resolved
+  // against an ephemeral pseudonym instead. Lets callers distinguish
+  // without a second lookup.
+  bool is_hub_user = 3;
+}
+
+message ResolveDisplayNamesResponse {
+  repeated ResolvedDisplayName names = 1;
+  // uuids from the request that resolved to neither a hub user nor a
+  // known pseudonym -- never an error, since a stale/evicted pseudonym
+  // is an expected condition, not a caller bug.
+  repeated string unresolved_uuids = 2;
+}
+
+// How a ResolveHandle reference matched. Carries no PII.
+enum MatchKind {
+  MATCH_KIND_UNSPECIFIED = 0;
+  // Discord-style mention: the platform user id was embedded in the token.
+  MATCH_KIND_MENTION = 1;
+  // Free-text handle matched against a linked or pseudonymised identity.
+  MATCH_KIND_HANDLE = 2;
+}
+
+message ResolveHandleRequest {
+  string tenant_id = 1;
+  string platform = 2;
+  // Raw reference exactly as typed (1..255 chars, no control characters).
+  // PII: stays inside hub-api, never persisted or logged.
+  string target = 3;
+}
+
+message ResolveHandleResponse {
+  // hub_users.uuid when the identity is linked to a hub user, else its
+  // stable per-tenant ephemeral pseudonym.
+  string uuid = 1;
+  MatchKind match_kind = 2;
+}

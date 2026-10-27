@@ -164,16 +164,13 @@ impl BucketConfig {
 }
 
 /// The production [`ComponentSource`]: SigV4-signs and issues one `GET`
-/// per `fetch` call against `config.endpoint`'s `config.bucket`, path-style
-/// (`/{bucket}/{key}`), returning the component bytes on `200`.
-///
-/// **Scope note** (matching this crate's existing "never fake a host
-/// call, but a realistic-scope item may stay a documented TODO"
-/// convention): only `component_key` is fetched. `sidecar_key` is still
-/// accepted (the trait signature is unchanged) but not fetched -- nothing
-/// in `crate::invoke::on_load` consumes sidecar bytes today; the spec
-/// SS7.6 step 4 Ed25519 signature check over the sidecar is a separate,
-/// not-yet-wired verification step this change does not add.
+/// per object against `config.endpoint`'s `config.bucket`, path-style
+/// (`/{bucket}/{key}`), returning `(component_bytes, sidecar_bytes)` on
+/// `200`. Both objects are fetched sequentially, each under its own
+/// `fetch_timeout` budget -- `crate::invoke::on_load` verifies the
+/// component against its digest and the sidecar's embedded Ed25519
+/// signature (`crate::signing`, spec SS7.6 step 4 / SS5.6) before either
+/// is trusted.
 pub struct BucketComponentSource {
     config: BucketConfig,
 }
@@ -191,23 +188,29 @@ impl BucketComponentSource {
     }
 }
 
+/// Issues one bucket GET under `config.fetch_timeout`, wrapping a bare
+/// `tokio::time::timeout` so both call sites in [`BucketComponentSource
+/// ::fetch`] report which key timed out.
+async fn timed_get_object(config: &BucketConfig, key: &str) -> Result<Vec<u8>, ExecutorError> {
+    tokio::time::timeout(config.fetch_timeout, get_object(config, key))
+        .await
+        .map_err(|_| {
+            ExecutorError::BucketFetch(format!(
+                "bucket GET for {key:?} timed out after {:?}",
+                config.fetch_timeout
+            ))
+        })?
+}
+
 impl ComponentSource for BucketComponentSource {
     async fn fetch(
         &self,
         component_key: &str,
-        _sidecar_key: &str,
-    ) -> Result<Vec<u8>, ExecutorError> {
-        tokio::time::timeout(
-            self.config.fetch_timeout,
-            get_object(&self.config, component_key),
-        )
-        .await
-        .map_err(|_| {
-            ExecutorError::BucketFetch(format!(
-                "bucket GET for {component_key:?} timed out after {:?}",
-                self.config.fetch_timeout
-            ))
-        })?
+        sidecar_key: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>), ExecutorError> {
+        let component = timed_get_object(&self.config, component_key).await?;
+        let sidecar = timed_get_object(&self.config, sidecar_key).await?;
+        Ok((component, sidecar))
     }
 }
 
@@ -926,18 +929,24 @@ mod tests {
         let digest = fixture_digest();
         let sha256_hex = digest.trim_start_matches("sha256:").to_string();
         let component_key = format!("bundles/{APP_ID}/1/{sha256_hex}.wasm");
-        let expected_request_line = format!("GET /waddles-bundles/{component_key} HTTP/1.1\r\n");
+        let sidecar_key = format!("bundles/{APP_ID}/1/{sha256_hex}.json");
+        let expected_component_request_line =
+            format!("GET /waddles-bundles/{component_key} HTTP/1.1\r\n");
+        let expected_sidecar_request_line =
+            format!("GET /waddles-bundles/{sidecar_key} HTTP/1.1\r\n");
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
+            // `fetch()` now issues two sequential `Connection: close` GETs
+            // (component, then sidecar) -- one accept per GET.
+            let (mut socket, _) = listener.accept().await.expect("accept component");
             let mut buf = vec![0u8; 8192];
-            let n = socket.read(&mut buf).await.expect("read request");
+            let n = socket.read(&mut buf).await.expect("read component request");
             let request = String::from_utf8_lossy(&buf[..n]).into_owned();
             assert!(
-                request.starts_with(&expected_request_line),
-                "unexpected request line: {request}"
+                request.starts_with(&expected_component_request_line),
+                "unexpected component request line: {request}"
             );
             assert!(request
                 .contains("Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"));
@@ -948,9 +957,42 @@ mod tests {
             socket
                 .write_all(header.as_bytes())
                 .await
-                .expect("write header");
-            socket.write_all(FIXTURE_WASM).await.expect("write body");
-            socket.shutdown().await.expect("shutdown");
+                .expect("write component header");
+            socket
+                .write_all(FIXTURE_WASM)
+                .await
+                .expect("write component body");
+            socket.shutdown().await.expect("shutdown component");
+
+            let (mut socket, _) = listener.accept().await.expect("accept sidecar");
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.expect("read sidecar request");
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            assert!(
+                request.starts_with(&expected_sidecar_request_line),
+                "unexpected sidecar request line: {request}"
+            );
+            // `cli_with_bucket_env()` sets no `bundle_signing_public_keys`,
+            // so `on_load` skips signature verification -- the unsigned
+            // `{}` stub `storage_service.upload_bundle_component()` writes
+            // before any approval-time signing is enough here (this test's
+            // job is proving the bucket-fetch wiring, not the signature
+            // crypto itself -- see `crate::invoke::tests::
+            // artifact_signature_on_load` for that).
+            let sidecar_body = b"{}";
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                sidecar_body.len()
+            );
+            socket
+                .write_all(header.as_bytes())
+                .await
+                .expect("write sidecar header");
+            socket
+                .write_all(sidecar_body)
+                .await
+                .expect("write sidecar body");
+            socket.shutdown().await.expect("shutdown sidecar");
         });
 
         let mut cfg = cli_with_bucket_env();
@@ -966,7 +1008,7 @@ mod tests {
                 version: "1".to_string(),
                 digest: digest.clone(),
                 component_key: component_key.clone(),
-                sidecar_key: format!("bundles/{APP_ID}/1/{sha256_hex}.json"),
+                sidecar_key: sidecar_key.clone(),
                 capabilities: vec![],
                 limits: LoadLimits {
                     timeout_ms: 2000,

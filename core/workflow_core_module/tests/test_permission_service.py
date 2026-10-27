@@ -130,6 +130,7 @@ class TestCheckPermission:
         svc, dal, logger = _service()
         svc._is_workflow_owner = MagicMock(side_effect=Exception("boom"))
         # _is_workflow_owner is awaited, so make it a coroutine function
+
         async def _raise(*a, **k):
             raise Exception("boom")
         svc._is_workflow_owner = _raise
@@ -175,7 +176,10 @@ class TestGrantPermission:
         dal.executesql.side_effect = Exception("db down")
         result = await svc.grant_permission("wf-1", "user", 1, {"can_view": True})
         assert result.success is False
-        assert result.error == "db down"
+        # SECURITY (PII in logs): the failure text is value-free (type only) -- never the
+        # driver message, which can embed bound values.
+        assert result.error == "type=Exception"
+        assert "db down" not in result.message
 
 
 class TestRevokePermission:
