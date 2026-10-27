@@ -147,7 +147,7 @@ def upgrade() -> None:
         """
         CREATE OR REPLACE FUNCTION fn_marketplace_sources_audit() RETURNS trigger AS $$
         BEGIN
-            INSERT INTO marketplace_sources_audit_log (
+            INSERT INTO public.marketplace_sources_audit_log (
                 db_role, operation, source_public_id,
                 old_status, new_status, old_build_mode, new_build_mode,
                 old_git_url, new_git_url, old_pinned_commit_sha, new_pinned_commit_sha
@@ -165,6 +165,7 @@ def upgrade() -> None:
             RETURN COALESCE(NEW, OLD);
         END;
         $$ LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog, pg_temp
         """
     )
     op.execute(
@@ -196,6 +197,7 @@ def upgrade() -> None:
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
+        SET search_path = pg_catalog, pg_temp
         """
     )
     op.execute(

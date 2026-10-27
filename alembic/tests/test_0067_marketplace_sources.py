@@ -311,3 +311,18 @@ def test_downgrade_roundtrip_and_existing_rows_untouched() -> None:
             cur.execute("SELECT count(*) FROM marketplace_sources WHERE is_builtin")
             assert cur.fetchone() == (1,)
         conn.close()
+
+
+def test_trigger_functions_pin_search_path(db: PgTestDatabase) -> None:
+    """Both trigger functions pin search_path (hijack/audit-evasion hardening)."""
+    conn = _connect(db)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT proname, proconfig FROM pg_proc WHERE proname IN "
+            "('fn_marketplace_sources_audit','fn_marketplace_sources_builtin_guard')"
+        )
+        rows = dict(cur.fetchall())
+    conn.close()
+    assert set(rows) == {"fn_marketplace_sources_audit", "fn_marketplace_sources_builtin_guard"}
+    for cfg in rows.values():
+        assert cfg == ["search_path=pg_catalog, pg_temp"]
