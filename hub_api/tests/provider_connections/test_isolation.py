@@ -129,6 +129,7 @@ class TestCrossTenant:
     ) -> None:
         """Defence in depth: ``insert_connection`` re-verifies community->tenant in its transaction."""
         from datetime import UTC, datetime
+        from uuid import uuid4
 
         with pytest.raises(ConnectionNotFound):
             await store.insert_connection(
@@ -138,12 +139,14 @@ class TestCrossTenant:
                 platform="twitch",
                 resource_type="twitch_channel",
                 resource_id="1",
-                secrets=store.SealedSecrets("a", None),
+                public_id=uuid4(),
+                secrets=store.SealedSecrets("a", None, seal_version=1),
                 expires_at=None,
                 resource_metadata={},
                 installed_by_user_id=None,
                 enabled=True,
                 now=datetime.now(UTC),
+                connection_kind=1,
             )
         assert await raw_rows(pc_db, "platform_connections") == []
 

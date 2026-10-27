@@ -11,8 +11,10 @@ and frame-only traceback, never by message.
 Tier mapping (critical-rules.md Feature Flags & License Tiers; the catalog
 lives in `flask_core.tier_catalog.FEATURE_MIN_TIERS`):
 
-* `saml` and `oidc` connections -> `waddles.auth.sso_saml` (Enterprise)
-* `google` connections          -> `waddles.auth.sso_google` (Professional)
+* `google` connections -> UNGATED (no flag, no tier; works at Free)
+* `oidc` connections   -> `waddles.auth.sso_custom` (Professional) -- every
+  bring-your-own IdP (generic OIDC, Okta, Entra ID, Keycloak, ...)
+* `saml` connections   -> `waddles.auth.sso_saml` (Enterprise)
 """
 
 from __future__ import annotations
@@ -27,8 +29,8 @@ PROTOCOL_GOOGLE: Final = "google"
 VALID_PROTOCOLS: Final[tuple[str, ...]] = (PROTOCOL_SAML, PROTOCOL_OIDC, PROTOCOL_GOOGLE)
 
 #: Feature flags (also the tier-catalog keys) gating each protocol family.
-FLAG_SSO_ENTERPRISE: Final = "waddles.auth.sso_saml"
-FLAG_SSO_GOOGLE: Final = "waddles.auth.sso_google"
+FLAG_SSO_SAML: Final = "waddles.auth.sso_saml"
+FLAG_SSO_CUSTOM: Final = "waddles.auth.sso_custom"
 
 #: OIDC scope every admin-managed tenant SSO admin route requires
 #: (`libs/core_platform_module/features.py` -> `requires_scopes`).
@@ -49,13 +51,20 @@ REASON_UNAVAILABLE: Final = "sso_unavailable"
 REASON_ACCOUNT_INACTIVE: Final = "sso_account_inactive"
 
 
-def flag_for_protocol(protocol: str) -> str:
-    """Return the entitlement flag gating `protocol`; raises on an unknown protocol."""
-    if protocol in (PROTOCOL_SAML, PROTOCOL_OIDC):
-        return FLAG_SSO_ENTERPRISE
+def flag_for_protocol(protocol: str) -> str | None:
+    """Return the entitlement flag gating `protocol`, or None when it is ungated (Google)."""
+    if protocol == PROTOCOL_SAML:
+        return FLAG_SSO_SAML
+    if protocol == PROTOCOL_OIDC:
+        return FLAG_SSO_CUSTOM
     if protocol == PROTOCOL_GOOGLE:
-        return FLAG_SSO_GOOGLE
+        return None
     raise SsoConfigError("unknown_protocol", f"Unknown SSO protocol {protocol!r}")
+
+
+def required_tier_for_protocol(protocol: str) -> str:
+    """Human-readable minimum plan for `protocol` (Free for the ungated Google type)."""
+    return {PROTOCOL_SAML: "Enterprise", PROTOCOL_OIDC: "Professional"}.get(protocol, "Free")
 
 
 class SsoError(Exception):

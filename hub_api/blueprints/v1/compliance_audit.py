@@ -265,8 +265,8 @@ _NOT_ENTITLED = "Tamper-evident audit logging is an Enterprise feature"
 
 
 @compliance_audit_bp.route("/events", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SCOPE)  # type: ignore[misc]
 @validate_response(AuditEventsResponse)
 async def list_events() -> AuditEventsResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/compliance/audit/events` -- filter by category/action/outcome/actor/time."""
@@ -313,8 +313,8 @@ async def list_events() -> AuditEventsResponse | tuple[dict[str, object], int]:
 
 
 @compliance_audit_bp.route("/head", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SCOPE)  # type: ignore[misc]
 @validate_response(AuditHeadResponse)
 async def get_head() -> AuditHeadResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/compliance/audit/head` -- the anchor to pin outside the database."""
@@ -335,8 +335,8 @@ async def get_head() -> AuditHeadResponse | tuple[dict[str, object], int]:
 
 
 @compliance_audit_bp.route("/verify", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SCOPE)  # type: ignore[misc]
 @validate_response(AuditVerifyResponse, 200)
 @validate_response(AuditVerifyResponse, 409)
 async def verify_chain() -> tuple[AuditVerifyResponse, int] | tuple[dict[str, object], int]:
@@ -405,8 +405,8 @@ async def verify_chain() -> tuple[AuditVerifyResponse, int] | tuple[dict[str, ob
 
 
 @compliance_audit_bp.route("/export", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SCOPE)  # type: ignore[misc]
 @validate_response(AuditExportResponse)
 async def export_chain() -> (
     tuple[AuditExportResponse, int, dict[str, str]] | tuple[dict[str, object], int]

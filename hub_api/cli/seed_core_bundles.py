@@ -69,7 +69,7 @@ import yaml
 from penguin_dal import AsyncDB
 
 from config import HubAPIConfig
-from services import vendor_bundle_authz
+from services import app_command_backfill, vendor_bundle_authz
 from services.app_source_binding_service import TENANT_WIDE_COMMUNITY_SENTINEL
 from services.bundle_approval_service import (
     activate_for_community,
@@ -1553,6 +1553,32 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 )
                 counter.add(1, {"app_id": result.app_id, "outcome": result.outcome})
                 seeded += 1
+
+        # Slash-command registry backfill: bundles activated before `app_commands` existed
+        # have no rows. Runs after seeding (so fresh activations are already registered) and
+        # before the reconcile sweep. Any per-app failure, or the sweep itself failing,
+        # counts toward `failures` -- never swallowed. Logs denominators only, no command text.
+        try:
+            backfill = await app_command_backfill.backfill_active_commands(install_dal)
+        except Exception as exc:  # noqa: BLE001 -- the backfill must not abort the summary/exit code
+            logger.error(
+                "core-bundle-seeder: command registry backfill sweep failed "
+                f"({type(exc).__name__})",
+                extra={"error_type": type(exc).__name__},
+            )
+            failures += 1
+        else:
+            logger.info(
+                "core-bundle-seeder: command registry backfill "
+                f"(examined={backfill.examined}, synced={backfill.synced}, "
+                f"failed={len(backfill.failed)})",
+                extra={
+                    "examined": backfill.examined,
+                    "synced": backfill.synced,
+                    "failed": len(backfill.failed),
+                },
+            )
+            failures += len(backfill.failed)
 
         # Reconcile-uninstall sweep (see `reconcile_removed_core_bundles()`'s own docstring) --
         # runs AFTER every catalog entry above has been seeded/no-op'd, so `catalog_app_ids`

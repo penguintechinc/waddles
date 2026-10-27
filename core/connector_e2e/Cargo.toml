@@ -17,13 +17,13 @@ path = "src/lib.rs"
 [dependencies]
 bundle-executor = { path = "../bundle_executor", version = "=0.1.0" }
 svc-ingest = { path = "../svc_ingest", version = "=0.1.0" }
-tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 
 [dev-dependencies]
 clap = { version = "=4.6.6", features = ["derive", "env"] }
 sha2 = "=0.10.9"
 prometheus = "=0.14.0"
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ce638ec24f0bca0e2afd7655b99d1f9162030156", package = "penguin-spine", version = "=0.2.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "90060a93925c50668cc1c6dd47a4ae24a7b4e321", package = "penguin-spine", version = "=0.2.0" }
 
 [lints.clippy]
 unwrap_used = "deny"
