@@ -4,6 +4,19 @@ general.md forbids PRC-origin / sanctioned-entity dependencies. This extracts de
 names from requirements*.txt, pyproject.toml, Cargo.toml/lock, package.json/lock and *.csproj
 inside one bundle directory and matches them against `supply_chain_denylist.yaml`. The list is
 data, not code: extend the YAML. Fail-loud if the list cannot be loaded (never silently empty).
+
+Scope. DOES cover: the declared-dependency forms of the manifests above (incl. npm aliases,
+overrides/resolutions, pip -r/-c includes, uv/poetry/cargo/MSBuild specifics such as
+PackageDownload and Sdk ids); registry pinning (git/url/path/custom-index/registry sources,
+off-registry lockfile `resolved`/`source` entries and out-of-bundle `link:` entries are
+rejected); and fail-closed behaviour on anything unsupported or unparseable (unknown manifests
+like yarn.lock/go.mod, and package-manager config files that can redirect sources such as
+.npmrc, .cargo/config.toml, pip.conf, uv.toml, nuget.config reject the whole bundle).
+
+Does NOT cover: transitive dependencies absent from a lockfile, binary/vendored code, or
+dependencies fetched at runtime. This is DEFENSE-IN-DEPTH, not the sole supply-chain gate: it
+sits behind human platform:admin approval, the WASM sandbox, publisher attestation and
+namespace isolation.
 """
 
 from __future__ import annotations
@@ -38,8 +51,25 @@ _REQ_INCLUDE_SHORT = {"-r", "-c"}
 _REQ_INCLUDE_LONG = {"--requirement", "--constraint"}
 _NUGET_SUFFIXES = (".csproj", ".fsproj", ".vbproj", ".props", ".targets")
 _NUGET_ELEMENTS = frozenset(
-    {"packagereference", "packageversion", "globalpackagereference", "dotnetclitoolreference"}
+    {
+        "packagereference", "packageversion", "globalpackagereference", "dotnetclitoolreference",
+        "packagedownload", "frameworkreference",
+    }
+)  # fmt: skip
+_NUGET_BAD_PROPS = frozenset(
+    {"restoresources", "restoreadditionalprojectsources", "restorefallbackfolders"}
 )
+# Package-manager config files that can redirect sources: presence rejects the bundle.
+_CONFIG_FILES = frozenset(
+    {"uv.toml", "pip.conf", "pip.ini", ".npmrc", ".yarnrc", ".yarnrc.yml", "poetry.toml",
+     "nuget.config"}
+)  # fmt: skip
+_CARGO_CONFIG_NAMES = frozenset({"config", "config.toml"})
+_NPM_REGISTRY = "https://registry.npmjs.org/"
+_CARGO_SOURCES = frozenset(
+    {"registry+https://github.com/rust-lang/crates.io-index", "sparse+https://index.crates.io/"}
+)
+_PYPI_REGISTRIES = frozenset({"https://pypi.org/simple", "https://pypi.org/simple/"})
 _NUGET_ATTRS = frozenset({"include", "update"})
 _TOML_FILES = {"pyproject.toml", "cargo.toml", "cargo.lock", "poetry.lock", "uv.lock"}
 _JSON_FILES = {"package.json", "package-lock.json", "npm-shrinkwrap.json"}
@@ -110,6 +140,14 @@ def _is_manifest_name(lower: str) -> bool:
         or lower == "packages.config"
         or lower.endswith(_NUGET_SUFFIXES)
     )
+
+
+def _is_config_file(path: Path) -> bool:
+    """True for a source-redirecting package-manager config (path-aware for `.cargo/config*`)."""
+    lower = path.name.lower()
+    if lower in _CONFIG_FILES:
+        return True
+    return lower in _CARGO_CONFIG_NAMES and path.parent.name.lower() == ".cargo"
 
 
 def _read(path: Path, rel: str) -> str:
@@ -236,10 +274,19 @@ def _poetry_spec(spec: Any, manifest_dir: Path, root: Path) -> None:
         _within(root, manifest_dir / str(spec["path"]))
 
 
+def _has_bad_key(obj: Any) -> bool:
+    """True if any (recursively nested) mapping key is a custom index/source key."""
+    if isinstance(obj, dict):
+        return bool(_UV_BAD_KEYS & obj.keys()) or any(_has_bad_key(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_has_bad_key(v) for v in obj)
+    return False
+
+
 def _reject_py_sources(tool: dict[str, Any]) -> None:
     """Fail closed on custom indexes/sources in `[tool.uv]` and `[tool.poetry.source]`."""
     uv = tool.get("uv", {})
-    if isinstance(uv, dict) and _UV_BAD_KEYS & uv.keys():
+    if isinstance(uv, dict) and (_UV_BAD_KEYS & uv.keys() or _has_bad_key(uv.get("pip", {}))):
         raise ValueError("custom uv index/source configuration")
     if tool.get("poetry", {}).get("source"):
         raise ValueError("custom poetry package source")
@@ -262,8 +309,10 @@ def _toml_deps(doc: dict[str, Any], ecosystem: str, manifest_dir: Path, root: Pa
         for dep in doc.get("build-system", {}).get("requires", []):
             names += _py_names(str(dep))
         tool = doc.get("tool", {})
-        for dep in tool.get("uv", {}).get("dev-dependencies", []):
-            names += _py_names(str(dep))
+        uv_tbl = tool.get("uv", {})
+        for key in ("dev-dependencies", "override-dependencies", "constraint-dependencies"):
+            for dep in [*uv_tbl.get(key, []), *uv_tbl.get("pip", {}).get(key, [])]:
+                names += _py_names(str(dep))
         _reject_py_sources(tool)
         poetry = tool.get("poetry", {})
         tables = [poetry.get("dependencies", {}), poetry.get("dev-dependencies", {})]
@@ -296,6 +345,36 @@ def _toml_deps(doc: dict[str, Any], ecosystem: str, manifest_dir: Path, root: Pa
     for key, spec in doc.get("replace", {}).items():
         _cargo_spec(key.split(":", 1)[0].split("@", 1)[0], spec, manifest_dir, root, names)
     return names
+
+
+def _check_lock_sources(kind: str, pkgs: list[Any], base: Path, root: Path) -> None:
+    """Reject Cargo/uv/poetry lock packages sourced from anything but the default registry."""
+    for pkg in pkgs:
+        src = pkg.get("source")
+        if src is None:
+            continue
+        if kind == "cargo.lock":
+            ok = src in _CARGO_SOURCES
+        elif kind == "uv.lock":
+            ok = _uv_source_ok(src, base, root)
+        else:  # poetry.lock: [package.source] table; only in-bundle directory/file allowed
+            ok = isinstance(src, dict) and src.get("type") in {"directory", "file"}
+            if ok:
+                _within(root, base / str(src.get("url", "")))
+        if not ok:
+            raise ValueError("lockfile package from a non-default registry/source")
+
+
+def _uv_source_ok(src: Any, base: Path, root: Path) -> bool:
+    """True for the default PyPI registry or an in-bundle virtual/editable/directory source."""
+    if not isinstance(src, dict):
+        return False
+    if set(src) == {"registry"}:
+        return src["registry"] in _PYPI_REGISTRIES
+    if len(src) == 1 and next(iter(src)) in {"virtual", "editable", "directory"}:
+        _within(root, base / str(next(iter(src.values()))))
+        return True
+    return False
 
 
 def _npm_range_ok(rng: str) -> bool:
@@ -367,6 +446,12 @@ def _npm_map(table: Any, names: list[str]) -> None:
             _npm_spec(key, val, names)
         elif isinstance(val, dict):
             names.append(key)
+            resolved = val.get("resolved")
+            if resolved is not None and not (
+                isinstance(resolved, str)
+                and (val.get("link") is True or resolved.startswith(_NPM_REGISTRY))
+            ):
+                raise ValueError("npm lockfile entry resolved outside the npm registry")
             if isinstance(val.get("version"), str):
                 _npm_spec(key, val["version"], names)
             if isinstance(val.get("name"), str):
@@ -375,7 +460,7 @@ def _npm_map(table: Any, names: list[str]) -> None:
                 _npm_map(val.get(sub), names)
 
 
-def _npm_names(doc: dict[str, Any]) -> list[str]:
+def _npm_names(doc: dict[str, Any], base: Path, root: Path) -> list[str]:
     """Names from package.json / package-lock.json, incl. aliases, `name` fields, overrides."""
     names: list[str] = []
     for key in (
@@ -390,6 +475,11 @@ def _npm_names(doc: dict[str, Any]) -> list[str]:
         if "node_modules/" in pkg_path:
             names.append(pkg_path.rsplit("node_modules/", 1)[1])
         if isinstance(entry, dict):
+            if entry.get("link") is True:
+                target = entry.get("resolved")
+                if not isinstance(target, str) or not target:
+                    raise ValueError("npm lockfile link entry without a target")
+                _within(root, base / target)
             _npm_map({pkg_path.rsplit("node_modules/", 1)[-1] or "_root": entry}, names)
     return names
 
@@ -416,6 +506,12 @@ def _nuget_names(text: str, lower: str, path: Path, root: Path) -> list[str]:
         if lower == "packages.config":
             if tag == "package" and "id" in attrs:
                 found.append(attrs["id"].strip())
+        elif tag in _NUGET_BAD_PROPS:
+            raise ValueError("custom NuGet restore source configuration")
+        elif tag == "project" and "sdk" in attrs:
+            found += [x.strip().split("/", 1)[0] for x in attrs["sdk"].split(";") if x.strip()]
+        elif tag == "sdk" and "name" in attrs:
+            found.append(attrs["name"].strip().split("/", 1)[0])
         elif tag in _NUGET_ELEMENTS:
             for key in _NUGET_ATTRS & attrs.keys():
                 found += [x.strip() for x in attrs[key].split(";") if x.strip()]
@@ -457,6 +553,8 @@ def scan_bundle_dependencies(bundle_dir: Path) -> tuple[DepFinding, ...]:
     for path in sorted(root.rglob("*")):
         rel = str(path.relative_to(root))
         lower = path.name.lower()
+        if _is_config_file(path):
+            raise ValueError(f"unsupported package-manager config file: {rel}")
         if path.is_symlink():
             if _is_manifest_name(lower) or path.is_dir():
                 raise ValueError(f"symlinked dependency manifest or directory: {rel}")
@@ -475,12 +573,13 @@ def scan_bundle_dependencies(bundle_dir: Path) -> tuple[DepFinding, ...]:
                 if lower in {"cargo.lock", "poetry.lock", "uv.lock"}:
                     eco = "cargo" if lower == "cargo.lock" else "pypi"
                     pkgs = doc.get("package", [])
+                    _check_lock_sources(lower, pkgs, path.parent, root)
                     record(eco, [p["name"] for p in pkgs if "name" in p], rel)
                 else:
                     eco = "pypi" if lower == "pyproject.toml" else "cargo"
                     record(eco, _toml_deps(doc, eco, path.parent, root), rel)
             elif lower in _JSON_FILES:
-                record("npm", _npm_names(json.loads(text)), rel)
+                record("npm", _npm_names(json.loads(text), path.parent, root), rel)
             else:
                 record("nuget", _nuget_names(text, lower, path, root), rel)
         except (tomllib.TOMLDecodeError, json.JSONDecodeError, AttributeError, TypeError) as exc:

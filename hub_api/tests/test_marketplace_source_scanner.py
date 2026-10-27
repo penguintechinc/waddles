@@ -589,3 +589,133 @@ def test_denylist_clean_manifests_still_pass(tmp_path: Path) -> None:
     )
     (tmp_path / "requirements.txt").write_text("ok==1 --hash=sha256:ab\n--require-hashes\n")
     assert _names(tmp_path) == []
+
+
+def test_denylist_msbuild_packagedownload_sdk_and_restore_sources(tmp_path: Path) -> None:
+    """regression: PackageDownload / Project Sdk / Sdk element / RestoreSources class."""
+    pkg = "AlibabaCloud.SDK.Core"
+    f = tmp_path / "a.csproj"
+    f.write_text(
+        f'<Project><ItemGroup><PackageDownload Include="{pkg}" Version="[1]"/>'
+        "</ItemGroup></Project>"
+    )
+    assert _names(tmp_path) == [pkg]
+    f.write_text(f'<Project Sdk="{pkg}/1.0;Microsoft.NET.Sdk"></Project>')
+    assert _names(tmp_path) == [pkg]
+    f.write_text(f'<Project><Sdk Name="{pkg}/2.0"/></Project>')
+    assert _names(tmp_path) == [pkg]
+    f.write_text(f'<Project><ItemGroup><FrameworkReference Include="{pkg}"/></ItemGroup></Project>')
+    assert _names(tmp_path) == [pkg]
+    for prop in ("RestoreSources", "RestoreAdditionalProjectSources", "RestoreFallbackFolders"):
+        f.write_text(
+            f"<Project><PropertyGroup><{prop}>https://e/v3</{prop}></PropertyGroup></Project>"
+        )
+        _scan_err(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        ".npmrc", ".cargo/config.toml", ".cargo/config", "sub/uv.toml", "pip.conf", "pip.ini",
+        ".yarnrc", ".yarnrc.yml", "poetry.toml", "NuGet.Config", ".CARGO/Config.toml",
+    ],
+)  # fmt: skip
+def test_denylist_config_files_rejected(tmp_path: Path, rel: str) -> None:
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x = 1\n")
+    _scan_err(tmp_path)
+
+
+def test_denylist_plain_config_name_outside_cargo_dir_ok(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text("x = 1\n")
+    assert _names(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '[tool.uv.pip]\nindex-url = "https://e/simple"\n',
+        '[tool.uv.pip]\nextra-index-url = ["https://e/simple"]\n',
+        '[tool.uv.pip.nested]\nfind-links = "x"\n',
+        '[tool.uv]\noverride-dependencies = ["foo @ https://e/x.whl"]\n',
+        '[tool.uv]\nconstraint-dependencies = ["git+https://e/x"]\n',
+    ],
+)
+def test_denylist_uv_recursion_and_override_deps_rejected(tmp_path: Path, content: str) -> None:
+    (tmp_path / "pyproject.toml").write_text(content)
+    _scan_err(tmp_path)
+
+
+def test_denylist_uv_override_constraint_names_scanned(tmp_path: Path) -> None:
+    from services.dependency_denylist import _DENYLIST
+
+    bad = "dashscope"
+    assert _DENYLIST["pypi"][0] == bad
+    (tmp_path / "pyproject.toml").write_text(
+        f'[tool.uv]\noverride-dependencies = ["{bad}>=1"]\nconstraint-dependencies = ["ok"]\n'
+    )
+    assert _names(tmp_path) == [bad]
+
+
+@pytest.mark.parametrize(
+    "lock",
+    [
+        {"packages": {"node_modules/a": {"version": "1.0.0", "resolved": "https://evil.example/a.tgz"}}},
+        {"packages": {"node_modules/a": {"version": "1.0.0", "resolved": "git+https://x/a.git"}}},
+        {"packages": {"node_modules/a": {"link": True, "resolved": "../../outside"}}},
+        {"packages": {"node_modules/a": {"link": True}}},
+        {"dependencies": {"a": {"version": "1.0.0", "resolved": "http://registry.npmjs.org/a.tgz"}}},
+    ],
+)  # fmt: skip
+def test_denylist_npm_lock_off_registry_rejected(tmp_path: Path, lock: dict[str, Any]) -> None:
+    (tmp_path / "package-lock.json").write_text(json.dumps(lock))
+    _scan_err(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("fname", "content"),
+    [
+        ("Cargo.lock", '[[package]]\nname = "a"\nversion = "1"\nsource = "git+https://x/a"\n'),
+        ("Cargo.lock", '[[package]]\nname = "a"\nversion = "1"\nsource = "registry+https://evil/index"\n'),
+        ("uv.lock", '[[package]]\nname = "a"\nsource = { registry = "https://evil/simple" }\n'),
+        ("uv.lock", '[[package]]\nname = "a"\nsource = { git = "https://x/a" }\n'),
+        ("uv.lock", '[[package]]\nname = "a"\nsource = { editable = "../../out" }\n'),
+        ("poetry.lock", '[[package]]\nname = "a"\n[package.source]\ntype = "legacy"\nurl = "https://e"\n'),
+        ("poetry.lock", '[[package]]\nname = "a"\n[package.source]\ntype = "git"\nurl = "https://e"\n'),
+    ],
+)  # fmt: skip
+def test_denylist_lockfile_non_default_source_rejected(
+    tmp_path: Path, fname: str, content: str
+) -> None:
+    (tmp_path / fname).write_text(content)
+    _scan_err(tmp_path)
+
+
+def test_denylist_clean_lockfiles_pass(tmp_path: Path) -> None:
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "packages": {
+                    "": {"name": "r"},
+                    "node_modules/a": {
+                        "version": "1.0.0",
+                        "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz",
+                    },
+                    "node_modules/b": {"version": "1.0.0"},
+                    "node_modules/loc": {"link": True, "resolved": "libs/loc"},
+                }
+            }
+        )
+    )
+    (tmp_path / "Cargo.lock").write_text(
+        '[[package]]\nname = "a"\nversion = "1"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        '[[package]]\nname = "b"\nversion = "1"\nsource = "sparse+https://index.crates.io/"\n'
+        '[[package]]\nname = "me"\nversion = "1"\n'
+    )
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "a"\nsource = { registry = "https://pypi.org/simple" }\n'
+        '[[package]]\nname = "me"\nsource = { virtual = "." }\n'
+    )
+    (tmp_path / "poetry.lock").write_text('[[package]]\nname = "a"\nversion = "1"\n')
+    assert _names(tmp_path) == []
