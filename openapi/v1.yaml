@@ -18335,7 +18335,15 @@ paths:
       summary: Get one source by public id.
   /api/v1/marketplace/sources/{public_id}/approve-update:
     post:
-      description: ''
+      description: '
+
+        Advancing the pin is privileged, so it re-applies `add`''s gates: not DISABLED
+        (409), license
+
+        tier (402), SANDBOX needs a fresh trust ack for the new commit (422), and
+        the client echoes
+
+        the pending SHA it reviewed (mismatch -> 409, enforced atomically in the UPDATE).'
       operationId: post_approve_update
       parameters:
       - in: path
@@ -18343,6 +18351,26 @@ paths:
         required: true
         schema:
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Body for `approve-update`: echo the reviewed pending SHA;
+                sandbox adds a fresh trust ack.'
+              properties:
+                pending_commit_sha:
+                  title: Pending Commit Sha
+                  type: string
+                sandbox_trust_ack:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Sandbox Trust Ack
+              required:
+              - pending_commit_sha
+              title: ApproveUpdateRequest
+              type: object
       responses:
         '200':
           content:

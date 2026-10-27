@@ -353,13 +353,13 @@ async def remove_source(public_id: str) -> SourceRemoveResponse | tuple[dict[str
             _count("remove", "builtin_refused")
             raise ApiError("the built-in marketplace source cannot be removed", 409, "CONFLICT")
         try:
-            await svc.delete_source(dal, record.public_id)
+            await svc.delete_source(dal, record.public_id, actor_id=get_current_user_id(request))
             disposition: Literal["deleted", "disabled"] = "deleted"
         except ApiError as exc:
             if exc.status_code != 409:
                 raise
             # Disable FIRST (blocks rescan/approve), then stop its installed bundles running.
-            await svc.disable_source(dal, record.public_id)
+            await svc.disable_source(dal, record.public_id, actor_id=get_current_user_id(request))
             await svc.deactivate_source_bundles(
                 dal, record.public_id, revoked_by=get_current_user_id(request)
             )
@@ -402,7 +402,12 @@ async def rescan_source(public_id: str) -> ScanSummaryDTO | tuple[dict[str, obje
             return denied
         with tempfile.TemporaryDirectory(prefix="mktscan-") as workdir:
             try:
-                result = await scan_source(record, workdir=Path(workdir), dal=dal)
+                result = await scan_source(
+                    record,
+                    workdir=Path(workdir),
+                    dal=dal,
+                    actor_id=get_current_user_id(request),
+                )
             except ScanRejectedError as exc:
                 _count("rescan", "scan_rejected")
                 raise unprocessable(f"scan rejected: {exc.reason}") from exc
@@ -483,6 +488,7 @@ async def approve_update(
             record.public_id,
             expected_pending_sha=data.pending_commit_sha,
             sandbox_ack=ack,
+            actor_id=caller,
         )
     except ApiError as exc:
         return _err(exc)

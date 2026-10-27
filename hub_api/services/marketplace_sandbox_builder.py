@@ -45,7 +45,7 @@ from typing import Any, Protocol
 from flask_core.tier_catalog import TIER_ENTERPRISE, TIER_LEVELS
 from penguin_dal import AsyncDB
 
-from services.bundle_telemetry import bundle_span, get_meter
+from services import marketplace_source_telemetry as mkt_telemetry
 from services.errors import ApiError, conflict
 from services.marketplace_sandbox_warning import WARNING_HASH
 from services.marketplace_source_ingest import (
@@ -324,8 +324,7 @@ async def run_sandbox_build(
         dir_name=candidate.dir_name,
     )
     started = time.monotonic()
-    meter = get_meter()
-    async with bundle_span("marketplace.sandbox.build", app_id=candidate.assigned_app_id):
+    async with mkt_telemetry.source_span("marketplace.sandbox.build", source.public_id):
         try:
             await client.create_source_configmap(config.namespace, cm_name, tarball)
             await client.create_job(config.namespace, manifest)
@@ -337,7 +336,7 @@ async def run_sandbox_build(
             logs = await client.read_logs(config.namespace, job_name)
             wasm = parse_build_log(logs, max_wasm_bytes=config.max_wasm_bytes)
         except SandboxBuildError as exc:
-            meter.create_counter("marketplace.sandbox.build.total").add(1, {"outcome": exc.reason})
+            mkt_telemetry.record_build(duration_s=time.monotonic() - started, outcome=exc.reason)
             raise
         finally:
             try:
@@ -346,8 +345,9 @@ async def run_sandbox_build(
                 logger.warning("sandbox build cleanup failed", extra={"job": job_name})
     digest = hashlib.sha256(wasm).hexdigest()  # recomputed here, never the builder's word
     reproducible = None if not candidate.sidecar_digest else candidate.sidecar_digest == digest
-    meter.create_counter("marketplace.sandbox.build.total").add(1, {"outcome": "ok"})
-    return BuildArtifact(wasm, digest, reproducible, time.monotonic() - started)
+    duration = time.monotonic() - started
+    mkt_telemetry.record_build(duration_s=duration, outcome="ok")
+    return BuildArtifact(wasm, digest, reproducible, duration)
 
 
 async def build_and_ingest(

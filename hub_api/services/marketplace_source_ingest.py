@@ -25,7 +25,7 @@ import yaml
 from penguin_dal import AsyncDB
 
 from services import bundle_approval_service, bundle_audit, bundle_signing_service
-from services.bundle_telemetry import bundle_span, get_meter
+from services import marketplace_source_telemetry as mkt_telemetry
 from services.bundle_version_service import (
     STATUS_PUBLISHED,
     create_version,
@@ -39,9 +39,12 @@ from services.marketplace_publisher_attestation import (
 )
 from services.marketplace_source_scanner import BundleCandidate, ScanResult
 from services.marketplace_source_service import (
+    ACTION_SIGNATURE_ISSUED,
+    ACTION_VERSION_APPROVED,
     BuildMode,
     SourceRecord,
     SourceStatus,
+    audit_source_event,
     get_source,
     get_source_pk,
 )
@@ -83,7 +86,7 @@ class IngestSummary:
 
 def _reject(c: BundleCandidate, reason: str) -> IngestedBundle:
     """Build a rejected outcome and count it."""
-    get_meter().create_counter("marketplace.ingest.total").add(1, {"outcome": reason})
+    mkt_telemetry.record_ingest(reason)
     logger.warning(
         "marketplace ingest rejected bundle", extra={"app_id": c.assigned_app_id, "reason": reason}
     )
@@ -128,7 +131,7 @@ async def _ingest_one(
             return IngestedBundle(
                 app_id, candidate.version, OUTCOME_SKIPPED_IDENTICAL, key_fingerprint=None
             )
-        get_meter().create_counter("marketplace.ingest.total").add(1, {"outcome": "conflict"})
+        mkt_telemetry.record_ingest("conflict")
         logger.warning(
             "marketplace ingest refused same-version different-digest",
             extra={"app_id": app_id, "version": candidate.version},
@@ -218,7 +221,7 @@ async def create_unapproved_version(
             **audit_details,
         },
     )
-    get_meter().create_counter("marketplace.ingest.total").add(1, {"outcome": "needs_approval"})
+    mkt_telemetry.record_ingest("needs_approval")
     logger.info(
         "marketplace ingest: version awaiting human approval",
         extra={"app_id": app_id, "version": candidate.version},
@@ -260,7 +263,7 @@ async def ingest_candidates(
     if fresh is None or fresh.status == SourceStatus.DISABLED:
         raise conflict("marketplace source is disabled")
     out: list[IngestedBundle] = []
-    async with bundle_span("marketplace.source.ingest", source_public_id=str(source.public_id)):
+    async with mkt_telemetry.source_span("marketplace.source.ingest", source.public_id):
         for candidate in result.bundles:
             try:
                 wasm = await fetch_wasm(candidate)
@@ -298,6 +301,27 @@ async def ingest_candidates(
 
 
 async def approve_source_version(
+    install_dal: AsyncDB,
+    source: SourceRecord,
+    *,
+    app_id: str,
+    version: str,
+    approved_by: int,
+    expected_permission_hash: str | None,
+) -> dict[str, Any]:
+    """Human-approve one ingested version under an approve span (see `_approve_inner`)."""
+    async with mkt_telemetry.source_span("marketplace.source.approve", source.public_id):
+        return await _approve_inner(
+            install_dal,
+            source,
+            app_id=app_id,
+            version=version,
+            approved_by=approved_by,
+            expected_permission_hash=expected_permission_hash,
+        )
+
+
+async def _approve_inner(
     install_dal: AsyncDB,
     source: SourceRecord,
     *,
@@ -357,7 +381,21 @@ async def approve_source_version(
             install_dal, app_id=app_id, revoked_by=approved_by
         )
         raise
-    get_meter().create_counter("marketplace.approve.total").add(1, {"outcome": "signed"})
+    mkt_telemetry.record_approval(outcome="signed")
+    await audit_source_event(
+        install_dal,
+        ACTION_VERSION_APPROVED,
+        source.public_id,
+        actor_id=approved_by,
+        details={"app_id": app_id, "version": version, "permission_hash": expected_permission_hash},
+    )
+    await audit_source_event(
+        install_dal,
+        ACTION_SIGNATURE_ISSUED,
+        source.public_id,
+        actor_id=approved_by,
+        details={"app_id": app_id, "version": version, "approval_id": int(install.id)},
+    )
     return signing
 
 

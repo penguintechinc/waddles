@@ -26,6 +26,8 @@ from penguin_dal import AsyncDB
 from sqlalchemy import case, delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
+from services import bundle_audit
+from services import marketplace_source_telemetry as mkt_telemetry
 from services.errors import ApiError, bad_request, conflict, not_found
 from services.marketplace_publisher_attestation import validate_publisher_key
 
@@ -160,6 +162,40 @@ def _validate_create(
             raise bad_request("sandbox acknowledgement commit_sha must be a 40-hex SHA")
 
 
+TARGET_TYPE = "marketplace_source"
+ACTION_ADDED = "marketplace_source_added"
+ACTION_ACK_RECORDED = "marketplace_sandbox_ack_recorded"
+ACTION_REMOVED = "marketplace_source_removed"
+ACTION_VERSION_APPROVED = "marketplace_version_approved"
+ACTION_SIGNATURE_ISSUED = "marketplace_signature_issued"
+ACTION_RESCANNED = "marketplace_source_rescanned"
+ACTION_SCAN_REJECTED = "marketplace_source_scan_rejected"
+ACTION_UPDATE_APPROVED = "marketplace_source_update_approved"
+
+
+async def audit_source_event(
+    dal: AsyncDB,
+    action: str,
+    public_id: uuid.UUID | str,
+    *,
+    actor_id: int | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Write one marketplace-source audit row (existing `bundle_audit` trail; fail-loud).
+
+    Target is the source `public_id`; `details` must hold only ids/hashes/counts -- never a
+    git URL, name or any user-supplied free text.
+    """
+    await bundle_audit.record(
+        dal,
+        actor_id=actor_id,
+        action=action,
+        target_type=TARGET_TYPE,
+        target_id=str(public_id),
+        details=details or {},
+    )
+
+
 _SHORT_INDEX_NAME = "uq_marketplace_sources_short"
 _MAX_SHORT_RETRIES = 5
 
@@ -227,6 +263,24 @@ async def create_source(
     if row is None:
         raise conflict("could not allocate a unique source namespace token")
     record = _to_record(row)
+    await audit_source_event(
+        dal,
+        ACTION_ADDED,
+        record.public_id,
+        actor_id=created_by,
+        details={"build_mode": int(build_mode), "pinned_commit_sha": pinned_commit_sha},
+    )
+    if sandbox_ack is not None:
+        await audit_source_event(
+            dal,
+            ACTION_ACK_RECORDED,
+            record.public_id,
+            actor_id=sandbox_ack.by,
+            details={
+                "ack_text_hash": sandbox_ack.text_hash,
+                "commit_sha": sandbox_ack.commit_sha,
+            },
+        )
     logger.info(
         "marketplace source: created",
         extra={"source_public_id": str(record.public_id), "build_mode": int(build_mode)},
@@ -328,12 +382,18 @@ async def update_status(
     return _to_record(row)
 
 
-async def disable_source(dal: AsyncDB, public_id: uuid.UUID) -> SourceRecord:
+async def disable_source(
+    dal: AsyncDB, public_id: uuid.UUID, *, actor_id: int | None = None
+) -> SourceRecord:
     """Mark a source `DISABLED` (versions are never deleted; deactivating its bundles is Task 6)."""
-    return await update_status(dal, public_id, SourceStatus.DISABLED)
+    record = await update_status(dal, public_id, SourceStatus.DISABLED)
+    await audit_source_event(
+        dal, ACTION_REMOVED, public_id, actor_id=actor_id, details={"disposition": "disabled"}
+    )
+    return record
 
 
-async def delete_source(dal: AsyncDB, public_id: uuid.UUID) -> None:
+async def delete_source(dal: AsyncDB, public_id: uuid.UUID, *, actor_id: int | None = None) -> None:
     """Hard-delete an external source. The built-in row is refused; referenced sources conflict."""
     existing = await get_source(dal, public_id)
     if existing is None:
@@ -346,6 +406,9 @@ async def delete_source(dal: AsyncDB, public_id: uuid.UUID) -> None:
             await conn.execute(delete(table).where(table.c.public_id == public_id))
     except IntegrityError as exc:
         raise conflict("marketplace source still has bundle versions; disable it instead") from exc
+    await audit_source_event(
+        dal, ACTION_REMOVED, public_id, actor_id=actor_id, details={"disposition": "deleted"}
+    )
     logger.info("marketplace source: deleted", extra={"source_public_id": str(public_id)})
 
 
@@ -381,6 +444,7 @@ async def approve_update(
     *,
     expected_pending_sha: str,
     sandbox_ack: SandboxAck | None = None,
+    actor_id: int | None = None,
 ) -> SourceRecord:
     """Promote `pending_commit_sha` to `pinned_commit_sha` (human-approved update, design 4.5).
 
@@ -429,6 +493,18 @@ async def approve_update(
         ).first()
     if row is None:
         raise conflict("marketplace source pending update changed or is not approvable")
+    mkt_telemetry.adjust_pending_updates(-1)
+    mkt_telemetry.record_approval(outcome="update_approved")
+    await audit_source_event(
+        dal,
+        ACTION_UPDATE_APPROVED,
+        public_id,
+        actor_id=actor_id,
+        details={
+            "pinned_commit_sha": expected_pending_sha,
+            "ack_text_hash": sandbox_ack.text_hash if sandbox_ack else None,
+        },
+    )
     logger.info("marketplace source: update approved", extra={"source_public_id": str(public_id)})
     return _to_record(row)
 

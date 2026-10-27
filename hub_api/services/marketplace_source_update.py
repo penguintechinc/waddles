@@ -24,7 +24,7 @@ from penguin_dal import AsyncDB
 
 from services import bundle_audit
 from services import marketplace_source_scanner as _scanner
-from services.bundle_telemetry import bundle_span, get_meter
+from services import marketplace_source_telemetry as mkt_telemetry
 from services.errors import ApiError
 from services.marketplace_source_guards import GuardLimits
 from services.marketplace_source_scanner import (
@@ -140,7 +140,7 @@ async def check_source_for_update(dal: AsyncDB, source: SourceRecord) -> UpdateO
         return UpdateOutcome.SKIPPED
     sid = str(source.public_id)
     try:
-        async with bundle_span("marketplace.source.update_check", source_public_id=sid):
+        async with mkt_telemetry.source_span("marketplace.source.update_check", sid):
             latest = await resolve_latest_commit(source)
             if latest == source.pinned_commit_sha or latest == source.pending_commit_sha:
                 return UpdateOutcome.UNCHANGED
@@ -171,6 +171,8 @@ async def check_source_for_update(dal: AsyncDB, source: SourceRecord) -> UpdateO
             "marketplace source update notification failed", extra={"source_public_id": sid}
         )
         return UpdateOutcome.ERROR
+    if source.pending_commit_sha is None:  # a replaced pending SHA is still ONE pending update
+        mkt_telemetry.adjust_pending_updates(1)
     logger.info(
         "marketplace source update pending approval",
         extra={"source_public_id": sid, "pending_commit_sha": latest},
@@ -180,15 +182,13 @@ async def check_source_for_update(dal: AsyncDB, source: SourceRecord) -> UpdateO
 
 async def rescan_all(dal: AsyncDB) -> RescanSummary:
     """Check every external source once (failures isolated per source) and return the counts."""
-    meter = get_meter()
-    counter = meter.create_counter("marketplace.source.update_check.total")
     sources = await list_sources(dal)
     tally = dict.fromkeys(UpdateOutcome, 0)
     examined = 0
     for source in sources:
         outcome = await check_source_for_update(dal, source)
         tally[outcome] += 1
-        counter.add(1, {"outcome": outcome.value})
+        mkt_telemetry.record_update_check(outcome.value)
         if outcome != UpdateOutcome.SKIPPED:
             examined += 1
         await asyncio.sleep(0)

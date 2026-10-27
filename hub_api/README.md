@@ -161,6 +161,7 @@ Gates are `flask_core.feature_flags.feature_enabled` (PostHog flag AND license t
 
 - **Admin/bulk DSAR console (Enterprise, `compliance.bulk_dsar`)** -- `blueprints/v1/admin_data_privacy.py` + `services/admin_data_privacy_service.py`, mounted at `/api/v1/tenant/<slug>/privacy/*`. The statutory self-service DSAR (`/api/v1/user/me/data`) stays ungated in every tier. See `docs/PRIVACY.md` "Admin / Bulk DSAR Console".
 - **Whitelabel branding (Professional, `tenancy.whitelabel`)** -- `services/branding_service.py`, applied in `GET /api/v1/auth/tenant/<slug>` and gated on write in `PUT /api/v1/tenant/<slug>`. See `docs/features/whitelabel-branding.md`.
+- **Marketplace sources (Professional prebuilt / Enterprise sandbox, flag `waddles.marketplace-sources`)** -- `blueprints/v1/marketplace_sources.py` + `services/marketplace_source_{service,scanner,ingest,update,telemetry}.py` + `services/marketplace_sandbox_builder.py`. Audit rows reuse `bundle_audit`; OTel triad via `marketplace_source_telemetry` (OTLP from `OTEL_*` env only, never fails a request). See `docs/marketplace-sources.md`.
 
 ## Data-subject erasure (GDPR Art. 17)
 

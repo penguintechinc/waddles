@@ -301,7 +301,11 @@ async def test_scan_updates_status_via_service(
     async def fake_update(dal: Any, pid: Any, status: Any, **kw: Any) -> None:
         calls.append((status, kw))
 
+    async def fake_audit(*a: Any, **kw: Any) -> None:
+        return None
+
     monkeypatch.setattr(sc, "update_status", fake_update)
+    monkeypatch.setattr(sc, "audit_source_event", fake_audit)
     work = _repo(tmp_path)
     add_bundle(work, "python", "alpha")
     bare = tmp_path / "r.git"

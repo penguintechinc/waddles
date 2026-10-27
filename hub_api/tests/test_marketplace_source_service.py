@@ -45,6 +45,19 @@ _PK = base64.b64encode(b"\x07" * 32).decode()
 _FP = fingerprint_publisher_key(_PK)
 
 
+async def _user(dal: Any, user_id: int) -> int:
+    """Seed a `hub_users` row so audit rows (`audit_log.user_id` FK) can name this actor."""
+    async with dal.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO hub_users (id, username, display_name) OVERRIDING SYSTEM VALUE "
+                "VALUES (:i, :n, :n) ON CONFLICT (id) DO NOTHING"
+            ),
+            {"i": user_id, "n": f"user{user_id}"},
+        )
+    return user_id
+
+
 async def _prebuilt(dal: Any, **kw: Any) -> SourceRecord:
     return await create_source(
         dal,
@@ -71,7 +84,7 @@ def test_enum_codes_are_stable_ints() -> None:
 
 
 async def test_create_get_roundtrip_with_uuid_and_pending_status(pg_dal: Any) -> None:
-    rec = await _prebuilt(pg_dal, created_by=3)
+    rec = await _prebuilt(pg_dal, created_by=await _user(pg_dal, 3))
     assert isinstance(rec.public_id, uuid.UUID)
     assert rec.build_mode is BuildMode.PREBUILT and rec.status is SourceStatus.PENDING_SCAN
     assert not rec.is_builtin and rec.pinned_commit_sha is None and rec.created_by == 3
@@ -90,7 +103,9 @@ async def test_sandbox_requires_and_stores_ack(pg_dal: Any) -> None:
             pg_dal, name="s", git_url=_url(), ref="main", build_mode=BuildMode.SANDBOX
         )
     assert ei.value.status_code == 400
-    ack = SandboxAck(by=9, at=datetime.now(UTC), text_hash="d" * 64, commit_sha=SHA)
+    ack = SandboxAck(
+        by=await _user(pg_dal, 9), at=datetime.now(UTC), text_hash="d" * 64, commit_sha=SHA
+    )
     rec = await create_source(
         pg_dal, name="s", git_url=_url(), ref="main", build_mode=BuildMode.SANDBOX, sandbox_ack=ack
     )
@@ -237,6 +252,7 @@ async def test_approve_update_refuses_disabled_and_writes_sandbox_ack(pg_dal: An
     from services.marketplace_source_service import approve_update
 
     new = "d" * 40
+    await _user(pg_dal, 1)
     ack = SandboxAck(by=1, at=datetime.now(UTC), text_hash="h" * 64, commit_sha="stale")
     sb = await create_source(
         pg_dal, name="sb", git_url=_url(), ref="main", build_mode=BuildMode.SANDBOX,

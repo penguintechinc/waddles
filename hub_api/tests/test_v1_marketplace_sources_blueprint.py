@@ -79,21 +79,27 @@ class Store:
     async def list_sources(self, dal: Any, **kw: Any) -> tuple[SourceRecord, ...]:
         return tuple(self.rows.values())
 
-    async def delete_source(self, dal: Any, pid: uuid.UUID) -> None:
+    async def delete_source(self, dal: Any, pid: uuid.UUID, **kw: Any) -> None:
         if self.rows[pid].is_builtin:
             raise conflict("builtin")
         if self.has_versions:
             raise conflict("still has bundle versions")
         del self.rows[pid]
 
-    async def disable_source(self, dal: Any, pid: uuid.UUID) -> SourceRecord:
+    async def disable_source(self, dal: Any, pid: uuid.UUID, **kw: Any) -> SourceRecord:
         import dataclasses
 
         self.rows[pid] = dataclasses.replace(self.rows[pid], status=SourceStatus.DISABLED)
         return self.rows[pid]
 
     async def approve_update(
-        self, dal: Any, pid: uuid.UUID, *, expected_pending_sha: str, sandbox_ack: Any = None
+        self,
+        dal: Any,
+        pid: uuid.UUID,
+        *,
+        expected_pending_sha: str,
+        sandbox_ack: Any = None,
+        actor_id: int | None = None,
     ) -> SourceRecord:
         import dataclasses
 
@@ -453,7 +459,9 @@ async def test_rescan_runs_scan_then_ingest_with_tenant_ctx(
     store.rows[rec.public_id] = rec
     seen: dict[str, Any] = {}
 
-    async def fake_scan(source: SourceRecord, *, workdir: Path, dal: Any = None) -> ScanResult:
+    async def fake_scan(
+        source: SourceRecord, *, workdir: Path, dal: Any = None, actor_id: int | None = None
+    ) -> ScanResult:
         assert str(workdir)
         return ScanResult(source.public_id, SHA, (), (), 3)
 

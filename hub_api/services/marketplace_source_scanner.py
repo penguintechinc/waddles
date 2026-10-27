@@ -29,8 +29,8 @@ from typing import Any
 import yaml
 from penguin_dal import AsyncDB
 
+from services import marketplace_source_telemetry as mkt_telemetry
 from services.bundle_manifest_v2 import ManifestV2Error, parse_bundle_manifest_v2
-from services.bundle_telemetry import bundle_span, get_meter
 from services.dependency_denylist import DepFinding, scan_bundle_dependencies
 from services.errors import ApiError
 from services.marketplace_source_guards import (
@@ -41,9 +41,12 @@ from services.marketplace_source_guards import (
     dir_size,
 )
 from services.marketplace_source_service import (
+    ACTION_RESCANNED,
+    ACTION_SCAN_REJECTED,
     BuildMode,
     SourceRecord,
     SourceStatus,
+    audit_source_event,
     update_status,
 )
 from services.url_guard import validate_outbound_url
@@ -386,6 +389,7 @@ async def scan_source(
     workdir: Path,
     limits: GuardLimits | None = None,
     dal: AsyncDB | None = None,
+    actor_id: int | None = None,
 ) -> ScanResult:
     """Clone `source` at its pinned SHA into an isolated temp dir, guard, walk and validate.
 
@@ -393,14 +397,14 @@ async def scan_source(
     zero bundles examined). With `dal`, updates the source's status + `last_scanned_at`.
     """
     lim = limits or GuardLimits()
-    meter = get_meter()
     started = time.monotonic()
+    examined_n = rejected_n = 0
     tmp = Path(tempfile.mkdtemp(prefix="mktsrc-", dir=workdir))
     root = tmp / "repo"
     root.mkdir()
     outcome = "ok"
     try:
-        async with bundle_span("marketplace.source.scan", source_public_id=str(source.public_id)):
+        async with mkt_telemetry.source_span("marketplace.source.scan", source.public_id):
             try:
                 await _clone_pinned(source, root, lim)
                 await asyncio.to_thread(check_tree, root, lim)
@@ -413,8 +417,7 @@ async def scan_source(
                 raise ScanRejectedError(exc.reason, str(exc)) from exc
             pinned = source.pinned_commit_sha or ""
             result = ScanResult(source.public_id, pinned, tuple(good), tuple(bad), examined)
-            meter.create_counter("marketplace.scan.bundles_examined").add(examined)
-            meter.create_counter("marketplace.scan.bundles_rejected").add(len(bad))
+            examined_n, rejected_n = examined, len(bad)
             logger.info(
                 "marketplace source scan complete",
                 extra={
@@ -426,6 +429,13 @@ async def scan_source(
             )
             if dal is not None:
                 await update_status(dal, source.public_id, SourceStatus.ACTIVE, scanned=True)
+                await audit_source_event(
+                    dal,
+                    ACTION_RESCANNED,
+                    source.public_id,
+                    actor_id=actor_id,
+                    details={"examined": examined, "accepted": len(good), "rejected": len(bad)},
+                )
             return result
     except ScanRejectedError as exc:
         outcome = exc.reason
@@ -434,6 +444,13 @@ async def scan_source(
             extra={"source_public_id": str(source.public_id), "reason": exc.reason},
         )
         if dal is not None:
+            await audit_source_event(
+                dal,
+                ACTION_SCAN_REJECTED,
+                source.public_id,
+                actor_id=actor_id,
+                details={"category": mkt_telemetry.reason_category(exc.reason)},
+            )
             try:
                 await update_status(
                     dal,
@@ -446,7 +463,14 @@ async def scan_source(
                 if status_exc.status_code != 409:  # disabled source: drop the status write
                     raise
         raise
+    except Exception:
+        outcome = "error"
+        raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-        meter.create_counter("marketplace.scan.total").add(1, {"outcome": outcome})
-        meter.create_histogram("marketplace.scan.duration_s").record(time.monotonic() - started)
+        mkt_telemetry.record_scan(
+            examined=examined_n,
+            rejected=rejected_n,
+            outcome=outcome,
+            duration_s=time.monotonic() - started,
+        )

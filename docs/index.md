@@ -112,6 +112,7 @@ Full detail, per-container table, typed stage contract, and current build status
 - **[JWT Verification](JWT_VERIFICATION.md)** — verifier hardening (one alg per verifier, enforced `iss`/`aud`/claims, `kid`), rejection reasons, per-algorithm metric
 - **[Session Revocation](TOKEN_REVOCATION.md)** — 15-minute access tokens, rotating refresh tokens, server-side revocation (jti / session / revoke-all), outage policy, Rust follow-up contract
 - **[Provider connections](PROVIDER_CONNECTIONS.md)** — standard Twitch/Discord/Slack connection API: per-community encrypted token store, adapter interface, data-plane contract
+- **[Marketplace sources](marketplace-sources.md)** — pinned git-repo bundle sources: prebuilt vs sandbox, trust warning, approve-update flow, kill-switch, audit + telemetry
 - **[Contributing](CONTRIBUTING.md)** — how to contribute
 
 ## Community & Support
