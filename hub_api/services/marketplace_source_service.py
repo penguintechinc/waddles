@@ -436,6 +436,21 @@ async def delete_source(dal: AsyncDB, public_id: uuid.UUID, *, actor_id: int | N
     logger.info("marketplace source: deleted", extra={"source_public_id": str(public_id)})
 
 
+def lock_source_status_stmt(table: Any, public_id: uuid.UUID) -> Any:
+    """`SELECT status ... FOR UPDATE` on one source row (the approve/disable serialization lock)."""
+    return select(table.c.status).where(table.c.public_id == public_id).with_for_update()
+
+
+async def lock_source_status(conn: Any, dal: AsyncDB, public_id: uuid.UUID) -> SourceStatus | None:
+    """Row-lock the source INSIDE the caller's open txn and return its status (None = missing).
+
+    `disable_and_deactivate_source`'s `UPDATE ... SET status=DISABLED` needs the same row lock,
+    so it blocks until the caller's txn (the global-install write) commits or rolls back.
+    """
+    raw = (await conn.execute(lock_source_status_stmt(_table(dal), public_id))).scalar_one_or_none()
+    return None if raw is None else SourceStatus(int(raw))
+
+
 async def get_source_pk(dal: AsyncDB, public_id: uuid.UUID) -> int | None:
     """Return the internal numeric `marketplace_sources.id` (FK use only, never exposed)."""
     table = _table(dal)

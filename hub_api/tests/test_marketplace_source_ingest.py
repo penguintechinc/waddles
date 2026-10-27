@@ -76,6 +76,13 @@ async def env(install_dal: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         row = (await dal(dal.marketplace_sources.id == pk).select()).first()
         return None if row is None else await _get(dal, uuid.UUID(str(row.public_id)))
 
+    async def _lock(conn: Any, dal: Any, public_id: uuid.UUID) -> SourceStatus | None:
+        """Sqlite mirror: no status column / FOR UPDATE; honour the _DISABLED stand-in."""
+        if str(public_id) in _DISABLED:
+            return SourceStatus.DISABLED
+        return SourceStatus.ACTIVE
+
+    monkeypatch.setattr(approvals, "lock_source_status", _lock)
     monkeypatch.setattr(ing, "get_source_by_pk", _by_pk)
     monkeypatch.setattr(ing, "get_source_pk", _pk)
     monkeypatch.setattr(ing, "get_source", _get)
@@ -334,6 +341,51 @@ async def test_disabled_source_ingest_and_approve_refused(install_dal: Any, env:
         )
     assert exc2.value.status_code == 409
     assert (await approvals.list_global_installs(install_dal)) == []
+
+
+async def test_disable_between_status_read_and_install_refused(
+    install_dal: Any, env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (TOCTOU): a disable landing after approve's status re-read must not install.
+
+    The install txn re-checks status under the source-row lock, so the late disable wins.
+    """
+    src, _, _ = env
+    cand = _candidate(src)
+    b = (await _ingest(install_dal, src, cand)).bundles[0]
+    real_pk = ing.get_source_pk
+
+    async def _pk_then_disable(dal: Any, public_id: uuid.UUID) -> int | None:
+        result = await real_pk(dal, public_id)  # runs AFTER the status read, BEFORE the install
+        await _disable(install_dal, src)
+        return result
+
+    monkeypatch.setattr(ing, "get_source_pk", _pk_then_disable)
+    with pytest.raises(ApiError) as exc:
+        await ing.approve_source_version(
+            install_dal,
+            src,
+            app_id=cand.assigned_app_id,
+            version="1.0.0",
+            approved_by=7,
+            expected_permission_hash=b.permission_hash,
+        )
+    assert exc.value.status_code == 409
+    assert (await approvals.list_global_installs(install_dal)) == []
+
+
+def test_source_lock_statement_is_for_update() -> None:
+    """The approve/disable serialization lock must compile to `SELECT ... FOR UPDATE` on PG."""
+    from sqlalchemy import Column, Integer, MetaData, Table
+    from sqlalchemy.dialects import postgresql
+
+    from services.marketplace_source_service import lock_source_status_stmt
+
+    t = Table(
+        "marketplace_sources", MetaData(), Column("status", Integer), Column("public_id", Integer)
+    )
+    sql = str(lock_source_status_stmt(t, 1).compile(dialect=postgresql.dialect()))  # type: ignore[arg-type]
+    assert sql.rstrip().endswith("FOR UPDATE") and "marketplace_sources" in sql
 
 
 async def test_source_disabled_mid_ingest_creates_no_version(

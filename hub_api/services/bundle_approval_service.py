@@ -122,7 +122,7 @@ from services.bundle_manifest_v2 import (
 )
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, conflict, not_found
-from services.marketplace_source_service import SourceRecord
+from services.marketplace_source_service import SourceRecord, SourceStatus, lock_source_status
 from services.permission_summary_service import build_permission_summary, permission_hash
 from services.vendor_bundle_authz import (
     INSTALL_SOURCE_HUMAN,
@@ -434,8 +434,14 @@ async def _write_global_install(
     summary: dict[str, Any],
     installed_by: int | None,
     install_source: str,
+    source: SourceRecord | None = None,
 ) -> int:
     """Insert `app_global_installs`, supersede the previous row, and set `app_versions.approval_id`.
+
+    For a source-backed install the FIRST statement is `SELECT status ... FOR UPDATE` on the
+    `marketplace_sources` row, so this txn serializes against `disable_and_deactivate_source`
+    (its DISABLED UPDATE blocks on that row lock): a DISABLED source is refused (409), and an
+    install that wins the lock commits before the disable proceeds to deactivate it.
 
     All in one transaction (same `engine.begin()` idiom the pre-split
     module used for its own multi-table atomicity, see
@@ -446,6 +452,10 @@ async def _write_global_install(
     now = datetime.now(UTC)
 
     async with install_dal.engine.begin() as conn:
+        if source is not None and not source.is_builtin:  # built-in is never disabled
+            locked_status = await lock_source_status(conn, install_dal, source.public_id)
+            if locked_status is None or locked_status == SourceStatus.DISABLED:
+                raise conflict("marketplace source is disabled")
         previous_id = (
             await conn.execute(
                 select(installs_table.c.id).where(
@@ -560,6 +570,7 @@ async def install_version_globally(
         summary=summary,
         installed_by=installed_by,
         install_source=install_source,
+        source=source,
     )
     await bundle_audit.record(
         install_dal,
