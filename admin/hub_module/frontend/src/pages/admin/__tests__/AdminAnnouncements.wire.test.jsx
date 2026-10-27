@@ -3,13 +3,13 @@
  * runs over a recording HTTP adapter, so the exact JSON the browser would
  * POST is asserted.
  *
- * KNOWN DEFECT: the page calls
- * `adminApi.broadcastAnnouncement(communityId, id, { platforms })`, but the
+ * Regression: the page used to call
+ * `adminApi.broadcastAnnouncement(communityId, id, { platforms })` while the
  * helper itself wraps its third argument as `{ platforms }`, so the request
- * body becomes `{"platforms": {"platforms": [...]}}`. hub-api
+ * body became `{"platforms": {"platforms": [...]}}`. hub-api
  * (`community_announcements.broadcast_route`) requires `platforms` to be a
- * non-empty list and rejects the dict -- broadcasting from this page cannot
- * succeed. `it.fails` goes red once fixed; then make it a plain `it`.
+ * non-empty list and rejected the dict, so broadcasting could never succeed.
+ * The page now passes the bare list; the body must be `{"platforms": [...]}`.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -74,8 +74,10 @@ describe('AdminAnnouncements broadcast over the real adminApi', () => {
     expect(url).toBe('/api/v1/admin/7/announcements/1/broadcast');
   });
 
-  it.fails('sends platforms as a flat list, as hub-api requires', async () => {
+  it('sends platforms as a flat list, as hub-api requires', async () => {
     const { body } = await pickPlatformAndBroadcast();
     expect(Array.isArray(body.platforms)).toBe(true);
+    expect(body.platforms).toHaveLength(1);
+    expect(Object.keys(body)).toEqual(['platforms']);
   });
 });

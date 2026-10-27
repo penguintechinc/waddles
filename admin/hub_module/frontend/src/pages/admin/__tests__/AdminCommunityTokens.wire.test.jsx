@@ -3,12 +3,14 @@
  * `tokenApi` runs over a recording HTTP adapter (nothing about the client is
  * mocked), so this proves what the page actually shows for a real response.
  *
- * KNOWN DEFECT: `tokenApi.*` returns the raw axios response, but the page
- * reads `res.tokens` / `res.quota` / `res.token` straight off it (no `.data`),
- * so against the real client the token list is always empty and a newly
- * created token is never revealed. `it.fails` goes red once that is fixed --
- * then convert these to plain `it` (and the mocked suite's payload shapes
- * should be revisited too).
+ * Regression: `tokenApi.*` returns the raw axios response, but the page used
+ * to read `res.tokens` / `res.quota` / `res.token` straight off it (no
+ * `.data`), so against the real client the token list was always empty and a
+ * newly created token was never revealed. The page now reads `res.data.*`,
+ * using the shapes hub-api actually returns
+ * (`hub_api/blueprints/v1/access_token.py`): `GET /cats` ->
+ * `{ tokens: [{ ..., created_by_name }], quota }`, `GET /scopes` ->
+ * `{ scopes: [{ scope_key, ... }] }`, `POST /cats` -> `{ token }`.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -34,9 +36,9 @@ function mount() {
 beforeEach(() => {
   rec.calls.length = 0;
   rec.reply.data = {
-    tokens: [{ id: 't1', name: 'Event bot', scopes: ['a:read'] }],
+    tokens: [{ id: 't1', name: 'Event bot', scopes: ['a:read'], created_by_name: 'Alice' }],
     quota: 5,
-    scopes: [{ key: 'misc:ping' }],
+    scopes: [{ scope_key: 'misc:ping' }],
     token: 'cat_secret_value',
   };
 });
@@ -52,12 +54,13 @@ describe('AdminCommunityTokens against the real tokenApi', () => {
     ]);
   });
 
-  it.fails('lists the tokens the API returned', async () => {
+  it('lists the tokens the API returned', async () => {
     mount();
     expect(await screen.findByText('Event bot')).toBeInTheDocument();
+    expect(screen.getByText('Alice')).toBeInTheDocument();
   });
 
-  it.fails('completes the create flow end to end (scopes load, token created and revealed)', async () => {
+  it('completes the create flow end to end (scopes load, token created and revealed)', async () => {
     mount();
     await screen.findByText('Community Access Tokens');
     fireEvent.click(screen.getByRole('button', { name: /New Token/ }));

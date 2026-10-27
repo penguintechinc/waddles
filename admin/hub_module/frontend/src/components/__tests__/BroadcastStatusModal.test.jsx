@@ -119,8 +119,7 @@ describe('BroadcastStatusModal history table', () => {
 });
 
 describe('BroadcastStatusModal new broadcast', () => {
-  // The picker only renders once there is history (or a selection), so these
-  // cases start from one prior broadcast.
+  // These cases start from one prior broadcast.
   beforeEach(() => {
     adminApi.getBroadcastStatus.mockResolvedValue(
       envelope([{ platform: 'twitch', serverName: 'Prior Channel', status: 'success' }]),
@@ -135,11 +134,10 @@ describe('BroadcastStatusModal new broadcast', () => {
     expect(screen.getAllByText('Discord')).toHaveLength(2);
   });
 
-  // KNOWN DEFECT: with no broadcast history the platform picker is hidden
-  // (`connectedServers` needs history or an existing selection, and a
-  // selection needs the picker), so a first broadcast can never be sent from
-  // this modal. `it.fails` goes red once fixed -- then make it a plain `it`.
-  it.fails('offers the platform picker even before any broadcast has been sent', async () => {
+  // Regression: the platform picker used to render only once there was
+  // history (or a selection, which itself needs the picker), so a first
+  // broadcast could never be sent from this modal.
+  it('offers the platform picker even before any broadcast has been sent', async () => {
     adminApi.getBroadcastStatus.mockResolvedValue(envelope([]));
     mount();
     await screen.findByText('No broadcasts yet');

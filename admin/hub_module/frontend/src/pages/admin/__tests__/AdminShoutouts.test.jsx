@@ -435,11 +435,10 @@ describe('AdminShoutouts history tab', () => {
     await waitFor(() => expect(adminApi.getShoutoutHistory).toHaveBeenCalledTimes(2));
   });
 
-  // KNOWN DEFECT: `Clear` resets the filter state and then calls
+  // Regression: `Clear` used to reset the filter state and then call
   // `setTimeout(fetchHistory, 0)`, but that `fetchHistory` closure was
-  // captured before the reset, so the refetch still sends the OLD filters.
-  // `it.fails` goes red once fixed -- then make it a plain `it`.
-  it.fails('Clear refetches the history without the old filters', async () => {
+  // captured before the reset, so the refetch still sent the OLD filters.
+  it('Clear refetches the history without the old filters', async () => {
     await loaded();
     tab('History');
     await screen.findByText('No shoutout history found.');
