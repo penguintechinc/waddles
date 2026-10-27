@@ -215,6 +215,13 @@ spec:
 {{- $allowed := concat (index $root.Values.tetragon.runtimes $rt) (.binaries | default list) $root.Values.tetragon.commonBinaries -}}
 {{- if .shell -}}{{- $allowed = concat $allowed $root.Values.tetragon.shellBinaries -}}{{- end -}}
 {{- $allowed = $allowed | uniq }}
+{{- /* runc exec re-exec (values.yaml tetragon.runcInit): `/proc/self/fd/<N>` execs are exempt from the
+       allowlist selector below but SIGKILLed by a second selector unless the caller is runc. */ -}}
+{{- $runcInit := $root.Values.tetragon.runcInit | default dict -}}
+{{- $runcCallers := $runcInit.callerBinaries | default list -}}
+{{- if and $runcInit.enabled (not $runcCallers) -}}
+{{- fail (printf "workload %q: tetragon.runcInit.enabled requires a non-empty tetragon.runcInit.callerBinaries (refusing to allow /proc/self/fd/ execs unscoped)" $c) -}}
+{{- end }}
 ---
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicyNamespaced
@@ -242,7 +249,31 @@ spec:
                 {{- range $allowed }}
                 - {{ . | quote }}
                 {{- end }}
+            {{- if $runcInit.enabled }}
+            # `/proc/self/fd/<N>` is judged by the next selector (runc-caller-scoped), not here.
+            - index: 0
+              operator: "NotPrefix"
+              values:
+                - "/proc/self/fd/"
+            {{- end }}
           matchActions:
             - action: {{ $root.Values.tetragon.action }}
+        {{- if $runcInit.enabled }}
+        # runc exec re-exec guard: kill any `/proc/self/fd/<N>` exec whose caller is NOT runc
+        # (blocks fileless memfd exec by app code; runc's own `runc init` is the only exempt caller).
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                {{- range $runcCallers }}
+                - {{ . | quote }}
+                {{- end }}
+          matchArgs:
+            - index: 0
+              operator: "Prefix"
+              values:
+                - "/proc/self/fd/"
+          matchActions:
+            - action: {{ $root.Values.tetragon.action }}
+        {{- end }}
 {{- end }}
 {{- end -}}

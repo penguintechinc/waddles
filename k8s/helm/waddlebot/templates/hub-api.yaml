@@ -49,7 +49,7 @@ spec:
         # API, see critical-rules.md Data Plane) now exists; no longer the shared
         # pipeline.pythonBaseImage skeleton placeholder. Bare module name "hub-api" is the
         # alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
         # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Every deploy
         # now carries a unique per-deploy global.imageTag (alpha SHA8, beta beta-<epoch>), so
         # the old hardcoded Always (a workaround for a stale same-tag `alpha` push) is
