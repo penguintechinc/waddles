@@ -23,7 +23,7 @@ from enum import IntEnum
 from typing import Any
 
 from penguin_dal import AsyncDB
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import case, delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from services.errors import ApiError, bad_request, conflict, not_found
@@ -253,30 +253,46 @@ async def list_sources(dal: AsyncDB, *, include_disabled: bool = True) -> tuple[
     return tuple(_to_record(r) for r in rows)
 
 
+class _KeepPending:
+    """Sentinel: leave `pending_commit_sha` untouched (the default for `update_status`)."""
+
+
+KEEP_PENDING = _KeepPending()
+
+
 async def update_status(
     dal: AsyncDB,
     public_id: uuid.UUID,
     status: SourceStatus,
     *,
     last_scan_error: str | None = None,
-    pending_commit_sha: str | None = None,
+    pending_commit_sha: str | None | _KeepPending = KEEP_PENDING,
     scanned: bool = False,
 ) -> SourceRecord:
     """Set `status` (and scan bookkeeping); `scanned=True` stamps `last_scanned_at`.
 
-    `last_scan_error` / `pending_commit_sha` are written as given (None clears them). This never
+    `last_scan_error` is written as given (None clears it). `pending_commit_sha` is PRESERVED
+    unless passed explicitly (a routine rescan must never wipe an upstream commit awaiting human
+    approval); while one is pending, a requested `ACTIVE` stays `NEEDS_APPROVAL`. This never
     touches `pinned_commit_sha` -- advancing the pin is a separate, approval-gated operation.
     """
-    if pending_commit_sha is not None and not _SHA_RE.fullmatch(pending_commit_sha):
+    if isinstance(pending_commit_sha, str) and not _SHA_RE.fullmatch(pending_commit_sha):
         raise bad_request("pending_commit_sha must be a 40-hex SHA")
     table = _table(dal)
     now = datetime.now(UTC)
     values: dict[str, Any] = {
         "status": int(status),
         "last_scan_error": last_scan_error,
-        "pending_commit_sha": pending_commit_sha,
         "updated_at": now,
     }
+    if isinstance(pending_commit_sha, _KeepPending):
+        if status == SourceStatus.ACTIVE:
+            values["status"] = case(
+                (table.c.pending_commit_sha.is_not(None), int(SourceStatus.NEEDS_APPROVAL)),
+                else_=int(SourceStatus.ACTIVE),
+            )
+    else:
+        values["pending_commit_sha"] = pending_commit_sha
     if scanned:
         values["last_scanned_at"] = now
     # DISABLED is terminal: a non-DISABLED target never overwrites a DISABLED row (a concurrent
@@ -397,6 +413,45 @@ async def approve_update(
         raise conflict("marketplace source pending update changed or is not approvable")
     logger.info("marketplace source: update approved", extra={"source_public_id": str(public_id)})
     return _to_record(row)
+
+
+async def record_pending_update(
+    dal: AsyncDB, public_id: uuid.UUID, *, latest_sha: str
+) -> SourceRecord | None:
+    """Record an upstream commit as `pending_commit_sha` for human approval (design 4.5).
+
+    One atomic conditional UPDATE: only an external, non-DISABLED, `ACTIVE`/`NEEDS_APPROVAL`
+    source with a pin, whose pin and current pending SHA both differ from `latest_sha`, is
+    changed. Sets `pending_commit_sha` + `NEEDS_APPROVAL`; NEVER touches `pinned_commit_sha`.
+    Returns the updated record, or `None` when nothing changed (so a caller notifies exactly once
+    per distinct pending commit, and a concurrent approve/disable is never overwritten).
+    """
+    if not _SHA_RE.fullmatch(latest_sha):
+        raise bad_request("latest_sha must be a 40-hex SHA")
+    table = _table(dal)
+    async with dal.engine.begin() as conn:
+        row = (
+            await conn.execute(
+                update(table)
+                .where(
+                    table.c.public_id == public_id,
+                    table.c.is_builtin.is_(False),
+                    table.c.status.in_(
+                        [int(SourceStatus.ACTIVE), int(SourceStatus.NEEDS_APPROVAL)]
+                    ),
+                    table.c.pinned_commit_sha.is_not(None),
+                    table.c.pinned_commit_sha != latest_sha,
+                    table.c.pending_commit_sha.is_distinct_from(latest_sha),
+                )
+                .values(
+                    pending_commit_sha=latest_sha,
+                    status=int(SourceStatus.NEEDS_APPROVAL),
+                    updated_at=datetime.now(UTC),
+                )
+                .returning(*table.c)
+            )
+        ).first()
+    return None if row is None else _to_record(row)
 
 
 async def source_app_ids(dal: AsyncDB, public_id: uuid.UUID) -> tuple[str, ...]:

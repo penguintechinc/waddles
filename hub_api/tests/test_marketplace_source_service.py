@@ -145,7 +145,7 @@ async def test_update_status_bookkeeping_never_moves_pin(pg_dal: Any) -> None:
     assert out.status is SourceStatus.NEEDS_APPROVAL and out.pending_commit_sha == SHA
     assert out.last_scanned_at is not None and out.pinned_commit_sha is None
     err = await update_status(pg_dal, rec.public_id, SourceStatus.ERROR, last_scan_error="boom")
-    assert err.last_scan_error == "boom" and err.pending_commit_sha is None
+    assert err.last_scan_error == "boom" and err.pending_commit_sha == SHA  # preserved (Task 8)
     with pytest.raises(ApiError) as ei:
         await update_status(pg_dal, rec.public_id, SourceStatus.ACTIVE, pending_commit_sha="nothex")
     assert ei.value.status_code == 400

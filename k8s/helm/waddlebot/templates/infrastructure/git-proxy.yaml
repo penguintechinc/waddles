@@ -138,6 +138,12 @@ spec:
         - matchLabels:
             {{- include "waddlebot.selectorLabels" . | nindent 12 }}
             app.kubernetes.io/component: hub-api
+{{- if .Values.sourceAutoUpdate.enabled }}
+        # ...and the auto-update CronJob (ls-remote only; same hub-api image, own pod).
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: marketplace-source-rescan
+{{- end }}
       toPorts:
         - ports:
             - port: {{ .Values.gitProxy.port | quote }}

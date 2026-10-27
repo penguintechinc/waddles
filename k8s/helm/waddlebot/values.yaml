@@ -3244,6 +3244,23 @@ gitProxy:
       cpu: "250m"
       memory: "128Mi"
 
+# Marketplace-sources auto-update (Phase 1, Task 8; templates/marketplace-source-rescan-cronjob.yaml).
+# Daily CronJob: records new upstream commits as pending_commit_sha + notifies admins; a human must
+# still approve-update. Default OFF (also requires gitProxy.enabled). No cron backoff beyond
+# backoffLimit; Forbid concurrency; deadline bounds a wedged run.
+sourceAutoUpdate:
+  enabled: false
+  schedule: "17 3 * * *"
+  backoffLimit: 1
+  activeDeadlineSeconds: 900
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+
 # Marketplace-sources sandbox builder (Phase 1, Task 7B; templates/marketplace-sandbox-builder.yaml).
 # hub-api launches ONE Job per SANDBOX-source bundle build (Enterprise + trust-ack gated in the API
 # AND the orchestrator). The Job pod is rootless, read-only root FS, all caps dropped, NO service-
