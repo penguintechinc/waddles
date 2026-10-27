@@ -1,0 +1,43 @@
+{
+  "context": {},
+  "frame": {
+    "author_id": "UCviewer1",
+    "channel_id": "UCabc123",
+    "display_name": "Alice",
+    "is_mod": false,
+    "is_owner": false,
+    "is_sponsor": false,
+    "live_chat_id": "chat123",
+    "message_id": "msg-1",
+    "platform": "youtube",
+    "published_at": "2026-09-11T00:00:00Z",
+    "text": "  hello chat  ",
+    "video_id": "vid123"
+  },
+  "golden": {
+    "actor": "UCviewer1",
+    "event_type": "message",
+    "payload": {
+      "author_id": "UCviewer1",
+      "display_name": "Alice",
+      "is_mod": false,
+      "is_owner": false,
+      "is_sponsor": false,
+      "live_chat_id": "chat123",
+      "message_id": "msg-1",
+      "published_at": "2026-09-11T00:00:00Z",
+      "text": "hello chat",
+      "video_id": "vid123"
+    },
+    "platform": "youtube"
+  },
+  "golden_origin": "python",
+  "id": "youtube/live_chat_message",
+  "outcome": "event",
+  "path": "youtube_live_poll",
+  "pii_classifier": "reject:is_owner,is_sponsor,live_chat_id,published_at,video_id",
+  "platform": "youtube",
+  "python_divergences": [],
+  "rust_path": null,
+  "seed": "core/svc_ingest/tests/test_builtin_youtube_live_ingest.py"
+}

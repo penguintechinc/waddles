@@ -2,7 +2,7 @@
 # waddles.core.example.chat -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 #
-# 1.0.0: initial port of core/svc_process/bundles/community_chat_process.py's two read-only
+# 1.0.0: initial port of core/svc_process/builtin_handlers/community_chat_process.py's two read-only
 # commands (chat-history, channels) -- see this bundle's src/app.py module docstring
 # (feature/bundle-chat). BUILD-ONLY / INERT -- see that docstring's own note.
 # 2026-10-08: re-ported onto the structured waddle_sdk.db facade -- no data/storage capability
@@ -11,7 +11,7 @@
 schema_version: 2
 app_id: waddles.core.example.chat
 name: Chat History Bundle (Python)
-version: 1.0.1
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -41,6 +41,8 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - id: flags.read
-    justification: "reads the waddles.command-chat PostHog feature flag via feature_enabled to gate the command"
+  - id: "chat.send:discord"
+    justification: "replies to the invoking command on its origin platform via the relay host import (relay.push -> chat.send:discord); no other capability is used"
+  - id: "chat.send:twitch"
+    justification: "replies to the invoking command on its origin platform via the relay host import (relay.push -> chat.send:twitch); no other capability is used"
 routes_to: []

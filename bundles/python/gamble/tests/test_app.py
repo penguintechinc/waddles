@@ -174,11 +174,6 @@ def test_transform_non_string_text(host: _FakeHost) -> None:
     assert _run(transform(ev)) is None
 
 
-def test_transform_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _FakeHost(), flag=False)
-    assert _run(transform(_event("!gamble 5"))) is None
-
-
 def test_transform_badge_forwarding(host: _FakeHost) -> None:
     out = _run(transform(_event("!gamble", is_mod=True, is_broadcaster=False)))
     assert out is not None

@@ -14,15 +14,13 @@ is not a declared verb and so is recognized here before the parser runs):
 
 ## Points-store integration (read this)
 
-`loyalty`'s `!points` ledger is a `db` table owned by that app, plus an
-app-private `kv` index. The host scopes BOTH per `(tenant, community,
-app_id)` (`core/bundle_host_kv/src/scope.rs`, `waddle_sdk/db.py`), and this
-bundle is granted only `storage.kv` + `flags.read`, so it cannot read or write
-`loyalty`'s balances directly -- there is no cross-bundle points capability on
-the platform today. Rather than fake one, this bundle keeps the balance behind
-the narrow `_Ledger` seam below (`balance`/`credit`/`debit` over community-
-scoped kv, pseudonymous keys, new players seeded with `STARTING_BALANCE`).
-When a platform points capability lands, only `_Ledger` changes. This gap is
+`loyalty`'s `!points` ledger is a `db` table owned by that app, plus an app-private `kv` index. The
+host scopes BOTH per `(tenant, community, app_id)` (`core/bundle_host_kv/src/scope.rs`,
+`waddle_sdk/db.py`), and this bundle is granted only `storage.kv`, so it cannot read or write
+`loyalty`'s balances directly -- there is no cross-bundle points capability on the platform today.
+Rather than fake one, this bundle keeps the balance behind the narrow `_Ledger` seam below
+(`balance`/`credit`/`debit` over community- scoped kv, pseudonymous keys, new players seeded with
+`STARTING_BALANCE`). When a platform points capability lands, only `_Ledger` changes. This gap is
 called out in the PR description.
 
 Overdraw safety: `debit` applies an atomic `kv.increment` and, if a concurrent
@@ -32,7 +30,8 @@ PII-free logging: log fields are `op`/`outcome`/`amount_bucket`/`community`
 only -- never the actor, username, or message text. The username appears only
 in the visible chat reply, never persisted or logged.
 
-Gated behind the PostHog flag ``waddles.command-gamble``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -44,10 +43,13 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-gamble"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 SPEC = CommandSpec(name="gamble")
 
 STARTING_BALANCE = 100
@@ -90,7 +92,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """`True`/`False` from badge fields, or `None` if absent (absent must deny)."""
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 @dataclass(slots=True, frozen=True)
@@ -104,7 +106,7 @@ class BetOutcome:
 
 def _roll(odds_percent: int) -> bool:
     """Return True with probability `odds_percent`/100."""
-    return random.randint(1, 100) <= odds_percent  # noqa: S311 - a game, not security
+    return _RNG.randint(1, 100) <= odds_percent
 
 
 def _resolve_command(parsed: ParsedCommand | None) -> str:
@@ -121,7 +123,7 @@ def _resolve_command(parsed: ParsedCommand | None) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!gamble`, `<amount>` and `set odds`.
 
-    Cheap command-match first, flag second, grammar last (same ordering as `slots`).
+    Cheap command-match first, grammar last (same ordering as `slots`).
     A recognized-but-malformed `!gamble ...` replies `usage`, never a silent drop.
     """
     text = event.payload.get("text")
@@ -129,8 +131,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     stripped = text.strip()
     if stripped.partition(" ")[0].lower() != "!gamble":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     tail = stripped.partition(" ")[2].strip()
@@ -149,9 +149,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
             payload["arg"] = parsed.args
     log.info("gamble.transform matched", command=payload["command"])
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
     return PlatformEvent(
         platform=event.platform,
         event_type=event.event_type,

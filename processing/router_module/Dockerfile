@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY libs/flask_core /app/libs/flask_core
 
 # Install shared library
-RUN cd /app/libs/flask_core && pip install --no-cache-dir .
+RUN pip install --no-cache-dir /app/libs/flask_core
 
 # Copy module files
 COPY processing/router_module/requirements.txt /app/
@@ -37,10 +37,9 @@ RUN mkdir -p /app/models && \
 RUN mkdir -p /var/log/waddlebotlog
 
 # Create non-root user
-RUN useradd --create-home --shell /bin/bash appuser
-
 # Set proper permissions for app directory, models, and log directory
-RUN chown -R appuser:appuser /app /var/log/waddlebotlog
+RUN useradd --create-home --shell /bin/bash appuser && \
+    chown -R appuser:appuser /app /var/log/waddlebotlog
 
 # Environment variable for fastText model path
 ENV FASTTEXT_MODEL_PATH=/app/models/lid.176.bin

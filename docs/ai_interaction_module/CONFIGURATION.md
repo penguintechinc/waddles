@@ -108,6 +108,21 @@ Request timeout for Ollama API calls.
 OLLAMA_TIMEOUT=45
 ```
 
+### OLLAMA_DISABLE_THINKING
+**Type:** Boolean
+**Default:** `true`
+
+Send `think: false` so reasoning models (e.g. gemma4) answer directly instead of spending the whole
+`OLLAMA_MAX_TOKENS` budget on hidden reasoning and returning an empty reply. This module only ever asks
+for plain-text chat replies (no JSON / structured-output params are sent), so it works with text-only
+models. A blank reply is logged with its `done_reason` before the canned fallback is used.
+
+```env
+OLLAMA_DISABLE_THINKING=true
+```
+
+See `docs/testing/ollama-realpath.md` for the env-gated real-Ollama test suite.
+
 ### OLLAMA_CERT_PATH
 **Type:** String
 **Default:** Empty
@@ -573,3 +588,15 @@ Configuration errors: AI_TEMPERATURE must be between 0 and 2
 6. **Test Configuration**: Use `/api/v1/ai/test` endpoint before deployment
 7. **Set Response Prefix**: Help users identify AI responses
 8. **Configure Event Responses**: Only enable events you want AI to respond to
+
+## Prompt-Injection Hardening (OWASP LLM01)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AI_REDACT_PII_SELF_HOSTED` | `false` | Also redact PII / secret-shaped strings from prompts sent to self-hosted Ollama. WaddleAI traffic leaves our infrastructure and is **always** redacted |
+
+Always on: delimiter-proof untrusted-content wrapping, tool-call refusal (a tool call in an answer
+raises `ToolCallDenied`; `AIService` serves the canned reply and meters `error.code=ToolCallDenied`),
+reply sanitising (remote-image beacons, mass mentions, hidden characters) and `safe_label`
+validation of the platform / event type before they reach the system prompt. See
+[`docs/security/ai-prompt-injection-hardening.md`](../security/ai-prompt-injection-hardening.md).

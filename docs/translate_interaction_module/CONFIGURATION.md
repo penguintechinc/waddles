@@ -43,7 +43,7 @@ All configuration is via environment variables. Defaults are shown.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WADDLEAI_BASE_URL` | `http://ollama:11434` | Ollama base URL |
-| `WADDLEAI_MODEL` | `qwen2.5:1.5b` | Model for translation fallback |
+| `WADDLEAI_MODEL` | `gemma4:e2b` | Model for translation fallback |
 | `WADDLEAI_TEMPERATURE` | `0.1` | Generation temperature |
 | `WADDLEAI_MAX_TOKENS` | `500` | Max output tokens |
 | `WADDLEAI_TIMEOUT` | `30` | Request timeout (seconds) |

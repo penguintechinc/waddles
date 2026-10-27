@@ -6,10 +6,8 @@ echoes or logs `event.actor` or any user text (PII-free logging: platform/count 
 Structure mirrors `bundles/python/eightball` (hand-authored `_entry_wiring.py`, not
 `bundle_compiler`).
 
-Gated behind the PostHog flag ``waddles.command-advice`` (new flags default OFF) via
-``waddle_sdk.flask_core.feature_flags.feature_enabled``; the flag check runs only after the
-cheap command-text match, so an unrelated event never pays for a host round trip. A
-flag-disabled `!advice` is indistinguishable from an unrecognized command.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 
 Entries are drawn with the stdlib ``random`` module -- see `eightball`'s own docstring for why
 no dedicated WIT random import is needed.
@@ -22,11 +20,7 @@ import re
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-#: PostHog flag key, `{product}.{feature-name}` convention.
-FLAG_KEY = "waddles.command-advice"
 
 #: Matches `!advice` alone or followed by anything -- trailing text is never inspected.
 COMMAND_PATTERN = re.compile(r"^!advice(?:\s+.*)?$", re.IGNORECASE)
@@ -74,14 +68,11 @@ ADVICE: tuple[str, ...] = (
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: `!advice` -> a random built-in entry.
 
-    Returns `None` for any non-matching payload or while the flag is disabled -- never raises
+    Returns `None` for any non-matching payload -- never raises
     over an event this bundle was never meant to react to.
     """
     text = event.payload.get("text")
     if not isinstance(text, str) or not COMMAND_PATTERN.match(text.strip()):
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     entry = random.choice(ADVICE)

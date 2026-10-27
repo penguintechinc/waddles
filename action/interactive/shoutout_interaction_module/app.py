@@ -152,9 +152,10 @@ async def create_shoutout():
 
         logger.audit(
             action="create_shoutout",
+            user="system",
             community=community_id,
-            target_user=username,
-            result="STARTED"
+            result="STARTED",
+            target_user=username
         )
 
         # Get Twitch data
@@ -175,9 +176,10 @@ async def create_shoutout():
 
         logger.audit(
             action="create_shoutout",
+            user="system",
             community=community_id,
-            target_user=username,
-            result="SUCCESS"
+            result="SUCCESS",
+            target_user=username
         )
 
         return success_response(shoutout)
@@ -275,6 +277,7 @@ async def save_template():
         if success:
             logger.audit(
                 action="save_template",
+                user="system",
                 community=community_id,
                 result="SUCCESS"
             )
@@ -363,10 +366,11 @@ async def execute_video_shoutout():
 
         logger.audit(
             action="video_shoutout",
+            user="system",
             community=community_id,
+            result="STARTED",
             target_user=target_username,
-            triggered_by=triggered_by_username,
-            result="STARTED"
+            triggered_by=triggered_by_username
         )
 
         result = await video_shoutout_service.execute_video_shoutout(
@@ -382,18 +386,20 @@ async def execute_video_shoutout():
         if not result.success:
             logger.audit(
                 action="video_shoutout",
+                user="system",
                 community=community_id,
-                target_user=target_username,
                 result="FAILED",
+                target_user=target_username,
                 error=result.error
             )
             return error_response(result.error, status_code=400)
 
         logger.audit(
             action="video_shoutout",
+            user="system",
             community=community_id,
-            target_user=target_username,
-            result="SUCCESS"
+            result="SUCCESS",
+            target_user=target_username
         )
 
         # Build response with video and channel info
@@ -496,6 +502,7 @@ async def update_vso_config(community_id: int):
         if success:
             logger.audit(
                 action="update_vso_config",
+                user="system",
                 community=community_id,
                 result="SUCCESS"
             )
@@ -565,9 +572,10 @@ async def add_creator(community_id: int):
         if success:
             logger.audit(
                 action="add_creator",
+                user="system",
                 community=community_id,
-                creator=username,
-                result="SUCCESS"
+                result="SUCCESS",
+                creator=username
             )
             return success_response({'message': 'Creator added'})
         else:
@@ -594,10 +602,11 @@ async def remove_creator(community_id: int, platform: str, user_id: str):
         if success:
             logger.audit(
                 action="remove_creator",
+                user="system",
                 community=community_id,
+                result="SUCCESS",
                 platform=platform,
-                user_id=user_id,
-                result="SUCCESS"
+                user_id=user_id
             )
             return success_response({'message': 'Creator removed'})
         else:

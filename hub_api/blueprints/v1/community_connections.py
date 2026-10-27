@@ -24,9 +24,12 @@ module's own docstring for the pattern this follows):
   has a single `BLUEPRINTS` list; it carries NO auth decorator, which is
   the actual gate that matters.
 - `connections_internal_bp` (`/api/v1/internal/communities/<id>/
-  connections/<provider>/token`): service-to-service `X-Service-Key` only,
-  same `is_valid_service_key()` mechanism as `community_loyalty.py`'s
-  `loyalty_internal_bp`. Deliberately under `/api/v1/internal/...`, not
+  connections/<provider>/token`): service-to-service, community-bound
+  machine JWT only (scope `connections:resolve`, `system` tenant, token
+  bound to the route's `<id>`) via `services.machine_auth` -- NO static
+  shared secret (HIGH-2); unlike `community_loyalty.py`'s
+  `loyalty_internal_bp`, which still uses `X-Service-Key`. Deliberately
+  under `/api/v1/internal/...`, not
   the `/internal/v1/...` shape this chunk's own task brief sketched --
   every existing internal blueprint in this port (`loyalty_internal_bp`,
   `music_internal_bp`, `live_status_internal_bp`,
@@ -75,9 +78,10 @@ from config import HubAPIConfig
 from services import community_connections as connections_svc
 from services import oauth_connection_state as state_svc
 from services import oauth_providers as providers_svc
-from services.community_common import community_in_tenant, is_valid_service_key
+from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, not_found, payment_required
+from services.machine_auth import machine_authenticated
 
 connections_bp = Blueprint("v1_community_connections", __name__, url_prefix="/api/v1")
 
@@ -168,8 +172,8 @@ def _callback_html(*, provider: str, ok: bool, error: str | None = None) -> Resp
 
 
 @connections_bp.route("/communities/<int:community_id>/connections", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.connections:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.connections:read")  # type: ignore[misc]
 async def list_connections(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/communities/<id>/connections`."""
     ctx = get_tenant_context(request)
@@ -195,8 +199,8 @@ async def list_connections(community_id: int) -> tuple[dict[str, Any], int]:
 @connections_bp.route(
     "/communities/<int:community_id>/connections/<provider>/authorize", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.connections:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.connections:write")  # type: ignore[misc]
 async def authorize_connection(community_id: int, provider: str) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/communities/<id>/connections/<provider>/authorize`.
 
@@ -307,8 +311,8 @@ async def oauth_callback(provider: str) -> tuple[Response, int] | Response:
 
 
 @connections_bp.route("/communities/<int:community_id>/connections/<provider>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.connections:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.connections:write")  # type: ignore[misc]
 async def delete_connection(community_id: int, provider: str) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/connections/<provider>`."""
     ctx = get_tenant_context(request)
@@ -332,12 +336,32 @@ async def delete_connection(community_id: int, provider: str) -> tuple[Any, int]
     return "", 204
 
 
-# ===== Internal (service-to-service, X-Service-Key) =====
+# ===== Internal (service-to-service, community-bound machine JWT) =====
+
+#: Valid machine JWT with `connections:resolve` from the operator-plane `system` tenant, bound
+#: to this route's `community_id`. Fail-closed ladder (503 unconfigured / 401 / 403) lives in
+#: `services.machine_auth.machine_authenticated`; bodies are generic.
+_token_authenticated = machine_authenticated(
+    "connections:resolve",
+    bind_community=True,
+    unconfigured_event="community_connections.service_auth_unconfigured",
+    rejected_event="community_connections.service_auth_rejected",
+    wrong_tenant_event="community_connections.service_auth_wrong_tenant",
+)
+
+
+@connections_internal_bp.after_request
+async def _no_store(response: Response) -> Response:
+    """Nothing under `/internal` may be cached by an intermediary (the body holds a token)."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @connections_internal_bp.route(
     "/communities/<int:community_id>/connections/<provider>/token", methods=["GET"]
 )
+@_token_authenticated
 async def internal_get_token(community_id: int, provider: str) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/internal/communities/<id>/connections/<provider>/token`.
 
@@ -345,10 +369,12 @@ async def internal_get_token(community_id: int, provider: str) -> tuple[dict[str
     of expiry (or already past it) before returning it, so callers never
     have to implement their own refresh-then-retry loop. Never logs a
     token value on any path.
-    """
-    if not is_valid_service_key(request):
-        return {"success": False, "error": "Invalid service key"}, 401
 
+    Auth: `Authorization: Bearer <community-bound machine JWT>` (scope
+    `connections:resolve`, `system` tenant, `community` claim equal to
+    `<id>`); missing/invalid -> 401, other community/tenant -> 403,
+    verifier unconfigured -> 503. No static shared secret is accepted.
+    """
     async_dal, dal = _dal()
     if not _community_exists(dal, community_id):
         return _err(not_found("Community not found"))

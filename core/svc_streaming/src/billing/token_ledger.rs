@@ -41,6 +41,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::telemetry::stream::{ExternalPeer, StreamMetrics};
+use crate::telemetry::trace_context::inject_current_context;
+
 /// Timeout for one debit attempt -- matches the Python alpha's
 /// `_TIMEOUT_SECONDS = 5.0`.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -111,6 +114,7 @@ struct DebitSuccessBody {
 #[derive(Clone)]
 pub struct TokenLedgerClient {
     http: reqwest::Client,
+    metrics: StreamMetrics,
 }
 
 impl Default for TokenLedgerClient {
@@ -129,7 +133,15 @@ impl TokenLedgerClient {
                 .timeout(TIMEOUT)
                 .build()
                 .expect("reqwest::Client::builder with only a timeout cannot fail"),
+            metrics: StreamMetrics::shared(),
         }
+    }
+
+    /// Replaces the process-wide stream instruments with an explicit handle
+    /// -- for tests that install their own meter provider.
+    pub fn with_stream_metrics(mut self, metrics: StreamMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Builds a client around an already-constructed `reqwest::Client` --
@@ -137,7 +149,10 @@ impl TokenLedgerClient {
     /// with the same (or a shorter) timeout.
     #[cfg(test)]
     fn with_client(http: reqwest::Client) -> Self {
-        Self { http }
+        Self {
+            http,
+            metrics: StreamMetrics::shared(),
+        }
     }
 
     /// POSTs a real debit to hub-api's token ledger; never returns an
@@ -172,12 +187,22 @@ impl TokenLedgerClient {
             reference,
         };
 
+        // W3C trace context rides on the call so hub-api's ledger work
+        // shows up as a child of this admission check.
+        let mut trace_headers = reqwest::header::HeaderMap::new();
+        inject_current_context(&mut trace_headers);
+
         let response = match self
-            .http
-            .post(&url)
-            .bearer_auth(bearer_token)
-            .json(&body)
-            .send()
+            .metrics
+            .time_external(
+                ExternalPeer::TokenLedger,
+                self.http
+                    .post(&url)
+                    .headers(trace_headers)
+                    .bearer_auth(bearer_token)
+                    .json(&body)
+                    .send(),
+            )
             .await
         {
             Ok(resp) => resp,

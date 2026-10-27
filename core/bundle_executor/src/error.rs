@@ -102,6 +102,15 @@ pub enum ExecutorError {
     #[error("bucket fetch failed: {0}")]
     BucketFetch(String),
 
+    /// `crate::connector::ConnectorHost::load` refused a component: wrong
+    /// world, non-core namespace, digest mismatch, or it does not compile /
+    /// pre-link against the per-component `connector` `Linker` (spec
+    /// `docs/superpowers/specs/2026-09-28-connector-bundles.md` S3.2.1).
+    /// Fail closed -- a connector that did not load is never a degraded
+    /// "partially loaded" connector.
+    #[error("connector load refused: {0}")]
+    ConnectorLoad(String),
+
     /// `crate::signing::verify_artifact_signature` refused a `load`: the
     /// sidecar was missing/malformed, its claimed `app_id`/`version`/
     /// `digest` did not match the load frame, its `key_id` is not among

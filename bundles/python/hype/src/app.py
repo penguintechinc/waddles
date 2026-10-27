@@ -12,7 +12,8 @@ scopes every key by (tenant, community, app_id), so no community id or actor ide
 embedded in the key (and kv keys never contain ':', see gh-631). Logging is PII-free: only
 op / count / exception type are logged -- never raw message text or the target of the command.
 
-Gated behind the PostHog flag ``waddles.command-hype``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -20,10 +21,8 @@ from __future__ import annotations
 from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-hype"
 COMMAND = "!hype"
 TOTAL_KEY = "hype.total"
 MAX_INCREMENT = 1000
@@ -78,7 +77,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("hype.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 def _inc_reply(total: int) -> str:
@@ -131,16 +130,13 @@ async def _handle(args: list[str], event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!hype` and reply with the counter state.
 
-    Returns `None` for non-chat payloads, non-`!hype` text, or while the flag is off.
+    Returns `None` for non-chat payloads, non-`!hype` text.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
         return None
     parts = text.strip().split()
     if not parts or parts[0].lower() != COMMAND:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

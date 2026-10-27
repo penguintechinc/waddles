@@ -23,7 +23,8 @@ Fail-loud (never silent-default): a `kv` host failure or a corrupt stored list i
 (op + exception type only) and answered with an explicit "unavailable" reply -- a corrupt
 list is NOT treated as empty. Empty list on draw gets an explicit no-entrants reply.
 
-Gated behind the PostHog flag ``waddles.command-winner``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -34,10 +35,13 @@ import uuid
 from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-winner"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 COMMAND = "!winner"
 
 ENTRANTS_KEY = "winner.entrants"
@@ -108,7 +112,7 @@ async def _save_entrants(entrants: list[str]) -> None:
 
 def _pick_winner(entrants: list[str]) -> str:
     """Pick one uniformly-random entrant. Isolated so tests can pin the choice."""
-    return random.choice(entrants)  # noqa: S311 - a game, not a security decision
+    return _RNG.choice(entrants)
 
 
 def _is_privileged(event: PlatformEvent) -> bool:
@@ -118,7 +122,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("winner.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 async def _handle(rest: str, event: PlatformEvent) -> str:
@@ -167,7 +171,7 @@ async def _handle(rest: str, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!winner` and build the reply.
 
-    Exact first-token match (so `!winners` never matches) comes before the flag check; a `kv`
+    Exact first-token match (so `!winners` never matches) is the only precondition; a `kv`
     failure is logged loudly (PII-free) and answered with an error reply, never swallowed.
     """
     text = event.payload.get("text")
@@ -175,8 +179,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

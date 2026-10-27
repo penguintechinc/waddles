@@ -4,22 +4,14 @@
 # variants -- both are live during the Rust data-plane migration, see
 # critical-rules.md Data Plane) ONLY.
 #
-# KNOWN GAP (documented, not silently claimed as a hard boundary):
-# templates/network-policies.yaml's `allow-same-namespace-and-ingress`
-# plain NetworkPolicy already allows ALL same-namespace pod-to-pod traffic
-# on every port, including this one. Kubernetes NetworkPolicy (and Cilium's
-# own policy model) computes the UNION of every applicable policy's allow
-# rules -- a second, narrower policy on the same pod can ADD allowed
-# traffic but can never SUBTRACT what a broader existing policy already
-# permits. So today, in isolation, this CiliumNetworkPolicy does not yet
-# provide a hard network-layer boundary; scoping down the namespace-wide
-# policy to exclude this port is tracked as follow-up work, out of scope
-# for this PR. The actual enforcement boundary today is
-# `hub_api/grpc_internal/interceptors.py::AuthInterceptor` -- every RPC
-# fails closed (UNAUTHENTICATED) without a valid, correctly-scoped
-# hub-api-issued machine JWT, regardless of which pod the connection comes
-# from. This policy is still added now as the correct target-state
-# allowlist and as defense-in-depth once the broader policy is scoped down.
+# R5 posture: this is now a HARD network-layer boundary (the previously documented
+# KNOWN GAP is closed). Cilium unions every applicable allow rule, so the old
+# namespace-wide allow-all-ports same-namespace policy used to swallow this one; that policy is
+# gone (templates/network-policies.yaml) and hub-api's own per-workload policy
+# (templates/_networkpolicy.tpl, included from hub-api.yaml with excludePorts=grpcPort)
+# deliberately omits this port -- so ONLY the callers listed below can reach it. The app-layer
+# boundary (`hub_api/grpc_internal/interceptors.py::AuthInterceptor` -- every RPC fails closed
+# without a valid, correctly-scoped hub-api-issued machine JWT) remains the second layer.
 {{- if .Values.pipeline.hubApi.enabled }}
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -46,6 +38,9 @@ spec:
                 - svc-process-rust
                 - svc-action
                 - svc-action-rust
+                # Rust svc-presentation resolves identities over this gRPC port too
+                # (rustDataPlane.hubApiGrpcEndpoint in templates/svc-presentation-rust.yaml).
+                - svc-presentation
       toPorts:
         - ports:
             - port: {{ .Values.pipeline.hubApi.grpcPort | quote }}

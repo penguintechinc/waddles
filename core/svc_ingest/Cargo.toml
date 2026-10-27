@@ -3,7 +3,7 @@ name = "svc-ingest"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Waddles chat/event data-plane ingest service -- Rust rewrite (M5). Owns every inbound platform connection and HTTP intake surface; normalizes raw platform payloads, mints D30 workstream identity/binding, and writes each event exactly once onto the Valkey stream spine. No database: ingest has no SeaORM dependency, unlike svc_process/svc_action (see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md S4.1)."
 
@@ -102,6 +102,17 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # is a pure no-op for this crate's own call sites; taken anyway to stay on
 # the same finalized spine rev as svc_process/svc_action.
 penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+# `penguin-bundle-host`: the host-API wire codec + `ExportKind::Connector*`
+# (0.3.0) `connector::wire_invoker` speaks to the bundle executor. Same pinned
+# rev as `core/bundle_executor` (the other end of the wire) -- the two must
+# move in lockstep, since a peer on an older crate rejects an unknown export
+# kind as a malformed frame. Git `rev` pin (immutable), `version` for
+# `cargo deny`'s wildcard ban -- see the dependency-pattern note above.
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "eef86927d015f530c14d8ed54d311494c1a8000d", package = "penguin-bundle-host", version = "=0.3.0" }
+# Standard base64 for the binary-safe frame/handshake bytes in the connector
+# wire payloads (JSON carries them as base64). Already resolved transitively;
+# same exact version `core/bundle_executor` pins on the other end.
+base64 = "=0.22.1"
 # `penguin-licensing`: the `waddles.core.rust-data-plane` feature-flag gate
 # on the receive/produce/outbound-drain loops (spec S13.5) -- see
 # `try_start_license_client`/`rust_data_plane_enabled` in `src/lib.rs`.

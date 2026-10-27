@@ -7,8 +7,8 @@ COPY libs/flask_core /app/libs/flask_core
 RUN uv pip install --system --no-cache /app/libs/flask_core
 COPY action/interactive/server_manager_interaction_module/requirements.txt /app/
 COPY action/interactive/server_manager_interaction_module /app/
-RUN uv pip install --system --no-cache -r requirements.txt
-RUN mkdir -p /var/log/waddlebotlog
+RUN uv pip install --system --no-cache -r requirements.txt && \
+    mkdir -p /var/log/waddlebotlog
 RUN groupadd -r waddlebot && useradd -r -g waddlebot -m waddlebot
 RUN chown -R waddlebot:waddlebot /app /var/log/waddlebotlog
 EXPOSE 8099

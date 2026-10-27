@@ -1,24 +1,24 @@
 # Privacy & Data Handling
 
-WaddleBot's approach to user data, privacy by design, and GDPR compliance — including the reasoning behind each architectural decision.
+Waddles' approach to user data, privacy by design, and GDPR compliance — including the reasoning behind each architectural decision. This document describes what the `hub_api` implementation actually does; where it and the code disagree, the code is authoritative and this document is the bug.
 
 ---
 
 ## Privacy by Design Principles
 
-WaddleBot applies privacy as a structural property, not an afterthought:
+Waddles applies privacy as a structural property, not an afterthought:
 
 - **Pseudonymization by default** — internal systems route by opaque IDs, never by email or username
 - **Data minimization** — only the fields needed for a given operation are queried and returned
 - **Aggregate-only analytics** — analytics consumers see histograms and counts, never individual rows
-- **Fail-closed auth** — analytics and deletion endpoints require explicit role grants, not opt-out
+- **Fail-closed auth** — every analytics and data-subject endpoint is authenticated; analytics reads require an explicit OIDC scope (`analytics:read`, `community.analytics:admin`, `users:admin`), and erasure additionally re-confirms the password when the account has one
 - **Audit trails without PII** — deletion records store counts and timestamps, not field values
 
 ---
 
 ## Pseudonymous Identifiers
 
-Across most of WaddleBot's internal services, users are referenced by **UUID or integer ID**, not by email or username. This is a deliberate pseudonymization strategy:
+Across most of Waddles' internal services, users are referenced by **UUID or integer ID**, not by email or username. This is a deliberate pseudonymization strategy:
 
 - The **router module**, **analytics core**, and **AI modules** receive and log `hub_user_id` (integer) or `platform_user_id` (platform-specific opaque string like a Discord snowflake) — never an email address
 - **Rate limit keys** use the pattern `ratelimit:{community_id}:{user_id}:{limit_type}:{hour_bucket}` — no PII in Redis keyspace
@@ -36,38 +36,42 @@ This means that if a non-hub service's logs or DB were compromised in isolation,
 
 ### What We Use Cookies For
 
-WaddleBot uses cookies for:
+The backend (`hub_api`) sets exactly three first-party cookies, all `Secure`:
 
-| Cookie | Purpose | Lifetime |
-|--------|---------|---------|
-| `jwt` / auth token | Session authentication | Session / configurable expiry |
-| `XSRF-TOKEN` | CSRF protection | Session |
-| Consent cookie | Records the user's cookie preferences | 12 months |
+| Cookie | Purpose | Attributes | Lifetime |
+|--------|---------|------------|----------|
+| `wb_session` | Session JWT for the browser app (`services/session_cookie.py`) | `HttpOnly`, `SameSite=Lax` — never readable by page script | 24 hours |
+| `waddlebot_consent_id` | Opaque UUID linking the browser to its `cookie_consent` row (`services/cookie_consent_service.py`) | `SameSite=Lax`; readable by page script — it is a grouping id, not a credential | 12 months |
+| `wb_sso_bind` | Binds one SSO login attempt to the browser that started it — a login-CSRF token, not a session credential (`blueprints/v1/sso.py`) | `HttpOnly`, path-scoped to that SSO connection, `SameSite=Lax` (`None` for SAML's cross-site POST) | The sign-in attempt (`state_ttl_s`) |
 
-We do not use third-party tracking cookies, advertising cookies, or analytics cookies that send data to external services.
+There is no separate CSRF cookie: CSRF is mitigated by `SameSite=Lax` on the session cookie (a cross-site request carries neither a bearer header nor the cookie). The browser also keeps the consent choice in `localStorage` (`cookie_consent`) so the banner does not reappear.
+
+**No third-party cookies, no advertising cookies, no browser analytics.** No analytics, session-recording or advertising script is loaded by the web app or the marketing site. The vendor cookies the cookie-policy page used to list (Google Analytics, Mixpanel, Hotjar, Facebook Pixel, Google Ads, LinkedIn) were never set by Waddles and have been removed from the policy. See *Third-Party Services and Analytics* below.
 
 ### Cookie Consent Flow
 
-Users are presented with a cookie consent banner on first visit. The choice is recorded in two places:
+Users are presented with a cookie consent banner on first visit. The choice is recorded in two server-side tables (plus the browser `localStorage` copy above):
 
-- `cookie_consent` table: stores `user_id`, consent type, and timestamp
-- `cookie_audit_log` table: immutable audit record of every consent event (granted, revoked, updated)
+- `cookie_consent` table: one record per consent id — `user_id` (null until the visitor signs in), the `preferences` object (`necessary`, `functional`, `analytics`, `marketing`, `doNotSell`), `consent_version`, `consent_method`, IP address, user agent, and `consented_at` / `updated_at` / `expires_at` (a consent expires after 12 months)
+- `cookie_audit_log` table: one row per consent event — `ACCEPT` (carries the IP address and user agent), `UPDATE` (one row per changed category, with previous and new value) or `REVOKE` — each with the consent version and a timestamp. A failed audit write is raised and counted, never swallowed
 
-Both tables are **hard deleted** as part of the GDPR data deletion flow (see below) — a user's consent history is itself PII.
+Both tables are **retained** by the GDPR data deletion flow (see *What Is Retained* below): the controller must be able to *demonstrate* that consent was obtained (GDPR Art. 5(2) accountability), so the consent record and its change log outlive the data subject's other data.
 
-### "Do Not Track" / Preferences
+### Preferences, Withdrawal and Global Privacy Control
 
-Users can update or withdraw cookie consent at any time from Account Settings. Withdrawing consent revokes non-essential cookies and deletes the consent record from `cookie_consent` (the audit log entry noting the withdrawal is retained for compliance).
+Users can update (`PATCH /api/v1/cookie/preferences`) or withdraw (`DELETE /api/v1/cookie`) consent at any time. **Withdrawing does not delete the consent record**: it resets `functional`, `analytics` and `marketing` to `false` in place and writes a `REVOKE` row to `cookie_audit_log`. Preference writes *merge* over the stored object, so a CCPA/CPRA `doNotSell` opt-out survives a withdrawal or an unrelated update — only an explicit `doNotSell=false` clears it.
+
+A `Sec-GPC: 1` (Global Privacy Control) request header is honoured server-side: it forces `doNotSell` on and `marketing` off regardless of the request body. A missing header is never read as consent. ("Do Not Track" is not a supported signal.)
 
 ---
 
 ## Data Deletion (GDPR Article 17 — Right to Erasure)
 
-Users can request deletion of their personal data via **Account Settings → Data & Privacy → Delete My Data**.
+Users can request deletion of their personal data from the **Your privacy rights** page (`/privacy-rights` → *Delete my data*), which calls `DELETE /api/v1/user/me/data`. An account with a password must re-confirm it; the page tells the user, before they confirm, that **everything is deleted** — profile, memberships, linked platform accounts and reputation — with one exception: a user under an *active ban* leaves a one-way coded suppression record (see *What Is Retained* §1).
 
 ### What Gets Deleted
 
-The deletion runs as a single database transaction:
+The deletion runs as a single, **all-or-nothing** database transaction (`services/data_privacy_service.py::anonymize_user_data`, shared by self-service and the Enterprise admin console):
 
 | Table | Action |
 |-------|--------|
@@ -77,9 +81,87 @@ The deletion runs as a single database transaction:
 | `user_passkeys` | Hard delete |
 | `activity_message_events` | Hard delete |
 | `activity_watch_sessions` | Hard delete |
-| `cookie_consent` | Hard delete |
-| `cookie_audit_log` | Hard delete |
+| `hub_chat_messages` | Hard delete (rows the user *sent*, every community) |
+| **mem0 / Qdrant chat memory** (`community_<id>` collections) | **Hard delete** — every vector/memory keyed to the account's `user_<uuid>` tokens, in every community; see *mem0 / Qdrant Chat Memory* below |
+| `community_members` | **Hard delete** — every membership row of the account, in every community, **including its reputation** (hub-linked rows and platform-keyed rows matching a linked identity) |
+| `hub_user_identities` | **Hard delete** — the Discord/Twitch/… account links (there is no "identity anchor" any more; see *Returning After Deletion*) |
+| `reputation_events`, `reputation_tenant` | **Hard delete** — the reputation score and its audit trail |
+| `bundle_reputation_scores`, `bundle_reputation_adjustments` | **Hard delete** — the app-bundle reputation balance and ledger, keyed on the account's pseudonymous `user_uuid`s |
+| `ephemeral_pseudonyms` | **Hard delete** — the platform-id → pseudonym mapping (and its raw handle) for the account's linked platform ids, in every tenant |
+| `suppression_records` | **Written only if the account had an active ban** — one keyed one-way code per (tenant, platform account); see *What Is Retained* §1 |
 | `hub_users` | **Anonymized in-place** (see below) |
+| `data_deletion_requests` | Completion row inserted (see *Deletion Audit Trail*) |
+
+**Atomicity.** The mem0/Qdrant purge is outside the database transaction, so it runs first, is idempotent and fails loudly (an unreachable Qdrant aborts the erasure before anything changes — a `failed` ledger row and a `500`; retry once Qdrant is back). Then every delete, the suppression record (when the account has an active ban), the `hub_users` anonymization and the `completed` ledger row are issued in one executor job and committed once. If any statement fails, everything is rolled back — the account is left exactly as it was, never half-erased — a separate `failed` ledger row records the attempt, and the original error is returned (a `500`; the request can simply be retried). Erasure never ends in a state where the data is gone but the proof of erasure is missing, or vice versa. A banned user's erasure also needs the platform key to compute the suppression code: if it is unavailable the whole erasure fails and rolls back (a `failed` ledger row, a `500`, retry once fixed) rather than erasing without suppressing — a user with no active ban never touches the key.
+
+**Export/erasure symmetry.** Everything the Art. 15 export discloses from the message/activity tables (`message_activity`, `watch_activity`, `chat_messages`) is removed by Art. 17 erasure. `hub_chat_messages` was previously exported but not erased (GRC finding #1, fixed).
+
+### Every Other User-Keyed Table — the Erasure Registry
+
+The table above is the hand-written core. It used to be the *whole* erasure: it covered ~16 tables while the schema holds well over a hundred that name a user (`user_id`, `hub_user_id`, `*_user_id`, `user_uuid`, `platform_user_id`, `*_by`, …), so a "completed" erasure left activity logs, SSO subjects, economy ledgers, bookings, labels, tokens and more behind (GRC audit, Art. 17). The rest is now driven by a **declarative registry** — `hub_api/services/erasure_registry.py` — executed by `services/erasure_executor.py` inside the same single transaction. Of the 178 user-keyed tables the migration chain defines, every one has a recorded decision:
+
+| Action | Meaning | Tables |
+|---|---|---|
+| **DELETE** | The row *is* the subject's data (their activity, content, tokens, balances, SSO subject): deleted. | 75 tables — activity, calendar/booking, call/poll/forum content, loyalty, marketplace reviews, memories/music/quotes, platform-keyed searches, `sso_identities`, `economy_balances`, `economy_ledger`, tokens, labels, … |
+| **SCRUB** | The row belongs to someone else (a booking's host, a quote's adder, the other side of an economy transfer) but names the subject: their raw PII columns are nulled/blanked, the row stays. | `bookings` (guest), `announcements`, `calendar_event_admins`, `calendar_ticket_check_ins`, `economy_ledger` (`counterparty_uuid`), `loyalty_transactions`, `marketplace_sellers`, `memories_quotes`, `music_playback_history`, `music_song_requests` |
+| **REF** | A pure pseudonymous reference (`created_by`, `approved_by`, `updated_by`, …) on a row the tenant/community owns — 60 tables hold only such references. Retained **by design**: the `hub_users` row it points at is anonymized in place and every identity link is deleted, so the integer identifies nobody; nulling it would destroy organisational records (approvals, attribution) and re-fire the bundle active-set triggers. | e.g. `app_install_approvals.approved_by`, `workflows.created_by`, `community_polls.created_by` |
+| **CORE** | Erased by the hand-written steps in the table above. | 15 tables |
+| **RETAIN** | Kept on purpose (Art. 5(2) / 17(3)(e)) — see *What Is Retained*. | `cookie_consent`, `cookie_audit_log`, `audit_log`, `data_deletion_requests`, `audit_events`, `workflow_audit_log`, `module_scope_audit`, `instance_permission_policy_audit`, `marketplace_tc_acceptance` |
+| **EXEMPT** | The column only looks user-keyed (an enum, a keyed hash, an organisation display name); each carries its reason in the registry. | 16 rules |
+| **REVIEW** | **Not erased** — a known gap, listed below. | 15 tables |
+
+Net: 94 of the 178 tables are erased (75 delete + 4 scrub-only + 15 core; 79 of them are driven by the registry — up from ~16 hand-listed), 60 hold only pseudonymous references, 9 are retained for legal reasons, and the remainder are exempt or listed below.
+
+**Subject keys.** A row is matched by the subject's integer hub id; by one of their PII-free uuid tokens (`hub_users.uuid`, member and pseudonym uuids — the key bundle economy/reputation/KV state uses); by a linked platform identity matched as a **pair** `(platform, platform_user_id)` — never the id alone, so the same id on another platform is never touched; or by one of their `community_members` ids.
+
+**Suppression-only design is unchanged.** Nothing in the registry branches on ban state. A benign user is erased completely; a user with an active ban is erased *identically* and keeps exactly the one salted one-way `suppression_records` code written before any delete (see *What Is Retained* §1).
+
+**Economy ledgers.** `economy_balances` and `economy_ledger` rows keyed to the subject's uuid are deleted. On the *other* side of a transfer, `economy_ledger.counterparty_uuid` is nulled, so a surviving row no longer names the erased user.
+
+**Bundle KV (Valkey).** Per-user bundle state lives under `bundlekv:{tenant}:{community}:{app_id}:data:{guest_key}`; a bundle that keeps per-user state puts the user's uuid token in `guest_key`. Erasure `SCAN`s that namespace for each of the subject's uuid tokens (dashed and hex spellings), `UNLINK`s every hit and lowers the app's live-key counter. State keyed by a free-form handle or name (not a uuid) cannot be located this way — a bundle that does so should key by uuid.
+
+**Uploaded objects (SeaweedFS/S3).** The avatar and banner the user uploaded (`avatars/…` in this deployment's bucket) are deleted; their URLs are read from the user's rows *before* those rows are erased. A platform-CDN avatar URL (Discord, Twitch, …) is not ours and is skipped.
+
+**SSO subject.** `sso_identities` (the IdP's stable `sub` / `NameID` for the person — PII on its own, sometimes an e-mail) is deleted. Its `ON DELETE CASCADE` from `hub_users` never fired because erasure anonymizes `hub_users` in place instead of deleting it; that is how the subject used to survive.
+
+**External stores fail loud.** Object and KV deletes run first and any failure aborts the whole erasure: the database transaction rolls back, a `failed` ledger row is written, and the retry re-runs everything (every operation is idempotent). Erasure never reports "completed" while leaving a user's upload or KV state behind. An environment with no Valkey configured (`VALKEY_URL`/`REDIS_URL` unset) has no bundle KV to erase; that is logged as a warning, not raised.
+
+**Every tier.** Erasure is a statutory right: nothing in the registry, the executor or the entry point consults a tier, a license or a feature flag (pinned by `test_erasure_is_never_tier_or_flag_gated`).
+
+**New tables cannot be forgotten.** `hub_api/tests/test_erasure_registry_coverage.py` reads the whole migration chain (legacy SQL + Alembic) as text, finds every column that names a person or carries raw PII about one, and **fails the build** if the registry does not classify it. Adding a user-keyed table without deciding what erasure does to it is a red CI run, not a silent hole. The gate proves it can fail (a synthetic unregistered table, and the real schema with one rule removed), asserts its denominators (≥150 files, ≥250 tables, ≥120 user-keyed tables examined), and pins the REVIEW set below so it cannot grow unnoticed. `test_erasure_registry_behavior.py` generates one check per registry rule (subject rows gone, decoys — another user, the same id on another platform — untouched), `test_erasure_registry_e2e.py` drives `anonymize_user_data()` for a benign and a banned user, and `test_erasure_registry_pg_integration.py` exercises the economy and SSO paths against a real migrated Postgres.
+
+**Known gaps (REVIEW) — not erased, listed for a human decision.**
+
+| Table | Columns | Why not |
+|---|---|---|
+| `platform_integrations` | `user_id` | User-level integration tokens; hub-api's DB role is *denied* this table by design (`service-roles.yaml` `deny_tables`). Needs a `SECURITY DEFINER` erase function or a credential-service call. |
+| `activity_stats_daily` | `platform_user_id`, `platform_username` | Hub-linked rows are deleted; rows keyed only by a platform id (no `platform` column) cannot be matched without risking a cross-platform collision. |
+| `hub_admins` | `email`, `username` | Legacy admin table with its own credentials, not keyed to `hub_users`. |
+| `live_activity_events` | `actor` | Free-text chat actor label stored with the message body; no stable id to match. |
+| `loyalty_giveaway_keys` | `claimed_by_user_id` | `varchar` id with no `platform` column (the winner row, which has one, *is* deleted). |
+| `communities` | `created_by`, `deleted_by`, `owner_id`, `owner_name` | Free-form `varchar` set by a superadmin, not a `hub_users` reference. |
+| `command_aliases` | `deleted_by` | `varchar` of unknown shape (hub id, username or `system`). |
+| `clip_bookmarks`, `clip_highlight_reels` | `bookmarked_by`, `created_by` | `varchar` of unknown shape (platform handle or id) with no `platform` column. |
+| `module_scopes`, `revoked_tokens` | `granted_by_user_id`, `revoked_by_user_id` | `varchar` of unknown shape; module-scope changes are audited by trigger into `module_scope_audit`. |
+| `server_link_requests` | `initiator_platform_user_id`, `initiator_platform_username` | Platform id/handle of the requester with no `platform` column on the row. |
+| `shoutout_creators` | `platform_username` | Creator handle with no id column to match on. |
+| `video_shoutout_history` | `triggered_by_user_id`, `triggered_by_username` | Platform id/handle of the trigger user with no `platform` column for the actor. |
+| `vendor_submissions` | `vendor_email`, `support_email` | Company contact e-mails typed on a submission, not linked to the submitting user. |
+
+**Assumed hub ids.** Fifteen legacy-module integer columns (`ASSUMED_HUB_ID_COLUMNS` in the registry — e.g. `memories_reminders.user_id`, `platform_admins.user_id`, `support_tickets.reporter_user_id`) declare no foreign key but are matched as `hub_users.id`, because the module code only ever writes the hub id. If any ever held another value, a different user's row with the same integer would be erased; each is listed (and a test fails if a new un-FK'd hub-id match is added without being listed) so the assumption is reviewable.
+
+**Cascade side effects.** Deleting a user's forum post cascades to other users' replies on it (`hub_forum_replies.post_id ON DELETE CASCADE`); deleting a call room they created cascades its participants and annotations; deleting a PvP match removes it from the opponent's history. These follow the schema's existing cascade semantics for "the owner's content is gone".
+
+### mem0 / Qdrant Chat Memory (Art. 15 / 17)
+
+The AI researcher module stores semantic chat memory in Qdrant via mem0 — one collection per community (`community_<id>`), each point owned by a mem0 `user_id` key. It is a covered data store: the DSAR export and the erasure both reach it (`hub_api/services/mem0_privacy.py`, called from `collect_user_data` and `anonymize_user_data`, so self-service and the Enterprise admin console share it).
+
+- **Keying.** Owner keys are PII-free: `user_<uuid>` (the account's `hub_users.uuid`, member `user_uuid`s and pseudonym tokens) or the community-wide `community_<id>`. The AI researcher (`Mem0Service.add_memory`/`add_messages`) **rejects** any other key shape, so a username, e-mail or numeric platform id can never become a Qdrant key. Message text itself is free-text content the subject wrote and is covered by this export/erasure, not by tokenization.
+- **Export.** `mem0_memories` lists every memory for the subject's tokens: community, memory id, text, timestamps, caller metadata — never the embedding vector. The tenant-admin console only reads its own tenant's collections.
+- **Erasure.** Every point owned by the subject's tokens is deleted in every community, a full delete (no suppression retention: a chat store holds no ban evidence — the keyed suppression code lives in `suppression_records`). The count is recorded in the ledger as `deletion_scope.mem0_memories`.
+- **Not configured.** With no `QDRANT_URL` the store does not exist in that deployment and the source is skipped (logged at WARNING; no ledger key).
+- **Residual (documented).** Memories stored under the community-wide `community_<id>` key (e.g. aggregated community context, messages added without an author token) cannot be attributed to one person and are outside a per-subject export/erasure; they are removed with the community. Authors should be attributed (`user_uuid`) when writing messages — doing so is what makes them reachable.
+
 
 ### Anonymize In-Place: Why Not Hard Delete `hub_users`?
 
@@ -92,51 +174,76 @@ UPDATE hub_users SET
   display_name = NULL,
   password_hash = NULL,
   avatar_url   = NULL,
-  is_active    = FALSE
+  email_verification_token = NULL,
+  password_reset_token     = NULL,
+  is_active    = FALSE,
+  updated_at   = now()
 WHERE id = {userId}
 ```
 
 **Reason:** `hub_users.id` is a foreign key referenced by dozens of tables across the schema (community memberships, reputation events, activity records, etc.). A hard delete would require cascading deletes across the entire database or leave orphaned rows — neither is safe at scale.
 
-The retained row contains no PII: the email is a non-identifiable placeholder, and all identifying fields are nulled. This satisfies Article 17.
+The anonymized `hub_users` row contains no PII: the email and username are non-identifiable placeholders, and the display name, avatar, password hash and verification/reset tokens are nulled. Other tables that still hold personal data about the user are listed under *What Is Retained* below — each is a per-table decision recorded there, not an omission.
 
 ### What Is Retained (and Why)
 
-Three categories of data are deliberately **not** deleted, each with a distinct legal basis under GDPR Article 6:
+Two categories of data are deliberately **not** deleted, each with a distinct legal basis under GDPR Article 6 or accountability duty under Article 5(2).
 
-#### 1. `hub_user_identities` — Platform Account Links
-*Legal basis: User's own legitimate interest (Article 6(1)(f)) — account reclaim*
+> **Status — counsel to verify.** §1 below is a *draft* disclosure for the ban-evasion suppression record. The legitimate-interest assessment, DPIA and the appeal / human-review process are drafts or open items: see [Suppression LIA](compliance/suppression-LIA.md) and [Suppression DPIA](compliance/suppression-DPIA.md). Nothing here is a final legal artifact.
 
-The rows linking a user's Discord ID, Twitch ID, etc. to their `hub_user_id` are kept. This serves two purposes:
+#### 0. Consent and audit logs — `cookie_consent`, `cookie_audit_log`, `audit_log`, `data_deletion_requests`
+*Legal basis: Legal obligation / accountability (Article 6(1)(c), Article 5(2))*
 
-- **Account reclaim**: If a user returns and logs in via their platform account, the OAuth flow (`findOrCreateUserFromOAuth`) finds the existing identity link and reconnects them to their original account — including their full reputation history. See *Account Reclaim After Deletion* below.
-- **Platform identity is not WaddleBot PII**: Discord/Twitch user IDs are owned and managed by those platforms. Deleting them from our records does not erase them from the source platform.
+Consent records, the consent change log, the platform audit trail and the deletion-request ledger are **never** deleted by erasure. They are the controller's proof that consent was lawfully obtained and that the erasure request was honoured; deleting them would destroy the evidence the regulator can demand. They hold identifiers and technical metadata (user id, consent choices, IP, user agent) but not the profile, credentials, or message content that erasure removes. This is pinned in code (`ERASURE_RETAINED_TABLES`) and by regression tests (`hub_api/tests/test_data_privacy_erasure.py::TestRetention`). The registry additionally retains the hash-chained `audit_events` log (a database trigger rejects `UPDATE`/`DELETE`), the append-only `workflow_audit_log`, `module_scope_audit` and `instance_permission_policy_audit` trails (their actor column is a pseudonymous id once `hub_users` is anonymized), and `marketplace_tc_acceptance` (terms-of-service acceptance evidence, Art. 17(3)(e) legal claims, like `cookie_consent`); `test_executable_rules_never_touch_a_retained_table` pins that no erasure statement can target any of them.
 
-#### 2. `reputation_tenant` + `reputation_events` — Score & Audit Trail
-*Legal basis: Legitimate interest (Article 6(1)(f)) — platform integrity / anti-gaming*
+#### 1. `suppression_records` — Ban-Evasion Suppression (only for a user with an active ban)
+*Legal basis: Legitimate interest (Article 6(1)(f)) — preventing evasion of a community ban. This is **not** an Article 17(3) exemption: it is a separate, narrowly-scoped retention with its own lawful basis, necessity and balancing test (counsel to verify).*
 
-Reputation scores and their audit trail are retained. **This is disclosed to users before they confirm deletion.**
+**When anything is kept.** Only if, at the moment of erasure, the account had an **active ban** — a `community_members` row whose `role` is `banned` (set by the reputation policy enforcer's auto-ban, or a moderator). For every other user **nothing at all is kept**: no reputation, no score, no tombstone, no platform-identity link. A user with no active ban who returns gets a fresh start.
 
-Allowing reputation reset via deletion would be a trivially exploitable loophole (farm score → delete → repeat). Reputation is also a community-wide signal that affects other users' experiences and community health calculations. The `reputation_events` trail justifies the retained score — without it, the score would be an unexplained number with no audit basis.
+**What is kept.** One `suppression_records` row per (tenant, platform account):
 
-#### 3. `community_members` — Membership Row (PII fields nulled)
-*Legal basis: Same as above — FK integrity + reputation retention*
+| Column | Content |
+|---|---|
+| `tenant_id` | The tenant (the controller) that banned them — a code only ever matches inside this tenant |
+| `platform` | The platform *name* (`discord`, `twitch`) — never an id |
+| `key_ver` | Which master key version produced the code (key rotation) |
+| `hmac` | **A keyed one-way code** of the platform id: `HMAC-SHA256(HKDF(K_master, tenant_id), platform ‖ platform_user_id)` |
+| `reason_enum` | A **closed** list of restriction types — `ban` or `auto_ban`. No free text, no offence detail (Art. 9/10) |
+| `expires_at` | The restriction's expiry, or empty = until a moderator lifts it |
+| `created_at` | When retention began |
 
-The row itself is kept for FK integrity. Display fields are nulled: `display_name`, `avatar_url`, `bio`, `social_links`. The retained columns are: `community_id`, `hub_user_id`, `reputation`, `role`, timestamps.
+**What is not kept:** the platform id, username, e-mail, display name, hub user id, community, the offence, the moderator, any reason text.
 
-### Account Reclaim After Deletion
+**Why a keyed code and not a salted hash.** A Discord/Twitch id is a short numeric string; an unkeyed or statically-salted hash of one is a lookup table an attacker enumerates in seconds. The code is an HMAC under a secret per-tenant key derived from the platform tenant KEK, which is mounted into `hub-api` only and never stored in the database: a database dump alone can neither reverse nor even test a guess against it (pinned by `hub_api/tests/test_suppression_keys.py::TestNotReversibleWithoutTheKey` and an enumeration test). It is deterministic, so a returning user's id recomputes to the same code and matches. The platform name is bound into the MAC input so equal ids on two platforms are not linkable either.
+
+**It is still personal data.** A pseudonymised code is personal data (Recital 26): it is covered by the access, objection and erasure rights, it is deleted at expiry (an hourly purge deletes expired rows; lookups ignore an expired row regardless) or when a moderator lifts the restriction, and an optional operator ceiling (`suppression.maxRetentionDays`) bounds how long even an indefinite ban is kept. The Art. 15 export of the deletion ledger discloses that a suppression record was written (`suppression_records_written`).
+
+**Per tenant only.** Each tenant is the controller of its own bans; Waddles is the processor. The same platform id has a **different** code in every tenant and a code is never matched outside the tenant that wrote it — a platform-wide ban list would make Waddles a controller (pinned by `test_ban_suppression.py::TestReturnRecatch::test_the_same_platform_id_in_another_tenant_never_matches`).
+
+**How a return is re-caught.** When a user is about to be admitted to a community — a join request is approved, an account is created through OAuth, or a platform account is linked — the code for the incoming platform id is recomputed with the *destination tenant's* key; a non-expired match re-applies the restriction (the membership is written `banned` + inactive and the request is refused). If the tenant has no live suppression row the key is never read; if it has one and the key is unavailable the check fails closed.
+
+**Your rights.** You may object (Art. 21) or ask for human review of the restriction (Art. 22 for automated `auto_ban` decisions) by contacting the community or tenant administrator, who can lift it — which deletes the row at once. **Process follow-ups, not yet built:** a DSA Art. 17 statement of reasons and an internal appeal for platform-level restrictions, and a documented human-review path for automated bans.
+
+#### No longer retained (changed from earlier versions of this document)
+
+Earlier versions kept three things for every erased user — the platform account links (`hub_user_identities`, as a "permanent identity anchor" for account reclaim), the reputation score and its audit trail (`reputation_tenant` + `reputation_events`, as an anti-gaming signal), and the membership rows with only their personal columns nulled (`community_members`). **All three are now deleted** for every user. The anti-gaming purpose is served instead — and only for users with an active ban — by the suppression record in §1, which is far narrower than retaining every user's score and identity. The visible consequence: a user who deletes their data and returns starts with a fresh account and fresh reputation.
+
+### Pseudonym Mapping — Erased With The Account
+
+Unlinked platform accounts are represented by a pseudonym UUID; the raw platform handle behind it is stored in `ephemeral_pseudonyms.handle`. For every platform account **linked to the erased hub user**, the mapping and its handle are now deleted in every tenant, together with any bundle reputation keyed on that pseudonym. For a platform account that was never linked to a hub user there is no `hub_users` row to erase; wiping its handle remains an operator/DSAR operation (`identity_resolution_service.erase_pseudonym_handles`, deliberately not exposed on the gRPC surface), recorded in `identity_resolution_events` without PII.
+
+### Returning After Deletion
 
 If a user deletes their data and later returns:
 
-1. They log in via a linked platform account (Discord, Twitch, etc.)
-2. `findOrCreateUserFromOAuth()` queries `hub_user_identities` and finds the existing record
-3. The record resolves to the original `hub_user_id`
-4. Their reputation score and community membership reputation are fully intact
-5. The `hub_users` row is updated with fresh profile data from the platform; `is_active` is set back to `true`
-
-The platform identity (Discord snowflake, Twitch ID) acts as the **permanent identity anchor** across the entire account lifecycle — including through deletion and return.
+1. They log in via a platform account (Discord, Twitch, etc.). No `hub_user_identities` link exists any more, so `_find_or_create_user_from_oauth()` creates a **new** hub account — new `hub_users.id`, new `uuid`, a fresh reputation. (A login by e-mail never adopts an existing account: an e-mail match with no linked identity is refused with a conflict, so the anonymized row cannot be claimed.)
+2. The anonymized `hub_users` row of the old account is never re-populated or re-activated.
+3. If the platform account had an active ban in a tenant, its suppression record matches when the new account is linked or admitted to a community of that tenant, and the restriction is re-applied there (and only there). A user with no active ban is not matched by anything.
 
 ### Deletion Audit Trail
+
+> Enterprise tenants additionally get erasure and DSAR-export requests recorded in the tamper-evident audit chain (actor is a `hub_users.uuid`, never a name or e-mail) -- see [Enterprise Audit Logging](compliance/audit-logging.md). The rights themselves are available in every tier.
 
 Every deletion attempt is recorded in `data_deletion_requests`. This table stores no PII values — only metadata:
 
@@ -146,10 +253,35 @@ Every deletion attempt is recorded in `data_deletion_requests`. This table store
 | `requested_at` | Timestamp of request |
 | `completed_at` | Timestamp of completion |
 | `status` | `pending`, `completed`, or `failed` |
-| `deletion_scope` | JSONB: row counts deleted per table (no field values) |
-| `error_detail` | Failure reason if status = `failed` |
+| `deletion_scope` | JSONB: row counts deleted per table (no field values) — `chat_messages`, `community_members`, `hub_user_identities`, the reputation tables, `ephemeral_pseudonyms`, `mem0_memories` — plus `suppression_records_written` (rows *written*, not deleted; `0` for a user with no active ban) |
+| `error_detail` | Failure category if status = `failed` — exception type / SQLSTATE only, never the driver message (which can echo row values) |
 
 Superadmins can view `{ requested_at, completed_at, status }` at `GET /api/v1/superadmin/users/:userId/deletion-request` for support inquiries. No PII is returned.
+
+### Admin / Bulk DSAR Console (Enterprise)
+
+Self-service data-subject rights (`GET`/`DELETE /api/v1/user/me/data`, above) are available in **every** tier — statutory rights are never tier-gated, and that path is unchanged. On top of it, a **tenant admin** on an Enterprise plan can run the same operations for a *caller-supplied* user, singly or in bulk. Feature contract `compliance.bulk_dsar` (Enterprise, flag `waddles.compliance.bulk_dsar`); the gate is the two-gate entitlement check (PostHog flag **and** license tier) and **fails closed** — either gate off or unreachable is a `402`.
+
+| Method | Path (under `/api/v1/tenant/<slug>/privacy`) | Action |
+|--------|----------------------------------------------|--------|
+| `GET` | `/users/<id>/export` | Access export (GDPR Art. 15/20) |
+| `POST` | `/users/<id>/erase` `{"confirm": true}` | Erasure — same anonymize-in-place core as self-service |
+| `PUT` | `/users/<id>/do-not-sell` | CCPA/CPRA Do-Not-Sell opt-out |
+| `POST` | `/bulk` `{"action", "userIds", "confirm"}` | Any of the three over many users |
+
+Bulk requests return `200` with a per-user `status` (`completed`, `already_done`, `not_found`, `conflict`, `failed`, `audit_unavailable`) — one user's failure never aborts the rest. Erasure deletes the target's memberships, which are what proves a user belongs to the admin's tenant, so a *repeat* erase of an already-erased user returns `not_found` (never a second erasure and never an existence oracle). Caps per request: 100 users (25 for `export`, which returns data inline).
+
+**Guardrails** (all enforced in `hub_api/services/admin_data_privacy_service.py`):
+
+1. **Authz order** — tenant (from the JWT, never a request field) → `tenant:admin` scope → URL slug must equal the JWT tenant → Enterprise gate.
+2. **Tenant fence** — the target must belong to the admin's own tenant (an active `tenant_admins` row, or membership of a community owned by that tenant). Anything else is `404`, never `403`, so the console is not a cross-tenant user-existence oracle.
+3. **Tenant-scoped export** — message/watch activity and chat rows are limited to the admin's tenant's communities; another tenant's rows are never disclosed.
+4. **Erasure rails** — `hub_users` is one global identity row, so an erase is refused (`conflict`) if the target is also a tenant admin or non-global community member of *another* tenant, is a platform super-admin, or is the acting admin (use self-service). Global-community membership is tenant-neutral and does not block. Erasure additionally requires `confirm: true`.
+5. **Mandatory audit, fail-closed** — every attempt writes an `audit_log` row **before** any data is touched; if that write fails the action is not performed (`503`, `audit_unavailable`). Rows are PII-free.
+
+`audit_log` row shape: `user_id` = acting admin; `action` = `dsar.export` / `dsar.erase` / `dsar.do_not_sell`; `target_type` = `user`; `target_id` = target `hub_users.id`; `details` = `{tenant_id, tenant_slug, bulk_id, outcome, ...}` where `outcome` is `attempted` → `completed` / `already_done` / `failed`, or `denied_not_in_tenant` / `denied_self` / `denied_super_admin` / `denied_shared_identity` for refused attempts (also audited). Exports add per-source `row_counts`; failures add `error_type` only.
+
+**Do-Not-Sell** is stored where the opt-out already lives, `cookie_consent.preferences.doNotSell`, and is **one-way** (opt-out only, forces `marketing` off; mirrored into the subject-visible `cookie_audit_log` as `ADMIN_DO_NOT_SELL`). Withdrawing an opt-out is the subject's own consent decision. A user with no consent record gets a new privacy-maximal one (`consent_method = admin_dsar`). The opt-out is durable: later self-service consent writes merge key-by-key and never drop `doNotSell`.
 
 ---
 
@@ -157,15 +289,17 @@ Superadmins can view `{ requested_at, completed_at, status }` at `GET /api/v1/su
 
 ### Who Can See What
 
-| Scenario | Route | What is returned |
-|----------|-------|-----------------|
-| Any user — own stats | `GET /analytics/me/stats` | Their own data only |
-| Any user — own reputation | `GET /analytics/me/reputation` | Their own reputation |
-| Community admin | `GET /analytics/community/:cid/members/:uid/stats` | One member's community activity |
-| Analytics consumer | `GET /analytics/platform/*` | **Aggregates only** — no user rows |
-| Superadmin | `GET /analytics/admin/users/:uid/stats` | Any user's data |
+All routes live under `/api/v1/analytics` (`blueprints/v1/analytics.py`) and go through the tenant middleware first; the OIDC scope, not a role name, decides access.
 
-The `is_analytics_consumer` role is superadmin-granted and provides access **only** to aggregate platform statistics — never to individual user data. This is enforced at the `analytics_core` service level, not just at the route level.
+| Scenario | Route | Required | What is returned |
+|----------|-------|----------|-----------------|
+| Any user — own stats | `GET /me/stats` | Authenticated (self-service, no scope) | Their own data only |
+| Any user — own reputation | `GET /me/reputation` | Authenticated (self-service) | Their own reputation |
+| Community admin | `GET /community/:cid/members/:uid/stats` | `community.analytics:admin`, the community must be in the caller's own tenant, and `:uid` must be a member of it (else `404`) | One member's community activity |
+| Analytics consumer | `GET /platform/*` | `analytics:read` | **Aggregates only** — no user rows. `community-health` additionally requires a Professional plan (flag `waddles.analytics.community_health`; `402` otherwise) |
+| Superadmin | `GET /admin/users/:uid/stats` and `/reputation` | `users:admin` | Any user's data |
+
+`is_analytics_consumer` is a superadmin-granted flag on the user; at token issuance it adds the `analytics:read` scope (the maintainer and admin scope bundles carry it too). It provides access **only** to aggregate platform statistics — never to individual user data. `analytics-core` itself trusts hub-api and performs no tenant or membership check of its own — hub-api is the authorization boundary — so the checks above are enforced in the hub-api route handlers, not "at the analytics_core service level" as an earlier revision of this document claimed.
 
 ### Data Minimization in Analytics Services
 
@@ -200,5 +334,28 @@ Internal service calls (hub → analytics-core, hub → ai-interaction) carry on
 
 ---
 
-*Last updated: 2026-02-26*
+## Data Access and Portability (GDPR Articles 15 and 20)
+
+`GET /api/v1/user/me/data` returns the authenticated user's own data as a JSON attachment (`waddles-data-{id}.json`). The subject is always the JWT's `sub` claim — there is no request parameter that can point it at another account. It is available in **every** tier.
+
+Sources: `account`, `profile`, `linked_identities`, `sessions`, `passkeys`, `message_activity`, `watch_activity`, `chat_messages`, `mem0_memories`, `cookie_consent`, `deletion_requests`. Every source lists its columns explicitly (never `SELECT *`), so the export never contains a password hash, a session token, a passkey public key, or a verification/reset token. A source that fails is reported in the response's `incomplete` list rather than silently omitted — a partial export the subject can see beats a `500`.
+
+---
+
+## Third-Party Services and Analytics
+
+Waddles has **no browser-side analytics**: no analytics SDK, tag manager, session-recording or advertising pixel is bundled in the web app or the marketing site, and nothing sets a cookie for one. (Mixpanel, Google Analytics and Hotjar were listed in the cookie policy in error and are not used.) Usage analytics are computed in-house by `analytics-core` and exposed only as described under *Analytics Data Access*.
+
+The services the platform itself calls with its own credentials:
+
+| Service | Used for | What it receives |
+|---------|----------|------------------|
+| **PostHog** (self-hosted; default host `https://license.penguintech.io`, in-cluster for alpha) | Feature-flag evaluation, **server-side only** (`flask_core.entitlement`; the web app reads resolved flags from `GET /api/v1/flags`, never from PostHog) | The flag key, a `distinct_id` that is the tenant slug (or `tenant:community-id`) and a `tenant` group. No user id, e-mail, username, IP address or message content. No PostHog SDK or key is in the browser. |
+| **License server** (`license.penguintech.io`) | License-tier validation through `penguin-licensing`, as product `waddles` | The license key (as a bearer token) and the product id. No end-user data. |
+| **OAuth / OIDC providers** (Discord, Twitch, …) | Sign-in and account linking | Standard OAuth traffic (client credentials, authorization code). Waddles receives the user's platform id, username, avatar and, where the provider gives one, e-mail. |
+| **OpenTelemetry collector** (deployer-chosen via the standard `OTEL_EXPORTER_OTLP_*` variables) | Logs, metrics and traces | Operational telemetry. The destination is never hard-coded; exception text is kept out of log lines by the `exc_log_audit` CI guard because driver errors can echo row values. |
+
+---
+
+*Last updated: 2026-10-12 — Art. 17 erasure expanded from ~16 hand-listed tables to the full user-keyed schema via the erasure registry (economy ledgers, bundle KV, SeaweedFS objects, SSO subjects), with a CI coverage gate. 2026-10-10 — cookies, consent, erasure, data access, analytics access and third-party sections reconciled against `hub_api`; the pseudonymous-identifier, rate-limit and service-to-service sections are unchanged from the earlier revision and have not been re-audited.*
 *See also: [docs/SECURITY.md](SECURITY.md)*

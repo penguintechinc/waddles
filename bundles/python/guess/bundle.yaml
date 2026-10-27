@@ -2,7 +2,8 @@ schema_version: 2
 app_id: waddles.core.example.guess
 name: Guess Bundle (Python)
 # 1.0.0: initial release -- per-community number-guessing game (feature/bundles-wordgames-pack).
-version: 1.0.0
+# 1.0.1: activation-gated only -- removed the in-bundle waddles.command-guess feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -45,12 +46,14 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the in-progress per-community guess round (secret number, bounds, attempt count)"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-guess feature flag"
+  - id: "chat.send:discord"
+    justification: "guess replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "guess replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null

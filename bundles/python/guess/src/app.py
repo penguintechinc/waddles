@@ -23,7 +23,8 @@ Data scoping: all state is community-scoped via `waddle_sdk.community_kv`
 (one active round per community). No player identity is stored or logged;
 logs carry only community id, op, and counts -- never the guessed values.
 
-Gated behind the PostHog flag ``waddles.command-guess``, default OFF.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -33,10 +34,13 @@ import random
 from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-guess"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 COMMAND = "guess"
 
 RANGE_MIN = 1
@@ -71,8 +75,7 @@ def _classify(stripped: str) -> tuple[str, str | None]:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!guess` and its verbs.
 
-    No `kv` access. Returns `None` for non-chat payloads, non-`!guess` text,
-    and while `waddles.command-guess` is disabled.
+    No `kv` access. Returns `None` for non-chat payloads, non-`!guess` text.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -81,9 +84,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.split(maxsplit=1)[0].lower() if stripped else ""
     if head != f"!{COMMAND}":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     action, arg = _classify(stripped)
@@ -185,7 +185,7 @@ async def _handle_start(*, community: str, provider: str, channel_id: str) -> st
             f"{existing['high']} (!guess <n>)"
         )
 
-    secret = random.randint(RANGE_MIN, RANGE_MAX)  # noqa: S311 -- a game pick, not crypto
+    secret = _RNG.randint(RANGE_MIN, RANGE_MAX)
     active = {"secret": secret, "low": RANGE_MIN, "high": RANGE_MAX, "attempts": 0}
     await _kv_set(
         _ACTIVE_KEY,

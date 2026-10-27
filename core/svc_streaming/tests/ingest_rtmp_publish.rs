@@ -4,6 +4,8 @@
 //! `IngestListener`/`IngestAuth` contract end-to-end rather than any
 //! private implementation detail.
 
+mod log_capture;
+
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -22,8 +24,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use log_capture::LogCapture;
 use svc_streaming::ingest::rtmp::{AuthDecision, IngestAuth, RtmpListener};
 use svc_streaming::ingest::{IngestKind, IngestListener, IngestSession};
+use svc_streaming::redact::fingerprint;
 use svc_streaming::telemetry::render_metrics;
 
 /// Generous upper bound for each network round trip in these tests -- a
@@ -525,5 +529,78 @@ async fn publish_metadata_forwards_onmetadata_as_flv_script_tag() {
     assert_eq!(
         tag_header[0], 18,
         "onMetaData must produce an FLV script-data tag (type 18)"
+    );
+}
+
+/// Regression: the RTMP stream key -- and any credential a client smuggles
+/// into the `app` name (`live?token=...`, a common auth scheme) -- never
+/// reaches a log line at any level. The logs carry the non-secret
+/// `key_hash` correlation id instead.
+#[tokio::test]
+async fn rtmp_ingest_logs_never_contain_the_raw_stream_key_or_app_query() {
+    const ALLOWED_KEY: &str = "sk_live_RTMP_ALLOWED_SECRET_3a7f";
+    const UNKNOWN_KEY: &str = "sk_live_RTMP_UNKNOWN_SECRET_b812";
+    const APP_QUERY_SECRET: &str = "APP_QUERY_TOKEN_SECRET_91cd";
+    let app = format!("live?token={APP_QUERY_SECRET}");
+
+    let capture = LogCapture::install();
+    let (addr, mut rx, _registry, _listener_handle) = start_listener(&[ALLOWED_KEY]).await;
+
+    // Unauthorized key.
+    let mut rejected = TcpStream::connect(addr).await.expect("connect");
+    let result = tokio::time::timeout(
+        TEST_TIMEOUT,
+        connect_and_publish(&mut rejected, &app, UNKNOWN_KEY),
+    )
+    .await
+    .expect("publish flow completes in time");
+    assert!(result.is_err(), "unknown key must be rejected");
+
+    // Authorized key.
+    let mut first = TcpStream::connect(addr).await.expect("connect");
+    let _client = tokio::time::timeout(
+        TEST_TIMEOUT,
+        connect_and_publish(&mut first, &app, ALLOWED_KEY),
+    )
+    .await
+    .expect("publish flow completes in time")
+    .expect("publish accepted");
+    let _session = tokio::time::timeout(TEST_TIMEOUT, rx.recv())
+        .await
+        .expect("ingest session received in time")
+        .expect("ingest channel not closed");
+
+    // Duplicate publisher for the active key.
+    let mut duplicate = TcpStream::connect(addr).await.expect("connect");
+    let result = tokio::time::timeout(
+        TEST_TIMEOUT,
+        connect_and_publish(&mut duplicate, &app, ALLOWED_KEY),
+    )
+    .await
+    .expect("publish flow completes in time");
+    assert!(result.is_err(), "duplicate publisher must be rejected");
+
+    // Publisher goes away.
+    drop(first);
+    capture
+        .wait_for(
+            &format!(
+                "rtmp connection closed, stream ended key_hash={}",
+                fingerprint(ALLOWED_KEY)
+            ),
+            TEST_TIMEOUT,
+        )
+        .await;
+
+    capture.assert_no_secret_leak(
+        &[ALLOWED_KEY, UNKNOWN_KEY, APP_QUERY_SECRET],
+        &[
+            "rtmp connect requested",
+            "rejecting rtmp publish: not authorized",
+            "rejecting rtmp publish: stream key already active",
+            "rtmp publish accepted",
+            &format!("key_hash={}", fingerprint(UNKNOWN_KEY)),
+            &format!("key_hash={}", fingerprint(ALLOWED_KEY)),
+        ],
     );
 }

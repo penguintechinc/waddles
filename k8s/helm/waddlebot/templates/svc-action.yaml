@@ -16,17 +16,24 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-action
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcAction")) }}
   replicas: {{ .Values.pipeline.svcAction.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: svc-action
   template:
     metadata:
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      annotations:
+        checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}
+      {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-action
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       # Dedicated identity (feature/eddsa-machine-jwt, security review HIGH
       # finding) -- distinguishes this deployment's pods from every other
       # workload in the namespace for `flask_core.service_jwt`'s TokenReview
@@ -46,6 +53,7 @@ spec:
         # scripts/deploy-alpha.sh.
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-action" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -58,6 +66,10 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_action;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_action") | nindent 8 }}
         - name: MODULE_NAME
           value: "svc-action"
         - name: PIPELINE_STAGE
@@ -69,15 +81,34 @@ spec:
         # deliberately UNSET -- tenant-wide per roadmap DATA-MODEL GAPS), hub-api
         # callback URL, and the JWT signing key shared with hub-api (same Secret key
         # SECRET_KEY as hub-api.yaml -- see templates/secrets.yaml).
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        # TLS-only durable Valkey: rediss:// URL w/ password + CA path (secrets.yaml VALKEY_DURABLE_URL_TLS_AUTH).
         - name: VALKEY_URL
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL
+              key: VALKEY_DURABLE_URL_TLS_AUTH
+        {{- else }}
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_DURABLE_URL
+        {{- end }}
         - name: RUNNER_TENANT_SLUG
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+        {{- if .Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled }}
+        # Task 8 -- the legacy Python pod's per-send credential resolution (waddle_transports
+        # resolve_community_tokens: platform_moderation / youtube_oauth) mints a community-bound
+        # `connections:resolve` token from the audience-scoped projected SA token mounted below;
+        # without these it silently stays on the static env fallback after the cutover.
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        {{- end }}
         - name: SECRET_KEY
           valueFrom:
             secretKeyRef:
@@ -91,11 +122,6 @@ spec:
         # svc-action writes action_dispatch_log rows directly (core/svc_action/runner.py)
         # and sends outbound Discord messages via CANON-LIB (waddle_transports) using this
         # bot token -- same Secret keys hub-api/svc-ingest already read.
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: DATABASE_URL
         # fix/helm-platform-credentials -- sourced from the operator-managed
         # platform-credentials Secret, never the chart-rendered `-secrets`
         # Secret; optional so a community with no Discord bot configured
@@ -122,6 +148,7 @@ spec:
         - name: MODULE_LOAD_MARKETING
           value: "true"
         {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -145,12 +172,18 @@ spec:
           mountPath: /var/log/waddlebotlog
         - name: tmp
           mountPath: /tmp
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
+        {{- end }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: logs
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
+      {{- end }}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
 ---
 apiVersion: v1
@@ -170,4 +203,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-action
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-action" "ports" (list $.Values.pipeline.svcAction.port) "runtime" "python" "shell" true) }}
 {{- end }}

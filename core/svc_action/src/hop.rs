@@ -5,21 +5,12 @@
 //! approval verification (§5.11) run before every dispatch; outbound
 //! credential/target resolved only from the verified envelope".
 //!
-//! `penguin_spine`'s own `binding` module (`compute_binding_mac`/
-//! `verify_binding`, that crate's doc comments reference it as "Task 19")
-//! has now landed, at the `rev` this service pins as of the M1a/dead-letter
-//! finalization pass. Its module doc states it was "reproduced byte-for-
-//! byte from `waddles core/svc_action/src/hop.rs` (verified-correct,
-//! reviewed) -- same formula, same keyring shape, same constant-time
-//! comparison", and this module's own re-verification below
-//! (`tests::this_modules_mac_matches_penguin_spines_binding_module_exactly`)
-//! confirms it against that crate's own published canonical test vectors:
-//! byte-identical output for the same `(tenant, community, workstream_id,
-//! event_id, trace_id)` tuple and keyring. Switching `svc_action::hop` to
-//! call `penguin_spine::binding` directly instead of keeping this local
-//! copy remains a separate follow-up (a call-site refactor, not a
-//! behavior change, since the two are already proven identical) -- not
-//! done in this landing.
+//! MAC verification is `penguin_spine::verify_binding` -- the single,
+//! schema-version-aware implementation (v2 legacy formula; v3 domain-tagged
+//! formula that also binds the numeric `tenant_id`/`community_id`). There is
+//! deliberately NO local MAC formula here: a local v2-only copy ignored
+//! `schema_version` and the numeric ids, so a relabelled v2->v3 envelope with
+//! forged ids verified, and genuine v3 envelopes failed.
 //!
 //! Implements checks 1-2 of the four-part list in spec §5.11 ("Verification
 //! at every hop"): `binding.mac` recomputation under the claimed `kid`, and
@@ -36,13 +27,11 @@
 //! reading a target/credential field from a bundle's `dispatch` return
 //! value.
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use subtle::ConstantTimeEq;
+use penguin_spine::{parse_scope_from_key, verify_binding, BindingError, StageEnvelope};
 
-use penguin_spine::{trace_id_from_traceparent, StageEnvelope, TENANT_WIDE_SEGMENT};
-
-type HmacSha256 = Hmac<Sha256>;
+// Re-exported so callers write `crate::hop::KeyRing` -- the type lives in
+// `penguin_spine::binding`, the single version-aware MAC implementation.
+pub use penguin_spine::KeyRing;
 
 /// Why a hop failed verification -- each variant is a `reason` label on
 /// `waddles_tenant_boundary_violations_total{stage,reason}` (spec §5.11)
@@ -95,137 +84,18 @@ impl BoundaryReason {
     }
 }
 
-/// Symmetric HMAC key material for `binding.mac`, keyed by `kid` (spec
-/// §5.11: "Keys are named by `kid` and rotated with an overlap window").
-/// Verification accepts a MAC produced under any `kid` the ring holds; new
-/// MACs (this stage never mints one in the M3 dispatch path -- only
-/// svc-ingest does, spec §5.11 "Minting" -- but `compute_mac` is exposed
-/// for tests and any future stage-side re-signing need) are produced under
-/// whichever `kid` the caller names.
-#[derive(Clone, Debug)]
-pub struct KeyRing {
-    keys: Vec<(String, Vec<u8>)>,
-}
-
-/// Raised building a [`KeyRing`] from its env-var text form.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum KeyRingError {
-    #[error("ENVELOPE_BINDING_KEYS entry {0:?} is not of the form kid:hexkey")]
-    MalformedEntry(String),
-    #[error("ENVELOPE_BINDING_KEYS entry for kid {0:?} is not valid hex: {1}")]
-    InvalidHex(String, String),
-    #[error("ENVELOPE_BINDING_KEYS is empty -- hop verification cannot start with no keys")]
-    Empty,
-}
-
-impl KeyRing {
-    /// Builds a ring directly from `(kid, key_bytes)` pairs -- the
-    /// programmatic constructor tests use.
-    pub fn new(keys: Vec<(String, Vec<u8>)>) -> Self {
-        Self { keys }
+/// Maps a `penguin_spine::binding` failure onto this module's reason
+/// vocabulary. `verify_binding` only returns `MacMismatch`/`UnknownKid`; the
+/// keyring-parse variants are startup-only and map conservatively to
+/// `MacMismatch` (never a silent pass) so the match stays exhaustive.
+fn from_binding_error(e: BindingError) -> BoundaryReason {
+    match e {
+        BindingError::MacMismatch => BoundaryReason::MacMismatch,
+        BindingError::UnknownKid(kid) => BoundaryReason::UnknownKid(kid),
+        BindingError::MalformedKeyEntry(_)
+        | BindingError::InvalidKeyHex(_, _)
+        | BindingError::EmptyKeyring => BoundaryReason::MacMismatch,
     }
-
-    /// Parses the `ENVELOPE_BINDING_KEYS` env-var shape:
-    /// `kid1:hexkey1,kid2:hexkey2`. Refuses to build an empty ring -- a
-    /// misconfigured/missing keyring must be a hard startup error, never a
-    /// silent "every MAC fails to verify" (which would DLQ 100% of
-    /// traffic) or worse, "every MAC passes" (which would defeat the wall
-    /// entirely).
-    pub fn parse(raw: &str) -> Result<Self, KeyRingError> {
-        let mut keys = Vec::new();
-        for entry in raw.split(',') {
-            let entry = entry.trim();
-            if entry.is_empty() {
-                continue;
-            }
-            let (kid, hexkey) = entry
-                .split_once(':')
-                .ok_or_else(|| KeyRingError::MalformedEntry(entry.to_string()))?;
-            if kid.is_empty() || hexkey.is_empty() {
-                return Err(KeyRingError::MalformedEntry(entry.to_string()));
-            }
-            let key_bytes = hex::decode(hexkey)
-                .map_err(|e| KeyRingError::InvalidHex(kid.to_string(), e.to_string()))?;
-            keys.push((kid.to_string(), key_bytes));
-        }
-        if keys.is_empty() {
-            return Err(KeyRingError::Empty);
-        }
-        Ok(Self { keys })
-    }
-
-    fn key_for(&self, kid: &str) -> Option<&[u8]> {
-        self.keys
-            .iter()
-            .find(|(k, _)| k == kid)
-            .map(|(_, v)| v.as_slice())
-    }
-}
-
-/// Computes `binding.mac` (spec §5.11's exact formula):
-/// `hex(HMAC-SHA256(k_binding[kid], tenant ‖ community ‖ workstream_id ‖
-/// event_id ‖ trace_id))`, where `community` renders as the literal
-/// `_tenant` when absent and `trace_id` is the 32-hex trace-id segment of
-/// `traceparent` (empty string when no trace is present -- the formula has
-/// no defined behavior for a missing trace, so this stage's own inputs are
-/// concatenated consistently with how `compute_mac`/`verify_mac` are both
-/// called: always from the same envelope fields).
-pub fn compute_mac(
-    ring: &KeyRing,
-    kid: &str,
-    tenant: &str,
-    community: Option<&str>,
-    workstream_id: &str,
-    event_id: &str,
-    trace_id: Option<&str>,
-) -> Result<String, BoundaryReason> {
-    let key = ring
-        .key_for(kid)
-        .ok_or_else(|| BoundaryReason::UnknownKid(kid.to_string()))?;
-    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| BoundaryReason::MacMismatch)?;
-    mac.update(tenant.as_bytes());
-    mac.update(community.unwrap_or(TENANT_WIDE_SEGMENT).as_bytes());
-    mac.update(workstream_id.as_bytes());
-    mac.update(event_id.as_bytes());
-    mac.update(trace_id.unwrap_or("").as_bytes());
-    Ok(hex::encode(mac.finalize().into_bytes()))
-}
-
-/// Recomputes `env.binding.mac` under `env.binding.kid` and compares in
-/// constant time (`subtle`) against the value on the wire -- a
-/// variable-time `==` on a MAC is a timing side channel a network attacker
-/// can exploit to forge a valid one byte at a time.
-fn verify_mac(ring: &KeyRing, env: &StageEnvelope) -> Result<(), BoundaryReason> {
-    let trace_id = env
-        .trace
-        .as_ref()
-        .and_then(|t| trace_id_from_traceparent(&t.traceparent));
-    let expected = compute_mac(
-        ring,
-        &env.binding.kid,
-        &env.tenant,
-        env.community.as_deref(),
-        &env.workstream_id,
-        &env.event_id,
-        trace_id,
-    )?;
-    let actual = env.binding.mac.as_bytes();
-    let expected_bytes = expected.as_bytes();
-    if expected_bytes.len() == actual.len() && bool::from(expected_bytes.ct_eq(actual)) {
-        Ok(())
-    } else {
-        Err(BoundaryReason::MacMismatch)
-    }
-}
-
-/// Parses `(tenant, community)` from a spine key of the shape
-/// `waddles:t:{tenant}:c:{community}:...`. Local re-implementation of
-/// `penguin_spine::parse_scope_from_key`'s exact behavior (that function is
-/// `pub` at the pinned rev, so this could call it directly -- kept as a
-/// thin local wrapper only so this module's public surface doesn't leak an
-/// otherwise-unused re-export; see the call site in `verify_hop`).
-fn scope_from_key(key: &str) -> Option<(String, Option<String>)> {
-    penguin_spine::parse_scope_from_key(key)
 }
 
 /// Runs spec §5.11 checks 1-2 (MAC recomputation, tenant/community-vs-key)
@@ -241,9 +111,10 @@ pub fn verify_hop(
     stream_key: &str,
     expected_app_id: &str,
 ) -> Result<(), BoundaryReason> {
-    verify_mac(ring, env)?;
+    verify_binding(ring, env).map_err(from_binding_error)?;
 
-    let (key_tenant, key_community) = scope_from_key(stream_key).unwrap_or((String::new(), None));
+    let (key_tenant, key_community) =
+        parse_scope_from_key(stream_key).unwrap_or((String::new(), None));
     if env.tenant != key_tenant {
         return Err(BoundaryReason::TenantMismatch {
             envelope: env.tenant.clone(),
@@ -268,6 +139,13 @@ pub fn verify_hop(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use penguin_spine::{compute_binding_mac, compute_binding_mac_v3, ENVELOPE_SCHEMA_VERSION};
+
+    const WS: &str = "8f14e45f-ceea-467e-adde-3fb5c9752730";
+    const EV: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    const TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const KEY: &str = "waddles:t:acme:c:main:app:waddles.bot.commands.default:action";
+    const APP: &str = "waddles.bot.commands.default";
 
     fn ring() -> KeyRing {
         KeyRing::new(vec![
@@ -281,7 +159,7 @@ mod tests {
             "schema_version": 2,
             "tenant": "acme",
             "community": "main",
-            "app_id": "waddles.bot.commands.default",
+            "app_id": APP,
             "stage": "action",
             "event": {
                 "platform": "twitch",
@@ -293,11 +171,11 @@ mod tests {
             },
             "ts": "2026-09-14T12:00:00.123Z",
             "target_app_id": null,
-            "workstream_id": "8f14e45f-ceea-467e-adde-3fb5c9752730",
-            "event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "workstream_id": WS,
+            "event_id": EV,
             "session_id": null,
             "trace": {
-                "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                "traceparent": format!("00-{TRACE}-00f067aa0ba902b7-01"),
                 "tracestate": null
             },
             "binding": {"kid": kid, "mac": mac}
@@ -305,121 +183,40 @@ mod tests {
         .unwrap()
     }
 
+    /// A genuine v2 MAC for the fixture envelope under `kid`.
     fn mac_for(ring: &KeyRing, kid: &str) -> String {
-        compute_mac(
+        compute_binding_mac(ring, kid, "acme", Some("main"), WS, EV, Some(TRACE)).unwrap()
+    }
+
+    /// A genuine v3 envelope (producer-minted `compute_binding_mac_v3`).
+    fn v3_envelope(ring: &KeyRing, tenant_id: i64, community_id: i32) -> StageEnvelope {
+        let mac = compute_binding_mac_v3(
             ring,
-            kid,
+            "k1",
+            tenant_id,
+            community_id,
             "acme",
             Some("main"),
-            "8f14e45f-ceea-467e-adde-3fb5c9752730",
-            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-            Some("4bf92f3577b34da6a3ce929d0e0e4736"),
+            WS,
+            EV,
+            Some(TRACE),
         )
-        .unwrap()
+        .unwrap();
+        let mut env = valid_envelope(mac, "k1");
+        env.schema_version = ENVELOPE_SCHEMA_VERSION;
+        env.tenant_id = Some(tenant_id);
+        env.community_id = Some(community_id);
+        env
     }
 
-    #[test]
-    fn compute_mac_is_deterministic_and_64_hex_chars() {
-        let mac1 = mac_for(&ring(), "k1");
-        let mac2 = mac_for(&ring(), "k1");
-        assert_eq!(mac1, mac2);
-        assert_eq!(mac1.len(), 64);
-        assert!(mac1.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    /// **Re-verification against the newly-landed `penguin_spine::binding`
-    /// module** (spine rev bump, finalization pass): this crate's fixture
-    /// (`ring()`, and `mac_for`'s tenant/community/workstream_id/event_id/
-    /// trace_id tuple) is byte-identical to `penguin_spine::binding`'s own
-    /// canonical test vectors -- so this hex literal is `penguin_spine::
-    /// binding::tests::K1_MAIN_MAC`, copied verbatim from that crate's
-    /// source at the pinned rev, not hand-computed here. A match proves
-    /// this module's independent implementation and spine's newly-landed
-    /// one agree exactly; do NOT assume it, the module doc explicitly
-    /// requires re-running this check on any future spine binding-module
-    /// pin bump.
-    #[test]
-    fn this_modules_mac_matches_penguin_spines_binding_module_exactly() {
-        const K1_MAIN_MAC_FROM_PENGUIN_SPINE_BINDING: &str =
-            "d94c3849257550fe817c399410113a45e22b1c9203fbd02908f6bcc19df95f3f";
-        assert_eq!(
-            mac_for(&ring(), "k1"),
-            K1_MAIN_MAC_FROM_PENGUIN_SPINE_BINDING
-        );
-    }
-
-    #[test]
-    fn different_kid_produces_a_different_mac() {
-        assert_ne!(mac_for(&ring(), "k1"), mac_for(&ring(), "k2"));
-    }
-
-    #[test]
-    fn compute_mac_rejects_unknown_kid() {
-        let err = compute_mac(&ring(), "nope", "acme", None, "w", "e", None).unwrap_err();
-        assert_eq!(err, BoundaryReason::UnknownKid("nope".to_string()));
-    }
-
-    #[test]
-    fn keyring_parse_reads_kid_hexkey_pairs() {
-        let ring = KeyRing::parse("k1:0102030405060708090a0b0c0d0e0f10,k2:ff").unwrap();
-        assert!(ring.key_for("k1").is_some());
-        assert_eq!(ring.key_for("k2"), Some(&[0xffu8][..]));
-    }
-
-    #[test]
-    fn keyring_parse_rejects_empty_string() {
-        assert_eq!(KeyRing::parse("").unwrap_err(), KeyRingError::Empty);
-    }
-
-    #[test]
-    fn keyring_parse_rejects_malformed_entry() {
-        assert!(matches!(
-            KeyRing::parse("k1-nocoloin"),
-            Err(KeyRingError::MalformedEntry(_))
-        ));
-    }
-
-    /// Distinct from `keyring_parse_rejects_malformed_entry` above (no
-    /// colon at all): a colon IS present, but one side is empty -- its own
-    /// `if kid.is_empty() || hexkey.is_empty()` branch, not the
-    /// `split_once` `None` case.
-    #[test]
-    fn keyring_parse_rejects_entry_with_empty_kid_or_hexkey() {
-        assert!(matches!(
-            KeyRing::parse(":deadbeef"),
-            Err(KeyRingError::MalformedEntry(_))
-        ));
-        assert!(matches!(
-            KeyRing::parse("k1:"),
-            Err(KeyRingError::MalformedEntry(_))
-        ));
-    }
-
-    #[test]
-    fn keyring_parse_rejects_invalid_hex() {
-        assert!(matches!(
-            KeyRing::parse("k1:zzzz"),
-            Err(KeyRingError::InvalidHex(_, _))
-        ));
-    }
-
-    // -- Sec14.11 test 4: a tampered binding.mac (one byte flipped) is
-    // rejected regardless of which kid is claimed. --
     #[test]
     fn tampered_mac_is_rejected() {
         let ring = ring();
         let mut mac = mac_for(&ring, "k1");
-        // Flip one hex character -- still 64 valid hex chars, just wrong.
-        let flipped = if mac.as_bytes()[0] == b'0' {
-            b'1'
-        } else {
-            b'0'
-        };
-        // SAFETY: mac is ASCII hex; replacing one byte keeps it valid UTF-8.
-        unsafe { mac.as_bytes_mut()[0] = flipped };
+        let flipped = if mac.as_bytes()[0] == b'0' { "1" } else { "0" };
+        mac.replace_range(0..1, flipped);
         let env = valid_envelope(mac, "k1");
-        let key = "waddles:t:acme:c:main:app:waddles.bot.commands.default:action";
-        let err = verify_hop(&ring, &env, key, "waddles.bot.commands.default").unwrap_err();
+        let err = verify_hop(&ring, &env, KEY, APP).unwrap_err();
         assert_eq!(err, BoundaryReason::MacMismatch);
         assert_eq!(err.as_metric_reason(), "mac_mismatch");
     }
@@ -427,53 +224,85 @@ mod tests {
     #[test]
     fn unknown_kid_on_envelope_is_rejected() {
         let ring = ring();
-        let mac = mac_for(&ring, "k1");
-        let env = valid_envelope(mac, "k99");
-        let key = "waddles:t:acme:c:main:app:waddles.bot.commands.default:action";
+        let env = valid_envelope(mac_for(&ring, "k1"), "k99");
         assert!(matches!(
-            verify_hop(&ring, &env, key, "waddles.bot.commands.default"),
+            verify_hop(&ring, &env, KEY, APP),
             Err(BoundaryReason::UnknownKid(_))
         ));
     }
 
+    /// v2 envelopes keep verifying (as v2) through the spine's dispatch.
     #[test]
-    fn valid_mac_and_matching_key_passes() {
+    fn valid_v2_mac_and_matching_key_passes() {
         let ring = ring();
-        let mac = mac_for(&ring, "k1");
-        let env = valid_envelope(mac, "k1");
-        let key = "waddles:t:acme:c:main:app:waddles.bot.commands.default:action";
-        assert!(verify_hop(&ring, &env, key, "waddles.bot.commands.default").is_ok());
+        let env = valid_envelope(mac_for(&ring, "k1"), "k1");
+        assert_eq!(env.schema_version, 2);
+        assert!(verify_hop(&ring, &env, KEY, APP).is_ok());
     }
 
-    // -- Sec14.11 test 1: a valid MAC for its own tenant/workstream read
-    // from a DIFFERENT tenant's stream key is rejected. --
+    /// regression: confused-deputy -- a legit v2 envelope relabelled to
+    /// schema_version=3 with forged numeric ids must FAIL the MAC (the v3
+    /// formula is domain-tagged + binds the ids, so the v2 MAC cannot match).
+    #[test]
+    fn v2_mac_relabelled_as_v3_with_forged_ids_is_rejected() {
+        let ring = ring();
+        let mut env = valid_envelope(mac_for(&ring, "k1"), "k1");
+        env.schema_version = ENVELOPE_SCHEMA_VERSION;
+        env.tenant_id = Some(999);
+        env.community_id = Some(888);
+        let err = verify_hop(&ring, &env, KEY, APP).unwrap_err();
+        assert_eq!(err, BoundaryReason::MacMismatch);
+    }
+
+    /// A genuine v3 envelope passes (the old local v2-only verify failed it).
+    #[test]
+    fn genuine_v3_mac_passes() {
+        let ring = ring();
+        let env = v3_envelope(&ring, 10, 7);
+        assert!(verify_hop(&ring, &env, KEY, APP).is_ok());
+    }
+
+    /// Swapping either numeric id on a genuine v3 envelope breaks the MAC.
+    #[test]
+    fn v3_envelope_with_swapped_ids_is_rejected() {
+        let ring = ring();
+        let mut env = v3_envelope(&ring, 10, 7);
+        env.tenant_id = Some(11);
+        assert_eq!(
+            verify_hop(&ring, &env, KEY, APP).unwrap_err(),
+            BoundaryReason::MacMismatch
+        );
+        let mut env = v3_envelope(&ring, 10, 7);
+        env.community_id = Some(8);
+        assert_eq!(
+            verify_hop(&ring, &env, KEY, APP).unwrap_err(),
+            BoundaryReason::MacMismatch
+        );
+    }
+
     #[test]
     fn valid_mac_but_wrong_tenant_stream_key_is_rejected() {
         let ring = ring();
-        let mac = mac_for(&ring, "k1");
-        let env = valid_envelope(mac, "k1");
+        let env = valid_envelope(mac_for(&ring, "k1"), "k1");
         let key = "waddles:t:other-tenant:c:main:app:waddles.bot.commands.default:action";
-        let err = verify_hop(&ring, &env, key, "waddles.bot.commands.default").unwrap_err();
+        let err = verify_hop(&ring, &env, key, APP).unwrap_err();
         assert_eq!(err.as_metric_reason(), "tenant_mismatch");
     }
 
     #[test]
     fn community_mismatch_between_envelope_and_key_is_rejected() {
         let ring = ring();
-        let mac = mac_for(&ring, "k1");
-        let env = valid_envelope(mac, "k1");
+        let env = valid_envelope(mac_for(&ring, "k1"), "k1");
         let key = "waddles:t:acme:c:other-community:app:waddles.bot.commands.default:action";
-        let err = verify_hop(&ring, &env, key, "waddles.bot.commands.default").unwrap_err();
+        let err = verify_hop(&ring, &env, key, APP).unwrap_err();
         assert_eq!(err.as_metric_reason(), "community_mismatch");
     }
 
     #[test]
     fn app_id_not_matching_the_scoped_reader_is_rejected() {
         let ring = ring();
-        let mac = mac_for(&ring, "k1");
-        let env = valid_envelope(mac, "k1");
-        let key = "waddles:t:acme:c:main:app:waddles.bot.commands.default:action";
-        let err = verify_hop(&ring, &env, key, "waddles.other.app.default").unwrap_err();
+        let env = valid_envelope(mac_for(&ring, "k1"), "k1");
+        let err = verify_hop(&ring, &env, KEY, "waddles.other.app.default").unwrap_err();
         assert_eq!(err.as_metric_reason(), "grant_scope_mismatch");
     }
 

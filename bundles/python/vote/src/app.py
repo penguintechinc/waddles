@@ -13,7 +13,8 @@ The document is read-modify-written non-atomically; concurrent votes in the same
 an update (acceptable for a quick chat tally). Logging is PII-free: only op / counts / exception
 type are logged -- never option text or actor ids.
 
-Gated behind the PostHog flag ``waddles.command-vote``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -23,10 +24,8 @@ import json
 from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-vote"
 COMMAND = "!vote"
 STATE_KEY = "vote.state"
 MAX_OPTIONS = 20
@@ -99,7 +98,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("vote.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 def _standings(state: dict[str, Any]) -> str:
@@ -171,16 +170,13 @@ async def _handle(args: list[str], event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!vote` and reply with tally state.
 
-    Returns `None` for non-chat payloads, non-`!vote` text, or while the flag is off.
+    Returns `None` for non-chat payloads, non-`!vote` text.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
         return None
     parts = text.strip().split()
     if not parts or parts[0].lower() != COMMAND:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

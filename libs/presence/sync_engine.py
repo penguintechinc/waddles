@@ -177,13 +177,13 @@ class PresenceSyncEngine:
                         "Fan-out rejected: user=%s → platform=%s", user_id, platform
                     )
             except Exception as exc:
-                msg = f"Fan-out error to platform={platform}: {exc}"
+                msg = f"Fan-out error to platform={platform}: {type(exc).__name__}"
                 errors.append(msg)
                 logger.error(
                     "Fan-out exception: user=%s → platform=%s error=%s",
                     user_id,
                     platform,
-                    exc,
+                    type(exc).__name__,
                 )
 
         return fanned_out_to, errors

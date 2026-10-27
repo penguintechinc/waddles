@@ -93,8 +93,25 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
         - name: MODULE_NAME
           value: "core-bundle-seeder"
+        # PR #870 -- the seeder now signs bundles on activation (activate_for_community ->
+        # bundle_signing_service.sign_and_record_version -> PlatformSigner.from_env()), which
+        # fail-closes without this pair. Same secretKeyRef pair as templates/hub-api.yaml.
+        - name: BUNDLE_SIGNING_PRIVATE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
+              key: BUNDLE_SIGNING_PRIVATE_KEY
+        - name: BUNDLE_SIGNING_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
+              key: BUNDLE_SIGNING_KEY_ID
         # regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509) --
         # this Job calls services/bundle_version_service.py::create_version()/
         # process_prebuilt_component() -> storage_service.upload_bundle_component(), the exact
@@ -131,12 +148,12 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
+              key: VALKEY_DURABLE_URL_TLS
         - name: VALKEY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: REDIS_PASSWORD
+              key: VALKEY_DURABLE_PASSWORD
         {{- end }}
         # Platform connections (services/ingest_source_service.py::ensure_ingest_source(),
         # NO credentials/tokens stored -- see hub_api/cli/seed_core_bundles.py's own module

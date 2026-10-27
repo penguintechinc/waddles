@@ -6,7 +6,8 @@
 # is a later step.
 #
 # Config surface (core/svc_presentation/src/config.rs):
-#   - DB_* : non-secret from the shared ConfigMap (envFrom); DB_PASSWORD from <release>-secrets.
+#   - DB_HOST/PORT/NAME : non-secret from the shared ConfigMap (envFrom); DB_USER/DB_PASSWORD :
+#     this workload's OWN least-privilege role (waddles_svc_presentation) via waddlebot.dbEnv (H-1/H-3).
 #   - PUSH_JWKS_URL/PUSH_AUDIENCE/PUSH_TRUSTED_ISSUER : overlay_auth PUSH guard verifies
 #     hub-api-issued machine JWTs against hub-api's service JWKS (no static shared secret,
 #     and no bundle-signing key is involved).
@@ -14,6 +15,17 @@
 #     REUSED from the existing <release>-secrets Secret (hub-api's SeaweedFS identity, which
 #     already has Read/Write/List/Tagging on the assets bucket) -- no new secret/identity.
 #   - OTEL_* : destination env-configurable, never hardcoded (presentation.rust.otlpEndpoint).
+#   - HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT/SERVICE_JWT_SA_TOKEN_PATH/
+#     HUB_API_GRPC_CA_FILE : overlay detokenization (core/svc_presentation/src/overlay/detok.rs)
+#     resolves `{user:<uuid>}` to hub-api display names over its internal gRPC
+#     (IdentityService.ResolveDisplayNames, scope identity:displayname:read). Field-for-field
+#     mirror of svc-action-rust.yaml's identical block, under the dedicated `svc-presentation`
+#     ServiceAccount (templates/service-jwt-rbac.yaml; serviceJwt.identities.svc-presentation).
+#   - PII_DETOKENIZATION_ENABLED=false : rendered only when pipeline.piiTokenization.enabled
+#     is false (alpha: no working hub gRPC yet) -- the explicit, loudly-logged operator
+#     escape hatch; every user then renders "Unknown User". Omitted otherwise, in which case
+#     the service REFUSES TO START without a reachable hub-api (fail loud, never a silently
+#     degraded overlay).
 {{- if and .Values.pipeline.svcPresentation.enabled .Values.presentation.rust.enabled }}
 ---
 apiVersion: apps/v1
@@ -24,6 +36,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-presentation
 spec:
+  # >1 replica is refused (render-time `fail`) unless sharedFanout is enabled -- see
+  # waddlebot.presentationReplicaGuard: the overlay fan-out is in-process, frames would split.
+  {{- include "waddlebot.presentationReplicaGuard" $ }}
   replicas: {{ .Values.pipeline.svcPresentation.replicas }}
   selector:
     matchLabels:
@@ -35,7 +50,11 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-presentation
     spec:
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      # Dedicated identity so hub-api's TokenReview-backed machine-JWT bootstrap can tell
+      # this pod from every other workload in the namespace (templates/service-jwt-rbac.yaml,
+      # serviceJwt.identities.svc-presentation) -- same pattern as svc-action/svc-process.
+      serviceAccountName: svc-presentation
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -44,9 +63,10 @@ spec:
       containers:
       - name: svc-presentation
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.presentation.rust.imageRepository | default "svc-presentation-rust") "imageTag" .Values.global.imageTag) }}"
-        # Always -- per-commit tag pushed to the local registry; same node-image-cache
-        # rationale as templates/svc-action-rust.yaml.
-        imagePullPolicy: Always
+        # Values-driven -- per-commit tag, so the old hardcoded Always is unnecessary (and
+        # fatal for locally-loaded images); see templates/svc-process-rust.yaml's comment.
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         # Pinned to the Rust image's own `appuser` (uid 10001, Dockerfile.rust), not the
         # chart-wide uid 1000 -- same pattern as svc-action-rust/svc-streaming.
         securityContext:
@@ -68,15 +88,14 @@ spec:
         - configMapRef:
             name: {{ include "waddlebot.fullname" . }}-config
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_presentation;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_presentation") | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.svcPresentation.port | quote }}
         - name: METRICS_PORT
           value: "9090"
-        - name: DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: DB_PASSWORD
         - name: PUSH_JWKS_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}/internal/service-jwks.json"
         - name: PUSH_AUDIENCE
@@ -102,6 +121,24 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: HUB_API_S3_SECRET_ACCESS_KEY
+        # Overlay detokenization -> hub-api (see header). Endpoints default to hub-api's own
+        # in-cluster Service, computed here rather than needing a per-environment override.
+        - name: HUB_API_GRPC_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        # The audience-scoped projected token mounted below (NOT the generic k8s SA token
+        # path: wrong audience, hub-api's TokenReview would reject it).
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        {{- if not .Values.pipeline.piiTokenization.enabled }}
+        - name: PII_DETOKENIZATION_ENABLED
+          value: "false"
+        {{- end }}
+        {{- if .Values.pipeline.hubApi.enabled }}
+        # CA that signed hub-api's internal gRPC server cert (core/hub_client trusts only it).
+        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        {{- end }}
         - name: OTEL_SERVICE_NAME
           value: "svc-presentation"
         - name: OTEL_RESOURCE_ATTRIBUTES
@@ -112,6 +149,7 @@ spec:
         - name: OTEL_EXPORTER_OTLP_PROTOCOL
           value: {{ .Values.presentation.rust.otlpProtocol | quote }}
         {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -133,9 +171,17 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- if .Values.pipeline.hubApi.enabled }}
+        {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
+        {{- end }}
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
+      {{- if .Values.pipeline.hubApi.enabled }}
+      {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -166,4 +212,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-presentation
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-presentation" "ports" (list $.Values.pipeline.svcPresentation.port 9090) "runtime" "rust" "binaries" (list "/app/svc-presentation")) }}
 {{- end }}

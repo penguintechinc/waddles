@@ -20,14 +20,13 @@ command after the window closes (exactly-once via an atomic kv claim).
 ## Points store
 
 Same as `gamble`: `loyalty`'s balances are app-scoped `db` rows this bundle cannot reach with
-`storage.kv` + `flags.read`, so balances sit behind the `_Ledger` seam (community-scoped,
+`storage.kv`, so balances sit behind the `_Ledger` seam (community-scoped,
 pseudonymous kv, new players seeded with 100). Replace only `_Ledger` when a platform points
 capability exists.
 
 ## Logging
 
-PII-free: `op`/`outcome`/`crew_size`/`amount_bucket`/error-case only. Gated by PostHog flag
-`waddles.command-heist` (default OFF).
+PII-free: `op`/`outcome`/`crew_size`/`amount_bucket`/error-case only. Activation-gated only.
 
 ## Tests
 

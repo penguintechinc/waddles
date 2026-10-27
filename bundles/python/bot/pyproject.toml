@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-bot"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!bot` -> static bot name/version/links. Stateless: relay only, no kv/db."
 requires-python = ">=3.13"
 dependencies = []

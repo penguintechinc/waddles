@@ -118,9 +118,6 @@ export default function BroadcastStatusModal({
     }
   };
 
-  const connectedServers = broadcasts.length > 0
-    || selectedPlatforms.length > 0; // Allow broadcasting if platforms selected
-
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-navy-800 rounded-lg max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
@@ -140,53 +137,51 @@ export default function BroadcastStatusModal({
         {/* Content */}
         <div className="p-6 space-y-6">
           {/* New Broadcast Section */}
-          {connectedServers && (
-            <div className="border border-navy-700 rounded-lg p-4 bg-navy-900/50">
-              <h3 className="text-lg font-semibold text-sky-100 mb-4">
-                New Broadcast
-              </h3>
+          <div className="border border-navy-700 rounded-lg p-4 bg-navy-900/50">
+            <h3 className="text-lg font-semibold text-sky-100 mb-4">
+              New Broadcast
+            </h3>
 
-              {/* Platform Checkboxes */}
-              <div className="space-y-3 mb-4">
-                {PLATFORMS.map((platform) => (
-                  <label
-                    key={platform.id}
-                    className="flex items-center gap-3 cursor-pointer group"
+            {/* Platform Checkboxes */}
+            <div className="space-y-3 mb-4">
+              {PLATFORMS.map((platform) => (
+                <label
+                  key={platform.id}
+                  className="flex items-center gap-3 cursor-pointer group"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedPlatforms.includes(platform.id)}
+                    onChange={() => handlePlatformToggle(platform.id)}
+                    className="w-4 h-4 rounded border-navy-600 bg-navy-800 text-purple-500 focus:ring-purple-500"
+                  />
+                  <span
+                    className={`${platform.color} text-white text-xs px-2 py-1 rounded font-medium`}
                   >
-                    <input
-                      type="checkbox"
-                      checked={selectedPlatforms.includes(platform.id)}
-                      onChange={() => handlePlatformToggle(platform.id)}
-                      className="w-4 h-4 rounded border-navy-600 bg-navy-800 text-purple-500 focus:ring-purple-500"
-                    />
-                    <span
-                      className={`${platform.color} text-white text-xs px-2 py-1 rounded font-medium`}
-                    >
-                      {platform.label}
-                    </span>
-                    <span className="text-gray-400 group-hover:text-gray-300 transition-colors">
-                      {platform.label}
-                    </span>
-                  </label>
-                ))}
-              </div>
-
-              {/* Broadcast Now Button */}
-              <button
-                onClick={handleBroadcast}
-                disabled={
-                  broadcasting || selectedPlatforms.length === 0
-                }
-                className={`w-full py-2 px-4 rounded-lg font-semibold transition-colors ${
-                  broadcasting || selectedPlatforms.length === 0
-                    ? 'bg-navy-700 text-gray-500 cursor-not-allowed'
-                    : 'bg-purple-600 hover:bg-purple-700 text-white'
-                }`}
-              >
-                {broadcasting ? 'Broadcasting...' : 'Broadcast Now'}
-              </button>
+                    {platform.label}
+                  </span>
+                  <span className="text-gray-400 group-hover:text-gray-300 transition-colors">
+                    {platform.label}
+                  </span>
+                </label>
+              ))}
             </div>
-          )}
+
+            {/* Broadcast Now Button */}
+            <button
+              onClick={handleBroadcast}
+              disabled={
+                broadcasting || selectedPlatforms.length === 0
+              }
+              className={`w-full py-2 px-4 rounded-lg font-semibold transition-colors ${
+                broadcasting || selectedPlatforms.length === 0
+                  ? 'bg-navy-700 text-gray-500 cursor-not-allowed'
+                  : 'bg-purple-600 hover:bg-purple-700 text-white'
+              }`}
+            >
+              {broadcasting ? 'Broadcasting...' : 'Broadcast Now'}
+            </button>
+          </div>
 
           {/* Broadcast History Section */}
           <div>

@@ -15,20 +15,24 @@ Internal route contract (`hub_api/blueprints/v1/...`, built concurrently
 with this module -- mocked in this module's own tests, never called for
 real here):
 `GET {hub_api_url}/api/v1/internal/communities/{community_id}/connections/{provider}/token`
--> 200 `{"access_token": str, "refresh_token": str|null, "expires_at":
-iso8601|null, "scopes": [str]}`; 404 when the community hasn't connected
+(Bearer machine JWT, see Auth below)
+-> 200 `{"status": "success", "data": {"access_token": str, "refresh_token": str|null,
+"expires_at": iso8601|null, "scopes": [str]}, "meta": {...}}` (flat payload also accepted);
+404 when the community hasn't connected
 that provider; 502 `{"error": "refresh_failed"}`; 503 when the feature is
 off. Every other non-2xx and any transport failure (timeout, connection
 refused, malformed JSON) degrades to `None`, logged at WARNING with
 `provider`/`community_id`/`status` only -- `fetch_community_tokens` never
 raises into a caller's request-handling path.
 
-Auth: `X-Service-Key` shared-secret header + `SERVICE_API_KEY` env var --
-the SAME internal-service-to-service convention
-`core/svc_process/services/reputation_gate_client.py`/`activity_accrual.py`
-already use to call hub-api's own `internal_bp`-gated endpoints (see
-those modules' docstrings), not the JWT-minting pattern used for
-hub-api's user-JWT-gated distribution endpoint.
+Auth (HIGH-2 -- NO static shared secret): `Authorization: Bearer <community-bound machine
+JWT>`. `_mint_community_jwt` bootstraps one against hub-api's `POST /internal/service-token`
+(`SERVICE_JWT_TOKEN_ENDPOINT`, default `{hub_api_url}/internal/service-token`) with the pod's own
+projected ServiceAccount token (`SERVICE_JWT_SA_TOKEN_PATH`) -- the Python equivalent of
+`service_auth::MachineJwtClient` -- requesting scope `connections:resolve` bound to this
+`community_id` (<=300s lifetime), and caches it per community until 30s before expiry. A token
+minted for community A is refused by hub-api for community B. When the bootstrap fails (no SA
+token file, hub-api rejects) the fetch degrades to `None` like every other failure here.
 
 `ENV_KEYS`' `client_id_env`/`client_secret_env` columns match
 `hub_api/services/oauth_providers.py::PROVIDERS`' own `client_id_env`/
@@ -38,7 +42,7 @@ needs the env var *names* to build the static env-fallback path, never
 the client id/secret values themselves -- `CommunityTokens` carries no
 client id/secret fields). `refresh_token_env` matches each connector's
 own existing static-credential env var where one already exists:
-`YOUTUBE_REFRESH_TOKEN` (`core/svc_action/bundles/youtube_send_action.py`),
+`YOUTUBE_REFRESH_TOKEN` (`core/svc_action/builtin_handlers/youtube_send_action.py`),
 `KICK_ACCESS_TOKEN` (`kick_send_action.py`'s `access_token_ref` default),
 `DISCORD_BOT_TOKEN`/`SLACK_BOT_TOKEN` (the one static bot credential
 those platforms already use in place of a per-user OAuth refresh token).
@@ -63,6 +67,7 @@ caller needing an uncached read (a test, or one that just called
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -95,7 +100,13 @@ _DEFAULT_HUB_API_URL = "http://hub-api:8204"
 _DEFAULT_TIMEOUT_S = 3.0
 #: URL path template, not a secret value.
 _TOKEN_PATH = "/api/v1/internal/communities/{community_id}/connections/{provider}/token"  # noqa: S105
-_SERVICE_KEY_HEADER = "X-Service-Key"  # noqa: S105 -- header name constant, not a secret value
+#: Machine-JWT bootstrap: path template (relative to the hub-api base URL), scope, and the
+#: projected-ServiceAccount-token file the pod already carries for `service_auth`.
+_MINT_PATH = "/internal/service-token"  # noqa: S105 -- URL path, not a secret value
+_MINT_SCOPE = "connections:resolve"
+_DEFAULT_SA_TOKEN_PATH = "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"  # noqa: S105 -- path
+#: Re-mint this many seconds before the JWT's own expiry.
+_JWT_SKEW_S = 30.0
 
 _POSITIVE_CACHE_TTL_S = 60.0
 _NEGATIVE_CACHE_TTL_S = 15.0
@@ -183,6 +194,74 @@ def _parse_expires_at(raw: object, *, provider: str, community_id: int) -> datet
         return None
 
 
+#: `community_id -> (monotonic_expiry, jwt)`. Process-wide, same convention as `_cache` below.
+_jwt_cache: dict[int, tuple[float, str]] = {}
+
+
+def _mint_endpoint(base_url: str) -> str:
+    """`SERVICE_JWT_TOKEN_ENDPOINT` if set, else `{base_url}/internal/service-token`."""
+    return os.environ.get("SERVICE_JWT_TOKEN_ENDPOINT") or f"{base_url}{_MINT_PATH}"
+
+
+async def _mint_community_jwt(
+    client: httpx.AsyncClient, community_id: int, base_url: str
+) -> str | None:
+    """Return a community-bound `connections:resolve` machine JWT, minting one if needed.
+
+    Cached per community until `_JWT_SKEW_S` before expiry. Returns `None` (logged WARNING, ids
+    only -- never a token) when the projected SA token is unreadable or hub-api refuses the
+    bootstrap; an `httpx.HTTPError` from the mint call propagates to the caller's handler.
+    """
+    cached = _jwt_cache.get(community_id)
+    if cached is not None and time.monotonic() < cached[0]:
+        return cached[1]
+
+    sa_path = os.environ.get("SERVICE_JWT_SA_TOKEN_PATH") or _DEFAULT_SA_TOKEN_PATH
+    try:
+        sa_token = (await asyncio.to_thread(_read_text, sa_path)).strip()
+    except OSError as exc:
+        logger.warning(
+            "community_credentials.mint_no_sa_token community_id=%s error=%s",
+            community_id,
+            type(exc).__name__,
+        )
+        return None
+    if not sa_token:
+        logger.warning("community_credentials.mint_empty_sa_token community_id=%s", community_id)
+        return None
+
+    response = await client.post(
+        _mint_endpoint(base_url),
+        headers={"Authorization": f"Bearer {sa_token}"},
+        json={"scope": _MINT_SCOPE, "community_id": community_id},
+    )
+    if response.status_code != 200:
+        logger.warning(
+            "community_credentials.mint_rejected community_id=%s status=%s",
+            community_id,
+            response.status_code,
+        )
+        return None
+    try:
+        body = response.json()
+        token = body["token"]
+        expires_in = float(body["expires_in"])
+    except (ValueError, KeyError, TypeError):
+        logger.warning("community_credentials.mint_malformed community_id=%s", community_id)
+        return None
+    if not isinstance(token, str) or not token or expires_in <= 0:
+        logger.warning("community_credentials.mint_malformed community_id=%s", community_id)
+        return None
+    _jwt_cache[community_id] = (time.monotonic() + max(expires_in - _JWT_SKEW_S, 0.0), token)
+    return token
+
+
+def _read_text(path: str) -> str:
+    """Read a small text file (run via `asyncio.to_thread` so the loop never blocks on disk)."""
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
 async def fetch_community_tokens(
     community_id: int,
     provider: str,
@@ -202,11 +281,13 @@ async def fetch_community_tokens(
     base_url = _resolve_hub_api_url(hub_api_url).rstrip("/")
     path = _TOKEN_PATH.format(community_id=community_id, provider=provider)
     url = f"{base_url}{path}"
-    service_key = os.environ.get("SERVICE_API_KEY", "")
 
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
-            response = await client.get(url, headers={_SERVICE_KEY_HEADER: service_key})
+            bearer = await _mint_community_jwt(client, community_id, base_url)
+            if bearer is None:
+                return None
+            response = await client.get(url, headers={"Authorization": f"Bearer {bearer}"})
     except httpx.HTTPError as exc:
         logger.warning(
             "community_credentials.fetch_unreachable provider=%s community_id=%s error=%s",
@@ -215,6 +296,9 @@ async def fetch_community_tokens(
             type(exc).__name__,
         )
         return None
+
+    if response.status_code in (401, 403):
+        _jwt_cache.pop(community_id, None)  # a rejected JWT is never reused
 
     if response.status_code == 404:
         logger.debug(
@@ -251,6 +335,12 @@ async def fetch_community_tokens(
             community_id,
         )
         return None
+
+    # hub-api wraps the payload in `{"status","data":{...},"meta"}` (`_envelope`); the flat shape
+    # is still accepted. (Found by the live round-trip test -- the mocked tests used the flat one.)
+    inner = body.get("data")
+    if isinstance(inner, dict):
+        body = inner
 
     access_token = body.get("access_token")
     if not isinstance(access_token, str) or not access_token:
@@ -336,3 +426,4 @@ def invalidate(community_id: int | None, provider: str) -> None:
 def reset_cache_for_tests() -> None:
     """Clear the entire cache. Test isolation only, never called by production code."""
     _cache.clear()
+    _jwt_cache.clear()

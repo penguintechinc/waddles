@@ -49,20 +49,134 @@ NetworkPolicy.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+import logging
+from dataclasses import asdict, dataclass
 from typing import Any, cast
 
+from flask_core.authz import require_scope
+from flask_core.feature_flags import feature_enabled
+from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
+from quart_schema import validate_response
 
 from services import event_discord_sync_service as sync_svc
 from services import guild_pairing as pairing_svc
-from services.community_common import is_valid_service_key
-from services.errors import ApiError, bad_request, not_found
+from services.community_common import community_in_tenant, is_valid_service_key
+from services.errors import ApiError, bad_request, not_found, payment_required
 from services.schema import bind_calendar_sync_tables
+
+logger = logging.getLogger(__name__)
 
 event_discord_sync_internal_bp = Blueprint(
     "v1_event_discord_sync_internal", __name__, url_prefix="/api/v1/internal"
 )
+
+event_discord_sync_admin_bp = Blueprint(
+    "v1_event_discord_sync_admin", __name__, url_prefix="/api/v1"
+)
+
+#: Plain feature flag gating the whole Discord event-sync feature (env baseline:
+#: `FLAG_WADDLES_CALENDAR_EVENT_DISCORD_SYNC`).
+FEATURE_EVENT_DISCORD_SYNC = sync_svc.FEATURE_EVENT_DISCORD_SYNC
+
+
+@dataclass(slots=True, frozen=True)
+class EventSyncStateResponse:
+    """Community-wide event-sync state: how many paired guilds have it on."""
+
+    success: bool
+    community_id: int
+    event_sync_enabled: bool
+    pairings_total: int
+    pairings_enabled: int
+
+
+def _sync_state(community_id: int) -> EventSyncStateResponse:
+    pairings = pairing_svc.list_pairings(_dal(), community_id)
+    enabled = sum(1 for p in pairings if p.event_sync_enabled)
+    return EventSyncStateResponse(
+        success=True,
+        community_id=community_id,
+        event_sync_enabled=bool(pairings) and enabled == len(pairings),
+        pairings_total=len(pairings),
+        pairings_enabled=enabled,
+    )
+
+
+async def _admin_gate(community_id: int) -> tuple[dict[str, object], int] | None:
+    """Feature flag then tenant-ownership gate; error tuple to short-circuit, else `None`."""
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # nosec B101  # noqa: S101
+    if not await feature_enabled(FEATURE_EVENT_DISCORD_SYNC, tenant=ctx.tenant_slug):
+        return _err(payment_required("Discord event sync is not enabled"))
+    if not community_in_tenant(_dal(), community_id, ctx):
+        return _err(not_found("Community not found"))
+    return None
+
+
+@event_discord_sync_admin_bp.route(
+    "/communities/<int:community_id>/calendar/event-sync", methods=["GET"]
+)
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:read")  # type: ignore[misc]
+@validate_response(EventSyncStateResponse)
+async def get_event_sync(
+    community_id: int,
+) -> EventSyncStateResponse | tuple[dict[str, object], int]:
+    """`GET /api/v1/communities/<id>/calendar/event-sync` -- current toggle state."""
+    gate_error = await _admin_gate(community_id)
+    if gate_error is not None:
+        return gate_error
+    return _sync_state(community_id)
+
+
+@event_discord_sync_admin_bp.route(
+    "/communities/<int:community_id>/calendar/event-sync", methods=["PUT"]
+)
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@validate_response(EventSyncStateResponse)
+async def put_event_sync(
+    community_id: int,
+) -> EventSyncStateResponse | tuple[dict[str, object], int]:
+    """`PUT /api/v1/communities/<id>/calendar/event-sync` body `{"enabled": bool}`.
+
+    Admin (tenant-JWT, scope-gated, flag-gated) counterpart of the internal
+    service-key route: sets `event_sync_enabled` on every guild pairing under
+    the community. 404 if the community has no pairings (nothing to toggle).
+    """
+    gate_error = await _admin_gate(community_id)
+    if gate_error is not None:
+        return gate_error
+
+    body = await request.get_json(force=True, silent=True) or {}
+    enabled = body.get("enabled") if isinstance(body, dict) else None
+    if not isinstance(enabled, bool):
+        return _err(bad_request("enabled (bool) is required"))
+
+    pairings = pairing_svc.list_pairings(_dal(), community_id)
+    if not pairings:
+        return _err(not_found("No guild pairings for this community"))
+    try:
+        for pairing in pairings:
+            pairing_svc.update_pairing(_dal(), community_id, pairing.id, event_sync_enabled=enabled)
+    except ApiError as exc:
+        # 4xx = handled client error (WARN); 5xx = server failure (ERROR + traceback).
+        level = logging.ERROR if exc.status_code >= 500 else logging.WARNING
+        logger.log(
+            level,
+            "event_sync_toggle_failed community_id=%s op=put status=%s code=%s "
+            "exc_type=%s message=%s",
+            community_id,
+            exc.status_code,
+            exc.code,
+            type(exc).__name__,
+            exc.message,
+            exc_info=exc.status_code >= 500,
+        )
+        return _err(exc)
+    return _sync_state(community_id)
+
 
 #: `action` values this endpoint accepts -- mirrors `event_discord_sync_service.sync_event`'s own.
 _VALID_ACTIONS = ("create", "update", "cancel")
@@ -156,4 +270,4 @@ async def set_event_sync_enabled() -> tuple[dict[str, Any], int]:
     )
 
 
-BLUEPRINTS = [event_discord_sync_internal_bp]
+BLUEPRINTS = [event_discord_sync_internal_bp, event_discord_sync_admin_bp]

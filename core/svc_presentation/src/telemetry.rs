@@ -236,6 +236,245 @@ pub fn register_request_metrics(registry: &prometheus::Registry) -> RequestMetri
     }
 }
 
+/// P6/P9 overlay-image metrics: upload counter (labeled by outcome),
+/// upload-size histogram, and presigned-URL signing-latency histogram --
+/// histograms first per `rules/critical-rules.md` Observability ("a lone
+/// request counter is not instrumentation").
+#[derive(Clone)]
+pub struct ImageMetrics {
+    pub uploads_total: prometheus::IntCounterVec,
+    pub upload_bytes: prometheus::Histogram,
+    pub sign_latency_seconds: prometheus::Histogram,
+}
+
+/// Registers [`ImageMetrics`] against `registry`. Must be called exactly
+/// once per `registry` -- see [`crate::http::AppState::new`].
+pub fn register_image_metrics(registry: &prometheus::Registry) -> ImageMetrics {
+    let uploads_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_image_uploads_total",
+            "Overlay image uploads handled, labeled by outcome (success/rejected/error)",
+        ),
+        &["result"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(uploads_total.clone()))
+        .expect("register svc_presentation_image_uploads_total");
+
+    let upload_bytes = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+        "svc_presentation_image_upload_bytes",
+        "Uploaded overlay image size in bytes",
+    ))
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(upload_bytes.clone()))
+        .expect("register svc_presentation_image_upload_bytes");
+
+    let sign_latency_seconds = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+        "svc_presentation_image_sign_latency_seconds",
+        "Latency of generating a presigned overlay-image GET URL",
+    ))
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(sign_latency_seconds.clone()))
+        .expect("register svc_presentation_image_sign_latency_seconds");
+
+    ImageMetrics {
+        uploads_total,
+        upload_bytes,
+        sign_latency_seconds,
+    }
+}
+
+/// Caption-overlay metrics: ingest outcome counter, ingest-latency and
+/// caption-size histograms, history-replay size histogram, and a websocket
+/// handshake outcome counter -- histograms for load/latency first per
+/// `rules/critical-rules.md` Observability. Live viewer count and
+/// connection lifetime are already recorded per surface (`caption`) by
+/// `crate::overlay::hub`.
+///
+/// Labels are closed sets only (`outcome`); never a community id, user
+/// reference, or any caption text.
+#[derive(Clone)]
+pub struct CaptionMetrics {
+    pub ingest_total: prometheus::IntCounterVec,
+    pub ingest_duration_seconds: prometheus::Histogram,
+    pub text_chars: prometheus::Histogram,
+    pub history_replayed: prometheus::Histogram,
+    pub ws_connections_total: prometheus::IntCounterVec,
+}
+
+/// Registers [`CaptionMetrics`] against `registry`. Must be called exactly
+/// once per `registry` -- see [`crate::http::AppState::new`].
+pub fn register_caption_metrics(registry: &prometheus::Registry) -> CaptionMetrics {
+    let ingest_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_caption_ingest_total",
+            "Caption pushes handled, labeled by outcome (ok/ok_not_persisted/rejected/disabled)",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(ingest_total.clone()))
+        .expect("register svc_presentation_caption_ingest_total");
+
+    let ingest_duration_seconds = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+        "svc_presentation_caption_ingest_duration_seconds",
+        "End-to-end caption ingest handling time (validate, publish, persist)",
+    ))
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(ingest_duration_seconds.clone()))
+        .expect("register svc_presentation_caption_ingest_duration_seconds");
+
+    let text_chars = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_caption_text_chars",
+            "Length in characters of the original text of accepted captions",
+        )
+        .buckets(vec![10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(text_chars.clone()))
+        .expect("register svc_presentation_caption_text_chars");
+
+    let history_replayed = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_caption_history_replayed",
+            "Captions replayed to a websocket client on connect",
+        )
+        .buckets(vec![0.0, 1.0, 2.0, 3.0, 5.0, 10.0]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(history_replayed.clone()))
+        .expect("register svc_presentation_caption_history_replayed");
+
+    let ws_connections_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_caption_ws_connections_total",
+            "Caption websocket handshakes, labeled by outcome (accepted/denied/disabled)",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(ws_connections_total.clone()))
+        .expect("register svc_presentation_caption_ws_connections_total");
+
+    CaptionMetrics {
+        ingest_total,
+        ingest_duration_seconds,
+        text_chars,
+        history_replayed,
+        ws_connections_total,
+    }
+}
+
+/// Metrics for the generic overlay push route (`POST /{overlay_code}/
+/// {surface}/push`): the end-to-end resolve + render + publish path.
+/// Labels are closed sets only (`surface`, `outcome`) -- never a community id,
+/// user reference or push text. Histogram first, per
+/// `rules/critical-rules.md` Observability.
+#[derive(Clone)]
+pub struct PushMetrics {
+    /// Pushes handled, labeled `surface` and `outcome` = `published`
+    /// (rendered and fanned out), `rejected` (the surface's renderer refused
+    /// the push -- a caller error), or `degraded` (published, but the
+    /// community context was unavailable so every user rendered as the
+    /// neutral label).
+    pub pushes_total: prometheus::IntCounterVec,
+    /// End-to-end push handling time: community-context lookup, display-name
+    /// resolution, render, publish.
+    pub push_duration_seconds: prometheus::HistogramVec,
+}
+
+/// Registers [`PushMetrics`] against `registry`. Must be called exactly once
+/// per `registry` -- see [`crate::http::AppState::new`].
+pub fn register_push_metrics(registry: &prometheus::Registry) -> PushMetrics {
+    let pushes_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_overlay_pushes_total",
+            "Overlay pushes handled, labeled by surface and outcome (published/rejected/degraded)",
+        ),
+        &["surface", "outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(pushes_total.clone()))
+        .expect("register svc_presentation_overlay_pushes_total");
+
+    let push_duration_seconds = prometheus::HistogramVec::new(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_overlay_push_duration_seconds",
+            "End-to-end overlay push handling time (context lookup, detokenize, render, publish), by surface",
+        ),
+        &["surface"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(push_duration_seconds.clone()))
+        .expect("register svc_presentation_overlay_push_duration_seconds");
+
+    PushMetrics {
+        pushes_total,
+        push_duration_seconds,
+    }
+}
+
+/// Metrics for the overlay-code -> community lookup every overlay route
+/// performs ([`crate::overlay::code`]). Labels are closed sets only -- never
+/// the code itself (a capability-like URL secret) or a community id.
+#[derive(Clone)]
+pub struct OverlayCodeMetrics {
+    /// Lookups, labeled `outcome` = `malformed` (not `[0-9a-f]{16}`; rejected
+    /// without touching the cache or database), `cache_hit` (a live cached
+    /// mapping), `db_found`, `db_absent` (well-formed but no such community --
+    /// a stale or guessed code), or `db_error` (the lookup itself failed).
+    pub lookups_total: prometheus::IntCounterVec,
+    /// Database lookup latency (cache misses only).
+    pub lookup_duration_seconds: prometheus::Histogram,
+}
+
+/// Registers [`OverlayCodeMetrics`] against `registry`. Must be called
+/// exactly once per registry.
+pub fn register_overlay_code_metrics(registry: &prometheus::Registry) -> OverlayCodeMetrics {
+    let lookups_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_overlay_code_lookups_total",
+            "Overlay code lookups, labeled by outcome \
+             (malformed/cache_hit/db_found/db_absent/db_error)",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(lookups_total.clone()))
+        .expect("register svc_presentation_overlay_code_lookups_total");
+
+    let lookup_duration_seconds = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_overlay_code_lookup_duration_seconds",
+            "Database latency of an overlay code -> community lookup (cache misses only)",
+        )
+        .buckets(vec![
+            0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+        ]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(lookup_duration_seconds.clone()))
+        .expect("register svc_presentation_overlay_code_lookup_duration_seconds");
+
+    OverlayCodeMetrics {
+        lookups_total,
+        lookup_duration_seconds,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,11 +504,78 @@ mod tests {
     }
 
     #[test]
+    fn register_push_metrics_exposes_the_counter_and_histogram() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_push_metrics(&registry);
+        metrics
+            .pushes_total
+            .with_label_values(&["chat", "published"])
+            .inc();
+        metrics
+            .push_duration_seconds
+            .with_label_values(&["chat"])
+            .observe(0.002);
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_overlay_pushes_total"));
+        assert!(rendered.contains("svc_presentation_overlay_push_duration_seconds"));
+    }
+
+    #[test]
+    fn register_overlay_code_metrics_exposes_the_counter_and_histogram() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_overlay_code_metrics(&registry);
+        metrics.lookups_total.with_label_values(&["db_found"]).inc();
+        metrics.lookup_duration_seconds.observe(0.003);
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_overlay_code_lookups_total"));
+        assert!(rendered.contains("svc_presentation_overlay_code_lookup_duration_seconds"));
+    }
+
+    #[test]
     fn up_gauge_alone_is_a_non_empty_series_before_any_request() {
         let registry = prometheus::Registry::new();
         register_request_metrics(&registry);
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_presentation_up 1"));
+    }
+
+    #[test]
+    fn register_image_metrics_produces_a_non_empty_exposition() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_image_metrics(&registry);
+        metrics.uploads_total.with_label_values(&["success"]).inc();
+        metrics.upload_bytes.observe(2048.0);
+        metrics.sign_latency_seconds.observe(0.01);
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_image_uploads_total"));
+        assert!(rendered.contains("svc_presentation_image_upload_bytes"));
+        assert!(rendered.contains("svc_presentation_image_sign_latency_seconds"));
+    }
+
+    #[test]
+    fn register_caption_metrics_produces_a_non_empty_exposition() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_caption_metrics(&registry);
+        metrics.ingest_total.with_label_values(&["ok"]).inc();
+        metrics.ingest_duration_seconds.observe(0.002);
+        metrics.text_chars.observe(42.0);
+        metrics.history_replayed.observe(3.0);
+        metrics
+            .ws_connections_total
+            .with_label_values(&["accepted"])
+            .inc();
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        for series in [
+            "svc_presentation_caption_ingest_total",
+            "svc_presentation_caption_ingest_duration_seconds",
+            "svc_presentation_caption_text_chars",
+            "svc_presentation_caption_history_replayed",
+            "svc_presentation_caption_ws_connections_total",
+        ] {
+            assert!(rendered.contains(series), "missing {series}");
+        }
     }
 
     #[test]

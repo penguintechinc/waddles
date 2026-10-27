@@ -70,6 +70,7 @@ pub mod config;
 pub(crate) mod crypto;
 pub mod db;
 pub mod dispatch;
+pub(crate) mod dispatch_destination;
 pub mod dispatch_supervisor;
 pub mod distribution;
 pub mod egress;
@@ -79,8 +80,10 @@ pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
 pub mod http;
+pub mod metrics_facade;
 pub mod retry;
 pub mod senders;
+pub mod stage_metrics;
 pub mod telemetry;
 pub mod usage;
 pub mod wiring;
@@ -236,6 +239,15 @@ where
     F2: std::future::Future<Output = ()> + Send + 'static,
 {
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
+    // Build the stage's OTel instruments NOW, strictly after `telemetry::init`
+    // installed the global meter provider: an instrument created earlier
+    // would bind to the no-op default provider and silently record nothing.
+    // Every later `stage_metrics::stage_metrics()` call returns this same set.
+    let _ = stage_metrics::stage_metrics();
+    // Route `bundle-capability-gate`'s `metrics`-facade audit counters
+    // (grants and denials) into the same OTel pipeline; without a recorder
+    // the facade drops them.
+    metrics_facade::install();
 
     tracing::info!(
         http_port = config.cli.http_port,
@@ -321,6 +333,12 @@ where
     // `crate::flags` before any bundle invoke can reach
     // `StageCapabilities::handle_flags`.
     flags::set_flags_metric(telemetry::register_flags_metrics(&prom_registry));
+    // Connector spec SS0 condition 5: registered here, same "before
+    // `prom_registry` moves" constraint as the metrics above, then threaded
+    // into whichever of `try_start_dispatch`/`try_start_changelog_consumer`
+    // actually starts.
+    let circuit_breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics> =
+        Arc::new(telemetry::register_circuit_breaker_metrics(&prom_registry));
 
     // Outbound PII-detokenization's hub_client startup wiring (closes the
     // TODO seam `capabilities::StageCapabilities::with_detokenize` used to
@@ -428,6 +446,7 @@ where
                 Arc::clone(&usage),
                 changelog_consumer_ready,
                 app_version_snapshot.clone(),
+                Arc::clone(&circuit_breaker_metrics),
             );
         }
         PathDecision::NoDbConfig | PathDecision::KillSwitchOn => {
@@ -454,6 +473,7 @@ where
                 app_version_snapshot.clone(),
                 drain_loop_metrics,
                 consumer_loop_ready,
+                circuit_breaker_metrics,
             );
         }
     }
@@ -578,6 +598,54 @@ fn flag_or_closed(
         Some(client) => flags::boxed(flags::LicenseFlag::new(Arc::clone(client), key)),
         None => flags::boxed(flags::StaticFlag(false)),
     }
+}
+
+/// Derives the bundle-`kv` Valkey connection config from the spine config
+/// for the DEDICATED `noeviction` kv instance (`VALKEY_KV_URL` /
+/// `VALKEY_KV_USERNAME` / `VALKEY_KV_PASSWORD`). TLS follows the kv URL
+/// scheme, never the spine's. Returns `None` when `VALKEY_KV_URL` is
+/// unset/blank -- deliberately NO fallback to the durable spine instance.
+fn kv_instance_config(
+    spine: &penguin_spine::SpineConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<penguin_spine::SpineConfig> {
+    let non_empty = |k: &str| lookup(k).filter(|v| !v.trim().is_empty());
+    let url = non_empty("VALKEY_KV_URL")?;
+    let mut cfg = spine.clone();
+    cfg.security_transport_tls = url.starts_with("rediss://");
+    cfg.valkey_url = url;
+    cfg.valkey_username = non_empty("VALKEY_KV_USERNAME");
+    cfg.valkey_password = non_empty("VALKEY_KV_PASSWORD");
+    Some(cfg)
+}
+
+/// Surfaces "bundle-kv is unavailable" loudly: ERROR log with `reason` plus
+/// a `kv` error-counter increment (`kind="kv_instance_unavailable"`). The
+/// caller then leaves `kv` unwired, so every kv host-call denies
+/// `not_implemented` (fail-CLOSED) -- never a fallback to the durable/spine
+/// instance and never an unmetered quota bypass.
+fn kv_degraded(reason: &str, detail: &str) {
+    tracing::error!(
+        reason = %reason,
+        detail = %detail,
+        "kv capability DEGRADED: dedicated kv Valkey instance unavailable; kv disabled \
+         (fail-closed: not_implemented on every kv host-call, NO fallback to the durable instance)"
+    );
+    static COUNTER: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    COUNTER
+        .get_or_init(|| {
+            opentelemetry::global::meter("bundle_host_kv")
+                .u64_counter("waddles_bundle_kv_instance_unavailable_total")
+                .with_description(
+                    "Bundle kv disabled at startup: dedicated kv Valkey unset/unreachable/evicting",
+                )
+                .build()
+        })
+        .add(
+            1,
+            &[opentelemetry::KeyValue::new("reason", reason.to_string())],
+        );
 }
 
 /// Builds (never connects) a [`redis::Client`] from `cfg`'s `VALKEY_URL`/
@@ -728,20 +796,33 @@ async fn build_stage_capabilities(
         Some(guard) => guard,
         None => return None,
     };
-    // `kv` reuses this same direct Valkey connection (cloned -- a cheap
-    // handle clone over one shared TCP connection, not a second socket)
-    // rather than opening a dedicated one: `relay_conn` already IS the
-    // "second, direct redis connection" `usage.rs`'s module doc describes,
-    // and `kv`'s isolation/quota model needs nothing about the connection
-    // itself that `relay`/usage don't already require (`crate::capabilities`'
-    // `StageCapabilities::with_kv`'s doc).
-    let mut kv_conn = relay_conn.clone();
-    // Low-severity fix, security review of PR #425: `count_key` has no
-    // TTL, so an `allkeys-*` `maxmemory-policy` can evict it under memory
-    // pressure, silently resetting the kv quota -- checked once here,
-    // never on the per-op hot path (`bundle_host_kv::policy`'s doc).
-    let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut kv_conn).await;
-    bundle_host_kv::policy::log_and_record(&policy_check);
+    // `kv` gets its OWN connection to the dedicated `noeviction` kv instance
+    // (`VALKEY_KV_URL`, see `kv_instance_config`), never `relay_conn`'s
+    // durable instance. Any unavailability (unset URL, connect failure,
+    // evicting policy) disables only `kv` LOUDLY (`kv_degraded`) and
+    // fail-CLOSED -- never a fallback to the durable instance.
+    let kv_conn = match kv_instance_config(&spine_cfg, |k| std::env::var(k).ok()) {
+        None => {
+            kv_degraded("url_unset", "VALKEY_KV_URL is unset or blank");
+            None
+        }
+        Some(kv_cfg) => match usage::connect(&kv_cfg).await {
+            Ok(mut conn) => {
+                let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut conn).await;
+                bundle_host_kv::policy::log_and_record(&policy_check);
+                if let bundle_host_kv::policy::PolicyCheck::Violation(policy) = &policy_check {
+                    kv_degraded("evicting_policy", policy);
+                    None
+                } else {
+                    Some(conn)
+                }
+            }
+            Err(err) => {
+                kv_degraded("connect_failed", &err.to_string());
+                None
+            }
+        },
+    };
     // `core/bundle_capability_gate::CapabilityGate` (spec
     // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     // SS5): `PgGrantLoader` against the RO-replica reader account when
@@ -785,8 +866,11 @@ async fn build_stage_capabilities(
     };
     let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
         relay_conn, egress, usage, gate,
-    )
-    .with_kv(kv_conn, kv_capabilities);
+    );
+    let caps = match kv_conn {
+        Some(kv_conn) => caps.with_kv(kv_conn, kv_capabilities),
+        None => caps,
+    };
     // Discord relay send (spec: relay providers, `discord`) -- graceful
     // degradation, not a startup requirement: a deployment that never sets
     // `DISCORD_BOT_TOKEN` simply never enables this provider, and a bundle
@@ -818,6 +902,10 @@ async fn build_stage_capabilities(
         ),
         None => caps,
     };
+    // Dispatcher egress toggle (`flags::EGRESS_VIA_DISPATCHER_FLAG`) --
+    // default OFF (unseen/absent => inline path); this is the only
+    // production wiring that makes the dispatcher path reachable.
+    let caps = caps.with_egress_dispatcher_flag(flags::egress_dispatcher_flag());
     Some(Arc::new(caps))
 }
 
@@ -1112,6 +1200,7 @@ fn try_start_changelog_consumer(
     // `app_versions.id`. See `dispatch::DispatchDeps::app_version_snapshot`'s
     // doc.
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -1255,11 +1344,17 @@ fn try_start_changelog_consumer(
                                 retry_policy: dispatch_retry_policy,
                                 db: dispatch_db,
                                 usage,
-                                metrics: Arc::new(penguin_spine::NoopMetrics),
+                                metrics: stage_metrics::stage_metrics(),
                                 rust_data_plane,
                                 active_digests: Arc::clone(&active_digests),
                                 loaded_sessions: Arc::clone(&loaded_sessions),
                                 app_version_snapshot: app_version_snapshot.clone(),
+                                // ONE shared instance for this supervisor
+                                // (`dispatch_supervisor::SupervisorDeps::
+                                // breaker`'s doc) -- built here (no I/O).
+                                breaker: Arc::new(circuit_breaker::CircuitBreaker::new(
+                                    Arc::clone(&breaker_metrics),
+                                )),
                             });
                             Some(Arc::new(dispatch_supervisor::SpineConsumerSupervisor {
                                 deps,
@@ -1330,6 +1425,7 @@ fn try_start_changelog_consumer(
 /// `ACTION_BUNDLE_*` env bundle *loader* ([`try_start_env_bundle_loader`])
 /// is a separate, non-consumer mechanism and still runs regardless of this
 /// decision.
+#[allow(clippy::too_many_arguments)]
 fn try_start_dispatch(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
@@ -1343,6 +1439,7 @@ fn try_start_dispatch(
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     drain_loop_metrics: telemetry::DrainLoopMetrics,
     consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) {
     if config.cli.action_app_id.is_empty() {
         tracing::info!("ACTION_APP_ID not set; dispatch loop not started (no bundle assigned)");
@@ -1416,7 +1513,7 @@ fn try_start_dispatch(
             platform: "internal".to_string(),
             source_id: app_id.clone(),
         };
-        let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
+        let metrics: Arc<dyn penguin_spine::SpineMetrics> = stage_metrics::stage_metrics();
 
         try_start_usage_flush(
             config.cli.metering_flush_interval_s,
@@ -1440,6 +1537,10 @@ fn try_start_dispatch(
         // 2026-10-02)
         const BACKOFF_MAX: Duration = Duration::from_secs(30);
         let mut attempt: u32 = 0;
+        // Built ONCE for this loop's lifetime, never per reconnect attempt
+        // -- see `core/svc_process::try_start_process_loop`'s identical
+        // breaker placement/rationale.
+        let breaker = Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics));
         loop {
             attempt += 1;
             drain_loop_metrics
@@ -1511,6 +1612,7 @@ fn try_start_dispatch(
                 spine,
                 metrics: metrics.clone(),
                 app_version_snapshot: app_version_snapshot.clone(),
+                breaker: Arc::clone(&breaker),
             };
 
             let (inner_tx, inner_rx) = tokio::sync::oneshot::channel();
@@ -2013,6 +2115,39 @@ mod tests {
         }
     }
 
+    /// Wiring: bundle-kv goes to `VALKEY_KV_URL` (dedicated), the spine config
+    /// stays on the durable `VALKEY_URL`; unset kv URL => None (no fallback).
+    #[test]
+    fn kv_instance_config_routes_kv_to_dedicated_and_leaves_spine_on_durable() {
+        let mut spine = unreachable_spine_config();
+        spine.valkey_url = "rediss://durable:6380/0".to_string();
+        spine.valkey_password = Some("durable-pass".to_string());
+        spine.security_transport_tls = true;
+        let env = |k: &str| match k {
+            "VALKEY_KV_URL" => Some("rediss://infra-redis:6380/0".to_string()),
+            "VALKEY_KV_PASSWORD" => Some("cache-pass".to_string()),
+            _ => None,
+        };
+        let kv = kv_instance_config(&spine, env).expect("kv url set");
+        assert_eq!(kv.valkey_url, "rediss://infra-redis:6380/0");
+        assert_eq!(kv.valkey_password.as_deref(), Some("cache-pass"));
+        assert!(kv.security_transport_tls);
+        assert_eq!(spine.valkey_url, "rediss://durable:6380/0");
+        assert_eq!(spine.valkey_password.as_deref(), Some("durable-pass"));
+
+        let plain = kv_instance_config(&spine, |k| {
+            (k == "VALKEY_KV_URL").then(|| "redis://:p@infra-redis:6379/0".to_string())
+        })
+        .expect("kv url set");
+        assert!(!plain.security_transport_tls);
+        assert!(plain.valkey_password.is_none());
+
+        // Unset/blank: NO fallback to the durable instance.
+        assert!(kv_instance_config(&spine, |_| None).is_none());
+        assert!(kv_instance_config(&spine, |_| Some("  ".to_string())).is_none());
+        kv_degraded("test", "does not panic");
+    }
+
     /// Regression coverage for the CRITICAL usage-metering finding: proves
     /// [`try_start_usage_flush`] doesn't panic and returns control to its
     /// caller immediately (fire-and-forget `tokio::spawn`) when the initial
@@ -2057,6 +2192,7 @@ mod tests {
             bundle_active_set::ActiveVersionSnapshot::new(),
             telemetry::register_drain_loop_metrics(&prometheus::Registry::new()),
             Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            Arc::new(()),
         );
     }
 
@@ -2100,6 +2236,7 @@ mod tests {
             usage,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bundle_active_set::ActiveVersionSnapshot::new(),
+            Arc::new(()),
         );
     }
 

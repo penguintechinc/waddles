@@ -67,7 +67,7 @@ async def test_mem0_service():
     try:
         result = await service.add_memory(
             content="The user prefers Python programming",
-            user_id="user123",
+            user_id=Mem0Service.user_key("00000000-0000-4000-8000-000000000123"),
             metadata={"category": "preference"}
         )
         logger.info(f"Added memory: {result}")
@@ -99,7 +99,7 @@ async def test_mem0_service():
     logger.info("\n--- Test 5: Getting community context ---")
     try:
         context = await service.get_community_context()
-        logger.info(f"Community context:")
+        logger.info("Community context:")
         logger.info(f"  Total memories: {context['total_memories']}")
         logger.info(f"  Recent memories: {len(context['recent_memories'])}")
         logger.info(

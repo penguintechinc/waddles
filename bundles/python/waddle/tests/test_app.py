@@ -106,11 +106,6 @@ def test_non_chat_payload_is_ignored() -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(fake_host: _Host) -> None:
-    fake_host.flag_enabled = False
-    assert _run(transform(_sample_event("!waddle"))) is None
-
-
 @pytest.mark.parametrize("platform", ["twitch", "discord"])
 def test_dispatch_relays_to_origin_platform(platform: str, fake_host: _Host) -> None:
     result = _run(dispatch(_envelope(platform, "reply"), {}, http_client=None))

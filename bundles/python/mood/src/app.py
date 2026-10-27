@@ -1,11 +1,12 @@
 """`!mood` -> a random mood / vibe from a built-in list. Stateless.
 
-No `kv` (only `flags.read` is declared) and no user reference at all: the reply names no one,
-so there is no username/PII surface. Logs carry only the command name.
+No `kv` (no permission is declared) and no user reference at all: the reply names no one, so there
+is no username/PII surface. Logs carry only the command name.
 
 Fail-loud: `!mood <anything>` gets a usage reply rather than being silently ignored.
 
-Gated behind the PostHog flag ``waddles.command-mood``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -14,10 +15,8 @@ import random
 from typing import Any
 
 from waddle_sdk import log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-mood"
 COMMAND = "!mood"
 
 _USAGE = "Usage: !mood"
@@ -50,15 +49,13 @@ def _pick(pool: tuple[str, ...]) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!mood` and build the reply.
 
-    Exact first-token match comes before the flag check.
+    Exact first-token match is the only precondition.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     reply = _USAGE if rest.strip() else f"Current mood: {_pick(_MOODS)}"

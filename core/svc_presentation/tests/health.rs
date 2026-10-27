@@ -2,6 +2,8 @@
 //! `/metrics` router -- exercised through the real axum `Router`, not the
 //! handler functions directly.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use clap::Parser;
@@ -18,9 +20,12 @@ fn test_state() -> AppState {
         cli,
         db_password: Secret::new("db-pass"),
         cache_password: None,
+        image_bucket_access_key_id: None,
+        image_bucket_secret_access_key: None,
     };
     let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
     AppState::new(config, prometheus::Registry::new(), db)
+        .with_overlay_codes(common::test_overlay_codes())
 }
 
 #[tokio::test]
@@ -141,21 +146,21 @@ async fn unknown_route_on_main_router_is_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-/// No overlay route is mounted yet in P1 (see `crate::overlay::router`'s
-/// module doc) -- `/overlay/*` 404s like any other unknown path today,
-/// honestly, rather than serving a stub.
+/// The plain full-page surface route (`GET /{overlay_code}/{surface}`)
+/// is mounted behind the VIEW guard like `/live`: without a `?key=` the guard
+/// answers 400 (never a 404 -- the route exists -- and never the page).
 #[tokio::test]
-async fn overlay_path_is_404_until_p2_p3_add_the_real_route() {
+async fn overlay_page_route_is_mounted_behind_the_view_guard() {
     let app = router(test_state());
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/overlay/42/media?key=anything")
+                .uri(format!("/{}/media", common::CODE_42))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

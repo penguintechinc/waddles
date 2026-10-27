@@ -79,7 +79,9 @@ class _FakeDiscordClient:
         member_roles: dict[str, set[str]],
         *,
         guild_members: list[svc.DiscordGuildMember] | None = None,
+        complete: bool = True,
     ) -> None:
+        self._complete = complete
         self._member_roles = member_roles
         # Separate from `_member_roles` (the twitch_to_discord direction's per-user
         # current-role lookup) -- `list_guild_members` is the discord_to_platform
@@ -109,6 +111,10 @@ class _FakeDiscordClient:
     async def list_guild_members(self, *, guild_id: str) -> list[svc.DiscordGuildMember]:
         self.list_guild_members_calls += 1
         return self._guild_members
+
+    async def list_guild_members_checked(self, *, guild_id: str) -> svc.GuildMemberSnapshot:
+        self.list_guild_members_calls += 1
+        return svc.GuildMemberSnapshot(members=self._guild_members, complete=self._complete)
 
 
 class _FailingCredentialResolver:
@@ -1072,3 +1078,187 @@ class TestHttpDiscordRoleTargetClientListGuildMembers:
         client = self._client(handler)
         with pytest.raises(svc.DiscordSyncError):
             await client.list_guild_members(guild_id=_DISCORD_GUILD_ID)
+
+
+# Guarded demote-on-role-remove
+# ---------------------------------------------------------------------------
+
+_DEMOTE_USER_A = "800010"
+_DEMOTE_USER_B = "800011"
+
+
+def _demote_setup(
+    dal: Any,
+    community_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enable: bool = True,
+    users: dict[int, tuple[str, str]] | None = None,
+) -> Any:
+    """Pairing + baseline role + linked members `{hub_id: (discord_id, role)}`."""
+    pairing = _make_platform_pairing(dal, community_id)
+    _add_community_role(dal, community_id=community_id, name="community-member")
+    if enable:
+        monkeypatch.setenv(svc.DEMOTE_PAIRING_IDS_ENV, str(pairing.id))
+    else:
+        monkeypatch.delenv(svc.DEMOTE_PAIRING_IDS_ENV, raising=False)
+    for hub_id, (discord_id, role) in (users or {}).items():
+        _link_identity(dal, hub_user_id=hub_id, platform="discord", platform_user_id=discord_id)
+        _add_community_member(dal, community_id=community_id, hub_user_id=hub_id, role=role)
+    return pairing
+
+
+def _present(user_id: str, *roles: str) -> svc.DiscordGuildMember:
+    return svc.DiscordGuildMember(user_id=user_id, role_ids=frozenset(roles))
+
+
+async def _run(dal: Any, pairing: Any, client: _FakeDiscordClient) -> Any:
+    return await svc.reconcile_pairing_discord_to_platform(
+        dal,
+        pairing,
+        credential_resolver=_FakeCredentialResolver(),
+        make_discord_client=lambda token: client,
+    )
+
+
+class TestGuardedDemote:
+    async def test_present_without_mapped_role_managed_role_demoted(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, cid, _t, _g = bar_citizen_db
+        pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "member")})
+        client = _FakeDiscordClient({}, guild_members=[_present(_DEMOTE_USER_A)])
+        result = await _run(dal, pairing, client)
+        assert result.error is None
+        assert result.community_roles_demoted == 1
+        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "community-member"
+
+    async def test_present_with_mapped_role_stays(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, cid, _t, _g = bar_citizen_db
+        pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "member")})
+        client = _FakeDiscordClient(
+            {}, guild_members=[_present(_DEMOTE_USER_A, _MEMBER_ROLE_DISCORD)]
+        )
+        result = await _run(dal, pairing, client)
+        assert result.community_roles_demoted == 0
+        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
+
+    async def test_empty_member_list_demotes_nobody(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, cid, _t, _g = bar_citizen_db
+        pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "member")})
+        client = _FakeDiscordClient({}, guild_members=[], complete=True)
+        # `guild_members or default` -> default from empty member_roles == [] as well
+        result = await _run(dal, pairing, client)
+        assert result.community_roles_demoted == 0
+        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
+
+    async def test_partial_or_truncated_read_demotes_nobody(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, cid, _t, _g = bar_citizen_db
+        pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "member")})
+        client = _FakeDiscordClient({}, guild_members=[_present(_DEMOTE_USER_A)], complete=False)
+        result = await _run(dal, pairing, client)
+        assert result.error is None
+        assert result.community_roles_demoted == 0
+        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
+
+    async def test_absent_from_list_never_demoted(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, cid, _t, _g = bar_citizen_db
+        pairing = _demote_setup(
+            dal,
+            cid,
+            monkeypatch,
+            users={1: (_DEMOTE_USER_A, "member"), 2: (_DEMOTE_USER_B, "member")},
+        )
+        # A is returned holding the mapped role; B is simply not in the list.
+        client = _FakeDiscordClient(
+            {}, guild_members=[_present(_DEMOTE_USER_A, _MEMBER_ROLE_DISCORD)]
+        )
+        await _run(dal, pairing, client)
+        assert _get_member_role(dal, community_id=cid, hub_user_id=2) == "member"
+
+    async def test_unmanaged_manual_role_untouched(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, cid, _t, _g = bar_citizen_db
+        pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "vip")})
+        client = _FakeDiscordClient({}, guild_members=[_present(_DEMOTE_USER_A)])
+        result = await _run(dal, pairing, client)
+        assert result.community_roles_demoted == 0
+        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "vip"
+
+    async def test_community_owner_never_demoted(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, cid, _t, _g = bar_citizen_db
+        pairing = _demote_setup(
+            dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "community-owner")}
+        )
+        client = _FakeDiscordClient({}, guild_members=[_present(_DEMOTE_USER_A)])
+        result = await _run(dal, pairing, client)
+        assert result.community_roles_demoted == 0
+        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "community-owner"
+
+    async def test_default_grant_only_without_opt_in(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, cid, _t, _g = bar_citizen_db
+        pairing = _demote_setup(
+            dal, cid, monkeypatch, enable=False, users={1: (_DEMOTE_USER_A, "member")}
+        )
+        client = _FakeDiscordClient({}, guild_members=[_present(_DEMOTE_USER_A)])
+        result = await _run(dal, pairing, client)
+        assert result.community_roles_demoted == 0
+        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
+
+    async def test_missing_baseline_role_aborts(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, cid, _t, _g = bar_citizen_db
+        pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "member")})
+        monkeypatch.setenv(svc.DEMOTE_BASELINE_ROLE_ENV, "no-such-role")
+        client = _FakeDiscordClient({}, guild_members=[_present(_DEMOTE_USER_A)])
+        result = await _run(dal, pairing, client)
+        assert result.community_roles_demoted == 0
+        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
+
+    async def test_circuit_breaker_blocks_mass_demote(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, cid, _t, _g = bar_citizen_db
+        users = {i: (f"9000{i}", "member") for i in range(1, 6)}
+        pairing = _demote_setup(dal, cid, monkeypatch, users=users)
+        client = _FakeDiscordClient({}, guild_members=[_present(d) for d, _r in users.values()])
+        result = await _run(dal, pairing, client)
+        assert result.community_roles_demoted == 0
+        for i in users:
+            assert _get_member_role(dal, community_id=cid, hub_user_id=i) == "member"
+
+
+class TestListGuildMembersChecked:
+    async def test_short_page_is_complete_and_max_pages_is_not(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _client(page_len: int) -> Any:
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(
+                    200,
+                    json=[{"user": {"id": str(i + 1)}, "roles": []} for i in range(page_len)],
+                )
+
+            http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            return svc.HttpDiscordRoleTargetClient(http, bot_token="t")  # noqa: S106
+
+        short = await _client(2).list_guild_members_checked(guild_id=_DISCORD_GUILD_ID)
+        assert short.complete is True and len(short.members) == 2
+        monkeypatch.setattr(svc, "_DISCORD_MEMBER_PAGE_SIZE", 2)
+        monkeypatch.setattr(svc, "_MAX_PAGES", 2)
+        capped = await _client(2).list_guild_members_checked(guild_id=_DISCORD_GUILD_ID)
+        assert capped.complete is False

@@ -34,16 +34,16 @@ post-write verification in `_join`.
 
 ## Points-store integration (read this)
 
-Identical situation to `bundles/python/gamble`: `loyalty`'s balances are a
-`db` table + kv index private to that app (host-scoped per app_id), and this
-bundle holds only `storage.kv` + `flags.read`, so it cannot touch them. Balances
-live behind the narrow `_Ledger` seam (community-scoped, pseudonymous kv; new
-players seeded with `STARTING_BALANCE`) so a future platform points capability
-replaces only that class. Flagged in the PR description.
+Identical situation to `bundles/python/gamble`: `loyalty`'s balances are a `db` table + kv index
+private to that app (host-scoped per app_id), and this bundle holds only `storage.kv`, so it cannot
+touch them. Balances live behind the narrow `_Ledger` seam (community-scoped, pseudonymous kv; new
+players seeded with `STARTING_BALANCE`) so a future platform points capability replaces only that
+class. Flagged in the PR description.
 
 PII-free logging: fields are `op`/`outcome`/`amount_bucket`/`crew_size`/error
 case only -- never actor, username or message text. Pseudonyms (SHA-256) are
-the only identity persisted. Gated by PostHog flag ``waddles.command-heist``.
+the only identity persisted. Activation-gated only -- no feature flag: the platform's installed ->
+enabled -> activated check decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -56,10 +56,13 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-heist"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 SPEC = CommandSpec(name="heist")
 
 STARTING_BALANCE = 100
@@ -137,14 +140,14 @@ def _success_percent(crew_size: int) -> int:
 
 def _roll(percent: int) -> bool:
     """Return True with probability `percent`/100."""
-    return random.randint(1, 100) <= percent  # noqa: S311 - a game, not security
+    return _RNG.randint(1, 100) <= percent
 
 
 def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """`True`/`False` from badge fields, or `None` if absent (absent must deny)."""
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 def _resolve_command(parsed: ParsedCommand | None) -> str:
@@ -161,7 +164,7 @@ def _resolve_command(parsed: ParsedCommand | None) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!heist`, `<amount>` and `set window`.
 
-    Cheap command-match first, flag second, grammar last. A recognized-but-malformed
+    Cheap command-match first, grammar last. A recognized-but-malformed
     `!heist ...` replies `usage`, never a silent drop.
     """
     text = event.payload.get("text")
@@ -169,8 +172,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     stripped = text.strip()
     if stripped.partition(" ")[0].lower() != "!heist":
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     tail = stripped.partition(" ")[2].strip()
@@ -188,9 +189,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
             payload["arg"] = parsed.args
     log.info("heist.transform matched", command=payload["command"])
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
     return PlatformEvent(
         platform=event.platform,
         event_type=event.event_type,

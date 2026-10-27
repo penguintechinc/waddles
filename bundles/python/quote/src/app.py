@@ -1,6 +1,6 @@
 """`!quote` -> a per-community quote book, DB-backed (structured `db` facade, v2).
 
-Strangler extraction of `core/svc_process/bundles/social_quote_process.py`'s
+Strangler extraction of `core/svc_process/builtin_handlers/social_quote_process.py`'s
 `!quote` command (`feature/bundle-quote`), modeled on `bundles/python/rank`'s
 structured-`db` + `community_kv`-index template -- see that bundle's own
 module docstring for the full rationale this one reuses byte-for-byte.
@@ -63,10 +63,8 @@ when `is_mod`/`is_broadcaster` aren't present as actual `bool`s on the
 event (the same Discord-normalizer gap `count`'s own module docstring
 describes).
 
-Gated behind the PostHog flag ``waddles.command-quote`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -75,10 +73,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, db, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-quote"
 
 _COMMAND_PREFIX = "!quote"
 _SPEC = CommandSpec(name="quote", sub_modules=frozenset())
@@ -121,7 +116,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     is_broadcaster = payload.get("is_broadcaster")
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         return None
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 def _resolve_command(parsed: ParsedCommand) -> tuple[str, str | None, str | None]:
@@ -149,7 +144,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     Cheap-skip first (exact `!quote` first token -- `None`, zero cost; a
     `startswith` check alone would wrongly match `!quotex`/`!quoter`, the
     same first-token-equality guard `count`/`rank`'s own `transform()`
-    use), flag check second, real grammar parse last. Builds a normalized
+    use), real grammar parse last. Builds a normalized
     command payload for `dispatch` to act on; all `kv`/`db` I/O and
     permission checks happen there, mirroring `rank`'s own transform/
     dispatch split.
@@ -161,9 +156,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() != _COMMAND_PREFIX:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     after_prefix = stripped[len(_COMMAND_PREFIX) :].strip()
@@ -196,9 +188,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     # Forward the normalized badge signal, if present -- see `count`/`rank`'s own identical
     # forwarding comment for why absence must reach `dispatch` as absence, not `False`.
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
 
     return PlatformEvent(
         platform=event.platform,

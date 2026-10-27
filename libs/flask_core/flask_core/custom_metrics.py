@@ -38,24 +38,37 @@ except ImportError:
     PROMETHEUS_AVAILABLE = False
     # Fallback implementations for when prometheus_client is not available
     class DummyMetric:
+        def __init__(self, *args, **kwargs):
+            # Accept (and ignore) the real prometheus_client constructor
+            # signature so MetricsManager still instantiates when the
+            # package is missing -- without this every Counter(name, doc,
+            # labels, registry=...) call raised TypeError, defeating the fallback.
+            pass
         def labels(self, *args, **kwargs):
             return self
+
         def inc(self, *args, **kwargs):
             pass
+
         def dec(self, *args, **kwargs):
             pass
+
         def set(self, *args, **kwargs):
             pass
+
         def observe(self, *args, **kwargs):
             pass
+
         def info(self, *args, **kwargs):
             pass
+
         def time(self):
             return DummyTimer()
 
     class DummyTimer:
         def __enter__(self):
             return self
+
         def __exit__(self, *args):
             pass
 

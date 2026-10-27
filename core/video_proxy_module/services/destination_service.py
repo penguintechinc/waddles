@@ -35,17 +35,17 @@ async def add_destination(
         ValueError: If config_id doesn't exist or validation fails
     """
     db = get_db()
-    
+
     # Validate config exists
     config = db(db.stream_configurations.id == config_id).select().first()
     if not config:
         raise ValueError(f"Stream configuration {config_id} not found")
-    
+
     # Validate resolution
     valid_resolutions = ["1080p", "2K", "4K"]
     if resolution not in valid_resolutions:
         raise ValueError(f"Invalid resolution. Must be one of: {valid_resolutions}")
-    
+
     try:
         dest_id = db.stream_destinations.insert(
             config_id=config_id,
@@ -60,9 +60,9 @@ async def add_destination(
             updated_at=datetime.utcnow(),
         )
         db.commit()
-        
+
         logger.info(f"Added destination {dest_id} for config {config_id}: {platform} @ {resolution}")
-        
+
         return {
             "destination_id": dest_id,
             "config_id": config_id,
@@ -90,11 +90,11 @@ async def remove_destination(destination_id: int) -> bool:
         True if removed, False if not found
     """
     db = get_db()
-    
+
     try:
         deleted = db(db.stream_destinations.id == destination_id).delete()
         db.commit()
-        
+
         if deleted:
             logger.info(f"Removed destination {destination_id}")
             return True
@@ -119,33 +119,33 @@ async def update_destination(destination_id: int, **kwargs) -> Optional[Dict[str
         Updated destination dict, or None if not found
     """
     db = get_db()
-    
+
     # Validate destination exists
     dest = db(db.stream_destinations.id == destination_id).select().first()
     if not dest:
         logger.warning(f"Destination {destination_id} not found")
         return None
-    
+
     # Filter allowed fields
     allowed_fields = {"platform", "rtmp_url", "stream_key", "resolution", "bitrate", "is_enabled", "force_cut"}
     update_data = {k: v for k, v in kwargs.items() if k in allowed_fields}
-    
+
     if not update_data:
         logger.warning("No valid fields to update")
         return None
-    
+
     # Add updated timestamp
     update_data["updated_at"] = datetime.utcnow()
-    
+
     try:
         db(db.stream_destinations.id == destination_id).update(**update_data)
         db.commit()
-        
+
         # Fetch updated record
         updated = db(db.stream_destinations.id == destination_id).select().first()
-        
+
         logger.info(f"Updated destination {destination_id}: {list(update_data.keys())}")
-        
+
         return {
             "destination_id": updated.id,
             "config_id": updated.config_id,
@@ -174,9 +174,9 @@ async def list_destinations(config_id: int) -> List[Dict[str, Any]]:
         List of destination dicts
     """
     db = get_db()
-    
+
     destinations = db(db.stream_destinations.config_id == config_id).select()
-    
+
     return [
         {
             "destination_id": dest.id,
@@ -205,14 +205,14 @@ async def set_force_cut(destination_id: int, enabled: bool) -> bool:
         True if updated, False if not found
     """
     db = get_db()
-    
+
     try:
         updated = db(db.stream_destinations.id == destination_id).update(
             force_cut=enabled,
             updated_at=datetime.utcnow(),
         )
         db.commit()
-        
+
         if updated:
             logger.info(f"Set force_cut={enabled} for destination {destination_id}")
             return True
@@ -236,10 +236,10 @@ async def count_2k_destinations(config_id: int) -> int:
         Count of 2K and 4K destinations
     """
     db = get_db()
-    
+
     count = db(
         (db.stream_destinations.config_id == config_id) &
         (db.stream_destinations.resolution.belongs(["2K", "4K"]))
     ).count()
-    
+
     return count

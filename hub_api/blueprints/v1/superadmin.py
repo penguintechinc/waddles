@@ -12,12 +12,13 @@ docstring for the scope/auth rationale (`@tenant_middleware` +
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
-from flask_core.tenancy import tenant_middleware
+from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
@@ -26,6 +27,8 @@ from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
+
+logger = logging.getLogger(__name__)
 
 superadmin_bp = Blueprint("v1_superadmin_platform", __name__, url_prefix="/api/v1/superadmin")
 
@@ -36,7 +39,8 @@ def _dal() -> tuple[Any, Any]:
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     return cast(
-        tuple[dict[str, object], int], error_response(exc.message, exc.status_code, exc.code)
+        tuple[dict[str, object], int],
+        error_response(exc.message, exc.status_code, exc.code, exc.details),
     )
 
 
@@ -415,8 +419,8 @@ def _community_dto(row: Any) -> CommunityDTO:
 
 
 @superadmin_bp.route("/dashboard", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("communities:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("communities:admin")  # type: ignore[misc]
 @validate_response(DashboardResponse)
 async def get_dashboard() -> DashboardResponse:
     """Get superadmin dashboard stats."""
@@ -440,8 +444,8 @@ async def get_dashboard() -> DashboardResponse:
 
 
 @superadmin_bp.route("/communities", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("communities:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("communities:admin")  # type: ignore[misc]
 @validate_response(CommunitiesResponse)
 async def list_communities() -> CommunitiesResponse:
     """List all communities (cross-tenant)."""
@@ -472,8 +476,8 @@ async def list_communities() -> CommunitiesResponse:
 
 
 @superadmin_bp.route("/communities/<int:community_id>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("communities:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("communities:admin")  # type: ignore[misc]
 @validate_response(CommunityDetailResponse)
 async def get_community(
     community_id: int,
@@ -507,8 +511,8 @@ async def get_community(
 
 
 @superadmin_bp.route("/communities", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("communities:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("communities:admin")  # type: ignore[misc]
 @validate_request(CreateCommunityRequest)
 # NOT @validate_response -- insert_async + nested-dataclass response hits
 # the crash class documented in services/dto_response.py.
@@ -516,6 +520,9 @@ async def create_community(data: CreateCommunityRequest) -> tuple[Any, int]:
     """Create a new community."""
     async_dal, dal = _dal()
     caller_id = get_current_user_id(request)
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
     try:
         community = await svc.create_community(
             async_dal,
@@ -530,8 +537,11 @@ async def create_community(data: CreateCommunityRequest) -> tuple[Any, int]:
             is_public=data.isPublic,
             community_type=data.communityType,
             caller_id=caller_id,
+            tenant_slug=ctx.tenant_slug,
+            tenant_id=ctx.tenant_id,
         )
     except ApiError as exc:
+        logger.info("api_error_rejected", extra={"code": exc.code, "status": exc.status_code})
         return _err(exc)
     return jsonify_dto(
         CreateCommunityResponse(
@@ -550,8 +560,8 @@ async def create_community(data: CreateCommunityRequest) -> tuple[Any, int]:
 
 
 @superadmin_bp.route("/communities/<int:community_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("communities:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("communities:admin")  # type: ignore[misc]
 @validate_request(UpdateCommunityRequest)
 @validate_response(MessageResponse)
 async def update_community(
@@ -581,8 +591,8 @@ async def update_community(
 
 
 @superadmin_bp.route("/communities/<int:community_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("communities:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("communities:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def delete_community(
     community_id: int,
@@ -598,8 +608,8 @@ async def delete_community(
 
 
 @superadmin_bp.route("/communities/<int:community_id>/reassign", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("communities:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("communities:admin")  # type: ignore[misc]
 @validate_request(ReassignOwnerRequest)
 @validate_response(MessageResponse)
 async def reassign_owner(
@@ -624,8 +634,8 @@ async def reassign_owner(
 
 
 @superadmin_bp.route("/marketplace/modules", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("modules:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("modules:admin")  # type: ignore[misc]
 @validate_response(ModulesResponse)
 async def get_all_modules() -> ModulesResponse:
     """List all modules (including unpublished)."""
@@ -675,8 +685,8 @@ async def get_all_modules() -> ModulesResponse:
 
 
 @superadmin_bp.route("/marketplace/modules", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("modules:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("modules:admin")  # type: ignore[misc]
 @validate_request(CreateModuleRequest)
 # NOT @validate_response -- insert_async + nested-dataclass response hits
 # the crash class documented in services/dto_response.py.
@@ -717,8 +727,8 @@ async def create_module(data: CreateModuleRequest) -> tuple[Any, int]:
 
 
 @superadmin_bp.route("/marketplace/modules/<int:module_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("modules:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("modules:admin")  # type: ignore[misc]
 @validate_request(UpdateModuleRequest)
 @validate_response(MessageResponse)
 async def update_module(
@@ -745,8 +755,8 @@ async def update_module(
 
 
 @superadmin_bp.route("/marketplace/modules/<int:module_id>/publish", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("modules:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("modules:admin")  # type: ignore[misc]
 @validate_request(PublishModuleRequest)
 @validate_response(MessageResponse)
 async def publish_module(
@@ -763,8 +773,8 @@ async def publish_module(
 
 
 @superadmin_bp.route("/marketplace/modules/<int:module_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("modules:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("modules:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def delete_module(module_id: int) -> MessageResponse | tuple[dict[str, object], int]:
     """Delete a module (blocked if any installations exist)."""
@@ -780,8 +790,8 @@ async def delete_module(module_id: int) -> MessageResponse | tuple[dict[str, obj
 
 
 @superadmin_bp.route("/tenants", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenants:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenants:admin")  # type: ignore[misc]
 @validate_response(TenantsResponse)
 async def list_tenants() -> TenantsResponse:
     """List all tenants."""
@@ -818,14 +828,17 @@ async def list_tenants() -> TenantsResponse:
 
 
 @superadmin_bp.route("/tenants", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenants:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenants:admin")  # type: ignore[misc]
 @validate_request(CreateTenantRequest)
 # NOT @validate_response -- insert_async + nested-dataclass response hits
 # the crash class documented in services/dto_response.py.
 async def create_tenant(data: CreateTenantRequest) -> tuple[Any, int]:
     """Create a new tenant."""
     async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
     try:
         tenant = await svc.create_tenant(
             async_dal,
@@ -836,8 +849,10 @@ async def create_tenant(data: CreateTenantRequest) -> tuple[Any, int]:
             logo_url=data.logoUrl,
             seat_limit=data.seatLimit,
             allowed_module_ids=data.allowedModuleIds,
+            caller_tenant_slug=ctx.tenant_slug,
         )
     except ApiError as exc:
+        logger.info("api_error_rejected", extra={"code": exc.code, "status": exc.status_code})
         return _err(exc)
     return jsonify_dto(
         CreateTenantResponse(
@@ -854,8 +869,8 @@ async def create_tenant(data: CreateTenantRequest) -> tuple[Any, int]:
 
 
 @superadmin_bp.route("/tenants/<int:tenant_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenants:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenants:admin")  # type: ignore[misc]
 @validate_request(UpdateTenantRequest)
 @validate_response(MessageResponse)
 async def update_tenant(
@@ -881,8 +896,8 @@ async def update_tenant(
 
 
 @superadmin_bp.route("/tenants/<int:tenant_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenants:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenants:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def delete_tenant(tenant_id: int) -> MessageResponse | tuple[dict[str, object], int]:
     """Deactivate a tenant."""

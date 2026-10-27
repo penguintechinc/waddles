@@ -127,7 +127,8 @@ func (s *CallFeaturesService) MuteAll(ctx context.Context, roomName, moderatorID
 }
 
 func (s *CallFeaturesService) KickParticipant(ctx context.Context, roomName, userID, adminID string) error {
-	s.LowerHand(ctx, roomName, userID)
+	// Best effort: a failure to lower the hand must not block the kick.
+	_ = s.LowerHand(ctx, roomName, userID)
 	return s.roomService.KickParticipant(ctx, roomName, userID)
 }
 

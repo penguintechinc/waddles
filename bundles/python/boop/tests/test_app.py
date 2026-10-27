@@ -104,16 +104,6 @@ def test_non_chat_payload_is_ignored_rather_than_erroring() -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`waddles.command-boop` OFF -> a matching command still produces no reply."""
-    flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: False)
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(flags=flags_mod)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-    assert _run(transform(_sample_event("!boop"))) is None
-
-
 def _sample_envelope(platform: str, text: str, *, channel_id: str | None = "12345") -> StageEnvelope:
     return StageEnvelope(
         tenant="tenant-1",
@@ -166,3 +156,46 @@ def test_transform_and_dispatch_never_log_the_raw_target_or_actor(fake_host) -> 
         fields = json.loads(fields_json)
         assert "actor" not in fields
         assert "target" not in fields
+
+
+# regression: gh-674 -- bundles must never log raw user input (typed tokens) or raw identity,
+# on ANY branch (solo / targeted / extra-token usage / bad-shape usage).
+def test_logs_never_contain_actor_target_or_extra_tokens(fake_host) -> None:
+    for text in (
+        "!boop",
+        "!boop @PIITARGET_bob",
+        "!boop PIITARGET_bob PIIEXTRA_tokens",
+        "!boop !!!PIITARGET_bob",
+    ):
+        event = _sample_event(text)
+        event.actor = "PIIACTOR_alice"
+        out = _run(transform(event))
+        assert out is not None
+        envelope = _sample_envelope("twitch", out.payload["text"])
+        envelope.event.actor = "PIIACTOR_alice"
+        _run(dispatch(envelope, {}, http_client=None))
+
+    assert len(fake_host.log_calls) >= 8, "no/too few log calls -- the PII check would be vacuous"
+    for _level, message, fields_json in fake_host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in ("piiactor_alice", "piitarget_bob", "piiextra_tokens"):
+            assert sentinel not in blob
+
+
+def test_target_with_leading_at_and_dots_hyphens_is_accepted(fake_host) -> None:
+    result = _run(transform(_sample_event("!boop @some.viewer-1")))
+    assert result is not None
+    assert "some.viewer-1" in result.payload["text"]
+
+
+def test_overlong_target_replies_usage(fake_host) -> None:
+    result = _run(transform(_sample_event("!boop " + "x" * 33)))
+    assert result is not None
+    assert result.payload["text"] == _USAGE
+
+
+def test_dispatch_preserves_reply_text_verbatim(fake_host) -> None:
+    """`dispatch` is a pure relay -- it never rewrites what `transform()` built."""
+    envelope = _sample_envelope("discord", "exactly this text")
+    _run(dispatch(envelope, {}, http_client=None))
+    assert json.loads(fake_host.relay_calls[0][1])["text"] == "exactly this text"

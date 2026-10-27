@@ -12,6 +12,7 @@ see that blueprint's module docstring. All routes here are self-service
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -21,10 +22,12 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import passkey_service
-from services.current_user import get_current_user_id
+from services.current_user import get_current_session_id, get_current_user_id
 from services.errors import ApiError
 
 passkey_bp = Blueprint("v1_user_passkey", __name__, url_prefix="/api/v1/user/passkey")
+
+logger = logging.getLogger(__name__)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -81,7 +84,7 @@ class ListCredentialsResponse:
 
 
 @passkey_bp.route("/register/start", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(PasskeyOptionsResponse)
 async def start_registration() -> PasskeyOptionsResponse | tuple[dict[str, object], int]:
     """Start registration."""
@@ -95,7 +98,7 @@ async def start_registration() -> PasskeyOptionsResponse | tuple[dict[str, objec
 
 
 @passkey_bp.route("/register/finish", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(FinishRegistrationRequest)
 @validate_response(SimpleSuccessResponse)
 async def finish_registration(
@@ -114,7 +117,7 @@ async def finish_registration(
 
 
 @passkey_bp.route("/credentials", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ListCredentialsResponse)
 async def list_credentials() -> ListCredentialsResponse:
     """List credentials."""
@@ -136,7 +139,7 @@ async def list_credentials() -> ListCredentialsResponse:
 
 
 @passkey_bp.route("/credentials/<int:credential_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
 async def remove_credential(
     credential_id: int,
@@ -146,9 +149,14 @@ async def remove_credential(
     try:
         user_id = get_current_user_id(request)
         await passkey_service.remove_credential(
-            async_dal, dal, user_id=user_id, credential_pk_id=credential_id
+            async_dal,
+            dal,
+            user_id=user_id,
+            credential_pk_id=credential_id,
+            keep_session_id=get_current_session_id(request),
         )
     except ApiError as exc:
+        logger.info("%s refused: status=%s code=%s", "remove_credential", exc.status_code, exc.code)
         return _err(exc)
     return SimpleSuccessResponse(success=True)
 

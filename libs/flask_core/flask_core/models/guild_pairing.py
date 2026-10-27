@@ -10,6 +10,7 @@ for FK resolution + any ORM-level read access other flask_core-based
 modules may need, same convention as `community.py`/`hub_user.py`/
 `tenant.py`'s own stub models.
 """
+import uuid
 from datetime import datetime
 
 from sqlalchemy import (
@@ -19,11 +20,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    JSON,
     SmallInteger,
     String,
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 from flask_core.models import db
 
@@ -110,6 +113,10 @@ class PlatformConnection(db.Model):
             "status IN ('active', 'revoked', 'expired')",
             name='platform_connections_status_check',
         ),
+        # 0058 also adds `platform_connections_status_reason_check` (a Postgres regex `~`
+        # CHECK on `status_reason`); it is deliberately NOT mirrored here -- `~` does not compile
+        # on the sqlite databases these models are `create_all()`-ed onto in tests. The migration
+        # is the schema owner; this model mirrors columns only.
         {'extend_existing': True},
     )
 
@@ -122,6 +129,21 @@ class PlatformConnection(db.Model):
     refresh_token = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default='active')
     installed_by_user_id = Column(Integer, ForeignKey('hub_users.id'), nullable=True)
+    # 0058_provider_connections: adapter-validated, never-secret facts about the link (bot
+    # account, resolved channel, scopes). Named `resource_metadata`, not `metadata` -- that
+    # attribute is reserved on declarative models.
+    resource_metadata = Column(
+        JSON().with_variant(JSONB(), 'postgresql'), nullable=False, default=dict,
+        server_default='{}',
+    )
+    # 0058: when `access_token` stops working (NULL = does not expire).
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    # 0058: fixed machine code for why `status` left 'active' -- never provider text.
+    status_reason = Column(String(40), nullable=True)
+    # 0063_seal_aad_version: immutable row identity -- the AAD the row's sealed tokens are bound
+    # to (M4) -- and which seal layout they use (0 = legacy no-AAD, 1 = AAD-bound).
+    public_id = Column(String(36), nullable=False, default=lambda: str(uuid.uuid4()), unique=True)
+    seal_version = Column(SmallInteger, nullable=False, default=0, server_default='0')
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -155,6 +177,8 @@ class CommunityConnectionAccess(db.Model):
         Integer, ForeignKey('platform_connections.id', ondelete='CASCADE'), nullable=False
     )
     status = Column(String(20), nullable=False, default='pending')
+    # 0058_provider_connections: per-community on/off switch for using the connection.
+    enabled = Column(Boolean, nullable=False, default=True, server_default='true')
     requested_by_user_id = Column(Integer, ForeignKey('hub_users.id'), nullable=True)
     approved_by_user_id = Column(Integer, ForeignKey('hub_users.id'), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

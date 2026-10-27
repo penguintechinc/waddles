@@ -44,6 +44,7 @@ class FeatureRegistryError(Exception):
 
 
 REASON_DUPLICATE_ID = "duplicate_id"
+REASON_DUPLICATE_FLAG = "duplicate_flag"
 REASON_NOT_FOUND = "not_found"
 
 
@@ -57,6 +58,7 @@ class FeatureRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._by_id: Dict[str, FeatureContract] = {}
+        self._by_flag: Dict[str, FeatureContract] = {}
         self._by_module: Dict[str, List[str]] = {}
 
     def register(self, contract: FeatureContract) -> FeatureContract:
@@ -66,7 +68,17 @@ class FeatureRegistry:
                 raise FeatureRegistryError(
                     REASON_DUPLICATE_ID, f"feature id {contract.id!r} already registered"
                 )
+            if contract.flag in self._by_flag:
+                # Two contracts sharing one flag key would make the flag's
+                # `min_tier` (what `EntitlementClient.required_tier` enforces)
+                # ambiguous -- reject rather than let either silently win.
+                raise FeatureRegistryError(
+                    REASON_DUPLICATE_FLAG,
+                    f"flag {contract.flag!r} already registered by feature "
+                    f"{self._by_flag[contract.flag].id!r}",
+                )
             self._by_id[contract.id] = contract
+            self._by_flag[contract.flag] = contract
             self._by_module.setdefault(contract.module, []).append(contract.id)
             return contract
 
@@ -78,6 +90,16 @@ class FeatureRegistry:
             raise FeatureRegistryError(
                 REASON_NOT_FOUND, f"no Feature registered with id {feature_id!r}"
             ) from None
+
+    def by_flag(self, flag: str) -> Optional[FeatureContract]:
+        """Look up a registered Feature by its PostHog ``flag`` key; ``None`` if unregistered.
+
+        This is the seam ``EntitlementClient.required_tier`` uses to turn a
+        contract's ``min_tier`` into runtime enforcement -- entitlement is
+        keyed on ``flag``, not ``id``. Returns ``None`` (never raises) because
+        most flag keys evaluated at runtime are not Feature contracts at all.
+        """
+        return self._by_flag.get(flag)
 
     def for_module(self, module: str) -> Tuple[FeatureContract, ...]:
         """All Features registered against ``module``, registration order."""
@@ -91,6 +113,7 @@ class FeatureRegistry:
         """Drop all registrations. Test-only -- production registries are load-once at startup."""
         with self._lock:
             self._by_id.clear()
+            self._by_flag.clear()
             self._by_module.clear()
 
 

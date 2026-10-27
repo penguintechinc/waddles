@@ -17,7 +17,7 @@ with the GLOBAL tier's own writes).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
@@ -27,6 +27,7 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import bundle_approval_service as svc
+from services.app_command_service import ActivationWarning
 from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
 from services.errors import ApiError
@@ -61,6 +62,37 @@ class MessageResponse:
 
     success: bool
     message: str
+
+
+@dataclass(slots=True, frozen=True)
+class ActivationWarningDTO:
+    """Response DTO: one non-fatal activation finding (e.g. a command-name conflict)."""
+
+    code: str
+    appId: str
+    command: str | None
+    ownerAppId: str | None
+    message: str
+
+
+@dataclass(slots=True, frozen=True)
+class ActivateResponse:
+    """Response DTO for `POST /community/<community_id>/activation` (always 201)."""
+
+    success: bool
+    message: str
+    warnings: list[ActivationWarningDTO] = field(default_factory=list)
+
+
+def _warning_dto(warning: ActivationWarning) -> ActivationWarningDTO:
+    """Map a service-layer `ActivationWarning` onto the camelCase wire DTO."""
+    return ActivationWarningDTO(
+        code=warning.code,
+        appId=warning.app_id,
+        command=warning.command,
+        ownerAppId=warning.owner_app_id,
+        message=warning.message,
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -100,7 +132,7 @@ def _activation_dto(row: Any) -> ActivationDTO:
 
 
 @bundle_activation_bp.route("/<int:community_id>/activation", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ActivationListResponse)
 async def list_activation(
     community_id: int,
@@ -117,18 +149,19 @@ async def list_activation(
 
 
 @bundle_activation_bp.route("/<int:community_id>/activation", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(ActivateRequest)
-@validate_response(MessageResponse, 201)
+@validate_response(ActivateResponse, 201)
 async def activate(
     data: ActivateRequest, community_id: int
-) -> tuple[MessageResponse | dict[str, object], int]:
+) -> tuple[ActivateResponse | dict[str, object], int]:
     """Activate an app for this community. Requires community-admin membership.
 
     409 if the app is not available in this community's tenant
     marketplace (TENANT tier gate) or conflicts with `routes_to`
     validation; 404 if `community_id` does not belong to the caller's
-    tenant.
+    tenant. Command-name conflicts never block activation -- they come back in
+    `warnings` on the (always) 201 response.
     """
     install_dal = _install_dal()
     async_dal, dal = _dal()
@@ -136,7 +169,7 @@ async def activate(
     assert ctx is not None  # nosec B101
     try:
         await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
-        await svc.activate_for_community(
+        result = await svc.activate_for_community_with_warnings(
             install_dal,
             tenant_id=ctx.tenant_id,
             community_id=community_id,
@@ -145,11 +178,18 @@ async def activate(
         )
     except ApiError as exc:
         return _err(exc)
-    return MessageResponse(success=True, message=f"{data.appId} activated"), 201
+    return (
+        ActivateResponse(
+            success=True,
+            message=f"{data.appId} activated",
+            warnings=[_warning_dto(w) for w in result.warnings],
+        ),
+        201,
+    )
 
 
 @bundle_activation_bp.route("/<int:community_id>/activation/<app_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def deactivate(
     community_id: int, app_id: str

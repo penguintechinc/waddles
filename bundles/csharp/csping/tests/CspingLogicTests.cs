@@ -31,7 +31,13 @@ file sealed class FailingRelayClient : IRelayClient
         throw new WaddleRelayException(RelayErrorKind.Backend, "relay backend unavailable");
 }
 
-file sealed class FakeHost(IRelayClient relay) : IWaddleHost
+file sealed class RecordingLog : ILogClient
+{
+    public List<(WaddleLogLevel Level, string Message, string FieldsJson)> Writes { get; } = [];
+    public void Write(WaddleLogLevel level, string message, string fieldsJson) => Writes.Add((level, message, fieldsJson));
+}
+
+file sealed class FakeHost(IRelayClient relay, ILogClient? log = null) : IWaddleHost
 {
     public BundleContextInfo Context { get; } = new("tenant-1", null, "waddles.core.example.csping", "waddles.core.example", "1.0.0", "msg-1", "{}");
     public IKvClient Kv => throw new NotSupportedException("!csping needs no kv");
@@ -39,7 +45,7 @@ file sealed class FakeHost(IRelayClient relay) : IWaddleHost
     public IRelayClient Relay { get; } = relay;
     public IHttpClient Http => throw new NotSupportedException("!csping needs no http");
     public IFlagsClient Flags { get; } = new NoopFlags();
-    public ILogClient Log { get; } = new NoopLog();
+    public ILogClient Log { get; } = log ?? new NoopLog();
     public IClockClient Clock { get; } = new FixedClock();
 
     private sealed class NoopFlags : IFlagsClient
@@ -186,5 +192,127 @@ public class CspingDispatchTests
 
         var ex = Assert.Throws<WaddleTransportException>(() => new CspingDispatch().Run(envelope, "{}", host));
         Assert.Equal("BAD_PAYLOAD", ex.Error.Code);
+    }
+}
+
+public class CspingMatchingTests
+{
+    private static PlatformEventInfo ChatEvent(string text, string? actor = "user-1", string platform = "twitch") =>
+        new(platform, "chat.message", actor,
+            System.Text.Json.JsonSerializer.Serialize(new ChatMessagePayload(text, "42"), WaddleSdkJsonContext.Default.ChatMessagePayload),
+            "2026-10-09T00:00:00.000Z");
+
+    [Theory]
+    [InlineData("!csping")]
+    [InlineData("  !csping  ")]
+    [InlineData("!csping extra arguments are ignored")]
+    public void command_name_matches_ignoring_surrounding_whitespace_and_trailing_arguments(string text)
+    {
+        var result = new CspingLogic().Run(ChatEvent(text), new FakeHost(new FakeRelayClient()));
+
+        Assert.NotNull(result);
+        Assert.Equal("pong (c#)", result!.Payload(WaddleSdkJsonContext.Default.ChatReplyPayload)!.Text);
+    }
+
+    [Theory]
+    [InlineData("!CSPING")]
+    [InlineData("!Csping")]
+    [InlineData("csping")]
+    [InlineData("!")]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void command_names_are_case_sensitive_and_a_bare_prefix_or_blank_never_matches(string text)
+    {
+        Assert.Null(new CspingLogic().Run(ChatEvent(text), new FakeHost(new FakeRelayClient())));
+    }
+
+    [Fact]
+    public void non_object_json_payload_produces_no_reply()
+    {
+        var @event = new PlatformEventInfo("twitch", "chat.message", "user-1", "[]", "2026-10-09T00:00:00.000Z");
+        Assert.Null(new CspingLogic().Run(@event, new FakeHost(new FakeRelayClient())));
+    }
+
+    [Fact]
+    public void reply_keeps_platform_event_type_actor_and_timestamp_unchanged()
+    {
+        var result = new CspingLogic().Run(ChatEvent("!csping", actor: "user-9", platform: "discord"), new FakeHost(new FakeRelayClient()));
+
+        Assert.NotNull(result);
+        Assert.Equal("discord", result!.Platform);
+        Assert.Equal("chat.message", result.EventType);
+        Assert.Equal("user-9", result.Actor);
+        Assert.Equal("2026-10-09T00:00:00.000Z", result.OccurredAt);
+    }
+}
+
+public class CspingHygieneTests
+{
+    private const string PiiActor = "PIIACTOR_alice";
+    private const string PiiText = "PIITEXT_secret_phrase";
+
+    private static StageEnvelopeInfo EnvelopeFor(PlatformEventInfo reply) =>
+        new("tenant-1", null, "waddles.core.example.csping", "action", reply, "2026-10-09T00:00:00.000Z", null, null);
+
+    // regression: gh-674 -- a bundle runs outside the PII boundary: neither the actor nor typed
+    // text may be copied into a reply payload, a relay message or any log line, on any path.
+    [Fact]
+    public void actor_and_typed_text_never_reach_the_reply_payload_the_relay_message_or_any_log()
+    {
+        var log = new RecordingLog();
+        var relay = new FakeRelayClient();
+        var host = new FakeHost(relay, log);
+        var @event = new PlatformEventInfo(
+            "twitch", "chat.message", PiiActor,
+            System.Text.Json.JsonSerializer.Serialize(new ChatMessagePayload($"!csping {PiiText}", "42"), WaddleSdkJsonContext.Default.ChatMessagePayload),
+            "2026-10-09T00:00:00.000Z");
+
+        var reply = new CspingLogic().Run(@event, host);
+        Assert.NotNull(reply);
+        Assert.DoesNotContain(PiiActor, reply!.PayloadJson);
+        Assert.DoesNotContain(PiiText, reply.PayloadJson);
+
+        var result = new CspingDispatch().Run(EnvelopeFor(reply), "{}", host);
+        Assert.True(result.Ok);
+        Assert.Single(relay.Pushes);
+        Assert.Contains("pong (c#)", relay.Pushes[0].MessageJson);
+        Assert.DoesNotContain(PiiActor, relay.Pushes[0].MessageJson);
+        Assert.DoesNotContain(PiiText, relay.Pushes[0].MessageJson);
+
+        Assert.All(log.Writes, w =>
+        {
+            Assert.DoesNotContain(PiiActor, w.Message + w.FieldsJson);
+            Assert.DoesNotContain(PiiText, w.Message + w.FieldsJson);
+        });
+    }
+
+    [Fact]
+    public void dispatch_error_messages_never_contain_the_actor_or_typed_text()
+    {
+        var host = new FakeHost(new FakeRelayClient());
+        var noChannel = new PlatformEventInfo(
+            "twitch", "chat.message", PiiActor,
+            System.Text.Json.JsonSerializer.Serialize(new ChatReplyPayload(PiiText, null), WaddleSdkJsonContext.Default.ChatReplyPayload),
+            "2026-10-09T00:00:00.000Z");
+        var ex = Assert.Throws<WaddleTransportException>(() => new CspingDispatch().Run(EnvelopeFor(noChannel), "{}", host));
+
+        Assert.Equal("MISSING_CHANNEL", ex.Error.Code);
+        Assert.DoesNotContain(PiiActor, ex.Error.Message);
+        Assert.DoesNotContain(PiiText, ex.Error.Message);
+    }
+
+    [Fact]
+    public void relay_failure_is_a_retryable_error_not_a_swallowed_one()
+    {
+        var host = new FakeHost(new FailingRelayClient());
+        var reply = new PlatformEventInfo(
+            "discord", "chat.message", PiiActor,
+            System.Text.Json.JsonSerializer.Serialize(new ChatReplyPayload("pong (c#)", "42"), WaddleSdkJsonContext.Default.ChatReplyPayload),
+            "2026-10-09T00:00:00.000Z");
+
+        var ex = Assert.Throws<WaddleTransportException>(() => new CspingDispatch().Run(EnvelopeFor(reply), "{}", host));
+        Assert.True(ex.Error.Retryable);
+        Assert.Equal("RELAY_PUSH_FAILED", ex.Error.Code);
+        Assert.DoesNotContain(PiiActor, ex.Error.Message);
     }
 }

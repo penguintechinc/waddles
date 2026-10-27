@@ -20,6 +20,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
+from flask_core import describe_db_error
+from flask_core.ai_guard import (
+    render_search_results,
+    sanitize_model_output,
+    wrap_untrusted,
+)
+
 logger = logging.getLogger(__name__)
 
 GAME_SEARCH_SYSTEM_PROMPT = (
@@ -177,17 +184,14 @@ class GameLookupService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 6. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'GAME_SEARCH_SYSTEM_PROMPT',
                 GAME_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Game: {game_name or 'Unknown'}\n"
-                f"Question: {query}\n\n"
+                f"Game: {wrap_untrusted(game_name or 'Unknown', max_chars=300)}\n"
+                f"Question: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Synthesize a clear, concise answer based on these results."
             )
@@ -224,7 +228,7 @@ class GameLookupService:
             )
 
         except Exception as exc:
-            logger.error("Game search failed: %s", exc)
+            logger.error("Game search failed: %s", describe_db_error(exc))
             return GameLookupResult(
                 success=False,
                 content="An internal error occurred during game search.",
@@ -328,6 +332,8 @@ class GameLookupService:
             content = '\n'.join(lines)
             if game_name:
                 content = f"**{game_name}** — Quick Search Results:\n\n{content}"
+            # Web snippets go straight to chat here: strip beacons / mass pings.
+            content = sanitize_model_output(content)
 
             # 7. Cache + log
             await self._set_cache(cache_key, {
@@ -352,7 +358,7 @@ class GameLookupService:
             )
 
         except Exception as exc:
-            logger.error("Quick game search failed: %s", exc)
+            logger.error("Quick game search failed: %s", describe_db_error(exc))
             return GameLookupResult(
                 success=False,
                 content="An internal error occurred during game search.",
@@ -380,7 +386,7 @@ class GameLookupService:
             )
             return [dict(r) for r in rows] if rows else []
         except Exception as exc:
-            logger.error("Failed to load community games: %s", exc)
+            logger.error("Failed to load community games: %s", describe_db_error(exc))
             return []
 
     async def add_game(self, community_id: int, admin_id: str, game_data: dict) -> dict:
@@ -431,7 +437,7 @@ class GameLookupService:
             )
             return True
         except Exception as exc:
-            logger.error("Failed to remove game %s: %s", game_id, exc)
+            logger.error("Failed to remove game %s: %s", game_id, describe_db_error(exc))
             return False
 
     async def get_cached_items(
@@ -514,7 +520,7 @@ class GameLookupService:
                 )
                 copied += 1
             except Exception as exc:
-                logger.warning("Failed to copy game %s: %s", row['name'], exc)
+                logger.warning("Failed to copy game %s: %s", row['name'], describe_db_error(exc))
 
         return copied
 
@@ -564,7 +570,7 @@ class GameLookupService:
             ttl = getattr(self.config, 'GAME_CACHE_TTL', 7200)
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as exc:
-            logger.warning("Cache set failed: %s", exc)
+            logger.warning("Cache set failed: %s", describe_db_error(exc))
 
     async def _log_search(
         self,
@@ -592,4 +598,4 @@ class GameLookupService:
                  search_type, result_count, was_cached, processing_time_ms],
             )
         except Exception as exc:
-            logger.warning("Failed to log search: %s", exc)
+            logger.warning("Failed to log search: %s", describe_db_error(exc))

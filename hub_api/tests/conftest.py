@@ -79,6 +79,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     MetaData,
+    SmallInteger,
     String,
     Table,
     Text,
@@ -95,6 +96,7 @@ from services.schema import (
     bind_community_authz_tables,
     bind_github_sync_tables,
     bind_lifecycle_tables,
+    bind_marketplace_module_tables,
     bind_music_tables,
     bind_overlay_tables,
     bind_platform_tables,
@@ -103,6 +105,16 @@ from services.schema import (
     bind_superadmin_tenant_fields,
     bind_tenant_tables,
     bind_token_billing_tables,
+)
+
+# Env-gated real-Ollama fixtures (skip unless WADDLE_TEST_OLLAMA_URL is set) -- shared support
+# in <repo>/tests/support; see docs/testing/ollama-realpath.md. Additive re-export only.
+from tests.ollama_support import (  # noqa: E402,F401
+    json_model,
+    ollama_url,
+    safety_model,
+    single_flight,
+    text_model,
 )
 
 #: Matches flask_core.tenancy/authz's own os.getenv("SECRET_KEY", ...) fallback.
@@ -157,6 +169,22 @@ def bundle_signing_sidecar_upload_mock(monkeypatch: Any) -> Any:
     mock = AsyncMock(return_value="bundles/mock/1/mock.json")
     monkeypatch.setattr(storage_service, "write_bundle_sidecar", mock)
     return mock
+
+
+@pytest.fixture(autouse=True)
+def isolated_token_revocation() -> Any:
+    """Every test gets its own empty process-local JWT revocation store.
+
+    `flask_core.auth.verify_jwt_token` consults a process-wide `TokenRevocation`; a user-wide
+    cutoff written by one test (same `sub`, same second) would otherwise reject the tokens of the
+    next. Yields the live instance so a test can assert on / drive revocations directly.
+    """
+    from flask_core import token_revocation as tr
+
+    instance = tr.TokenRevocation(tr.MemoryBackend())
+    previous = tr.configure_token_revocation(instance)
+    yield instance
+    tr.configure_token_revocation(previous)
 
 
 @pytest.fixture
@@ -431,7 +459,9 @@ def seed_membership(
     dal.commit()
 
 
-def seed_super_admin(overlay_db: Any, *, user_id: int, username: str = "root") -> None:
+def seed_super_admin(
+    overlay_db: Any, *, user_id: int, username: str = "root", bootstrap: bool = False
+) -> None:
     """Insert one `hub_users` row with `is_super_admin=True`, at `hub_users.id == user_id`.
 
     Needed by any test asserting `services.community_authz.is_super_admin()`'s
@@ -442,9 +472,14 @@ def seed_super_admin(overlay_db: Any, *, user_id: int, username: str = "root") -
     must insert this BEFORE minting the matching token so `hub_users`' own
     autoincrement lands on the same id `user_id` expects (fixtures' `hub_users`
     table starts empty, so the first insert lands on id 1).
+
+    ``bootstrap=True`` marks it as the migration-081 seeded initial admin
+    (``hub_users.is_bootstrap``), the one super admin the free-tier cap never counts.
     """
     dal = overlay_db.dal
-    inserted_id: int = dal.hub_users.insert(username=username, is_super_admin=True)
+    inserted_id: int = dal.hub_users.insert(
+        username=username, is_super_admin=True, is_bootstrap=bootstrap
+    )
     dal.commit()
     assert inserted_id == user_id, (
         f"hub_users autoincrement landed on {inserted_id}, expected {user_id} -- "
@@ -509,6 +544,7 @@ def platform_db(tmp_path: Any) -> Any:
         Field("config", "json"),
     )
     bind_platform_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
     for table_name in dal.tables:
@@ -540,6 +576,7 @@ def admin_db(tmp_path: Any) -> Any:
     )
     bind_auth_tables(dal, migrate=True)
     bind_admin_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_superadmin_tenant_fields(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
@@ -580,6 +617,7 @@ def tenant_admin_db(tmp_path: Any) -> Any:
         Field("config", "json"),
     )
     bind_auth_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_tenant_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
@@ -985,7 +1023,7 @@ def marketplace_catalog_db(tmp_path: Any) -> Any:
     matching `community_db`'s own `(dal, community_id)` tuple-return
     convention rather than attaching ad hoc attributes to the `DAL` object.
     """
-    from services.schema import bind_marketplace_catalog_tables
+    from services.schema import bind_marketplace_module_tables
 
     dal = DAL(f"sqlite://{tmp_path / 'marketplace_catalog_test.db'}")
     dal.define_table(
@@ -999,7 +1037,7 @@ def marketplace_catalog_db(tmp_path: Any) -> Any:
     other_id = dal.tenants.insert(slug=OTHER_TENANT_SLUG, display_name="Other Corp", is_active=True)
     dal.commit()
 
-    bind_marketplace_catalog_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
 
     now = "2026-01-01 00:00:00"
     dal.marketplace_catalog.insert(
@@ -1172,6 +1210,7 @@ def marketplace_billing_db(tenant_db: Any) -> Any:
     from services.schema import bind_marketplace_billing_tables
 
     dal = tenant_db
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_marketplace_billing_tables(dal, migrate=True)
 
     tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
@@ -1252,7 +1291,7 @@ def marketplace_db(tenant_db: Any, monkeypatch: Any) -> Any:
     Also sets `SERVICE_API_KEY` for the `internal_bp` (X-Service-Key)
     endpoint tests, matching `community_db`'s own precedent.
     """
-    from services.schema import bind_marketplace_vendor_tables
+    from services.schema import bind_marketplace_module_tables, bind_marketplace_vendor_tables
 
     monkeypatch.setenv("SERVICE_API_KEY", SERVICE_API_KEY)
     monkeypatch.setenv(
@@ -1261,6 +1300,7 @@ def marketplace_db(tenant_db: Any, monkeypatch: Any) -> Any:
     )
 
     dal = tenant_db
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_marketplace_vendor_tables(dal, migrate=True)
     return dal
 
@@ -1617,6 +1657,24 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("platform", String(50), nullable=False),
         Column("source_id", String(255), nullable=False),
         Column("created_at", DateTime),
+    )
+    # app_commands (migration 0062) -- slash-command registry, hub-api the
+    # only writer. sqlite-compatible mirror: plain types, no FKs / CHECKs
+    # (the real constraints are proven against Postgres in
+    # alembic/tests/test_0062_app_commands_registry.py).
+    Table(
+        "app_commands",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, nullable=False, server_default="0"),
+        Column("app_id", String(255), nullable=False),
+        Column("command", String(32), nullable=False),
+        Column("command_types", SmallInteger, nullable=False, server_default="1"),
+        Column("platforms", JSON, nullable=False),
+        Column("description", String(100)),
+        Column("registered_at", DateTime),
+        UniqueConstraint("tenant_id", "community_id", "app_id", "command"),
     )
     # app_global_installs / bundle_tenant_availability (migration 0027) --
     # GLOBAL and TENANT tiers of the App Bundle 3-tier split

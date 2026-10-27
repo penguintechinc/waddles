@@ -93,6 +93,18 @@ impl<L: GrantLoader> GrantLoader for AlwaysGrantedLoader<L> {
             }))
         })
     }
+
+    fn list_active_keys<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<GrantScopeKey>, GrantLoadError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.inner.list_active_keys()
+    }
 }
 
 /// The RO-replica reader for `community_permission_grants` JOIN
@@ -209,6 +221,50 @@ impl GrantLoader for PgGrantLoader {
             }))
         })
     }
+
+    /// Startup-seed source: every `(tenant, community, app, version_id)` in
+    /// `app_active_versions`. Best-effort -- a query error is returned to
+    /// the seeding task, which logs it; lazy-load still covers cold keys.
+    fn list_active_keys<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<GrantScopeKey>, GrantLoadError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let stmt = Statement::from_string(
+                self.db.get_database_backend(),
+                "SELECT tenant_id, community_id, app_id, version_id FROM app_active_versions"
+                    .to_string(),
+            );
+            let rows = self
+                .db
+                .query_all_raw(stmt)
+                .await
+                .map_err(|e| GrantLoadError::Backend(e.to_string()))?;
+            let mut keys = Vec::with_capacity(rows.len());
+            for row in rows {
+                let parsed = (|| -> Result<GrantScopeKey, sea_orm::DbErr> {
+                    Ok(GrantScopeKey {
+                        tenant_id: row.try_get("", "tenant_id")?,
+                        community_id: row.try_get("", "community_id")?,
+                        app_id: row.try_get("", "app_id")?,
+                        app_version: row.try_get("", "version_id")?,
+                    })
+                })();
+                match parsed {
+                    Ok(k) => keys.push(k),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "skipping unparseable app_active_versions row in grant seed")
+                    }
+                }
+            }
+            Ok(keys)
+        })
+    }
 }
 
 /// One `bundle:grants:invalidate` entry as hub-api's
@@ -269,6 +325,10 @@ async fn invalidate_matching<L: GrantLoader + 'static>(
 }
 
 const GRANT_INVALIDATE_STREAM: &str = "bundle:grants:invalidate";
+/// `XREAD BLOCK` duration for the invalidation tail.
+const XREAD_BLOCK_MS: usize = 5_000;
+/// Client response timeout: comfortably above [`XREAD_BLOCK_MS`].
+const XREAD_BLOCK_MS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Runs forever (until the process shuts down): tails `bundle:grants:
 /// invalidate` (an `XADD`ed Valkey Stream -- hub-api's actual publish
@@ -302,7 +362,14 @@ async fn tail_invalidation_stream<L: GrantLoader + 'static>(
     use redis::AsyncCommands;
 
     loop {
-        let mut conn = match redis_client.get_multiplexed_async_connection().await {
+        // Response timeout must exceed the XREAD BLOCK below or every idle
+        // block times out client-side (~2/s "XREAD failed: timed out" flap).
+        let conn_cfg = redis::AsyncConnectionConfig::new()
+            .set_response_timeout(Some(XREAD_BLOCK_MS_RESPONSE_TIMEOUT));
+        let mut conn = match redis_client
+            .get_multiplexed_async_connection_with_config(&conn_cfg)
+            .await
+        {
             Ok(c) => c,
             Err(err) => {
                 tracing::warn!(error = %err, "grant invalidation stream connect failed, retrying");
@@ -315,7 +382,7 @@ async fn tail_invalidation_stream<L: GrantLoader + 'static>(
         // `poll_refresh_all`'s fallback, same posture pub/sub `SUBSCRIBE`
         // (which also can't replay history) had.
         let mut last_id = "$".to_string();
-        let opts = StreamReadOptions::default().block(5_000);
+        let opts = StreamReadOptions::default().block(XREAD_BLOCK_MS);
         loop {
             let reply: Result<StreamReadReply, redis::RedisError> = conn
                 .xread_options(&[GRANT_INVALIDATE_STREAM], &[last_id.as_str()], &opts)
@@ -386,6 +453,21 @@ pub fn build_production_gate<L: GrantLoader + 'static>(
     poll_interval: Duration,
 ) -> Arc<CapabilityGate> {
     let cache = Arc::new(GrantCache::new(Arc::new(AlwaysGrantedLoader::new(loader))));
+    // Startup seed: prime every currently-active key so the first message
+    // is not denied while the lazy load races. Best-effort and off the
+    // startup path; `GrantCache::ensure_loaded` (called per host-call) is
+    // the correctness mechanism, this only warms it.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let seed_cache = Arc::clone(&cache);
+        tokio::spawn(async move {
+            match seed_cache.seed().await {
+                Ok(n) => tracing::info!(keys = n, "grant cache seeded from active versions"),
+                Err(err) => {
+                    tracing::warn!(error = %err, "grant cache startup seed failed; lazy-load will cover")
+                }
+            }
+        });
+    }
     if let Some(client) = redis_client {
         tokio::spawn(run_grant_gate_refresh_loop(
             client,

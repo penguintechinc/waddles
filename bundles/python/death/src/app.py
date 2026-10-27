@@ -19,7 +19,8 @@ Fail-loud (never silent-default): a `kv` host failure or a corrupt stored value 
 "unavailable" reply; a corrupt counter is NOT treated as 0. Invalid input (`set abc`,
 out-of-range, unknown verb) gets an explicit usage/error reply.
 
-Gated behind the PostHog flag ``waddles.command-death``.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -28,10 +29,8 @@ import re
 from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-death"
 COMMAND = "!death"
 
 COUNT_KEY = "death.count"
@@ -98,7 +97,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("death.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 def _fmt(total: int) -> str:
@@ -163,7 +162,7 @@ async def _handle(rest: str, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!death` and build the reply.
 
-    Exact first-token match (so `!deaths` never matches) comes before the flag check; a `kv`
+    Exact first-token match (so `!deaths` never matches) is the only precondition; a `kv`
     failure is logged loudly (PII-free) and answered with an error reply, never swallowed.
     """
     text = event.payload.get("text")
@@ -171,8 +170,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

@@ -101,4 +101,15 @@ for pkg in hub_api core/svc_action core/svc_ingest core/svc_presentation core/sv
     "${PIP[@]}" --require-hashes -r "$req"
 done
 
+# tests/unit's own test-only deps (hash-pinned): defusedxml, imported by the
+# XXE regression tests (tests/unit/test_caldav_xxe.py,
+# tests/unit/test_youtube_webhook_xxe.py) and by the production code they
+# exercise (libs/calendar_sync Apple provider, youtube_live_module webhook
+# handler). No subproject above declares it, so without this step the legacy
+# tests/unit suite fails to collect with ModuleNotFoundError: defusedxml.
+# Installed last: defusedxml has no dependencies, so it cannot disturb any
+# earlier subproject's pins.
+echo "[install-unit-test-deps] tests/unit (hash-pinned: defusedxml for XXE regression tests)"
+"${PIP[@]}" --require-hashes -r tests/unit/requirements.txt
+
 echo "[install-unit-test-deps] done"

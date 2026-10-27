@@ -63,6 +63,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::ingest::{IngestKind, IngestListener, IngestSession};
+use crate::redact::fingerprint;
 
 /// First byte of every 188-byte MPEG-TS packet.
 const TS_SYNC_BYTE: u8 = 0x47;
@@ -205,11 +206,17 @@ impl SrtListener {
         loop {
             match incoming.incoming().next().await {
                 Some(request) => {
-                    tokio::spawn(handle_connection(
-                        request,
-                        tx.clone(),
-                        active_keys.clone(),
-                        self.auth.clone(),
+                    // No remote address on the span: a publisher's IP is
+                    // personal data and must not reach the trace backend.
+                    let span = tracing::info_span!("srt_connection");
+                    tokio::spawn(tracing::Instrument::instrument(
+                        handle_connection(
+                            request,
+                            tx.clone(),
+                            active_keys.clone(),
+                            self.auth.clone(),
+                        ),
+                        span,
                     ));
                 }
                 None => {
@@ -322,8 +329,12 @@ async fn handle_connection(
         }
     };
 
+    // The stream key is a bearer credential: every log line below carries
+    // its fingerprint, never the raw value, at any level.
+    let key_hash = fingerprint(&key);
+
     if let Err(reason) = auth.authorize(&key) {
-        tracing::warn!(%remote, key = %key, reason, "srt connect rejected: unauthorized key");
+        tracing::warn!(%remote, key_hash = %key_hash, reason, "srt connect rejected: unauthorized key");
         SRT_METRICS
             .publish_total
             .with_label_values(&["rejected_unauthorized"])
@@ -349,7 +360,7 @@ async fn handle_connection(
     };
 
     if is_duplicate {
-        tracing::warn!(%remote, key = %key, "srt connect rejected: publisher already active for key");
+        tracing::warn!(%remote, key_hash = %key_hash, "srt connect rejected: publisher already active for key");
         SRT_METRICS
             .publish_total
             .with_label_values(&["rejected_duplicate"])
@@ -368,7 +379,7 @@ async fn handle_connection(
     let mut socket = match request.accept(None).await {
         Ok(socket) => socket,
         Err(err) => {
-            tracing::warn!(%remote, key = %key, error = %err, "srt accept failed");
+            tracing::warn!(%remote, key_hash = %key_hash, error = %err, "srt accept failed");
             SRT_METRICS
                 .publish_total
                 .with_label_values(&["accept_error"])
@@ -388,7 +399,7 @@ async fn handle_connection(
     let first_chunk = match socket.next().await {
         Some(Ok((_instant, bytes))) => bytes,
         Some(Err(err)) => {
-            tracing::warn!(%remote, key = %key, error = %err, "srt read error before first packet");
+            tracing::warn!(%remote, key_hash = %key_hash, error = %err, "srt read error before first packet");
             SRT_METRICS
                 .publish_total
                 .with_label_values(&["read_error"])
@@ -397,7 +408,7 @@ async fn handle_connection(
             return;
         }
         None => {
-            tracing::warn!(%remote, key = %key, "srt caller disconnected before sending data");
+            tracing::warn!(%remote, key_hash = %key_hash, "srt caller disconnected before sending data");
             SRT_METRICS
                 .publish_total
                 .with_label_values(&["empty_stream"])
@@ -407,7 +418,7 @@ async fn handle_connection(
     };
 
     if !looks_like_mpegts(&first_chunk) {
-        tracing::warn!(%remote, key = %key, "srt publish rejected: not mpegts");
+        tracing::warn!(%remote, key_hash = %key_hash, "srt publish rejected: not mpegts");
         SRT_METRICS
             .publish_total
             .with_label_values(&["rejected_not_mpegts"])
@@ -434,10 +445,11 @@ async fn handle_connection(
             rx: data_rx,
             partial: Bytes::new(),
         }),
+        span: tracing::Span::current(),
     };
 
     if tx.send(session).await.is_err() {
-        tracing::warn!(key = %key, "srt session dropped: pipeline supervisor channel closed");
+        tracing::warn!(key_hash = %key_hash, "srt session dropped: pipeline supervisor channel closed");
         let _ = socket.close_and_finish().await;
         return;
     }

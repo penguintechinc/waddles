@@ -39,7 +39,7 @@ spec:
               type: RuntimeDefault
           containers:
           - name: bundle-signing-reconciler
-            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
             imagePullPolicy: {{ .Values.global.imagePullPolicy }}
             command: ["python3", "-m", "cli.reconcile_signed_sidecars"]
             securityContext:
@@ -58,8 +58,28 @@ spec:
             - secretRef:
                 name: {{ include "waddlebot.fullname" . }}-secrets
             env:
+            # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+            # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+            # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 12 }}
             - name: MODULE_NAME
               value: "bundle-signing-reconciler"
+            # fix/signing-reconciler-s3-identity -- explicit hub-api S3 identity (Read/Write/List on
+            # the bundles bucket). waddlebot-secrets carries NO plain S3_ACCESS_KEY_ID/
+            # S3_SECRET_ACCESS_KEY (unscoped admin identity removed), so without these the
+            # envFrom gives storage_service no credentials -> InvalidAccessKeyId. Same
+            # override core-bundle-seeder-job.yaml and hub-api.yaml use; keys are
+            # lookup-retained (secrets.yaml autoSecretValue), stable across upgrades.
+            - name: S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "waddlebot.fullname" . }}-secrets
+                  key: HUB_API_S3_ACCESS_KEY_ID
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "waddlebot.fullname" . }}-secrets
+                  key: HUB_API_S3_SECRET_ACCESS_KEY
             # Read-path only (upload_signed_sidecar() re-uploads a signature already
             # recorded in Postgres -- see that function's own docstring). Confirmed
             # `upload_signed_sidecar()` never calls `PlatformSigner.from_env()` --

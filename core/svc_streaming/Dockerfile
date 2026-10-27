@@ -27,7 +27,7 @@ RUN apt-get update \
 
 # Shared library
 COPY libs/flask_core /app/libs/flask_core
-RUN cd /app/libs/flask_core && pip install --no-cache-dir .
+RUN pip install --no-cache-dir /app/libs/flask_core
 
 # Module files
 COPY core/svc_streaming/requirements.txt /app/

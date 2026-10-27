@@ -477,7 +477,7 @@ if __name__ == '__main__':
     print(f"{'='*60}")
     print(f"Health endpoint: http://{HOST}:{PORT}/health")
     print(f"Metrics endpoint: http://{HOST}:{PORT}/metrics")
-    print(f"Example endpoints:")
+    print("Example endpoints:")
     print(f"  GET  http://{HOST}:{PORT}/api/example/simple")
     print(f"  POST http://{HOST}:{PORT}/api/example/traced")
     print(f"  GET  http://{HOST}:{PORT}/api/example/metrics")

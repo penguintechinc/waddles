@@ -173,6 +173,7 @@ fn test_config(allowed_ports: Vec<u16>) -> Config {
         assertion_max_ttl: Duration::from_secs(60),
         header_read_timeout: Duration::from_secs(10),
         tunnel_idle_timeout: Duration::from_secs(300),
+        shutdown_drain: Duration::from_secs(2),
         tunnel_max_duration: Duration::from_secs(3600),
         allow_private_ip: true,
     }

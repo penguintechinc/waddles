@@ -20,10 +20,12 @@ spec:
         app.kubernetes.io/name: posthog-worker
         app.kubernetes.io/component: feature-flags
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       containers:
         - name: worker
           image: {{ include "waddlebot.posthog.image" . }}
           imagePullPolicy: {{ .Values.posthog.image.pullPolicy }}
+          {{- include "waddlebot.preStop" $ | nindent 10 }}
           # Writable rootfs required: PostHog writes temp/cache under the
           # app dir at runtime. Still non-root, no added caps.
           securityContext:
@@ -43,4 +45,6 @@ spec:
               command: ["pgrep", "-f", "docker-worker-celery"]
             initialDelaySeconds: 45
             periodSeconds: 30
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "feature-flags" "name" "posthog-worker" "selector" (dict "app.kubernetes.io/name" "posthog-worker") "ports" (list) "egress" "internal" "tetragon" false) }}
 {{- end }}

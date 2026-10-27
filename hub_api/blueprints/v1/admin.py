@@ -296,8 +296,8 @@ class CommandsResponse:
 
 
 @admin_bp.route("/<int:community_id>/settings", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_response(SettingsResponse)
 async def get_settings(community_id: int) -> SettingsResponse | tuple[dict[str, object], int]:
     """Get community settings."""
@@ -325,8 +325,8 @@ async def get_settings(community_id: int) -> SettingsResponse | tuple[dict[str, 
 
 
 @admin_bp.route("/<int:community_id>/settings", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_request(UpdateSettingsRequest)
 @validate_response(MessageResponse)
 async def update_settings(
@@ -355,8 +355,8 @@ async def update_settings(
 
 
 @admin_bp.route("/<int:community_id>/members", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_response(MembersResponse)
 async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, object], int]:
     """Get community members."""
@@ -403,8 +403,8 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
 
 
 @admin_bp.route("/<int:community_id>/members/<int:user_id>/role", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_request(UpdateRoleRequest)
 @validate_response(MessageResponse)
 async def update_member_role(
@@ -431,8 +431,8 @@ async def update_member_role(
 
 
 @admin_bp.route("/<int:community_id>/members/<int:user_id>/reputation", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_request(AdjustReputationRequest)
 # NOT @validate_response -- update_async + response returned to caller
 # hits the crash class documented in services/dto_response.py.
@@ -461,8 +461,8 @@ async def adjust_reputation(
 
 
 @admin_bp.route("/<int:community_id>/members/<int:user_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_request(RemoveMemberRequest)
 @validate_response(MessageResponse)
 async def remove_member(
@@ -489,8 +489,8 @@ async def remove_member(
 
 
 @admin_bp.route("/<int:community_id>/temp-password", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_request(TempPasswordRequest)
 # NOT @validate_response -- insert_async + response hits the crash class
 # documented in services/dto_response.py.
@@ -538,8 +538,8 @@ async def generate_temp_password(data: TempPasswordRequest, community_id: int) -
 
 
 @admin_bp.route("/<int:community_id>/modules", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_response(ModulesResponse)
 async def get_modules(community_id: int) -> ModulesResponse | tuple[dict[str, object], int]:
     """Get installed modules for a community."""
@@ -568,8 +568,8 @@ async def get_modules(community_id: int) -> ModulesResponse | tuple[dict[str, ob
 
 
 @admin_bp.route("/<int:community_id>/modules/<int:module_id>/config", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_request(UpdateModuleConfigRequest)
 @validate_response(MessageResponse)
 async def update_module_config(
@@ -595,8 +595,8 @@ async def update_module_config(
 
 
 @admin_bp.route("/<int:community_id>/connected-platforms", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_response(ConnectedPlatformsResponse)
 async def get_connected_platforms(
     community_id: int,
@@ -617,8 +617,8 @@ async def get_connected_platforms(
 
 
 @admin_bp.route("/<int:community_id>/commands", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community:admin")  # type: ignore[misc]
 @validate_response(CommandsResponse)
 async def get_commands(community_id: int) -> CommandsResponse | tuple[dict[str, object], int]:
     """Get the commands reference list."""

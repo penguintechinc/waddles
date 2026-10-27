@@ -6,11 +6,11 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test proxy.test.js"
   },
   "dependencies": {
-    "express": "4.22.2",
-    "http-proxy-middleware": "4.2.0"
+    "express": "4.22.3"
   },
   "engines": {
     "node": ">=20.0.0"

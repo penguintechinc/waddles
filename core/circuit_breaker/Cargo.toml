@@ -1,0 +1,15 @@
+[package]
+name = "circuit-breaker"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Shared, process-local per-key circuit breaker for guest faults (bundle-executor traps/timeouts/fuel exhaustion/OOM) across the data-plane stage services (svc_process, svc_action, and svc_ingest's future connector host). A path dependency within this repo -- NOT a penguin-libs crate: purely generic, no dependency on this repo's schema or wire protocol, kept local so every stage crate can adopt it without a penguin-libs release cycle. See src/lib.rs module doc for the isolation/backoff contract (connector spec docs/superpowers/specs/2026-09-28-connector-bundles.md SS0 condition 5)."
+
+[lib]
+name = "circuit_breaker"
+path = "src/lib.rs"
+
+[dependencies]
+tracing = "=0.1.44"

@@ -7,7 +7,7 @@ name: Ping Example Bundle (Rust)
 # hub-manifest.yaml's own -- this file isn't what hub-api reads for activation/auto-bind, but
 # the two manifests describe the same real bundle and must not silently diverge on what it
 # actually consumes.
-version: 1.0.3
+version: 1.0.4
 feature: waddles.core.example
 module: core
 provider: builtin

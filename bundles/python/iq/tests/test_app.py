@@ -107,11 +107,6 @@ def test_missing_text_ignored_and_wiring_exports(host: _Host) -> None:
     assert _entry_wiring.bundle_dispatch is dispatch
 
 
-def test_flag_off_returns_none(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!iq"))) is None
-
-
 def test_dispatch_relays_and_rejects_bad_payload(host: _Host) -> None:
     out = _run(transform(_event("!iq")))
     assert out is not None
@@ -139,16 +134,44 @@ def test_dispatch_relays_and_rejects_bad_payload(host: _Host) -> None:
         _run(dispatch(_envelope(nochan), {}, http_client=None))
 
 
+def _tok(u: str) -> str:
+    return "{user:" + u + "}"
+
+
 def test_deterministic_per_user_and_in_range(host: _Host) -> None:
     u = str(uuid.uuid4())
-    first = _say(f"!iq {u}")
-    assert _say(f"!iq {u}") == first
+    first = _say(f"!iq {_tok(u)}")
+    assert _say(f"!iq {_tok(u)}") == first
     assert bundle.IQ_MIN <= bundle._compute_iq(u) <= bundle.IQ_MAX
     assert f"IQ of {bundle._compute_iq(u)}" in first
 
 
-def test_bare_scores_caller_same_as_self_handle(host: _Host) -> None:
-    assert _say("!iq", actor="Bob") == _say("!iq @bob", actor="someone-else")
+def test_tokenized_actor_round_trips(host: _Host) -> None:
+    u = str(uuid.uuid4())
+    reply = _say("!iq", actor=_tok(u))
+    # parsed uuid drives the score AND is emitted as a {user:} token (no raw/short form)
+    assert reply == f"\U0001f9e0 User {_tok(u)} has an IQ of {bundle._compute_iq(u)} -- " + bundle._flavor(
+        bundle._compute_iq(u)
+    ) + "!"
+    assert u[:8] + " " not in reply
+    assert _say(f"!iq {_tok(u)}", actor="x") == reply
+
+
+def test_non_token_actor_is_graceful(host: _Host) -> None:
+    assert _say("!iq", actor="Bob") == bundle._NO_ACTOR_MSG
+    assert _say("!iq @bob", actor=_tok(str(uuid.uuid4()))) == bundle._BAD_TARGET_MSG
+
+
+def test_no_local_uuid5_derivation() -> None:
+    from pathlib import Path
+
+    src = Path(bundle.__file__).read_text()
+    assert "uuid.uuid5" not in src and "_ACTOR_NAMESPACE" not in src and "_short" not in src
+
+
+@pytest.mark.parametrize("raw", ["{user:}", "{user:a b}", "\\{user:abc\\}", "user:abc", None, 5])
+def test_parse_user_token_rejects_non_tokens(raw: Any) -> None:
+    assert bundle._parse_user_token(raw) is None
 
 
 def test_range_and_distribution() -> None:
@@ -159,7 +182,7 @@ def test_range_and_distribution() -> None:
         assert bundle._flavor(iq)
 
 
-def test_usage_bad_target_and_no_pii(host: _Host) -> None:
+def test_usage_and_bad_target_and_no_pii(host: _Host) -> None:
     assert _say("!iq a b") == bundle._USAGE
     assert _say("!iq ???") == bundle._BAD_TARGET_MSG
     reply = _say("!iq @SecretName")
