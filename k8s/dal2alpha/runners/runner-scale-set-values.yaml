@@ -2,6 +2,11 @@
 # => the runner "label" is the scale set name `dal2-alpha`.
 githubConfigUrl: https://github.com/penguintechinc/waddles
 githubConfigSecret: arc-github-app   # k8s Secret created by the user (see SETUP.md) - never inline
+# Keep the scale-set binding deterministic instead of relying on Helm's live
+# cluster lookup for the controller installed by the preceding command in SETUP.md.
+controllerServiceAccount:
+  namespace: arc-systems
+  name: arc-gha-rs-controller
 minRunners: 0
 maxRunners: 2
 # Listener pod runs in arc-systems (PSA restricted): must set its own securityContext.

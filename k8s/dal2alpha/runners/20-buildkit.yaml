@@ -77,6 +77,7 @@ spec:
             allowPrivilegeEscalation: true  # rootless buildkit requires: setuid newuidmap/newgidmap must gain privilege to write uid_map/gid_map
             seccompProfile: {type: Unconfined}  # rootless buildkit requires: RuntimeDefault blocks userns/mount syscalls (follow-up: Localhost profile)
             appArmorProfile: {type: Unconfined}  # rootless buildkit requires: default AppArmor denies userns creation + mounts (k8s 1.30+ field)
+            readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
               add: [SETUID, SETGID]  # rootless buildkit requires: newuidmap/newgidmap need these (no NET_ADMIN/SYS_ADMIN/privileged)
@@ -85,9 +86,17 @@ spec:
             limits: {cpu: "6", memory: 12Gi, ephemeral-storage: 60Gi}
           volumeMounts:
             - {name: cache, mountPath: /home/user/.local/share/buildkit}
+            # Rootless BuildKit writes its XDG runtime socket and temporary files
+            # here; keep those writable without making the image root writable.
+            - {name: runtime, mountPath: /run/user/1000}
+            - {name: tmp, mountPath: /home/user/.local/tmp}
       volumes:
         - name: cache
           emptyDir: {sizeLimit: 50Gi}
+        - name: runtime
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -96,6 +105,7 @@ metadata:
   namespace: buildkit
 spec:
   type: ClusterIP
+  clusterIP: None  # governing headless Service for StatefulSet buildkitd-0
   selector: {app: buildkitd}
   ports: [{name: grpc, port: 1234, targetPort: 1234}]
 ---
