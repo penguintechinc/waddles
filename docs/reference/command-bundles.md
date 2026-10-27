@@ -10,41 +10,41 @@ Chat commands that ship as first-party App Bundles. This page covers how they be
 |---|---|
 | Platforms | Twitch and Discord. Each bundle's manifest declares a `chat.message` consume rule for both. None declares `supported_platforms`, so no further platform restriction applies (see [Bundle `supported_platforms`](bundle-supported-platforms.md)). |
 | Trigger | Chat prefix `!`, matched case-insensitively on the first word. |
-| Feature flag | Every command is gated by a `waddles.command-<name>` flag, **default OFF**. |
-| Disabled command | A flag-off command is dropped. It is indistinguishable from an unrecognized command; no error is sent. |
-| Permissions | Every bundle requests `flags.read`. Bundles that keep state also request `storage.kv`. None requests network egress. |
+| Gating | **Activation-gated**, not feature-flag-gated. A command runs only once its bundle is installed, enabled for the tenant and activated for the community (install -> enable -> activate). Feature flags are reserved for system bundles. |
+| Inactive command | A bundle that is not activated for the community never sees the message. It is indistinguishable from an unrecognized command; no error is sent. |
+| Permissions | Every bundle requests `chat.send:<platform>` for its reply. Bundles that keep state also request `storage.kv`. None requests network egress or `flags.read`. |
 | State scope | kv state is scoped to tenant, community and bundle. No bundle shares state with another. |
 | Mod-only verbs | Checked against the caller's moderator/broadcaster role. If the platform supplies no role information the check fails closed (the verb is refused). |
 | Logging | PII-free. Logs carry platform, operation, counts and exception type, never chat text or usernames. |
 | App id | `waddles.core.example.<name>`, version `1.0.0`. |
 
-Turn a command on by enabling its flag (for example `waddles.command-catfact`) in the feature-flag backend for the tenant.
+Turn a command on by activating its bundle for the community.
 
 ## Fun
 
 Stateless. Each reply is picked at random from a curated list built into the bundle. No external API calls.
 
-| Command | Reply | Flag |
-|---|---|---|
-| `!catfact` | A random cat fact. Trailing text is ignored. | `waddles.command-catfact` |
-| `!dogfact` | A random dog fact. Trailing text is ignored. | `waddles.command-dogfact` |
-| `!advice` | A random piece of advice. | `waddles.command-advice` |
-| `!fortune` | A random fortune-cookie line. | `waddles.command-fortune` |
-| `!waddle` | A random penguin-themed line. | `waddles.command-waddle` |
-| `!hello`, `!hi`, `!hey` | A random friendly greeting. | `waddles.command-hello` |
+| Command | Reply |
+|---|---|
+| `!catfact` | A random cat fact. Trailing text is ignored. |
+| `!dogfact` | A random dog fact. Trailing text is ignored. |
+| `!advice` | A random piece of advice. |
+| `!fortune` | A random fortune-cookie line. |
+| `!waddle` | A random penguin-themed line. |
+| `!hello`, `!hi`, `!hey` | A random friendly greeting. |
 
 ## Utility
 
 Stateless.
 
-| Command | Reply | Flag |
-|---|---|---|
-| `!dice [NdM]` | Rolls `N` dice with `M` sides. No argument rolls one six-sided die. `N` is 1-100, `M` is 2-1000. Beyond 20 dice only the sum is shown. A bad spec returns the usage line, for example `!dice 2d6`. | `waddles.command-dice` |
-| `!echo text` | Repeats `text`, up to 300 characters. Refuses text that starts with `/`, `.` or `!` so the bot cannot be made to run commands. No text returns `Usage: !echo <text>`. | `waddles.command-echo` |
-| `!time` | Current UTC time from the host clock, formatted `YYYY-MM-DD HH:MM:SS UTC`. | `waddles.command-time` |
-| `!bot` | Bot name, version and project links. | `waddles.command-bot` |
+| Command | Reply |
+|---|---|
+| `!dice [NdM]` | Rolls `N` dice with `M` sides. No argument rolls one six-sided die. `N` is 1-100, `M` is 2-1000. Beyond 20 dice only the sum is shown. A bad spec returns the usage line, for example `!dice 2d6`. |
+| `!echo text` | Repeats `text`, up to 300 characters. Refuses text that starts with `/`, `.` or `!` so the bot cannot be made to run commands. No text returns `Usage: !echo <text>`. |
+| `!time` | Current UTC time from the host clock, formatted `YYYY-MM-DD HH:MM:SS UTC`. |
+| `!bot` | Bot name, version and project links. |
 
-> **Trigger collision.** The existing `about` bundle also answers `!bot`. If both `waddles.command-about` and `waddles.command-bot` are on, both reply. Leave one flag off.
+> **Trigger collision.** The existing `about` bundle also answers `!bot`. If both are activated for a community, both reply. Activate only one.
 
 ## Counters
 
@@ -57,17 +57,17 @@ Each counter keeps one total per community. All three use the same verbs.
 | `!NAME total` | Shows the total without changing it. Aliases: `get`, `show`, `count`. | Anyone |
 | `!NAME reset` | Sets the total to 0. | Moderator or broadcaster |
 
-| Command | Counts | Flag |
-|---|---|---|
-| `!rip` | Respects paid | `waddles.command-rip` |
-| `!hype` | Hype | `waddles.command-hype` |
-| `!cringe` | Cringe | `waddles.command-cringe` |
+| Command | Counts |
+|---|---|
+| `!rip` | Respects paid |
+| `!hype` | Hype |
+| `!cringe` | Cringe |
 
 For named counters you define yourself, use the `count` bundle instead.
 
 ## Voting
 
-`!vote` is a lighter tally than the `poll` bundle. Flag: `waddles.command-vote`.
+`!vote` is a lighter tally than the `poll` bundle.
 
 | Command | Effect | Who |
 |---|---|---|
@@ -80,7 +80,7 @@ Options are single lowercase words of at most 32 characters, up to 20 distinct o
 
 ## Social
 
-Stateless flavor-text replies. Flags are `waddles.command-hug`, `-boop` and `-highfive`.
+Stateless flavor-text replies.
 
 | Command | Reply |
 |---|---|
@@ -129,10 +129,14 @@ Warnings are logged after commit by code only (no command or user text). Under R
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Command gets no reply | Its `waddles.command-<name>` flag is off, or the bundle is not activated for the community. | Enable the flag; confirm the bundle is installed, available and activated. |
+| Command gets no reply | The bundle is not installed, enabled for the tenant or activated for the community. | Confirm all three steps (install, enable, activate). |
 | Mod verb refused | Platform did not report moderator/broadcaster role (fails closed). | Run it as the broadcaster, or use a platform that supplies role info. |
-| `!bot` answers twice | `about` and `bot` both enabled. | Disable one flag. |
+| `!bot` answers twice | `about` and `bot` both activated. | Deactivate one. |
 
 ## Source
 
-Bundle source: `bundles/python/<name>/`. Catalog: `bundles/core-bundles.yaml`.
+Bundle source: `bundles/python/<name>/`. Catalog: `bundles/core-bundles.yaml` (the seeder's input -- every bundle needs a row; `scripts/ci/tests/test_bundle_wit_world.py` fails on a missing one).
+
+**WIT world.** `bundles/build_python_bundles.py` builds each row against `world stage` unless the row says `wit_world: stage-next`. Economy (`economy.*`, `identity.resolve`) and AI (`ai.generate`) bundles need `stage-next` -- those host imports do not exist in `stage` -- and the build fails if a manifest declares one of them while the row resolves to `stage`.
+
+**Declared bounds.** `economy.wager` / `economy.transfer` must declare `params.max_bet` / `params.max_amount` (integer, 1..=1000), and `limits.timeout_ms` must be at most 10000, or the seeder's manifest parser refuses the bundle. The seeder carries the economy bounds into the bundle's grant, so the declared value is the enforced per-call ceiling.
