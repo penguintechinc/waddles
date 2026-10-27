@@ -98,7 +98,7 @@ class TestFetchActiveBundles:
                     {
                         "appId": "waddles.core.demo.echo",
                         "communityId": 42,
-                        "entrypoint": "bundles.echo_ingest:normalize",
+                        "entrypoint": "builtin_handlers.echo_ingest:normalize",
                         "spec": {},
                         "config": {"greeting": "hi"},
                     }
@@ -115,7 +115,7 @@ class TestFetchActiveBundles:
         assert bundles[0] == sr.BundleDistribution(
             app_id="waddles.core.demo.echo",
             community_id=42,
-            entrypoint="bundles.echo_ingest:normalize",
+            entrypoint="builtin_handlers.echo_ingest:normalize",
             spec={},
             config={"greeting": "hi"},
         )
@@ -169,7 +169,7 @@ class TestBundlePoller:
                     {
                         "appId": "waddles.core.demo.echo",
                         "communityId": None,
-                        "entrypoint": "bundles.echo_process:transform",
+                        "entrypoint": "builtin_handlers.echo_process:transform",
                         "spec": {},
                         "config": {},
                     }
@@ -210,7 +210,7 @@ class TestBundlePoller:
                             {
                                 "appId": "waddles.core.demo.echo",
                                 "communityId": None,
-                                "entrypoint": "bundles.echo_ingest:normalize",
+                                "entrypoint": "builtin_handlers.echo_ingest:normalize",
                                 "spec": {},
                                 "config": {},
                             }

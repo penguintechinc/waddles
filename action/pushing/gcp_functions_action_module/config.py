@@ -27,7 +27,7 @@ class Config:
     GCP_SERVICE_ACCOUNT_EMAIL: str = _optional_env("GCP_SERVICE_ACCOUNT_EMAIL")
 
     # GCP API Configuration
-    GCP_API_ENDPOINT: str = f"https://cloudfunctions.googleapis.com/v2"
+    GCP_API_ENDPOINT: str = "https://cloudfunctions.googleapis.com/v2"
     GCP_API_TIMEOUT: int = int(os.getenv("GCP_API_TIMEOUT", "30"))
 
     # Database Configuration

@@ -82,7 +82,9 @@ class CorrelationIDManager:
         try:
             uuid.UUID(id_value)
             return True
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, TypeError):
+            # uuid.UUID(None) raises TypeError, not ValueError -- a missing/non-str
+            # ID must read as "invalid", not crash the request middleware.
             return False
 
     def get_correlation_id(self) -> Optional[str]:
@@ -263,8 +265,6 @@ class CorrelationIDManager:
             return async_wrapper
         else:
             return sync_wrapper
-
-        return wrapper
 
 
 class CorrelationIDFilter(logging.Filter):

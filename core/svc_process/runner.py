@@ -154,7 +154,7 @@ from services.raid_shoutout import RAID_EVENT_TYPE, SHOUTOUT_APP_ID, maybe_auto_
 logger = logging.getLogger(__name__)
 
 #: PostHog flag gating the raid auto-shoutout hook entirely (gh #316) --
-#: same flag key `bundles/social_shoutout_process.py`'s own `_FEATURE_FLAG`
+#: same flag key `builtin_handlers/social_shoutout_process.py`'s own `_FEATURE_FLAG`
 #: uses for the manual `!so`/`!vso` path (not imported -- that module is a
 #: process-stage bundle, this is the runner itself). Default ON: disabling
 #: this flag skips the hook (and its DB/Redis round trip) entirely, whereas
@@ -187,7 +187,7 @@ _MODERATION_ENFORCE_APP_ID = "waddles.community.moderation.default"
 
 #: Identity payload keys copied verbatim from the inbound event onto the
 #: synthetic enforcement envelope's own event payload -- exactly the field
-#: names `core/svc_action/bundles/moderation_enforce_action.py` reads to
+#: names `core/svc_action/builtin_handlers/moderation_enforce_action.py` reads to
 #: resolve its target user/channel/guild/broadcaster (`_resolve_target_
 #: user_id`, `_enforce_discord`, `_enforce_twitch`), plus `message_id`/
 #: `room_id` for audit/future use. Deliberately excludes `text` -- the
@@ -254,7 +254,7 @@ def _resolve_platform_entity_id(event: PlatformEvent) -> str | None:
     """The platform-native channel/server id for community resolution, or `None`.
 
     Same `channel_id or channel_name` normalization `_emit_activity()`
-    (below) and `bundles/community_context_process.py` already use, to
+    (below) and `builtin_handlers/community_context_process.py` already use, to
     reconcile Discord's `channel_id` against Twitch's `channel_name` into
     one platform-entity identifier.
     """
@@ -267,7 +267,7 @@ def _resolve_platform_entity_id(event: PlatformEvent) -> str | None:
 def _community_id_or_none(community: str | None) -> int | None:
     """Best-effort `int(community)` for `feature_enabled()`'s own `int | None` param, or `None`.
 
-    Same conversion `bundles/social_shoutout_process.py::_community_id`
+    Same conversion `builtin_handlers/social_shoutout_process.py::_community_id`
     performs locally for the identical `feature_enabled()` call shape --
     replicated here rather than imported (that module is a process-stage
     bundle, this is the runner itself).
@@ -727,7 +727,7 @@ class ProcessRunner:
         """Best-effort raid auto-shoutout hook (gh #316) -- alongside the chat-command path.
 
         Fires for every inbound `channel.raid` event, independent of
-        `transform_fn`'s own result: `bundles.bot_process.transform()`
+        `transform_fn`'s own result: `builtin_handlers.bot_process.transform()`
         (this pipeline's chat-command router) returns `None` for any event
         with no `payload['text']` key, so a raid event never reaches the
         chat-command path at all -- this hook is the ONLY consumer that

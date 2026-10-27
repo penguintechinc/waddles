@@ -1,0 +1,15 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "frame": "@user-id=1;display-name=WaddleBot :WaddleBot!WaddleBot@WaddleBot.tmi.twitch.tv PRIVMSG #somechannel :echo of our own reply",
+  "golden": null,
+  "golden_origin": "rust",
+  "id": "twitch/irc_self_message_dropped",
+  "outcome": "dropped",
+  "path": "twitch_irc",
+  "pii_classifier": "pass",
+  "platform": "twitch",
+  "python_divergences": [],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_receivers_twitch_irc.py"
+}

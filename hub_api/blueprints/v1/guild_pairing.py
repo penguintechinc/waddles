@@ -124,8 +124,8 @@ async def _feature_gate_and_tenant_check(community_id: int) -> tuple[dict[str, o
 
 
 @guild_pairing_bp.route("/communities/<int:community_id>/guild-pairings", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:read")  # type: ignore[misc]
 @validate_response(GuildPairingListResponse)
 async def list_pairings(
     community_id: int,
@@ -139,8 +139,8 @@ async def list_pairings(
 
 
 @guild_pairing_bp.route("/communities/<int:community_id>/guild-pairings", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 @validate_response(GuildPairingResponse, status_code=201)
 async def create_pairing(
     community_id: int,
@@ -178,8 +178,8 @@ async def create_pairing(
 @guild_pairing_bp.route(
     "/communities/<int:community_id>/guild-pairings/<int:pairing_id>", methods=["PATCH"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 @validate_response(GuildPairingResponse)
 async def update_pairing(
     community_id: int, pairing_id: int
@@ -213,8 +213,8 @@ async def update_pairing(
 @guild_pairing_bp.route(
     "/communities/<int:community_id>/guild-pairings/<int:pairing_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 async def delete_pairing(community_id: int, pairing_id: int) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/guild-pairings/<pairing_id>`."""
     gate_error = await _feature_gate_and_tenant_check(community_id)
@@ -236,8 +236,8 @@ async def delete_pairing(community_id: int, pairing_id: int) -> tuple[Any, int]:
     "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
     methods=["GET"],
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:read")  # type: ignore[misc]
 @validate_response(RoleSyncBindingListResponse)
 async def list_bindings(
     community_id: int, pairing_id: int
@@ -258,8 +258,8 @@ async def list_bindings(
     "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
     methods=["POST"],
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 @validate_response(RoleSyncBindingResponse, status_code=201)
 async def create_binding(
     community_id: int, pairing_id: int
@@ -292,8 +292,8 @@ async def create_binding(
     "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings/<int:binding_id>",
     methods=["DELETE"],
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 async def delete_binding(community_id: int, pairing_id: int, binding_id: int) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/guild-pairings/<pairing_id>/role-bindings/<binding_id>`."""
     gate_error = await _feature_gate_and_tenant_check(community_id)

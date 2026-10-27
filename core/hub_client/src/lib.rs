@@ -11,11 +11,20 @@
 //! - carries a bounded per-RPC deadline ([`DEFAULT_RPC_DEADLINE`]),
 //!   matching `hub_api/grpc_internal/interceptors.py::
 //!   MAX_RPC_DEADLINE_SECONDS`'s server-side ceiling;
-//! - runs behind a [`CircuitBreaker`] shared across every RPC on this
-//!   client, so a hub-api outage fails fast instead of piling up
-//!   in-flight requests against a channel that keeps refusing them;
+//! - runs behind a [`CircuitBreaker`] so a hub-api outage fails fast instead
+//!   of piling up in-flight requests against a channel that keeps refusing
+//!   them. Breakers are **per RPC class** ([`Circuits`]): the per-message
+//!   identity hot path (mint + display names), the chatter-driven handle
+//!   lookup, and the `KeyService` each trip independently, so one noisy call
+//!   can never take the others down. Only server-health failures count --
+//!   a request the server *answered and rejected* (`NOT_FOUND`,
+//!   `FAILED_PRECONDITION`, `INVALID_ARGUMENT`, `RESOURCE_EXHAUSTED`,
+//!   `UNIMPLEMENTED`; see [`is_caller_error`]) is breaker-neutral: it neither
+//!   trips the breaker nor resets the failure count (it proves reachability,
+//!   not health, so it must not mask a genuinely failing hub-api either);
 //! - retries **only** if the RPC is idempotent
 //!   ([`ResolveDisplayNames`](HubClient::resolve_display_names),
+//!   [`ResolveHandle`](HubClient::resolve_handle),
 //!   [`GetStreamDek`](HubClient::get_stream_dek)) and the failure is
 //!   transient (`UNAVAILABLE`/`DEADLINE_EXCEEDED`).
 //!   [`MintEphemeralPseudonyms`](HubClient::mint_ephemeral_pseudonyms)
@@ -42,6 +51,7 @@ use pb::key_service_client::KeyServiceClient;
 use pb::{
     EphemeralPseudonym, GetStreamDekRequest, GetStreamDekResponse, MintEphemeralPseudonymRequest,
     MintEphemeralPseudonymsRequest, ResolveDisplayNamesRequest, ResolveDisplayNamesResponse,
+    ResolveHandleRequest, ResolveHandleResponse,
 };
 use service_auth::{MachineJwtClient, ServiceAuthError};
 use tonic::transport::{Channel, Endpoint};
@@ -147,6 +157,57 @@ fn is_retryable(status: &Status) -> bool {
     )
 }
 
+/// Whether a failed RPC is the server *answering and declining* -- the caller's own input
+/// rejected (no such handle, ambiguous or not a member, malformed request), the caller
+/// rate-limited, or a method not served yet -- rather than a sign hub-api is unhealthy.
+///
+/// `ResolveHandle` hits `NOT_FOUND`/`FAILED_PRECONDITION` on ordinary typos
+/// (`!secret @nobody`) and a spamming chatter earns `RESOURCE_EXHAUSTED` from hub-api's
+/// rate limiter; `KeyService.GetStreamDek` answers `UNIMPLEMENTED` until it lands. None of
+/// these may count as a circuit failure, or a few bad lookups -- or one hostile chatter --
+/// would open a breaker and fail healthy traffic fast. They are also breaker-*neutral*, not
+/// a success: an answer of "no" must not reset the failure count of a hub-api that is
+/// otherwise failing. Auth rejections (`UNAUTHENTICATED`/`PERMISSION_DENIED`) stay failures
+/// -- they mean this client's identity or scope is broken, which is not caller input.
+fn is_caller_error(status: &Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::NotFound
+            | tonic::Code::FailedPrecondition
+            | tonic::Code::InvalidArgument
+            | tonic::Code::ResourceExhausted
+            | tonic::Code::Unimplemented
+    )
+}
+
+/// Retry budget for `MintEphemeralPseudonyms`: never retried (see module docs).
+const MINT_MAX_RETRIES: u32 = 0;
+
+/// The independent breakers a [`HubClient`] owns, one per RPC class. Cloning shares state
+/// (each is an `Arc`), so every clone of a client sees the same open/closed view.
+#[derive(Clone)]
+pub struct Circuits {
+    /// Mint + display-name resolution: the per-message identity hot path (ingest
+    /// tokenization, egress detokenization).
+    identity: Arc<CircuitBreaker>,
+    /// `ResolveHandle`: driven by chat commands (`!secret @x`), so a flood of lookups is
+    /// kept off the hot path's breaker.
+    handle_lookup: Arc<CircuitBreaker>,
+    /// `KeyService`: stream-DEK delivery, independent of every identity call.
+    key: Arc<CircuitBreaker>,
+}
+
+impl Circuits {
+    fn new(failure_threshold: u32, reset_after: Duration) -> Self {
+        let breaker = || Arc::new(CircuitBreaker::new(failure_threshold, reset_after));
+        Self {
+            identity: breaker(),
+            handle_lookup: breaker(),
+            key: breaker(),
+        }
+    }
+}
+
 /// Builds the `ClientTlsConfig` [`HubClient::connect`] dials with -- pulled out as its
 /// own function so the CA-loading behavior (PR #570 review blocker 2) can be unit
 /// tested without a real network connection.
@@ -169,13 +230,13 @@ fn build_tls_config(
 /// Client for `waddles.hub.internal.v1`'s `IdentityService` + `KeyService`.
 /// Cheaply `Clone` -- clones share the same underlying [`Channel`] (pooled
 /// HTTP/2 connection(s)), [`MachineJwtClient`] (token cache), and
-/// [`CircuitBreaker`] state.
+/// [`Circuits`] (per-RPC-class breaker state).
 #[derive(Clone)]
 pub struct HubClient {
     identity: IdentityServiceClient<Channel>,
     key: KeyServiceClient<Channel>,
     token_client: Arc<MachineJwtClient>,
-    circuit: Arc<CircuitBreaker>,
+    circuits: Circuits,
     deadline: Duration,
     max_retries: u32,
 }
@@ -214,7 +275,7 @@ impl HubClient {
             identity: IdentityServiceClient::new(channel.clone()),
             key: KeyServiceClient::new(channel),
             token_client: Arc::new(MachineJwtClient::new(token_endpoint, sa_token_path, scope)),
-            circuit: Arc::new(CircuitBreaker::new(5, Duration::from_secs(30))),
+            circuits: Circuits::new(5, Duration::from_secs(30)),
             deadline: DEFAULT_RPC_DEADLINE,
             max_retries: 2,
         })
@@ -234,28 +295,28 @@ impl HubClient {
     }
 
     /// Mints (or returns the existing) ephemeral pseudonym for each item.
-    /// **Never retried** -- see module docs.
+    /// **Never retried** -- see module docs. Goes through the same breaker accounting as
+    /// every other RPC ([`HubClient::call_with_retry`]), so a caller-rejected batch
+    /// (`INVALID_ARGUMENT`, `RESOURCE_EXHAUSTED`, ...) is breaker-neutral here too.
     pub async fn mint_ephemeral_pseudonyms(
         &self,
         items: Vec<MintEphemeralPseudonymRequest>,
     ) -> Result<Vec<EphemeralPseudonym>, HubClientError> {
-        if !self.circuit.allow() {
-            return Err(HubClientError::CircuitOpen);
-        }
-        let request = self
-            .authed_request(MintEphemeralPseudonymsRequest { items })
-            .await?;
-        let mut client = self.identity.clone();
-        match client.mint_ephemeral_pseudonyms(request).await {
-            Ok(response) => {
-                self.circuit.record_success();
-                Ok(response.into_inner().pseudonyms)
+        self.call_with_retry(&self.circuits.identity, MINT_MAX_RETRIES, || {
+            let items = items.clone();
+            async move {
+                let request = self
+                    .authed_request(MintEphemeralPseudonymsRequest { items })
+                    .await?;
+                let mut client = self.identity.clone();
+                client
+                    .mint_ephemeral_pseudonyms(request)
+                    .await
+                    .map(|r| r.into_inner().pseudonyms)
+                    .map_err(HubClientError::from)
             }
-            Err(status) => {
-                self.circuit.record_failure();
-                Err(status.into())
-            }
-        }
+        })
+        .await
     }
 
     /// Resolves up to 100 UUIDs to display names. Idempotent -- retried
@@ -265,7 +326,7 @@ impl HubClient {
         tenant_id: String,
         uuids: Vec<String>,
     ) -> Result<ResolveDisplayNamesResponse, HubClientError> {
-        self.call_with_retry(|| {
+        self.call_with_retry(&self.circuits.identity, self.max_retries, || {
             let tenant_id = tenant_id.clone();
             let uuids = uuids.clone();
             async move {
@@ -283,6 +344,46 @@ impl HubClient {
         .await
     }
 
+    /// Resolves ONE raw chat reference (`@bob`, `bob`, or a Discord `<@id>`
+    /// mention) to its stable UUID inside hub-api's PII boundary -- the raw
+    /// handle is sent to hub-api and never comes back, only the UUID does.
+    /// Idempotent (a read, or a get-or-create of the same stable pseudonym)
+    /// so it is retried like `resolve_display_names`. A handle with no match
+    /// (or whose identity is not a current community member, or -- on Discord --
+    /// that is only a display name) surfaces as `HubClientError::Grpc` with
+    /// `Code::NotFound`, an ambiguous one as `Code::FailedPrecondition` -- never
+    /// a default UUID. Runs behind its own breaker (`Circuits::handle_lookup`):
+    /// it is chatter-driven, so it must not be able to open the identity hot
+    /// path's breaker.
+    pub async fn resolve_handle(
+        &self,
+        tenant_id: String,
+        platform: String,
+        target: String,
+    ) -> Result<ResolveHandleResponse, HubClientError> {
+        self.call_with_retry(&self.circuits.handle_lookup, self.max_retries, || {
+            let tenant_id = tenant_id.clone();
+            let platform = platform.clone();
+            let target = target.clone();
+            async move {
+                let request = self
+                    .authed_request(ResolveHandleRequest {
+                        tenant_id,
+                        platform,
+                        target,
+                    })
+                    .await?;
+                let mut client = self.identity.clone();
+                client
+                    .resolve_handle(request)
+                    .await
+                    .map(|r| r.into_inner())
+                    .map_err(HubClientError::from)
+            }
+        })
+        .await
+    }
+
     /// Returns a sealed stream DEK. Idempotent -- retried the same as
     /// `resolve_display_names`.
     pub async fn get_stream_dek(
@@ -292,7 +393,7 @@ impl HubClient {
         version: u32,
         caller_ephemeral_public_key: Vec<u8>,
     ) -> Result<GetStreamDekResponse, HubClientError> {
-        self.call_with_retry(|| {
+        self.call_with_retry(&self.circuits.key, self.max_retries, || {
             let tenant_id = tenant_id.clone();
             let purpose = purpose.clone();
             let caller_ephemeral_public_key = caller_ephemeral_public_key.clone();
@@ -316,36 +417,50 @@ impl HubClient {
         .await
     }
 
-    async fn call_with_retry<F, Fut, T>(&self, make_call: F) -> Result<T, HubClientError>
+    /// The single place breaker accounting happens, for every RPC (mint included):
+    ///
+    /// - `Ok` -> `record_success` (closes the breaker, clears the failure count);
+    /// - transient `UNAVAILABLE`/`DEADLINE_EXCEEDED` with retries left -> `record_failure`
+    ///   and retry after backoff (`max_retries == 0` never retries);
+    /// - a caller error ([`is_caller_error`]) -> **neutral**: returned as-is, touching
+    ///   neither the failure count nor the open/closed state, so caller-driven rejections
+    ///   can neither trip the breaker nor mask a real outage by resetting its count;
+    /// - anything else (server errors, auth/transport/token failures) -> `record_failure`.
+    async fn call_with_retry<F, Fut, T>(
+        &self,
+        circuit: &CircuitBreaker,
+        max_retries: u32,
+        make_call: F,
+    ) -> Result<T, HubClientError>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T, HubClientError>>,
     {
         let mut attempt = 0;
         loop {
-            if !self.circuit.allow() {
+            if !circuit.allow() {
                 return Err(HubClientError::CircuitOpen);
             }
             match make_call().await {
                 Ok(value) => {
-                    self.circuit.record_success();
+                    circuit.record_success();
                     return Ok(value);
                 }
                 Err(HubClientError::Grpc(status))
-                    if is_retryable(&status) && attempt < self.max_retries =>
+                    if is_retryable(&status) && attempt < max_retries =>
                 {
-                    self.circuit.record_failure();
+                    circuit.record_failure();
                     attempt += 1;
                     let backoff = Duration::from_millis(50 * 2u64.pow(attempt));
                     debug!(attempt, code = ?status.code(), "hub_client.retrying");
                     tokio::time::sleep(backoff).await;
                 }
-                Err(HubClientError::Grpc(status)) => {
-                    self.circuit.record_failure();
+                Err(HubClientError::Grpc(status)) if is_caller_error(&status) => {
+                    debug!(code = ?status.code(), "hub_client.caller_error_breaker_neutral");
                     return Err(HubClientError::Grpc(status));
                 }
                 Err(other) => {
-                    self.circuit.record_failure();
+                    circuit.record_failure();
                     return Err(other);
                 }
             }
@@ -383,12 +498,599 @@ mod tests {
     }
 
     #[test]
+    fn caller_errors_are_exactly_the_five_answered_and_declined_codes() {
+        // Caller input rejected / rate-limited / method not served yet: breaker-neutral.
+        assert!(is_caller_error(&Status::not_found("no such handle")));
+        assert!(is_caller_error(&Status::failed_precondition("ambiguous")));
+        assert!(is_caller_error(&Status::invalid_argument("bad")));
+        assert!(is_caller_error(&Status::resource_exhausted("rate limited")));
+        assert!(is_caller_error(&Status::unimplemented("pending PR #442")));
+        // Server-health and identity problems still count as failures.
+        assert!(!is_caller_error(&Status::internal("boom")));
+        assert!(!is_caller_error(&Status::unavailable("down")));
+        assert!(!is_caller_error(&Status::deadline_exceeded("slow")));
+        assert!(!is_caller_error(&Status::unknown("?")));
+        assert!(!is_caller_error(&Status::data_loss("corrupt")));
+        assert!(!is_caller_error(&Status::unauthenticated("no")));
+        assert!(!is_caller_error(&Status::permission_denied("no")));
+    }
+
+    /// A `HubClient` over a lazy channel that never dials -- `call_with_retry` is driven
+    /// with synthetic results, so no network or JWT bootstrap is involved.
+    fn offline_client() -> HubClient {
+        let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        HubClient {
+            identity: IdentityServiceClient::new(channel.clone()),
+            key: KeyServiceClient::new(channel),
+            token_client: Arc::new(MachineJwtClient::new(
+                "http://127.0.0.1:1/token",
+                "/nonexistent/sa-token",
+                "identity:handle:resolve",
+            )),
+            circuits: Circuits::new(5, Duration::from_secs(30)),
+            deadline: DEFAULT_RPC_DEADLINE,
+            max_retries: 2,
+        }
+    }
+
+    /// Drives `call_with_retry` on `circuit` with one synthetic gRPC failure.
+    async fn fail_with(
+        client: &HubClient,
+        circuit: &CircuitBreaker,
+        max_retries: u32,
+        status: Status,
+    ) -> Result<(), HubClientError> {
+        client
+            .call_with_retry(circuit, max_retries, || {
+                let status = status.clone();
+                async move { Err(HubClientError::Grpc(status)) }
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn repeated_not_found_lookups_never_open_the_circuit() {
+        let client = offline_client();
+        for _ in 0..20 {
+            let result = fail_with(
+                &client,
+                &client.circuits.handle_lookup,
+                2,
+                Status::not_found("no such handle"),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(HubClientError::Grpc(ref s)) if s.code() == tonic::Code::NotFound
+            ));
+        }
+        assert!(
+            client.circuits.handle_lookup.allow(),
+            "caller errors are not health failures: the breaker must stay closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_caller_error_code_is_breaker_neutral_on_every_breaker() {
+        let client = offline_client();
+        let breakers = [
+            &client.circuits.identity,
+            &client.circuits.handle_lookup,
+            &client.circuits.key,
+        ];
+        for breaker in breakers {
+            for _ in 0..25 {
+                for status in [
+                    Status::not_found("n"),
+                    Status::failed_precondition("f"),
+                    Status::invalid_argument("i"),
+                    Status::resource_exhausted("r"),
+                    Status::unimplemented("u"),
+                ] {
+                    assert!(fail_with(&client, breaker, 2, status).await.is_err());
+                }
+            }
+            assert!(
+                breaker.allow(),
+                "125 caller-side rejections must never open a breaker"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn caller_errors_never_reset_the_failure_count_of_a_failing_hub_api() {
+        let client = offline_client();
+        let breaker = &client.circuits.identity;
+        // Four real server failures (threshold is 5), with a flood of "no such handle"
+        // answers interleaved: the old behaviour treated each answer as a success and
+        // reset the count, so a genuinely failing hub-api never opened the breaker.
+        for _ in 0..4 {
+            let _ = fail_with(&client, breaker, 0, Status::internal("boom")).await;
+            for _ in 0..10 {
+                let _ = fail_with(&client, breaker, 0, Status::not_found("x")).await;
+            }
+        }
+        assert!(breaker.allow(), "four failures: still below the threshold");
+        let _ = fail_with(&client, breaker, 0, Status::internal("boom")).await;
+        assert!(
+            !breaker.allow(),
+            "the fifth real failure must open it -- caller errors in between cannot mask the outage"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_errors_still_open_the_circuit() {
+        let client = offline_client();
+        for _ in 0..5 {
+            let result = fail_with(
+                &client,
+                &client.circuits.identity,
+                2,
+                Status::internal("boom"),
+            )
+            .await;
+            assert!(result.is_err());
+        }
+        assert!(
+            !client.circuits.identity.allow(),
+            "five consecutive INTERNAL failures must open the breaker"
+        );
+        let blocked: Result<(), HubClientError> = client
+            .call_with_retry(&client.circuits.identity, 2, || async { Ok(()) })
+            .await;
+        assert!(matches!(blocked, Err(HubClientError::CircuitOpen)));
+    }
+
+    #[tokio::test]
+    async fn one_breaker_opening_leaves_the_others_serving() {
+        let client = offline_client();
+        for _ in 0..5 {
+            let _ = fail_with(
+                &client,
+                &client.circuits.handle_lookup,
+                0,
+                Status::unavailable("down"),
+            )
+            .await;
+        }
+        assert!(!client.circuits.handle_lookup.allow());
+        assert!(
+            client.circuits.identity.allow(),
+            "a handle-lookup outage must not fail mint / egress detokenization fast"
+        );
+        assert!(
+            client.circuits.key.allow(),
+            "a handle-lookup outage must not fail the KeyService"
+        );
+        let ok: Result<u8, HubClientError> = client
+            .call_with_retry(&client.circuits.key, 2, || async { Ok(7) })
+            .await;
+        assert!(matches!(ok, Ok(7)));
+    }
+
+    #[tokio::test]
+    async fn mint_is_never_retried_and_shares_the_classification() {
+        let client = offline_client();
+        let attempts = std::sync::atomic::AtomicU32::new(0);
+        let result: Result<(), HubClientError> = client
+            .call_with_retry(&client.circuits.identity, MINT_MAX_RETRIES, || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async { Err(HubClientError::Grpc(Status::unavailable("down"))) }
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "a mint must be attempted exactly once even on a transient failure"
+        );
+        // ...and a chatter-triggered rejection of a mint batch is neutral, like any RPC's.
+        for _ in 0..20 {
+            let _ = fail_with(
+                &client,
+                &client.circuits.identity,
+                MINT_MAX_RETRIES,
+                Status::resource_exhausted("rate limited"),
+            )
+            .await;
+        }
+        // 1 recorded failure from the transient attempt above, 0 from the 20 rejections.
+        for _ in 0..3 {
+            let _ = fail_with(
+                &client,
+                &client.circuits.identity,
+                MINT_MAX_RETRIES,
+                Status::internal("boom"),
+            )
+            .await;
+        }
+        assert!(
+            client.circuits.identity.allow(),
+            "4 real failures (1 + 3) + 20 rejections must still be closed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_failures_are_retried_for_idempotent_rpcs() {
+        let client = offline_client();
+        let attempts = std::sync::atomic::AtomicU32::new(0);
+        let result: Result<u8, HubClientError> = client
+            .call_with_retry(&client.circuits.identity, client.max_retries, || {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n < 2 {
+                        Err(HubClientError::Grpc(Status::unavailable("blip")))
+                    } else {
+                        Ok(9)
+                    }
+                }
+            })
+            .await;
+        assert!(matches!(result, Ok(9)));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(
+            client.circuits.identity.allow(),
+            "a success closes the breaker"
+        );
+    }
+
+    /// The public RPC methods really route through `call_with_retry` on their own breaker:
+    /// with an unreadable service-account token every call fails before the network, and
+    /// each failure lands on exactly that RPC class's breaker -- including `mint`, which
+    /// previously bypassed the shared accounting.
+    #[tokio::test]
+    async fn public_rpcs_use_their_own_breaker() {
+        let client = offline_client();
+        for _ in 0..5 {
+            assert!(matches!(
+                client.mint_ephemeral_pseudonyms(vec![]).await,
+                Err(HubClientError::Auth(_))
+            ));
+        }
+        assert!(
+            !client.circuits.identity.allow(),
+            "mint failures count against the identity breaker"
+        );
+        assert!(client.circuits.handle_lookup.allow());
+        assert!(client.circuits.key.allow());
+        assert!(matches!(
+            client.mint_ephemeral_pseudonyms(vec![]).await,
+            Err(HubClientError::CircuitOpen)
+        ));
+        assert!(matches!(
+            client.resolve_display_names("t".into(), vec![]).await,
+            Err(HubClientError::CircuitOpen)
+        ));
+        for _ in 0..5 {
+            assert!(matches!(
+                client
+                    .resolve_handle("t".into(), "discord".into(), "@x".into())
+                    .await,
+                Err(HubClientError::Auth(_))
+            ));
+        }
+        assert!(!client.circuits.handle_lookup.allow());
+        assert!(client.circuits.key.allow());
+        assert!(matches!(
+            client
+                .get_stream_dek("t".into(), "p".into(), 1, vec![])
+                .await,
+            Err(HubClientError::Auth(_))
+        ));
+    }
+
+    #[test]
     fn retryable_codes_are_exactly_unavailable_and_deadline_exceeded() {
         assert!(is_retryable(&Status::unavailable("down")));
         assert!(is_retryable(&Status::deadline_exceeded("slow")));
         assert!(!is_retryable(&Status::invalid_argument("bad")));
         assert!(!is_retryable(&Status::permission_denied("no")));
         assert!(!is_retryable(&Status::unauthenticated("no")));
+    }
+}
+
+/// Coverage for the client's auth/retry/circuit-breaker paths using a lazily-connected
+/// channel to a dead port (every RPC fails `UNAVAILABLE`) and a tiny local token server.
+#[cfg(test)]
+mod client_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const DEAD_ENDPOINT: &str = "http://127.0.0.1:1";
+
+    /// Local HTTP server answering every request with the given status/body.
+    async fn token_server(status: u16, body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn sa_token_file(label: &str) -> String {
+        let path =
+            std::env::temp_dir().join(format!("hub_client_sa_{}_{label}", std::process::id()));
+        std::fs::write(&path, "sa-token").expect("write sa token");
+        path.to_string_lossy().into_owned()
+    }
+
+    fn client_with(token_endpoint: &str, sa_path: &str, threshold: u32) -> HubClient {
+        let channel = Endpoint::from_static(DEAD_ENDPOINT).connect_lazy();
+        HubClient {
+            identity: IdentityServiceClient::new(channel.clone()),
+            key: KeyServiceClient::new(channel),
+            token_client: Arc::new(MachineJwtClient::new(token_endpoint, sa_path, "scope")),
+            circuits: Circuits::new(threshold, Duration::from_secs(60)),
+            deadline: Duration::from_millis(500),
+            max_retries: 2,
+        }
+    }
+
+    fn token_body() -> String {
+        r#"{"token":"jwt-abc","expires_in":900}"#.to_string()
+    }
+
+    #[test]
+    fn error_display_strings() {
+        assert!(HubClientError::CircuitOpen
+            .to_string()
+            .contains("circuit breaker open"));
+        assert!(HubClientError::Grpc(Status::internal("x"))
+            .to_string()
+            .contains("gRPC call failed"));
+        assert!(
+            HubClientError::Auth(ServiceAuthError::BootstrapRejected("r".into()))
+                .to_string()
+                .contains("machine JWT")
+        );
+        let e = HubClientError::TlsCaRead {
+            path: "/p".into(),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(e.to_string().contains("/p"));
+    }
+
+    #[test]
+    fn build_tls_config_without_ca_uses_system_roots() {
+        assert!(build_tls_config(None).is_ok());
+    }
+
+    #[test]
+    fn build_tls_config_reads_a_ca_file() {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let params = rcgen::CertificateParams::new(vec!["ca".to_string()]).expect("params");
+        let cert = params.self_signed(&key).expect("cert");
+        let path = std::env::temp_dir().join(format!("hub_client_ca_{}.pem", std::process::id()));
+        std::fs::write(&path, cert.pem()).expect("write");
+        assert!(build_tls_config(path.to_str()).is_ok());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn circuit_breaker_stays_open_before_reset_window() {
+        let breaker = CircuitBreaker::new(1, Duration::from_secs(60));
+        breaker.record_failure();
+        assert!(!breaker.allow());
+        assert!(!breaker.allow(), "still open until reset_after elapses");
+        breaker.record_success();
+        assert!(breaker.allow(), "success closes the breaker");
+    }
+
+    #[test]
+    fn now_ms_is_nonzero() {
+        assert!(now_ms() > 0);
+    }
+
+    #[tokio::test]
+    async fn connect_fails_closed_on_missing_ca_file() {
+        let err = HubClient::connect(
+            "https://127.0.0.1:1",
+            "http://t",
+            "/sa",
+            "s",
+            Some("/nonexistent/ca.pem"),
+        )
+        .await
+        .err()
+        .expect("must fail");
+        assert!(matches!(err, HubClientError::TlsCaRead { .. }));
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_invalid_endpoint_uri() {
+        let err = HubClient::connect("not a uri", "http://t", "/sa", "s", None)
+            .await
+            .err()
+            .expect("must fail");
+        assert!(matches!(err, HubClientError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_refused_is_transport_error() {
+        let err = HubClient::connect("https://127.0.0.1:1", "http://t", "/sa", "s", None)
+            .await
+            .err()
+            .expect("must fail");
+        assert!(matches!(err, HubClientError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn authed_request_sets_bearer_and_timeout() {
+        let url = token_server(200, token_body()).await;
+        let sa = sa_token_file("authed");
+        let client = client_with(&url, &sa, 5);
+        let req = client.authed_request(()).await.expect("request");
+        assert_eq!(
+            req.metadata().get("authorization").unwrap(),
+            "Bearer jwt-abc"
+        );
+        assert!(req.metadata().get("grpc-timeout").is_some());
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn authed_request_surfaces_bootstrap_rejection_as_auth_error() {
+        let url = token_server(401, "{}".into()).await;
+        let sa = sa_token_file("rejected");
+        let client = client_with(&url, &sa, 5);
+        let err = client.authed_request(()).await.expect_err("must fail");
+        assert!(matches!(
+            err,
+            HubClientError::Auth(ServiceAuthError::BootstrapRejected(_))
+        ));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn rpcs_fail_with_auth_error_when_token_unavailable() {
+        let client = client_with("http://127.0.0.1:1/t", "/nonexistent/sa", 5);
+        assert!(matches!(
+            client.mint_ephemeral_pseudonyms(vec![]).await,
+            Err(HubClientError::Auth(_))
+        ));
+        assert!(matches!(
+            client.resolve_display_names("t".into(), vec![]).await,
+            Err(HubClientError::Auth(_))
+        ));
+        assert!(matches!(
+            client
+                .get_stream_dek("t".into(), "p".into(), 1, vec![1])
+                .await,
+            Err(HubClientError::Auth(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn mint_is_not_retried_and_failures_open_the_circuit() {
+        let url = token_server(200, token_body()).await;
+        let sa = sa_token_file("mint");
+        let client = client_with(&url, &sa, 2);
+        for _ in 0..2 {
+            let err = client.mint_ephemeral_pseudonyms(vec![]).await.unwrap_err();
+            assert!(matches!(err, HubClientError::Grpc(_)));
+        }
+        assert!(matches!(
+            client.mint_ephemeral_pseudonyms(vec![]).await,
+            Err(HubClientError::CircuitOpen)
+        ));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn idempotent_rpcs_surface_grpc_error_after_retries_exhausted() {
+        let url = token_server(200, token_body()).await;
+        let sa = sa_token_file("idem");
+        let client = client_with(&url, &sa, 100);
+        let err = client
+            .resolve_display_names("tenant".into(), vec!["u".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::Grpc(_)));
+        let err = client
+            .get_stream_dek("tenant".into(), "purpose".into(), 1, vec![0; 32])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::Grpc(_)));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_retries_transient_then_succeeds() {
+        let client = client_with("http://t", "/sa", 100);
+        let calls = AtomicUsize::new(0);
+        let out = client
+            .call_with_retry(&client.circuits.identity, client.max_retries, || async {
+                if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(HubClientError::Grpc(Status::unavailable("flap")))
+                } else {
+                    Ok(7u32)
+                }
+            })
+            .await
+            .expect("succeeds on third attempt");
+        assert_eq!(out, 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_gives_up_after_max_retries() {
+        let client = client_with("http://t", "/sa", 100);
+        let calls = AtomicUsize::new(0);
+        let err = client
+            .call_with_retry(&client.circuits.identity, client.max_retries, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(HubClientError::Grpc(Status::deadline_exceeded("slow")))
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::Grpc(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "1 try + max_retries(2)");
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_never_retries_non_transient_grpc() {
+        let client = client_with("http://t", "/sa", 100);
+        let calls = AtomicUsize::new(0);
+        let err = client
+            .call_with_retry(&client.circuits.identity, client.max_retries, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(HubClientError::Grpc(Status::permission_denied("no")))
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HubClientError::Grpc(s) if s.code() == tonic::Code::PermissionDenied)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_never_retries_non_grpc_errors() {
+        let client = client_with("http://t", "/sa", 100);
+        let calls = AtomicUsize::new(0);
+        let err = client
+            .call_with_retry(&client.circuits.identity, client.max_retries, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(HubClientError::Auth(ServiceAuthError::BootstrapRejected(
+                    "x".into(),
+                )))
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::Auth(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_fails_fast_when_circuit_open() {
+        let client = client_with("http://t", "/sa", 1);
+        client.circuits.identity.record_failure();
+        let calls = AtomicUsize::new(0);
+        let err = client
+            .call_with_retry(&client.circuits.identity, client.max_retries, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, HubClientError>(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HubClientError::CircuitOpen));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no call made while open");
     }
 }
 

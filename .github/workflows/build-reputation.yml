@@ -17,6 +17,8 @@ on:
   merge_group:
     types: [checks_requested]
     branches: ['release/**']
+  release:
+    types: [released, prereleased]
   workflow_dispatch:
 
 
@@ -39,6 +41,7 @@ jobs:
   detect-changes:
     name: Detect Changed Files
     runs-on: ubuntu-latest
+    if: github.event_name != 'release'
     outputs:
       changed: ${{ steps.changes.outputs.changed }}
     steps:
@@ -62,7 +65,11 @@ jobs:
   build:
     name: Build reputation Container
     needs: detect-changes
-    if: needs.detect-changes.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    if: >-
+      !cancelled() &&
+      (needs.detect-changes.outputs.changed == 'true' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'release')
     permissions:
       contents: read
       packages: write

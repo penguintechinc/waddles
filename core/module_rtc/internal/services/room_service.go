@@ -87,7 +87,7 @@ func (s *RoomService) JoinRoom(ctx context.Context, roomName, userID, userName, 
 		CanPublishData: &canPublishData,
 	}
 
-	at.AddGrant(grant).
+	at.SetVideoGrant(grant).
 		SetIdentity(userID).
 		SetName(userName).
 		SetValidFor(24 * time.Hour).

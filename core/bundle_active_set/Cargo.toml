@@ -3,7 +3,7 @@ name = "bundle-active-set"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Shared, read-only Postgres query + diff logic for the data-plane's DB-driven active-bundle loader (svc_process + svc_action). A path dependency within this repo -- NOT a penguin-libs crate: it depends only on this repo's own hub-api-owned schema (app_active_versions/app_versions/app_install_approvals, migrations 0022/0023), so a penguin-libs cross-repo release cycle would only add friction for a schema this repo itself owns and evolves. See src/lib.rs module doc for the RO account SQL grants this crate's queries require."
 
@@ -45,7 +45,7 @@ chrono = "=0.4.45"
 sha2 = "=0.10.9"
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
 sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
 # Test-only: parses `reader::connection_url`'s output with the same URL
 # parser `sqlx_postgres::PgConnectOptions::parse_from_url` uses, so the

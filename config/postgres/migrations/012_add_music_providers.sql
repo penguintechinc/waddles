@@ -243,7 +243,7 @@ RETURNS TABLE(
     duration_ms INTEGER,
     requested_by_user_id INTEGER,
     votes INTEGER,
-    position INTEGER,
+    "position" INTEGER,
     status VARCHAR
 ) AS $$
 BEGIN

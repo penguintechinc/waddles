@@ -1,0 +1,38 @@
+{
+  "context": {},
+  "frame": {
+    "author_id": "spectrum-user-1",
+    "created_at": "2026-09-11T00:00:00Z",
+    "display_name": "SomeCitizen",
+    "kind": "lobby",
+    "message_id": "m-1",
+    "platform": "spectrum",
+    "source_id": "lobby-1",
+    "text": "  o7 citizens  ",
+    "thread_id": "t-1"
+  },
+  "golden": {
+    "actor": "spectrum-user-1",
+    "event_type": "message",
+    "payload": {
+      "author_id": "spectrum-user-1",
+      "created_at": "2026-09-11T00:00:00Z",
+      "display_name": "SomeCitizen",
+      "kind": "lobby",
+      "message_id": "m-1",
+      "source_id": "lobby-1",
+      "text": "o7 citizens",
+      "thread_id": "t-1"
+    },
+    "platform": "spectrum"
+  },
+  "golden_origin": "python",
+  "id": "spectrum/lobby_message",
+  "outcome": "event",
+  "path": "spectrum_poll",
+  "pii_classifier": "reject:created_at,kind,source_id,thread_id",
+  "platform": "spectrum",
+  "python_divergences": [],
+  "rust_path": null,
+  "seed": "core/svc_ingest/tests/test_receivers_spectrum_poll.py"
+}

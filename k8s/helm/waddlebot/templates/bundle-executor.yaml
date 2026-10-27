@@ -16,9 +16,8 @@
 #   - readOnlyRootFilesystem + all capabilities dropped + RuntimeDefault seccomp
 #     (.Values.podSecurityContext) + non-root uid -- matches the rest of the chart's Rust
 #     Deployments (10001, core/bundle_executor's future Dockerfile is assumed to create the
-#     same `appuser` convention core/svc_action/Dockerfile.rust already does; NO Dockerfile
-#     exists yet for this crate -- see pipeline.rustDataPlane.bundleExecutor's KNOWN GAPS
-#     comment in values.yaml).
+#     same `appuser` convention core/svc_action/Dockerfile.rust already does;
+#     core/bundle_executor/Dockerfile.rust exists and is the image build source).
 #
 # No Service object: this process has no HTTP/gRPC listener of any kind (core/
 # bundle_executor/src/tls.rs's own doc comment -- "this process has no HTTP surface to
@@ -79,7 +78,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: bundle-executor
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "bundleExecutor")) }}
   replicas: {{ .Values.pipeline.rustDataPlane.bundleExecutor.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -98,6 +99,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: bundle-executor
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       automountServiceAccountToken: false
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -113,12 +115,12 @@ spec:
         # (see those templates' own image lines); using the waddlebot.image helper here
         # would double-prefix alpha's already-registry-qualified repository value.
         image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
-        # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same
-        # line for the node-image-cache rationale (identical here). Proven stale in this
-        # exact deploy: the running pod was serving invoke.rs's UnimplementedBucketSource
-        # stub (LOAD_FAILED "object_store bucket GET not yet wired") a full image behind
-        # the registry's current BucketComponentSource-wired build.
-        imagePullPolicy: Always
+        # Values-driven -- see templates/svc-process-rust.yaml's comment on this same line
+        # for why the old hardcoded Always was removed (identical here). The stale-image
+        # case that motivated it (a same-tag `:alpha` push) is closed by the per-deploy
+        # global.imageTag fall-through above (bundleExecutor.image.tag left unset).
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         # uid 10001 -- see file header assumption note (no Dockerfile exists for this crate
         # yet, so this mirrors the sibling Rust crates' own established convention).
         securityContext:
@@ -246,4 +248,6 @@ spec:
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
       {{- end }}
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "bundle-executor" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false) }}
 {{- end }}

@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use thiserror::Error;
 
+use crate::pipeline::encoder::EncoderPreference;
+
 /// Errors that can occur while loading configuration.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
@@ -95,6 +97,20 @@ pub struct CliConfig {
     /// Path to the `ffmpeg` binary this service shells out to.
     #[arg(long, env = "FFMPEG_PATH", default_value = "/usr/bin/ffmpeg")]
     pub ffmpeg_path: PathBuf,
+
+    /// Video encoder preference: `auto` (a GPU encoder per codec when a
+    /// startup trial encode proves it works, else the CPU encoder), `cpu`,
+    /// `nvenc` or `vaapi`. Every value falls back to the CPU encoder, per
+    /// codec, when its GPU path is unusable -- the CPU path works
+    /// everywhere.
+    #[arg(long, env = "STREAM_ENCODER", default_value = "auto")]
+    pub stream_encoder: EncoderPreference,
+
+    /// VA-API render node used for GPU encoding (e.g.
+    /// `/dev/dri/renderD128`); the lowest-numbered `renderD*` node is
+    /// auto-discovered when unset.
+    #[arg(long, env = "STREAM_VAAPI_DEVICE")]
+    pub stream_vaapi_device: Option<PathBuf>,
 
     /// Externally-reachable base URL used to build playback/webhook links.
     #[arg(long, env = "PUBLIC_BASE_URL", default_value = "http://localhost:8208")]

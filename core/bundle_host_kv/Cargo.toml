@@ -3,7 +3,7 @@ name = "bundle-host-kv"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Shared `kv` bundle host-capability implementation (stage.wit `interface kv`: get/set/delete/increment) for the data-plane's two invoke-side stages (svc_process + svc_action). A path dependency within this repo -- NOT a penguin-libs crate: the key scheme, quotas, and isolation rules here are this repo's own security boundary for untrusted vendor bundle state, evolved alongside stage.wit and the manifest schema this repo owns. Backed by Valkey; every guest-visible key is namespaced server-side from the invocation's authenticated (tenant, community, app_id) scope, never from guest input, so one app can never read or enumerate another app's or another tenant's keys."
 
@@ -35,7 +35,7 @@ sha2 = "=0.10.9"
 opentelemetry = "=0.32.0"
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
 # Integration test against a real Valkey container (task requirement --
 # no existing testcontainers pattern in this repo to follow yet, so this
 # is the first landing of it; `rust-bundle-host-kv.yml` installs Docker

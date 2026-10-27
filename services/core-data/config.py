@@ -13,6 +13,7 @@ from urllib.parse import quote_plus as _quote_plus
 
 from flask_core.secrets import require_secret_key
 
+
 @dataclass
 class Config:
     """Unified configuration for core-data service."""

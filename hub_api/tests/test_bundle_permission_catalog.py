@@ -14,6 +14,7 @@ from services.bundle_permission_catalog import (
     is_valid_fqdn,
     is_valid_private_ip_or_cidr,
     is_valid_public_ip,
+    permission_family,
     resolve_risk,
 )
 
@@ -58,6 +59,37 @@ def test_moderation_family_is_dangerous_for_known_platform() -> None:
 
 def test_moderation_family_unknown_platform_is_unknown() -> None:
     assert resolve_risk("moderation.myspace") is None
+
+
+@pytest.mark.parametrize("family", ["chat.delete", "dm.send"])
+def test_provider_framework_outbound_families_are_dangerous(family: str) -> None:
+    """`chat.delete:`/`dm.send:<platform>` (issue #719) are `dangerous` for known platforms."""
+    for platform in ("discord", "twitch"):
+        assert resolve_risk(f"{family}:{platform}") == "dangerous"
+        assert is_dangerous(f"{family}:{platform}")
+        assert is_known_permission(f"{family}:{platform}")
+        assert permission_family(f"{family}:{platform}") == family
+
+
+@pytest.mark.parametrize(
+    "raw", ["chat.delete", "dm.send", "chat.delete:myspace", "dm.send:myspace"]
+)
+def test_provider_framework_outbound_families_reject_bare_or_unknown_platform(raw: str) -> None:
+    """A bare family id or an uncompiled platform is not a catalog member (fail closed)."""
+    assert resolve_risk(raw) is None
+
+
+def test_python_catalog_matches_rust_catalog_for_outbound_families() -> None:
+    """The Rust gate catalog and this module must both define the new outbound families."""
+    from pathlib import Path
+
+    rust = Path(__file__).resolve().parents[2] / "core/bundle_capability_gate/src/permission.rs"
+    if not rust.exists():
+        pytest.skip("Rust catalog source not present in this checkout (hub_api-only image)")
+    text = rust.read_text()
+    for family in ("chat.delete", "dm.send"):
+        assert f'=> "{family}"' in text, f"{family} missing from the Rust catalog"
+        assert resolve_risk(f"{family}:discord") == "dangerous"
 
 
 def test_unknown_permission_id_resolves_to_none() -> None:

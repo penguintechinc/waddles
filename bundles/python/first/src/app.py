@@ -70,9 +70,8 @@ process/action-stage split (as opposed to `count`'s "transform does
 everything" shape, which only applies there because `count`'s own routing
 decision itself requires a `kv` read).
 
-Gated behind the PostHog flag ``waddles.command-first``, default OFF -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -84,10 +83,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-first"
 
 SPEC = CommandSpec(name="first", sub_modules=frozenset({"leaderboard"}))
 
@@ -184,8 +180,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     normalized badge signal (`is_mod`/`is_broadcaster`, if the platform's
     normalizer emits them) for `dispatch`'s own `reset` permission gate.
     Returns `None` for any non-chat payload, text that isn't `!first`-shaped
-    (cheap-skip, zero `kv` cost), and while `waddles.command-first` is
-    disabled.
+    (cheap-skip, zero `kv` cost).
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -194,9 +189,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.split(maxsplit=1)[0].lower() if stripped else ""
     if head != f"!{SPEC.name}":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     action: str
@@ -216,9 +208,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     # Forward the normalized badge signal, if the platform's own normalizer emitted one --
     # absence (e.g. Discord today) must reach `dispatch` as absence, not an implicit `False`.
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
 
     return PlatformEvent(
         platform=event.platform,
@@ -252,7 +244,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 async def _fail_kv(exc: Exception, *, provider: str, channel_id: str, op: str) -> NoReturn:

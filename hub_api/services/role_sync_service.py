@@ -127,6 +127,7 @@ from services.credential_resolver import (
 )
 from services.guild_pairing import list_bindings
 from services.schema import bind_auth_tables, bind_bar_citizen_tables
+from services.sync_worker_dal import open_worker_dal
 
 try:
     from flask_core.feature_flags import feature_enabled
@@ -143,6 +144,31 @@ _REQUEST_TIMEOUT_SECONDS = 10.0
 _MAX_PAGES = 20
 #: Discord's own documented max page size for `GET /guilds/{id}/members`.
 _DISCORD_MEMBER_PAGE_SIZE = 1000
+
+#: Opt-in for demote-on-role-remove (Discord -> platform): comma-separated
+#: `guild_tenant_pairings.id` list. Unset/empty (the default) = grant-only, exactly the
+#: pre-existing behaviour -- no deploy demotes anyone until a pairing is listed here.
+DEMOTE_PAIRING_IDS_ENV = "ROLE_SYNC_DEMOTE_PAIRING_IDS"
+#: Role a demoted member falls back to (never null). Default `community-member`.
+DEMOTE_BASELINE_ROLE_ENV = "ROLE_SYNC_DEMOTE_BASELINE_ROLE"
+_DEFAULT_DEMOTE_BASELINE_ROLE = "community-member"
+#: Circuit breaker: one pass may demote at most this many members unless that is also
+#: <= `_DEMOTE_MAX_FRACTION` of the linked holders of sync-managed roles.
+_DEMOTE_ABS_FLOOR = 3
+_DEMOTE_MAX_FRACTION = 0.5
+_OWNER_ROLE = "community-owner"
+
+
+def _demote_enabled_for(pairing_id: int) -> bool:
+    """True only when `pairing_id` is explicitly listed in `ROLE_SYNC_DEMOTE_PAIRING_IDS`."""
+    raw = os.environ.get(DEMOTE_PAIRING_IDS_ENV, "")
+    return str(pairing_id) in {tok.strip() for tok in raw.split(",") if tok.strip()}
+
+
+def _demote_baseline_role() -> str:
+    """Configured demote target (never empty)."""
+    return os.environ.get(DEMOTE_BASELINE_ROLE_ENV, "").strip() or _DEFAULT_DEMOTE_BASELINE_ROLE
+
 
 #: `guild_tenant_pairings.direction` values that run `reconcile_pairing()` (Twitch ->
 #: Discord, subscriber_tier/moderator bindings).
@@ -205,6 +231,14 @@ class DiscordGuildMember:
 
     user_id: str
     role_ids: frozenset[str]
+
+
+@dataclass(slots=True, frozen=True)
+class GuildMemberSnapshot:
+    """Member read + whether pagination provably reached the end (`complete`)."""
+
+    members: list[DiscordGuildMember]
+    complete: bool
 
 
 class DiscordRoleTargetClient(Protocol):
@@ -413,16 +447,21 @@ class HttpDiscordRoleTargetClient:
         )
 
     async def list_guild_members(self, *, guild_id: str) -> list[DiscordGuildMember]:
+        """Members only -- grant-only callers; see `list_guild_members_checked` for completeness."""
+        return (await self.list_guild_members_checked(guild_id=guild_id)).members
+
+    async def list_guild_members_checked(self, *, guild_id: str) -> GuildMemberSnapshot:
         """`GET /guilds/{guild_id}/members`, paginated by snowflake `after` cursor (max 1000/page).
 
-        The discord_to_platform direction's one read of guild state --
-        mirrors `_paginate()`'s cursor-loop shape on
-        `HttpTwitchRoleSourceClient` (a different pagination style --
-        Discord has no cursor token, just "page by the last-seen user id" --
-        so not shared code, same `_MAX_PAGES` safety cap).
+        Returns the members PLUS an explicit `complete` flag: True only when the
+        cursor loop ended on a short/empty page (Discord has no more rows). Hitting
+        `_MAX_PAGES`, an unusable cursor, or a row without a user id => `complete=False`
+        (UNKNOWN), which the demote pass treats as "demote nobody". HTTP/transport
+        errors raise `DiscordSyncError` as before.
         """
         members: list[DiscordGuildMember] = []
         after: str | None = None
+        complete = False
         for _ in range(_MAX_PAGES):
             params: dict[str, str] = {"limit": str(_DISCORD_MEMBER_PAGE_SIZE)}
             if after:
@@ -439,11 +478,14 @@ class HttpDiscordRoleTargetClient:
             _classify_discord(response, action="guild member list")
             page = response.json() or []
             if not page:
+                complete = True
                 break
+            malformed = False
             for row in page:
                 user = row.get("user") or {}
                 user_id = user.get("id")
                 if not user_id:
+                    malformed = True
                     continue
                 members.append(
                     DiscordGuildMember(
@@ -451,12 +493,15 @@ class HttpDiscordRoleTargetClient:
                         role_ids=frozenset(str(r) for r in row.get("roles") or []),
                     )
                 )
+            if malformed:
+                break  # a row we could not read => state unknown
             if len(page) < _DISCORD_MEMBER_PAGE_SIZE:
+                complete = True
                 break
             after = str(page[-1].get("user", {}).get("id") or "")
             if not after:
                 break
-        return members
+        return GuildMemberSnapshot(members=members, complete=complete)
 
 
 @dataclass(slots=True, frozen=True)
@@ -482,6 +527,7 @@ class PlatformSyncResult:
     users_skipped_not_member: int
     users_skipped_owner_protected: int
     error: str | None
+    community_roles_demoted: int = 0
 
 
 @dataclass(slots=True)
@@ -607,12 +653,21 @@ def _community_role_priorities(dal: Any, community_id: int) -> dict[str, int]:
 
 
 def _apply_community_role(
-    dal: Any, *, community_id: int, hub_user_id: int, desired_role: str
+    dal: Any,
+    *,
+    community_id: int,
+    hub_user_id: int,
+    desired_role: str,
+    demote_only_from: frozenset[str] | None = None,
 ) -> str:
     """Idempotently set an existing active member's role, never touching `community-owner`.
 
+    Revoke path: `demote_only_from` (the sync-managed role set) makes this a guarded
+    downgrade to `desired_role` (the baseline); a current role outside the set returns
+    `"unmanaged_untouched"`.
+
     Returns one of `"applied"` / `"unchanged"` / `"not_a_member"` /
-    `"owner_protected"` -- this worker never creates `community_members`
+    `"owner_protected"` / `"unmanaged_untouched"` -- this worker never creates `community_members`
     rows (a Discord guild member who never joined this hub platform
     community is skipped, not auto-enrolled) and never downgrades
     `community-owner` (mirrors `admin_service.update_member_role()`'s own
@@ -635,10 +690,14 @@ def _apply_community_role(
     )
     if member is None:
         return "not_a_member"
-    if member.role == "community-owner":
+    if member.role == _OWNER_ROLE:
         return "owner_protected"
     if member.role == desired_role:
         return "unchanged"
+    if demote_only_from is not None and member.role not in demote_only_from:
+        # Revoke path: `desired_role` is the baseline; only a role sync itself could have
+        # granted may be downgraded -- manual/unmanaged roles are never touched.
+        return "unmanaged_untouched"
 
     role_row = (
         dal(
@@ -658,6 +717,104 @@ def _apply_community_role(
     )
     dal.commit()
     return "applied"
+
+
+def _run_demote_pass(
+    dal: Any,
+    *,
+    community_id: int,
+    pairing_id: int,
+    candidates: list[int],
+    managed_roles: frozenset[str],
+    baseline_role: str,
+    member_count: int,
+    member_read_complete: bool,
+    linked_managed_holders: int,
+) -> int:
+    """Guarded demote of confirmed-present, mapped-role-less members; returns the count.
+
+    Aborts (demotes nobody) when the member read is empty or not provably complete, or
+    when the circuit breaker trips. Per-member guards (owner, unmanaged role) live in
+    `_apply_community_role`.
+    """
+    if not candidates:
+        return 0
+    if member_count == 0 or not member_read_complete:
+        logger.warning(
+            "role_sync.demote_aborted_unknown_member_read pairing_id=%s members=%d complete=%s",
+            pairing_id,
+            member_count,
+            member_read_complete,
+        )
+        return 0
+    # Baseline must itself be a real role of this community, else refuse (never null).
+    bind_auth_tables(dal)
+    has_baseline = (
+        dal(
+            (dal.community_roles.community_id == community_id)
+            & (dal.community_roles.name == baseline_role)
+        )
+        .select()
+        .first()
+    )
+    if has_baseline is None:
+        logger.warning(
+            "role_sync.demote_aborted_baseline_missing pairing_id=%s baseline=%s",
+            pairing_id,
+            baseline_role,
+        )
+        return 0
+    # Circuit breaker: count only candidates that would really change (managed, non-owner).
+    would_demote = [
+        uid
+        for uid in candidates
+        if _current_role(dal, community_id, uid) in (managed_roles - {baseline_role})
+    ]
+    population = len(would_demote) + linked_managed_holders
+    if (
+        len(would_demote) > _DEMOTE_ABS_FLOOR
+        and len(would_demote) > population * _DEMOTE_MAX_FRACTION
+    ):
+        logger.error(
+            "role_sync.demote_aborted_circuit_breaker pairing_id=%s would_demote=%d population=%d",
+            pairing_id,
+            len(would_demote),
+            population,
+        )
+        return 0
+    demoted = 0
+    for uid in would_demote:
+        outcome = _apply_community_role(
+            dal,
+            community_id=community_id,
+            hub_user_id=uid,
+            desired_role=baseline_role,
+            demote_only_from=managed_roles - {baseline_role},
+        )
+        if outcome == "applied":
+            demoted += 1
+    logger.info(
+        "role_sync.demote_pass pairing_id=%s community_id=%s demoted=%d",
+        pairing_id,
+        community_id,
+        demoted,
+    )
+    return demoted
+
+
+def _current_role(dal: Any, community_id: int, hub_user_id: int) -> str | None:
+    """Active member's current `community_members.role`, or None."""
+    bind_auth_tables(dal)
+    row = (
+        dal(
+            (dal.community_members.community_id == community_id)
+            & (dal.community_members.user_id == str(hub_user_id))
+            & (dal.community_members.is_active == True)  # noqa: E712 - pydal idiom
+        )
+        .select()
+        .first()
+    )
+    return None if row is None else str(row.role)
 
 
 async def _flag_enabled(tenant_slug: str) -> bool:
@@ -884,8 +1041,19 @@ async def reconcile_pairing_discord_to_platform(
             return PlatformSyncResult(pairing_id, community_id, 0, 0, 0, 0, None)
 
         discord_client = make_discord_client(bot_token)
-        members = await discord_client.list_guild_members(guild_id=guild_id)
+        demote_on = _demote_enabled_for(pairing_id)
+        member_read_complete = False
+        checked = getattr(discord_client, "list_guild_members_checked", None)
+        if demote_on and checked is not None:
+            snapshot = await checked(guild_id=guild_id)
+            members = snapshot.members
+            member_read_complete = bool(snapshot.complete)
+        else:
+            members = await discord_client.list_guild_members(guild_id=guild_id)
         role_priority = _community_role_priorities(dal, community_id)
+        demote_candidates: list[int] = []
+        linked_managed_holders = 0
+        managed_roles = frozenset(role_by_discord_role_id.values())
 
         applied = 0
         skipped_unlinked = 0
@@ -899,13 +1067,20 @@ async def reconcile_pairing_discord_to_platform(
             }
             desired_role = _resolve_desired_community_role(role_priority, mapped_roles)
             if desired_role is None:
-                continue  # no mapped Discord role held this pass -- grant-only, never demote
+                # Guard 1: this member WAS returned by Discord and holds none of the mapped
+                # roles. Only collected (never applied here) -- guards 2/3 run after the loop.
+                if demote_on:
+                    absent_user = _find_linked_hub_user_by_discord(dal, member.user_id)
+                    if absent_user is not None:
+                        demote_candidates.append(absent_user)
+                continue
 
             hub_user_id = _find_linked_hub_user_by_discord(dal, member.user_id)
             if hub_user_id is None:
                 skipped_unlinked += 1
                 continue
 
+            linked_managed_holders += 1
             outcome = _apply_community_role(
                 dal, community_id=community_id, hub_user_id=hub_user_id, desired_role=desired_role
             )
@@ -916,6 +1091,20 @@ async def reconcile_pairing_discord_to_platform(
             elif outcome == "owner_protected":
                 skipped_owner_protected += 1
             # "unchanged" -- already correct, not counted as a skip or an error.
+
+        demoted = 0
+        if demote_on:
+            demoted = _run_demote_pass(
+                dal,
+                community_id=community_id,
+                pairing_id=pairing_id,
+                candidates=demote_candidates,
+                managed_roles=managed_roles,
+                baseline_role=_demote_baseline_role(),
+                member_count=len(members),
+                member_read_complete=member_read_complete,
+                linked_managed_holders=linked_managed_holders,
+            )
 
         logger.info(
             "role_sync.platform_pairing_synced pairing_id=%s community_id=%s guild_id=%s "
@@ -939,6 +1128,7 @@ async def reconcile_pairing_discord_to_platform(
             skipped_not_member,
             skipped_owner_protected,
             None,
+            demoted,
         )
 
     except (TransportUnavailable, DiscordSyncError) as exc:
@@ -1051,31 +1241,26 @@ async def run_role_sync_reconcile_batch(
             await bound_http_client.aclose()
 
 
-async def _build_install_dal() -> Any:
-    """Open this standalone CronJob process's own penguin-dal connection.
-
-    Same DSN as the app, a separate pool -- mirrors `usage_aggregator_
-    service.py::_build_install_dal`.
-    """
-    from services.bundle_install_dal import build_install_dal
-
-    return await build_install_dal(os.environ["DATABASE_URL"], pool_size=1)
-
-
 async def main() -> int:
-    """CronJob entrypoint: one reconcile pass, denominators printed, never a silent zero."""
+    """CronJob entrypoint: one reconcile pass, denominators printed, never a silent zero.
+
+    The engine queries the RAW pydal DAL (`async_dal.dal`) and token lookup takes the
+    flask_core `AsyncDAL` itself (`get_decrypted_tokens` calls `.dal` + `.select_async`) --
+    exactly the objects hub-api builds in `app.py::startup`. Neither is a penguin-dal
+    `AsyncDB`: that has no `.dal`, and reading one raises `TableNotFoundError: Table 'dal'
+    not found` (see `services/sync_worker_dal.py`).
+    """
     from services.community_connections import get_decrypted_tokens
 
-    install_dal = await _build_install_dal()
-    dal = install_dal.dal
+    with open_worker_dal(os.environ["DATABASE_URL"]) as async_dal:
 
-    async def _get_broadcaster_user_token(community_id: int) -> str | None:
-        tokens = await get_decrypted_tokens(install_dal, community_id, "twitch")
-        return tokens.access_token if tokens else None
+        async def _get_broadcaster_user_token(community_id: int) -> str | None:
+            tokens = await get_decrypted_tokens(async_dal, community_id, "twitch")
+            return tokens.access_token if tokens else None
 
-    summary = await run_role_sync_reconcile_batch(
-        dal, get_broadcaster_user_token=_get_broadcaster_user_token
-    )
+        summary = await run_role_sync_reconcile_batch(
+            async_dal.dal, get_broadcaster_user_token=_get_broadcaster_user_token
+        )
     print(
         f"role_sync: pairings_examined={summary.pairings_examined} "
         f"pairings_synced={summary.pairings_synced} "

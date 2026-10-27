@@ -78,8 +78,8 @@ class ListBundleVersionsResponse:
 
 
 @bundle_admin_bp.route("/bundle-versions", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(ListBundleVersionsResponse)
 async def list_bundle_versions() -> ListBundleVersionsResponse | tuple[dict[str, object], int]:
     """Cross-app bundle-version upload rows, newest first (default `?status=pending`).

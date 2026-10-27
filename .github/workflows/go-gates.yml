@@ -1,0 +1,67 @@
+name: Go lint + vuln gates
+
+# Runs golangci-lint and govulncheck against every Go module with a toolchain
+# new enough for the module's `go` directive. Both tools must be built with a Go
+# >= the module's go.mod version or they crash on load; the previous count-based
+# gate read that crash as "0 findings, PASS". Here exit status propagates, and
+# the module count is printed so zero modules examined is a failure.
+
+on:
+  pull_request:
+    paths:
+      - 'core/module_rtc/**'
+      - '.github/workflows/go-gates.yml'
+  merge_group:
+    types: [checks_requested]
+    branches: ['release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-gates-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-gates:
+    name: golangci-lint + govulncheck (Go 1.26)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.26.10'
+          cache: false
+
+      - name: Install lint/vuln tools (built with the pinned toolchain)
+        run: |
+          set -euo pipefail
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+          golangci-lint --version
+          govulncheck -version
+
+      - name: Run gates (exit status propagates; zero modules is a failure)
+        run: |
+          set -euo pipefail
+          mods=$(find . -name go.mod -not -path '*/node_modules/*' -not -path './.git/*' -not -path '*/vendor/*')
+          n=$(printf '%s\n' "$mods" | grep -c . || true)
+          echo "Go modules examined: ${n}"
+          if [ "${n}" -eq 0 ]; then
+            echo "::error::no go.mod found - refusing to report a pass on zero modules"
+            exit 1
+          fi
+          for mod in $mods; do
+            dir=$(dirname "$mod")
+            echo "=== ${dir}: golangci-lint ==="
+            (cd "$dir" && golangci-lint run ./...)
+            echo "=== ${dir}: govulncheck ==="
+            (cd "$dir" && govulncheck ./...)
+          done

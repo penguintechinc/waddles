@@ -84,8 +84,8 @@ pub fn authorize_db(scope: &DbScope, snapshot: &CapabilitySnapshot) -> Result<()
 
     crate::metrics::record_authorize_denied(&scope.app_id, DB_PERMISSION_ID);
     tracing::debug!(
-        tenant = %scope.tenant,
-        community = scope.community.as_deref().unwrap_or(""),
+        tenant_id = scope.tenant_id,
+        community_id = scope.community_id,
         app_id = %scope.app_id,
         permission = DB_PERMISSION_ID,
         "db capability denied: not declared in this app version's approved manifest capabilities"
@@ -108,14 +108,14 @@ mod tests {
 
     #[test]
     fn authorize_db_grants_when_the_app_declares_storage_tables() {
-        let scope = DbScope::new("acme", Some("main".to_string()), "waddles.bot.a");
+        let scope = DbScope::new(7, 3, "waddles.bot.a");
         let snapshot = snapshot_granting("waddles.bot.a");
         assert_eq!(authorize_db(&scope, &snapshot), Ok(()));
     }
 
     #[test]
     fn authorize_db_denies_when_the_app_never_declared_storage_tables() {
-        let scope = DbScope::new("acme", Some("main".to_string()), "waddles.bot.a");
+        let scope = DbScope::new(7, 3, "waddles.bot.a");
         let snapshot = CapabilitySnapshot::new();
         snapshot.update("waddles.bot.a", ["context".to_string()]);
         let err = authorize_db(&scope, &snapshot).unwrap_err();
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn authorize_db_denies_an_app_id_the_snapshot_has_never_seen() {
-        let scope = DbScope::new("acme", Some("main".to_string()), "waddles.bot.unknown");
+        let scope = DbScope::new(7, 3, "waddles.bot.unknown");
         let snapshot = snapshot_granting("waddles.bot.a");
         let err = authorize_db(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn authorize_db_denies_against_a_completely_empty_snapshot() {
-        let scope = DbScope::new("acme", None, "waddles.bot.a");
+        let scope = DbScope::new(7, 0, "waddles.bot.a");
         let snapshot = CapabilitySnapshot::new();
         let err = authorize_db(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");

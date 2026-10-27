@@ -10,13 +10,14 @@ log = botLogger("waddlebot-dbc")
 log.fileLogger("waddlebot-dbc.log")
 
 # const
-DEFAULT_CFG_FILENAME="config.yml"
+DEFAULT_CFG_FILENAME = "config.yml"
+
 
 # ---------------------
 # This is the class which will handle all database interactions
 # ---------------------
 class botDb:
-    def __init__(self, config: dict = None, dbc: dbinfo = None ):
+    def __init__(self, config: dict = None, dbc: dbinfo = None):
         # our input
         self.dbc = dbc
         # These must initialize in order to be useful
@@ -27,7 +28,7 @@ class botDb:
             log.debug("No dbinfo object given, trying to find config file based on default")
             call_abspath = os.path.abspath((inspect.stack()[0])[1])
             path = f"{os.path.dirname(call_abspath)}{DEFAULT_CFG_FILENAME}"
-            self.dbc = bc(configPath = path).config["database"]
+            self.dbc = bc(configPath=path).config["database"]
         # set the below to whatever request auth method you want before calling dbConnect functions
         self.auth = None
 
@@ -46,7 +47,7 @@ class botDb:
         requrl = f"https://{self.db.webhost}:{self.db.webport}/{self.db.database}/{self.db.table}/read"
         reqquery = {'columns': ','.join(query.columns), 'queryColumn': query.queryColumn, 'queryValue': query.queryValue}
         try:
-            response = requests.get(requrl, data = reqquery, auth = self.auth)
+            response = requests.get(requrl, data=reqquery, auth=self.auth)
             response.raise_for_status()
             return response.json()
         except requests.RequestException as err:
@@ -55,7 +56,7 @@ class botDb:
         except ValueError as err:
             log.error(f"JSON decoding failed: {err}")
             return None
-    
+
     # ---------------------
     # Function which calls out to a DB via API to update DB records
     # ---------------------
@@ -63,7 +64,7 @@ class botDb:
         # I split this up to make it easier to debug and for PEP8 compliance
         webDBurl = f"https://{self.db.webhost}:{self.db.webport}/{self.db.database}"
         requrl = f"{webDBurl}/{self.db.table}/update"
-        reqquery = {'columns': ','.join(query.columns), 'queryColumn': query.queryColumn, 
+        reqquery = {'columns': ','.join(query.columns), 'queryColumn': query.queryColumn,
                     'queryValue': query.queryValue}
         log.debug(f"Requesting update to {requrl}")
         try:

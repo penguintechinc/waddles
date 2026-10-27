@@ -31,19 +31,23 @@
 
 pub mod bucket;
 pub mod config;
+pub mod connector;
 pub mod engine;
 pub mod error;
 pub mod heartbeat;
 pub mod host;
 pub mod invoke;
 pub mod manifest;
+pub mod metrics;
 pub mod probe;
 pub mod signing;
+pub mod telemetry;
 pub mod tls;
 pub mod wire;
 
+use std::future::Future;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::{error, info, warn};
 
@@ -51,11 +55,88 @@ use crate::bucket::BucketComponentSource;
 use crate::config::CliConfig;
 use crate::error::ExecutorError;
 use crate::heartbeat::{Heartbeat, HeartbeatConfig, HeartbeatMetrics};
-use crate::invoke::{ComponentSource, Executor};
+use crate::invoke::{ComponentSource, DrainOutcome, Executor};
 
 /// `tracing`/OTel service name (spec SS12.7's `OTEL_SERVICE_NAME`
 /// fallback).
 pub const SERVICE_NAME: &str = "bundle-executor";
+
+/// SIGTERM/SIGINT listeners, installed eagerly (at startup, before the first
+/// dial) so a signal arriving at any point -- including mid-handshake -- is
+/// observed instead of killing the process via the default disposition.
+/// Install failure is fatal at startup (fail loud), never a silent "no
+/// graceful shutdown" fallback.
+struct ShutdownSignals {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    /// Registers the SIGTERM (Kubernetes rollout/eviction) and SIGINT
+    /// (local ^C) handlers.
+    fn install() -> Result<Self, ExecutorError> {
+        use tokio::signal::unix::{signal, SignalKind};
+        let io_err = |name: &str, e: std::io::Error| {
+            ExecutorError::Config(format!("failed to install {name} handler: {e}"))
+        };
+        Ok(Self {
+            term: signal(SignalKind::terminate()).map_err(|e| io_err("SIGTERM", e))?,
+            int: signal(SignalKind::interrupt()).map_err(|e| io_err("SIGINT", e))?,
+        })
+    }
+
+    /// Resolves with the name of the first signal received.
+    async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.term.recv() => "SIGTERM",
+            _ = self.int.recv() => "SIGINT",
+        }
+    }
+}
+
+/// Runs `serve` (the never-ending dial/reconnect loop) until `shutdown`
+/// resolves, then drains `executor` for up to `drain_deadline` and returns.
+/// `serve` keeps being polled DURING the drain on purpose: in-flight
+/// invokes make host calls whose replies are delivered by the connection's
+/// read loop, so dropping it first would deadlock exactly the work being
+/// drained. If `serve` ends on its own first, returns immediately.
+async fn serve_until_shutdown<S, Sv, Sd>(
+    serve: Sv,
+    shutdown: Sd,
+    executor: &Executor<S>,
+    drain_deadline: Duration,
+) -> DrainOutcome
+where
+    S: ComponentSource,
+    Sv: Future<Output = ()>,
+    Sd: Future<Output = &'static str>,
+{
+    tokio::pin!(serve);
+    let signal = tokio::select! {
+        _ = &mut serve => return DrainOutcome::Drained,
+        signal = shutdown => signal,
+    };
+    info!(
+        signal,
+        drain_deadline_s = drain_deadline.as_secs(),
+        "shutdown requested; refusing new work and draining in-flight invokes"
+    );
+    let outcome = tokio::select! {
+        _ = &mut serve => DrainOutcome::Drained,
+        outcome = executor.drain(drain_deadline) => outcome,
+    };
+    match outcome {
+        DrainOutcome::Drained => info!("drain complete; exiting"),
+        DrainOutcome::TimedOut {
+            in_flight_calls,
+            in_flight_compiles,
+        } => warn!(
+            in_flight_calls,
+            in_flight_compiles, "drain deadline reached with work still in flight; exiting anyway"
+        ),
+    }
+    outcome
+}
 
 /// A tiny, dependency-free xorshift64* PRNG for jittering `crate::run`'s
 /// host-api reconnect backoff -- regression: readiness gated on executor
@@ -143,6 +224,13 @@ pub async fn run() -> Result<(), ExecutorError> {
     cfg.validate_host_api_tls()?;
 
     init_telemetry();
+    // Metrics pipeline (OTLP export only when `OTEL_EXPORTER_OTLP_ENDPOINT` is
+    // set -- see `crate::telemetry`). Held for the life of `run` so the final
+    // export interval is flushed on an orderly stop, and built strictly
+    // BEFORE the first `executor_metrics()` call so the instruments bind to
+    // the provider it installs rather than the no-op default.
+    let _metrics_guard = telemetry::init_metrics(SERVICE_NAME);
+    let _ = metrics::executor_metrics();
 
     // Marks "the long-running process started trying to connect now" --
     // `crate::probe::check_session`'s startup-grace window is measured
@@ -152,6 +240,7 @@ pub async fn run() -> Result<(), ExecutorError> {
         warn!(error = %e, probe_file = ?cfg.executor_probe_file, "failed to record liveness probe start marker");
     }
 
+    let mut signals = ShutdownSignals::install()?;
     let source = BucketComponentSource::from_cli(&cfg)?;
     let executor = Arc::new(Executor::new(&cfg, source)?);
     let heartbeat_cfg = HeartbeatConfig::from_cli(&cfg);
@@ -163,43 +252,53 @@ pub async fn run() -> Result<(), ExecutorError> {
         "host-api session liveness configured"
     );
 
-    let mut backoff = std::time::Duration::from_secs(1);
-    let backoff_cap = std::time::Duration::from_secs(30);
-    let mut attempt: u32 = 0;
-    let mut disconnected_at: Option<Instant> = None;
-    let jitter = Jitter::from_entropy();
-    loop {
-        attempt += 1;
-        match connect_and_serve(
-            &cfg,
-            &executor,
-            attempt,
-            heartbeat_cfg,
-            Arc::clone(&heartbeat_metrics),
-            disconnected_at,
-        )
-        .await
-        {
-            Ok(()) => {
-                info!(attempt, "host-api connection closed cleanly, reconnecting");
-                backoff = std::time::Duration::from_secs(1);
+    let serve = async {
+        let mut backoff = std::time::Duration::from_secs(1);
+        let backoff_cap = std::time::Duration::from_secs(30);
+        let mut attempt: u32 = 0;
+        let mut disconnected_at: Option<Instant> = None;
+        let jitter = Jitter::from_entropy();
+        loop {
+            attempt += 1;
+            match connect_and_serve(
+                &cfg,
+                &executor,
+                attempt,
+                heartbeat_cfg,
+                Arc::clone(&heartbeat_metrics),
+                disconnected_at,
+            )
+            .await
+            {
+                Ok(()) => {
+                    info!(attempt, "host-api connection closed cleanly, reconnecting");
+                    backoff = std::time::Duration::from_secs(1);
+                }
+                Err(e) => {
+                    let sleep_for = jittered_backoff(&jitter, backoff);
+                    error!(
+                        error = %e,
+                        attempt,
+                        backoff_s = backoff.as_secs(),
+                        sleep_s = sleep_for.as_secs_f64(),
+                        "host-api connection failed, retrying"
+                    );
+                    tokio::time::sleep(sleep_for).await;
+                    backoff = (backoff * 2).min(backoff_cap);
+                }
             }
-            Err(e) => {
-                let sleep_for = jittered_backoff(&jitter, backoff);
-                error!(
-                    error = %e,
-                    attempt,
-                    backoff_s = backoff.as_secs(),
-                    sleep_s = sleep_for.as_secs_f64(),
-                    "host-api connection failed, retrying"
-                );
-                tokio::time::sleep(sleep_for).await;
-                backoff = (backoff * 2).min(backoff_cap);
-            }
+            disconnected_at = Some(Instant::now());
+            heartbeat_metrics.record_reconnect();
         }
-        disconnected_at = Some(Instant::now());
-        heartbeat_metrics.record_reconnect();
-    }
+    };
+    serve_until_shutdown(
+        serve,
+        signals.recv(),
+        &executor,
+        Duration::from_secs(cfg.executor_shutdown_drain_secs),
+    )
+    .await;
+    Ok(())
 }
 
 /// Dials the stage and runs one connection to completion (spec SS4.5).
@@ -217,7 +316,14 @@ async fn connect_and_serve<S: ComponentSource>(
     heartbeat_metrics: Arc<HeartbeatMetrics>,
     disconnected_at: Option<Instant>,
 ) -> Result<(), ExecutorError> {
-    let io = tls::dial_stage(cfg).await?;
+    let metrics = metrics::executor_metrics();
+    let io = match tls::dial_stage(cfg).await {
+        Ok(io) => io,
+        Err(err) => {
+            metrics.record_connection_attempt("failed");
+            return Err(err);
+        }
+    };
     let peer = io
         .get_ref()
         .0
@@ -232,13 +338,23 @@ async fn connect_and_serve<S: ComponentSource>(
     );
     let probe_file = cfg.executor_probe_file.clone();
     let on_connected_peer = peer.clone();
+    // Set once, when the hello/hello-ok handshake completes: distinguishes a
+    // session that was established (and has a length) from a dial that never
+    // got that far (a failed attempt).
+    let connected_at: Arc<std::sync::OnceLock<Instant>> = Arc::new(std::sync::OnceLock::new());
+    let on_connected_metrics = Arc::clone(&metrics);
+    let on_connected_at = Arc::clone(&connected_at);
     let heartbeat = Heartbeat {
         cfg: heartbeat_cfg,
         metrics: heartbeat_metrics,
         probe_file: probe_file.clone(),
         probe_grace: std::time::Duration::from_secs(cfg.executor_grace_secs),
         on_connected: Some(Box::new(move || {
+            on_connected_metrics.record_connection_attempt("connected");
+            on_connected_metrics.set_connection_up(true);
+            let _ = on_connected_at.set(Instant::now());
             if let Some(since) = disconnected_at {
+                on_connected_metrics.record_outage(since.elapsed());
                 info!(
                     peer = %on_connected_peer,
                     attempt,
@@ -251,7 +367,14 @@ async fn connect_and_serve<S: ComponentSource>(
             }
         })),
     };
-    wire::run_connection(io, hello, Arc::clone(executor), &peer, heartbeat).await
+    let outcome = wire::run_connection(io, hello, Arc::clone(executor), &peer, heartbeat).await;
+    metrics.set_connection_up(false);
+    match connected_at.get() {
+        Some(connected) => metrics.record_session(connected.elapsed()),
+        // The dial succeeded but the handshake never completed.
+        None => metrics.record_connection_attempt("failed"),
+    }
+    outcome
 }
 
 /// Installs this binary's `tracing` subscriber: JSON to stdout, level
@@ -349,6 +472,104 @@ mod tests {
     #[tokio::test]
     async fn run_healthcheck_succeeds() -> Result<(), ExecutorError> {
         run_healthcheck().await
+    }
+
+    /// SIGTERM is actually observed (not the default kill): sends a real
+    /// SIGTERM to this test process and expects `ShutdownSignals::recv` to
+    /// resolve -- the process surviving at all proves the handler replaced
+    /// the default disposition.
+    #[tokio::test]
+    async fn a_real_sigterm_resolves_the_shutdown_signal() {
+        let mut signals = ShutdownSignals::install().expect("install handlers");
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .expect("spawn kill");
+        assert!(status.success(), "kill -TERM failed: {status:?}");
+        let got = tokio::time::timeout(Duration::from_secs(5), signals.recv())
+            .await
+            .expect("SIGTERM must be delivered to the handler");
+        assert_eq!(got, "SIGTERM");
+    }
+
+    fn shutdown_test_executor() -> Executor<UnimplementedBucketSource> {
+        let mut cfg = CliConfig::for_healthcheck();
+        cfg.executor_max_concurrent_calls = 2;
+        Executor::new(&cfg, UnimplementedBucketSource).expect("executor")
+    }
+
+    /// SIGTERM triggers a graceful drain: after the signal, the loop waits
+    /// for the in-flight call to finish, and returns `Drained` (so `run`
+    /// returns `Ok` and the process exits 0) only once it has.
+    #[tokio::test]
+    async fn shutdown_signal_drains_in_flight_calls_before_returning() {
+        let executor = shutdown_test_executor();
+        let in_flight = executor.test_hold_call_slot();
+        let serve = std::future::pending::<()>();
+        let shutdown = async { "SIGTERM" };
+
+        let mut outcome = Box::pin(serve_until_shutdown(
+            serve,
+            shutdown,
+            &executor,
+            Duration::from_secs(10),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut outcome)
+                .await
+                .is_err(),
+            "must keep waiting while a call is still in flight"
+        );
+        drop(in_flight);
+        assert_eq!(outcome.await, DrainOutcome::Drained);
+    }
+
+    /// A stuck guest cannot block a rollout: past the drain deadline the
+    /// loop returns anyway, reporting what was abandoned.
+    #[tokio::test]
+    async fn shutdown_signal_gives_up_at_the_drain_deadline() {
+        let executor = shutdown_test_executor();
+        let _stuck = executor.test_hold_call_slot();
+        let outcome = serve_until_shutdown(
+            std::future::pending::<()>(),
+            async { "SIGTERM" },
+            &executor,
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            DrainOutcome::TimedOut {
+                in_flight_calls: 1,
+                in_flight_compiles: 0
+            }
+        );
+    }
+
+    /// The serve loop keeps running (so in-flight host-call replies still
+    /// get delivered) until the signal arrives.
+    #[tokio::test]
+    async fn serve_keeps_running_until_the_shutdown_signal() {
+        let executor = shutdown_test_executor();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown = async move {
+            let _ = rx.await;
+            "SIGTERM"
+        };
+        let mut fut = Box::pin(serve_until_shutdown(
+            std::future::pending::<()>(),
+            shutdown,
+            &executor,
+            Duration::from_secs(1),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut fut)
+                .await
+                .is_err(),
+            "must not exit before a signal"
+        );
+        tx.send(()).expect("signal");
+        assert_eq!(fut.await, DrainOutcome::Drained);
     }
 
     #[test]
@@ -505,6 +726,159 @@ mod tests {
         .await?;
         stage_task.await?;
         let _ = std::fs::remove_file(&ca_path);
+        Ok(())
+    }
+
+    /// The OTel series this module's connect tests touch are label-light and
+    /// shared with every other test in the process, so they assert on deltas
+    /// against the process-wide harness.
+    fn shared_count(name: &str, filter: &[(&str, &str)]) -> f64 {
+        crate::metrics::test_support::shared().count(name, filter)
+    }
+
+    /// A dial that never reaches a stage must be counted as a failed attempt
+    /// (not silently skipped) and must not mark the session up.
+    #[tokio::test]
+    async fn a_failed_dial_is_counted_as_a_failed_connection_attempt() -> Result<(), ExecutorError>
+    {
+        // Bind then drop: a port nothing is listening on.
+        let addr = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .map_err(ExecutorError::Io)?;
+            listener.local_addr().map_err(ExecutorError::Io)?
+        };
+        let cfg = test_config_for(addr);
+        let executor = Arc::new(Executor::new(&cfg, UnimplementedBucketSource)?);
+        let before = shared_count(
+            "waddles_executor_connection_attempts_total",
+            &[("result", "failed")],
+        );
+
+        let outcome = connect_and_serve(
+            &cfg,
+            &executor,
+            1,
+            crate::heartbeat::HeartbeatConfig::disabled(),
+            Arc::new(crate::heartbeat::HeartbeatMetrics::default()),
+            None,
+        )
+        .await;
+
+        assert!(outcome.is_err(), "nothing is listening, the dial must fail");
+        assert!(
+            shared_count(
+                "waddles_executor_connection_attempts_total",
+                &[("result", "failed")]
+            ) >= before + 1.0
+        );
+        Ok(())
+    }
+
+    /// A full session against a local TLS stage: the handshake is counted as a
+    /// connected attempt, the prior outage is recorded, the session length is
+    /// recorded when it ends. (The up-gauge's down transition is asserted in
+    /// `tests/metrics_emission.rs`, which owns its process; here the gauge is
+    /// shared with a concurrently running connect test.)
+    #[tokio::test]
+    async fn a_completed_session_records_attempt_outage_and_session(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloLimits, HelloOkBody, Message, ShutdownBody,
+        };
+
+        let ca_key = rcgen::KeyPair::generate()?;
+        let ca_params = rcgen::CertificateParams::new(vec!["bundle-executor-test-ca".to_string()])?;
+        let ca_cert = ca_params.self_signed(&ca_key)?;
+        let issuer = rcgen::Issuer::from_params(&ca_params, ca_key);
+        let server_key = rcgen::KeyPair::generate()?;
+        let server_params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()])?;
+        let server_cert = server_params.signed_by(&server_key, &issuer)?;
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls_pki_types::CertificateDer::from(
+                    server_cert.der().to_vec(),
+                )],
+                rustls_pki_types::PrivateKeyDer::try_from(server_key.serialize_der())
+                    .map_err(|e| e.to_string())?,
+            )?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let ca_path = std::env::temp_dir().join(format!(
+            "bundle-executor-test-{}-session-metrics-ca.pem",
+            std::process::id()
+        ));
+        std::fs::write(&ca_path, ca_cert.pem())?;
+
+        let stage_task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("accept");
+            let mut tls = acceptor.accept(tcp).await.expect("server tls handshake");
+            let hello = read_frame(&mut tls).await.expect("hello");
+            write_frame(
+                &mut tls,
+                &Frame::new(
+                    hello.id,
+                    Message::HelloOk(HelloOkBody {
+                        stage: "svc-process".to_string(),
+                        protocol_version: 1,
+                        limits: HelloLimits {
+                            call_timeout_ms: 2000,
+                            memory_mb: 64,
+                            max_concurrent_calls: 32,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .expect("write hello-ok");
+            write_frame(
+                &mut tls,
+                &Frame::new(1, Message::Shutdown(ShutdownBody { grace_ms: 10 })),
+            )
+            .await
+            .expect("write shutdown");
+        });
+
+        let mut cfg = test_config_for(addr);
+        cfg.host_api_ca_file = Some(ca_path.clone());
+        let executor = Arc::new(Executor::new(&cfg, UnimplementedBucketSource)?);
+        let connected_before = shared_count(
+            "waddles_executor_connection_attempts_total",
+            &[("result", "connected")],
+        );
+        let sessions_before = shared_count("waddles_executor_session_seconds", &[]);
+        let outages_before = shared_count("waddles_executor_outage_seconds", &[]);
+
+        connect_and_serve(
+            &cfg,
+            &executor,
+            2,
+            crate::heartbeat::HeartbeatConfig::disabled(),
+            Arc::new(crate::heartbeat::HeartbeatMetrics::default()),
+            Some(Instant::now() - std::time::Duration::from_secs(5)),
+        )
+        .await?;
+        stage_task.await?;
+        let _ = std::fs::remove_file(&ca_path);
+
+        assert!(
+            shared_count(
+                "waddles_executor_connection_attempts_total",
+                &[("result", "connected")]
+            ) >= connected_before + 1.0
+        );
+        assert!(shared_count("waddles_executor_session_seconds", &[]) >= sessions_before + 1.0);
+        assert!(shared_count("waddles_executor_outage_seconds", &[]) >= outages_before + 1.0);
+        let outage = crate::metrics::test_support::shared()
+            .last("waddles_executor_outage_seconds", &[])
+            .expect("outage exported");
+        assert!(
+            outage.sum >= 5.0,
+            "the injected 5s outage must be reflected in the histogram sum, got {}",
+            outage.sum
+        );
         Ok(())
     }
 }

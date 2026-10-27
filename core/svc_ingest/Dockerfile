@@ -30,7 +30,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY core/svc_ingest/app.py core/svc_ingest/config.py core/svc_ingest/runner.py \
      core/svc_ingest/supervisor.py core/svc_ingest/fanout.py core/svc_ingest/socket_lease.py \
      core/svc_ingest/eventsub.py core/svc_ingest/outbound_drain.py ./
-COPY core/svc_ingest/bundles ./bundles
+COPY core/svc_ingest/builtin_handlers ./builtin_handlers
 COPY core/svc_ingest/receivers ./receivers
 
 EXPOSE 8210

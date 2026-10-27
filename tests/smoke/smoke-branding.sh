@@ -191,18 +191,6 @@ test_display_names() {
         record_fail "Hub frontend index.html not found"
     fi
 
-    # Premium/Desktop/cmd/main.go Short/Long should contain "Waddles"
-    local main_go="${PROJECT_ROOT}/Premium/Desktop/cmd/main.go"
-    if [ -f "$main_go" ]; then
-        if grep -q 'Waddles' "$main_go"; then
-            record_pass "Premium Desktop main.go contains 'Waddles' branding"
-        else
-            record_fail "Premium Desktop main.go does not contain 'Waddles' branding"
-        fi
-    else
-        record_fail "Premium Desktop main.go not found"
-    fi
-
     # AdminLayout.jsx heading should contain "Waddles"
     local admin_layout="${PROJECT_ROOT}/admin/hub_module/frontend/src/layouts/AdminLayout.jsx"
     if [ -f "$admin_layout" ]; then

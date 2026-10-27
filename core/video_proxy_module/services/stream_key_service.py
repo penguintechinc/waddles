@@ -25,16 +25,16 @@ async def generate_stream_key(community_id: str) -> Dict[str, Any]:
         ValueError: If community already has an active stream key
     """
     db = get_db()
-    
+
     # Check if community already has a config
     existing = db(db.stream_configurations.community_id == community_id).select().first()
     if existing and existing.is_active:
         raise ValueError(f"Community {community_id} already has an active stream key")
-    
+
     # Generate secure random stream key
     stream_key = secrets.token_urlsafe(32)
     stream_key_hash = hashlib.sha256(stream_key.encode()).hexdigest()
-    
+
     try:
         config_id = db.stream_configurations.insert(
             community_id=community_id,
@@ -45,9 +45,9 @@ async def generate_stream_key(community_id: str) -> Dict[str, Any]:
             updated_at=datetime.utcnow(),
         )
         db.commit()
-        
+
         logger.info(f"Generated stream key for community {community_id}")
-        
+
         return {
             "config_id": config_id,
             "community_id": community_id,
@@ -72,13 +72,13 @@ async def validate_stream_key(stream_key: str) -> Optional[Dict[str, Any]]:
         Configuration dict if valid and active, None otherwise
     """
     db = get_db()
-    
+
     config = db(db.stream_configurations.stream_key == stream_key).select().first()
-    
+
     if not config or not config.is_active:
-        logger.warning(f"Invalid or inactive stream key attempted")
+        logger.warning("Invalid or inactive stream key attempted")
         return None
-    
+
     return {
         "config_id": config.id,
         "community_id": config.community_id,
@@ -103,16 +103,16 @@ async def regenerate_stream_key(community_id: str) -> Dict[str, Any]:
         ValueError: If community has no existing configuration
     """
     db = get_db()
-    
+
     # Find existing config
     existing = db(db.stream_configurations.community_id == community_id).select().first()
     if not existing:
         raise ValueError(f"No stream configuration found for community {community_id}")
-    
+
     # Generate new key
     new_stream_key = secrets.token_urlsafe(32)
     new_stream_key_hash = hashlib.sha256(new_stream_key.encode()).hexdigest()
-    
+
     try:
         # Update existing config
         db(db.stream_configurations.id == existing.id).update(
@@ -122,9 +122,9 @@ async def regenerate_stream_key(community_id: str) -> Dict[str, Any]:
             updated_at=datetime.utcnow(),
         )
         db.commit()
-        
+
         logger.info(f"Regenerated stream key for community {community_id}")
-        
+
         return {
             "config_id": existing.id,
             "community_id": community_id,
@@ -149,12 +149,12 @@ async def get_stream_config(community_id: str) -> Optional[Dict[str, Any]]:
         Configuration dict if exists, None otherwise
     """
     db = get_db()
-    
+
     config = db(db.stream_configurations.community_id == community_id).select().first()
-    
+
     if not config:
         return None
-    
+
     return {
         "config_id": config.id,
         "community_id": config.community_id,

@@ -19,6 +19,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: action-platforms
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -30,6 +31,7 @@ spec:
       - name: action-platforms
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-platforms" "imageTag" .Values.modules.actionPlatforms.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -42,6 +44,10 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_legacy_action_platforms;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_legacy_action_platforms") | nindent 8 }}
         - name: MODULE_NAME
           value: "action-platforms"
         - name: MODULE_PORT
@@ -92,4 +98,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: action-platforms
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "action-platforms" "ports" (list 8102) "runtime" "python") }}
 {{- end }}

@@ -146,6 +146,13 @@ pub enum CapabilityKind {
     Users,
     Telemetry,
     Reputation,
+    /// `economy.read`/`economy.wager`/`economy.transfer` -- the shared
+    /// community currency (issue #714).
+    Economy,
+    /// `identity.resolve` -- resolves the triggering actor / a mention target
+    /// to the community `user_uuid` the economy and reputation capabilities
+    /// require (UUID-only, never PII).
+    Identity,
     Flags,
     Context,
     Clock,
@@ -189,6 +196,21 @@ pub enum Quota {
         per_user_daily_abs_max: i64,
         per_scope_daily_abs_max: i64,
     },
+    /// `economy.wager`/`economy.transfer`'s three-part CURRENCY cap (issue
+    /// #714). Deliberately a separate family from [`Quota::ReputationDelta`]:
+    /// reputation's ceilings (5 per call / 5 per user per day) are a
+    /// points-nudge scale and would make a currency unusable, while the
+    /// currency amounts here are `i64` (a `BIGINT` balance), unsigned in the
+    /// WIT, and metered as the call's absolute amount (a wager meters its
+    /// STAKE and, separately against the same ceilings, the PAYOUT it credits
+    /// -- the mint cap; a transfer its amount). A per-call breach is
+    /// [`crate::denied::Denied::AmountOutOfBounds`]; either aggregate breach
+    /// is [`crate::denied::Denied::QuotaExceeded`].
+    EconomyAmount {
+        per_call_abs_max: i64,
+        per_user_daily_abs_max: i64,
+        per_scope_daily_abs_max: i64,
+    },
     /// Real, but not numerically enforced by this gate -- see the type doc.
     Descriptive(&'static str),
 }
@@ -219,6 +241,16 @@ pub enum PermissionFamily {
     /// network. See [`crate::instance_policy`].
     NetHttpPrivateIp,
     ChatSend,
+    /// `chat.delete:<platform>` -- delete a chat message on a platform
+    /// (provider-framework Step 0, issue #719). `Dangerous`: a
+    /// destructive moderation-class action on third-party content.
+    ChatDelete,
+    /// `dm.send:<platform>` -- send a direct message to a platform user
+    /// (provider-framework Step 0, issue #719). `Dangerous` and the
+    /// highest-risk outbound family: reaches a user outside any public
+    /// channel (spam/phishing/harassment vector) and is PII-adjacent
+    /// (addresses a specific platform identity).
+    DmSend,
     Moderation,
     OverlayMedia,
     AiGenerate,
@@ -228,6 +260,17 @@ pub enum PermissionFamily {
     ReputationRead,
     ReputationCommunityWrite,
     ReputationTenantWrite,
+    /// `economy.read` -- balance / max-bet / leaderboard reads (issue #714).
+    EconomyRead,
+    /// `economy.wager` -- atomic debit-stake/credit-payout (issue #714).
+    EconomyWager,
+    /// `economy.transfer` -- member-to-member currency transfer (issue #714).
+    EconomyTransfer,
+    /// `identity.resolve` -- resolve the invocation's triggering actor (and a
+    /// mention target the triggering message carried) to the community
+    /// `user_uuid` that `economy.*`/`reputation.*` name their targets by.
+    /// UUID-only: the bundle never receives a platform id, handle or name.
+    IdentityResolve,
     FlagsRead,
     PlatformScheduled,
     PlatformContext,
@@ -268,6 +311,8 @@ impl PermissionFamily {
         Self::NetHttpPublicIp,
         Self::NetHttpPrivateIp,
         Self::ChatSend,
+        Self::ChatDelete,
+        Self::DmSend,
         Self::Moderation,
         Self::OverlayMedia,
         Self::AiGenerate,
@@ -277,6 +322,10 @@ impl PermissionFamily {
         Self::ReputationRead,
         Self::ReputationCommunityWrite,
         Self::ReputationTenantWrite,
+        Self::EconomyRead,
+        Self::EconomyWager,
+        Self::EconomyTransfer,
+        Self::IdentityResolve,
         Self::FlagsRead,
         Self::PlatformScheduled,
         Self::PlatformContext,
@@ -297,6 +346,8 @@ impl PermissionFamily {
             Self::NetHttpPublicIp => "net.http.public-ip",
             Self::NetHttpPrivateIp => "net.http.private-ip",
             Self::ChatSend => "chat.send",
+            Self::ChatDelete => "chat.delete",
+            Self::DmSend => "dm.send",
             Self::Moderation => "moderation",
             Self::OverlayMedia => "overlay.media",
             Self::AiGenerate => "ai.generate",
@@ -306,6 +357,10 @@ impl PermissionFamily {
             Self::ReputationRead => "reputation.read",
             Self::ReputationCommunityWrite => "reputation.community.write",
             Self::ReputationTenantWrite => "reputation.tenant.write",
+            Self::EconomyRead => "economy.read",
+            Self::EconomyWager => "economy.wager",
+            Self::EconomyTransfer => "economy.transfer",
+            Self::IdentityResolve => "identity.resolve",
             Self::FlagsRead => "flags.read",
             Self::PlatformScheduled => "platform.scheduled",
             Self::PlatformContext => "platform.context",
@@ -328,6 +383,8 @@ impl PermissionFamily {
                 | Self::NetHttpPublicIp
                 | Self::NetHttpPrivateIp
                 | Self::ChatSend
+                | Self::ChatDelete
+                | Self::DmSend
                 | Self::Moderation
         )
     }
@@ -335,7 +392,19 @@ impl PermissionFamily {
     /// spec SS5.2: `AppScoped` permissions have their resource derived
     /// server-side from `(tenant, community, app_id)` alone.
     pub fn is_app_scoped(&self) -> bool {
-        !self.is_reputation_scoped()
+        !self.is_reputation_scoped() && !self.is_economy_scoped()
+    }
+
+    /// issue #714: `economy.*` carries its own resource shape
+    /// ([`crate::resource::EconomyTarget`]: zero, one or two target users
+    /// plus a metered amount) and its own quota family, but reuses the
+    /// reputation mechanism's call-time membership check for every user it
+    /// names.
+    pub fn is_economy_scoped(&self) -> bool {
+        matches!(
+            self,
+            Self::EconomyRead | Self::EconomyWager | Self::EconomyTransfer
+        )
     }
 
     /// spec SS5.2 + SS10.2: `reputation.*` and `users.profile.read` share the
@@ -366,6 +435,35 @@ impl PermissionFamily {
             Self::OverlayMedia => AppScopedResource::Overlay,
             _ => AppScopedResource::None,
         }
+    }
+
+    /// The effective per-call amount bound of an `economy.wager`
+    /// (`params.max_bet`) or `economy.transfer` (`params.max_amount`) grant:
+    /// the community's declared value clamped to the catalog's
+    /// `per_call_abs_max` ceiling; an absent, non-integer or `< 1` declaration
+    /// means the ceiling itself. `None` for any other family. One definition
+    /// shared by the gate and by the stage's durable store call so the two can
+    /// never disagree about the bound (defense in depth against a declared
+    /// value above the ceiling hub-api already rejects at approval time).
+    pub fn economy_amount_bound(&self, params: &serde_json::Value) -> Option<i64> {
+        let key = match self {
+            Self::EconomyWager => "max_bet",
+            Self::EconomyTransfer => "max_amount",
+            _ => return None,
+        };
+        let Quota::EconomyAmount {
+            per_call_abs_max, ..
+        } = self.catalog_entry().default_quota
+        else {
+            return None;
+        };
+        Some(
+            params
+                .get(key)
+                .and_then(serde_json::Value::as_i64)
+                .filter(|v| *v >= 1)
+                .map_or(per_call_abs_max, |v| v.min(per_call_abs_max)),
+        )
     }
 
     pub fn catalog_entry(&self) -> CatalogEntry {
@@ -429,6 +527,29 @@ impl PermissionFamily {
                 default_quota: Quota::Descriptive("existing relay rate limits (UsageBatcher)"),
                 notes: "Action-stage only; outbound text is placeholder-only (spec SS10.4)",
             },
+            Self::ChatDelete => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Moderation,
+                default_quota: Quota::Descriptive(
+                    "confirmed per-op (host waits for the platform); targets only the \
+                     triggering event's own channel; UsageBatcher is metering only",
+                ),
+                notes: "Destructive moderation-class action; op `chat.delete` of the \
+                        provider-framework outbound schema (issue #719)",
+            },
+            Self::DmSend => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "enforced in svc_action: 10/min per (tenant, community, app) + 3/min per \
+                     recipient; target must be a member of the triggering event's guild \
+                     (UsageBatcher is metering only)",
+                ),
+                notes: "Highest-risk outbound family: reaches a user outside any public \
+                        channel, PII-adjacent; op `dm.send` (issue #719)",
+            },
             Self::Moderation => CatalogEntry {
                 family: *self,
                 risk: Risk::Dangerous,
@@ -456,7 +577,7 @@ impl PermissionFamily {
                     max_calls: 10,
                     window: Duration::from_secs(60),
                 },
-                notes: "2k prompt / 512 completion tokens; Enterprise-gated at marketplace time (spec SS9), not here",
+                notes: "2k prompt / 512 completion tokens; Enterprise enforcement NOT YET implemented (issue #858)",
             },
             Self::UsersProfileRead => CatalogEntry {
                 family: *self,
@@ -507,6 +628,50 @@ impl PermissionFamily {
                     per_scope_daily_abs_max: 200,
                 },
                 notes: "spec SS7; strictly a superset grant of community.write's bound",
+            },
+            Self::EconomyRead => CatalogEntry {
+                family: *self,
+                risk: Risk::Normal,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 20,
+                    window: Duration::from_secs(1),
+                },
+                notes: "balance / max-bet / community leaderboard reads; never cross-tenant",
+            },
+            Self::EconomyWager => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::EconomyAmount {
+                    per_call_abs_max: 1_000,
+                    per_user_daily_abs_max: 10_000,
+                    per_scope_daily_abs_max: 250_000,
+                },
+                notes: "issue #714; stake AND payout (the mint) metered; declared params.max_bet clamped to the per-call ceiling",
+            },
+            Self::EconomyTransfer => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::EconomyAmount {
+                    per_call_abs_max: 1_000,
+                    per_user_daily_abs_max: 5_000,
+                    per_scope_daily_abs_max: 100_000,
+                },
+                notes: "issue #714; amount metered against the SENDER; declared params.max_amount clamped to the per-call ceiling",
+            },
+            Self::IdentityResolve => CatalogEntry {
+                family: *self,
+                risk: Risk::Normal,
+                capability_kind: CapabilityKind::Identity,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 20,
+                    window: Duration::from_secs(1),
+                },
+                notes: "actor + @mention target -> community user_uuid, UUID-only (no PII); \
+                        fail-closed on unlinked/non-member/ambiguous; mention lookups are \
+                        limited to references present in the triggering message",
             },
             Self::FlagsRead => CatalogEntry {
                 family: *self,
@@ -590,6 +755,8 @@ pub enum PermissionId {
     NetHttpPublicIp(String),
     NetHttpPrivateIp(String),
     ChatSend(String),
+    ChatDelete(String),
+    DmSend(String),
     Moderation(String),
     OverlayMedia,
     AiGenerate,
@@ -599,6 +766,10 @@ pub enum PermissionId {
     ReputationRead,
     ReputationCommunityWrite,
     ReputationTenantWrite,
+    EconomyRead,
+    EconomyWager,
+    EconomyTransfer,
+    IdentityResolve,
     FlagsRead,
     PlatformScheduled,
     PlatformContext,
@@ -647,6 +818,8 @@ impl PermissionId {
             Self::NetHttpPublicIp(_) => PermissionFamily::NetHttpPublicIp,
             Self::NetHttpPrivateIp(_) => PermissionFamily::NetHttpPrivateIp,
             Self::ChatSend(_) => PermissionFamily::ChatSend,
+            Self::ChatDelete(_) => PermissionFamily::ChatDelete,
+            Self::DmSend(_) => PermissionFamily::DmSend,
             Self::Moderation(_) => PermissionFamily::Moderation,
             Self::OverlayMedia => PermissionFamily::OverlayMedia,
             Self::AiGenerate => PermissionFamily::AiGenerate,
@@ -656,6 +829,10 @@ impl PermissionId {
             Self::ReputationRead => PermissionFamily::ReputationRead,
             Self::ReputationCommunityWrite => PermissionFamily::ReputationCommunityWrite,
             Self::ReputationTenantWrite => PermissionFamily::ReputationTenantWrite,
+            Self::EconomyRead => PermissionFamily::EconomyRead,
+            Self::EconomyWager => PermissionFamily::EconomyWager,
+            Self::EconomyTransfer => PermissionFamily::EconomyTransfer,
+            Self::IdentityResolve => PermissionFamily::IdentityResolve,
             Self::FlagsRead => PermissionFamily::FlagsRead,
             Self::PlatformScheduled => PermissionFamily::PlatformScheduled,
             Self::PlatformContext => PermissionFamily::PlatformContext,
@@ -683,6 +860,8 @@ impl PermissionId {
             Self::NetHttpPublicIp(ip) => format!("net.http.public-ip:{ip}"),
             Self::NetHttpPrivateIp(value) => format!("net.http.private-ip:{value}"),
             Self::ChatSend(platform) => format!("chat.send:{platform}"),
+            Self::ChatDelete(platform) => format!("chat.delete:{platform}"),
+            Self::DmSend(platform) => format!("dm.send:{platform}"),
             Self::Moderation(platform) => format!("moderation.{platform}"),
             other => other.family().id_prefix().to_string(),
         }
@@ -776,6 +955,14 @@ impl PermissionId {
             Self::validate_platform(platform)?;
             return Ok(Self::ChatSend(platform.to_string()));
         }
+        if let Some(platform) = raw.strip_prefix("chat.delete:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::ChatDelete(platform.to_string()));
+        }
+        if let Some(platform) = raw.strip_prefix("dm.send:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::DmSend(platform.to_string()));
+        }
         if let Some(platform) = raw.strip_prefix("moderation.") {
             Self::validate_platform(platform)?;
             return Ok(Self::Moderation(platform.to_string()));
@@ -789,9 +976,13 @@ impl PermissionId {
                 },
             });
         }
-        if raw == "chat.send" {
+        if raw == "chat.send" || raw == "chat.delete" || raw == "dm.send" {
             return Err(ParsePermissionIdError::MissingParam {
-                family: "chat.send",
+                family: match raw {
+                    "chat.send" => "chat.send",
+                    "chat.delete" => "chat.delete",
+                    _ => "dm.send",
+                },
             });
         }
 
@@ -807,6 +998,10 @@ impl PermissionId {
             "reputation.read" => Ok(Self::ReputationRead),
             "reputation.community.write" => Ok(Self::ReputationCommunityWrite),
             "reputation.tenant.write" => Ok(Self::ReputationTenantWrite),
+            "economy.read" => Ok(Self::EconomyRead),
+            "economy.wager" => Ok(Self::EconomyWager),
+            "economy.transfer" => Ok(Self::EconomyTransfer),
+            "identity.resolve" => Ok(Self::IdentityResolve),
             "flags.read" => Ok(Self::FlagsRead),
             "platform.scheduled" => Ok(Self::PlatformScheduled),
             "platform.context" => Ok(Self::PlatformContext),
@@ -859,6 +1054,34 @@ mod tests {
             id.family().catalog_entry().capability_kind,
             CapabilityKind::Interaction
         );
+    }
+
+    #[test]
+    fn identity_resolve_is_normal_risk_app_scoped_and_round_trips() {
+        let id = PermissionId::parse("identity.resolve").unwrap();
+        assert_eq!(id.canonical_id(), "identity.resolve");
+        assert_eq!(id, PermissionId::IdentityResolve);
+        assert_eq!(id.family(), PermissionFamily::IdentityResolve);
+        assert_eq!(id.risk(), Risk::Normal);
+        assert_eq!(
+            id.family().catalog_entry().capability_kind,
+            CapabilityKind::Identity
+        );
+        // Plain AppScoped/None: no target-user shape (the bundle names no
+        // user to this capability -- the host derives the actor and only
+        // looks up mention tokens it already minted for this invocation).
+        assert!(id.family().is_app_scoped());
+        assert!(!id.family().is_reputation_scoped());
+        assert!(!id.family().is_economy_scoped());
+        assert_eq!(
+            id.family().expected_app_scoped_resource(),
+            crate::resource::AppScopedResource::None
+        );
+        // Rate limited, never unlimited: a resolve loop must not be free.
+        assert!(matches!(
+            id.default_quota(),
+            Quota::CallsPerWindow { max_calls: 20, .. }
+        ));
     }
 
     #[test]
@@ -966,6 +1189,37 @@ mod tests {
     }
 
     #[test]
+    fn chat_delete_and_dm_send_are_dangerous_parameterized_and_round_trip() {
+        for (raw, family) in [
+            ("chat.delete:discord", PermissionFamily::ChatDelete),
+            ("dm.send:twitch", PermissionFamily::DmSend),
+        ] {
+            let id = PermissionId::parse(raw).unwrap();
+            assert_eq!(id.canonical_id(), raw);
+            assert_eq!(id.family(), family);
+            assert_eq!(id.risk(), Risk::Dangerous);
+            assert!(family.is_parameterized());
+            assert!(PermissionFamily::ALL.contains(&family));
+        }
+    }
+
+    #[test]
+    fn chat_delete_and_dm_send_reject_bare_and_unknown_platform() {
+        for raw in ["chat.delete", "dm.send"] {
+            assert!(matches!(
+                PermissionId::parse(raw),
+                Err(ParsePermissionIdError::MissingParam { .. })
+            ));
+        }
+        for raw in ["chat.delete:myspace", "dm.send:myspace"] {
+            assert!(matches!(
+                PermissionId::parse(raw),
+                Err(ParsePermissionIdError::UnsupportedPlatform(_))
+            ));
+        }
+    }
+
+    #[test]
     fn parse_accepts_a_compiled_in_chat_send_platform() {
         let id = PermissionId::parse("chat.send:discord").unwrap();
         assert_eq!(id.canonical_id(), "chat.send:discord");
@@ -1062,9 +1316,14 @@ mod tests {
     }
 
     #[test]
-    fn app_scoped_and_reputation_scoped_partition_every_family() {
+    fn app_reputation_and_economy_scoped_partition_every_family() {
         for family in PermissionFamily::ALL {
-            assert_ne!(family.is_app_scoped(), family.is_reputation_scoped());
+            let classes = [
+                family.is_app_scoped(),
+                family.is_reputation_scoped(),
+                family.is_economy_scoped(),
+            ];
+            assert_eq!(classes.iter().filter(|c| **c).count(), 1, "{family:?}");
         }
     }
 }

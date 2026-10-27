@@ -3,7 +3,7 @@ name = "svc-streaming"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Waddles A/V data-plane service -- RTMP/SRT/WHIP ingest, ffmpeg transcode, HLS/WHEP/relay/record/Discord-voice egress."
 
@@ -18,7 +18,7 @@ path = "src/main.rs"
 # Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
 # Dependency Pinning. Cargo.lock is committed alongside this file.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 axum = "=0.8.9"
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace", "cors"] }
@@ -32,8 +32,8 @@ opentelemetry-otlp = { version = "=0.32.0", features = ["grpc-tonic"] }
 opentelemetry_sdk = { version = "=0.32.1", features = ["rt-tokio"] }
 tracing-opentelemetry = "=0.33.0"
 prometheus = "=0.14.0"
-utoipa = { version = "=5.5.0", features = ["axum_extras", "uuid"] }
-utoipa-swagger-ui = { version = "=9.0.2", features = ["axum"] }
+utoipa = { version = "=6.0.0", features = ["axum_extras", "uuid"] }
+utoipa-swagger-ui = { version = "=10.0.2", features = ["axum"] }
 # `aws_lc_rs` (not `rust_crypto`): the `rust_crypto` feature pulls in the
 # pure-Rust `rsa` crate, which carries RUSTSEC-2023-0071 (Marvin Attack --
 # RSA private-key timing side-channel, no fix available) -- a live network
@@ -42,6 +42,12 @@ utoipa-swagger-ui = { version = "=9.0.2", features = ["axum"] }
 # `aws_lc_rs` avoids that dependency entirely (requires cmake + a C/C++
 # compiler in the Docker builder stage -- see `Dockerfile.rust`).
 jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
+# JWT Phase-0 hardening (`src/http/auth/hardening.rs`): the JOSE header is
+# decoded by hand (base64url + JSON) BEFORE `jsonwebtoken` sees the token so
+# `alg: none` / `jku` / `crit` / a hostile `kid` are named precisely. Already
+# in the lockfile transitively via `jsonwebtoken` (same exact version) --
+# promoting it to a direct dependency adds no new package.
+base64 = "=0.22.1"
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
 chrono = { version = "=0.4.45", features = ["serde"] }
 thiserror = "=2.0.20"
@@ -90,17 +96,33 @@ webrtc = { version = "=0.20.5", default-features = false, features = ["runtime-t
 # than silently expanded; the alternative is code that cannot compile.
 rtc = "=0.20.5"
 async-trait = "=0.1.92"
-ffmpeg-sidecar = "=2.5.2"
+ffmpeg-sidecar = "=2.7.0"
 hls_m3u8 = "=0.7.0"
 object_store = { version = "=0.14.1", features = ["aws"] }
 
+# Direct process-group signalling (`killpg`) and non-reaping exit detection
+# (`waitid(WNOWAIT)`) for `pipeline::process_group` -- the supervisor used to
+# shell out to a `kill` binary the `debian:bookworm-slim` runtime image does not
+# ship, so teardown signals were silently never delivered. `nix` is NOT new
+# supply-chain surface: 0.31.3 (MIT) is already resolved at this exact version
+# and checksum in Cargo.lock via the WebRTC stack; only this crate's edge to it
+# is new. `signal` pulls in `process` (waitid/getpgrp); default features off.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["signal"] }
+
 [dev-dependencies]
 http-body-util = "=0.1.3"
+# `testing` (dev-only feature of the already-declared `opentelemetry_sdk`)
+# unlocks `InMemoryMetricExporter`/`InMemorySpanExporter`, which the
+# telemetry-emission tests read back to assert histograms and spans really
+# emit. Never linked into the release binary; adds no new crate to
+# Cargo.lock.
+opentelemetry_sdk = { version = "=0.32.1", features = ["rt-tokio", "testing"] }
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
 # `tokio::time::{pause,advance}` so `ingest::rtmp`'s >5s backpressure-stall
 # disconnect path can be tested against a virtual clock instead of a real
 # 5s sleep in the suite. Never linked into the release binary.
-tokio = { version = "=1.53.1", features = ["test-util"] }
+tokio = { version = "=1.53.3", features = ["test-util"] }
 
 [profile.release]
 opt-level = 3

@@ -51,6 +51,11 @@ api.interceptors.response.use(
 
 export default api;
 
+// Server-side OAuth login: hub-api owns client_id + redirect and returns the authorize URL.
+export const oauthApi = {
+  start: (platform) => api.get(`/api/v1/auth/oauth/${platform}`),
+};
+
 // API helper functions
 export const publicApi = {
   getStats: () => api.get('/api/v1/public/stats'),
@@ -535,6 +540,11 @@ export const adminApi = {
   // Server link requests (community-initiated)
   createServerLinkRequest: (communityId, data) =>
     api.post(`/api/v1/admin/${communityId}/server-link-requests`, data),
+  // Discord scheduled-event sync toggle (community-wide, flag-gated)
+  getEventDiscordSync: (communityId) =>
+    api.get(`/api/v1/communities/${communityId}/calendar/event-sync`),
+  setEventDiscordSync: (communityId, enabled) =>
+    api.put(`/api/v1/communities/${communityId}/calendar/event-sync`, { enabled }),
   // Community OAuth connections (gh-320)
   listCommunityConnections: (communityId) =>
     api.get(`/api/v1/communities/${communityId}/connections`),
@@ -993,6 +1003,12 @@ export const rconApi = {
     api.get(`/api/v1/admin/${communityId}/rcon/info/${serverId}/status`),
   getPlayerList: (communityId, serverId) =>
     api.get(`/api/v1/admin/${communityId}/rcon/info/${serverId}/players`),
+};
+
+// Enterprise tenant SSO (SAML / custom OIDC / Google connections) -- public, pre-auth.
+export const ssoApi = {
+  getOptions: (tenant) => api.get('/api/v1/auth/sso/options', { params: tenant ? { tenant } : {} }),
+  start: (connectionId) => api.get(`/api/v1/auth/sso/${encodeURIComponent(connectionId)}/start`),
 };
 
 // ── Tenant API ─────────────────────────────────────────────────────

@@ -36,12 +36,55 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: cache
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.infrastructure.redis.podSecurityContext | nindent 8 }}
+      initContainers:
+      # R5 rootless migration (kind upgrade-path regression). Before R5 this pod ran as ROOT
+      # (`redis-server` is not the image entrypoint's `valkey-server`, so it never dropped privileges),
+      # leaving root-owned AOF/RDB files in /data. The rootless pod (uid 999) cannot open them
+      # for writing -- and volumes without fsGroup support (hostPath/local-path: kind, MicroK8s)
+      # never chown them -- so valkey crash-looped with "Can't open the append-only file ...
+      # Permission denied". The pod now persists under /data/valkey, created here as uid 999
+      # (volume roots are 0777/fsGroup-writable), copying any pre-R5 state across once. cp reads
+      # the old 0644 files fine; a failure is loud (set -e), never a silent data reset.
+      - name: migrate-data-dir
+        image: {{ .Values.infrastructure.redis.image }}
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          {{- toYaml .Values.infrastructure.redis.securityContext | nindent 10 }}
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          if [ ! -d /data/valkey ]; then
+            mkdir /data/valkey
+            for f in appendonlydir dump.rdb; do
+              if [ -e "/data/$f" ]; then cp -R "/data/$f" /data/valkey/; fi
+            done
+          fi
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        resources:
+          requests:
+            memory: 16Mi
+            cpu: 10m
+          limits:
+            memory: 64Mi
+            cpu: 100m
       containers:
       - name: redis
         image: {{ .Values.infrastructure.redis.image }}
         imagePullPolicy: IfNotPresent
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          {{- toYaml .Values.infrastructure.redis.securityContext | nindent 10 }}
         command:
         - redis-server
+        - --dir
+        - /data/valkey
         - --requirepass
         - $(REDIS_PASSWORD)
         - --appendonly
@@ -179,4 +222,8 @@ spec:
   selector:
     app.kubernetes.io/name: redis
     app.kubernetes.io/instance: {{ .Release.Name }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- $redisPorts := list 6379 }}
+{{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}{{- $redisPorts = append $redisPorts $.Values.infrastructure.redis.tls.port }}{{- end }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "cache" "name" "redis" "selector" (dict "app.kubernetes.io/name" "redis" "app.kubernetes.io/instance" $.Release.Name) "ports" $redisPorts "egress" "internal" "tetragon" false) }}
 {{- end }}

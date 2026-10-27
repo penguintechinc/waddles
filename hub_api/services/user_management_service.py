@@ -35,8 +35,10 @@ from typing import Any
 
 import bcrypt
 
+from services import session_service
 from services.community_authz import is_super_admin
 from services.errors import bad_request, conflict, forbidden, not_found
+from services.free_tier_caps import grant_super_admin_capped
 
 SALT_ROUNDS = (
     10  # matches userManagementController.js's own SALT_ROUNDS (distinct from auth_service's 12)
@@ -149,6 +151,10 @@ async def update_user(
 
     update_fields["updated_at"] = datetime.now(UTC)
     await async_dal.update_async(dal.hub_users.id == user_id, **update_fields)
+    if is_active is False:
+        await session_service.revoke_user_sessions(
+            async_dal, dal, user_id=user_id, reason="user_deactivated"
+        )
     return await get_user(async_dal, dal, user_id=user_id)
 
 
@@ -160,10 +166,13 @@ async def delete_user(async_dal: Any, dal: Any, *, user_id: int, caller_id: int)
     await async_dal.update_async(
         dal.hub_users.id == user_id, is_active=False, updated_at=datetime.now(UTC)
     )
+    await session_service.revoke_user_sessions(
+        async_dal, dal, user_id=user_id, reason="user_deleted"
+    )
 
 
 async def assign_super_admin_role(
-    async_dal: Any, dal: Any, *, user_id: int, grant: bool, caller_id: int
+    async_dal: Any, dal: Any, *, user_id: int, grant: bool, caller_id: int, tenant_slug: str
 ) -> bool:
     """Assign super admin role.
 
@@ -180,9 +189,24 @@ async def assign_super_admin_role(
     user = await get_user(async_dal, dal, user_id=user_id)
     if bool(user.is_super_admin) == grant:
         return False
-    await async_dal.update_async(
-        dal.hub_users.id == user_id, is_super_admin=grant, updated_at=datetime.now(UTC)
-    )
+    if grant:
+        await grant_super_admin_capped(
+            async_dal,
+            dal,
+            caller_tenant_slug=tenant_slug,
+            user_id=user_id,
+            update_fields={"is_super_admin": True, "updated_at": datetime.now(UTC)},
+        )
+    else:
+        await async_dal.update_async(
+            dal.hub_users.id == user_id, is_super_admin=False, updated_at=datetime.now(UTC)
+        )
+    if not grant:
+        # A demotion must not wait out the demoted admin's remaining access-token life: their
+        # existing tokens still carry the admin scope bundle.
+        await session_service.revoke_user_sessions(
+            async_dal, dal, user_id=user_id, reason="super_admin_revoked"
+        )
     return True
 
 
@@ -249,3 +273,34 @@ async def generate_password_reset(
         updated_at=datetime.now(UTC),
     )
     return reset_token, reset_expires
+
+
+async def list_user_sessions(
+    async_dal: Any, dal: Any, *, user_id: int
+) -> list[session_service.SessionInfo]:
+    """Every login session of `user_id` -- ids and timestamps only, never a token."""
+    await get_user(async_dal, dal, user_id=user_id)  # 404 if missing
+    return await session_service.list_sessions(async_dal, dal, user_id=user_id)
+
+
+async def revoke_user_sessions(
+    async_dal: Any, dal: Any, *, user_id: int
+) -> session_service.RevocationOutcome:
+    """Admin "revoke user": end every session of `user_id` and cut off every token issued so far."""
+    await get_user(async_dal, dal, user_id=user_id)  # 404 if missing
+    return await session_service.revoke_user_sessions(
+        async_dal, dal, user_id=user_id, reason="admin_revoke_user"
+    )
+
+
+async def revoke_user_session(
+    async_dal: Any, dal: Any, *, user_id: int, session_id: int
+) -> session_service.RevocationOutcome:
+    """Admin "revoke session": end one login session of `user_id` (404 if it is not theirs)."""
+    await get_user(async_dal, dal, user_id=user_id)  # 404 if missing
+    owner = await session_service.get_session_owner(async_dal, dal, session_id=session_id)
+    if owner != user_id:
+        raise not_found("Session not found")
+    return await session_service.revoke_session(
+        async_dal, dal, session_id=session_id, reason="admin_revoke_session"
+    )

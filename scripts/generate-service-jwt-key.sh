@@ -11,10 +11,20 @@
 # the safe-generation pattern used for bundle artifact signing
 # (scripts/generate-bundle-signing-key.sh, PR #431).
 #
-# Usage: KID=2026-09-28 NAMESPACE=waddlebot ./scripts/generate-service-jwt-key.sh
+# Usage: KID=20260928 NAMESPACE=waddlebot ./scripts/generate-service-jwt-key.sh
 set -euo pipefail
 
 KID="${KID:?set KID to a short rotation identifier, e.g. the generation date}"
+# fix/hub-api-grpc-service-jwt-issuer -- KID becomes the
+# `SERVICE_JWT_PRIVATE_KEY_<KID>` SECRET KEY NAME below, which reaches hub-api as
+# an env var of the identical name via the chart's `envFrom.secretRef`. A hyphen
+# (or any non-POSIX-identifier character) makes that an invalid env var name --
+# kubelet silently drops it, and hub-api's `load_issuer_from_env` never sees it.
+# Fail loudly here instead of producing a Secret hub-api can never parse.
+if ! [[ "${KID}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+  echo "KID='${KID}' must match [A-Za-z_][A-Za-z0-9_]* (it becomes an env var name suffix, e.g. use 20260928 not 2026-09-28)" >&2
+  exit 1
+fi
 NAMESPACE="${NAMESPACE:-waddlebot}"
 SECRET_NAME="${SECRET_NAME:-service-jwt-signing-key}"
 

@@ -120,7 +120,21 @@ except ImportError:
 # neither case may break module load. Absence after this point is exactly
 # what each wrapper's existing ``getattr(..., None)``/``hasattr`` call-site
 # guard already handles.
-for _wit_capability in ("context", "http", "kv", "db", "relay", "flags", "log", "clock"):
+for _wit_capability in (
+    "context",
+    "context_v2",  # stage-v2 only (numeric scope); absent from every v1 world, hence the guard
+    "http",
+    "kv",
+    "db",
+    "relay",
+    "flags",
+    "log",
+    "clock",
+    "reputation",  # stage-next only (issue #726); absent from a stage-1.0.0 world, hence the guard
+    "economy",  # stage-next only (issue #714); same guard
+    "identity",  # stage-next only (actor/mention -> community user_uuid); same guard
+    "ai",  # stage-next only (ai.generate, host-mediated model call); same guard
+):
     try:
         importlib.import_module(f"wit_world.imports.{_wit_capability}")
     except (ImportError, AttributeError):
@@ -165,6 +179,28 @@ def _run_coro(coro: Any) -> Any:
         asyncio.set_event_loop(None)
 
 
+def _wit_context() -> tuple[Any, int | None, int | None]:
+    """Read the host's bundle context from whichever WIT family this component targets.
+
+    A ``world stage-v2`` component imports ``context-v2`` (authoritative
+    numeric ``tenant_id``/``community_id``); every v1 world imports
+    ``context``. Returns ``(context, tenant_id, community_id)`` with the ids
+    ``None`` for v1. A v2 ``tenant_id == 0`` means the host could not supply a
+    scope: fail CLOSED (raise) rather than act under a guessed scope.
+    """
+    import wit_world
+
+    v2 = getattr(wit_world.imports, "context_v2", None)
+    if v2 is None:
+        return wit_world.imports.context.get_context(), None, None
+    ctx = v2.get_context()
+    if ctx.tenant_id == 0:
+        raise RuntimeError(
+            "stage-v2 host supplied no numeric scope (tenant-id == 0); refusing to act"
+        )
+    return ctx, ctx.tenant_id, ctx.community_id
+
+
 def _transform_impl(event: Any) -> Any:
     """Implement the exported ``process-stage.transform`` WIT function.
 
@@ -176,7 +212,7 @@ def _transform_impl(event: Any) -> Any:
     import wit_world
 
     sdk_event = PlatformEvent.from_wit_record(event)
-    ctx = wit_world.imports.context.get_context()
+    ctx, tenant_id, community_id = _wit_context()
 
     if _entry_wiring is None or not hasattr(_entry_wiring, "bundle_transform"):
         from componentize_py_types import Err
@@ -184,7 +220,13 @@ def _transform_impl(event: Any) -> Any:
         raise Err(wit_world.imports.types.UnsupportedStage(stage="process"))
 
     async def _run() -> PlatformEvent | None:
-        with bundle_context(tenant=ctx.tenant, community=ctx.community, app_id=ctx.app_id):
+        with bundle_context(
+            tenant=ctx.tenant,
+            community=ctx.community,
+            app_id=ctx.app_id,
+            tenant_id=tenant_id,
+            community_id=community_id,
+        ):
             # _entry_wiring is generated per-bundle at build time (module
             # docstring) -- mypy has no stub for it and treats every
             # attribute as Any; the real static contract is the WIT
@@ -227,6 +269,8 @@ def _dispatch_impl(envelope: Any, config: str) -> Any:
             tenant=sdk_envelope.tenant,
             community=sdk_envelope.community,
             app_id=sdk_envelope.app_id,
+            tenant_id=sdk_envelope.tenant_id,
+            community_id=sdk_envelope.community_id,
         ):
             return await _entry_wiring.bundle_dispatch(
                 sdk_envelope, config_dict, http_client=HttpClient()
@@ -291,3 +335,65 @@ class ActionStage:
         See :func:`_dispatch_impl`.
         """
         return _dispatch_impl(envelope, config)
+
+
+class ActionStageV2:
+    """componentize-py's app-class name for the ``action-stage-v2`` export (``world stage-v2``).
+
+    ``world stage-v2`` exports ``action-stage-v2`` (envelope carries the
+    authoritative numeric ``tenant-id``/``community-id``) instead of
+    ``action-stage``; componentize-py resolves it by ``getattr(app_module,
+    "ActionStageV2")``. Shares :func:`_dispatch_impl` with :class:`ActionStage`
+    -- ``StageEnvelope.from_wit_record`` already reads the ids off a v2 record
+    -- so a bundle author writes the same ``dispatch`` and reads the ids from
+    ``get_bundle_context()`` / ``envelope.tenant_id``. Unused (and harmless)
+    when the component is built against a v1 world.
+    """
+
+    def dispatch(self, envelope: Any, config: str) -> Any:
+        """Implement the exported ``action-stage-v2.dispatch`` WIT function.
+
+        See :func:`_dispatch_impl`.
+        """
+        return _dispatch_impl(envelope, config)
+
+
+def _unsupported_lifecycle(stage: str) -> Any:
+    """Raise the generated ``Err(types.UnsupportedStage(stage=...))`` for a lifecycle hook."""
+    import wit_world
+    from componentize_py_types import Err
+
+    raise Err(wit_world.imports.types.UnsupportedStage(stage=stage))
+
+
+class StreamingLifecycle:
+    """componentize-py's app-class name for the ``streaming-lifecycle`` export (``stage-next``).
+
+    ``world stage-next`` (``wit/waddle-bundle/stage.wit``) additionally exports
+    ``streaming-lifecycle``; componentize-py ``-w stage-next`` therefore
+    requires this class on the entry module just as it requires
+    ``ProcessStage``/``ActionStage`` (``getattr(app_module,
+    "StreamingLifecycle")``). A bundle that reacts to stream events is a
+    follow-up (issue #716); until then every hook returns the WIT
+    ``unsupported-stage`` failure arm -- "not interested", exactly what the
+    interface documents -- so a ``stage-next`` Python bundle built only to
+    CALL a new host import (e.g. ``reputation``) componentizes and runs
+    unchanged. Unused (and harmless) when the component is built against
+    ``world stage``.
+    """
+
+    def on_start(self, info: Any) -> Any:
+        """Implement ``streaming-lifecycle.on-start`` (unsupported by default)."""
+        return _unsupported_lifecycle("on-start")
+
+    def on_stop(self, info: Any) -> Any:
+        """Implement ``streaming-lifecycle.on-stop`` (unsupported by default)."""
+        return _unsupported_lifecycle("on-stop")
+
+    def on_segment(self, segment: Any) -> Any:
+        """Implement ``streaming-lifecycle.on-segment`` (unsupported by default)."""
+        return _unsupported_lifecycle("on-segment")
+
+    def on_recording_ready(self, recording: Any) -> Any:
+        """Implement ``streaming-lifecycle.on-recording-ready`` (unsupported by default)."""
+        return _unsupported_lifecycle("on-recording-ready")

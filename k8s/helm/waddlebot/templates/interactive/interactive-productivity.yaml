@@ -19,6 +19,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: interactive-productivity
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -30,6 +31,7 @@ spec:
       - name: interactive-productivity
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "interactive-productivity" "imageTag" .Values.modules.interactiveProductivity.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -45,6 +47,10 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_legacy_interactive_productivity;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_legacy_interactive_productivity") | nindent 8 }}
         - name: MODULE_NAME
           value: "interactive-productivity"
         - name: MODULE_PORT
@@ -111,4 +117,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: interactive-productivity
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "interactive-productivity" "ports" (list 8030 50033) "runtime" "python" "egress" "https") }}
 {{- end }}

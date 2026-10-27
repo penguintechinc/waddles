@@ -48,7 +48,9 @@ async fn seed_db_singleton(config: &Config) {
             enabled INTEGER NOT NULL DEFAULT 1,
             record_enabled INTEGER NOT NULL DEFAULT 0,
             transcode_enabled INTEGER NOT NULL DEFAULT 0,
-            transcode_bitrate_kbps INTEGER NOT NULL DEFAULT 4000
+            transcode_bitrate_kbps INTEGER NOT NULL DEFAULT 4000,
+            video_codec TEXT NOT NULL DEFAULT 'h264',
+            audio_codec TEXT NOT NULL DEFAULT 'copy'
         );
         "#,
     )

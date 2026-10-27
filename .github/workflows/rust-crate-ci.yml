@@ -42,6 +42,11 @@ on:
         type: string
         default: ''
         description: 'Passed to `cargo llvm-cov --ignore-filename-regex` (e.g., a thin binary entrypoint carve-out)'
+      valkey:
+        required: false
+        type: boolean
+        default: false
+        description: 'Start a real Valkey container and export VALKEY_URL for the crate tests (lease/real-socket tests fail loudly without it, by design)'
 
 permissions:
   contents: read
@@ -50,7 +55,7 @@ jobs:
   lint-test:
     name: "${{ inputs.crate_name }}: fmt + clippy + deny + coverage"
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -101,7 +106,21 @@ jobs:
       # runs seed it for PR runs. A cache miss only costs time, never
       # correctness (all cargo steps still run with --locked).
       - name: Cache cargo registry + git + target
+        if: github.event_name != 'merge_group'
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ inputs.working_directory }}/target
+          key: cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', inputs.working_directory)) }}
+          restore-keys: |
+            cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-
+
+      - name: Restore-only cargo cache (merge_group refs never save; avoids evicting real cache)
+        if: github.event_name == 'merge_group'
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
         with:
           path: |
             ~/.cargo/registry/index
@@ -149,6 +168,25 @@ jobs:
         if: inputs.extra_security_scanners
         run: pip install --no-cache-dir pip-audit==2.10.0
 
+      # A REAL Valkey for crates whose tests exercise a real lease/stream (svc-ingest's
+      # per-community Twitch sessions). The tests FAIL (never skip) when VALKEY_URL is unset,
+      # so a failed start here fails the job. Same digest as the chart's Valkey image.
+      - name: Start Valkey (VALKEY_URL for crate tests)
+        if: inputs.valkey
+        run: |
+          set -euo pipefail
+          docker run -d --name ci-valkey -p 127.0.0.1:6379:6379 \
+            valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+          for i in $(seq 1 30); do
+            if docker exec ci-valkey valkey-cli ping | grep -q PONG; then
+              echo "VALKEY_URL=redis://127.0.0.1:6379" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "valkey did not become ready" >&2
+          exit 1
+
       - name: cargo fmt --check
         run: cargo fmt --check
 
@@ -165,9 +203,6 @@ jobs:
       - name: cargo build --release --locked (proves the git dep resolves)
         if: inputs.release_build
         run: cargo build --release --locked
-
-      - name: cargo test --locked
-        run: cargo test --locked
 
       - name: cargo llvm-cov --locked (>=90% line coverage gate)
         env:

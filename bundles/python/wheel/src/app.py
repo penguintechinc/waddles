@@ -12,7 +12,7 @@ even though the task spec's own grammar line doesn't repeat the qualifier for
 it, matching every sibling bundle's "mutation = privileged, read = open"
 convention: `count`'s `add`/`remove` vs `list`, `command`'s `set`/`remove`/
 `timer` vs `list`); bare `!wheel` or `!wheel spin` spins the wheel, replying
-with a uniformly random option (stdlib `random.choice`, rejecting with an
+with a uniformly random option (`SystemRandom.choice`, rejecting with an
 "empty wheel" message rather than crashing when no options exist yet).
 
 State -- PER-COMMUNITY, via `waddle_sdk.community_kv` (explicit
@@ -52,10 +52,8 @@ this bundle never stores or logs `event.actor` anywhere (no per-caller state
 at all, unlike `lurk`'s hashed-actor keys), so there is nothing to tokenize
 here in the first place.
 
-Gated behind the PostHog flag ``waddles.command-wheel`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (command-text match first, flag check second, so an
-unrelated event never pays for a host round trip it doesn't need).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -66,11 +64,12 @@ from typing import Any, cast
 
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.flask_core import get_bundle_context
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-#: PostHog flag key, `{product}.{feature-name}` convention (`critical-rules.md`).
-FLAG_KEY = "waddles.command-wheel"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 #: The command word this bundle answers to -- matched case-insensitively,
 #: and only as a whole token (`!wheel`/`!wheel ...`), never as a prefix of a
@@ -86,6 +85,10 @@ OPTIONS_KEY = "wheel.options"
 #: comfortably inside the host's per-value size limit.
 MAX_OPTION_LEN = 200
 MAX_OPTIONS = 100
+
+#: The only sub-command tokens that may appear verbatim in a log line (static, code-owned
+#: names; the empty string is bare `!wheel`, logged as `spin`). Anything else is user input.
+_LOGGED_TOKENS = frozenset({"", "spin", "add", "remove", "list", "reset"})
 
 _USAGE = (
     "Usage: !wheel [spin] | !wheel add <option> | !wheel remove <option> | "
@@ -106,7 +109,18 @@ class _KvFailure(Exception):
     thin wrapper that does not classify or catch the generated WIT `Err`
     itself, so this bundle reclassifies it at its own call sites -- fail
     loud, never silent (`critical-rules.md` Fail-Loud Code Paths).
+
+    Carries only a static `op` name and the failure's *class name* (`cause`): this is what the
+    ERROR log line reports. Neither the stored option text, the key's contents, nor the host's
+    free-form error message is ever included -- a corrupt blob is made of user-typed options, so
+    echoing a parse/decode message could leak them (PII-free logs, gh-674).
     """
+
+    def __init__(self, op: str, cause: str) -> None:
+        """Record the failing operation name and the cause's class name."""
+        super().__init__(f"{op} failed: {cause}")
+        self.op = op
+        self.cause = cause
 
 
 async def _kv_get(community_id: str, key: str) -> bytes | None:
@@ -114,9 +128,7 @@ async def _kv_get(community_id: str, key: str) -> bytes | None:
     try:
         result = await community_kv.get(community_id, key)
     except Exception as exc:  # noqa: BLE001 - classified like waddle_sdk.db/count (see module docstring)
-        raise _KvFailure(
-            f"kv.get({key!r}) failed: {getattr(exc, 'value', exc)}"
-        ) from exc
+        raise _KvFailure("kv_get", type(getattr(exc, "value", exc)).__name__) from exc
     # `waddle_sdk.community_kv` ships no `py.typed` marker, so mypy sees `Any` here -- cast
     # back to the real contract (`waddle_sdk/community_kv.py`'s own `get()` signature).
     return cast("bytes | None", result)
@@ -126,10 +138,8 @@ async def _kv_set(community_id: str, key: str, value: bytes) -> None:
     """`community_kv.set` (no TTL -- wheel options persist indefinitely), reclassifying `Err`."""
     try:
         await community_kv.set(community_id, key, value, ttl_seconds=0)
-    except Exception as exc:  # noqa: BLE001
-        raise _KvFailure(
-            f"kv.set({key!r}) failed: {getattr(exc, 'value', exc)}"
-        ) from exc
+    except Exception as exc:  # noqa: BLE001 - classified like waddle_sdk.db/count
+        raise _KvFailure("kv_set", type(getattr(exc, "value", exc)).__name__) from exc
 
 
 async def _load_options(community_id: str) -> list[str]:
@@ -146,9 +156,9 @@ async def _load_options(community_id: str) -> list[str]:
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise _KvFailure(f"corrupt wheel options: {exc}") from exc
+        raise _KvFailure("options_decode", type(exc).__name__) from exc
     if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
-        raise _KvFailure("corrupt wheel options: expected a JSON array of strings")
+        raise _KvFailure("options_shape", "NotAStringList")
     return data
 
 
@@ -168,7 +178,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("wheel.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 async def _handle_add(community_id: str, arg: str, event: PlatformEvent) -> str:
@@ -238,7 +248,7 @@ async def _handle_spin(community_id: str) -> str:
     options = await _load_options(community_id)
     if not options:
         return _EMPTY_WHEEL_MSG
-    winner = random.choice(options)  # noqa: S311 - a game pick, not a security decision
+    winner = _RNG.choice(options)
     log.info("wheel.spin", option_count=len(options))
     return f"\U0001f3a1 The wheel lands on: {winner}!"
 
@@ -274,9 +284,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     if lowered != COMMAND_WORD and not lowered.startswith(COMMAND_WORD + " "):
         return None
 
-    if not await feature_enabled(FLAG_KEY, default=False):
-        return None
-
     rest = stripped[len(COMMAND_WORD) :].strip()
     parts = rest.split(maxsplit=1)
     token = parts[0].lower() if parts else ""
@@ -290,10 +297,13 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         try:
             reply = await _route(ctx.community, token, arg, event)
         except _KvFailure as exc:
-            log.error("wheel.kv_failure", error=str(exc))
+            log.error("wheel.kv_failure", op=exc.op, error=exc.cause)
             reply = _KV_ERROR_MSG
 
-    log.info("wheel.transform matched", command=token or "spin")
+    # PII-free: `token` is user-typed (e.g. `!wheel @someone`), so log a static name only --
+    # an unrecognized token is reported as the fixed string "unknown", never echoed.
+    logged_command = (token or "spin") if token in _LOGGED_TOKENS else "unknown"
+    log.info("wheel.transform matched", command=logged_command)
     return PlatformEvent(
         platform=event.platform,
         event_type=event.event_type,

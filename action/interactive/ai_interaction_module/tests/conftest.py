@@ -17,3 +17,19 @@ import flask_core  # noqa: F401
 # Add module root so `from app import app`, `import config`, and
 # `from services.* import ...` all work
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+# Env-gated real-Ollama fixtures (skip unless WADDLE_TEST_OLLAMA_URL is set).
+# Shared support lives in <repo>/tests/support -- see docs/testing/ollama-realpath.md.
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "tests", "support"
+    ),
+)
+from ollama_realpath import (  # noqa: E402,F401
+    json_model,
+    ollama_url,
+    safety_model,
+    single_flight,
+    text_model,
+)

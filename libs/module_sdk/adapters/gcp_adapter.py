@@ -172,8 +172,9 @@ class GCPAdapter(BaseAdapter):
                 )
             except Exception as e:
                 logger.warning(
-                    f"Failed to initialize GCP client: {str(e)}. "
-                    "Will fall back to HTTP invocation if URL is available."
+                    "Failed to initialize GCP client (%s). "
+                    "Will fall back to HTTP invocation if URL is available.",
+                    type(e).__name__,
                 )
                 self._gcp_client = None
         else:
@@ -360,7 +361,8 @@ class GCPAdapter(BaseAdapter):
                     f"GCP function returned HTTP {response.status_code}: "
                     f"{response.text[:200]}"
                 )
-                logger.error(error_msg)
+                # SECURITY: never log the remote body (it can echo the request payload)
+                logger.error("GCP function returned HTTP %s", response.status_code)
 
                 # Retry on server errors (5xx)
                 if 500 <= response.status_code < 600 and retry_count < self.max_retries:
@@ -383,7 +385,7 @@ class GCPAdapter(BaseAdapter):
                 response_data = response.json()
             except json.JSONDecodeError as e:
                 error_msg = f"Failed to parse GCP response as JSON: {str(e)}"
-                logger.error(error_msg)
+                logger.error("Failed to parse GCP response as JSON: %s", type(e).__name__)
                 self.health.record_failure()
 
                 return ExecuteResponse(
@@ -422,7 +424,9 @@ class GCPAdapter(BaseAdapter):
                 return await self._invoke_http(request, retry_count + 1)
 
             error_msg = f"GCP function request timed out after {self.timeout}s: {str(e)}"
-            logger.error(error_msg)
+            logger.error(
+                "GCP function request timed out after %ss: %s", self.timeout, type(e).__name__
+            )
             self.health.record_failure()
 
             return ExecuteResponse(
@@ -442,7 +446,7 @@ class GCPAdapter(BaseAdapter):
                 return await self._invoke_http(request, retry_count + 1)
 
             error_msg = f"GCP function request failed: {str(e)}"
-            logger.error(error_msg)
+            logger.error("GCP function request failed: %s", type(e).__name__)
             self.health.record_failure()
 
             return ExecuteResponse(
@@ -452,7 +456,8 @@ class GCPAdapter(BaseAdapter):
 
         except Exception as e:
             error_msg = f"Unexpected error during GCP HTTP invocation: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            # SECURITY: log the type only -- the message/traceback may echo the request payload
+            logger.error("Unexpected error during GCP HTTP invocation: %s", type(e).__name__)
             self.health.record_failure()
 
             return ExecuteResponse(
@@ -518,7 +523,7 @@ class GCPAdapter(BaseAdapter):
                 response_data = json.loads(response.result)
             except (json.JSONDecodeError, AttributeError) as e:
                 error_msg = f"Failed to parse GCP response as JSON: {str(e)}"
-                logger.error(error_msg)
+                logger.error("Failed to parse GCP response as JSON: %s", type(e).__name__)
                 self.health.record_failure()
 
                 return ExecuteResponse(
@@ -550,14 +555,17 @@ class GCPAdapter(BaseAdapter):
             if retry_count < self.max_retries:
                 wait_time = self.backoff_factor ** retry_count
                 logger.info(
-                    f"GCP invocation failed, retrying after {wait_time}s "
-                    f"(attempt {retry_count + 1}/{self.max_retries}): {str(e)}"
+                    "GCP invocation failed, retrying after %ss (attempt %d/%d): %s",
+                    wait_time,
+                    retry_count + 1,
+                    self.max_retries,
+                    type(e).__name__,
                 )
                 await asyncio.sleep(wait_time)
                 return await self._invoke_client(request, retry_count + 1)
 
             error_msg = f"GCP function invocation failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            logger.error("GCP function invocation failed: %s", type(e).__name__)
             self.health.record_failure()
 
             return ExecuteResponse(

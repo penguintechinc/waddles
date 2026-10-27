@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 
 # Seeded 2026-08-29 by measuring the tree at HEAD. Lower as phases land; never
 # raise it.
-DOC_REF_BUDGET="${DOC_REF_BUDGET:-27}"
+DOC_REF_BUDGET="${DOC_REF_BUDGET:-21}"
 
 count_only=0
 [ "${1:-}" = "--count" ] && count_only=1

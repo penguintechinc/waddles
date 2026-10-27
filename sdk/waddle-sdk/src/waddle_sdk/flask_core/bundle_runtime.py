@@ -57,11 +57,19 @@ def reset_bundle_dal_for_tests() -> None:
 
 @dataclass(slots=True, frozen=True)
 class BundleContext:
-    """The tenant/community/app_id scope of the envelope currently being processed."""
+    """The tenant/community/app_id scope of the envelope currently being processed.
+
+    ``tenant_id``/``community_id`` are the AUTHORITATIVE numeric scope keys a
+    ``world stage-v2`` bundle receives from the host (``community_id == 0`` is
+    tenant-wide); they stay ``None`` for a v1 bundle. When set, ``tenant`` /
+    ``community`` are display-only and must never be used as keys.
+    """
 
     tenant: str
     community: str | None
     app_id: str
+    tenant_id: int | None = None
+    community_id: int | None = None
 
 
 _context: contextvars.ContextVar[BundleContext | None] = contextvars.ContextVar(
@@ -82,9 +90,22 @@ def get_bundle_context() -> BundleContext:
 
 
 @contextmanager
-def bundle_context(*, tenant: str, community: str | None, app_id: str) -> Iterator[BundleContext]:
-    """Scope tenant/community/app_id for one bundle entrypoint invocation."""
-    ctx = BundleContext(tenant=tenant, community=community, app_id=app_id)
+def bundle_context(
+    *,
+    tenant: str,
+    community: str | None,
+    app_id: str,
+    tenant_id: int | None = None,
+    community_id: int | None = None,
+) -> Iterator[BundleContext]:
+    """Scope tenant/community/app_id (+ numeric ids for stage-v2) for one entrypoint invocation."""
+    ctx = BundleContext(
+        tenant=tenant,
+        community=community,
+        app_id=app_id,
+        tenant_id=tenant_id,
+        community_id=community_id,
+    )
     token = _context.set(ctx)
     try:
         yield ctx

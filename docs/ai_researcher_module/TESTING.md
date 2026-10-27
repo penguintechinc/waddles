@@ -10,6 +10,15 @@ The AI Researcher Module uses a multi-tier testing approach:
 4. **Mock Data** — Realistic test scenarios
 5. **Performance Tests** — Latency and throughput validation
 
+## Real-Ollama integration tests (env-gated)
+
+`tests/test_ai_researcher_ollama_realpath.py` drives `AIProviderService`, `ResearchService` (+ the real
+`SafetyLayer`) and `SummaryService` against a live Ollama - no mocked transport, one query at a time.
+Set `WADDLE_TEST_OLLAMA_URL` to run them (unset = skipped). Offline contract/capability tests
+(`test_ai_provider_capability.py`, `test_research_service_contract.py`,
+`test_summary_service_capability.py`, `test_ai_provider_telemetry.py`) always run. Full instructions:
+`docs/testing/ollama-realpath.md`.
+
 ## Test Setup
 
 ### Prerequisites
@@ -661,3 +670,18 @@ async def test_research_queries(service, query, expected_success):
     result = await service.research(123, 456, query)
     assert result.success == expected_success
 ```
+
+## Prompt-Injection Hardening Tests
+
+```bash
+cd core/ai_researcher_module
+python3 -m pytest tests/test_research_injection_hardening.py tests/test_lookup_services_injection.py -v
+```
+
+* `test_lookup_services_injection.py` runs the real `SafetyLayer` and `AIProviderService` against
+  all 11 SearXNG-backed AI methods (printed denominator) plus the 3 quick-search outputs: injected
+  results are dropped, queries are delimited, a blocked / erroring / verdict-less gate stops the
+  search and the model call, a tool call in the answer fails closed, replies are sanitised.
+* `test_research_injection_hardening.py` covers `SafetyLayer` obfuscation resistance, the
+  `ResearchService` prompts and replies, `AIProviderService` structure and the summary / insights
+  prompts.

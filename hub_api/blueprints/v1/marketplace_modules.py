@@ -103,8 +103,8 @@ async def module_details(module_id: int) -> ModuleDetailResponse | tuple[dict[st
 
 
 @modules_bp.route("", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_ADMIN_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_ADMIN_SCOPE)  # type: ignore[misc]
 # NOT @validate_response -- an `insert()` followed by a nested-dataclass
 # response (`ModuleCreateResponse.module: ModuleCreated`) trips the same
 # quart-schema/pydantic-core crash `services/dto_response.py`'s module
@@ -130,8 +130,8 @@ async def create_module_route() -> tuple[Any, int]:
 
 
 @modules_bp.route("/<int:module_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_ADMIN_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_ADMIN_SCOPE)  # type: ignore[misc]
 @validate_response(SimpleMessageResponse)
 async def update_module_route(
     module_id: int,
@@ -148,8 +148,8 @@ async def update_module_route(
 
 
 @modules_bp.route("/<int:module_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_ADMIN_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_ADMIN_SCOPE)  # type: ignore[misc]
 @validate_response(SimpleMessageResponse)
 async def delete_module_route(
     module_id: int,
@@ -165,8 +165,8 @@ async def delete_module_route(
 
 
 @modules_bp.route("/<int:module_id>/subscriptions", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_ADMIN_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_ADMIN_SCOPE)  # type: ignore[misc]
 @validate_response(ModuleSubscriptionsResponse)
 async def module_subscriptions(module_id: int) -> ModuleSubscriptionsResponse:
     """`GET /api/v1/modules/<id>/subscriptions` -- superadmin only."""

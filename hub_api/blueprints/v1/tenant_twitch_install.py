@@ -169,8 +169,8 @@ def _validate_credential_field(value: Any, *, field_name: str) -> str:
 
 
 @tenant_twitch_install_bp.route("/authorize", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(TwitchInstallAuthorizeResponse)
 async def authorize() -> TwitchInstallAuthorizeResponse | tuple[dict[str, object], int]:
     """`POST /api/v1/tenant/twitch-install/authorize`.

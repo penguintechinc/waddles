@@ -23,5 +23,7 @@ mod push;
 mod surface;
 
 pub use envelope::{ConnectedFrame, OverlayEnvelope};
-pub use push::{AlertPayload, ChatMessagePayload, GoalPayload, OverlayPush, PushKind};
+pub use push::{
+    AlertPayload, CaptionPayload, ChatMessagePayload, GoalPayload, OverlayPush, PushKind,
+};
 pub use surface::Surface;

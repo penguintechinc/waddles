@@ -38,9 +38,10 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Callable, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 import jwt
 import requests
@@ -51,7 +52,25 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from quart import current_app, g, jsonify, request
 
+from .jwt_hardening import (
+    OUTCOME_OK,
+    REASON_BAD_ISSUER,
+    REASON_INVALID,
+    REASON_SCOPE_DENIED,
+    REASON_UNKNOWN_KID,
+    VERIFIER_SERVICE_EDDSA,
+    JwtRejection,
+    classify_decode_error,
+    inspect_header,
+    log_rejection,
+    record_verification,
+)
+
 logger = logging.getLogger(__name__)
+
+#: The ONE algorithm the machine-JWT verifier accepts and the issuer signs with
+#: (RFC 8725 one-alg-per-verifier). Ed25519 per RFC 8037.
+SERVICE_JWT_ALGORITHM = "EdDSA"
 
 #: Reserved SPIFFE trust domain (penguintech.md SPIFFE Identity) -- every
 #: `sub` this module issues or verifies lives under it, today via hub-api
@@ -67,15 +86,40 @@ def spiffe_id(env: str, service: str) -> str:
         raise ServiceJwtError(f"invalid SPIFFE id components: env={env!r} service={service!r}")
     return candidate
 
+
 #: Machine JWTs are capped at 1h per security.md JWT Claims ("Machine access
 #: tokens are short-lived (1h, same ceiling as JWT Claims above)").
 MAX_TOKEN_TTL_SECONDS = 3600
 DEFAULT_TOKEN_TTL_SECONDS = 900
 
+#: Community-bound connection-resolve tokens are capped far tighter than the 1h ceiling: they
+#: authorise reading one community's provider credentials, so a leaked one must die fast.
+BOUND_TOKEN_TTL_SECONDS = 300
+
+#: Connection scopes. ``resolve`` is community-bound (claims below); ``list`` is unbound,
+#: operator-plane, and the routes it guards never return secrets.
+SCOPE_CONNECTIONS_RESOLVE = "connections:resolve"
+SCOPE_CONNECTIONS_LIST = "connections:list"
+#: Least privilege by kind: ``resolve`` alone releases only platform-OAuth (kind 1) credentials;
+#: static-secret kinds (external HTTP / AWS Lambda / GCP function) additionally need this scope.
+#: Community-bound exactly like ``resolve``.
+SCOPE_CONNECTIONS_RESOLVE_STATIC = "connections:resolve:static"
+#: Scopes whose tokens are community-bound.
+COMMUNITY_BOUND_SCOPES = frozenset({SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC})
+
+#: The ONLY extra claims an issuer call may stamp, and both are integers (numeric ids only --
+#: never a name/slug, never PII), so a JWS suffices and no JWE wrapping is needed.
+ALLOWED_EXTRA_CLAIMS = frozenset({"community", "conn"})
+
 #: Allowed clock skew when validating `iat`/`exp` across services.
 CLOCK_SKEW_SECONDS = 30
 
 ISSUER = os.getenv("SERVICE_JWT_ISSUER", "hub-api")
+
+#: Reserved operator-plane tenant (security.md Reserved Tenants): internal service
+#: accounts such as svc-process/svc-action live here and may act on behalf of any
+#: tenant. Every other `tenant` claim value confines the token to that one tenant.
+SYSTEM_TENANT = "system"
 
 
 class ServiceJwtError(Exception):
@@ -127,44 +171,73 @@ class ServiceJwtVerifier:
     def verify(self, token: str, *, required_scope: str) -> dict[str, Any]:
         """Validate signature, `iss`, `aud`, `exp` (with clock skew) and `scope`.
 
-        Raises `UnknownKeyId` for an unrecognized `kid` and
+        Raises `UnknownKeyId` for an unrecognized or absent `kid` and
         `InvalidServiceToken` for every other validation failure --
         callers should treat both as an authn/authz failure (401/403),
         never leak which check failed to the caller.
+
+        H-2 Phase 0: the header is vetted before any key lookup -- `alg`
+        must be exactly `SERVICE_JWT_ALGORITHM` (so `alg: none`, an HMAC
+        token "signed" with the public key, or any other algorithm is
+        refused outright), `jku`/`jwk`/`x5u`/`x5c`/`crit` are refused, and a
+        `kid` outside the pinned charset never reaches the trust bundle.
+        Every call emits `waddles_jwt_verifications_total` with
+        `verifier=service_eddsa`.
         """
+        started = time.perf_counter()
+        alg: str | None = None
+        outcome = REASON_INVALID  # what an unexpected escape is counted as
         try:
-            header = jwt.get_unverified_header(token)
-        except jwt.InvalidTokenError as exc:
-            raise InvalidServiceToken("malformed token header") from exc
-        kid = header.get("kid")
-        public_key = self.trust_bundle.get_public_key(kid) if kid else None
-        if public_key is None:
-            raise UnknownKeyId(f"unknown kid {kid!r}")
-        try:
-            payload = jwt.decode(
-                token,
-                public_key,
-                algorithms=["EdDSA"],
-                audience=self.audience,
-                leeway=CLOCK_SKEW_SECONDS,
-                # `nbf` is mandatory (security review MEDIUM finding) --
-                # PyJWT validates `nbf <= now` automatically once present,
-                # honoring the same `leeway` clock-skew bound applied to
-                # `exp`/`iat` above; `require` additionally rejects any
-                # token minted without one (an older issuer or a forged
-                # token that omits it), rather than silently accepting it.
-                options={
-                    "require": ["exp", "iat", "nbf", "iss", "aud", "sub", "scope", "jti"],
-                    "verify_iss": False,
-                },
+            try:
+                header = inspect_header(
+                    token, allowed_algs=(SERVICE_JWT_ALGORITHM,), validate_kid=True
+                )
+            except JwtRejection as rejection:
+                alg, outcome = rejection.alg, rejection.reason
+                raise InvalidServiceToken(f"rejected token header ({outcome})") from rejection
+            alg = header.alg
+            kid = header.kid
+            public_key = self.trust_bundle.get_public_key(kid) if kid else None
+            if public_key is None:
+                outcome = REASON_UNKNOWN_KID
+                raise UnknownKeyId("unknown or absent kid")
+            try:
+                payload = jwt.decode(
+                    token,
+                    public_key,
+                    algorithms=[SERVICE_JWT_ALGORITHM],
+                    audience=self.audience,
+                    leeway=CLOCK_SKEW_SECONDS,
+                    # `nbf` is mandatory (security review MEDIUM finding) --
+                    # PyJWT validates `nbf <= now` automatically once present,
+                    # honoring the same `leeway` clock-skew bound applied to
+                    # `exp`/`iat` above; `require` additionally rejects any
+                    # token minted without one (an older issuer or a forged
+                    # token that omits it), rather than silently accepting it.
+                    options={
+                        "require": ["exp", "iat", "nbf", "iss", "aud", "sub", "scope", "jti"],
+                        "verify_iss": False,
+                    },
+                )
+            except jwt.PyJWTError as exc:
+                outcome = classify_decode_error(exc)
+                raise InvalidServiceToken(str(exc)) from exc
+            if payload.get("iss") not in self.trusted_issuers:
+                outcome = REASON_BAD_ISSUER
+                raise InvalidServiceToken(f"untrusted issuer {payload.get('iss')!r}")
+            if payload.get("scope") != required_scope:
+                outcome = REASON_SCOPE_DENIED
+                raise InvalidServiceToken(
+                    f"scope {payload.get('scope')!r} != required {required_scope!r}"
+                )
+            outcome = OUTCOME_OK
+            return payload
+        finally:
+            record_verification(
+                verifier=VERIFIER_SERVICE_EDDSA, alg=alg, outcome=outcome, started=started
             )
-        except jwt.InvalidTokenError as exc:
-            raise InvalidServiceToken(str(exc)) from exc
-        if payload.get("iss") not in self.trusted_issuers:
-            raise InvalidServiceToken(f"untrusted issuer {payload.get('iss')!r}")
-        if payload.get("scope") != required_scope:
-            raise InvalidServiceToken(f"scope {payload.get('scope')!r} != required {required_scope!r}")
-        return payload
+            if outcome != OUTCOME_OK:
+                log_rejection(verifier=VERIFIER_SERVICE_EDDSA, reason=outcome, alg=alg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +253,11 @@ class ServiceIdentity:
     k8s_namespace: str
     k8s_service_account: str
     allowed_scopes: frozenset[str]
+    #: Tenant this identity's tokens are bound to, stamped into the `tenant` claim by
+    #: the issuer (never taken from the caller -- security.md "Client cannot set
+    #: tenant"). `SYSTEM_TENANT` = operator plane (all tenants); empty = no tenant
+    #: claim, which tenant-aware consumers (the internal gRPC server) reject.
+    tenant: str = ""
 
     def matches_service_account(self, namespace: str, service_account: str) -> bool:
         """Return True if a validated TokenReview identity is this service."""
@@ -224,6 +302,28 @@ class ServiceJwtIssuer:
         doesn't carry `scope`, and `ServiceJwtError` if `ttl_seconds`
         exceeds the 1h platform ceiling.
         """
+        return self.issue_with_claims(service_id, scope, ttl_seconds=ttl_seconds)[0]
+
+    def issue_with_claims(
+        self,
+        service_id: str,
+        scope: str,
+        *,
+        ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
+        extra_claims: Mapping[str, int] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Mint a JWT like `issue()` and also return the exact claims that were signed.
+
+        Lets the token endpoint audit-log `jti`/`exp`/`tenant` straight from what it just
+        minted, instead of re-decoding its own output with signature verification
+        disabled (an unverified decode is a footgun this codebase no longer carries).
+
+        ``extra_claims`` binds the token to a community (``community``) and optionally one
+        connection (``conn``). Only those two names are accepted, each a non-negative ``int``
+        (``bool`` refused); anything else raises ``ValueError``. A bound token's lifetime is
+        clamped to ``BOUND_TOKEN_TTL_SECONDS``.
+        """
+        extra = _validated_extra_claims(extra_claims)
         if ttl_seconds > MAX_TOKEN_TTL_SECONDS:
             raise ServiceJwtError(f"ttl_seconds {ttl_seconds} exceeds {MAX_TOKEN_TTL_SECONDS}s ceiling")
         identity = self.identities.get(service_id)
@@ -232,8 +332,10 @@ class ServiceJwtIssuer:
         key = self.keys[self.active_kid]
         if key.private_key is None:
             raise ServiceJwtError(f"active key {self.active_kid!r} has no private key loaded")
+        if extra:
+            ttl_seconds = min(ttl_seconds, BOUND_TOKEN_TTL_SECONDS)
         now = int(time.time())
-        payload = {
+        payload: dict[str, Any] = {
             "iss": ISSUER,
             "aud": self.audience,
             "sub": service_id,
@@ -249,19 +351,27 @@ class ServiceJwtIssuer:
             "exp": now + ttl_seconds,
             "jti": str(uuid.uuid4()),
         }
+        if identity.tenant:
+            # Tenant binding comes from the allow-listed identity only -- the caller
+            # supplies a scope, never a tenant (security.md Tenant Isolation).
+            payload["tenant"] = identity.tenant
+        payload.update(extra)
         # PyJWT's EdDSA signer accepts a `cryptography` private-key object
         # directly -- extracting raw bytes here was dead code that only
         # ever created (and immediately discarded) an extra copy of the
         # private key material in memory, widening its exposure window for
         # no benefit.
-        return jwt.encode(payload, key.private_key, algorithm="EdDSA", headers={"kid": key.kid})
+        token = jwt.encode(
+            payload, key.private_key, algorithm=SERVICE_JWT_ALGORITHM, headers={"kid": key.kid}
+        )
+        return token, dict(payload)
 
     def get_public_key(self, kid: str) -> Ed25519PublicKey | None:
         """Implements `TrustBundleSource` -- hub-api verifies its own JWKS today."""
         key = self.keys.get(kid)
         return key.public_key if key else None
 
-    def as_verifier(self) -> "ServiceJwtVerifier":
+    def as_verifier(self) -> ServiceJwtVerifier:
         """Wrap this issuer as a `ServiceJwtVerifier` (self-verification today).
 
         Migration note: retiring hub-api issuance later means constructing
@@ -289,6 +399,19 @@ class ServiceJwtIssuer:
                 }
             )
         return {"keys": keys}
+
+
+def _validated_extra_claims(extra_claims: Mapping[str, int] | None) -> dict[str, int]:
+    """Allow-list and type-check issuer extra claims; fail loudly on anything else."""
+    if not extra_claims:
+        return {}
+    unknown = set(extra_claims) - ALLOWED_EXTRA_CLAIMS
+    if unknown:
+        raise ValueError(f"extra claim(s) not allowed: {sorted(unknown)}")
+    for name, value in extra_claims.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"extra claim {name!r} must be a non-negative integer")
+    return dict(extra_claims)
 
 
 def _b64url(raw: bytes) -> str:
@@ -372,8 +495,17 @@ def load_identities_from_env(*, env: str = "alpha") -> list[ServiceIdentity]:
                 k8s_namespace=entry["k8s_namespace"],
                 k8s_service_account=entry["k8s_service_account"],
                 allowed_scopes=frozenset(entry.get("allowed_scopes", [])),
+                tenant=str(entry.get("tenant") or ""),
             )
         )
+        if not identities[-1].tenant:
+            # Not fatal (non-tenant-aware scopes such as egress:connect still work), but
+            # the internal gRPC server rejects tokens without a tenant claim, so say so
+            # loudly at startup rather than at the first denied RPC.
+            logger.warning(
+                "service identity has no tenant binding; tenant-aware RPCs will reject its tokens",
+                extra={"action": "service_jwt_identity_untenanted", "service_id": service_id},
+            )
     return identities
 
 

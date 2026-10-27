@@ -3,7 +3,7 @@ name = "overlay-schema"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "The unified overlay surface enum, push wire format, and SSE/websocket envelope (issues #456/#457 contract C3) -- single source of truth svc-presentation-rust, svc-streaming-rust, and the webui all target. A path dependency within this repo, not a penguin-libs crate: it depends on no cross-repo schema, only this repo's own overlay wire protocol (mirrors core/svc_presentation/services/render.py's existing payload fields for a faithful Python->Rust port). See src/lib.rs module doc."
 

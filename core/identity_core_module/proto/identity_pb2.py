@@ -32,16 +32,16 @@ _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'identity_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_LOOKUPIDENTITYREQUEST']._serialized_start=52
-  _globals['_LOOKUPIDENTITYREQUEST']._serialized_end=134
-  _globals['_LOOKUPIDENTITYRESPONSE']._serialized_start=137
-  _globals['_LOOKUPIDENTITYRESPONSE']._serialized_end=321
-  _globals['_PLATFORMIDENTITY']._serialized_start=323
-  _globals['_PLATFORMIDENTITY']._serialized_end=412
-  _globals['_GETLINKEDPLATFORMSREQUEST']._serialized_start=414
-  _globals['_GETLINKEDPLATFORMSREQUEST']._serialized_end=477
-  _globals['_GETLINKEDPLATFORMSRESPONSE']._serialized_start=480
-  _globals['_GETLINKEDPLATFORMSRESPONSE']._serialized_end=622
-  _globals['_IDENTITYSERVICE']._serialized_start=625
-  _globals['_IDENTITYSERVICE']._serialized_end=864
+  _globals['_LOOKUPIDENTITYREQUEST']._serialized_start = 52
+  _globals['_LOOKUPIDENTITYREQUEST']._serialized_end = 134
+  _globals['_LOOKUPIDENTITYRESPONSE']._serialized_start = 137
+  _globals['_LOOKUPIDENTITYRESPONSE']._serialized_end = 321
+  _globals['_PLATFORMIDENTITY']._serialized_start = 323
+  _globals['_PLATFORMIDENTITY']._serialized_end = 412
+  _globals['_GETLINKEDPLATFORMSREQUEST']._serialized_start = 414
+  _globals['_GETLINKEDPLATFORMSREQUEST']._serialized_end = 477
+  _globals['_GETLINKEDPLATFORMSRESPONSE']._serialized_start = 480
+  _globals['_GETLINKEDPLATFORMSRESPONSE']._serialized_end = 622
+  _globals['_IDENTITYSERVICE']._serialized_start = 625
+  _globals['_IDENTITYSERVICE']._serialized_end = 864
 # @@protoc_insertion_point(module_scope)

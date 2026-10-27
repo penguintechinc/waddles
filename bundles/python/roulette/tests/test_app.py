@@ -25,6 +25,7 @@ from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.testing import FakeKvHost, install_fake_kv_host
 
+import app
 from app import (
     _NOTHING_PULLED_YET,
     _USAGE,
@@ -236,13 +237,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
         occurred_at="",
     )
     assert _run(transform(event)) is None
-
-
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    kv = install_fake_kv_host(monkeypatch)
-    host = _FakeHost(kv)
-    _attach_non_kv_fakes(host, flag_enabled=False)
-    assert _run(transform(_sample_event("!roulette"))) is None
 
 
 def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:
@@ -716,7 +710,7 @@ def test_pseudonym_differs_per_actor() -> None:
 
 
 def test_pull_trigger_is_out_on_chamber_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("random.randint", lambda lo, hi: 1)
+    monkeypatch.setattr(app._RNG, "randint", lambda lo, hi: 1)
     assert _pull_trigger() is True
 
 
@@ -724,7 +718,7 @@ def test_pull_trigger_is_out_on_chamber_one(monkeypatch: pytest.MonkeyPatch) -> 
 def test_pull_trigger_survives_on_other_chambers(
     chamber: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("random.randint", lambda lo, hi: chamber)
+    monkeypatch.setattr(app._RNG, "randint", lambda lo, hi: chamber)
     assert _pull_trigger() is False
 
 

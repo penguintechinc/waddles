@@ -260,8 +260,8 @@ original's `UserId`/`Username` string pairs (`FishingTournamentStanding.cs:6-7` 
 
 ## 4. Currency/Points Integration — BLOCKER (partial)
 
-Read: `action/interactive/loyalty_interaction_module/services/currency_service.py:33-101`, `core/svc_process/bundles/community_loyalty_process.py`,
-`core/svc_action/bundles/community_loyalty_action.py`, `wit/waddle-bundle/stage.wit` (full file), `core/*/src/capabilities.rs`.
+Read: `action/interactive/loyalty_interaction_module/services/currency_service.py:33-101`, `core/svc_process/builtin_handlers/community_loyalty_process.py`,
+`core/svc_action/builtin_handlers/community_loyalty_action.py`, `wit/waddle-bundle/stage.wit` (full file), `core/*/src/capabilities.rs`.
 
 **Bundles cannot debit/credit the platform's native loyalty/points currency today.** `CapabilityKind` (referenced at
 `core/bundle_executor/src/host/imports.rs:13`, matched exhaustively in `core/svc_process/src/capabilities.rs:411-414`
@@ -269,7 +269,7 @@ and `core/svc_action/src/capabilities.rs`) has exactly 8 variants — `Context, 
 Clock` — one per `stage.wit` import. There is no `Loyalty`/`Points`/`Currency` kind, and `stage.wit` declares no such
 interface. The v1.1 design doc adds `moderation` and `db.execute-batch` but nothing for currency either. The
 existing loyalty system (`action/interactive/loyalty_interaction_module`'s `CurrencyService`) is Python, called
-in-process by the **native** (non-WASM) `core/svc_process/bundles/community_loyalty_process.py` — a different,
+in-process by the **native** (non-WASM) `core/svc_process/builtin_handlers/community_loyalty_process.py` — a different,
 legacy bundle mechanism from the WASM component model fishing will use, with no host-capability bridge between them.
 
 Additional wrinkle: `CurrencyService.get_balance` (`currency_service.py:53-58`) keys balances by

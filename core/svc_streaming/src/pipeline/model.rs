@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::redact::{fingerprint, redact_url};
 use crate::store::SecretRef;
 
 /// Unique identifier for a configured or running pipeline.
@@ -24,7 +25,13 @@ pub struct PipelineSpec {
 }
 
 /// A single ingest source for a pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written: every variant carries a bearer credential (stream
+/// key, SRT stream id, WHIP token, or a pull URL that may embed
+/// `user:password@`), so a derived `{:?}` -- of this or of a
+/// [`PipelineSpec`] -- would print it. The manual impl shows a
+/// [`crate::redact::fingerprint`] / [`crate::redact::redact_url`] instead.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InputSpec {
     /// RTMP push ingest, keyed by stream key (owned by `ingest::rtmp`).
@@ -35,6 +42,29 @@ pub enum InputSpec {
     Whip { token: String },
     /// Pull ingest from an arbitrary upstream URL (RTMP/SRT/HLS source).
     Pull { url: String },
+}
+
+impl std::fmt::Debug for InputSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rtmp { stream_key } => f
+                .debug_struct("Rtmp")
+                .field("stream_key_hash", &fingerprint(stream_key))
+                .finish(),
+            Self::Srt { stream_id } => f
+                .debug_struct("Srt")
+                .field("stream_id_hash", &fingerprint(stream_id))
+                .finish(),
+            Self::Whip { token } => f
+                .debug_struct("Whip")
+                .field("token_hash", &fingerprint(token))
+                .finish(),
+            Self::Pull { url } => f
+                .debug_struct("Pull")
+                .field("url_redacted", &redact_url(url))
+                .finish(),
+        }
+    }
 }
 
 /// A named transcode profile: one video + one audio codec configuration,
@@ -97,9 +127,20 @@ pub enum AudioCodec {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputSpec {
     /// Forward to an external RTMP endpoint (owned by `egress::relay`).
-    RtmpPush { url_secret_ref: SecretRef },
+    /// `profile` names the [`TranscodeProfile`] this push encodes with;
+    /// `None` keeps the legacy binding to `PipelineSpec::profiles[0]`.
+    RtmpPush {
+        url_secret_ref: SecretRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+    },
     /// Forward to an external SRT endpoint (owned by `egress::relay`).
-    SrtPush { url_secret_ref: SecretRef },
+    /// `profile` is the same optional binding as on [`Self::RtmpPush`].
+    SrtPush {
+        url_secret_ref: SecretRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+    },
     /// Serve HLS (owned by `egress::hls`).
     Hls {
         variant: HlsVariant,
@@ -277,12 +318,37 @@ mod tests {
             url_secret_ref: SecretRef::Env {
                 var: "RELAY_TARGET_URL".into(),
             },
+            profile: None,
         };
         let json = serde_json::to_string(&output).unwrap();
         // The serialized form carries the *reference* only -- the env var
         // name, never a resolved secret value.
         assert!(json.contains("RELAY_TARGET_URL"));
         assert!(json.contains("\"source\":\"env\""));
+    }
+
+    #[test]
+    fn push_output_profile_is_optional_on_the_wire() {
+        // A spec serialized before `profile` existed must still deserialize.
+        let legacy = r#"{"kind":"rtmp_push","url_secret_ref":{"source":"env","var":"X"}}"#;
+        let parsed: OutputSpec = serde_json::from_str(legacy).expect("legacy json");
+        assert!(matches!(parsed, OutputSpec::RtmpPush { profile: None, .. }));
+
+        // `None` is omitted, keeping the legacy shape byte-for-byte.
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert!(!json.contains("profile"), "{json}");
+
+        let bound = r#"{"kind":"srt_push","url_secret_ref":{"source":"env","var":"X"},"profile":"h265-aac"}"#;
+        match serde_json::from_str::<OutputSpec>(bound).expect("bound json") {
+            OutputSpec::SrtPush { profile, .. } => assert_eq!(profile.as_deref(), Some("h265-aac")),
+            other => panic!("unexpected output {other:?}"),
+        }
+        let round_trip =
+            serde_json::to_string(&serde_json::from_str::<OutputSpec>(bound).unwrap()).unwrap();
+        assert!(
+            round_trip.contains("\"profile\":\"h265-aac\""),
+            "{round_trip}"
+        );
     }
 
     #[test]

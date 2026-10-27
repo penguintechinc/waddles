@@ -128,7 +128,7 @@ _ENFORCEMENT_WARN_TEXT_TEMPLATE = (
 #: (`moderation_enforce_action.py:enforce`), seeded by migration
 #: `0016_moderation_enforce_app`. `PROCESS_TARGET_APP_ID_KEY` cross-app
 #: routing convention: `flask_core.stream_pipeline`'s own docstring,
-#: `bundles/social_music_process.py`'s existing usage.
+#: `builtin_handlers/social_music_process.py`'s existing usage.
 _MODERATION_ENFORCE_APP_ID = "waddles.community.moderation.default"
 
 _DEDUPE_TTL_SECONDS = 30

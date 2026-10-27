@@ -3,7 +3,7 @@ name = "overlay_auth"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Unified overlay-auth contract (C4) for the streaming/overlay Rust rewrite: a per-community, rotatable, hashed-at-rest VIEW credential for browser-source GET routes, plus a community-scoped PUSH credential (built on `service_auth` machine JWTs) replacing the static `PRESENTATION_PUSH_TOKEN` bearer. Owned by the future svc-presentation-rust; P4/P5 (view routes) and the action-stage push path both consume this crate instead of re-implementing overlay auth."
 
@@ -46,7 +46,7 @@ sha2 = "=0.10.9"
 hex = "=0.4.3"
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt", "rt-multi-thread"] }
 # Test-only: signs fixture JWTs to exercise `service_auth::verify` through
 # this crate's scoping layer. Same version/feature pin as
 # core/service_auth/Cargo.toml so cargo-deny sees one resolved version,

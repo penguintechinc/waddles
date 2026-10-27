@@ -164,6 +164,26 @@ pub struct CliConfig {
     /// rollouts (alpha 2026-10-02).
     #[arg(long, env = "EXECUTOR_GRACE_SECONDS", default_value_t = 60)]
     pub executor_grace_seconds: u64,
+    /// Capacity (frames) of each host-API connection's bounded writer
+    /// channel. A full channel applies backpressure to producers rather
+    /// than growing memory without limit.
+    #[arg(long, env = "HOST_API_WRITER_CHANNEL_CAPACITY", default_value_t = 1024)]
+    pub host_api_writer_channel_capacity: usize,
+    /// How long a producer awaits writer-channel capacity before the frame
+    /// is shed (logged + metriced, never silent).
+    #[arg(long, env = "HOST_API_WRITER_SEND_TIMEOUT_MS", default_value_t = 30000)]
+    pub host_api_writer_send_timeout_ms: u64,
+    /// Cap on concurrently running `host-call` handler tasks per
+    /// connection; the excess is shed with an `overloaded` error reply.
+    #[arg(
+        long,
+        env = "HOST_API_MAX_CONCURRENT_HOST_CALLS",
+        default_value_t = 256
+    )]
+    pub host_api_max_concurrent_host_calls: usize,
+    /// Cap on simultaneously accepted host-API connections.
+    #[arg(long, env = "HOST_API_MAX_CONNECTIONS", default_value_t = 64)]
+    pub host_api_max_connections: usize,
 
     /// Interim, env-driven substitute for the `GET /api/v1/distribution/
     /// bundles?stage=process` grant list (spec SS4.2/SS6.7) -- **TODO(M4+)**:
@@ -248,6 +268,92 @@ pub struct CliConfig {
     /// `app_core`/`app_community`, no DDL, no access to any other schema).
     #[arg(long, env = "BUNDLE_DB_USER", default_value = "waddles_bundle_runtime")]
     pub bundle_db_user: String,
+
+    /// Production wiring for the bundle `reputation` host capability
+    /// (issue #726, `bundle_host_reputation::connect`) -- the least-privilege
+    /// `waddles_bundle_reputation` role (`alembic/versions/
+    /// 0050_bundle_reputation_store.py`): DML on the two reputation tables +
+    /// column-scoped membership SELECT, nothing else. Distinct from both
+    /// `BUNDLE_DB_*` (app_core/app_community DML) and `DB_READER_*`
+    /// (read-only loader).
+    #[arg(long, env = "BUNDLE_REPUTATION_HOST", default_value = "localhost")]
+    pub bundle_reputation_host: String,
+    #[arg(long, env = "BUNDLE_REPUTATION_PORT", default_value_t = 5432)]
+    pub bundle_reputation_port: u16,
+    #[arg(long, env = "BUNDLE_REPUTATION_NAME", default_value = "waddlebot")]
+    pub bundle_reputation_name: String,
+    #[arg(
+        long,
+        env = "BUNDLE_REPUTATION_USER",
+        default_value = "waddles_bundle_reputation"
+    )]
+    pub bundle_reputation_user: String,
+    /// Refresh cadence, in whole seconds, of the reputation membership
+    /// snapshot (`bundle_capability_gate::SnapshotMembership`). The snapshot
+    /// is a read pre-filter only -- writes re-check live membership in their
+    /// own transaction -- so this bounds how long a departed member stays
+    /// readable, never write authority. Clamped to a 5s floor by
+    /// [`CliConfig::bundle_reputation_membership_refresh`].
+    #[arg(
+        long,
+        env = "BUNDLE_REPUTATION_MEMBERSHIP_REFRESH_S",
+        default_value_t = 30
+    )]
+    pub bundle_reputation_membership_refresh_s: u64,
+
+    /// Production wiring for the bundle `economy` host capability (issue
+    /// #714, `bundle_host_economy::connect`) -- the least-privilege
+    /// `waddles_economy_runtime` role (`alembic/versions/
+    /// 0051_bundle_economy_store.py`): DML on `economy_balances` + append-only
+    /// `economy_ledger` + column-scoped membership SELECT, nothing else.
+    /// Distinct from `BUNDLE_DB_*`, `BUNDLE_REPUTATION_*` and `DB_READER_*`.
+    #[arg(long, env = "BUNDLE_ECONOMY_HOST", default_value = "localhost")]
+    pub bundle_economy_host: String,
+    #[arg(long, env = "BUNDLE_ECONOMY_PORT", default_value_t = 5432)]
+    pub bundle_economy_port: u16,
+    #[arg(long, env = "BUNDLE_ECONOMY_NAME", default_value = "waddlebot")]
+    pub bundle_economy_name: String,
+    #[arg(
+        long,
+        env = "BUNDLE_ECONOMY_USER",
+        default_value = "waddles_economy_runtime"
+    )]
+    pub bundle_economy_user: String,
+    /// Refresh cadence, in whole seconds, of the membership snapshot the
+    /// economy wiring feeds (`bundle_capability_gate::SnapshotMembership`; a
+    /// read pre-filter only -- writes re-check live membership inside the
+    /// write itself). Clamped to a 5s floor by
+    /// [`CliConfig::bundle_economy_membership_refresh`].
+    #[arg(
+        long,
+        env = "BUNDLE_ECONOMY_MEMBERSHIP_REFRESH_S",
+        default_value_t = 30
+    )]
+    pub bundle_economy_membership_refresh_s: u64,
+    /// The self-hosted model endpoint behind the bundle `ai` host capability
+    /// (`ai.generate`, `crate::ai::OllamaBackend`). Same variable and default the
+    /// Python services use (`processing/router_module/config.py`). Refused at
+    /// startup unless it names a cluster-local / private host -- never a public
+    /// endpoint (`crate::ai::validate_base_url`).
+    #[arg(long, env = "WADDLEAI_BASE_URL", default_value = "http://ollama:11434")]
+    pub ai_base_url: String,
+    /// Model for free-text `ai.generate` calls (the free community Gemma tier).
+    #[arg(long, env = "WADDLEAI_MODEL", default_value = "gemma4:e2b")]
+    pub ai_model: String,
+    /// Model for structured (`json: true`) `ai.generate` calls -- the larger
+    /// Gemma, the one that reliably emits JSON.
+    #[arg(long, env = "BUNDLE_AI_JSON_MODEL", default_value = "gemma4:e4b")]
+    pub ai_json_model: String,
+    /// Ceiling, in milliseconds, on one `ai.generate` model call. Always further
+    /// clamped to the invocation's remaining `EXECUTOR_CALL_TIMEOUT_MS` budget,
+    /// so raise that for slower models. Clamped to `[100, 10000]` by
+    /// [`CliConfig::ai_call_timeout`].
+    #[arg(long, env = "BUNDLE_AI_TIMEOUT_MS", default_value_t = 8000)]
+    pub ai_timeout_ms: u64,
+    /// Process-wide cap on concurrent `ai.generate` model calls (clamped to
+    /// `[1, 64]` by [`CliConfig::ai_max_concurrency`]).
+    #[arg(long, env = "BUNDLE_AI_MAX_CONCURRENCY", default_value_t = 4)]
+    pub ai_max_concurrency: usize,
     /// Poll interval, in whole seconds, for the change-log consumer's
     /// incremental tick (`bundle_active_set::read_safe_seq`/`read_changes`)
     /// -- the full active-set re-read only runs for scopes the change-log
@@ -392,6 +498,30 @@ impl CliConfig {
                 reason: "must be positive".to_string(),
             });
         }
+        if self.host_api_writer_channel_capacity == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_writer_channel_capacity",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.host_api_writer_send_timeout_ms == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_writer_send_timeout_ms",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.host_api_max_concurrent_host_calls == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_max_concurrent_host_calls",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.host_api_max_connections == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_max_connections",
+                reason: "must be positive".to_string(),
+            });
+        }
         if self.executor_grace_seconds == 0 {
             return Err(ConfigError::InvalidValue {
                 field: "executor_grace_seconds",
@@ -445,6 +575,31 @@ impl CliConfig {
     /// hot-loop the watermark check against the reader database.
     pub fn bundle_config_poll_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.bundle_config_poll_seconds.max(5) as u64)
+    }
+
+    /// [`Self::bundle_reputation_membership_refresh_s`] clamped to a 5s floor
+    /// so a misconfigured `0` can never hot-loop the membership query.
+    pub fn bundle_reputation_membership_refresh(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.bundle_reputation_membership_refresh_s.max(5))
+    }
+
+    /// [`Self::bundle_economy_membership_refresh_s`] clamped to a 5s floor so
+    /// a misconfigured `0` can never hot-loop the membership query.
+    pub fn bundle_economy_membership_refresh(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.bundle_economy_membership_refresh_s.max(5))
+    }
+
+    /// [`Self::ai_max_concurrency`] clamped to `[1, 64]` so `0` can never make
+    /// every call wait forever for a permit that does not exist.
+    pub fn ai_max_concurrency(&self) -> usize {
+        self.ai_max_concurrency.clamp(1, 64)
+    }
+
+    /// [`Self::ai_timeout_ms`] clamped to `[100ms, 10s]` (the executor's own
+    /// maximum per-call budget), so a misconfigured `0` or huge value can neither
+    /// disable the timeout nor outlive any invocation.
+    pub fn ai_call_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.ai_timeout_ms.clamp(100, 10_000))
     }
 
     /// [`Self::bundle_config_full_reconcile_minutes`] clamped to a 1-minute
@@ -503,6 +658,20 @@ pub struct Config {
     /// `not_implemented`) when this is unset. Once set, a connection
     /// *failure* is a different, louder case -- see that function's doc.
     pub bundle_db_password: Option<Secret>,
+    /// `BUNDLE_REPUTATION_PASSWORD` for the `reputation` host capability's
+    /// `waddles_bundle_reputation` connection
+    /// (`crate::lib::try_build_reputation_wiring`). `Option`, same rationale
+    /// as `bundle_db_password`: the capability's flag defaults OFF, so an
+    /// unprovisioned deployment must start; the capability then denies
+    /// `not_implemented`. An empty value is treated as unset.
+    pub bundle_reputation_password: Option<Secret>,
+    /// `BUNDLE_ECONOMY_PASSWORD` for the `economy` host capability's
+    /// `waddles_economy_runtime` connection
+    /// (`crate::lib::try_build_economy_wiring`). `Option`, same rationale as
+    /// `bundle_reputation_password`: the capability's flag defaults OFF, so an
+    /// unprovisioned deployment must start; the capability then denies
+    /// `not_implemented`. An empty value is treated as unset.
+    pub bundle_economy_password: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -522,6 +691,20 @@ impl fmt::Debug for Config {
             .field(
                 "bundle_db_password",
                 &self.bundle_db_password.as_ref().map(|_| Secret::new("")),
+            )
+            .field(
+                "bundle_reputation_password",
+                &self
+                    .bundle_reputation_password
+                    .as_ref()
+                    .map(|_| Secret::new("")),
+            )
+            .field(
+                "bundle_economy_password",
+                &self
+                    .bundle_economy_password
+                    .as_ref()
+                    .map(|_| Secret::new("")),
             )
             .field(
                 "envelope_binding_keys",
@@ -567,6 +750,14 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(Secret::new);
+        let bundle_reputation_password = std::env::var("BUNDLE_REPUTATION_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
+        let bundle_economy_password = std::env::var("BUNDLE_ECONOMY_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
@@ -575,6 +766,8 @@ impl Config {
             envelope_binding_keys,
             db_reader_password,
             bundle_db_password,
+            bundle_reputation_password,
+            bundle_economy_password,
         })
     }
 }
@@ -600,6 +793,8 @@ mod tests {
             "ENVELOPE_BINDING_KEYS",
             "DB_READER_PASSWORD",
             "BUNDLE_DB_PASSWORD",
+            "BUNDLE_REPUTATION_PASSWORD",
+            "BUNDLE_ECONOMY_PASSWORD",
         ] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.
@@ -615,6 +810,81 @@ mod tests {
         assert_eq!(cli.poll_interval_s, 5.0);
         assert_eq!(cli.process_app_id, "");
         cli.validate().expect("defaults must be valid");
+    }
+
+    /// The `ai.generate` knobs default to the self-hosted Gemma tier and clamp
+    /// hostile values: a zero/huge timeout can neither disable the deadline nor
+    /// outlive the executor's own ceiling, and zero concurrency can never strand
+    /// every call waiting for a permit that does not exist.
+    #[test]
+    fn ai_knobs_default_to_the_self_hosted_tier_and_clamp() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.ai_base_url, "http://ollama:11434");
+        assert_eq!(cli.ai_model, "gemma4:e2b");
+        assert_eq!(cli.ai_json_model, "gemma4:e4b");
+        assert_eq!(
+            cli.ai_call_timeout(),
+            std::time::Duration::from_millis(8_000)
+        );
+        assert_eq!(cli.ai_max_concurrency(), 4);
+
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--ai-timeout-ms",
+            "0",
+            "--ai-max-concurrency",
+            "0",
+        ]);
+        assert_eq!(cli.ai_call_timeout(), std::time::Duration::from_millis(100));
+        assert_eq!(cli.ai_max_concurrency(), 1);
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--ai-timeout-ms",
+            "9999999",
+            "--ai-max-concurrency",
+            "100000",
+        ]);
+        assert_eq!(cli.ai_call_timeout(), std::time::Duration::from_secs(10));
+        assert_eq!(cli.ai_max_concurrency(), 64);
+    }
+
+    /// The host-API bounds default to the documented values and each zero
+    /// value is a hard startup error (a zero-capacity channel or a zero
+    /// permit semaphore would deadlock every send / shed every call).
+    #[test]
+    fn host_api_bounds_default_and_reject_zero() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.host_api_writer_channel_capacity, 1024);
+        assert_eq!(cli.host_api_writer_send_timeout_ms, 30_000);
+        assert_eq!(cli.host_api_max_concurrent_host_calls, 256);
+        assert_eq!(cli.host_api_max_connections, 64);
+        assert!(cli.validate().is_ok());
+
+        for (flag, field) in [
+            (
+                "--host-api-writer-channel-capacity",
+                "host_api_writer_channel_capacity",
+            ),
+            (
+                "--host-api-writer-send-timeout-ms",
+                "host_api_writer_send_timeout_ms",
+            ),
+            (
+                "--host-api-max-concurrent-host-calls",
+                "host_api_max_concurrent_host_calls",
+            ),
+            ("--host-api-max-connections", "host_api_max_connections"),
+        ] {
+            let cli = CliConfig::parse_from(["svc-process", flag, "0"]);
+            assert_eq!(
+                cli.validate().unwrap_err(),
+                ConfigError::InvalidValue {
+                    field,
+                    reason: "must be positive".to_string(),
+                },
+                "{flag}=0 must be rejected"
+            );
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Module RTC Dockerfile
 # Multi-stage Go build
 
-FROM golang:1.26-bookworm@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107 AS builder
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS builder
 
 WORKDIR /build
 

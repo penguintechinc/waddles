@@ -165,9 +165,11 @@ class PolicyEnforcer:
             )
 
             self.logger.audit(
-                "Auto-ban executed",
                 action="auto_ban",
-                community_id=community_id,
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Auto-ban executed",
                 user_id=user_id,
                 platform=platform,
                 platform_user_id=platform_user_id,
@@ -241,9 +243,11 @@ class PolicyEnforcer:
             self.dal.commit()
 
             self.logger.audit(
-                "Low score warning",
                 action="low_score_warning",
-                community_id=community_id,
+                user="system",
+                community=str(community_id),
+                result="WARNED",
+                detail="Low score warning",
                 user_id=user_id,
                 score=current_score
             )
@@ -400,9 +404,11 @@ class PolicyEnforcer:
             self.weight_manager.invalidate_cache(community_id)
 
             self.logger.audit(
-                "Auto-ban disabled",
-                community_id=community_id,
-                admin_id=admin_id
+                action="disable_auto_ban",
+                user=str(admin_id),
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Auto-ban disabled"
             )
             return True
 
@@ -435,9 +441,11 @@ class PolicyEnforcer:
             self.weight_manager.invalidate_cache(community_id)
 
             self.logger.audit(
-                "Auto-ban enabled",
-                community_id=community_id,
-                admin_id=admin_id,
+                action="enable_auto_ban",
+                user=str(admin_id),
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Auto-ban enabled",
                 threshold=threshold
             )
             return True

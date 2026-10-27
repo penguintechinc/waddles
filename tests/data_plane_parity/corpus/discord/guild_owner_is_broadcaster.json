@@ -1,0 +1,60 @@
+{
+  "context": {
+    "guild_owner_id": "900",
+    "guild_roles": [],
+    "member_role_ids": [],
+    "self_user_id": "999"
+  },
+  "frame": {
+    "author": {
+      "bot": false,
+      "id": "900",
+      "username": "someuser"
+    },
+    "channel_id": "222",
+    "content": "hello chat",
+    "guild_id": "111",
+    "id": "333",
+    "type": 0
+  },
+  "golden": {
+    "platform": "discord",
+    "event_type": "message",
+    "actor": "someuser",
+    "payload": {
+      "text": "hello chat",
+      "guild_id": "111",
+      "channel_id": "222",
+      "message_id": "333",
+      "author_id": "900",
+      "is_mod": true,
+      "is_broadcaster": true
+    },
+    "source": {
+      "platform": "discord",
+      "account_id": "111",
+      "channel_id": "222"
+    }
+  },
+  "golden_origin": "rust",
+  "id": "discord/guild_owner_is_broadcaster",
+  "outcome": "event",
+  "path": "discord_gateway",
+  "pii_classifier": "pass",
+  "platform": "discord",
+  "python_divergences": [
+    {
+      "path": "payload.is_mod",
+      "python": "<absent>",
+      "reason": "Python discord_ingest.normalize() emits no role flags; Rust resolves is_mod/is_broadcaster from guild roles",
+      "tracking": "#840"
+    },
+    {
+      "path": "payload.is_broadcaster",
+      "python": "<absent>",
+      "reason": "Python discord_ingest.normalize() emits no role flags; Rust resolves is_mod/is_broadcaster from guild roles",
+      "tracking": "#840"
+    }
+  ],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_builtin_discord_ingest.py"
+}

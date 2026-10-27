@@ -145,6 +145,14 @@ def _column_definition_sql(column: ColumnDecl) -> sql.Composable:
 # bundle-influenced. `gen_random_uuid()`/`now()` are safe here (unlike a
 # bundle-declared default) because they are authored in this file, not
 # accepted from manifest input.
+#
+# The Rust data plane (`core/bundle_host_db`) binds `tenant_id`/`community_id`
+# as int4 (tenant-wide = community_id 0, the columns are NOT NULL), decodes
+# `version` as int4, and its real-Postgres integration test restates this
+# template and the RLS policy below verbatim
+# (`core/bundle_host_db/tests/postgres_integration.rs::production_table_ddl`).
+# Change a platform column's type here and that crate + its test DDL must change
+# in the same PR, or every bundle `tables.*` call fails against this schema.
 def _platform_columns_sql() -> list[sql.Composable]:
     return [
         sql.SQL("row_id uuid PRIMARY KEY DEFAULT gen_random_uuid()"),

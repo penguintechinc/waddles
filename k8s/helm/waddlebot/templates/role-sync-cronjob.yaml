@@ -63,7 +63,7 @@ spec:
           {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 10 }}
           containers:
           - name: role-sync
-            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
             imagePullPolicy: {{ .Values.global.imagePullPolicy }}
             # Overrides hub-api's own `ENTRYPOINT`/`CMD` (hypercorn) -- same services/ tree,
             # a different standalone entrypoint (role_sync_service.py's own `main()`).
@@ -92,6 +92,10 @@ spec:
                 name: {{ include "waddlebot.platformCredentialsSecretName" . }}
                 optional: true
             env:
+            # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+            # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+            # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 12 }}
             # services/platform_integrations_crypto.py::_get_key() -- decrypts per-tenant
             # tenant_platform_apps/platform_connections rows this worker's credential
             # resolver reads for every non-global-tenant pairing. Explicit secretKeyRef
@@ -105,6 +109,10 @@ spec:
                   name: {{ include "waddlebot.fullname" . }}-secrets
                   key: CREDENTIAL_ENCRYPTION_KEY
                   optional: true
+            - name: ROLE_SYNC_DEMOTE_PAIRING_IDS
+              value: {{ .Values.pipeline.roleSync.demotePairingIds | default "" | quote }}
+            - name: ROLE_SYNC_DEMOTE_BASELINE_ROLE
+              value: {{ .Values.pipeline.roleSync.demoteBaselineRole | default "community-member" | quote }}
             resources:
               {{- toYaml .Values.pipeline.roleSync.resources | nindent 14 }}
             volumeMounts:

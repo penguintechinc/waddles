@@ -9,7 +9,6 @@ name: Build svc-process
 on:
   push:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
-    tags: ['v*']
     paths:
       - 'core/svc_process/**'
       - '.version'
@@ -21,6 +20,8 @@ on:
   merge_group:
     types: [checks_requested]
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+  release:
+    types: [released, prereleased]
   workflow_dispatch:
 
 concurrency:
@@ -70,27 +71,48 @@ jobs:
         # interpolating github.ref/github.head_ref directly into the script
         # (zizmor template-injection).
         run: |
-          if [ -f .version ]; then
-            VERSION=$(tr -d '[:space:]' < .version)
+          set -euo pipefail
+          # Five-tier tag scheme (devops.md CI/CD Tag Naming) -- tier -> tag -> trigger:
+          #   alpha : any non-release branch push / dispatch -> alpha-<epoch>
+          #   beta  : push to release/v*.X (or main)         -> beta-<epoch>
+          #   gamma : GitHub release flagged pre-release     -> gamma-<epoch>   (release: prereleased)
+          #   prod  : GitHub release published as release    -> v{Major}.{Minor}.{Patch} + latest (release: released)
+          # <epoch> = unix seconds, computed once here so every matrix job shares it.
+          # .version is NOT used for tags. `suffix` is kept (always empty) so
+          # downstream ${version}${suffix} references keep resolving.
+          EPOCH="$(date +%s)"
+          IS_RELEASE=false
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            ACTION="$(jq -r '.action' "$GITHUB_EVENT_PATH")"
+            case "$ACTION" in
+              released)
+                SEMVER_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
+                if ! [[ "$GITHUB_REF_NAME" =~ $SEMVER_RE ]]; then
+                  echo "::error::release tag '$GITHUB_REF_NAME' is not v{Major}.{Minor}.{Patch}" >&2
+                  exit 1
+                fi
+                TAG="$GITHUB_REF_NAME"
+                IS_RELEASE=true
+                ;;
+              prereleased)
+                TAG="gamma-${EPOCH}"
+                ;;
+              *)
+                echo "::error::unsupported release action '$ACTION'" >&2
+                exit 1
+                ;;
+            esac
+          elif [[ "$GITHUB_REF" == refs/heads/release/v* ]] || [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            TAG="beta-${EPOCH}"
           else
-            VERSION="0.0.0"
+            TAG="alpha-${EPOCH}"
           fi
-
-          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
-
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "suffix=" >> "$GITHUB_OUTPUT"
-            echo "is_release=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$GITHUB_REF" == refs/heads/v* ]] || [[ "$GITHUB_HEAD_REF" == v* ]]; then
-            echo "suffix=-beta" >> "$GITHUB_OUTPUT"
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-          elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
-            echo "suffix=-gamma" >> "$GITHUB_OUTPUT"
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "suffix=-alpha" >> "$GITHUB_OUTPUT"
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-          fi
+          {
+            echo "version=${TAG}"
+            echo "suffix="
+            echo "is_release=${IS_RELEASE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${TAG} (release=${IS_RELEASE})"
 
           # Derive the whole matrix object + multi_arch flag from the single
           # BUILD_PLATFORMS toggle (env, top of file). A comma means more
@@ -116,7 +138,9 @@ jobs:
   # untrusted PR's Dockerfile.
   build-platform:
     name: Build (${{ matrix.platform }})
-    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'pull_request' && github.event_name != 'merge_group')
     permissions:
       contents: read
       packages: write
@@ -202,7 +226,9 @@ jobs:
   # build-svc-ingest.yml's header comment for the shared rationale.
   build-pr:
     name: Build & Scan (PR)
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     needs: determine-version
     permissions:
@@ -257,6 +283,7 @@ jobs:
     # directly in that case, so there is nothing to merge. trivy-scan below
     # falls back to build-platform's own digest output in that case.
     if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       github.event_name != 'pull_request' &&
       github.event_name != 'merge_group' &&
       needs.determine-version.outputs.multi_arch == 'true'
@@ -330,6 +357,7 @@ jobs:
     # amd64-only -- run this gate off build-platform's own digest in that
     # case instead of letting the skip cascade and silently drop the scan.
     if: >
+      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       always() &&
       needs.build-platform.result == 'success' &&
       (needs.merge.result == 'success' || needs.merge.result == 'skipped')

@@ -29,6 +29,7 @@ from services.grpc_handler import OpenWhiskActionServicer, GrpcServer
 app = Quart(__name__)
 app.config.from_object(Config)
 
+
 # Setup logging
 def setup_logging():
     """Setup comprehensive AAA logging."""
@@ -72,6 +73,7 @@ def setup_logging():
             root_logger.addHandler(syslog_handler)
         except Exception as e:
             print(f"Failed to setup syslog: {e}")
+
 
 setup_logging()
 logger = logging.getLogger(__name__)

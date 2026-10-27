@@ -782,8 +782,33 @@ CREATE TABLE workflow_executions (
 ### Sandboxing
 
 - RestrictedPython for data transformation nodes
-- Expression engine with restricted globals
+- Expression engine (`services/expression_engine.py`): AST allowlist walker, **never
+  `eval`/`exec`/`compile`**. Allowed: literals, arithmetic/boolean/comparison
+  operators, variable names, dict-key attribute access, list/dict/tuple subscripts,
+  public built-in functions, and a fixed string-method set. Refused: any name or
+  attribute starting with `_` (dunders), `getattr`-style object traversal
+  (`().__class__.__bases__[0].__subclasses__()`), lambdas/comprehensions, keyword/starred
+  calls, slices, oversized `**`/`*` results, expressions over 4096 chars. Webhook
+  `$(...)` templates use the same approach (`SafeExpressionEvaluator`).
 - No access to system modules or file I/O
+
+### SSRF Egress Guard (ACTION_WEBHOOK)
+
+`services/egress_guard.py` protects the webhook node, which fetches an
+author-controllable URL and reflects the response:
+
+- http/https only; URL userinfo refused
+- Host is resolved and **every** address must be globally routable — RFC1918,
+  loopback, link-local (incl. 169.254.169.254), CGNAT, unique-local (fc00::/7),
+  fe80::/10, multicast/reserved/unspecified, and IPv4 embedded in IPv6
+  (mapped, NAT64, 6to4, Teredo) are blocked
+- DNS-rebinding safe: pre-flight check plus a connect-time `GuardedResolver` whose
+  validated answer *is* the connect target (no second lookup between check and use)
+- Redirects are not followed (a redirect hop could target a blocked address)
+- Blocked targets fail loudly: `NodeExecutionResult(error_type="egress_blocked")`,
+  never retried, never silently fetched
+- The guarded session is separate from the internal-service session (router etc.
+  live on private addresses and are intentionally unguarded)
 
 ---
 

@@ -78,6 +78,18 @@ impl TenantLimiter {
         })
     }
 
+    /// Total live connection slots across every tenant -- includes CONNECT
+    /// tunnels (their guard is held for the tunnel's lifetime), so the
+    /// graceful-shutdown drain in `lib.rs` uses it as the "work still in
+    /// flight" count.
+    pub fn active_total(&self) -> usize {
+        let state = self.state.lock().expect("limiter mutex poisoned");
+        state
+            .values()
+            .map(|t| t.active_connections as usize)
+            .sum::<usize>()
+    }
+
     /// Blocks (async sleep) until `bytes` worth of bandwidth budget is
     /// available for `tenant`, then debits it. Called from the
     /// bidirectional-copy loop in `proxy.rs` on every chunk transferred.

@@ -1,57 +1,12 @@
 import { useEffect } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { LoginPageBuilder } from '@penguintechinc/react-libs';
+import SocialLoginButtons from './SocialLoginButtons';
 import { useAuth } from '../../contexts/AuthContext';
 import { KeyIcon } from '@heroicons/react/24/outline';
-import { passkeyApi, publicApi } from '../../services/api';
+import { passkeyApi, publicApi, ssoApi, tenantApi } from '../../services/api';
+import { resolveBranding } from './tenantBranding';
 import { useState } from 'react';
-
-// Social login providers — all route through the backend OAuth proxy.
-// The LoginPageBuilder appends client_id/state params to the authUrl,
-// but the backend ignores them and generates its own state UUID.
-const SOCIAL_PROVIDERS = [
-  { provider: 'discord', clientId: 'server-side', authUrl: '/api/v1/auth/oauth/discord' },
-  { provider: 'twitch',  clientId: 'server-side', authUrl: '/api/v1/auth/oauth/twitch' },
-  {
-    provider: 'oauth2',
-    clientId: 'server-side',
-    authUrl: '/api/v1/auth/oauth/slack',
-    label: 'Continue with Slack',
-    icon: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="#36C5F0">
-        <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/>
-      </svg>
-    ),
-    buttonColor: '#1e293b',
-    textColor: '#f0f9ff',
-  },
-  {
-    provider: 'oauth2',
-    clientId: 'server-side',
-    authUrl: '/api/v1/auth/oauth/youtube',
-    label: 'Continue with YouTube',
-    icon: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="#FF0000">
-        <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
-      </svg>
-    ),
-    buttonColor: '#1e293b',
-    textColor: '#f0f9ff',
-  },
-  {
-    provider: 'oauth2',
-    clientId: 'server-side',
-    authUrl: '/api/v1/auth/oauth/kick',
-    label: 'Continue with KICK',
-    icon: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="#53FC18">
-        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
-      </svg>
-    ),
-    buttonColor: '#1e293b',
-    textColor: '#f0f9ff',
-  },
-];
 
 // Waddlebot color overrides — match the existing navy/gold theme palette
 const WADDLEBOT_COLORS = {
@@ -144,11 +99,114 @@ function PasskeyButton({ onLogin }) {
   );
 }
 
+/**
+ * Enterprise "Sign in with your organization" affordance. Lists the tenant's
+ * enabled, entitled SSO connections (GET /auth/sso/options) and starts the
+ * chosen one; renders nothing when the tenant has none or discovery fails.
+ */
+function SsoOptions({ tenantSlug }) {
+  const [options, setOptions] = useState([]);
+  const [selected, setSelected] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    ssoApi.getOptions(tenantSlug)
+      .then(({ data }) => {
+        if (cancelled) return;
+        const list = Array.isArray(data?.options) ? data.options : [];
+        setOptions(list);
+        setSelected(list[0]?.id ?? '');
+      })
+      .catch(() => {
+        if (!cancelled) setOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantSlug]);
+
+  if (options.length === 0) return null;
+
+  const handleStart = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const { data } = await ssoApi.start(selected);
+      window.location.assign(data.redirectUrl);
+    } catch (err) {
+      const apiErr = err?.response?.data?.error;
+      setError(
+        typeof apiErr === 'string' ? apiErr :
+        apiErr?.message || 'Single sign-on is unavailable right now.'
+      );
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 bg-navy-800 border border-navy-600 rounded-xl px-6 py-4" data-testid="sso-options">
+      {error && (
+        <div className="mb-2 p-3 bg-red-500/20 border border-red-500/30 rounded-lg text-red-300 text-sm">
+          {error}
+        </div>
+      )}
+      {options.length > 1 && (
+        <select
+          aria-label="Organization sign-in method"
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          className="w-full mb-3 px-3 py-2 bg-navy-900 border border-navy-600 rounded-lg text-sky-100"
+        >
+          {options.map((o) => (
+            <option key={o.id} value={o.id}>{o.displayName}</option>
+          ))}
+        </select>
+      )}
+      <button
+        type="button"
+        onClick={handleStart}
+        disabled={busy || !selected}
+        className="w-full flex items-center justify-center px-4 py-3 bg-navy-800 border border-navy-600 rounded-lg hover:bg-navy-700 hover:border-gold-500 transition-all disabled:opacity-50"
+      >
+        <span className="font-medium text-sky-100">
+          {busy
+            ? 'Redirecting...'
+            : options.length === 1
+              ? `Sign in with ${options[0].displayName}`
+              : 'Sign in with your organization (SSO)'}
+        </span>
+      </button>
+    </div>
+  );
+}
+
 function LoginPage() {
   const navigate = useNavigate();
   const { tenantSlug } = useParams();
   const { refreshUser, isAuthenticated } = useAuth();
   const [signupEnabled, setSignupEnabled] = useState(false);
+  const [tenantInfo, setTenantInfo] = useState(null);
+
+  // Tenant branding (whitelabel). Fails soft -- any error keeps stock branding.
+  useEffect(() => {
+    if (!tenantSlug) {
+      setTenantInfo(null);
+      return undefined;
+    }
+    let cancelled = false;
+    tenantApi.getLoginInfo(tenantSlug)
+      .then(({ data }) => {
+        if (!cancelled) setTenantInfo(data?.tenant ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setTenantInfo(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantSlug]);
 
   useEffect(() => {
     publicApi.getSignupSettings()
@@ -190,6 +248,7 @@ function LoginPage() {
         {/* Passkey login — shown above the OAuth/email sections */}
         <div className="bg-navy-800 border border-navy-600 border-b-0 rounded-t-xl px-6 pt-6 pb-4">
           <PasskeyButton onLogin={handlePasskeyLogin} />
+          <SocialLoginButtons />
           <div className="relative mt-2">
             <div className="absolute inset-0 flex items-center">
               <div className="w-full border-t border-navy-600" />
@@ -204,10 +263,8 @@ function LoginPage() {
         <LoginPageBuilder
           api={{ loginUrl: '/api/v1/auth/login' }}
           branding={{
-            appName: 'Welcome to Waddles',
-            logo: '/waddlebot-logo.png',
+            ...resolveBranding(tenantInfo, tenantSlug),
             logoHeight: 72,
-            tagline: tenantSlug ? `Signing into: ${tenantSlug}` : 'Access your communities',
             githubRepo: 'penguintechinc/waddlebot',
           }}
           onSuccess={handleSuccess}
@@ -216,7 +273,6 @@ function LoginPage() {
             if (err?.message) return err.message;
             return 'Login failed. Please try again.';
           }}
-          socialLogins={SOCIAL_PROVIDERS}
           tenantField={{
             show: true,
             label: 'Tenant (optional)',
@@ -224,14 +280,18 @@ function LoginPage() {
             helpText: 'Enter your organization slug, or leave blank for personal login',
             defaultValue: tenantSlug || '',
           }}
+          // Consent is owned app-wide by <CookieBanner /> (main.jsx), which records
+          // it server-side and carries the Do-Not-Sell control. Disabling the
+          // library's built-in GDPR banner prevents a second, duplicate banner.
           gdpr={{
-            enabled: true,
+            enabled: false,
             privacyPolicyUrl: '/privacy',
           }}
           showSignUp={false}
           className="!rounded-t-none !border-t-0 !mt-0"
           colors={WADDLEBOT_COLORS}
         />
+        <SsoOptions tenantSlug={tenantSlug} />
         {signupEnabled && (
           <p className="mt-4 text-center text-navy-400">
             Don&apos;t have an account?{' '}
