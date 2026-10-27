@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1
+# Marketplace-sources sandbox builder image (Phase 1, Task 7B). Runs ONLY inside the locked-down
+# per-build K8s Job (k8s/helm/waddlebot/templates/marketplace-sandbox-builder.yaml): rootless,
+# read-only root FS, deny-ALL-egress CiliumNetworkPolicy, Tetragon exec allowlist, no secrets.
+#
+# OFFLINE BY CONSTRUCTION: every network-touching step (toolchain + cargo-component/wasm-tools +
+# componentize-py install) happens in the BUILD stages of THIS image, from the same
+# digest-pinned bases/versions as bundles/Dockerfile.core-bundles. The final stage ships no
+# package manager use at run time; `bundles/sandbox_build.py` runs cargo `--offline --locked`
+# against builder-injected source replacement of the bundle's vendored crates, so a bundle that
+# is not fully vendored FAILS LOUDLY instead of reaching for a registry (there is no route).
+#
+# Build (from repo root):  docker build -f bundles/Dockerfile.sandbox-builder \
+#                            -t <registry>/waddlebot-sandbox-builder:<tag> .
+
+# ---------------------------------------------------------------------------
+# Stage 1: Rust toolchain + cargo-component/wasm-tools (pins == Dockerfile.core-bundles)
+# ---------------------------------------------------------------------------
+FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS rust-toolchain
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        build-essential=12.9 ca-certificates=20250419~deb12u2 \
+    && rm -rf /var/lib/apt/lists/*
+RUN rustup toolchain install 1.97.1 --target wasm32-wasip2 --target wasm32-wasip1 \
+    && rustup default 1.97.1
+RUN cargo install cargo-component --version 0.21.1 --locked \
+    && cargo install wasm-tools --version 1.259.0 --locked
+# Stable, arch-independent path to the real toolchain dir (no rustup proxy exec at run time).
+RUN ln -s "$(rustc --print sysroot)" /opt/rust
+
+# ---------------------------------------------------------------------------
+# Stage 2: final builder image
+# ---------------------------------------------------------------------------
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
+
+# Host linker/cc for crate build scripts + proc-macros (same package pin as stage 1).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y build-essential=12.9 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir componentize-py==0.25.1 pyyaml==6.0.3 \
+    && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin builder
+
+COPY --from=rust-toolchain /usr/local/rustup/toolchains /usr/local/rustup/toolchains
+COPY --from=rust-toolchain /opt/rust /opt/rust
+COPY --from=rust-toolchain /usr/local/cargo/bin/cargo-component /usr/local/bin/cargo-component
+COPY --from=rust-toolchain /usr/local/cargo/bin/wasm-tools /usr/local/bin/wasm-tools
+
+# Baked repo skeleton the bundle is laid into (WIT world + SDKs); the bundle itself arrives as a
+# read-only tarball at /input/source.tgz at run time.
+COPY wit /opt/repo-base/wit
+COPY sdk/waddle-sdk /opt/repo-base/sdk/waddle-sdk
+COPY sdk/waddle-sdk-rs /opt/repo-base/sdk/waddle-sdk-rs
+COPY bundles/build_python_bundles.py /usr/local/lib/sandbox/build_python_bundles.py
+COPY bundles/sandbox_build.py /usr/local/bin/sandbox-build
+RUN chmod 0555 /usr/local/bin/sandbox-build
+
+# Offline + reproducible-build env (same constants as Dockerfile.core-bundles). The toolchain bin
+# dir is on PATH directly so cargo/rustc exec real binaries, never the rustup network-capable shim.
+ENV PATH=/opt/rust/bin:/usr/local/bin:/usr/bin:/bin \
+    PYTHONPATH=/usr/local/lib/sandbox \
+    CARGO_NET_OFFLINE=true \
+    CARGO_INCREMENTAL=0 \
+    SOURCE_DATE_EPOCH=1704067200 \
+    PYTHONHASHSEED=0 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TZ=UTC \
+    LC_ALL=C.UTF-8
+
+USER builder
+WORKDIR /work
+ENTRYPOINT ["/usr/local/bin/sandbox-build"]

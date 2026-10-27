@@ -127,6 +127,28 @@ spec:
         - name: MARKETPLACE_GIT_PROXY_URL
           value: "http://{{ include "waddlebot.fullname" . }}-git-proxy:{{ .Values.gitProxy.port }}"
         {{- end }}
+        {{- if .Values.sandboxBuilder.enabled }}
+        # Sandbox builder orchestrator (services/marketplace_sandbox_builder.py); unset => sandbox
+        # builds fail closed ("builder_not_configured").
+        - name: SANDBOX_BUILDER_IMAGE
+          value: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" .Values.sandboxBuilder.image "imageTag" .Values.sandboxBuilder.imageTag) }}"
+        - name: SANDBOX_BUILDER_NAMESPACE
+          value: {{ .Values.namespace | quote }}
+        - name: SANDBOX_BUILDER_INSTANCE
+          value: {{ .Release.Name | quote }}
+        - name: SANDBOX_BUILDER_SERVICE_ACCOUNT
+          value: "{{ include "waddlebot.fullname" . }}-sandbox-builder"
+        - name: SANDBOX_BUILDER_DEADLINE_SECONDS
+          value: {{ .Values.sandboxBuilder.deadlineSeconds | quote }}
+        - name: SANDBOX_BUILDER_MAX_WASM_BYTES
+          value: {{ .Values.sandboxBuilder.maxWasmBytes | quote }}
+        - name: SANDBOX_BUILDER_CPU_LIMIT
+          value: {{ .Values.sandboxBuilder.resources.cpu | quote }}
+        - name: SANDBOX_BUILDER_MEMORY_LIMIT
+          value: {{ .Values.sandboxBuilder.resources.memory | quote }}
+        - name: SANDBOX_BUILDER_EPHEMERAL_LIMIT
+          value: {{ .Values.sandboxBuilder.resources.ephemeralStorage | quote }}
+        {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
         - name: SERVICE_JWT_BOOTSTRAP_AUDIENCE

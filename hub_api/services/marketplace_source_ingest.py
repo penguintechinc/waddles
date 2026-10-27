@@ -15,6 +15,7 @@ An unattested prebuilt NEVER yields a version row. Logs/audit carry app_id + cou
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -136,6 +137,43 @@ async def _ingest_one(
             app_id, candidate.version, OUTCOME_REFUSED_CONFLICT, "digest_differs_for_version"
         )
 
+    return await create_unapproved_version(
+        install_dal,
+        source,
+        source_pk,
+        candidate,
+        wasm,
+        audit_action="marketplace_prebuilt_attested",
+        audit_details={"publisher_key_fingerprint": verified.key_fingerprint},
+        key_fingerprint=verified.key_fingerprint,
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        requested_by=requested_by,
+        valkey_client=valkey_client,
+    )
+
+
+async def create_unapproved_version(
+    install_dal: AsyncDB,
+    source: SourceRecord,
+    source_pk: int,
+    candidate: BundleCandidate,
+    wasm: bytes,
+    *,
+    audit_action: str,
+    audit_details: dict[str, Any],
+    key_fingerprint: str | None,
+    tenant_id: int,
+    tenant_slug: str,
+    requested_by: int | None,
+    valkey_client: Any | None,
+) -> IngestedBundle:
+    """Create the PUBLISHED-but-NOT-installed version for already-trusted `wasm` bytes.
+
+    Shared tail of the prebuilt path (post-attestation) and the sandbox-build path (the platform
+    built the bytes, so there is no publisher attestation). Never approves, signs or installs.
+    """
+    app_id = candidate.assigned_app_id
     current = await get_source(install_dal, source.public_id)
     if current is None or current.status == SourceStatus.DISABLED:
         return _reject(candidate, "source_disabled")  # re-check: disabled mid-ingest
@@ -170,14 +208,14 @@ async def _ingest_one(
     await bundle_audit.record(
         install_dal,
         actor_id=requested_by,
-        action="marketplace_prebuilt_attested",
+        action=audit_action,
         target_type="app_versions",
         target_id=f"{app_id}@{candidate.version}",
         details={
             "source_public_id": str(source.public_id),
-            "publisher_key_fingerprint": verified.key_fingerprint,
-            "wasm_sha256": verified.digest,
+            "wasm_sha256": hashlib.sha256(wasm).hexdigest(),
             "permission_hash": permission_hash,
+            **audit_details,
         },
     )
     get_meter().create_counter("marketplace.ingest.total").add(1, {"outcome": "needs_approval"})
@@ -191,7 +229,7 @@ async def _ingest_one(
         OUTCOME_NEEDS_APPROVAL,
         permission_summary=summary,
         permission_hash=permission_hash,
-        key_fingerprint=verified.key_fingerprint,
+        key_fingerprint=key_fingerprint,
     )
 
 
@@ -327,5 +365,6 @@ __all__ = [
     "IngestSummary",
     "IngestedBundle",
     "approve_source_version",
+    "create_unapproved_version",
     "ingest_candidates",
 ]

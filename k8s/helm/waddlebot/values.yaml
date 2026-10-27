@@ -3244,6 +3244,48 @@ gitProxy:
       cpu: "250m"
       memory: "128Mi"
 
+# Marketplace-sources sandbox builder (Phase 1, Task 7B; templates/marketplace-sandbox-builder.yaml).
+# hub-api launches ONE Job per SANDBOX-source bundle build (Enterprise + trust-ack gated in the API
+# AND the orchestrator). The Job pod is rootless, read-only root FS, all caps dropped, NO service-
+# account token, NO secrets, and a deny-ALL-egress CiliumNetworkPolicy (DNS included): the build is
+# offline, so deps must be vendored. Tetragon kills any exec outside the toolchain allowlist.
+# Default OFF: the builder image (bundles/Dockerfile.sandbox-builder) is built locally/by release CI.
+sandboxBuilder:
+  enabled: false
+  image: "waddlebot-sandbox-builder"
+  imageTag: ""
+  deadlineSeconds: 600          # activeDeadlineSeconds: hard wall-clock cap per build
+  ttlSecondsAfterFinished: 300
+  maxWasmBytes: 8388608         # output size cap (also enforced by the hub on the pod log)
+  resources:
+    cpu: "2"
+    memory: "2Gi"
+    ephemeralStorage: "2Gi"
+  scratchSizeLimit: "1536Mi"
+  # Exec allowlist (Tetragon, SIGKILL). `execPaths` = exact binaries; `execPrefixes` = directories
+  # (cargo build scripts run from the scratch dir, so /work/ must be allowed; shells/curl/wget are
+  # NOT on the list). Defaults match bundles/Dockerfile.sandbox-builder (amd64 bookworm; add the
+  # aarch64 triplet for arm64 builders).
+  execPaths:
+    - /usr/local/bin/sandbox-build
+    - /usr/local/bin/python3
+    - /usr/local/bin/python3.13
+    - /usr/local/bin/componentize-py
+    - /usr/local/bin/cargo-component
+    - /usr/local/bin/wasm-tools
+    - /usr/bin/cc
+    - /usr/bin/gcc
+    - /usr/bin/ld
+    - /usr/bin/as
+    - /usr/bin/ar
+    - /usr/bin/x86_64-linux-gnu-gcc-12
+    - /usr/bin/x86_64-linux-gnu-ld.bfd
+    - /usr/bin/x86_64-linux-gnu-as
+  execPrefixes:
+    - /opt/rust/
+    - /usr/lib/gcc/
+    - /work/
+
 egressProxy:
   enabled: true
   environment: "alpha"

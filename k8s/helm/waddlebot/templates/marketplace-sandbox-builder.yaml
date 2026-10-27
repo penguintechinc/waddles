@@ -1,0 +1,189 @@
+# Marketplace-sources sandbox builder (Phase 1, Task 7B). hub-api creates the per-build Jobs at
+# runtime from services/marketplace_sandbox_builder.py::build_job_manifest; THIS template renders
+# the standing policy around them so the lockdown does not depend on the Job spec alone:
+#   - dedicated ServiceAccount (token never mounted) the build pods run as
+#   - minimal Role/RoleBinding letting hub-api create/read/delete build Jobs + their ConfigMaps
+#     and read build-pod logs (the artifact return path) -- nothing else
+#   - deny-ALL-egress (and ingress) CiliumNetworkPolicy for build pods: offline, no DNS, no cluster
+#     or world access, so a malicious build can neither fetch code nor exfiltrate
+#   - Tetragon TracingPolicy: exec allowlist = the builder's toolchain only (SIGKILL)
+#   - `helm test` Job: runs the builder image under the SAME lockdown and asserts egress is denied
+# Pod Security Admission `restricted` is the chart-wide namespace posture (values podSecurity...);
+# every pod this renders/creates is restricted-compliant (non-root, no caps, RuntimeDefault seccomp).
+{{- if .Values.sandboxBuilder.enabled }}
+{{- $sb := .Values.sandboxBuilder }}
+{{- $name := printf "%s-sandbox-builder" (include "waddlebot.fullname" .) }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-builder
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-launcher
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-builder
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-launcher
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-builder
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-launcher
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "waddlebot.serviceAccountName" . }}
+    namespace: {{ .Values.namespace }}
+---
+# Deny ALL egress (DNS included) and ALL ingress: `- {}` enables default-deny for the direction
+# with no allow rule. Build pods are selected by the component label hub-api stamps on them.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ $name }}-deny-all
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-builder
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: sandbox-builder
+  ingress:
+    - {}
+  egress:
+    - {}
+{{- if .Values.tetragon.enabled }}
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: {{ $name }}-exec-allowlist
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-builder
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: sandbox-builder
+  kprobes:
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+      selectors:
+        # Kill any exec that is neither an allowlisted binary NOR under an allowlisted directory.
+        - matchArgs:
+            - index: 0
+              operator: "NotEqual"
+              values:
+                {{- range $sb.execPaths }}
+                - {{ . | quote }}
+                {{- end }}
+            - index: 0
+              operator: "NotPrefix"
+              values:
+                {{- range $sb.execPrefixes }}
+                - {{ . | quote }}
+                {{- end }}
+          matchActions:
+            - action: {{ .Values.tetragon.action }}
+{{- end }}
+---
+# `helm test`: the same lockdown, running the builder's --selftest (toolchain present AND a TCP
+# connect to the internet must FAIL -- proves the deny-all CNP is enforced).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-selftest
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-builder
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ $sb.deadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $sb.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: sandbox-builder
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: builder
+          image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" $sb.image "imageTag" $sb.imageTag) }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args: ["--selftest"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: {{ $sb.resources.cpu | quote }}
+              memory: {{ $sb.resources.memory | quote }}
+              ephemeral-storage: {{ $sb.resources.ephemeralStorage | quote }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: {{ $sb.scratchSizeLimit | quote }}
+{{- end }}
