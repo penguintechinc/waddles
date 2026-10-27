@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from defusedxml import ElementTree as DefusedET
+from defusedxml.common import DefusedXmlException
 
 _DENYLIST_PATH = Path(__file__).with_name("supply_chain_denylist.yaml")
 _MAX_FILE_BYTES = 5 * 1024 * 1024
@@ -26,18 +29,18 @@ _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)", re.ASCII)
 _MAX_INCLUDE_DEPTH = 8
 _SAFE_REQ_OPTS = frozenset(
     {
-        "--hash", "--no-binary", "--only-binary", "--prefer-binary", "--pre",
+        "--hash", "--no-binary", "--only-binary", "--prefer-binary",
         "--require-hashes", "--no-deps", "--no-index", "--use-feature",
     }
 )  # fmt: skip
-_REQ_INCLUDE_PREFIXES = ("--requirement", "--constraint", "-r", "-c")
+_REQ_ARG_OPTS = frozenset({"--hash", "--no-binary", "--only-binary", "--use-feature"})
+_REQ_INCLUDE_SHORT = {"-r", "-c"}
+_REQ_INCLUDE_LONG = {"--requirement", "--constraint"}
 _NUGET_SUFFIXES = (".csproj", ".fsproj", ".vbproj", ".props", ".targets")
-_NUGET_TAG_RE = re.compile(
-    r"<(?:PackageReference|PackageVersion|GlobalPackageReference|DotNetCliToolReference)\b([^>]*)>",
-    re.I,
+_NUGET_ELEMENTS = frozenset(
+    {"packagereference", "packageversion", "globalpackagereference", "dotnetclitoolreference"}
 )
-_NUGET_ATTR_RE = re.compile(r"\b(?:Include|Update)\s*=\s*([\"'])(.*?)\1", re.I | re.S)
-_PKGCONFIG_RE = re.compile(r"<package\b[^>]*?\bid\s*=\s*([\"'])(.*?)\1", re.I | re.S)
+_NUGET_ATTRS = frozenset({"include", "update"})
 _TOML_FILES = {"pyproject.toml", "cargo.toml", "cargo.lock", "poetry.lock", "uv.lock"}
 _JSON_FILES = {"package.json", "package-lock.json", "npm-shrinkwrap.json"}
 # Dependency manifests/lockfiles we cannot parse: their presence rejects the bundle (fail closed).
@@ -46,7 +49,14 @@ _UNSUPPORTED = {
     "go.sum", "gemfile", "gemfile.lock", "pom.xml", "build.gradle", "build.gradle.kts",
     "composer.json", "composer.lock", "bun.lockb", "bun.lock", "pdm.lock", "environment.yml",
 }  # fmt: skip
-_NPM_BAD_SPEC_RE = re.compile(r"[:/\\]|^\s*[.~]")
+_SEMVER_CMP_RE = re.compile(
+    r"^(?:[<>]=?|=|~>?|\^)?v?(?:\d+|[xX*])(?:\.(?:\d+|[xX*])){0,2}"
+    r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$",
+    re.ASCII,
+)
+_NPM_TAG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$", re.ASCII)
+_NPM_NAME_RE = re.compile(r"^(?:@[a-z0-9._~-]+/)?[a-z0-9][a-z0-9._~-]*$", re.I | re.ASCII)
+_CARGO_BAD_KEYS = frozenset({"git", "registry", "registry-index"})
 Recorder = Callable[[str, list[str], str], None]
 
 
@@ -135,6 +145,43 @@ def _within(root: Path, candidate: Path) -> Path:
     return resolved
 
 
+def _req_option_targets(line: str, rel: str) -> list[str]:
+    """Tokenise one pip option line; return every -r/-c target, reject any unsafe option.
+
+    Every option token must be a safe flag (include or in `_SAFE_REQ_OPTS`); anything else
+    (-e, -i, --index-url, --extra-index-url, -f, --find-links, --trusted-host, --pre ...)
+    rejects the bundle, so a safe option cannot smuggle an unsafe one onto the same line.
+    """
+    try:
+        tokens = shlex.split(line.split(" #", 1)[0], comments=False, posix=True)
+    except ValueError as exc:
+        raise ValueError(f"unparseable requirements option line in {rel}") from exc
+    targets: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        flag, eq, val = tok.partition("=")
+        if flag in _REQ_INCLUDE_LONG or flag in _REQ_INCLUDE_SHORT:
+            if not eq:
+                if i >= len(tokens):
+                    raise ValueError(f"unresolvable requirements include in {rel}")
+                val = tokens[i]
+                i += 1
+        elif tok[:2] in _REQ_INCLUDE_SHORT and not tok.startswith("--"):
+            val = tok[2:]  # -rfile.txt / -cfile.txt
+        elif flag in _SAFE_REQ_OPTS:
+            if flag in _REQ_ARG_OPTS and not eq:
+                i += 1  # value token belongs to the option
+            continue
+        else:
+            raise ValueError(f"unsupported requirements option in {rel}")
+        if not val or "://" in val:
+            raise ValueError(f"unresolvable requirements include in {rel}")
+        targets.append(val)
+    return targets
+
+
 def _scan_req_file(
     path: Path, root: Path, record: Recorder, seen: set[Path], depth: int = 0
 ) -> None:
@@ -151,22 +198,9 @@ def _scan_req_file(
         if not line or line.startswith("#"):
             continue
         if line.startswith("-"):
-            target = None
-            for prefix in _REQ_INCLUDE_PREFIXES:
-                rest = line[len(prefix) :]
-                if line.startswith(prefix) and not (
-                    prefix.startswith("--") and rest and rest[0] not in " \t="
-                ):
-                    target = rest.lstrip(" \t=").split(" #", 1)[0].strip()
-                    break
-            if target is None:
-                if line.split("=", 1)[0].split()[0] in _SAFE_REQ_OPTS:
-                    continue
-                raise ValueError(f"unsupported requirements option in {rel}")
-            if not target or "://" in target:
-                raise ValueError(f"unresolvable requirements include in {rel}")
-            inc = _within(root, path.parent / target)
-            _scan_req_file(inc, root, record, seen, depth + 1)
+            for target in _req_option_targets(line, rel):
+                inc = _within(root, path.parent / target)
+                _scan_req_file(inc, root, record, seen, depth + 1)
             continue
         try:
             name = _py_req(line)
@@ -179,11 +213,36 @@ def _scan_req_file(
 def _cargo_spec(dep_name: str, spec: Any, manifest_dir: Path, root: Path, names: list[str]) -> None:
     """Collect the real crate name of one Cargo dependency; reject out-of-bundle path deps."""
     if isinstance(spec, dict):
+        if _CARGO_BAD_KEYS & spec.keys():
+            raise ValueError("non-registry cargo dependency (git/registry source)")
         names.append(str(spec.get("package", dep_name)))
         if "path" in spec:
             _within(root, manifest_dir / str(spec["path"]))
     else:
         names.append(dep_name)
+
+
+_PY_BAD_SPEC_KEYS = frozenset({"git", "url", "source", "rev", "branch", "tag"})
+_UV_BAD_KEYS = frozenset({"sources", "index", "index-url", "extra-index-url", "find-links"})
+
+
+def _poetry_spec(spec: Any, manifest_dir: Path, root: Path) -> None:
+    """Reject poetry dependency specs that leave the registry (git/url/source; path in-bundle)."""
+    if not isinstance(spec, dict):
+        return
+    if _PY_BAD_SPEC_KEYS & spec.keys():
+        raise ValueError("non-registry poetry dependency (git/url/custom source)")
+    if "path" in spec:
+        _within(root, manifest_dir / str(spec["path"]))
+
+
+def _reject_py_sources(tool: dict[str, Any]) -> None:
+    """Fail closed on custom indexes/sources in `[tool.uv]` and `[tool.poetry.source]`."""
+    uv = tool.get("uv", {})
+    if isinstance(uv, dict) and _UV_BAD_KEYS & uv.keys():
+        raise ValueError("custom uv index/source configuration")
+    if tool.get("poetry", {}).get("source"):
+        raise ValueError("custom poetry package source")
 
 
 def _toml_deps(doc: dict[str, Any], ecosystem: str, manifest_dir: Path, root: Path) -> list[str]:
@@ -205,11 +264,17 @@ def _toml_deps(doc: dict[str, Any], ecosystem: str, manifest_dir: Path, root: Pa
         tool = doc.get("tool", {})
         for dep in tool.get("uv", {}).get("dev-dependencies", []):
             names += _py_names(str(dep))
+        _reject_py_sources(tool)
         poetry = tool.get("poetry", {})
         tables = [poetry.get("dependencies", {}), poetry.get("dev-dependencies", {})]
         tables += [g.get("dependencies", {}) for g in poetry.get("group", {}).values()]
         for table in tables:
-            names += [k for k in table if k != "python"]
+            for key, spec in table.items():
+                if key == "python":
+                    continue
+                for variant in spec if isinstance(spec, list) else [spec]:
+                    _poetry_spec(variant, manifest_dir, root)
+                names.append(key)
         return names
 
     def walk(table: dict[str, Any]) -> None:
@@ -222,7 +287,9 @@ def _toml_deps(doc: dict[str, Any], ecosystem: str, manifest_dir: Path, root: Pa
 
     walk(doc)
     walk(doc.get("workspace", {}))
-    for registry_table in doc.get("patch", {}).values():
+    for registry, registry_table in doc.get("patch", {}).items():
+        if registry != "crates-io":
+            raise ValueError("cargo patch from a non-crates.io registry")
         for dep_name, spec in registry_table.items():
             names.append(dep_name)
             _cargo_spec(dep_name, spec, manifest_dir, root, names)
@@ -231,16 +298,62 @@ def _toml_deps(doc: dict[str, Any], ecosystem: str, manifest_dir: Path, root: Pa
     return names
 
 
+def _npm_range_ok(rng: str) -> bool:
+    """True iff `rng` is a strict semver range (comparators, hyphen ranges, `||`) or empty."""
+    rng = rng.strip()
+    if not rng:
+        return True
+    for alt in rng.split("||"):
+        toks = alt.split()
+        if not toks:
+            return False
+        for idx, tok in enumerate(toks):
+            hyphen = tok == "-" and 0 < idx < len(toks) - 1
+            if not hyphen and not _SEMVER_CMP_RE.match(tok):
+                return False
+    return True
+
+
+def _npm_spec_ok(spec: str) -> bool:
+    """Allowlist: semver range, dist-tag, or `npm:<name>@<range>` alias; nothing else."""
+    spec = spec.strip()
+    if spec.startswith("npm:"):
+        real = spec[4:]
+        at = real.rfind("@")
+        name, rng = (real[:at], real[at + 1 :]) if at > 0 else (real, "")
+        return bool(_NPM_NAME_RE.match(name)) and _npm_range_ok(rng)
+    return _npm_range_ok(spec) or bool(_NPM_TAG_RE.match(spec))
+
+
 def _npm_spec(name: str, spec: str, names: list[str]) -> None:
-    """Record a dependency name, resolving `npm:` aliases and flagging non-registry specs."""
+    """Record a dependency name, resolving `npm:` aliases; reject any non-allowlisted spec."""
     names.append(name)
+    if not _npm_spec_ok(spec):
+        raise ValueError("non-registry or unrecognised npm dependency spec")
     spec = spec.strip()
     if spec.startswith("npm:"):
         real = spec[4:]
         at = real.rfind("@")
         names.append(real[:at] if at > 0 else real)
-    elif _NPM_BAD_SPEC_RE.search(spec):
-        raise ValueError("non-registry npm dependency spec (git/url/file/link)")
+
+
+def _npm_overrides(table: Any, parent: str, names: list[str]) -> None:
+    """Recursively walk `overrides`/`resolutions`: every string leaf is a spec (key `.` too)."""
+    if isinstance(table, str):
+        if table.startswith("$") and _NPM_NAME_RE.match(table[1:]):
+            return  # reference to a direct dependency's own (already checked) spec
+        _npm_spec(parent, table, names)
+        return
+    if not isinstance(table, dict):
+        raise ValueError("malformed npm overrides entry")
+    for key, val in table.items():
+        at = key.find("@", 1 if key.startswith("@") else 0)
+        name = key[:at] if at > 0 else key
+        # resolutions keys may be glob paths ("a/**/b"): every segment is a package name
+        segs = re.split(r"/?\*\*/?", name)
+        if name != ".":
+            names += [x for x in segs if x]
+        _npm_overrides(val, parent if name == "." else name, names)
 
 
 def _npm_map(table: Any, names: list[str]) -> None:
@@ -267,9 +380,11 @@ def _npm_names(doc: dict[str, Any]) -> list[str]:
     names: list[str] = []
     for key in (
         "dependencies", "devDependencies", "peerDependencies", "optionalDependencies",
-        "overrides", "resolutions",
     ):  # fmt: skip
         _npm_map(doc.get(key), names)
+    for key in ("overrides", "resolutions"):
+        if key in doc:
+            _npm_overrides(doc[key], "_root", names)
     names += [str(n) for n in doc.get("bundledDependencies", []) if isinstance(n, str)]
     for pkg_path, entry in doc.get("packages", {}).items():
         if "node_modules/" in pkg_path:
@@ -279,18 +394,41 @@ def _npm_names(doc: dict[str, Any]) -> list[str]:
     return names
 
 
-def _nuget_names(text: str, lower: str) -> list[str]:
-    """Package ids from csproj-style files (any quotes; Include=/Update=) or packages.config."""
-    if lower == "packages.config":
-        found = [m.group(2) for m in _PKGCONFIG_RE.finditer(text)]
-    else:
-        found = [
-            part.strip()
-            for tag in _NUGET_TAG_RE.finditer(text)
-            for attr in _NUGET_ATTR_RE.finditer(tag.group(1))
-            for part in attr.group(2).split(";")
-            if part.strip()
-        ]
+def _local(tag: str) -> str:
+    """Lower-cased local name of an XML tag, namespace stripped."""
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def _nuget_names(text: str, lower: str, path: Path, root: Path) -> list[str]:
+    """Package ids from csproj-style XML (defusedxml) or packages.config.
+
+    `<Import>` is rejected unless it targets a plain in-bundle .props/.targets file (which the
+    caller scans as its own manifest); anything with a property, `Sdk=` or outside the bundle fails.
+    """
+    try:
+        tree = DefusedET.fromstring(text)
+    except (DefusedXmlException, SyntaxError) as exc:
+        raise ValueError("malformed or unsafe XML dependency manifest") from exc
+    found: list[str] = []
+    for el in tree.iter():
+        tag = _local(el.tag) if isinstance(el.tag, str) else ""
+        attrs = {_local(k): v for k, v in el.attrib.items()}
+        if lower == "packages.config":
+            if tag == "package" and "id" in attrs:
+                found.append(attrs["id"].strip())
+        elif tag in _NUGET_ELEMENTS:
+            for key in _NUGET_ATTRS & attrs.keys():
+                found += [x.strip() for x in attrs[key].split(";") if x.strip()]
+        elif tag == "import":
+            target = attrs.get("project", "").strip().replace("\\", "/")
+            if (
+                "sdk" in attrs
+                or not target
+                or "$(" in target
+                or not target.lower().endswith((".props", ".targets"))
+            ):
+                raise ValueError("unsupported MSBuild <Import>")
+            _within(root, path.parent / target)
     if any("$(" in n for n in found):
         raise ValueError("unresolvable MSBuild property in package reference")
     return found
@@ -344,7 +482,7 @@ def scan_bundle_dependencies(bundle_dir: Path) -> tuple[DepFinding, ...]:
             elif lower in _JSON_FILES:
                 record("npm", _npm_names(json.loads(text)), rel)
             else:
-                record("nuget", _nuget_names(text, lower), rel)
+                record("nuget", _nuget_names(text, lower, path, root), rel)
         except (tomllib.TOMLDecodeError, json.JSONDecodeError, AttributeError, TypeError) as exc:
             raise ValueError(f"malformed dependency manifest: {rel}") from exc
         except (KeyError, ValueError) as exc:

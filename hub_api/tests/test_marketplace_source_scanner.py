@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from collections.abc import Iterator
@@ -475,4 +476,116 @@ def test_denylist_cargo_patch_and_path_dep(tmp_path: Path) -> None:
     (tmp_path / "Cargo.toml").write_text('[dependencies]\nfoo = { path = "../../outside" }\n')
     _scan_err(tmp_path)
     (tmp_path / "Cargo.toml").write_text('[dependencies]\nfoo = { path = "sub" }\n')
+    assert _names(tmp_path) == []
+
+
+def test_denylist_pip_mixed_options_rejected_and_include_scanned(tmp_path: Path) -> None:
+    """regression: safe -r first token must not smuggle --extra-index-url on the same line."""
+    (tmp_path / "safe.txt").write_text("dashscope==1\n")
+    for bad in (
+        "-r safe.txt --extra-index-url http://evil",
+        "-r safe.txt -i http://evil",
+        "-r safe.txt --pre",
+        "-r safe.txt -f http://evil",
+        "-e .",
+        "--trusted-host evil.example",
+        "-r safe.txt --find-links=x",
+    ):
+        (tmp_path / "requirements.txt").write_text(bad + "\n")
+        _scan_err(tmp_path)
+    (tmp_path / "requirements.txt").write_text("-r safe.txt -c safe.txt\n--require-hashes\nok==1\n")
+    assert "dashscope" in _names(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("spec", "ok"),
+    [
+        ("^1.2.3", True), (">=1.0.0 <2.0.0", True), ("1.x", True), ("latest", True),
+        ("1.0.0 - 2.0.0", True), ("^1 || ^2", True), ("npm:left-pad@^1.0.0", True),
+        ("evil.tgz", False), ("1.0.0.tgz", False), ("x.tar.gz", False), ("a.tar", False),
+        ("git+https://x/y.git", False), ("github:o/r", False), ("o/r", False),
+        ("file:../x", False), ("https://x/y", False), ("./x", False), ("npm:a/b@1", False),
+    ],
+)  # fmt: skip
+def test_denylist_npm_spec_allowlist(tmp_path: Path, spec: str, ok: bool) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"pkg": spec}}))
+    if ok:
+        assert _names(tmp_path) == []
+    else:
+        _scan_err(tmp_path)
+
+
+def test_denylist_npm_nested_overrides_resolutions(tmp_path: Path) -> None:
+    from services.dependency_denylist import _DENYLIST
+
+    bad = next(p for p in _DENYLIST["npm"] if not p.endswith("*"))
+    for key in ("overrides", "resolutions"):
+        doc = {key: {"a": {"b": {"c": {bad: "1.0.0"}}}}}
+        (tmp_path / "package.json").write_text(json.dumps(doc))
+        assert bad in _names(tmp_path)
+        doc = {key: {"a": {".": "evil.tgz"}}}
+        (tmp_path / "package.json").write_text(json.dumps(doc))
+        _scan_err(tmp_path)
+        doc = {key: {"a": {"b": {"c": "git+https://x/y"}}}}
+        (tmp_path / "package.json").write_text(json.dumps(doc))
+        _scan_err(tmp_path)
+        (tmp_path / "package.json").write_text(json.dumps({key: {"a": {".": "^1.0.0"}}}))
+        assert _names(tmp_path) == []
+
+
+def test_denylist_nuget_xml_parser(tmp_path: Path) -> None:
+    pkg = "AlibabaCloud.SDK.Core"
+    ent = "AlibabaCloud&#x2E;SDK.Core"  # XML character reference regex scanners miss
+    (tmp_path / "a.csproj").write_text(
+        f'<Project><ItemGroup><PackageReference Include="{ent}" Version="1"/>'
+        '<PackageVersion\n Update="Ok.Pkg" /></ItemGroup></Project>'
+    )
+    assert _names(tmp_path) == [pkg]
+    (tmp_path / "a.csproj").write_text('<Project><Import Project="../../evil.props"/></Project>')
+    _scan_err(tmp_path)
+    (tmp_path / "a.csproj").write_text('<Project><Import Project="$(X)/e.props"/></Project>')
+    _scan_err(tmp_path)
+    (tmp_path / "a.csproj").write_text('<Project><Import Project="b.props"/></Project>')
+    (tmp_path / "b.props").write_text(
+        f'<Project><ItemGroup><GlobalPackageReference Include="{pkg}"/></ItemGroup></Project>'
+    )
+    assert _names(tmp_path) == [pkg]
+    (tmp_path / "b.props").write_text("<!DOCTYPE x [<!ENTITY e 'v'>]><Project>&e;</Project>")
+    _scan_err(tmp_path)
+    (tmp_path / "b.props").write_text("<Project><Unclosed></Project>")
+    _scan_err(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("fname", "content"),
+    [
+        ("pyproject.toml", '[tool.poetry.dependencies]\nfoo = {git = "https://x/y"}\n'),
+        ("pyproject.toml", '[tool.poetry.dependencies]\nfoo = {url = "https://x/y.whl"}\n'),
+        ("pyproject.toml", '[tool.poetry.dependencies]\nfoo = {path = "../../out"}\n'),
+        ("pyproject.toml", '[tool.poetry.dependencies]\nfoo = [{git = "https://x/y"}]\n'),
+        ("pyproject.toml", '[tool.uv.sources]\nfoo = {git = "https://x/y"}\n'),
+        ("pyproject.toml", '[[tool.uv.index]]\nurl = "https://evil/simple"\n'),
+        ("pyproject.toml", '[[tool.poetry.source]]\nname = "e"\nurl = "https://evil"\n'),
+        ("Cargo.toml", '[dependencies]\nfoo = {git = "https://x/y"}\n'),
+        ("Cargo.toml", '[dependencies]\nfoo = {version = "1", registry = "evil"}\n'),
+        ("Cargo.toml", '[dependencies]\nfoo = {version = "1", registry-index = "https://e"}\n'),
+        ("Cargo.toml", '[patch."https://evil"]\nfoo = {version = "1"}\n'),
+    ],
+)  # fmt: skip
+def test_denylist_non_registry_sources_rejected(tmp_path: Path, fname: str, content: str) -> None:
+    (tmp_path / fname).write_text(content)
+    _scan_err(tmp_path)
+
+
+def test_denylist_clean_manifests_still_pass(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry.dependencies]\npython = "^3.13"\nfoo = "^1"\nbar = {path = "sub"}\n'
+    )
+    (tmp_path / "Cargo.toml").write_text('[dependencies]\nserde = {version = "1"}\n')
+    (tmp_path / "package.json").write_text('{"dependencies": {"a": "^1.2.3"}}')
+    (tmp_path / "x.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>'
+        '<PackageReference Include="Newtonsoft.Json" Version="13.0.1"/></ItemGroup></Project>'
+    )
+    (tmp_path / "requirements.txt").write_text("ok==1 --hash=sha256:ab\n--require-hashes\n")
     assert _names(tmp_path) == []
