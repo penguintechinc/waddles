@@ -236,78 +236,78 @@ function AdminLayout() {
 
   return (
     <div className="min-h-screen bg-navy-950">
-      <GlobalBanner />
-      {/* Top bar */}
-      <header className="bg-navy-900 border-b border-navy-700 sticky top-0 z-50">
-        <div className="flex justify-between items-center h-16 px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center space-x-3 sm:space-x-4">
-            <SidebarMenuTrigger
-              onClick={() => setMobileOpen((o) => !o)}
-              isOpen={mobileOpen}
-              themeMode="dark"
-            />
-            <Link to="/" className="flex items-center space-x-2">
-              <img src="/waddlebot-logo.png" alt="Waddles" className="w-8 h-8" />
-              <span className="text-xl font-bold text-gold-400">Waddles</span>
-            </Link>
-            <span className="hidden sm:inline text-navy-600">|</span>
-            <div className="hidden sm:flex items-center space-x-2">
-              <ShieldCheckIcon className="w-5 h-5 text-gold-400" />
-              <span className="font-medium text-gold-400">{title}</span>
-            </div>
-          </div>
+      {/* SidebarMenu owns a fixed desktop rail; make it a sibling of the
+          content shell so desktop links are never covered by the header flow. */}
+      <SidebarMenu
+        categories={categories}
+        currentPath={location.pathname}
+        onNavigate={(href) => navigate(href)}
+        autoCollapse={false}
+        width="w-64"
+        themeMode="dark"
+        mobileOpen={mobileOpen}
+        onMobileClose={() => setMobileOpen(false)}
+        footerItems={[{ name: 'Back to Dashboard', href: '/dashboard', icon: HomeIcon }]}
+      />
 
-          <div className="flex items-center space-x-2 sm:space-x-4">
-            {isSuperAdmin && (
-              <Link
-                to="/superadmin"
-                className="hidden md:inline text-sm font-medium text-gold-400 hover:text-gold-300"
-              >
-                Super Admin
+      <div data-testid="admin-content-shell" className="flex min-h-screen flex-col lg:pl-64">
+        <GlobalBanner />
+        {/* Top bar */}
+        <header className="bg-navy-900 border-b border-navy-700 sticky top-0 z-50">
+          <div className="flex justify-between items-center h-16 px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center space-x-3 sm:space-x-4">
+              <SidebarMenuTrigger
+                onClick={() => setMobileOpen((o) => !o)}
+                isOpen={mobileOpen}
+                themeMode="dark"
+              />
+              <Link to="/" className="flex items-center space-x-2">
+                <img src="/waddlebot-logo.png" alt="Waddles" className="w-8 h-8" />
+                <span className="text-xl font-bold text-gold-400">Waddles</span>
               </Link>
-            )}
-            <Link to="/dashboard" className="hidden md:inline text-sm text-navy-300 hover:text-sky-300">
-              Back to Dashboard
-            </Link>
-            <div className="flex items-center space-x-2">
-              {user?.avatarUrl ? (
-                <img src={user.avatarUrl} alt={user.username} className="w-8 h-8 rounded-full" />
-              ) : (
-                <div className="w-8 h-8 rounded-full bg-navy-700 flex items-center justify-center border border-navy-600">
-                  <span className="text-sky-100 font-medium">
-                    {user?.username?.charAt(0).toUpperCase()}
-                  </span>
-                </div>
-              )}
-              <span className="hidden md:inline text-sm text-sky-100">{user?.username}</span>
+              <span className="hidden sm:inline text-navy-600">|</span>
+              <div className="hidden sm:flex items-center space-x-2">
+                <ShieldCheckIcon className="w-5 h-5 text-gold-400" />
+                <span className="font-medium text-gold-400">{title}</span>
+              </div>
             </div>
-            <button
-              onClick={logout}
-              aria-label="Log out"
-              className="p-2 text-navy-400 hover:text-sky-300 rounded-lg hover:bg-navy-800"
-            >
-              <ArrowLeftOnRectangleIcon className="w-5 h-5" />
-            </button>
+
+            <div className="flex items-center space-x-2 sm:space-x-4">
+              {isSuperAdmin && (
+                <Link
+                  to="/superadmin"
+                  className="hidden md:inline text-sm font-medium text-gold-400 hover:text-gold-300"
+                >
+                  Super Admin
+                </Link>
+              )}
+              <Link to="/dashboard" className="hidden md:inline text-sm text-navy-300 hover:text-sky-300">
+                Back to Dashboard
+              </Link>
+              <div className="flex items-center space-x-2">
+                {user?.avatarUrl ? (
+                  <img src={user.avatarUrl} alt={user.username} className="w-8 h-8 rounded-full" />
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-navy-700 flex items-center justify-center border border-navy-600">
+                    <span className="text-sky-100 font-medium">
+                      {user?.username?.charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                )}
+                <span className="hidden md:inline text-sm text-sky-100">{user?.username}</span>
+              </div>
+              <button
+                onClick={logout}
+                aria-label="Log out"
+                className="p-2 text-navy-400 hover:text-sky-300 rounded-lg hover:bg-navy-800"
+              >
+                <ArrowLeftOnRectangleIcon className="w-5 h-5" />
+              </button>
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
-      <div className="flex">
-        {/* Sidebar — drawer below lg, fixed rail at lg+ (handled by SidebarMenu) */}
-        <SidebarMenu
-          categories={categories}
-          currentPath={location.pathname}
-          onNavigate={(href) => navigate(href)}
-          autoCollapse={false}
-          width="w-64"
-          themeMode="dark"
-          mobileOpen={mobileOpen}
-          onMobileClose={() => setMobileOpen(false)}
-          footerItems={[{ name: 'Back to Dashboard', href: '/dashboard', icon: HomeIcon }]}
-        />
-
-        {/* Main content — offset by sidebar width on desktop only */}
-        <main className="flex-1 min-w-0 p-4 sm:p-6 lg:ml-64">
+        <main className="flex-1 min-w-0 p-4 sm:p-6">
           <Outlet />
         </main>
       </div>
