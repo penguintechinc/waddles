@@ -41,7 +41,7 @@ FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install --no-install-recommends -y \
-        ca-certificates=20250419~deb12u1 \
+        ca-certificates=20250419~deb12u2 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 10001 appuser \

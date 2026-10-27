@@ -142,49 +142,49 @@ function DashboardLayout() {
 
   return (
     <div className="min-h-screen bg-navy-950">
-      <GlobalBanner />
-      {/* Top bar */}
-      <header className="bg-navy-900 border-b border-navy-700 sticky top-0 z-50">
-        <div className="flex justify-between items-center h-16 px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center space-x-3">
-            <SidebarMenuTrigger
-              onClick={() => setMobileOpen((o) => !o)}
-              isOpen={mobileOpen}
-              themeMode="dark"
-            />
-            <Link to="/" className="flex items-center space-x-2">
-              <img src="/waddlebot-logo.png" alt="Waddles" className="w-8 h-8" />
-              <span className="text-xl font-bold text-gold-400">Waddles</span>
-            </Link>
+      {/* SidebarMenu is fixed at lg+. Keep it outside the content shell so it
+          cannot share an overlapping flex/stacking context with the header. */}
+      <SidebarMenu
+        categories={categories}
+        currentPath={location.pathname}
+        onNavigate={(href) => navigate(href)}
+        autoCollapse={true}
+        activeGroupKey={activeGroupKey}
+        width="w-64"
+        themeMode="dark"
+        mobileOpen={mobileOpen}
+        onMobileClose={() => setMobileOpen(false)}
+        footerItems={[
+          { name: user?.displayName || user?.username || 'Account', href: '/dashboard/profile', icon: UserCircleIcon },
+        ]}
+      />
+
+      <div data-testid="dashboard-content-shell" className="flex min-h-screen flex-col lg:pl-64">
+        <GlobalBanner />
+        {/* Top bar */}
+        <header className="bg-navy-900 border-b border-navy-700 sticky top-0 z-50">
+          <div className="flex justify-between items-center h-16 px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center space-x-3">
+              <SidebarMenuTrigger
+                onClick={() => setMobileOpen((o) => !o)}
+                isOpen={mobileOpen}
+                themeMode="dark"
+              />
+              <Link to="/" className="flex items-center space-x-2">
+                <img src="/waddlebot-logo.png" alt="Waddles" className="w-8 h-8" />
+                <span className="text-xl font-bold text-gold-400">Waddles</span>
+              </Link>
+            </div>
+
+            <UserDropdown />
           </div>
+        </header>
 
-          <UserDropdown />
-        </div>
-      </header>
-
-      <div className="flex">
-        {/* Sidebar */}
-        <SidebarMenu
-          categories={categories}
-          currentPath={location.pathname}
-          onNavigate={(href) => navigate(href)}
-          autoCollapse={true}
-          activeGroupKey={activeGroupKey}
-          width="w-64"
-          themeMode="dark"
-          mobileOpen={mobileOpen}
-          onMobileClose={() => setMobileOpen(false)}
-          footerItems={[
-            { name: user?.displayName || user?.username || 'Account', href: '/dashboard/profile', icon: UserCircleIcon },
-          ]}
-        />
-
-        {/* Main content — offset by sidebar width */}
-        <main className="flex-1 p-6 lg:ml-64">
+        <main className="flex-1 p-6">
           <Outlet />
         </main>
+        <VendorRequestFooter />
       </div>
-      <VendorRequestFooter />
     </div>
   );
 }
