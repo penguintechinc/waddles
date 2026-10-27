@@ -4832,6 +4832,93 @@ components:
       - channels
       title: SlackStatsDTO
       type: object
+    SourceDTO:
+      description: 'Response DTO: one marketplace source (public_id only; no numeric
+        ids, no user ids).'
+      properties:
+        buildMode:
+          title: Buildmode
+          type: string
+        createdAt:
+          title: Createdat
+          type: string
+        gitUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Giturl
+        isBuiltin:
+          title: Isbuiltin
+          type: boolean
+        lastScanError:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lastscanerror
+        lastScannedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lastscannedat
+        name:
+          title: Name
+          type: string
+        pendingCommitSha:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Pendingcommitsha
+        pinnedCommitSha:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Pinnedcommitsha
+        publicId:
+          title: Publicid
+          type: string
+        publisherKeyFingerprint:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Publisherkeyfingerprint
+        ref:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Ref
+        sandboxAckAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sandboxackat
+        sandboxAcknowledged:
+          title: Sandboxacknowledged
+          type: boolean
+        status:
+          title: Status
+          type: string
+        updatedAt:
+          title: Updatedat
+          type: string
+      required:
+      - publicId
+      - name
+      - isBuiltin
+      - gitUrl
+      - ref
+      - pinnedCommitSha
+      - pendingCommitSha
+      - buildMode
+      - publisherKeyFingerprint
+      - sandboxAcknowledged
+      - sandboxAckAt
+      - status
+      - lastScannedAt
+      - lastScanError
+      - createdAt
+      - updatedAt
+      title: SourceDTO
+      type: object
     SpotlightedCommunityDTO:
       description: Spotlighted community DTO.
       properties:
@@ -18086,6 +18173,256 @@ paths:
         default:
           description: Undocumented response
       summary: '`POST /api/v1/marketplace/public/vendor/submit` -- unauthenticated.'
+  /api/v1/marketplace/sources:
+    get:
+      description: ''
+      operationId: get_list_sources
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response envelope for the source list.
+                properties:
+                  sources:
+                    items:
+                      $ref: '#/components/schemas/SourceDTO'
+                    title: Sources
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - sources
+                title: SourceListResponse
+                type: object
+          description: Response envelope for the source list.
+      summary: List all sources (built-in first).
+    post:
+      description: ''
+      operationId: post_add_source
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /sources` -- `is_builtin` is deliberately
+                not a field.
+              properties:
+                build_mode:
+                  enum:
+                  - prebuilt
+                  - sandbox
+                  title: Build Mode
+                  type: string
+                commit_sha:
+                  title: Commit Sha
+                  type: string
+                git_url:
+                  title: Git Url
+                  type: string
+                name:
+                  title: Name
+                  type: string
+                publisher_public_key:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Publisher Public Key
+                ref:
+                  title: Ref
+                  type: string
+                sandbox_trust_ack:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Sandbox Trust Ack
+              required:
+              - name
+              - git_url
+              - ref
+              - build_mode
+              - commit_sha
+              title: SourceCreateRequest
+              type: object
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Response envelope for a single source.
+                properties:
+                  source:
+                    $ref: '#/components/schemas/SourceDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - source
+                title: SourceResponse
+                type: object
+          description: Response envelope for a single source.
+      summary: Add an external source (tier- and ack-gated); built-in rows are never
+        creatable here.
+  /api/v1/marketplace/sources/{public_id}:
+    delete:
+      description: ''
+      operationId: delete_remove_source
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Outcome of `DELETE`: hard-deleted, or disabled when
+                  bundle versions still reference it.'
+                properties:
+                  disposition:
+                    enum:
+                    - deleted
+                    - disabled
+                    title: Disposition
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - disposition
+                title: SourceRemoveResponse
+                type: object
+          description: 'Outcome of `DELETE`: hard-deleted, or disabled when bundle
+            versions still reference it.'
+      summary: 'Remove a source: hard-delete, or disable when versions reference it.
+        Built-in refused.'
+    get:
+      description: ''
+      operationId: get_get_source
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response envelope for a single source.
+                properties:
+                  source:
+                    $ref: '#/components/schemas/SourceDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - source
+                title: SourceResponse
+                type: object
+          description: Response envelope for a single source.
+      summary: Get one source by public id.
+  /api/v1/marketplace/sources/{public_id}/approve-update:
+    post:
+      description: ''
+      operationId: post_approve_update
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response envelope for a single source.
+                properties:
+                  source:
+                    $ref: '#/components/schemas/SourceDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - source
+                title: SourceResponse
+                type: object
+          description: Response envelope for a single source.
+      summary: 'Human-approve a pending update: pinned_commit_sha <- pending_commit_sha.'
+  /api/v1/marketplace/sources/{public_id}/rescan:
+    post:
+      description: ''
+      operationId: post_rescan_source
+      parameters:
+      - in: path
+        name: public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Counts + status of one rescan+ingest run (no manifests,
+                  no per-bundle detail).
+                properties:
+                  accepted:
+                    title: Accepted
+                    type: integer
+                  created:
+                    title: Created
+                    type: integer
+                  examined:
+                    title: Examined
+                    type: integer
+                  refusedConflict:
+                    title: Refusedconflict
+                    type: integer
+                  rejectedAtIngest:
+                    title: Rejectedatingest
+                    type: integer
+                  rejectedAtScan:
+                    title: Rejectedatscan
+                    type: integer
+                  skippedIdentical:
+                    title: Skippedidentical
+                    type: integer
+                  status:
+                    title: Status
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - status
+                - examined
+                - accepted
+                - rejectedAtScan
+                - created
+                - skippedIdentical
+                - refusedConflict
+                - rejectedAtIngest
+                title: ScanSummaryDTO
+                type: object
+          description: Counts + status of one rescan+ingest run (no manifests, no
+            per-bundle detail).
+      summary: Bounded synchronous scan + prebuilt ingest at the pinned SHA (versions
+        land unapproved).
   /api/v1/marketplace/tenant/{tenant_slug}/bundles:
     get:
       description: ''
@@ -18819,6 +19156,109 @@ paths:
                 type: object
           description: Response DTO for `GET /api/v1/modules/<id>/subscriptions`.
       summary: '`GET /api/v1/modules/<id>/subscriptions` -- superadmin only.'
+  /api/v1/one-time-secrets:
+    post:
+      description: ''
+      operationId: post_create_secret
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Body for create. Target is a `hub_users.uuid` -- never
+                a username.
+              properties:
+                communityId:
+                  title: Communityid
+                  type: integer
+                message:
+                  title: Message
+                  type: string
+                targetUserUuid:
+                  format: uuid
+                  title: Targetuseruuid
+                  type: string
+                ttlSeconds:
+                  default: 86400
+                  title: Ttlseconds
+                  type: integer
+              required:
+              - communityId
+              - targetUserUuid
+              - message
+              title: CreateSecretRequest
+              type: object
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Create result; `token` is the only time the link token
+                  is ever returned.
+                properties:
+                  expiresAt:
+                    title: Expiresat
+                    type: string
+                  secretId:
+                    title: Secretid
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  token:
+                    title: Token
+                    type: string
+                required:
+                - success
+                - secretId
+                - token
+                - expiresAt
+                title: CreateSecretResponse
+                type: object
+          description: Create result; `token` is the only time the link token is ever
+            returned.
+      summary: Store an encrypted one-time secret for the target user; return the
+        link token once.
+  /api/v1/one-time-secrets/pull:
+    post:
+      description: ''
+      operationId: post_pull_secret
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Body for pull.
+              properties:
+                token:
+                  title: Token
+                  type: string
+              required:
+              - token
+              title: PullSecretRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Pull result -- the secret message, delivered once.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - message
+                title: PullSecretResponse
+                type: object
+          description: Pull result -- the secret message, delivered once.
+      summary: Return the secret once to the linked target user, then delete it.
   /api/v1/platform/audit-log:
     get:
       description: ''

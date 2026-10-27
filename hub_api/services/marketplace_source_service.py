@@ -175,8 +175,15 @@ async def create_source(
     publisher_key_fingerprint: str | None = None,
     publisher_public_key: str | None = None,
     sandbox_ack: SandboxAck | None = None,
+    pinned_commit_sha: str | None = None,
 ) -> SourceRecord:
-    """Insert an external source in `PENDING_SCAN` and return it (public_id assigned by the DB)."""
+    """Insert an external source in `PENDING_SCAN` and return it (public_id assigned by the DB).
+
+    `pinned_commit_sha` is the operator-supplied commit the scanner will clone (the only thing
+    ever cloned/built); `None` leaves the source un-scannable until a pin is set.
+    """
+    if pinned_commit_sha is not None and not _SHA_RE.fullmatch(pinned_commit_sha):
+        raise bad_request("pinned_commit_sha must be a 40-hex SHA")
     _validate_create(
         name=name,
         git_url=git_url,
@@ -196,6 +203,7 @@ async def create_source(
         "created_by": created_by,
         "publisher_key_fingerprint": publisher_key_fingerprint,
         "publisher_public_key": publisher_public_key,
+        "pinned_commit_sha": pinned_commit_sha,
     }
     if sandbox_ack is not None:
         values.update(
@@ -316,3 +324,37 @@ async def get_source_pk(dal: AsyncDB, public_id: uuid.UUID) -> int | None:
     async with dal.engine.connect() as conn:
         row = (await conn.execute(select(table.c.id).where(table.c.public_id == public_id))).first()
     return None if row is None else int(row[0])
+
+
+async def approve_update(dal: AsyncDB, public_id: uuid.UUID) -> SourceRecord:
+    """Promote `pending_commit_sha` to `pinned_commit_sha` (human-approved update, design 4.5).
+
+    One atomic UPDATE guarded on `pending_commit_sha IS NOT NULL`, so a concurrent approve or a
+    missing pending SHA can never advance the pin to a stale/empty value. The built-in source is
+    refused (its pin is the baked image commit). Status returns to `ACTIVE`.
+    """
+    existing = await get_source(dal, public_id)
+    if existing is None:
+        raise not_found("marketplace source not found")
+    if existing.is_builtin:
+        raise conflict("the built-in marketplace source has no approvable update")
+    table = _table(dal)
+    async with dal.engine.begin() as conn:
+        row = (
+            await conn.execute(
+                update(table)
+                .where(table.c.public_id == public_id, table.c.pending_commit_sha.is_not(None))
+                .values(
+                    pinned_commit_sha=table.c.pending_commit_sha,
+                    pending_commit_sha=None,
+                    status=int(SourceStatus.ACTIVE),
+                    last_scan_error=None,
+                    updated_at=datetime.now(UTC),
+                )
+                .returning(*table.c)
+            )
+        ).first()
+    if row is None:
+        raise conflict("marketplace source has no pending update to approve")
+    logger.info("marketplace source: update approved", extra={"source_public_id": str(public_id)})
+    return _to_record(row)

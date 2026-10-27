@@ -206,3 +206,24 @@ async def test_source_short_unique_index_and_create_retries_collision(
             )
         ).scalar_one()
     assert n is True
+
+
+async def test_create_with_pin_and_approve_update_promotes_pending(pg_dal: Any) -> None:
+    from services.marketplace_source_service import approve_update
+
+    rec = await _prebuilt(pg_dal, pinned_commit_sha=SHA)
+    assert rec.pinned_commit_sha == SHA
+    with pytest.raises(ApiError) as no_pending:  # nothing pending -> never moves the pin
+        await approve_update(pg_dal, rec.public_id)
+    assert no_pending.value.status_code == 409
+    new = "d" * 40
+    await update_status(pg_dal, rec.public_id, SourceStatus.NEEDS_APPROVAL, pending_commit_sha=new)
+    out = await approve_update(pg_dal, rec.public_id)
+    assert (out.pinned_commit_sha, out.pending_commit_sha) == (new, None)
+    assert out.status is SourceStatus.ACTIVE
+    with pytest.raises(ApiError) as missing:
+        await approve_update(pg_dal, uuid.uuid4())
+    assert missing.value.status_code == 404
+    with pytest.raises(ApiError) as bad:
+        await _prebuilt(pg_dal, pinned_commit_sha="nothex")
+    assert bad.value.status_code == 400
