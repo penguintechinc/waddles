@@ -88,15 +88,23 @@ pub enum KvError {
     Backend(String),
 }
 
-/// Mirrors WIT `interface db`'s `variant error`.
+/// Mirrors WIT `interface db`'s `variant error` (structured ops -- the
+/// earlier raw-SQL `execute`'s `syntax` case is retired along with it; see
+/// `wit/waddle-bundle/stage.wit`'s `db` interface doc).
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DbError {
     #[error("denied: {0}")]
     Denied(String),
-    #[error("syntax error: {0}")]
-    Syntax(String),
+    #[error("invalid column: {0}")]
+    InvalidColumn(String),
+    #[error("invalid value: {0}")]
+    InvalidValue(String),
+    #[error("row not found")]
+    NotFound,
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("quota exceeded: {0}")]
+    QuotaExceeded(String),
     #[error("statement timed out")]
     Timeout,
     #[error("backend error: {0}")]

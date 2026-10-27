@@ -201,7 +201,6 @@ Response modules that execute commands and user interactions:
 ├── version-release.yml                # Version release workflow
 ├── build-router.yml                   # Router module build
 ├── build-{module-name}.yml            # Individual module builds (24 files)
-├── android.yml                        # Android lint, tests, and debug build
 ├── containers.yml                     # Container orchestration
 ├── pr-validation.yml                  # Pull request and merge-queue tests
 └── security.yml                       # Dependency and code security checks
@@ -238,10 +237,6 @@ Response modules that execute commands and user interactions:
   - `gosec` for security issues
   - `golangci-lint` for code quality
 
-- **Kotlin** (for mobile apps):
-  - Kotlin linting and static analysis
-  - Security vulnerability scanning
-
 ### Container Build Workflow (`build-container.yml` - Reusable Template)
 
 **Purpose**: Shared reusable workflow for all module containers
@@ -251,15 +246,19 @@ Response modules that execute commands and user interactions:
 - `module_path`: Path to module (e.g., "processing/router_module")
 - `port`: Service port number
 
-**Version Determination**:
+**Version Determination** (five-tier tag scheme, computed once in `determine-version`; `.version` is not used for tags):
 ```
-Branch Context               Tag Suffix    Latest Tag
-main + .version changed      (none)        ✓ latest
-main + regular commit        -beta         ✗
-develop + any commit         -alpha        ✗
-feature/* + any commit       -alpha        ✗
-bugfix/* + any commit        -alpha        ✗
+Tier   Trigger                                           Image tag
+alpha  push/dispatch on any non-release branch           alpha-<epoch>
+beta   push to release/v*.X (or main)                    beta-<epoch>
+gamma  GitHub release flagged pre-release (prereleased)  gamma-<epoch>
+prod   GitHub release published (released)               v{Major}.{Minor}.{Patch} + latest
 ```
+- `<epoch>` = unix seconds at `determine-version` time (shared by all matrix jobs).
+- Prod requires the release tag to match `v{Major}.{Minor}.{Patch}` or the build fails.
+- Gamma/prod run on the `release:` event (not a `tags: v*` push); every image workflow
+  carries `release: types: [released, prereleased]` and force-builds on it (path filters do not apply).
+- The same mapping is documented in the `determine-version` step of every image workflow.
 
 **Build Features**:
 - Multi-platform: Linux AMD64 + ARM64
@@ -315,13 +314,10 @@ jobs:
 - GitHub Release: `v0.2.0` (or current version)
 - Release artifacts and changelog
 
-### Mobile Workflow
+### Mobile / Desktop Clients
 
-**android.yml** validates the maintained Kotlin application under
-`mobile/android` with Gradle wrapper validation, lint, unit tests, and a debug
-assembly. **pr-validation.yml** provides the pull-request and merge-queue test
-gate. The former desktop workflows were removed when their source projects were
-retired.
+Mobile and desktop client code (and its CI) is not built from this repository.
+**pr-validation.yml** provides the pull-request and merge-queue test gate.
 
 ---
 

@@ -1,0 +1,183 @@
+# feature/alpha-localized-posthog -- closes the gap flagged in prior alpha
+# ops notes ("enabling a flag requires a human with PostHog organization
+# access; there is no in-cluster UI to create or enable flags"): a
+# post-install/post-upgrade hook Job that provisions the in-cluster PostHog's
+# first admin/org/project, mints a personal API key, and seeds
+# posthog.bootstrap.seedFlags as ENABLED -- so alpha's command flags are
+# testable without a human ever opening the PostHog UI.
+#
+# Same KEEP-vs-GENERATE / least-privilege conventions as
+# auto-provisioned-keys-job.yaml: RBAC is its own hook at a lower weight so
+# the ServiceAccount exists before the Job's pod is admitted; the Job writes
+# ONLY the named `posthog-bootstrap-secret` (never `waddlebot-platform-
+# credentials`, which this chart never writes -- see docs/
+# PLATFORM_CREDENTIALS.md) and only restarts the one named Deployment given
+# to it. Entirely gated on posthog.enabled -- a no-op (not rendered) once
+# posthog.enabled=false, e.g. beta/gamma/production, which keep pointing at
+# the hosted license.penguintech.io PostHog and never run this Job.
+{{- if and .Values.posthog.enabled .Values.posthog.bootstrap.enabled }}
+{{- $fullname := include "waddlebot.fullname" . }}
+{{- $secretName := .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-posthog-bootstrap
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.posthog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: posthog-bootstrap
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-posthog-bootstrap
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.posthog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: posthog-bootstrap
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  # No `resourceNames` support for `create` (API limitation, not a gap here)
+  # -- the script itself (not RBAC) is what keeps the created Secret to
+  # exactly $secretName (same accepted shape as auto-provisioned-keys-job-rbac.yaml).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ $secretName }}"]
+    verbs: ["get", "patch"]
+  {{- if .Values.posthog.bootstrap.restartDeployment }}
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["{{ $fullname }}-{{ .Values.posthog.bootstrap.restartDeployment }}"]
+    verbs: ["get", "patch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-posthog-bootstrap
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.posthog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: posthog-bootstrap
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-posthog-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-posthog-bootstrap
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-posthog-bootstrap-script
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.posthog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: posthog-bootstrap
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  posthog-bootstrap.py: |
+{{ .Files.Get "files/posthog-bootstrap.py" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-posthog-bootstrap
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: posthog-bootstrap
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  # Generous: web + worker + postgres + clickhouse + kafka all have to come up
+  # and run migrations before /_health is green -- the script's own poll
+  # (POSTHOG_WAIT_ATTEMPTS x POSTHOG_WAIT_DELAY_S, default 60x5s=5min) budgets
+  # for that; this ceiling just needs to exceed it with margin.
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: posthog-bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $fullname }}-posthog-bootstrap
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: posthog-bootstrap
+          # Stdlib-only script (urllib, no httpx/pip install at runtime) --
+          # same pinned base image already used by pipeline.pythonBaseImage,
+          # no new image to vet/pin.
+          image: {{ .Values.pipeline.pythonBaseImage | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["python3", "/scripts/posthog-bootstrap.py"]
+          env:
+            - name: POSTHOG_URL
+              value: {{ printf "http://posthog-web:%v" .Values.posthog.web.port | quote }}
+            - name: POSTHOG_BOOTSTRAP_EMAIL
+              value: {{ .Values.posthog.bootstrap.adminEmail | quote }}
+            - name: POSTHOG_BOOTSTRAP_ORG
+              value: {{ .Values.posthog.bootstrap.orgName | quote }}
+            - name: BOOTSTRAP_SECRET_NAME
+              value: {{ $secretName | quote }}
+            {{- if .Values.posthog.bootstrap.restartDeployment }}
+            - name: BOOTSTRAP_RESTART_DEPLOYMENT
+              value: "{{ $fullname }}-{{ .Values.posthog.bootstrap.restartDeployment }}"
+            {{- end }}
+            - name: WADDLES_SEED_FLAGS
+              value: {{ .Values.posthog.bootstrap.seedFlags | join "," | quote }}
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits: { cpu: "250m", memory: "128Mi" }
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: script
+          configMap:
+            name: {{ $fullname }}-posthog-bootstrap-script
+            defaultMode: 0o555
+        - name: tmp
+          emptyDir: {}
+{{- end }}

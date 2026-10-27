@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 
+
 def find_dockerfiles():
     """Find all Dockerfile paths in the repository."""
     dockerfiles = []
@@ -18,14 +19,17 @@ def find_dockerfiles():
                 dockerfiles.append(os.path.join(root, file))
     return sorted(dockerfiles)
 
+
 def extract_port(content):
     """Extract EXPOSE port from Dockerfile content."""
     match = re.search(r'^EXPOSE\s+(\d+)', content, re.MULTILINE)
     return match.group(1) if match else None
 
+
 def has_healthcheck_script(content):
     """Check if Dockerfile already has healthcheck.py."""
     return 'COPY scripts/healthcheck.py' in content
+
 
 def add_healthcheck(dockerfile_path):
     """Add standardized healthcheck to a Dockerfile."""
@@ -113,6 +117,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \\
 
     return 'added'
 
+
 def main():
     print("Adding standardized healthcheck to all Dockerfiles...\n")
 
@@ -141,6 +146,7 @@ def main():
     print(f"  No port found: {stats['no_port']}")
     print(f"  No insertion point: {stats['no_insert_point']}")
     print("=" * 80)
+
 
 if __name__ == '__main__':
     main()

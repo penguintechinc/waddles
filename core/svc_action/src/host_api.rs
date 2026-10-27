@@ -12,10 +12,31 @@
 //! `load`/`invoke`; here, the stage answers `hello` and sends `load`/
 //! `invoke`. `core/bundle_executor/src/tls.rs` is the client-TLS mirror of
 //! [`build_server_config`] below.
+//!
+//! # Bounds and backpressure
+//!
+//! Nothing on a host-API connection grows without limit (release-audit ops
+//! HIGH). Every bound is config-sized (`CliConfig::host_api_*`, env in
+//! parentheses) and every overflow is loud -- WARN/ERROR log plus a
+//! Prometheus counter -- never a silent drop:
+//!
+//! | Bound | Default | On overflow |
+//! |---|---|---|
+//! | Writer channel capacity (`HOST_API_WRITER_CHANNEL_CAPACITY`) | 1024 frames | Producer **awaits capacity** (`host_api_writer_backpressure_total`); after `HOST_API_WRITER_SEND_TIMEOUT_MS` (30s) the frame is shed with [`HostApiError::WriterBackpressure`] (`host_api_writer_shed_total`, ERROR) |
+//! | In-flight `host-call` handlers (`HOST_API_MAX_CONCURRENT_HOST_CALLS`) | 256 / connection | Excess call answered immediately with an `overloaded` error reply (`host_api_host_calls_shed_total`) -- the read loop never stalls |
+//! | Accepted connections (`HOST_API_MAX_CONNECTIONS`) | 64 | New TCP connection dropped before the TLS handshake (`host_api_connections_rejected_total`) |
+//!
+//! The read loop itself never awaits writer capacity (its `pong` replies and
+//! shed replies use a non-blocking send), so a peer that has stopped
+//! draining cannot deadlock the connection against itself; the heartbeat
+//! supervisor ([`run_heartbeat`]) then reaps it.
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use penguin_bundle_host::wire::{
     read_frame, write_frame, CorrelationError, CorrelationTable, ErrorBody, ErrorCode, Frame,
@@ -25,11 +46,12 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use socket2::{SockRef, TcpKeepalive};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore, TryAcquireError};
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::capabilities::{denied, CapabilityHandler, InvokeScope};
 use crate::config::CliConfig;
@@ -54,6 +76,60 @@ pub enum HostApiError {
     UnexpectedFrame(&'static str),
     #[error("peer reported error {code:?}: {message}")]
     PeerError { code: ErrorCode, message: String },
+    #[error("heartbeat timed out waiting for pong")]
+    HeartbeatTimeout,
+    /// The bounded writer channel stayed full for the whole send timeout --
+    /// the peer is not draining frames. The frame is shed (never silently
+    /// dropped: counted in `host_api_writer_shed_total` and logged at
+    /// ERROR) rather than queued without bound.
+    #[error("writer channel full for {waited_ms}ms (peer not draining), frame shed")]
+    WriterBackpressure { waited_ms: u64 },
+}
+
+/// Default capacity of a connection's bounded writer channel (frames).
+pub const DEFAULT_WRITER_CHANNEL_CAPACITY: usize = 1024;
+/// Default time a producer waits for writer-channel capacity before the
+/// frame is shed.
+pub const DEFAULT_WRITER_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default cap on concurrently running `host-call` handlers per connection.
+pub const DEFAULT_MAX_CONCURRENT_HOST_CALLS: usize = 256;
+/// Default cap on simultaneously accepted host-API connections.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
+
+/// Resource bounds for one host-API connection -- all config-sized
+/// (`CliConfig::host_api_*`), never unbounded. See the module doc's
+/// "Bounds and backpressure" section.
+#[derive(Debug, Clone)]
+pub struct HostApiLimits {
+    /// Bounded writer-channel capacity (frames).
+    pub writer_channel_capacity: usize,
+    /// How long a producer awaits capacity on a full writer channel before
+    /// the frame is shed with [`HostApiError::WriterBackpressure`].
+    pub writer_send_timeout: Duration,
+    /// Max in-flight `host-call` handler tasks on this connection; the
+    /// excess is shed with a `overloaded` error reply.
+    pub max_concurrent_host_calls: usize,
+}
+
+impl Default for HostApiLimits {
+    fn default() -> Self {
+        Self {
+            writer_channel_capacity: DEFAULT_WRITER_CHANNEL_CAPACITY,
+            writer_send_timeout: DEFAULT_WRITER_SEND_TIMEOUT,
+            max_concurrent_host_calls: DEFAULT_MAX_CONCURRENT_HOST_CALLS,
+        }
+    }
+}
+
+impl HostApiLimits {
+    /// Builds the limits from the parsed CLI/env configuration.
+    pub fn from_cli(cli: &CliConfig) -> Self {
+        Self {
+            writer_channel_capacity: cli.host_api_writer_channel_capacity,
+            writer_send_timeout: Duration::from_millis(cli.host_api_writer_send_timeout_ms),
+            max_concurrent_host_calls: cli.host_api_max_concurrent_host_calls,
+        }
+    }
 }
 
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, HostApiError> {
@@ -129,20 +205,45 @@ pub fn build_server_config(cli: &CliConfig) -> Result<ServerConfig, HostApiError
 pub struct Connection {
     ids: IdAllocator,
     pending: CorrelationTable,
-    writer_tx: mpsc::UnboundedSender<Frame>,
+    /// Bounded: a slow/stuck peer applies backpressure to producers
+    /// ([`Connection::send`]) instead of growing memory without limit.
+    writer_tx: mpsc::Sender<Frame>,
+    send_timeout: Duration,
+    /// Caps in-flight `host-call` handler tasks (see [`read_loop`]).
+    host_call_permits: Arc<Semaphore>,
     closed: Arc<std::sync::atomic::AtomicBool>,
     scopes: std::sync::Mutex<std::collections::HashMap<u64, InvokeScope>>,
+    /// Wired once in production (`serve`) so writer-backpressure/shed
+    /// events are metriced; `OnceLock` so the many bare
+    /// `Connection::new` test call sites need no metrics plumbing.
+    metrics: std::sync::OnceLock<crate::telemetry::HostApiMetrics>,
 }
 
 impl Connection {
-    fn new(writer_tx: mpsc::UnboundedSender<Frame>) -> Arc<Self> {
+    /// A connection with the default [`HostApiLimits`] (test-only; production
+    /// always builds via [`Connection::with_limits`]).
+    #[cfg(test)]
+    fn new(writer_tx: mpsc::Sender<Frame>) -> Arc<Self> {
+        Self::with_limits(writer_tx, &HostApiLimits::default())
+    }
+
+    fn with_limits(writer_tx: mpsc::Sender<Frame>, limits: &HostApiLimits) -> Arc<Self> {
         Arc::new(Self {
             ids: IdAllocator::new(),
             pending: CorrelationTable::new(),
             writer_tx,
+            send_timeout: limits.writer_send_timeout,
+            host_call_permits: Arc::new(Semaphore::new(limits.max_concurrent_host_calls)),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scopes: std::sync::Mutex::new(std::collections::HashMap::new()),
+            metrics: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Wires the Prometheus handles in (production only -- called by
+    /// `serve` right after the handshake).
+    pub(crate) fn set_metrics(&self, metrics: crate::telemetry::HostApiMetrics) {
+        let _ = self.metrics.set(metrics);
     }
 
     /// Sends `message` under a freshly allocated id and awaits the peer's
@@ -157,7 +258,7 @@ impl Connection {
         }
         let id = self.ids.next_id();
         let rx = self.pending.register(id)?;
-        self.send(Frame::new(id, message))?;
+        self.send(Frame::new(id, message)).await?;
         rx.await.map_err(|_| HostApiError::ConnectionUnavailable)
     }
 
@@ -183,7 +284,7 @@ impl Connection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id, scope);
-        let send_result = self.send(Frame::new(id, Message::Invoke(body)));
+        let send_result = self.send(Frame::new(id, Message::Invoke(body))).await;
         if let Err(err) = send_result {
             self.scopes
                 .lock()
@@ -216,15 +317,66 @@ impl Connection {
     /// Sends `shutdown` without awaiting a reply (spec §6.6: "connection
     /// closed after in-flight calls drain or `grace_ms` elapses" -- no
     /// reply frame is defined for this message kind).
-    pub fn shutdown(&self, grace_ms: u64) -> Result<(), HostApiError> {
+    pub async fn shutdown(&self, grace_ms: u64) -> Result<(), HostApiError> {
         let id = self.ids.next_id();
         self.send(Frame::new(id, Message::Shutdown(ShutdownBody { grace_ms })))
+            .await
     }
 
-    fn send(&self, frame: Frame) -> Result<(), HostApiError> {
-        self.writer_tx
-            .send(frame)
-            .map_err(|_| HostApiError::ConnectionUnavailable)
+    /// Queues `frame` on the bounded writer channel. Fast path is a
+    /// non-blocking `try_send`; when the channel is full the producer
+    /// **awaits capacity** (backpressure, counted in
+    /// `host_api_writer_backpressure_total`) for at most the configured
+    /// send timeout, after which the frame is **shed loudly**
+    /// ([`HostApiError::WriterBackpressure`], ERROR log,
+    /// `host_api_writer_shed_total`) -- never an unbounded queue, never a
+    /// silent drop, never an indefinite hang.
+    async fn send(&self, frame: Frame) -> Result<(), HostApiError> {
+        let frame = match self.writer_tx.try_send(frame) {
+            Ok(()) => return Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err(HostApiError::ConnectionUnavailable)
+            }
+            Err(mpsc::error::TrySendError::Full(frame)) => frame,
+        };
+        if let Some(m) = self.metrics.get() {
+            m.writer_backpressure_total.inc();
+        }
+        debug!("host-api writer channel full, awaiting capacity");
+        match tokio::time::timeout(self.send_timeout, self.writer_tx.send(frame)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(HostApiError::ConnectionUnavailable),
+            Err(_) => {
+                let waited_ms = self.send_timeout.as_millis() as u64;
+                if let Some(m) = self.metrics.get() {
+                    m.writer_shed_total.inc();
+                }
+                error!(
+                    waited_ms,
+                    "host-api writer channel full for {waited_ms}ms (peer not draining): \
+                     frame shed"
+                );
+                Err(HostApiError::WriterBackpressure { waited_ms })
+            }
+        }
+    }
+
+    /// Non-blocking send for call sites that must never stall (the read
+    /// loop's `pong` / shed replies -- awaiting there could deadlock a
+    /// peer that is itself blocked writing to us). A full channel sheds the
+    /// frame loudly (WARN + `host_api_writer_shed_total`).
+    fn try_send(&self, frame: Frame) -> Result<(), HostApiError> {
+        match self.writer_tx.try_send(frame) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(HostApiError::ConnectionUnavailable),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if let Some(m) = self.metrics.get() {
+                    m.writer_shed_total.inc();
+                }
+                warn!("host-api writer channel full, non-blocking frame shed");
+                Err(HostApiError::WriterBackpressure { waited_ms: 0 })
+            }
+        }
     }
 
     fn deliver(&self, frame: Frame) -> Result<(), CorrelationError> {
@@ -236,6 +388,55 @@ impl Connection {
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
+
+    /// Sends `ping` and awaits `pong` within `timeout` -- the heartbeat
+    /// supervisor's ([`run_heartbeat`]) probe for the alpha 2026-10-02
+    /// incident this whole mechanism exists to catch: a rolled svc pod left
+    /// the executor bound to a terminated peer with no OS-level signal at
+    /// all, so the only reliable "is the peer actually still there" check
+    /// is a round trip on the wire protocol itself. On timeout the pending
+    /// registration is cancelled so it never leaks in the correlation
+    /// table.
+    pub async fn ping(&self, timeout: Duration) -> Result<(), HostApiError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(HostApiError::ConnectionUnavailable);
+        }
+        let id = self.ids.next_id();
+        let rx = self.pending.register(id)?;
+        self.send(Frame::new(id, Message::Ping)).await?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(frame)) => match frame.message {
+                Message::Pong => Ok(()),
+                _ => Err(HostApiError::UnexpectedFrame("expected pong")),
+            },
+            Ok(Err(_)) => Err(HostApiError::ConnectionUnavailable),
+            Err(_) => {
+                self.pending.cancel(id);
+                Err(HostApiError::HeartbeatTimeout)
+            }
+        }
+    }
+
+    /// Forcibly marks this connection closed -- used by [`run_heartbeat`]
+    /// when it declares a session dead so [`ConnectionRegistry::active`]
+    /// stops handing it out even before the read loop itself notices,
+    /// which for a true half-open socket (no FIN ever arrives) may never
+    /// happen on its own. The actual socket teardown happens when the
+    /// caller's `tokio::select!` racing this heartbeat against the read
+    /// loop drops the losing (read loop) future -- see `crate::host_api::
+    /// serve`.
+    pub(crate) fn mark_closed(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+}
+
+/// Test-only bare `Connection` construction -- for `crate::http::health`'s
+/// readiness-transition tests, which need a `Connection` to register as
+/// `ConnectionRegistry::set_active` without driving a full handshake.
+#[cfg(test)]
+pub(crate) fn test_connection() -> Arc<Connection> {
+    let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+    Connection::new(tx)
 }
 
 /// Completes the `hello`/`hello-ok` handshake as the stage side, then runs
@@ -249,6 +450,7 @@ impl Connection {
 /// about); `crate::dispatch`'s own tests call this directly over a plain
 /// in-memory duplex to build a real, handshaken [`Connection`] without a
 /// TLS handshake or a live executor process.
+#[cfg(test)]
 pub(crate) async fn run_connection<S>(
     io: S,
     hello_ok: HelloOkBody,
@@ -264,9 +466,38 @@ pub(crate) async fn run_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    run_connection_with_limits(
+        io,
+        hello_ok,
+        expected_sandbox_gvisor,
+        capabilities,
+        HostApiLimits::default(),
+    )
+    .await
+}
+
+/// [`run_connection`] with explicit [`HostApiLimits`] -- the production
+/// path ([`accept_and_handshake`]) passes the config-sized bounds; tests
+/// pass tiny ones to exercise backpressure/shedding deterministically.
+pub(crate) async fn run_connection_with_limits<S>(
+    io: S,
+    hello_ok: HelloOkBody,
+    expected_sandbox_gvisor: bool,
+    capabilities: Arc<dyn CapabilityHandler>,
+    limits: HostApiLimits,
+) -> Result<
+    (
+        Arc<Connection>,
+        impl std::future::Future<Output = Result<(), HostApiError>>,
+    ),
+    HostApiError,
+>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (mut reader, mut writer) = tokio::io::split(io);
-    let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<Frame>();
-    let connection = Connection::new(writer_tx);
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Frame>(limits.writer_channel_capacity.max(1));
+    let connection = Connection::with_limits(writer_tx, &limits);
 
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = writer_rx.recv().await {
@@ -291,14 +522,16 @@ where
     };
     if hello.protocol_version != 1 {
         let message = format!("unsupported protocol_version {}", hello.protocol_version);
-        connection.send(Frame::new(
-            hello_frame.id,
-            Message::Error(ErrorBody {
-                code: ErrorCode::ProtocolVersion,
-                message: message.clone(),
-                detail: None,
-            }),
-        ))?;
+        connection
+            .send(Frame::new(
+                hello_frame.id,
+                Message::Error(ErrorBody {
+                    code: ErrorCode::ProtocolVersion,
+                    message: message.clone(),
+                    detail: None,
+                }),
+            ))
+            .await?;
         drop(connection);
         let _ = writer_task.await;
         return Err(HostApiError::PeerError {
@@ -308,17 +541,19 @@ where
     }
     let executor_gvisor = hello.sandbox.runtime == "gvisor";
     if expected_sandbox_gvisor && !executor_gvisor {
-        connection.send(Frame::new(
-            hello_frame.id,
-            Message::Error(ErrorBody {
-                code: ErrorCode::UnsandboxedExecutor,
-                message: format!(
-                    "stage expects WADDLES_SANDBOX_GVISOR=true but executor reported sandbox {:?}",
-                    hello.sandbox.runtime
-                ),
-                detail: None,
-            }),
-        ))?;
+        connection
+            .send(Frame::new(
+                hello_frame.id,
+                Message::Error(ErrorBody {
+                    code: ErrorCode::UnsandboxedExecutor,
+                    message: format!(
+                        "stage expects WADDLES_SANDBOX_GVISOR=true but executor reported sandbox {:?}",
+                        hello.sandbox.runtime
+                    ),
+                    detail: None,
+                }),
+            ))
+            .await?;
         // Flush the queued error frame, then close -- spec §6.6 test 12c:
         // "Connection refused with UNSANDBOXED_EXECUTOR".
         drop(connection);
@@ -329,7 +564,9 @@ where
         });
     }
     debug!(?hello, "host-api hello accepted");
-    connection.send(Frame::new(hello_frame.id, Message::HelloOk(hello_ok)))?;
+    connection
+        .send(Frame::new(hello_frame.id, Message::HelloOk(hello_ok)))
+        .await?;
 
     let read_loop = {
         let connection = Arc::clone(&connection);
@@ -386,9 +623,40 @@ where
             // `crate::capabilities`'s module doc; this is the fix for the
             // post-M3 review's connection-fixed-scope finding).
             Message::HostCall(body) => {
+                // Concurrency cap: at most `max_concurrent_host_calls`
+                // handler tasks per connection. Over the cap the call is
+                // shed *loudly* with an `overloaded` error reply (counted
+                // in `host_api_host_calls_shed_total`, WARN-logged) --
+                // never an unbounded task spawn, never a silent drop, and
+                // never a stalled read loop (which would also stop `pong`
+                // / reply delivery for every other in-flight call).
+                let permit = match Arc::clone(&connection.host_call_permits).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(TryAcquireError::NoPermits | TryAcquireError::Closed) => {
+                        if let Some(m) = connection.metrics.get() {
+                            m.host_calls_shed_total.inc();
+                        }
+                        warn!(
+                            call_id = body.call_id,
+                            "host-api host-call shed: concurrent host-call cap reached"
+                        );
+                        let reply = penguin_bundle_host::wire::HostResultBody {
+                            result: None,
+                            error: Some(denied(
+                                "overloaded",
+                                "stage host-call concurrency cap reached, retry later",
+                            )),
+                        };
+                        let _ =
+                            connection.try_send(Frame::new(frame.id, Message::HostResult(reply)));
+                        continue;
+                    }
+                };
                 let connection = Arc::clone(connection);
                 let capabilities = Arc::clone(&capabilities);
                 tokio::spawn(async move {
+                    // Held for the handler's whole lifetime; released on drop.
+                    let _permit = permit;
                     let scope = connection.scope_for(body.call_id);
                     let result = match scope {
                         Some(scope) => capabilities.handle(&scope, body).await,
@@ -407,8 +675,27 @@ where
                             error: Some(e),
                         },
                     };
-                    let _ = connection.send(Frame::new(frame.id, Message::HostResult(reply)));
+                    // Awaits writer capacity (backpressure) up to the send
+                    // timeout; a shed here is already logged + metriced.
+                    let _ = connection
+                        .send(Frame::new(frame.id, Message::HostResult(reply)))
+                        .await;
                 });
+            }
+            // Bidirectional heartbeat (fix/executor-link-heartbeat): this
+            // stage drives its own `ping`/`pong` round trip via
+            // `run_heartbeat`, but also answers an executor-initiated
+            // `ping` rather than treating it as the fatal "unexpected
+            // frame" every other unhandled kind is below -- the executor
+            // side may run its own independent heartbeat (a separate
+            // change, on its own branch) and this stage must never close a
+            // perfectly healthy connection just because the executor
+            // happened to speak first.
+            Message::Ping => {
+                debug!("host-api heartbeat: received ping, replying pong");
+                if let Err(e) = connection.try_send(Frame::new(frame.id, Message::Pong)) {
+                    warn!(error = %e, "host-api failed to reply to ping");
+                }
             }
             other => {
                 warn!(
@@ -418,6 +705,73 @@ where
                 return Err(HostApiError::UnexpectedFrame(
                     "unexpected frame kind on stage side",
                 ));
+            }
+        }
+    }
+}
+
+/// Consecutive missed heartbeats before [`run_heartbeat`] declares a
+/// session dead (fix/executor-link-heartbeat, alpha 2026-10-02 incident).
+pub const HEARTBEAT_MISSED_LIMIT: u32 = 3;
+
+/// Heartbeat supervisor for one accepted executor session: sends `ping`
+/// every `interval` and requires `pong` back within that same interval.
+/// After [`HEARTBEAT_MISSED_LIMIT`] consecutive misses the session is
+/// declared dead -- loudly (`ERROR`, naming the peer and how long it's been
+/// since the last successful heartbeat in the rendered message, not just
+/// structured fields) -- and [`Connection::mark_closed`] is called so
+/// [`ConnectionRegistry::active`] stops handing this connection out. The
+/// caller (`crate::host_api::serve`) races this future against the read
+/// loop via `tokio::select!`; whichever finishes first wins, and dropping
+/// the other tears down the underlying socket.
+pub async fn run_heartbeat(
+    connection: Arc<Connection>,
+    peer: SocketAddr,
+    interval: Duration,
+    metrics: crate::telemetry::HostApiMetrics,
+) {
+    let mut missed: u32 = 0;
+    let mut last_success = Instant::now();
+    loop {
+        tokio::time::sleep(interval).await;
+        if connection.is_closed() {
+            debug!(%peer, "host-api heartbeat: connection already closed, stopping");
+            return;
+        }
+        debug!(%peer, "host-api heartbeat: sending ping");
+        match connection.ping(interval).await {
+            Ok(()) => {
+                if missed > 0 {
+                    info!(%peer, missed, "host-api heartbeat: pong received, session recovered");
+                }
+                missed = 0;
+                last_success = Instant::now();
+                debug!(%peer, "host-api heartbeat: pong received");
+            }
+            Err(e) => {
+                missed += 1;
+                let age_s = last_success.elapsed().as_secs();
+                if missed >= HEARTBEAT_MISSED_LIMIT {
+                    error!(
+                        %peer,
+                        missed,
+                        last_seen_age_s = age_s,
+                        error = %e,
+                        "host-api heartbeat timeout: dropping dead executor session {peer} \
+                         after {missed} consecutive missed heartbeats (last seen {age_s}s ago)"
+                    );
+                    metrics.heartbeat_timeouts_total.inc();
+                    connection.mark_closed();
+                    return;
+                }
+                warn!(
+                    %peer,
+                    missed,
+                    last_seen_age_s = age_s,
+                    error = %e,
+                    "host-api heartbeat missed ({missed}/{HEARTBEAT_MISSED_LIMIT}) for {peer}, \
+                     last seen {age_s}s ago"
+                );
             }
         }
     }
@@ -434,6 +788,7 @@ pub async fn accept_and_handshake(
     limits: penguin_bundle_host::wire::HelloLimits,
     expected_sandbox_gvisor: bool,
     capabilities: Arc<dyn CapabilityHandler>,
+    io_limits: HostApiLimits,
 ) -> Result<
     (
         Arc<Connection>,
@@ -442,7 +797,7 @@ pub async fn accept_and_handshake(
     HostApiError,
 > {
     let tls_stream = acceptor.accept(tcp).await?;
-    run_connection(
+    run_connection_with_limits(
         tls_stream,
         HelloOkBody {
             stage: stage_name.to_string(),
@@ -451,6 +806,7 @@ pub async fn accept_and_handshake(
         },
         expected_sandbox_gvisor,
         capabilities,
+        io_limits,
     )
     .await
 }
@@ -461,13 +817,60 @@ pub type ShutdownReceiver = oneshot::Receiver<()>;
 /// Registry of currently-live executor connections this stage can dispatch
 /// `invoke`/`load` requests over. `EXECUTOR_STAGE_CONNECTIONS` (spec §6.6)
 /// describes spreading invocations across many connections from one
-/// executor replica; this M3 landing keeps the single most-recently
-/// connected one active (correct for the common one-executor-replica
-/// deployment; TODO(M3+) is round-robin across all held connections).
+/// executor replica -- identical shape to
+/// `core/svc_process::host_api::ConnectionRegistry`.
+///
+/// **Regression: svc reported zero executors while holding a live session
+/// after reconnect (alpha 2026-10-03).** The previous design kept a single
+/// `Mutex<Option<Arc<Connection>>>` "active" slot, overwritten wholesale by
+/// every newly accepted connection (`set_active`). That is a race the
+/// moment more than one connection is ever in flight for the same stage:
+/// if connection B supersedes connection A in the slot and then B itself
+/// closes quickly (a duplicate dial, a transient reconnect race, or simply
+/// the older connection B replaced), `active()` reports "no executor" --
+/// `duration_without_executor` climbs and the watchdog dead-letters
+/// everything -- even though connection A is still fully alive, still
+/// answering heartbeats, and simply no longer reachable through the slot.
+/// Observed live on alpha: `svc-process` held a connection established at
+/// 02:09:22 from 10.1.0.33 for the next ~10 minutes (confirmed by that
+/// pod's own `connection closed` log only at the 02:20 restart), yet
+/// logged "no executor connection" every 60s the entire time. `svc-action`
+/// exhibited the identical pattern.
+///
+/// The fix: every live session is tracked in `sessions`, keyed by a unique
+/// per-connection id allocated in [`Self::register`] -- never by peer
+/// address (NAT/fast-reconnect can collide there) and never collapsed into
+/// a single slot a dead connection can occupy while a live one goes
+/// unregistered. Teardown ([`Self::remove`]) removes only its own id, so a
+/// session's close can never clear another session's registration. The
+/// connected-executor count is the live map size ([`Self::live_count`]).
+/// [`Self::active`] picks a live session to dispatch over -- **newest wins**
+/// (highest allocated id still reporting `!is_closed()`), preserving this
+/// landing's prior single-executor-replica behavior; TODO(M3+) is
+/// round-robin across all held connections once a replica legitimately
+/// holds more than one. The zero-executor watchdog and `/health` readiness
+/// both read through `active`/`live_count`, so they observe exactly the
+/// same live set dispatch does.
 #[derive(Default)]
 pub struct ConnectionRegistry {
-    active: std::sync::Mutex<Option<Arc<Connection>>>,
-    generation: AtomicU64,
+    /// Every session this stage currently holds a connection object for
+    /// (live or not-yet-pruned-closed), keyed by the id `register` handed
+    /// back to the accept task that owns it.
+    sessions: Mutex<HashMap<u64, Arc<Connection>>>,
+    next_id: AtomicU64,
+    /// When [`Self::active`] last transitioned from "some" to "none" --
+    /// `None` means either an executor is currently active, or none has
+    /// ever connected since this registry was created. Backs both
+    /// [`Self::duration_without_executor`] (the `/health` liveness-grace
+    /// check and `crate::dispatch`'s loud dead-letter log) and readiness
+    /// (`/healthz` is simply `active().is_some()`).
+    zero_since: Mutex<Option<Instant>>,
+    /// Set once, in production wiring (`crate::try_start_host_api`), to
+    /// `telemetry::HostApiMetrics::dead_lettered_no_executor_total` --
+    /// `OnceLock` rather than a constructor parameter so the many existing
+    /// `ConnectionRegistry::new()` call sites across this crate's tests
+    /// don't all need updating for a metric they don't exercise.
+    dead_lettered_no_executor_total: std::sync::OnceLock<prometheus::IntCounter>,
 }
 
 impl ConnectionRegistry {
@@ -475,19 +878,171 @@ impl ConnectionRegistry {
         Self::default()
     }
 
-    /// Registers a newly-handshaken connection as the active one.
-    pub fn set_active(&self, conn: Arc<Connection>) {
-        *self.active.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn);
-        self.generation.fetch_add(1, Ordering::Relaxed);
+    /// Registers a newly-handshaken connection as a live session and
+    /// returns the id its owning accept task must pass back to
+    /// [`Self::remove`] on teardown -- the only correct way to drop a
+    /// session, since removing by id can never disturb any other session.
+    pub fn register(&self, conn: Arc<Connection>) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, conn);
+        id
     }
 
-    /// Returns the current active connection, if it is still open. A
-    /// closed connection is treated as absent so callers fail over to
-    /// "no executor available" (`error.kind = "executor_unavailable"`,
-    /// spec §6.3) rather than sending into a dead socket.
+    /// Back-compat convenience for tests that only need *a* live session
+    /// present and don't care about its id -- production teardown always
+    /// goes through [`Self::register`] paired with [`Self::remove`].
+    pub fn set_active(&self, conn: Arc<Connection>) {
+        self.register(conn);
+    }
+
+    /// Removes exactly session `id` -- a no-op if it was already removed or
+    /// never existed. Never touches any other session, including one that
+    /// has since superseded it as [`Self::active`]'s pick (the alpha
+    /// 2026-10-03 bug this type exists to prevent).
+    pub fn remove(&self, id: u64) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+    }
+
+    /// Prunes closed sessions from the map and returns the remaining live
+    /// ones. Shared by [`Self::active`] and [`Self::live_count`] so both
+    /// observe exactly the same live set on every call.
+    fn prune_and_snapshot(&self) -> Vec<(u64, Arc<Connection>)> {
+        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        guard.retain(|_, conn| !conn.is_closed());
+        guard
+            .iter()
+            .map(|(id, conn)| (*id, Arc::clone(conn)))
+            .collect()
+    }
+
+    /// Number of sessions currently reporting a live (non-closed)
+    /// connection -- the correct `connected_executors` gauge value,
+    /// replacing the old `registry.active().is_some() as i64` which could
+    /// read 0 while other live sessions existed outside the single slot.
+    pub fn live_count(&self) -> usize {
+        self.prune_and_snapshot().len()
+    }
+
+    /// Every currently-live session's id -- the per-session bundle-sync fix
+    /// (regression: bundles loaded only onto a terminating executor during
+    /// rollout; live executor got none, alpha 2026-10-03) drives `Load`/
+    /// `Unload` at EVERY id this returns, never just [`Self::active`]'s
+    /// single "newest" pick.
+    pub fn live_session_ids(&self) -> Vec<u64> {
+        self.prune_and_snapshot()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// The live connection for exactly `id`, or `None` if it was never
+    /// registered, already removed, or has since reported closed -- the
+    /// per-session dispatch target [`crate::bundle_loader::RegistrySink`]
+    /// resolves against for every `Load`/`Unload` call, and the lookup
+    /// `crate::dispatch::handle_delivered` performs once `bundle_active_set::
+    /// pick_session_with_digest` (via `crate::active_digests::LoadedSessions`)
+    /// names a target session.
+    pub fn get(&self, id: u64) -> Option<Arc<Connection>> {
+        let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(&id)
+            .filter(|conn| !conn.is_closed())
+            .map(Arc::clone)
+    }
+
+    /// Returns a live session to dispatch over, or `None` if none remain.
+    /// Selection is "newest live session wins" (see the type doc) -- a
+    /// closed connection is never returned, so callers fail over to "no
+    /// executor available" (`error.kind = "executor_unavailable"`, spec
+    /// §6.3) rather than sending into a dead socket.
     pub fn active(&self) -> Option<Arc<Connection>> {
-        let guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().filter(|c| !c.is_closed()).map(Arc::clone)
+        let live = self.prune_and_snapshot();
+        let active = live
+            .into_iter()
+            .max_by_key(|(id, _)| *id)
+            .map(|(_, conn)| conn);
+        let mut zero_since = self.zero_since.lock().unwrap_or_else(|e| e.into_inner());
+        if active.is_some() {
+            *zero_since = None;
+        } else {
+            zero_since.get_or_insert_with(Instant::now);
+        }
+        active
+    }
+
+    /// How long this registry has held zero live executor sessions --
+    /// `Duration::ZERO` while one is active. Fix/executor-link-heartbeat:
+    /// backs both `crate::dispatch::handle_delivered`'s loud dead-letter
+    /// log (names the outage duration in the rendered message, not just a
+    /// field) and `/health`'s liveness-grace check (fail liveness only
+    /// after `EXECUTOR_GRACE_SECONDS`, not on every transient reconnect).
+    pub fn duration_without_executor(&self) -> Duration {
+        if self.active().is_some() {
+            return Duration::ZERO;
+        }
+        let zero_since = self.zero_since.lock().unwrap_or_else(|e| e.into_inner());
+        zero_since.map(|t| t.elapsed()).unwrap_or(Duration::ZERO)
+    }
+
+    /// Wires the `dispatch_dead_lettered_no_executor_total` counter in --
+    /// called exactly once, from `crate::try_start_host_api`.
+    pub fn set_dead_letter_metric(&self, counter: prometheus::IntCounter) {
+        let _ = self.dead_lettered_no_executor_total.set(counter);
+    }
+
+    /// Increments `dispatch_dead_lettered_no_executor_total` if the metric
+    /// has been wired (see [`Self::set_dead_letter_metric`]) -- a no-op
+    /// (never a panic) in the many tests that build a bare
+    /// `ConnectionRegistry::new()` without wiring telemetry.
+    pub fn record_dead_letter_no_executor(&self) {
+        if let Some(counter) = self.dead_lettered_no_executor_total.get() {
+            counter.inc();
+        }
+    }
+}
+
+/// Fixed cadence for [`run_zero_executor_watchdog`]'s periodic ERROR log --
+/// independent of `EXECUTOR_GRACE_SECONDS` (the outage threshold), which is
+/// configurable.
+const ZERO_EXECUTOR_WATCHDOG_PERIOD: Duration = Duration::from_secs(60);
+
+/// Logs loudly, on a fixed cadence (`period`), while the executor link has
+/// been down longer than `grace` -- regression: readiness gated on
+/// executor connection deadlocked rollouts (alpha 2026-10-02). Distinct
+/// from `crate::dispatch::handle_delivered`'s per-message dead-letter ERROR
+/// log: that one only fires when work is actually waiting to dispatch, so
+/// an idle stage with zero executors and nothing queued would otherwise go
+/// unlogged indefinitely. Runs for the lifetime of the process -- like
+/// `run_heartbeat`, it is not wired to `shutdown` and simply stops when the
+/// runtime does. `period` is a parameter (production wiring always passes
+/// [`ZERO_EXECUTOR_WATCHDOG_PERIOD`]) purely so tests can use a short tick
+/// instead of waiting out the real 60s cadence.
+pub async fn run_zero_executor_watchdog(
+    registry: Arc<ConnectionRegistry>,
+    grace: Duration,
+    period: Duration,
+) {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let outage = registry.duration_without_executor();
+        if outage >= grace {
+            let outage_s = outage.as_secs();
+            let grace_s = grace.as_secs();
+            tracing::error!(
+                no_executor_for_s = outage_s,
+                grace_s,
+                "no executor connection for {outage_s}s, past the {grace_s}s grace period -- \
+                 dispatch is dead-lettering all work for redelivery"
+            );
+        }
     }
 }
 
@@ -503,6 +1058,7 @@ pub async fn serve(
     registry: Arc<ConnectionRegistry>,
     capabilities: Arc<dyn CapabilityHandler>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    metrics: crate::telemetry::HostApiMetrics,
 ) -> Result<(), HostApiError> {
     let server_config = build_server_config(&cli)?;
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
@@ -515,6 +1071,17 @@ pub async fn serve(
         memory_mb: 64,
         max_concurrent_calls: 32,
     };
+    let heartbeat_interval = cli.heartbeat_interval();
+    let io_limits = HostApiLimits::from_cli(&cli);
+    // Bounds simultaneously accepted connections (each holds a task, a TLS
+    // session and a bounded writer channel); the permit is held for the
+    // connection's whole lifetime.
+    let connection_permits = Arc::new(Semaphore::new(cli.host_api_max_connections));
+    tokio::spawn(run_zero_executor_watchdog(
+        Arc::clone(&registry),
+        cli.executor_grace(),
+        ZERO_EXECUTOR_WATCHDOG_PERIOD,
+    ));
 
     loop {
         tokio::select! {
@@ -527,20 +1094,75 @@ pub async fn serve(
                         continue;
                     }
                 };
+                // TCP keepalive (fix/executor-link-heartbeat, alpha
+                // 2026-10-02 incident): the application-level `ping`/`pong`
+                // heartbeat above is the primary detection mechanism, but
+                // OS-level keepalive is cheap defense in depth for the
+                // window before the first heartbeat round trip completes.
+                // A failure to set it is logged, never fatal to accepting
+                // the connection.
+                if let Err(e) = SockRef::from(&tcp).set_tcp_keepalive(
+                    &TcpKeepalive::new()
+                        .with_time(heartbeat_interval)
+                        .with_interval(heartbeat_interval),
+                ) {
+                    warn!(%peer, error = %e, "host-api: failed to set TCP keepalive on accepted socket");
+                }
+                let conn_permit = match Arc::clone(&connection_permits).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        metrics.connections_rejected_total.inc();
+                        warn!(
+                            %peer,
+                            max = cli.host_api_max_connections,
+                            "host-api connection rejected: connection cap reached"
+                        );
+                        drop(tcp);
+                        continue;
+                    }
+                };
+                let io_limits = io_limits.clone();
                 let acceptor = acceptor.clone();
                 let registry = Arc::clone(&registry);
                 let capabilities = Arc::clone(&capabilities);
                 let stage_name = "svc-action".to_string();
                 let expected_gvisor = cli.sandbox_gvisor;
                 let limits = limits.clone();
+                let metrics = metrics.clone();
                 tokio::spawn(async move {
-                    match accept_and_handshake(tcp, &acceptor, &stage_name, limits, expected_gvisor, capabilities).await {
+                    let _conn_permit = conn_permit;
+                    match accept_and_handshake(tcp, &acceptor, &stage_name, limits, expected_gvisor, capabilities, io_limits).await {
                         Ok((connection, read_loop)) => {
-                            debug!(%peer, "host-api connection established");
-                            registry.set_active(connection);
-                            if let Err(e) = read_loop.await {
-                                warn!(%peer, error = %e, "host-api connection closed");
+                            connection.set_metrics(metrics.clone());
+                            info!(%peer, "host-api connection established with executor {peer}");
+                            // Own id, not a slot overwrite (regression:
+                            // alpha 2026-10-03 -- see `ConnectionRegistry`'s
+                            // doc): this session's own teardown below
+                            // removes only `session_id`, so it can never
+                            // clear a different, still-live session's
+                            // registration out from under it.
+                            let session_id = registry.register(Arc::clone(&connection));
+                            metrics.connected_executors.set(registry.live_count() as i64);
+                            let heartbeat = run_heartbeat(
+                                Arc::clone(&connection),
+                                peer,
+                                heartbeat_interval,
+                                metrics.clone(),
+                            );
+                            tokio::pin!(read_loop);
+                            tokio::pin!(heartbeat);
+                            tokio::select! {
+                                res = &mut read_loop => {
+                                    if let Err(e) = res {
+                                        warn!(%peer, error = %e, "host-api connection closed");
+                                    }
+                                }
+                                _ = &mut heartbeat => {
+                                    warn!(%peer, "host-api connection dropped by heartbeat supervisor");
+                                }
                             }
+                            registry.remove(session_id);
+                            metrics.connected_executors.set(registry.live_count() as i64);
                         }
                         Err(e) => warn!(%peer, error = %e, "host-api handshake failed"),
                     }
@@ -558,6 +1180,50 @@ mod tests {
     use penguin_bundle_host::wire::{
         HelloBody, HelloLimits, InvokeBody, LoadBody, LoadLimits, LoadedBody, SandboxInfo,
     };
+
+    /// A permissive [`bundle_capability_gate::CapabilityGate`] for this
+    /// module's `StageCapabilities` construction sites -- these tests
+    /// exercise the host-API connection/frame layer, not the gate itself
+    /// (`crate::capabilities`'s own tests cover that), so every relevant
+    /// permission is pre-granted here.
+    fn test_gate() -> Arc<bundle_capability_gate::CapabilityGate> {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        let mut grants = std::collections::HashMap::new();
+        for id in [
+            "platform.context",
+            "platform.clock",
+            "platform.log",
+            "storage.kv",
+            "chat.send:twitch",
+            "chat.send:discord",
+        ] {
+            grants.insert(
+                id.to_string(),
+                bundle_capability_gate::GrantedPermission {
+                    permission_id: id.to_string(),
+                    params: serde_json::json!({}),
+                },
+            );
+        }
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 7,
+                community_id: 0,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: 1,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants,
+            },
+        );
+        Arc::new(bundle_capability_gate::CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ))
+    }
 
     fn test_limits() -> HelloLimits {
         HelloLimits {
@@ -753,7 +1419,7 @@ mod tests {
 
         let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
         let egress = Arc::new(crate::egress::EgressGuard::new(
-            Arc::new(crate::egress::ReqwestTransport),
+            Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
                 allow_private_hosts: false,
                 rate_limit_rps: 10,
@@ -761,6 +1427,8 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -770,10 +1438,14 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            test_gate(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -871,6 +1543,8 @@ mod tests {
 
         let loaded = connection
             .request(Message::Load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.bot.commands.default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),
@@ -901,6 +1575,9 @@ mod tests {
                     community: None,
                     app_id: "waddles.bot.commands.default".to_string(),
                     origin_channel_id: None,
+                    tenant_id: 7,
+                    community_id: 0,
+                    app_version: 1,
                 },
             )
             .await
@@ -957,7 +1634,7 @@ mod tests {
         let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
         let relay_queue = Arc::new(RecordingRelayQueue::default());
         let egress = Arc::new(crate::egress::EgressGuard::new(
-            Arc::new(crate::egress::ReqwestTransport),
+            Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
                 allow_private_hosts: false,
                 rate_limit_rps: 10,
@@ -965,6 +1642,8 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -987,10 +1666,14 @@ mod tests {
                 self.0.lpush(key, value)
             }
         }
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             SharedQueue(Arc::clone(&relay_queue)),
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            test_gate(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -1086,6 +1769,8 @@ mod tests {
 
         connection
             .request(Message::Load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.bot.commands.default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),
@@ -1115,6 +1800,9 @@ mod tests {
                     community: Some("main".to_string()),
                     app_id: "waddles.bot.commands.default".to_string(),
                     origin_channel_id: None,
+                    tenant_id: 7,
+                    community_id: 0,
+                    app_version: 1,
                 },
             )
             .await
@@ -1162,7 +1850,7 @@ mod tests {
 
         let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
         let egress = Arc::new(crate::egress::EgressGuard::new(
-            Arc::new(crate::egress::ReqwestTransport),
+            Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
                 allow_private_hosts: false,
                 rate_limit_rps: 10,
@@ -1170,6 +1858,8 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -1179,10 +1869,14 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            test_gate(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -1266,7 +1960,7 @@ mod tests {
 
         let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
         let egress = Arc::new(crate::egress::EgressGuard::new(
-            Arc::new(crate::egress::ReqwestTransport),
+            Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
                 allow_private_hosts: false,
                 rate_limit_rps: 10,
@@ -1274,6 +1968,8 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -1283,10 +1979,14 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            test_gate(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -1408,6 +2108,9 @@ mod tests {
                     community: None,
                     app_id: "waddles.bot.commands.default".to_string(),
                     origin_channel_id: None,
+                    tenant_id: 7,
+                    community_id: 0,
+                    app_version: 1,
                 },
             ),
             connection.invoke(
@@ -1424,6 +2127,9 @@ mod tests {
                     community: None,
                     app_id: "waddles.bot.commands.default".to_string(),
                     origin_channel_id: None,
+                    tenant_id: 7,
+                    community_id: 0,
+                    app_version: 1,
                 },
             ),
         );
@@ -1442,7 +2148,7 @@ mod tests {
     #[tokio::test]
     async fn connection_registry_returns_the_active_connection() {
         let (_a, _b) = tokio::io::duplex(1024);
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn = Connection::new(tx);
         let registry = ConnectionRegistry::new();
         registry.set_active(Arc::clone(&conn));
@@ -1451,12 +2157,418 @@ mod tests {
 
     #[tokio::test]
     async fn connection_registry_hides_a_closed_connection() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let conn = Connection::new(tx);
         conn.closed.store(true, Ordering::Release);
         let registry = ConnectionRegistry::new();
         registry.set_active(conn);
         assert!(registry.active().is_none());
+    }
+
+    #[test]
+    fn connection_registry_duration_without_executor_grows_while_none_is_active() {
+        let registry = ConnectionRegistry::new();
+        let first = registry.duration_without_executor();
+        assert!(first < Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(20));
+        let second = registry.duration_without_executor();
+        assert!(second > first);
+    }
+
+    #[tokio::test]
+    async fn connection_registry_resets_duration_once_an_executor_connects() {
+        let registry = ConnectionRegistry::new();
+        let _ = registry.duration_without_executor();
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(registry.duration_without_executor() > Duration::ZERO);
+        let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        registry.set_active(Connection::new(tx));
+        assert_eq!(registry.duration_without_executor(), Duration::ZERO);
+    }
+
+    // regression: svc reported zero executors while holding a live session
+    // after reconnect (alpha 2026-10-03) -- the following four tests
+    // exercise the `ConnectionRegistry` map-of-sessions fix directly: a
+    // superseding/closed session must never clear a different, still-live
+    // session's registration.
+
+    /// (a) Session A connects, B connects, A closes: B must still be
+    /// registered, `live_count` must read 1, and `active` (dispatch's
+    /// session pick) must be B -- never `None`.
+    #[tokio::test]
+    async fn registry_keeps_a_live_session_when_a_different_one_is_removed() {
+        let registry = ConnectionRegistry::new();
+        let (tx_a, _rx_a) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let conn_a = Connection::new(tx_a);
+        let id_a = registry.register(Arc::clone(&conn_a));
+
+        let (tx_b, _rx_b) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let conn_b = Connection::new(tx_b);
+        registry.register(Arc::clone(&conn_b));
+
+        // A's own teardown removes only its own id.
+        conn_a.mark_closed();
+        registry.remove(id_a);
+
+        assert_eq!(registry.live_count(), 1);
+        let active = registry.active().expect("B is still live");
+        assert!(Arc::ptr_eq(&active, &conn_b), "dispatch must use B");
+    }
+
+    /// (b) A connects, then drops abruptly (no FIN -- it simply never
+    /// answers `ping`): the heartbeat supervisor must declare it dead
+    /// (`mark_closed`) within [`HEARTBEAT_MISSED_LIMIT`] misses, pruning it
+    /// to `live_count() == 0`, and the zero-executor watchdog must then
+    /// fire `ERROR`.
+    #[tokio::test]
+    async fn heartbeat_drops_a_silent_session_and_watchdog_errors() {
+        // Dropping the receiver end closes the channel, so every `ping`'s
+        // `send` fails immediately -- simulating a half-open peer that
+        // never replies, without waiting out real per-ping timeouts.
+        let (tx, rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        drop(rx);
+        let conn = Connection::new(tx);
+        let registry = Arc::new(ConnectionRegistry::new());
+        let id = registry.register(Arc::clone(&conn));
+        assert_eq!(registry.live_count(), 1);
+
+        let metrics = crate::telemetry::register_host_api_metrics(&prometheus::Registry::new());
+        run_heartbeat(
+            Arc::clone(&conn),
+            "127.0.0.1:1".parse().unwrap(),
+            Duration::from_millis(5),
+            metrics,
+        )
+        .await;
+        assert!(conn.is_closed(), "heartbeat must mark the session closed");
+
+        // The owning accept task's teardown removes its own id once the
+        // heartbeat future wins the `tokio::select!` race.
+        registry.remove(id);
+        assert_eq!(registry.live_count(), 0);
+
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _guard = tracing::subscriber::set_default(ErrorCountingSubscriber(Arc::clone(&count)));
+        let watchdog = tokio::spawn(run_zero_executor_watchdog(
+            Arc::clone(&registry),
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+        ));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        watchdog.abort();
+        assert!(count.load(Ordering::SeqCst) >= 1);
+    }
+
+    /// (c) Two concurrent live sessions: selection is stable -- the newest
+    /// (highest-id) session is picked, and repeated calls to `active()`
+    /// keep returning the same one while both remain live.
+    #[tokio::test]
+    async fn registry_selection_is_stable_across_two_concurrent_sessions() {
+        let registry = ConnectionRegistry::new();
+        let (tx_a, _rx_a) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let conn_a = Connection::new(tx_a);
+        registry.register(Arc::clone(&conn_a));
+
+        let (tx_b, _rx_b) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let conn_b = Connection::new(tx_b);
+        registry.register(Arc::clone(&conn_b));
+
+        assert_eq!(registry.live_count(), 2);
+        let first = registry.active().expect("a live session exists");
+        let second = registry.active().expect("a live session exists");
+        assert!(Arc::ptr_eq(&first, &conn_b), "newest session (B) must win");
+        assert!(
+            Arc::ptr_eq(&second, &conn_b),
+            "selection must be stable across repeated calls while both remain live"
+        );
+    }
+
+    /// (d) The exact alpha 2026-10-03 sequence -- connect, close, reconnect
+    /// -- must leave `live_count() == 1`, with the reconnected session as
+    /// `active`. Before the fix, the single-slot registry could be left
+    /// pointing at the closed first connection with nothing to replace it.
+    #[tokio::test]
+    async fn registry_connect_close_reconnect_leaves_count_one() {
+        let registry = ConnectionRegistry::new();
+
+        let (tx1, _rx1) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let conn1 = Connection::new(tx1);
+        let id1 = registry.register(Arc::clone(&conn1));
+        conn1.mark_closed();
+        registry.remove(id1);
+        assert_eq!(registry.live_count(), 0);
+
+        let (tx2, _rx2) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let conn2 = Connection::new(tx2);
+        registry.register(Arc::clone(&conn2));
+
+        assert_eq!(registry.live_count(), 1);
+        let active = registry.active().expect("the reconnected session is live");
+        assert!(Arc::ptr_eq(&active, &conn2));
+    }
+
+    /// `live_session_ids` reports EVERY live session's id, not just the
+    /// single "newest" `active()` would pick -- the per-session bundle-sync
+    /// fix's actual fan-out target (regression: bundles loaded only onto a
+    /// terminating executor during rollout; live executor got none, alpha
+    /// 2026-10-03).
+    #[tokio::test]
+    async fn live_session_ids_reports_every_live_session_not_just_the_newest() {
+        let registry = ConnectionRegistry::new();
+        let (tx_a, _rx_a) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let id_a = registry.register(Connection::new(tx_a));
+        let (tx_b, _rx_b) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let id_b = registry.register(Connection::new(tx_b));
+
+        let mut ids = registry.live_session_ids();
+        ids.sort_unstable();
+        let mut expected = vec![id_a, id_b];
+        expected.sort_unstable();
+        assert_eq!(ids, expected);
+    }
+
+    /// `get` resolves a live session's connection by id, and fails closed
+    /// (`None`) for an id that was never registered, already removed, or
+    /// has since closed -- the exact lookup
+    /// `bundle_loader::RegistrySink` performs on every `Load`/`Unload`.
+    #[tokio::test]
+    async fn get_resolves_a_live_session_and_fails_closed_otherwise() {
+        let registry = ConnectionRegistry::new();
+        let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let conn = Connection::new(tx);
+        let id = registry.register(Arc::clone(&conn));
+
+        assert!(Arc::ptr_eq(&registry.get(id).expect("live session"), &conn));
+        assert!(registry.get(id + 1).is_none(), "never-registered id");
+
+        conn.mark_closed();
+        assert!(
+            registry.get(id).is_none(),
+            "a closed session must never be resolved, even before pruning"
+        );
+    }
+
+    /// Minimal `tracing::Subscriber` that counts `ERROR`-level events --
+    /// just enough to assert [`run_zero_executor_watchdog`] actually logs,
+    /// without pulling in a test-only tracing-capture crate.
+    struct ErrorCountingSubscriber(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl tracing::Subscriber for ErrorCountingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    // regression: readiness gated on executor connection deadlocked
+    // rollouts (alpha 2026-10-02) -- the periodic watchdog is the loud
+    // signal operators get for an idle stage sitting with zero executors
+    // past the grace period (item 3 of the fix: readiness/liveness no
+    // longer gate on executor presence, so this is the replacement
+    // visibility mechanism).
+    #[tokio::test]
+    async fn zero_executor_watchdog_logs_error_once_past_the_grace_period() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _guard = tracing::subscriber::set_default(ErrorCountingSubscriber(Arc::clone(&count)));
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        assert!(registry.active().is_none()); // establishes `zero_since`
+
+        let watchdog = tokio::spawn(run_zero_executor_watchdog(
+            Arc::clone(&registry),
+            Duration::from_millis(15),
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        watchdog.abort();
+
+        assert!(count.load(Ordering::SeqCst) >= 1);
+    }
+
+    /// The watchdog must stay silent while an executor is connected -- it
+    /// must never fire on a transient/healthy state.
+    #[tokio::test]
+    async fn zero_executor_watchdog_stays_silent_while_executor_connected() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _guard = tracing::subscriber::set_default(ErrorCountingSubscriber(Arc::clone(&count)));
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(test_connection());
+
+        let watchdog = tokio::spawn(run_zero_executor_watchdog(
+            Arc::clone(&registry),
+            Duration::from_millis(5),
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        watchdog.abort();
+
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn connection_registry_dead_letter_metric_is_a_noop_until_wired() {
+        let registry = ConnectionRegistry::new();
+        registry.record_dead_letter_no_executor();
+    }
+
+    #[test]
+    fn connection_registry_dead_letter_metric_increments_once_wired() {
+        let registry = ConnectionRegistry::new();
+        let metrics = crate::telemetry::register_host_api_metrics(&prometheus::Registry::new());
+        registry.set_dead_letter_metric(metrics.dead_lettered_no_executor_total.clone());
+        registry.record_dead_letter_no_executor();
+        registry.record_dead_letter_no_executor();
+        assert_eq!(metrics.dead_lettered_no_executor_total.get(), 2);
+    }
+
+    /// `Message::Ping` sent by the executor must be answered with `Pong`,
+    /// not treated as the fatal "unexpected frame" every other unhandled
+    /// kind is.
+    #[tokio::test]
+    async fn stage_replies_pong_to_an_executor_initiated_ping() {
+        let (stage_io, mut executor_io) = tokio::io::duplex(4096);
+        let executor = tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(1, Message::Hello(hello_body("runc"))),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap(); // hello-ok
+            write_frame(&mut executor_io, &Frame::new(42, Message::Ping))
+                .await
+                .unwrap();
+            let pong = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(pong.message, Message::Pong));
+            assert_eq!(pong.id, 42);
+        });
+        let (_connection, read_loop) = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        let read_loop_handle = tokio::spawn(read_loop);
+        executor.await.expect("executor task");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), read_loop_handle).await;
+    }
+
+    /// `Connection::ping` succeeds end to end when the peer actually
+    /// answers `pong`.
+    #[tokio::test]
+    async fn connection_ping_succeeds_when_peer_replies_pong() {
+        let (stage_io, mut executor_io) = tokio::io::duplex(4096);
+        let executor = tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(1, Message::Hello(hello_body("runc"))),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap(); // hello-ok
+            let ping = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(ping.message, Message::Ping));
+            write_frame(&mut executor_io, &Frame::new(ping.id, Message::Pong))
+                .await
+                .unwrap();
+        });
+        let (connection, read_loop) = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+        connection
+            .ping(Duration::from_secs(2))
+            .await
+            .expect("ping succeeds when the peer replies pong");
+        executor.await.expect("executor task");
+    }
+
+    /// **regression: executor stuck on terminated svc pod after rollout
+    /// (alpha 2026-10-02).** A session whose peer goes silent after the
+    /// handshake (the same shape a half-open socket takes: frames queue,
+    /// nobody ever replies) must be dropped by [`run_heartbeat`] after
+    /// [`HEARTBEAT_MISSED_LIMIT`] consecutive missed heartbeats, marking
+    /// the connection closed and incrementing `host_api_heartbeat_
+    /// timeouts_total` -- loudly, not silently left "connected" forever.
+    #[tokio::test]
+    async fn run_heartbeat_drops_a_silent_session_after_missed_limit() {
+        let (stage_io, mut executor_io) = tokio::io::duplex(4096);
+        // Drives the handshake CONCURRENTLY with `run_connection` below
+        // (not inline, sequentially) -- awaiting the executor's own
+        // `hello`/`hello-ok` exchange before `run_connection` has even
+        // been called would deadlock: nothing would be reading `stage_io`
+        // yet to produce the `hello-ok` this task waits on.
+        let executor = tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(1, Message::Hello(hello_body("runc"))),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+            // Goes silent from here on -- it never answers any `ping` the
+            // heartbeat supervisor sends, exactly like a half-open socket
+            // pointed at a terminated pod. Keeps `executor_io` alive
+            // (never dropped) for the rest of the test so the pipe stays
+            // open rather than EOF-ing the read loop.
+            std::future::pending::<()>().await;
+        });
+
+        let (connection, read_loop) = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let metrics = crate::telemetry::register_host_api_metrics(&prometheus::Registry::new());
+        let peer: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        run_heartbeat(
+            Arc::clone(&connection),
+            peer,
+            Duration::from_millis(50),
+            metrics.clone(),
+        )
+        .await;
+
+        assert!(connection.is_closed());
+        assert_eq!(metrics.heartbeat_timeouts_total.get(), 1);
+        executor.abort();
     }
 
     fn write_temp_pem(contents: &str, label: &str) -> std::path::PathBuf {
@@ -1587,6 +2699,7 @@ mod tests {
                 test_limits(),
                 false,
                 Arc::new(DenyAllCapabilities),
+                HostApiLimits::default(),
             )
             .await
             .expect("handshake succeeds");
@@ -1632,5 +2745,169 @@ mod tests {
         let _ = std::fs::remove_file(&ca_path);
         let _ = std::fs::remove_file(&server_cert_path);
         let _ = std::fs::remove_file(&server_key_path);
+    }
+
+    /// A full bounded writer channel applies BACKPRESSURE: the producer
+    /// awaits capacity (does not complete, does not grow the queue) until
+    /// the consumer drains a slot, then completes. Counted in
+    /// `host_api_writer_backpressure_total`.
+    #[tokio::test]
+    async fn bounded_writer_channel_applies_backpressure_when_full() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let conn = Connection::with_limits(
+            tx,
+            &HostApiLimits {
+                writer_channel_capacity: 2,
+                writer_send_timeout: Duration::from_secs(30),
+                max_concurrent_host_calls: 8,
+            },
+        );
+        let registry = prometheus::Registry::new();
+        let metrics = crate::telemetry::register_host_api_metrics(&registry);
+        conn.set_metrics(metrics.clone());
+
+        conn.send(Frame::new(1, Message::Ping)).await.unwrap();
+        conn.send(Frame::new(2, Message::Ping)).await.unwrap();
+        assert_eq!(metrics.writer_backpressure_total.get(), 0);
+
+        let producer = {
+            let conn = Arc::clone(&conn);
+            tokio::spawn(async move { conn.send(Frame::new(3, Message::Ping)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !producer.is_finished(),
+            "producer must await capacity while the bounded channel is full"
+        );
+        assert_eq!(metrics.writer_backpressure_total.get(), 1);
+
+        // Drain one slot -> the blocked producer completes successfully.
+        assert_eq!(rx.recv().await.unwrap().id, 1);
+        producer.await.unwrap().expect("send completes after drain");
+        assert_eq!(rx.recv().await.unwrap().id, 2);
+        assert_eq!(rx.recv().await.unwrap().id, 3);
+        assert_eq!(metrics.writer_shed_total.get(), 0);
+    }
+
+    /// A consumer that never drains must not stall a producer forever nor
+    /// grow memory: past the send timeout the frame is shed loudly with
+    /// `WriterBackpressure` and `host_api_writer_shed_total` increments.
+    #[tokio::test]
+    async fn stuck_writer_sheds_frame_after_send_timeout_with_metric() {
+        let (tx, _rx) = mpsc::channel(1);
+        let conn = Connection::with_limits(
+            tx,
+            &HostApiLimits {
+                writer_channel_capacity: 1,
+                writer_send_timeout: Duration::from_millis(50),
+                max_concurrent_host_calls: 8,
+            },
+        );
+        let registry = prometheus::Registry::new();
+        let metrics = crate::telemetry::register_host_api_metrics(&registry);
+        conn.set_metrics(metrics.clone());
+
+        conn.send(Frame::new(1, Message::Ping)).await.unwrap();
+        let err = conn.send(Frame::new(2, Message::Ping)).await.unwrap_err();
+        assert!(
+            matches!(err, HostApiError::WriterBackpressure { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(metrics.writer_shed_total.get(), 1);
+
+        let err = conn.try_send(Frame::new(3, Message::Ping)).unwrap_err();
+        assert!(matches!(
+            err,
+            HostApiError::WriterBackpressure { waited_ms: 0 }
+        ));
+        assert_eq!(metrics.writer_shed_total.get(), 2);
+    }
+
+    /// The per-connection host-call concurrency cap sheds the excess with
+    /// an `overloaded` error reply (never a silent drop, never an
+    /// unbounded spawn) and `host_api_host_calls_shed_total` increments;
+    /// once a permit frees up the next call is serviced normally.
+    #[tokio::test]
+    async fn host_call_concurrency_cap_sheds_excess_with_overloaded_reply() {
+        let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
+        let limits = HostApiLimits {
+            writer_channel_capacity: 16,
+            writer_send_timeout: Duration::from_secs(5),
+            max_concurrent_host_calls: 1,
+        };
+        let stage = tokio::spawn(async move {
+            run_connection_with_limits(
+                stage_io,
+                HelloOkBody {
+                    stage: "svc-action".to_string(),
+                    protocol_version: 1,
+                    limits: test_limits(),
+                },
+                false,
+                Arc::new(DenyAllCapabilities),
+                limits,
+            )
+            .await
+        });
+
+        let mut io = executor_io;
+        write_frame(&mut io, &Frame::new(1, Message::Hello(hello_body("runc"))))
+            .await
+            .unwrap();
+        let hello_ok = read_frame(&mut io).await.unwrap();
+        assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+        let (connection, read_loop) = stage.await.unwrap().expect("handshake succeeds");
+        let read_loop = tokio::spawn(read_loop);
+
+        let registry = prometheus::Registry::new();
+        let metrics = crate::telemetry::register_host_api_metrics(&registry);
+        connection.set_metrics(metrics.clone());
+
+        let call = |id: u64| {
+            Frame::new(
+                id,
+                Message::HostCall(penguin_bundle_host::wire::HostCallBody {
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    capability: penguin_bundle_host::wire::CapabilityKind::Clock,
+                    op: "now-millis".to_string(),
+                    args: serde_json::json!({}),
+                    call_id: 9999,
+                }),
+            )
+        };
+
+        // Saturate the single permit, standing in for one in-flight slow
+        // host-call handler.
+        let held = Arc::clone(&connection.host_call_permits)
+            .try_acquire_owned()
+            .expect("the single permit is free");
+
+        write_frame(&mut io, &call(10)).await.unwrap();
+        let shed = read_frame(&mut io).await.unwrap();
+        assert_eq!(shed.id, 10);
+        match shed.message {
+            Message::HostResult(b) => {
+                assert_eq!(b.error.expect("shed reply is an error").code, "overloaded")
+            }
+            other => panic!("expected host-result, got {other:?}"),
+        }
+        assert_eq!(metrics.host_calls_shed_total.get(), 1);
+
+        // Permit released -> the same call is now handled (unknown_invoke,
+        // since no invoke is in flight) instead of shed.
+        drop(held);
+        write_frame(&mut io, &call(11)).await.unwrap();
+        let handled = read_frame(&mut io).await.unwrap();
+        match handled.message {
+            Message::HostResult(b) => assert_eq!(
+                b.error.expect("unregistered call_id is refused").code,
+                "unknown_invoke"
+            ),
+            other => panic!("expected host-result, got {other:?}"),
+        }
+        assert_eq!(metrics.host_calls_shed_total.get(), 1);
+
+        drop(io);
+        let _ = tokio::time::timeout(Duration::from_secs(2), read_loop).await;
     }
 }

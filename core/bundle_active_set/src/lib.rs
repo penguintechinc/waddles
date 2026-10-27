@@ -51,25 +51,48 @@
 //! `tenants`/`communities` (migration `058_tenants_and_claims.sql`) are the
 //! same tables hub-api's own auth chain reads (`hub_api/app.py::
 //! _bind_reference_tables`) -- `crate::scope::resolve_scope` reads them to
-//! translate the numeric `BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID`
-//! scope into the tenant slug/community name `penguin_spine::Scope` needs.
+//! translate a `(tenant_id, community_id)` scope (discovered per-scope by
+//! the multi-tenant change-log consumer, `crate::changelog`) into the
+//! tenant slug/community name `penguin_spine::Scope` needs.
 //!
 //! `app_catalog` itself is never queried directly by this crate (only
 //! joined-through via `app_id` FKs already resolved on the rows it does
 //! read), so it needs no grant here.
 
 pub mod bindings;
+pub mod changelog;
 pub mod diff;
 pub mod entities;
+pub mod full_sync;
+pub mod multi_tenant;
 pub mod query;
 pub mod reader;
 pub mod scope;
+pub mod session_sync;
+pub mod snapshot;
 
 pub use bindings::{read_source_bindings, SourceBinding};
-pub use diff::{plan, DiffPlan};
+pub use changelog::{
+    affected_scopes, probe_min_retained_seq_supported, read_changes, read_safe_seq,
+    read_safe_seq_watermark, ChangeLogTracker, ChangeRow, SafeSeqWatermark,
+};
+pub use diff::{plan, plan_scoped, DiffPlan, ScopedDiffPlan};
+pub use full_sync::{
+    any_session_diverged, digest_prefix, loaded_state_diverged, session_loaded_state_diverged,
+    should_send_full_sync, FullSyncReason,
+};
+pub use multi_tenant::{
+    read_active_set_all, read_source_bindings_all, scoped_active_rows, tenant_active_app_counts,
+    AppScope, ScopeKey,
+};
 pub use query::{
-    derive_component_keys, read_active_set, read_watermark, ActiveBundleRow, ActiveSetError,
-    ActiveSetRead, DegradedReason, ExclusionReason, Watermark, WatermarkTracker,
+    canonical_digest, derive_component_keys, read_active_set, read_watermark, ActiveBundleRow,
+    ActiveSetError, ActiveSetRead, DegradedReason, DigestError, ExclusionReason, Watermark,
+    WatermarkTracker,
 };
 pub use reader::ReaderConfig;
 pub use scope::{resolve_scope, ResolvedScope};
+pub use session_sync::{
+    pick_session_with_digest, plan_sessions, SessionId, SessionLoaded, SessionSyncPlan,
+};
+pub use snapshot::ActiveVersionSnapshot;

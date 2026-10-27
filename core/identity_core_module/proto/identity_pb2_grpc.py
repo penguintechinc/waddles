@@ -80,8 +80,9 @@ def add_IdentityServiceServicer_to_server(servicer, server):
     server.add_generic_rpc_handlers((generic_handler,))
     server.add_registered_method_handlers('waddlebot.identity.IdentityService', rpc_method_handlers)
 
-
  # This class is part of an EXPERIMENTAL API.
+
+
 class IdentityService(object):
     """Missing associated documentation comment in .proto file."""
 

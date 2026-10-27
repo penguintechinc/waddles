@@ -18,5 +18,7 @@ pub mod app_active_versions;
 pub mod app_install_approvals;
 pub mod app_source_bindings;
 pub mod app_versions;
+pub mod bundle_active_set_changes;
+pub mod bundle_active_set_watermark;
 pub mod communities;
 pub mod tenants;

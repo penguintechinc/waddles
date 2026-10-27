@@ -1,23 +1,29 @@
-# feature/e2e-helm-rust-dataplane -- Rust svc-ingest (core/svc_ingest, M5-blocked skeleton
-# today) Deployment, ADDITIVE to templates/svc-ingest.yaml's Python Deployment -- never
+# feature/e2e-helm-rust-dataplane -- Rust svc-ingest (core/svc_ingest, full receiver stack
+# implemented; INERT unless the PostHog flag waddles.core.rust-data-plane is ON -- see
+# pipeline.rustDataPlane in values.yaml) Deployment, ADDITIVE to templates/svc-ingest.yaml's Python Deployment -- never
 # replaces it. Gated on the top-level pipeline.rustDataPlane.enabled flag (default false)
 # plus this stage's own .enabled sub-flag, so flipping the parent flag alone doesn't force
 # every stage on.
 #
-# Resource name carries a `-rust` suffix (see pipeline.rustDataPlane's values.yaml comment
-# for why) even though the image repository:tag below (waddlebot.legacyModuleImage,
-# module "svc-ingest") is the exact same one templates/svc-ingest.yaml's Python Deployment
-# already uses -- core/svc_ingest/Dockerfile.rust's own build comment tags the Rust image
-# with that identical repo:tag (M6 cutover-in-place convention), so an operator doing the
-# e2e cutover builds+pushes the Rust image over that tag and disables the Python
-# Deployment (pipeline.svcIngest.enabled=false) alongside enabling this one.
+# fix/helm-alpha-self-provisioning -- Resource name carries a `-rust` suffix (see
+# pipeline.rustDataPlane's values.yaml comment for why), AND the image repository below
+# (waddlebot.legacyModuleImage, module rustDataPlane.svcIngest.imageRepository, default
+# "svc-ingest-rust") is now a DISTINCT repository from templates/svc-ingest.yaml's Python
+# Deployment (module "svc-ingest") -- previously both resolved to the identical
+# repository:tag, which broke the documented alpha COEXISTENCE state (both Deployments
+# enabled simultaneously, see pipeline.rustDataPlane's values-alpha.yaml comment): whichever
+# image was pushed to that shared tag last silently became what BOTH Deployments ran.
+# core/svc_ingest/Dockerfile.rust's own build-tag comment predates this split and should be
+# updated to build+push "svc-ingest-rust" going forward.
 #
-# KNOWN GAP: core/svc_ingest/src/config.rs has no VALKEY_URL/DB/Discord+Twitch receiver-
-# credential fields yet (TODO(M5)) -- the env below is wired ahead of that landing so no
-# further chart change is needed once M5 lands; until then these are harmless extra env
-# vars clap silently ignores. No DB -- this stage owns no tables (config.rs's own doc
-# comment), so unlike svc-process-rust/svc-action-rust there is no db-migrate initContainer
-# here.
+# CURRENT STATE: core/svc_ingest is implemented -- native Twitch IRC, Discord Gateway,
+# Twitch EventSub (HMAC-verified), and Twitch/Discord outbound drains. Valkey is read from
+# VALKEY_URL via penguin_spine::SpineConfig::from_env(); receiver tokens come from its Config.
+# The stage is inert until the PostHog flag waddles.core.rust-data-plane is ON (default OFF,
+# fail-closed). Remaining gaps: no Slack/YouTube/Kick/Spectrum receivers (TODO(M5)), static
+# single-source config, no host-API listener. No DB -- this stage owns no tables (config.rs's
+# own doc comment), so unlike svc-process-rust/svc-action-rust there is no db-migrate
+# initContainer here.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcIngest.enabled }}
 ---
 apiVersion: apps/v1
@@ -28,27 +34,47 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-ingest-rust
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcIngestRust")) }}
   replicas: {{ .Values.pipeline.rustDataPlane.svcIngest.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: svc-ingest-rust
   template:
     metadata:
+      annotations:
+        # fix/valkey-cert-rollout-and-migrate-wait -- see templates/infrastructure/
+        # redis.yaml's identical annotation comment; rolls this client pod in lockstep
+        # with the Valkey server on any identity/SAN change.
+        # regression: valkey cert regenerated but server pod not rolled; clients BadSignature (alpha 2026-10-02)
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}
+        {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-ingest-rust
     spec:
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      # feature/svc-ingest-connections-scope -- dedicated identity so hub-api's TokenReview-backed
+      # machine-JWT bootstrap can tell this pod from every other workload in the namespace
+      # (templates/service-jwt-rbac.yaml; serviceJwt.identities.svc-ingest, scope
+      # connections:resolve only) -- same pattern as svc-action/svc-process/svc-presentation.
+      serviceAccountName: svc-ingest
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own
+      # /ready before this pod's main container starts (see _helpers.tpl).
+      initContainers:
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-ingest-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-ingest" "imageTag" .Values.global.imageTag) }}"
-        # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same line
-        # for the node-image-cache rationale (identical here).
-        imagePullPolicy: Always
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcIngest.imageRepository | default "svc-ingest-rust") "imageTag" .Values.global.imageTag) }}"
+        # Values-driven -- see templates/svc-process-rust.yaml's comment on this same line
+        # for why the old hardcoded Always was removed (identical here).
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_ingest/
         # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
         # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
@@ -73,6 +99,10 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_ingest;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_ingest") | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.port | quote }}
         - name: METRICS_PORT
@@ -81,13 +111,36 @@ spec:
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        # Machine-JWT bootstrap for hub-api's internal provider-connections routes. The endpoint
+        # defaults to hub-api's own in-cluster Service (same default as svc-action/svc-process).
+        # The audience-scoped projected token is mounted below -- NOT the generic k8s SA token
+        # path (wrong audience; hub-api's TokenReview would reject it).
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        # waddles.ingest-dynamic-connections env baseline: svc-ingest resolves each event's
+        # guild/channel to a numeric scope via hub-api and stamps schema-v3 envelopes (an
+        # unresolvable source is dropped, never defaulted). Rendered only with the grant above.
+        - name: INGEST_DYNAMIC_CONNECTIONS
+          value: "true"
+        - name: WADDLES_ENVIRONMENT
+          value: {{ .Values.global.environment | default "alpha" | quote }}
+        # Per-community Twitch sessions (INGEST_DYNAMIC_CONNECTIONS ON): reconcile cadence and
+        # the per-call hub-api resolve/list timeout. The static TWITCH_IRC_NICK/TWITCH_IRC_CHANNEL
+        # pair is deliberately never rendered here -- with the flag ON it is a FATAL conflict.
+        - name: TWITCH_RECONCILE_INTERVAL_SECS
+          value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchReconcileIntervalSecs | default 60 | quote }}
+        - name: TWITCH_RESOLVE_TIMEOUT_SECS
+          value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchResolveTimeoutSecs | default 10 | quote }}
+        {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid }}
         - name: ENVELOPE_BINDING_ACTIVE_KID
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid | quote }}
         {{- end }}
-        # Forward-compatible only until core/svc_ingest's M5 connector/intake work lands
-        # (see file header KNOWN GAP) -- same Secret keys the Python svc-ingest Deployment
-        # already reads (templates/svc-ingest.yaml).
+        # Valkey and receiver credentials consumed by core/svc_ingest (see file header) --
+        # same Secret keys the Python svc-ingest Deployment already reads (templates/svc-ingest.yaml).
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # fix/valkey-tls-alpha -- see templates/svc-process-rust.yaml's comment on this same
         # override block for the full rationale (identical here). Stays a secretKeyRef
@@ -99,18 +152,18 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
+              key: VALKEY_DURABLE_URL_TLS
         - name: VALKEY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: REDIS_PASSWORD
+              key: VALKEY_DURABLE_PASSWORD
         {{- else }}
         - name: VALKEY_URL
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL
+              key: VALKEY_DURABLE_URL
         {{- end }}
         - name: SECRET_KEY
           valueFrom:
@@ -119,20 +172,36 @@ spec:
               key: SECRET_KEY
         - name: WADDLES_AI_ENABLED
           value: {{ .Values.pipeline.hubApi.aiEnabled | quote }}
+        # fix/helm-platform-credentials -- sourced from the operator-managed
+        # platform-credentials Secret, never the chart-rendered `-secrets`
+        # Secret (see docs/PLATFORM_CREDENTIALS.md); `optional: true` so an
+        # unconfigured platform doesn't block scheduling -- config.rs must
+        # fail fast at startup if a *required* one is absent instead of
+        # connecting with an empty/garbage credential.
         - name: DISCORD_BOT_TOKEN
           valueFrom:
             secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: DISCORD_BOT_TOKEN
-        - name: TWITCH_OAUTH_TOKEN
+              optional: true
+        # fix/helm-platform-credentials -- env var NAME corrected to
+        # TWITCH_IRC_OAUTH_TOKEN, the one core/svc_ingest/src/config.rs
+        # actually reads (`std::env::var("TWITCH_IRC_OAUTH_TOKEN")`); the
+        # previous `TWITCH_OAUTH_TOKEN` name meant this Rust receiver never
+        # saw the value regardless of what Helm rendered. Secret key name
+        # (TWITCH_OAUTH_TOKEN) is unchanged for continuity with the
+        # operator-facing platform-credentials Secret.
+        - name: TWITCH_IRC_OAUTH_TOKEN
           valueFrom:
             secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: TWITCH_OAUTH_TOKEN
+              optional: true
         - name: TWITCH_NICK
           value: {{ .Values.oauth.twitch.nick | default "" | quote }}
         - name: TWITCH_CHANNELS
           value: {{ .Values.oauth.twitch.channels | default "" | quote }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -142,8 +211,14 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
+          # /readyz (not /healthz, which is a bare always-ok liveness probe
+          # mistakenly wired here) reflects whether every enabled receiver
+          # (Discord gateway, Twitch IRC) has actually connected to the
+          # spine -- regression: a one-shot valkey probe used to leave this
+          # pod Running 1/1 forever with both receivers permanently
+          # disabled (alpha 2026-10-02).
           httpGet:
-            path: /healthz
+            path: /readyz
             port: http
           initialDelaySeconds: 5
           periodSeconds: 5
@@ -157,9 +232,15 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
+      {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
@@ -185,4 +266,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-ingest-rust
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-ingest-rust" "ports" (list $.Values.pipeline.rustDataPlane.svcIngest.port $.Values.pipeline.rustDataPlane.svcIngest.metricsPort) "runtime" "rust" "binaries" (list "/app/svc-ingest")) }}
 {{- end }}

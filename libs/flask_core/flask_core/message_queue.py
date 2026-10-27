@@ -23,6 +23,8 @@ except ImportError:
     REDIS_AVAILABLE = False
     redis = None
 
+from flask_core.valkey_tls import build_tls_kwargs
+
 logger = logging.getLogger(__name__)
 
 
@@ -95,7 +97,8 @@ class MessageQueue:
                 encoding="utf-8",
                 decode_responses=True,
                 socket_connect_timeout=5,
-                socket_timeout=5
+                socket_timeout=5,
+                **build_tls_kwargs(self.redis_url)
             )
 
             # Test connection

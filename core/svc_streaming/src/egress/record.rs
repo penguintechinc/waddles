@@ -3,7 +3,7 @@
 //! Segments live pipeline output to local disk via ffmpeg's `segment`
 //! muxer ([`RecordSink::ffmpeg_output_args`]), then a background watcher
 //! task ([`egress::record::watcher`]) uploads each closed segment to
-//! S3-compatible object storage (MinIO in this cluster -- see
+//! S3-compatible object storage (SeaweedFS in this cluster -- see
 //! `k8s/helm/waddlebot/templates/svc-streaming.yaml`) via `object_store`,
 //! deleting the local copy once the upload succeeds. See
 //! `docs/plans/2026-09-11-svc-streaming-pipeline-matrix.md` §4 Record + §8
@@ -49,6 +49,7 @@ use tokio::task::JoinHandle;
 use crate::egress::{OutputSink, SinkError};
 use crate::pipeline::model::{ObjectStoreRef, OutputSpec, PipelineId};
 use crate::store::{SecretRef, SecretResolver};
+use crate::telemetry::stream::StreamMetrics;
 
 const DEFAULT_SEGMENT_SECONDS: u64 = 60;
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -72,6 +73,7 @@ pub struct RecordSink {
     store: Arc<dyn ObjectStore>,
     index: RecordingIndex,
     metrics: RecordMetrics,
+    stream_metrics: StreamMetrics,
     free_space_probe: Arc<dyn FreeSpaceProbe>,
     segment_seconds: u64,
     poll_interval: Duration,
@@ -98,6 +100,7 @@ impl RecordSink {
             store,
             index: RecordingIndex::new(),
             metrics,
+            stream_metrics: StreamMetrics::shared(),
             free_space_probe: Arc::new(DfFreeSpaceProbe),
             segment_seconds: DEFAULT_SEGMENT_SECONDS,
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -153,6 +156,14 @@ impl RecordSink {
             Arc::new(s3),
             metrics,
         ))
+    }
+
+    /// Replaces the process-wide stream instruments with an explicit handle
+    /// -- for tests that install their own meter provider.
+    #[must_use]
+    pub fn with_stream_metrics(mut self, stream_metrics: StreamMetrics) -> Self {
+        self.stream_metrics = stream_metrics;
+        self
     }
 
     /// Overrides the free-space probe (defaults to [`DfFreeSpaceProbe`]).
@@ -277,6 +288,7 @@ impl OutputSink for RecordSink {
             store: self.store.clone(),
             index: self.index.clone(),
             metrics: self.metrics.clone(),
+            stream_metrics: self.stream_metrics.clone(),
             free_space_probe: self.free_space_probe.clone(),
             local_root: self.local_root.clone(),
             min_free_bytes: self.min_free_bytes,

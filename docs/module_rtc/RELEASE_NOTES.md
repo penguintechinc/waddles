@@ -130,7 +130,7 @@ Initial documentation package created for Module RTC. This release documents the
    - *Future*: Support multiple LiveKit clusters with load balancing
 
 3. **No Recording**: Recording not yet implemented
-   - *Future*: MinIO integration for recording storage
+   - *Future*: SeaweedFS (S3-compatible) integration for recording storage
 
 4. **No Screen Sharing Annotations**: Screen sharing present but no annotation UI
    - *Future*: Canvas-based annotation layer
@@ -152,7 +152,7 @@ Initial documentation package created for Module RTC. This release documents the
 - Improved error messages and validation
 
 #### Medium-term (v0.3.0)
-- Video recording integration (MinIO backend)
+- Video recording integration (SeaweedFS/S3-compatible backend)
 - Screen sharing with annotations
 - Prometheus metrics export
 - Webhooks for event notifications

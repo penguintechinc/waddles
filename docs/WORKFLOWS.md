@@ -25,7 +25,7 @@ Complete technical reference for Waddles's GitHub Actions CI/CD workflows, cover
 Waddles uses a sophisticated multi-workflow CI/CD pipeline that automates:
 
 - **Container builds** for 24+ microservices modules
-- **Multi-language security scanning** (Python, JavaScript, Go, Kotlin)
+- **Multi-language security scanning** (Python, JavaScript, Go)
 - **Version management** via `.version` file monitoring
 - **Multi-platform builds** (linux/amd64, linux/arm64)
 - **Automated deployments** to Kubernetes clusters
@@ -36,7 +36,6 @@ Waddles uses a sophisticated multi-workflow CI/CD pipeline that automates:
 **Total Workflow Files**: 35+
 - 1 main CI/CD pipeline
 - 24+ individual module builds
-- 5 desktop/mobile builds
 - 5+ infrastructure workflows
 
 ---
@@ -79,7 +78,10 @@ Waddles uses a sophisticated multi-workflow CI/CD pipeline that automates:
 ├── build-spotify-interaction.yml
 ├── build-loyalty-interaction.yml
 │
-├── android.yml                        # Android validation
+├── build-svc-ingest.yml               # Rust data-plane (3 files, `-rust` images)
+├── build-svc-process.yml
+├── build-svc-action.yml
+│
 └── pr-validation.yml                  # Pull request and merge-queue tests
 ```
 
@@ -141,16 +143,7 @@ The comprehensive pipeline that runs security checks, builds containers, and dep
      - Run container security scans
    ```
 
-3. **Android App Build** (parallel with containers)
-   ```yaml
-   android:
-     - Setup JDK 17 and Android SDK
-     - Run tests and lint
-     - Build debug and release APKs
-     - Upload artifacts
-   ```
-
-4. **Pull Request Validation**
+3. **Pull Request Validation**
    ```yaml
    pr-validation:
      - Python unit tests
@@ -260,6 +253,16 @@ inputs:
 - Per-module GitHub Actions cache scopes
 - Build arguments (MODULE_NAME, MODULE_PORT)
 - Automatic tagging based on version and branch
+
+**PR/merge_group path (`build-pr` job)**: `pull_request` and `merge_group`
+events never run `build-platform` (needs `packages: write` to push) --
+instead a dedicated `build-pr` job runs with `permissions: contents: read`
+only, no registry login, single amd64 build (`push: false`, `load: true`),
+followed by a gated Trivy scan (`exit-code: 1`, HIGH/CRITICAL) against the
+locally loaded image. This means a broken build context (e.g. a Dockerfile
+`COPY` of a path that doesn't exist under the declared context -- the bug
+gh-475 fixed for `svc-process`/`svc-action`) now fails the PR outright
+instead of only surfacing on a push to a release branch.
 
 **Example Output**:
 ```
@@ -390,6 +393,20 @@ security-scan:
   - Run Trivy scanner on each image
   - Upload SARIF results to GitHub Security
 ```
+This `security-scan` job is gating at the job level (no `continue-on-error`):
+a scanner, registry-pull or SARIF-upload failure fails the run. Trivy itself
+still reports findings without failing (action default `exit-code: 0`), so CVE
+findings stay advisory here. It needs `merge-manifests`, which is skipped on `pull_request`/`merge_group`
+-- so it never runs on a PR. The actual PR gate is a separate step inside
+`build-platform` itself ("Trivy vulnerability scan (gated, local image)"),
+conditioned on `matrix.platform == 'linux/amd64'` and the PR/merge_group
+events, scanning the image that step's own `load: true` build just produced
+(`exit-code: 1`, HIGH/CRITICAL, `ignore-unfixed: true`). Known limitation:
+because it shares `build-platform` with the push path, the job's token
+still nominally carries `packages: write` during a PR run even though the
+login step is skipped and nothing is pushed -- unlike `build-container.yml`
+and the `build-svc-*.yml` files, which route PR/merge_group to a fully
+separate `contents: read`-only job.
 
 ---
 
@@ -465,6 +482,16 @@ jobs:
 - `build-youtube-music-interaction.yml` - YouTube Music (port 8015)
 - `build-spotify-interaction.yml` - Spotify integration (port 8016)
 - `build-loyalty-interaction.yml` - Loyalty points (port 8017)
+
+**Rust Data-Plane Modules** (3) — `-rust`-suffixed images published alongside
+the still-deployed Python alpha builds; see `core/<module>/Dockerfile.rust`.
+Self-contained (don't call `build-container.yml`) but share its PR-gate
+pattern: push-path `build-platform` builds/pushes multi-arch, PR/merge_group
+route to a separate `build-pr` job (`permissions: contents: read`, no
+login, single amd64 build, gated Trivy scan on the local image):
+- `build-svc-ingest.yml` - `svc-ingest-rust` (port 8200)
+- `build-svc-process.yml` - `svc-process-rust` (port 8201, context `core/`)
+- `build-svc-action.yml` - `svc-action-rust` (port 8202, context `core/`)
 
 ---
 
@@ -635,7 +662,6 @@ npm run lint
 ```yaml
 - name: Run Go vet
   run: go vet ./...
-  working-directory: Premium/Desktop
 
 - name: Run Go fmt check
   run: |
@@ -653,28 +679,6 @@ gosec ./...
 
 # golangci-lint
 golangci-lint run
-```
-
-### Kotlin Security
-
-**Tools**:
-- ktlint: Kotlin linter
-- detekt: Code quality and security
-
-**CI/CD Integration**:
-```yaml
-- name: Run Android lint
-  run: ./gradlew lint
-  working-directory: Premium/Android
-```
-
-**Local Execution**:
-```bash
-# Kotlin linting via ktlint
-ktlint src/
-
-# Detekt for code quality
-detekt -i src/
 ```
 
 ### Container Security
@@ -899,14 +903,14 @@ cache-to: type=gha,mode=max,scope=router
      --wait
    ```
 
-6. **Verify Rollout**
+6. **Verify Rollout** (gating -- a deployment that never becomes ready fails the job)
    ```bash
    kubectl rollout status deployment -n waddlebot --timeout=10m
    kubectl get pods -n waddlebot
    kubectl get deployments -n waddlebot
    ```
 
-7. **Run Smoke Tests**
+7. **Run Smoke Tests** (gating -- `set -euo pipefail`, no `|| echo` / `continue-on-error`)
    ```bash
    # Test router health
    kubectl run curl-test --image=curlimages/curl:latest --rm -i --restart=Never \
@@ -934,17 +938,9 @@ identity-core-xxxxx          2/2     Running   0          2m
 
 ### Desktop and Mobile Builds
 
-**Android Build** (`android.yml`):
-```yaml
-- Setup JDK 17 and Android SDK
-- Cache Gradle packages
-- Run tests: ./gradlew test
-- Run lint: ./gradlew lint
-- Build APKs: ./gradlew assembleDebug assembleRelease
-- Upload artifacts
-```
-
-Legacy desktop workflows were removed when their source projects were retired.
+Mobile and desktop client code no longer lives in this repository: mobile apps
+are owned by `penguinm`, the desktop client by `penguind`. Waddles builds only
+server-side artifacts.
 
 ---
 
@@ -1050,7 +1046,7 @@ jobs:
     # Waits for security to complete
 
   deploy:
-    needs: [containers, android, desktop-bridge]
+    needs: [containers]
     # Waits for all builds to complete
 ```
 
@@ -1113,14 +1109,14 @@ jobs:
 - name: Upload artifacts
   uses: actions/upload-artifact@v3
   with:
-    name: android-apks
-    path: Premium/Android/app/build/outputs/apk/
+    name: build-artifacts
+    path: dist/
 
 # Download in job 2
 - name: Download artifacts
   uses: actions/download-artifact@v3
   with:
-    name: android-apks
+    name: build-artifacts
 ```
 
 ---
@@ -1408,3 +1404,26 @@ gh run view <run-id> --log
 **Module Build Workflows**: 24+
 **Container Platforms**: 2 (amd64, arm64)
 **Security Scanners**: 6 (Trivy, CodeQL, pip-audit, npm audit, gosec, bandit)
+
+## Gate Integrity (Lint / Security Scripts)
+
+`make lint` (`scripts/lint.sh`) and `make test-security` (`scripts/security-scan.sh`)
+share `scripts/lib/checks.sh`. Rules, enforced by
+`scripts/ci/tests/test_checks_gate_integrity.sh` (`make test-gate-integrity`, CI job
+`gate-integrity`):
+
+- A scanner that exits with a code outside its documented "ran to completion" set
+  (`tool_capture`) is a **FAIL**, never "0 findings".
+- A counter that exits non-zero or prints a non-integer is a **FAIL**.
+- Finding counts are compared against the ceilings in `.checks-baseline`; a new
+  finding fails, ceilings only move down, and a run under its ceiling prints a
+  `RATCHET` line to lower it in the same PR.
+- Zero applicable checks, or a missing tool for files that exist, fails the suite.
+- Python unit suites (`hub_api`, `core/workflow_core_module`, `core/community_module`,
+  `libs/*`, `core/svc_ingest|presentation|streaming`) each carry a `.coveragerc` (`fail_under = 90`, tests omitted)
+  and `addopts = --cov ...` in `pytest.ini`, so `make test-unit` / CI fail below 90%
+  line coverage. Use `pytest --no-cov <file>` when iterating on a single test file.
+  `core/svc_action` and `core/svc_process` are not yet wired: touching their directory triggers the Rust
+  workflows, which currently fail `cargo deny` on RUSTSEC-2024-0449 (transitive `unsafe-libyaml` via
+  `penguin-bundle-host`) -- tracked as follow-up.
+  Rust crates gate via `cargo llvm-cov --fail-under-lines 90` (`rust-crate-ci.yml`).

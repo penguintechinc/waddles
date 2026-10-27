@@ -26,8 +26,141 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
 
 use crate::ingest::{Backoff, STABILITY_WINDOW};
+use crate::normalize::{compute_discord_permissions, DiscordPermissions};
 use crate::publish::{deterministic_workstream_id, publish_event, EventAppender};
 use crate::telemetry::ReceiverHealthMetrics;
+
+/// Resolves a Discord guild member's [`DiscordPermissions`] -- split out as
+/// a trait (mirrors [`GatewayChannel`]/[`GatewayConnector`] above) so
+/// [`run_loop`]'s per-message permission lookup is driven by a scripted fake
+/// in tests, never a live Discord REST call. The real implementation
+/// ([`RestPermissionsResolver`]) is the only thing that talks to Discord's
+/// REST API; `penguin_connector_discord::gateway::ChatMessage` carries no
+/// role/permission data of its own -- Discord's `MESSAGE_CREATE` dispatch's
+/// partial `member` object is stripped by the connector crate before
+/// `ChatMessage` is built (confirmed: `penguin-connector-discord`'s own
+/// `ChatMessage` struct has no `member`/`roles` field at the pinned rev), so
+/// this is a deliberate supplementary REST lookup, not plumbing an already
+/// available field through.
+#[allow(async_fn_in_trait)] // pub trait, service binary only -- see `GatewayChannel`'s own doc comment above
+pub trait PermissionsResolver: Send + Sync {
+    /// Resolves `author_id`'s effective permissions within `guild_id`.
+    /// Never fails outward -- any lookup error is caught and logged by the
+    /// implementation, which returns [`DiscordPermissions::default`] (fail
+    /// closed) instead of propagating.
+    async fn resolve(&self, guild_id: &str, author_id: &str) -> DiscordPermissions;
+}
+
+/// The real resolver: two Discord REST calls per guild message --
+/// `GET /guilds/{guild_id}` (owner id + every role's permission bitfield)
+/// and `GET /guilds/{guild_id}/members/{author_id}` (the member's assigned
+/// role ids) -- combined via [`compute_discord_permissions`]. Deliberately
+/// uncached for now (documented follow-up, not a correctness gap): a role
+/// grant/revoke takes effect on this member's very next message instead of
+/// up to a cache TTL later. No request is made at all for a DM (no
+/// `guild_id`) -- see [`run_loop`]'s call site.
+pub struct RestPermissionsResolver {
+    client: reqwest::Client,
+    bot_token: String,
+    api_base: String,
+}
+
+impl RestPermissionsResolver {
+    /// Builds a resolver pointed at `api_base` (normally
+    /// [`penguin_connector_discord::gateway::DEFAULT_API_BASE`]), using
+    /// `bot_token` as the same `Authorization: Bot <token>` credential the
+    /// Gateway connection itself authenticates with.
+    #[must_use]
+    pub fn new(client: reqwest::Client, bot_token: String, api_base: String) -> Self {
+        Self {
+            client,
+            bot_token,
+            api_base,
+        }
+    }
+
+    async fn fetch(&self, guild_id: &str, author_id: &str) -> anyhow::Result<DiscordPermissions> {
+        let guild: serde_json::Value = self
+            .client
+            .get(format!("{}/guilds/{guild_id}", self.api_base))
+            .header("Authorization", format!("Bot {}", self.bot_token))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let owner_id = guild
+            .get("owner_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("guild response missing owner_id"))?;
+        let guild_roles: Vec<(String, u64)> = guild
+            .get("roles")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("guild response missing roles"))?
+            .iter()
+            .filter_map(|role| {
+                let id = role.get("id")?.as_str()?.to_string();
+                // Discord stringifies the permission bitfield (avoids JS
+                // 53-bit integer precision loss on their end) -- parse it
+                // back into a `u64` here.
+                let permissions: u64 = role.get("permissions")?.as_str()?.parse().ok()?;
+                Some((id, permissions))
+            })
+            .collect();
+
+        let member: serde_json::Value = self
+            .client
+            .get(format!(
+                "{}/guilds/{guild_id}/members/{author_id}",
+                self.api_base
+            ))
+            .header("Authorization", format!("Bot {}", self.bot_token))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        // The member's assigned roles, plus the implicit `@everyone` role
+        // (id == guild id) Discord's member response never lists explicitly
+        // even though its permissions apply to every member.
+        let mut member_role_ids: Vec<String> = member
+            .get("roles")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("member response missing roles"))?
+            .iter()
+            .filter_map(|r| r.as_str().map(str::to_string))
+            .collect();
+        member_role_ids.push(guild_id.to_string());
+
+        Ok(compute_discord_permissions(
+            author_id,
+            owner_id,
+            &member_role_ids,
+            &guild_roles,
+        ))
+    }
+}
+
+impl PermissionsResolver for RestPermissionsResolver {
+    async fn resolve(&self, guild_id: &str, author_id: &str) -> DiscordPermissions {
+        match self.fetch(guild_id, author_id).await {
+            Ok(perms) => perms,
+            Err(err) => {
+                // Fail closed: a guild/member lookup failure (network,
+                // rate-limit, Discord outage, unexpected response shape)
+                // must never default to allow. `guild_id` is loggable (not
+                // PII); the bot token never is (never interpolated here).
+                tracing::warn!(
+                    platform = "discord",
+                    guild_id,
+                    error = %err,
+                    "failed to resolve discord permissions; defaulting to non-privileged (fail closed)"
+                );
+                DiscordPermissions::default()
+            }
+        }
+    }
+}
 
 /// Abstraction over a live, identified Gateway session's
 /// `next_chat_message()` -- lets [`run_loop`] be driven by a scripted fake
@@ -37,6 +170,16 @@ use crate::telemetry::ReceiverHealthMetrics;
 pub trait GatewayChannel: Send {
     /// Reads the next chat message, `Ok(None)` on a clean close.
     async fn next_chat_message(&mut self) -> Result<Option<ChatMessage>, DiscordError>;
+
+    /// A snapshot of this session's `session_id`/`seq`/`resume_gateway_url`
+    /// for [`crate::ingest::discord_identify_budget::SessionStore`] to
+    /// persist, enabling a future `RESUME` instead of a fresh `IDENTIFY`.
+    /// Default `None` (nothing to persist) -- the real `GatewaySession<S>`
+    /// impl below overrides this with
+    /// [`GatewaySession::session_info`][penguin_connector_discord::gateway::GatewaySession::session_info].
+    fn session_snapshot(&self) -> Option<crate::ingest::discord_identify_budget::StoredSession> {
+        None
+    }
 }
 
 impl<S> GatewayChannel for GatewaySession<S>
@@ -45,6 +188,10 @@ where
 {
     async fn next_chat_message(&mut self) -> Result<Option<ChatMessage>, DiscordError> {
         GatewaySession::next_chat_message(self).await
+    }
+
+    fn session_snapshot(&self) -> Option<crate::ingest::discord_identify_budget::StoredSession> {
+        GatewaySession::session_info(self).map(Into::into)
     }
 }
 
@@ -58,12 +205,37 @@ pub trait GatewayConnector: Send + Sync {
     type Channel: GatewayChannel;
     /// Establishes one new connection (connect + `HELLO`/`IDENTIFY`).
     async fn connect(&self) -> Result<Self::Channel, DiscordError>;
+
+    /// Attempts to resume a prior session via `OP_RESUME` instead of a
+    /// fresh `HELLO`/`IDENTIFY` handshake -- see
+    /// `crate::ingest::discord_identify_budget::BudgetedResumingConnector`,
+    /// which always tries this before ever consulting the distributed
+    /// IDENTIFY budget (spec §2.5, RESUME is exempt from Discord's
+    /// IDENTIFY rate limit entirely). Default impl always reports the
+    /// session non-resumable: the real [`DiscordGatewayReceiver`] impl
+    /// below overrides this with a real
+    /// [`DiscordGatewayReceiver::resume`][penguin_connector_discord::gateway::DiscordGatewayReceiver::resume]
+    /// call; this default only serves hypothetical future transports that
+    /// have no resume support at all.
+    async fn resume(
+        &self,
+        _session: &crate::ingest::discord_identify_budget::StoredSession,
+    ) -> Result<Self::Channel, DiscordError> {
+        Err(DiscordError::SessionInvalidated { resumable: false })
+    }
 }
 
 impl GatewayConnector for DiscordGatewayReceiver {
     type Channel = GatewaySession<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
     async fn connect(&self) -> Result<Self::Channel, DiscordError> {
         DiscordGatewayReceiver::connect(self).await
+    }
+
+    async fn resume(
+        &self,
+        session: &crate::ingest::discord_identify_budget::StoredSession,
+    ) -> Result<Self::Channel, DiscordError> {
+        DiscordGatewayReceiver::resume(self, &session.clone().into()).await
     }
 }
 
@@ -95,13 +267,17 @@ pub fn source_id(guild_id: Option<&str>) -> String {
 ///   the gateway is never going to un-surprise us on, e.g. `UnexpectedOpcode`/
 ///   `Decode` during the handshake) stops this loop entirely instead of
 ///   backing off forever against a connection that can never succeed. The
-///   crate's own `ResumeRequested` (opcode 7, session resumable) vs
-///   `SessionInvalidated` (opcode 9, must re-`IDENTIFY`) distinction is
-///   surfaced via distinct log lines below; both still fall through to a
-///   fresh `connector.connect()` because this crate does not yet implement
-///   `OP_RESUME` (see [`penguin_connector_discord::gateway::DiscordError::ResumeRequested`]'s
-///   own doc comment) -- there is no different *action* to take yet, only
-///   a different thing to tell the operator.
+///   crate's own `ResumeRequested` (opcode 7) vs `SessionInvalidated`
+///   (opcode 9, carrying Discord's own `resumable` flag) distinction is
+///   surfaced via distinct log lines below; both still reconnect through
+///   `connector.connect()` here -- the RESUME-vs-IDENTIFY decision itself
+///   belongs one layer down, inside
+///   `ingest::discord_identify_budget::BudgetedResumingConnector::connect`,
+///   a decorator any `C: GatewayConnector` (including the real
+///   [`DiscordGatewayReceiver`]) can be wrapped in without this loop
+///   changing at all -- wiring that decorator into this module's own
+///   production `connector` construction is tracked separately, not done
+///   in this commit.
 /// - A [`DiscordError::GatewayClosed`] (a WebSocket close frame that carried
 ///   an explicit Discord close code) branches on its
 ///   [`CloseCodeClass`]: `Resumable` and `ReconnectFresh` both reconnect via
@@ -118,7 +294,7 @@ pub fn source_id(guild_id: Option<&str>) -> String {
 ///   code (never the bot token) -- the service process itself keeps
 ///   running; only this one platform's ingest loop has stopped.
 #[allow(clippy::too_many_arguments)] // every parameter is independently varied across tests; a params struct would just move the same count elsewhere -- matches twitch.rs's own precedent
-async fn run_loop<C, A, M>(
+async fn run_loop<C, A, M, P>(
     connector: C,
     appender: &A,
     metrics: &M,
@@ -127,10 +303,12 @@ async fn run_loop<C, A, M>(
     scope: &Scope,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
+    permissions: &P,
 ) where
     C: GatewayConnector,
     A: EventAppender,
     M: SpineMetrics + ReceiverHealthMetrics,
+    P: PermissionsResolver,
 {
     'outer: loop {
         let mut channel = tokio::select! {
@@ -180,7 +358,26 @@ async fn run_loop<C, A, M>(
                         }
                         let sid = source_id(msg.guild_id.as_deref());
                         let workstream_id = deterministic_workstream_id(&sid);
-                        let event = crate::normalize::normalize_discord(&msg);
+                        let perms = match msg.guild_id.as_deref() {
+                            Some(guild_id) => permissions.resolve(guild_id, &msg.author_id).await,
+                            None => {
+                                // DM: no guild, so no roles/ownership exist to
+                                // resolve -- fail closed without attempting a
+                                // lookup (there is nothing a lookup could find).
+                                tracing::debug!(
+                                    platform = "discord",
+                                    "dm message has no guild context; is_mod/is_broadcaster default false"
+                                );
+                                DiscordPermissions::default()
+                            }
+                        };
+                        tracing::debug!(
+                            platform = "discord",
+                            is_mod = perms.is_mod,
+                            is_broadcaster = perms.is_broadcaster,
+                            "resolved discord permissions"
+                        );
+                        let event = crate::normalize::normalize_discord(&msg, &perms);
                         if let Err(err) = publish_event(
                             appender,
                             metrics,
@@ -212,8 +409,8 @@ async fn run_loop<C, A, M>(
                                 tracing::warn!(platform = "discord", "gateway requested reconnect (resumable session), reconnecting");
                                 metrics.receiver_reconnect("discord", "session_resume_requested");
                             }
-                            DiscordError::SessionInvalidated => {
-                                tracing::warn!(platform = "discord", "gateway invalidated the session, re-identifying");
+                            DiscordError::SessionInvalidated { resumable } => {
+                                tracing::warn!(platform = "discord", resumable, "gateway invalidated the session");
                                 metrics.receiver_reconnect("discord", "session_invalidated");
                             }
                             DiscordError::GatewayClosed {
@@ -308,10 +505,23 @@ pub async fn run<A: EventAppender, M: SpineMetrics + ReceiverHealthMetrics>(
     scope: &Scope,
     shutdown: oneshot::Receiver<()>,
 ) {
+    let permissions = RestPermissionsResolver::new(
+        reqwest::Client::new(),
+        gateway_cfg.token.clone(),
+        penguin_connector_discord::gateway::DEFAULT_API_BASE.to_string(),
+    );
     let receiver = DiscordGatewayReceiver::new(gateway_cfg);
     let backoff = Backoff::new(Duration::from_secs(30));
     run_loop(
-        receiver, appender, metrics, keyring, active_kid, scope, backoff, shutdown,
+        receiver,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        backoff,
+        shutdown,
+        &permissions,
     )
     .await;
 }
@@ -325,6 +535,39 @@ mod tests {
 
     fn test_keyring() -> KeyRing {
         KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
+    }
+
+    /// Always resolves to [`DiscordPermissions::default`] (both flags
+    /// false) without making any network call -- the fake every `run_loop`
+    /// test unrelated to permission resolution itself uses, so those tests
+    /// stay focused on their own concern (reconnect/backoff/publish
+    /// behavior) instead of also depending on a live/mocked Discord REST
+    /// API.
+    #[derive(Default)]
+    struct NoopPermissionsResolver;
+    impl PermissionsResolver for NoopPermissionsResolver {
+        async fn resolve(&self, _guild_id: &str, _author_id: &str) -> DiscordPermissions {
+            DiscordPermissions::default()
+        }
+    }
+
+    /// Records every `resolve()` call and returns a fixed, configured
+    /// response -- lets permission-resolution tests assert both *what* was
+    /// published (payload carries the resolved flags) and *whether a lookup
+    /// was even attempted* (a DM must never call this at all).
+    #[derive(Default)]
+    struct ScriptedPermissionsResolver {
+        response: DiscordPermissions,
+        calls: Mutex<Vec<(String, String)>>,
+    }
+    impl PermissionsResolver for ScriptedPermissionsResolver {
+        async fn resolve(&self, guild_id: &str, author_id: &str) -> DiscordPermissions {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((guild_id.to_string(), author_id.to_string()));
+            self.response
+        }
     }
 
     #[derive(Default)]
@@ -482,6 +725,7 @@ mod tests {
                 &Scope::new("acme", None),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
+                &NoopPermissionsResolver,
             ),
         )
         .await;
@@ -525,6 +769,7 @@ mod tests {
                 &Scope::new("acme", None),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
+                &NoopPermissionsResolver,
             ),
         )
         .await;
@@ -533,6 +778,118 @@ mod tests {
         assert_eq!(
             calls[0].0,
             "waddles:t:acme:c:_tenant:src:discord:dg-dm:events"
+        );
+    }
+
+    /// A DM (no `guild_id`) must never attempt a permissions lookup -- there
+    /// is no guild to resolve roles/ownership against, and attempting one
+    /// anyway would be a wasted (or worse, nonsensical) REST call. Fail
+    /// closed via the `None` branch in `run_loop` instead.
+    #[tokio::test]
+    async fn dm_messages_never_invoke_the_permissions_resolver() {
+        let connector = FakeConnector::new(vec![test_msg(None, "hi from dm")], 0);
+        let appender = RecordingAppender::default();
+        let permissions = ScriptedPermissionsResolver::default();
+        let (_tx, rx) = oneshot::channel();
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_loop(
+                connector,
+                &appender,
+                &NoopTestMetrics,
+                &test_keyring(),
+                "k1",
+                &Scope::new("acme", None),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+                &permissions,
+            ),
+        )
+        .await;
+
+        assert_eq!(appender.calls.lock().unwrap().len(), 1);
+        assert!(
+            permissions.calls.lock().unwrap().is_empty(),
+            "a DM must never trigger a guild permissions lookup"
+        );
+        let calls = appender.calls.lock().unwrap();
+        assert_eq!(
+            calls[0]
+                .1
+                .event
+                .payload
+                .get("is_mod")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            calls[0]
+                .1
+                .event
+                .payload
+                .get("is_broadcaster")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    /// A guild message resolves permissions via the injected resolver (the
+    /// real `RestPermissionsResolver` in production, a scripted fake here)
+    /// keyed on that message's own `guild_id`/`author_id`, and the resolved
+    /// flags land in the published event's payload unchanged.
+    #[tokio::test]
+    async fn guild_messages_resolve_permissions_and_publish_them() {
+        let connector = FakeConnector::new(vec![test_msg(Some("111"), "mod command")], 0);
+        let appender = RecordingAppender::default();
+        let permissions = ScriptedPermissionsResolver {
+            response: DiscordPermissions {
+                is_mod: true,
+                is_broadcaster: false,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+        let (_tx, rx) = oneshot::channel();
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_loop(
+                connector,
+                &appender,
+                &NoopTestMetrics,
+                &test_keyring(),
+                "k1",
+                &Scope::new("acme", None),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+                &permissions,
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            permissions.calls.lock().unwrap().as_slice(),
+            [("111".to_string(), "444".to_string())],
+            "must resolve using this message's own guild_id/author_id"
+        );
+        let calls = appender.calls.lock().unwrap();
+        assert_eq!(
+            calls[0]
+                .1
+                .event
+                .payload
+                .get("is_mod")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            calls[0]
+                .1
+                .event
+                .payload
+                .get("is_broadcaster")
+                .and_then(|v| v.as_bool()),
+            Some(false)
         );
     }
 
@@ -553,6 +910,7 @@ mod tests {
                 &Scope::new("acme", None),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
+                &NoopPermissionsResolver,
             ),
         )
         .await;
@@ -635,6 +993,7 @@ mod tests {
                 &Scope::new("acme", None),
                 backoff,
                 rx,
+                &NoopPermissionsResolver,
             ),
         )
         .await;
@@ -738,6 +1097,7 @@ mod tests {
                 &Scope::new("acme", None),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
+                &NoopPermissionsResolver,
             ),
         )
         .await;
@@ -780,6 +1140,7 @@ mod tests {
                 &Scope::new("acme", None),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
+                &NoopPermissionsResolver,
             ),
         )
         .await;
@@ -850,6 +1211,7 @@ mod tests {
                 &Scope::new("acme", None),
                 backoff,
                 rx,
+                &NoopPermissionsResolver,
             ),
         )
         .await;
@@ -959,6 +1321,7 @@ mod tests {
                 &Scope::new("acme", None),
                 Backoff::new(Duration::from_millis(10)),
                 rx,
+                &NoopPermissionsResolver,
             ),
         )
         .await;
@@ -1007,6 +1370,7 @@ mod tests {
                 &Scope::new("acme", None),
                 Backoff::new(Duration::from_millis(10)),
                 rx,
+                &NoopPermissionsResolver,
             ),
         )
         .await;
@@ -1062,6 +1426,7 @@ mod tests {
                 &Scope::new("acme", None),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
+                &NoopPermissionsResolver,
             ),
         )
         .await;
@@ -1084,5 +1449,214 @@ mod tests {
             metrics.reconnects.lock().unwrap().is_empty(),
             "a fatal close must never be recorded as a reconnect attempt"
         );
+    }
+
+    /// Exercises the real `OP_RESUME` wire handshake (penguin-libs PR #129)
+    /// end-to-end against an in-memory mock gateway -- a `tokio::io::duplex`
+    /// pipe driven the same way `penguin-connector-discord`'s own
+    /// `resume_handshake_sends_resume_and_receives_resumed` test drives it
+    /// (that crate has no separately-exported "mock gateway" module; this
+    /// is the same public-API technique, not a stub). Proves this crate's
+    /// real `GatewaySession::resume_handshake` sends `RESUME` (not
+    /// `IDENTIFY`) with the stored session id/seq, and that this module's
+    /// own [`GatewayChannel::session_snapshot`] impl (`GatewaySession::
+    /// session_info`) correctly reports the resumed session afterward --
+    /// the exact glue [`crate::ingest::discord_identify_budget`]'s
+    /// `BudgetedResumingConnector` depends on.
+    #[tokio::test]
+    async fn real_resume_handshake_against_a_mock_gateway_sends_resume_not_identify() {
+        use futures_util::{SinkExt, StreamExt};
+        use penguin_connector_discord::gateway::GatewaySessionInfo;
+        use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+
+        let (client_io, server_io) = tokio::io::duplex(16384);
+        let mut server_ws =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(server_io, Role::Server, None)
+                .await;
+        let client_ws =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(client_io, Role::Client, None)
+                .await;
+
+        let stored_session = crate::ingest::discord_identify_budget::StoredSession {
+            session_id: "sess-abc".to_string(),
+            seq: Some(7),
+            resume_gateway_url: "wss://resume.example".to_string(),
+        };
+
+        let send_hello = server_ws.send(Message::text(
+            r#"{"op":10,"d":{"heartbeat_interval":60000}}"#,
+        ));
+        let session_info = GatewaySessionInfo::from(stored_session.clone());
+        let handshake = GatewaySession::resume_handshake(client_ws, "test-token", &session_info);
+        let (send_result, handshake_result) = tokio::join!(send_hello, handshake);
+        send_result.expect("send hello");
+        let mut resumed_channel = handshake_result.expect("resume handshake succeeds");
+
+        // The mock gateway received `RESUME` (opcode 6), never `IDENTIFY`.
+        let resume_frame = server_ws
+            .next()
+            .await
+            .expect("resume frame")
+            .expect("ok frame");
+        let payload: serde_json::Value =
+            serde_json::from_str(&resume_frame.into_text().expect("text frame"))
+                .expect("decode resume frame");
+        assert_eq!(payload["op"], 6, "must send OP_RESUME, not OP_IDENTIFY");
+        assert_eq!(payload["d"]["session_id"], "sess-abc");
+        assert_eq!(payload["d"]["seq"], 7);
+
+        // Our own `GatewayChannel::session_snapshot` glue must surface the
+        // real resumed session (not the default `None`).
+        let snapshot = GatewayChannel::session_snapshot(&resumed_channel)
+            .expect("resumed session has a snapshot");
+        assert_eq!(snapshot, stored_session);
+
+        // A dispatch after RESUME (no fresh READY -- Discord replays
+        // missed dispatches then RESUMED) still flows through
+        // `next_chat_message` normally.
+        server_ws
+            .send(Message::text(
+                r#"{"op":0,"s":8,"t":"MESSAGE_CREATE","d":{"id":"1","channel_id":"2",
+                   "author":{"id":"3","username":"zed","bot":false},"content":"post-resume"}}"#,
+            ))
+            .await
+            .expect("send message_create");
+        let msg = resumed_channel
+            .next_chat_message()
+            .await
+            .expect("no transport error")
+            .expect("message present");
+        assert_eq!(msg.content, "post-resume");
+    }
+
+    /// [`RestPermissionsResolver`]'s real HTTP lookups, exercised against a
+    /// mock Discord REST API (`wiremock`) -- the two-request shape
+    /// (`GET /guilds/{id}`, `GET /guilds/{id}/members/{id}`) and the
+    /// resulting [`DiscordPermissions`], not just the pure bit-math
+    /// `crate::normalize::compute_discord_permissions` already covers.
+    mod rest_permissions_resolver {
+        use super::*;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const ADMINISTRATOR: &str = "8"; // 1 << 3
+        const MANAGE_MESSAGES: &str = "8192"; // 1 << 13
+        const NONE: &str = "0";
+
+        async fn mock_guild(
+            server: &MockServer,
+            guild_id: &str,
+            owner_id: &str,
+            roles: serde_json::Value,
+        ) {
+            Mock::given(method("GET"))
+                .and(path(format!("/guilds/{guild_id}")))
+                .and(header("Authorization", "Bot test-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": guild_id,
+                    "owner_id": owner_id,
+                    "roles": roles,
+                })))
+                .mount(server)
+                .await;
+        }
+
+        async fn mock_member(server: &MockServer, guild_id: &str, author_id: &str, roles: &[&str]) {
+            Mock::given(method("GET"))
+                .and(path(format!("/guilds/{guild_id}/members/{author_id}")))
+                .and(header("Authorization", "Bot test-token"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "roles": roles })),
+                )
+                .mount(server)
+                .await;
+        }
+
+        fn resolver_for(server: &MockServer) -> RestPermissionsResolver {
+            RestPermissionsResolver::new(
+                reqwest::Client::new(),
+                "test-token".to_string(),
+                server.uri(),
+            )
+        }
+
+        #[tokio::test]
+        async fn guild_owner_resolves_as_broadcaster_and_mod() {
+            let server = MockServer::start().await;
+            mock_guild(&server, "111", "444", serde_json::json!([])).await;
+            mock_member(&server, "111", "444", &[]).await;
+
+            let perms = resolver_for(&server).resolve("111", "444").await;
+            assert!(perms.is_broadcaster);
+            assert!(perms.is_mod);
+        }
+
+        #[tokio::test]
+        async fn administrator_role_resolves_as_broadcaster_and_mod() {
+            let server = MockServer::start().await;
+            mock_guild(
+                &server,
+                "111",
+                "owner-id",
+                serde_json::json!([{"id": "role-admin", "permissions": ADMINISTRATOR}]),
+            )
+            .await;
+            mock_member(&server, "111", "444", &["role-admin"]).await;
+
+            let perms = resolver_for(&server).resolve("111", "444").await;
+            assert!(perms.is_broadcaster);
+            assert!(perms.is_mod);
+        }
+
+        #[tokio::test]
+        async fn manage_messages_role_resolves_as_mod_only() {
+            let server = MockServer::start().await;
+            mock_guild(
+                &server,
+                "111",
+                "owner-id",
+                serde_json::json!([{"id": "role-mod", "permissions": MANAGE_MESSAGES}]),
+            )
+            .await;
+            mock_member(&server, "111", "444", &["role-mod"]).await;
+
+            let perms = resolver_for(&server).resolve("111", "444").await;
+            assert!(!perms.is_broadcaster);
+            assert!(perms.is_mod);
+        }
+
+        #[tokio::test]
+        async fn plain_member_resolves_as_neither() {
+            let server = MockServer::start().await;
+            mock_guild(
+                &server,
+                "111",
+                "owner-id",
+                serde_json::json!([{"id": "111", "permissions": NONE}]),
+            )
+            .await;
+            mock_member(&server, "111", "444", &[]).await;
+
+            let perms = resolver_for(&server).resolve("111", "444").await;
+            assert!(!perms.is_broadcaster);
+            assert!(!perms.is_mod);
+        }
+
+        /// A failed/unreachable lookup (here: Discord returns 404, e.g. the
+        /// member left the guild between the message and this lookup) must
+        /// fail closed -- never default to allow.
+        #[tokio::test]
+        async fn lookup_failure_fails_closed() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/guilds/111"))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&server)
+                .await;
+
+            let perms = resolver_for(&server).resolve("111", "444").await;
+            assert!(!perms.is_broadcaster);
+            assert!(!perms.is_mod);
+        }
     }
 }

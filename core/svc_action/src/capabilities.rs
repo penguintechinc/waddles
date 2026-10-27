@@ -20,12 +20,23 @@
 //! leftover scope.
 //!
 //! `relay` (Twitch outbound via Valkey `LPUSH`, drained by svc-ingest's own
-//! persistent IRC connection; Discord outbound via a direct, stateless bot
+//! persistent IRC connection; Discord `chat.send` via a direct, stateless bot
 //! REST send -- see [`StageCapabilities::handle_discord_relay`]'s doc for
-//! why Discord takes a different path than Twitch), `clock`, `context` and
-//! `log` are fully wired. `http` is wired to `crate::egress::EgressGuard`
-//! (spec §8's full SSRF guard). `db`/`kv`/`flags` remain documented
-//! `TODO(M3+)` seams -- see [`StageCapabilities::handle`]'s match arms.
+//! why Discord takes a different path than Twitch; Discord `chat.delete`/
+//! `dm.send` via the Valkey queue with a **confirmation handshake**, see
+//! [`StageCapabilities::handle_discord_queued_op`]), `clock`, `context`,
+//! `log`, and `kv` are fully wired. `http` is wired to
+//! `crate::egress::EgressGuard` (spec §8's full SSRF guard). `kv` is wired
+//! to `bundle_host_kv::KvHost` (the crate shared with `core/svc_process` --
+//! see that crate's own module doc for the key-derivation/isolation/quota
+//! design) over the same direct Valkey connection this stage already opens
+//! for `relay`/usage metering (see [`Self::with_kv`]'s doc for why that
+//! connection is reused rather than a second one opened). `db` is wired to
+//! `bundle_host_db::DbHost` (mirrors `core/svc_process::capabilities::
+//! StageCapabilities::handle_db` byte-for-byte, rescoped per-call to this
+//! connection's [`InvokeScope`] instead of svc_process's fixed
+//! per-invocation `StageCapabilities`). `flags` remains a documented
+//! `TODO(M3+)` seam -- see [`StageCapabilities::handle`]'s match arm.
 //!
 //! A bundle never holds a platform credential (spec §4.3): every
 //! capability here resolves any credential itself, from this process's own
@@ -34,10 +45,22 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use bundle_capability_gate::{
+    AppScopedResource, CapabilityGate, Denied, HostInvokeScopeBuilder, PermissionId, ResourceRef,
+    TenantTier,
+};
+use bundle_host_db::{
+    CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
+    SchemaCache,
+};
+use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::egress::EgressGuard;
+use crate::flags::FeatureFlag;
+use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
 /// The `(tenant, community, app_id)` an in-flight `invoke` belongs to,
@@ -60,6 +83,107 @@ pub struct InvokeScope {
     /// bundle's own `message_json`, unchanged) and for any invoke with no
     /// channel-bearing origin event.
     pub origin_channel_id: Option<String>,
+    /// Numeric `tenants.id`/`communities.id` (spec
+    /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    /// SS5.1/SS4 `GrantScopeKey`) -- resolved by `crate::dispatch::
+    /// handle_delivered` via `TenantResolver` before this scope is built
+    /// (never guest-suppliable). `community_id` is `0` for a tenant-wide
+    /// activation, matching `bundle_active_set`'s existing sentinel
+    /// convention.
+    pub tenant_id: i32,
+    pub community_id: i32,
+    /// The approved `(app_id, version)` row id this invoke's grants are
+    /// pinned to (spec SS4). **Interim placeholder** until the real
+    /// `app_versions.id` is threaded through `crate::dispatch`'s bundle-load
+    /// path (tracked as follow-on work, same "interim substitute" posture
+    /// this crate already documents for `ProcessDeps::version`): every
+    /// invocation today resolves to `0` here, which only ever matches a
+    /// grant row also written under version `0` -- never a real approved
+    /// version, so this fails closed (denies every non-platform permission)
+    /// rather than silently matching the wrong version's grants.
+    pub app_version: i64,
+}
+
+impl InvokeScope {
+    /// Builds the gate's host-only [`bundle_capability_gate::InvokeScope`]
+    /// from this already-trusted scope (spec SS5.1: `HostInvokeScopeBuilder`
+    /// is the sole constructor). `tenant_tier` is not yet resolved per
+    /// invocation (no capability wired in this stage today reads it) and
+    /// defaults to [`TenantTier::Free`] -- documented here rather than
+    /// silently guessed, so the follow-on task that wires `storage.objects`
+    /// (spec SS6) knows exactly what to replace.
+    fn gate_scope(&self) -> bundle_capability_gate::InvokeScope {
+        HostInvokeScopeBuilder::new()
+            .tenant_id(self.tenant_id)
+            .community_id(self.community_id)
+            .app_id(self.app_id.clone())
+            .app_version(self.app_version)
+            .tenant_tier(TenantTier::Free)
+            .build()
+            // `app_id` is always non-empty here: it is always
+            // `deps.app_id`, itself sourced from a live `app_catalog` row
+            // (never guest input, never constructed empty) -- see
+            // `crate::dispatch::DispatchDeps::app_id`'s doc.
+            .expect("InvokeScope::app_id is never empty for a live invocation")
+    }
+}
+
+/// Maps a gate [`Denied`] onto the `{code, message}` shape every `host-call`
+/// error reply carries (spec SS5.4's stable `reason` vocabulary).
+fn denied_from_gate(err: Denied) -> HostResultError {
+    denied(err.reason_str(), err.to_string())
+}
+
+/// Best-effort host extraction for `net.http:<host>` (spec SS1) from the
+/// `http.send` host-call's own `{"url": ...}` arg -- no `url` crate
+/// dependency in this crate, so this is a small manual scheme/port strip
+/// rather than a full URL parse. `crate::egress::EgressGuard::send` (called
+/// only once this permission is authorized) performs the real, security-
+/// relevant URL validation/SSRF guarding on this same `url` string; this
+/// function only needs a good-enough host to select which per-host
+/// permission grant to check.
+fn extract_http_host(args: &serde_json::Value) -> Option<String> {
+    let url = args.get("url").and_then(|v| v.as_str())?;
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// Classifies an extracted `http.send` host into the specific
+/// [`PermissionId`] family `bundle_capability_gate`'s catalog actually
+/// grants against (`NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp`) --
+/// a literal IP address is classified directly (no DNS lookup, since only
+/// literal-IP syntax can be classified without one); anything else is a
+/// hostname, gated as `NetHttpFqdn`. This is a permission-family choice,
+/// NOT the SSRF wall itself -- `crate::egress::EgressGuard::send`'s own
+/// resolved-IP `is_forbidden_address` check remains the authoritative
+/// defense against a hostname that DNS-resolves to a private address; a
+/// bundle merely holding `net.http.fqdn` never bypasses that downstream
+/// check.
+fn classify_net_http_permission(host: &str) -> PermissionId {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            if v4.is_private() || v4.is_loopback() || v4.is_link_local() {
+                PermissionId::NetHttpPrivateIp(host.to_string())
+            } else {
+                PermissionId::NetHttpPublicIp(host.to_string())
+            }
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let is_unique_local = (v6.segments()[0] & 0xfe00) == 0xfc00;
+            if v6.is_loopback() || v6.is_unicast_link_local() || is_unique_local {
+                PermissionId::NetHttpPrivateIp(host.to_string())
+            } else {
+                PermissionId::NetHttpPublicIp(host.to_string())
+            }
+        }
+        Err(_) => PermissionId::NetHttpFqdn(host.to_string()),
+    }
 }
 
 /// Answers one `host-call` for a given `capability`/`op`, scoped to the
@@ -87,6 +211,39 @@ pub(crate) fn denied(code: &str, message: impl Into<String>) -> HostResultError 
     }
 }
 
+/// Counter incremented whenever the dispatcher finds no destination for an
+/// authorized relay op. Labels are `provider` (compiled-in allowlist) and
+/// `op` (closed enum) only -- bounded cardinality, no bundle/user data.
+pub const NO_DESTINATION_METRIC: &str = "svc_action_dispatch_no_destination_total";
+
+/// Counter incremented once per dispatcher routing decision (before the
+/// drain send, so it counts decisions, not delivered sends).
+/// Labels `provider` (allowlist), `op` (closed enum), `destination` (closed
+/// label) only -- bounded cardinality, no bundle/user data.
+pub const ROUTED_METRIC: &str = "svc_action_dispatch_routed_total";
+
+/// Surfaces a `NoDestination` loudly: error log (ids only), counter, and a
+/// refused `unsupported_op` result -- never a silent success or drop.
+fn no_destination_error(
+    scope: &InvokeScope,
+    err: &crate::dispatch_destination::DispatchError,
+) -> HostResultError {
+    let crate::dispatch_destination::DispatchError::NoDestination { provider, op } = err;
+    metrics::counter!(
+        NO_DESTINATION_METRIC,
+        "provider" => provider.clone(),
+        "op" => op.as_str()
+    )
+    .increment(1);
+    tracing::error!(
+        provider = %provider,
+        op = op.as_str(),
+        app_id = %scope.app_id,
+        "relay op has no dispatch destination"
+    );
+    denied("unsupported_op", err.to_string())
+}
+
 /// The Valkey list key an outbound relay send `LPUSH`es onto for
 /// `provider` -- a byte-exact Rust port of `waddle_transports.transports.
 /// irc_relay.outbound_queue_key` (`libs/waddle_transports` in this repo):
@@ -103,7 +260,269 @@ pub fn outbound_relay_queue_key(provider: &str) -> String {
 /// [`StageCapabilities::handle_relay`] (Valkey `LPUSH` vs. a direct bot
 /// REST send), documented on that function and
 /// [`StageCapabilities::handle_discord_relay`]. Action-stage bundles only.
-const RELAY_PROVIDERS: &[&str] = &["twitch", "discord"];
+///
+/// **Membership here is NOT support.** A provider listed here is merely a
+/// name the capability recognises; which `(provider, op)` pairs actually have
+/// a live sender behind them is the explicit table in [`relay_op_supported`].
+/// Adding a provider here without adding its table rows leaves every op
+/// refused `unsupported_op` -- a new provider is unsupported until someone
+/// deliberately opts it in, never auto-supported onto an undrained queue.
+pub(crate) const RELAY_PROVIDERS: &[&str] = &["twitch", "discord"];
+
+/// Valkey key the Discord outbound drain (`svc_ingest::outbound::
+/// run_discord`) keeps alive (short TTL, heartbeat-refreshed) while it is
+/// actually running with a working bot token. Discord `chat.delete`/`dm.send`
+/// are refused loudly when it is absent, so a misconfigured deployment (drain
+/// flag off, `DISCORD_BOT_TOKEN` missing, spine config missing, drain crashed)
+/// fails at the producer instead of queueing ops nothing will ever drain.
+/// Byte-identical to `svc_ingest::outbound::DISCORD_DRAIN_READY_KEY`
+/// (duplicated, not imported -- separate crates; both sides pin the literal
+/// in a test).
+pub const DISCORD_DRAIN_READY_KEY: &str = "waddles:transport:discord:drain-ready";
+
+/// Prefix of the per-op result key (`<prefix><op_id>`) the drain posts an
+/// op's outcome under; the producer polls it. Byte-identical to
+/// `svc_ingest::outbound::DISCORD_OP_ACK_KEY_PREFIX`.
+pub const DISCORD_OP_ACK_KEY_PREFIX: &str = "waddles:transport:discord:ack:";
+
+/// Hard upper bound on an outbound relay list: after every push the list is
+/// trimmed to its newest `OUTBOUND_QUEUE_MAX_LEN` entries, so an undrained
+/// queue can never grow without limit.
+const OUTBOUND_QUEUE_MAX_LEN: isize = 1000;
+
+/// TTL (seconds) re-armed on the list key by every push. An undrained list
+/// evaporates this long after its last push, so a stale `chat.delete`/
+/// `dm.send` is never executed hours later if a drain comes back.
+const OUTBOUND_QUEUE_TTL_SECS: i64 = 300;
+
+/// How long a queued Discord op waits for the drain to confirm it. Must fit,
+/// twice over (delete then DM), inside the bundle invoke budget
+/// (`limits.timeout_ms`, capped by the executor at 10s). Also stamped on the
+/// envelope as its deadline, so the drain drops an entry the producer has
+/// already given up on instead of executing an op it reported as failed.
+const DISCORD_OP_ACK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Poll interval while waiting for the drain's result. Polling (`GETDEL`)
+/// rather than a blocking pop: a blocking command would stall every other
+/// command multiplexed on this stage's shared Valkey connection (`kv`,
+/// usage metering, relay pushes).
+const DISCORD_OP_ACK_POLL: Duration = Duration::from_millis(50);
+
+/// Discord's hard limit on a message's `content`. A `dm.send` longer than this
+/// can never be delivered, so it is refused up front rather than queued (the
+/// list bound is by entry count, not size).
+const DISCORD_MAX_CONTENT_CHARS: usize = 2000;
+
+/// `dm.send` throttle: fixed window (seconds) shared by both limits below.
+/// Enforced in Valkey so every `svc_action` replica counts against the same
+/// budget.
+const DM_SEND_WINDOW_SECS: u64 = 60;
+
+/// Max `dm.send` ops per `(tenant, community, app)` per window.
+const DM_SEND_APP_LIMIT: u64 = 10;
+
+/// Max `dm.send` ops to one target user per tenant per window -- caps how
+/// hard any bundle (or several) can hammer a single person.
+const DM_SEND_TARGET_LIMIT: u64 = 3;
+
+/// Version stamped on every outbound action envelope this host queues
+/// (`"v"`). The consumer (`svc_ingest::outbound_ops`) treats a missing `v`
+/// as the legacy text-only shape and rejects any version above the one it
+/// knows -- bump only with a consumer that understands it.
+const OUTBOUND_SCHEMA_VERSION: u32 = 1;
+
+/// The verb of an outbound platform action (provider-framework Step 0,
+/// issue #719). Mirrors `svc_ingest::outbound_ops::OutboundAction`; the
+/// wire string is the same `op` field the queue envelope carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RelayOp {
+    ChatSend,
+    ChatDelete,
+    DmSend,
+}
+
+impl RelayOp {
+    /// Parses the wire `op` string; `None` for an unknown verb (the caller
+    /// fails loud rather than defaulting to `chat.send`).
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "chat.send" => Some(Self::ChatSend),
+            "chat.delete" => Some(Self::ChatDelete),
+            "dm.send" => Some(Self::DmSend),
+            _ => None,
+        }
+    }
+
+    /// The wire/permission-family spelling of this op.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatSend => "chat.send",
+            Self::ChatDelete => "chat.delete",
+            Self::DmSend => "dm.send",
+        }
+    }
+
+    /// The catalog permission id this op requires for `provider`.
+    fn permission(self, provider: &str) -> PermissionId {
+        match self {
+            Self::ChatSend => PermissionId::ChatSend(provider.to_string()),
+            Self::ChatDelete => PermissionId::ChatDelete(provider.to_string()),
+            Self::DmSend => PermissionId::DmSend(provider.to_string()),
+        }
+    }
+}
+
+/// Whether `(provider, op)` has a live sender behind it today -- an
+/// **explicit opt-in table**, deliberately without a wildcard arm: a provider
+/// (or a new op) is unsupported until a row is added here, so adding a name to
+/// [`RELAY_PROVIDERS`] can never silently route ops onto a queue nothing
+/// drains. Today: Twitch `chat.send` (IRC drain in `svc_ingest`); Discord
+/// `chat.send` (inline bot REST, [`StageCapabilities::handle_discord_relay`])
+/// and Discord `chat.delete`/`dm.send` (bot-token REST sender behind the
+/// confirmation handshake, [`StageCapabilities::handle_discord_queued_op`]).
+/// Twitch `chat.delete`/`dm.send` stay authorized-then-refused
+/// (`unsupported_op`) until the Helix client lands -- never queued into a
+/// consumer that cannot act on them, so the bundle sees the failure instead of
+/// a silent black hole.
+pub(crate) fn relay_op_supported(provider: &str, op: RelayOp) -> bool {
+    matches!(
+        (provider, op),
+        ("twitch", RelayOp::ChatSend)
+            | (
+                "discord",
+                RelayOp::ChatSend | RelayOp::ChatDelete | RelayOp::DmSend
+            )
+    )
+}
+
+/// Optional fields of the outbound queue envelope beyond the always-present
+/// `v`/`op`/`platform`; only the ones an op needs are set.
+#[derive(Default)]
+struct EnvelopeFields<'a> {
+    channel: Option<&'a str>,
+    text: Option<&'a str>,
+    message_id: Option<&'a str>,
+    user_id: Option<&'a str>,
+    /// The triggering event's channel -- `dm.send` only: lets the sender bind
+    /// the DM target to that channel's community.
+    origin_channel: Option<&'a str>,
+}
+
+/// Producer-side builder for the versioned outbound queue envelope
+/// (`svc_ingest::outbound_ops::parse_outbound_entry` is the consumer). Only
+/// the fields the op needs are emitted; `channel`/`text` stay top-level for
+/// the legacy-consumer rolling-upgrade guarantee on `chat.send`.
+fn build_outbound_envelope(
+    op: RelayOp,
+    provider: &str,
+    fields: &EnvelopeFields<'_>,
+) -> serde_json::Value {
+    let mut env = serde_json::json!({
+        "v": OUTBOUND_SCHEMA_VERSION,
+        "op": op.as_str(),
+        "platform": provider,
+    });
+    if let Some(obj) = env.as_object_mut() {
+        for (key, value) in [
+            ("channel", fields.channel),
+            ("text", fields.text),
+            ("message_id", fields.message_id),
+            ("user_id", fields.user_id),
+            ("origin_channel", fields.origin_channel),
+        ] {
+            if let Some(v) = value {
+                obj.insert(key.to_string(), serde_json::Value::String(v.to_string()));
+            }
+        }
+    }
+    env
+}
+
+/// Stamps the confirmation handshake onto a queued envelope: `op_id` (the
+/// id the drain posts its result under) and `exp_ms` (epoch-ms deadline after
+/// which the producer has stopped waiting and the drain must not execute the
+/// op).
+fn stamp_handshake(env: &mut serde_json::Value, op_id: &str, exp_ms: u64) {
+    if let Some(obj) = env.as_object_mut() {
+        obj.insert(
+            "op_id".to_string(),
+            serde_json::Value::String(op_id.to_string()),
+        );
+        obj.insert("exp_ms".to_string(), serde_json::Value::from(exp_ms));
+    }
+}
+
+/// Wall-clock now in epoch milliseconds. A clock before the epoch reads `0`
+/// (the resulting deadline then looks already-expired and the op fails loudly
+/// rather than being executed late).
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// A short, non-reversible tag for a platform user id, for use in Valkey
+/// rate-limit keys -- the raw id (a user identifier) never becomes part of a
+/// key name.
+fn user_tag(user_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(user_id.as_bytes());
+    hex::encode(&hash[..8])
+}
+
+/// The drain's outcome for one queued op, as read from its result key.
+#[derive(Debug, PartialEq, Eq)]
+enum AckOutcome {
+    /// The platform performed the op.
+    Confirmed,
+    /// The drain reported the op was not performed, and why.
+    Refused(AckFailure),
+}
+
+/// Why the drain did not perform a queued op -- a closed set, so an
+/// unexpected string in the result key can never become an arbitrary error
+/// code surfaced to a bundle.
+#[derive(Debug, PartialEq, Eq)]
+enum AckFailure {
+    NotInCommunity,
+    Unsupported,
+    Failed,
+}
+
+/// Parses the drain's result JSON (`{"ok":true}` / `{"ok":false,"code":..}`).
+/// `Err` is a malformed/unrecognisable result -- the caller treats the op as
+/// unconfirmed, never as done.
+fn parse_ack(raw: &str) -> Result<AckOutcome, String> {
+    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    match v.get("ok").and_then(serde_json::Value::as_bool) {
+        Some(true) => Ok(AckOutcome::Confirmed),
+        Some(false) => Ok(AckOutcome::Refused(
+            match v.get("code").and_then(serde_json::Value::as_str) {
+                Some("not_in_community") => AckFailure::NotInCommunity,
+                Some("unsupported") => AckFailure::Unsupported,
+                _ => AckFailure::Failed,
+            },
+        )),
+        None => Err("result has no boolean 'ok'".to_string()),
+    }
+}
+
+/// Peeks the `op` a bundle's `message_json` asks for. Absent, unparsable or
+/// non-string `op` is the legacy `chat.send` shape -- the later field-level
+/// validation in `handle_relay` still produces the same `invalid_args`
+/// errors it always did for malformed input. `Err` carries an unknown op
+/// string.
+fn peek_relay_op(args: &serde_json::Value) -> Result<RelayOp, String> {
+    let op = args
+        .get("message_json")
+        .and_then(|v| v.as_str())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|m| m.get("op").and_then(|o| o.as_str()).map(str::to_string));
+    match op {
+        None => Ok(RelayOp::ChatSend),
+        Some(raw) => RelayOp::parse(&raw).ok_or(raw),
+    }
+}
 
 /// Strips CR/LF and every other control character before an outbound relay
 /// write -- a byte-exact port of `waddle_transports.transports.irc.
@@ -181,15 +600,86 @@ fn sanitize_bundle_log_message(raw_message: &str) -> String {
     message
 }
 
-/// The one Valkey operation the `relay` capability needs -- narrow and easy
-/// to fake in tests (mirrors `libs/waddle_transports`'s own
+/// The narrow set of Valkey operations the `relay` capability needs -- easy
+/// to fake in tests (the `lpush` core mirrors `libs/waddle_transports`'s own
 /// `RelayRedisLike` protocol on the Python side).
+///
+/// Beyond `lpush`, the Discord confirmation handshake needs three more
+/// primitives (readiness probe, per-op result read, rate-limit counter). They
+/// default to a loud error rather than a silent value, so a fake or queue
+/// that does not support them fails the op visibly instead of passing.
 pub trait RelayQueue: Send + Sync {
+    /// Appends `value` to the list `key`. The production implementation is
+    /// **bounded**: the list is trimmed to [`OUTBOUND_QUEUE_MAX_LEN`] entries
+    /// and its TTL re-armed ([`OUTBOUND_QUEUE_TTL_SECS`]) on every push, so an
+    /// undrained queue can neither grow without limit nor outlive its entries'
+    /// usefulness.
     fn lpush<'a>(
         &'a self,
         key: &'a str,
         value: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+    /// Whether `key` currently exists (the drain-ready probe).
+    fn key_exists<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        let _ = key;
+        Box::pin(async { Err("this RelayQueue has no key-exists support".to_string()) })
+    }
+
+    /// Atomically increments the fixed-window counter `key` (creating it with
+    /// a `window_secs` TTL on first use) and returns the new count.
+    fn incr_window<'a>(
+        &'a self,
+        key: &'a str,
+        window_secs: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send + 'a>> {
+        let _ = (key, window_secs);
+        Box::pin(async { Err("this RelayQueue has no rate-window support".to_string()) })
+    }
+
+    /// Reads and deletes the string at `key` (`GETDEL`); `Ok(None)` if absent.
+    fn take<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send + 'a>> {
+        let _ = key;
+        Box::pin(async { Err("this RelayQueue has no result-read support".to_string()) })
+    }
+}
+
+/// Lua for [`RelayQueue::incr_window`]: `INCR`, and arm the window TTL only
+/// when this call created the key -- atomic, so a crash can never leave a
+/// counter without an expiry (which would block its subject forever).
+const INCR_WINDOW_SCRIPT: &str = r"
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+";
+
+/// The atomic `MULTI`/`EXEC` pipeline behind the bounded [`RelayQueue::lpush`]:
+/// push, trim to the newest [`OUTBOUND_QUEUE_MAX_LEN`] entries, re-arm the TTL.
+/// Built separately from the connection so its exact commands are unit-tested.
+fn bounded_push_pipeline(key: &str, value: &str) -> redis::Pipeline {
+    let mut pipe = redis::pipe();
+    pipe.atomic()
+        .cmd("LPUSH")
+        .arg(key)
+        .arg(value)
+        .cmd("LTRIM")
+        .arg(key)
+        .arg(0)
+        .arg(OUTBOUND_QUEUE_MAX_LEN - 1)
+        .ignore()
+        .cmd("EXPIRE")
+        .arg(key)
+        .arg(OUTBOUND_QUEUE_TTL_SECS)
+        .ignore();
+    pipe
 }
 
 impl RelayQueue for redis::aio::MultiplexedConnection {
@@ -200,7 +690,59 @@ impl RelayQueue for redis::aio::MultiplexedConnection {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         let mut conn = self.clone();
         Box::pin(async move {
-            redis::AsyncCommands::lpush::<_, _, ()>(&mut conn, key, value)
+            let (len,): (i64,) = bounded_push_pipeline(key, &value)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            if len > i64::try_from(OUTBOUND_QUEUE_MAX_LEN).unwrap_or(i64::MAX) {
+                tracing::warn!(
+                    key,
+                    len,
+                    "outbound relay queue exceeded its bound; oldest entries trimmed (is the drain running?)"
+                );
+            }
+            Ok(())
+        })
+    }
+
+    fn key_exists<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            redis::AsyncCommands::exists::<_, bool>(&mut conn, key)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn incr_window<'a>(
+        &'a self,
+        key: &'a str,
+        window_secs: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send + 'a>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            let count: i64 = redis::Script::new(INCR_WINDOW_SCRIPT)
+                .key(key)
+                .arg(window_secs)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(u64::try_from(count).unwrap_or(0))
+        })
+    }
+
+    fn take<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send + 'a>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            redis::cmd("GETDEL")
+                .arg(key)
+                .query_async::<Option<String>>(&mut conn)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -236,9 +778,37 @@ struct DiscordRelay {
 /// over [`RelayQueue`] so `handle_relay` is fully unit-testable against a
 /// fake queue without a live Valkey server -- production callers
 /// instantiate `StageCapabilities<redis::aio::MultiplexedConnection>`.
-/// Holds no per-connection tenant/community/app_id (see the module doc --
-/// that scope now arrives per call via [`InvokeScope`]).
-pub struct StageCapabilities<Q: RelayQueue> {
+/// Also generic over [`KvBackend`] (defaulted to the same production
+/// connection type) for the identical reason: `handle_kv`'s argument-
+/// parsing/error-mapping is unit-testable against a fake implementing the
+/// public `bundle_host_kv::KvBackend` trait, with no live Valkey server --
+/// see this module's `tests::FakeKvBackend`. Holds no per-connection
+/// tenant/community/app_id (see the module doc -- that scope now arrives
+/// per call via [`InvokeScope`]).
+///
+/// Everything `handle_db` needs, shared across every invocation this
+/// process serves -- constructed once at startup and cloned cheaply into
+/// each connection's [`StageCapabilities`] via `Arc`. Byte-for-byte the
+/// same shape as `core/svc_process::capabilities::DbWiring`, just built
+/// over this crate's own [`FeatureFlag`] trait instead of svc_process's
+/// `FeatureGate` -- the two stages' license-gating traits differ (module
+/// doc's "kept as a separate trait per crate" rationale extends to this
+/// struct too). `schemas`/`capabilities` are refreshed by this service's
+/// own `bundle_loader` poll (not wired in this landing -- see
+/// `bundle_host_db`'s crate doc "remaining work"); an `app_id` this
+/// process has never heard of fails closed by construction ([`DbHost`]'s
+/// own resolve-then-authorize order).
+#[derive(Clone)]
+pub struct DbWiring {
+    pub host: Arc<DbHost<PostgresBackend>>,
+    pub schemas: Arc<SchemaCache>,
+    pub capabilities: Arc<DbCapabilitySnapshot>,
+    /// `crate::flags::BUNDLE_DB_CAPABILITY_FLAG` gate -- OFF denies every
+    /// `db` call `feature_disabled` before any schema/authorize lookup.
+    pub flag: Arc<dyn FeatureFlag>,
+}
+
+pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::MultiplexedConnection> {
     relay_queue: Q,
     egress: Arc<EgressGuard>,
     /// Shared with the dispatch loop's own `DispatchDeps::usage` so a
@@ -253,24 +823,171 @@ pub struct StageCapabilities<Q: RelayQueue> {
     /// See [`DiscordRelay`]'s doc; `None` until [`Self::with_discord`] is
     /// called.
     discord: Option<DiscordRelay>,
+    /// How long a queued Discord `chat.delete`/`dm.send` waits for the
+    /// drain's confirmation ([`DISCORD_OP_ACK_TIMEOUT`] unless overridden by
+    /// [`Self::with_discord_ack_timeout`]).
+    discord_ack_timeout: Duration,
+    /// See [`Self::with_kv`]'s doc; `None` until it is called (mirrors
+    /// [`Self::discord`]'s graceful-degradation shape: a bundle sees
+    /// `not_implemented` rather than this process failing to start if a
+    /// live Valkey connection for `kv` was never configured).
+    kv: Option<KvHost<K>>,
+    /// The standard enforcement gate (spec SS5) every arm of
+    /// [`CapabilityHandler::handle`] calls first. Mandatory, never
+    /// bypassable (spec SS5.2 "no kill-switch") -- see [`Self::new`]'s doc.
+    gate: Arc<CapabilityGate>,
+    /// `None` until `crate::lib`'s startup wiring provisions a live
+    /// Postgres pool + flag client -- every `db` call denies
+    /// `feature_disabled` in that state, never panics (mirrors every
+    /// other unimplemented-seam capability's fail-closed default in
+    /// [`Self::handle`]).
+    db: Option<DbWiring>,
+    /// `None` until [`Self::with_detokenize`] is called -- every relay send
+    /// then falls back to showing the raw `{user:<token>}` placeholder it
+    /// received from the bundle (the degraded, but never-PII-leaking,
+    /// fallback -- see that method's doc).
+    detokenize: Option<DetokenizeWiring>,
+    /// The OTel instruments every `host-call` served by this value is timed
+    /// into (`waddles_host_call_latency_seconds`). Always the process-wide
+    /// set in production; tests swap it via `with_stage_metrics` so they can
+    /// read back exactly what this call emitted.
+    stage_metrics: Arc<StageMetrics>,
+    /// Operational toggle (`crate::flags::EGRESS_VIA_DISPATCHER_FLAG`);
+    /// `None` until [`Self::with_egress_dispatcher_flag`] -- reads as OFF
+    /// (fail-safe to the inline egress path).
+    egress_dispatcher_flag: Option<Arc<dyn FeatureFlag>>,
 }
 
-impl<Q: RelayQueue> StageCapabilities<Q> {
+/// The outbound PII-detokenization dependency: a live resolver over
+/// `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames`
+/// (`core/egress_detokenizer::HubClientResolver`), plus the opt-out
+/// kill-switch gate (`crate::flags::DISABLE_PII_DETOKENIZATION_FLAG`).
+#[derive(Clone)]
+struct DetokenizeWiring {
+    resolver: Arc<dyn egress_detokenizer::DisplayNameResolver>,
+    gate: Arc<dyn crate::flags::FeatureFlag>,
+}
+
+impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// Builds the capability set this connection's read loop answers every
     /// `host-call` against, for as long as the connection lives. No
     /// tenant/community/app_id here -- every capability method below takes
     /// its [`InvokeScope`] as a parameter instead (module doc). The Discord
-    /// relay provider starts unconfigured (`relay_unavailable` until
-    /// [`Self::with_discord`] is chained on) so every existing caller of
-    /// this constructor -- production and test alike -- is unaffected by
-    /// this landing.
-    pub fn new(relay_queue: Q, egress: Arc<EgressGuard>, usage: Arc<Mutex<UsageBatcher>>) -> Self {
+    /// relay provider and the `kv` backend both start unconfigured
+    /// (`relay_unavailable`/`not_implemented` until [`Self::with_discord`]/
+    /// [`Self::with_kv`] are chained on) so every existing caller of this
+    /// constructor -- production and test alike -- is unaffected by this
+    /// landing. `gate` is mandatory: every arm calls `gate.authorize()`
+    /// first (spec SS5), typically backed by
+    /// `crate::grant_gate::AlwaysGrantedLoader` so `context`/`clock`/`log`
+    /// keep working even before the sibling grants migration lands, while
+    /// every other permission fails closed with no grant data.
+    pub fn new(
+        relay_queue: Q,
+        egress: Arc<EgressGuard>,
+        usage: Arc<Mutex<UsageBatcher>>,
+        gate: Arc<CapabilityGate>,
+    ) -> Self {
         Self {
             relay_queue,
             egress,
             usage,
             discord: None,
+            discord_ack_timeout: DISCORD_OP_ACK_TIMEOUT,
+            kv: None,
+            gate,
+            db: None,
+            detokenize: None,
+            stage_metrics: stage_metrics::stage_metrics(),
+            egress_dispatcher_flag: None,
         }
+    }
+
+    /// Wires the egress-via-dispatcher toggle. Without it
+    /// [`Self::egress_via_dispatcher`] is always `false` (inline path).
+    #[must_use]
+    pub fn with_egress_dispatcher_flag(mut self, flag: Arc<dyn FeatureFlag>) -> Self {
+        self.egress_dispatcher_flag = Some(flag);
+        self
+    }
+
+    /// Whether egress should route through the action dispatcher; `false`
+    /// when no flag is wired. Async because [`FeatureFlag::enabled`] is.
+    pub(crate) async fn egress_via_dispatcher(&self) -> bool {
+        match &self.egress_dispatcher_flag {
+            Some(flag) => flag.enabled().await,
+            None => false,
+        }
+    }
+
+    /// Test seam: routes this value's host-call timings into `metrics`
+    /// instead of the process-wide set, so an assertion sees only the calls
+    /// made through this instance.
+    #[cfg(test)]
+    pub(crate) fn with_stage_metrics(mut self, metrics: Arc<StageMetrics>) -> Self {
+        self.stage_metrics = metrics;
+        self
+    }
+
+    /// Overrides how long a queued Discord op waits for the drain's
+    /// confirmation (default [`DISCORD_OP_ACK_TIMEOUT`]). Must stay well
+    /// inside the bundle invoke budget; exposed mainly so tests can use a
+    /// short wait.
+    #[must_use]
+    pub fn with_discord_ack_timeout(mut self, timeout: Duration) -> Self {
+        self.discord_ack_timeout = timeout;
+        self
+    }
+
+    /// Enables the outbound PII-detokenization pass for every `relay` host
+    /// call this connection answers -- builder-style so existing
+    /// `StageCapabilities::new` call sites (including every current test)
+    /// are unaffected and so a deployment whose `hub_client::HubClient`
+    /// connection failed to open at startup can still construct every
+    /// other capability (same graceful-degradation pattern as
+    /// [`Self::with_discord`]/[`Self::with_kv`]).
+    pub fn with_detokenize(
+        mut self,
+        resolver: Arc<dyn egress_detokenizer::DisplayNameResolver>,
+        gate: Arc<dyn crate::flags::FeatureFlag>,
+    ) -> Self {
+        self.detokenize = Some(DetokenizeWiring { resolver, gate });
+        self
+    }
+
+    /// Enables the `kv` capability over `backend` (production:
+    /// `redis::aio::MultiplexedConnection` -- the exact same direct Valkey
+    /// connection `lib.rs`'s `build_stage_capabilities` already opens for
+    /// `relay`/usage metering, cloned rather than opening a second
+    /// connection, since `MultiplexedConnection::clone` is a cheap handle
+    /// clone over one shared TCP connection, not a new socket). Builder-
+    /// style so a deployment where the Valkey connection failed to open can
+    /// still construct every other capability and simply skip this call,
+    /// the same pattern [`Self::with_discord`] already established.
+    ///
+    /// `capabilities` is the manifest-declared-capability snapshot
+    /// `bundle_host_kv::authorize::authorize_kv` checks -- the same
+    /// `Arc<CapabilitySnapshot>` `crate::bundle_loader`'s DB-driven poll
+    /// loop updates every tick, shared (not copied) so a capability
+    /// dropped from a new manifest version is visible to the very next
+    /// `kv` host-call, not just the next connection.
+    pub fn with_kv(
+        mut self,
+        backend: K,
+        capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+    ) -> Self {
+        self.kv = Some(KvHost::new(backend, capabilities));
+        self
+    }
+
+    /// Attaches the `db` capability's live wiring -- called once at
+    /// startup (`crate::lib`) with the shared, process-wide [`DbWiring`],
+    /// never per-connection. Builder-style so existing `StageCapabilities::new`
+    /// call sites (including every current test) are unaffected. Mirrors
+    /// `core/svc_process::capabilities::StageCapabilities::with_db`.
+    pub fn with_db(mut self, db: DbWiring) -> Self {
+        self.db = Some(db);
+        self
     }
 
     /// Enables the Discord relay provider, given the transport to send
@@ -294,6 +1011,29 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
         self
     }
 
+    /// Substitutes every `{user:<token>}` placeholder in `text` with its
+    /// resolved, `sink`-escaped display name (`egress_detokenizer::
+    /// detokenize_resolving`) -- the PII boundary's outbound half. Returns
+    /// `text` unchanged (tokens still visible, never raw PII -- see
+    /// [`Self::with_detokenize`]'s doc) when no resolver is configured yet,
+    /// or when the opt-out kill-switch is ON.
+    async fn detokenize_text(
+        &self,
+        tenant: &str,
+        text: &str,
+        sink: egress_detokenizer::Sink,
+    ) -> String {
+        let Some(wiring) = &self.detokenize else {
+            return text.to_string();
+        };
+        if !wiring.gate.enabled().await {
+            return text.to_string();
+        }
+        egress_detokenizer::detokenize_resolving(text, tenant, wiring.resolver.as_ref(), sink)
+            .await
+            .text
+    }
+
     async fn handle_relay(
         &self,
         scope: &InvokeScope,
@@ -307,6 +1047,46 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
             return Err(denied(
                 "unknown_provider",
                 format!("relay provider {provider:?} is not in the compiled-in allowlist"),
+            ));
+        }
+        // The op defaults to `chat.send` (legacy shape); an unknown op is
+        // refused loudly, never defaulted.
+        let op = peek_relay_op(args).map_err(|raw| {
+            denied(
+                "unknown_op",
+                format!("relay op {raw:?} is not one of chat.send/chat.delete/dm.send"),
+            )
+        })?;
+        // Gate call FIRST (spec SS5), now that `provider` and `op` are known
+        // well enough to name the specific `<op>:<platform>` permission id
+        // this call maps to (`chat.send:`/`chat.delete:`/`dm.send:`).
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                op.permission(provider),
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
+        if !relay_op_supported(provider, op) {
+            // Flag ON: an unroutable op is a `NoDestination` -- counted and
+            // refused loudly via the dispatcher's own error path.
+            if self.egress_via_dispatcher().await {
+                if let Err(e) = crate::dispatch_destination::route_destination(provider, op) {
+                    return Err(no_destination_error(scope, &e));
+                }
+            }
+            tracing::error!(
+                provider,
+                op = op.as_str(),
+                app_id = %scope.app_id,
+                "relay op authorized but no sender implements it yet"
+            );
+            return Err(denied(
+                "unsupported_op",
+                format!(
+                    "relay op {:?} has no sender for provider {provider:?}",
+                    op.as_str()
+                ),
             ));
         }
         // WIT `relay.push(provider: string, message-json: string)`
@@ -336,7 +1116,14 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
                 format!("relay.send message_json is not valid JSON: {e}"),
             )
         })?;
-        // `text` is common to every provider; `channel` resolution below is
+        // Discord `chat.delete`/`dm.send` are executed by svc-ingest's
+        // bot-token REST sender via the outbound queue, behind a
+        // confirmation handshake; they do not share the `text`-required
+        // shape below (delete has no text).
+        if provider == "discord" && op != RelayOp::ChatSend {
+            return self.handle_discord_queued_op(scope, op, &message).await;
+        }
+        // `text` is common to every provider; `channel` resolution is
         // NOT -- Discord branches off before ever looking at
         // `message.channel` (see `handle_discord_relay`'s doc for why).
         let text = message
@@ -350,13 +1137,32 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
                 )
             })?;
 
-        if provider == "discord" {
-            return self.handle_discord_relay(scope, text).await;
+        // Explicit per-provider dispatch: there is deliberately no implicit
+        // "everything else is Twitch" arm. `relay_op_supported` already
+        // refused any provider/op without a table row above; this match
+        // keeps the send path itself equally explicit.
+        match provider {
+            "discord" => self.handle_discord_relay(scope, text).await,
+            "twitch" => self.handle_twitch_relay(scope, op, &message, text).await,
+            other => Err(denied(
+                "unsupported_op",
+                format!("relay provider {other:?} has no send path"),
+            )),
         }
+    }
 
-        // Twitch, the only other compiled-in provider: `channel` comes from
-        // the bundle's own `message_json`, unchanged from this capability's
-        // original (Twitch-only) landing.
+    /// Twitch `chat.send`: `LPUSH`es the versioned envelope onto
+    /// `waddles:transport:irc:twitch:outbound` for svc-ingest's persistent
+    /// IRC drain. `channel` comes from the bundle's own `message_json`,
+    /// unchanged from this capability's original (Twitch-only) landing.
+    async fn handle_twitch_relay(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+        message: &serde_json::Value,
+        text: &str,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let provider = "twitch";
         let channel = message
             .get("channel")
             .and_then(|v| v.as_str())
@@ -368,8 +1174,11 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
                 )
             })?;
 
+        let text = self
+            .detokenize_text(&scope.tenant, text, egress_detokenizer::Sink::Twitch)
+            .await;
         let channel = sanitize_irc_component(channel);
-        let text = sanitize_irc_component(text);
+        let text = sanitize_irc_component(&text);
         if channel.is_empty() || text.is_empty() {
             return Err(denied(
                 "invalid_args",
@@ -378,7 +1187,20 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
         }
 
         let key = outbound_relay_queue_key(provider);
-        let payload = serde_json::json!({"channel": channel, "text": text}).to_string();
+        // Versioned envelope. `channel`/`text` stay top-level so a not-yet-
+        // upgraded consumer (which ignores unknown fields) still delivers it
+        // during a rolling upgrade; `v`/`op`/`platform` are what the new
+        // consumer dispatches on.
+        let payload = build_outbound_envelope(
+            op,
+            provider,
+            &EnvelopeFields {
+                channel: Some(&channel),
+                text: Some(&text),
+                ..EnvelopeFields::default()
+            },
+        )
+        .to_string();
         let outbound_bytes = payload.len() as u64;
         self.relay_queue
             .lpush(&key, payload)
@@ -397,6 +1219,452 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
                 outbound_bytes,
             );
         Ok(serde_json::json!({"queued": true, "provider": provider}))
+    }
+
+    /// Refuses a Discord queued op unless the outbound drain advertises
+    /// readiness ([`DISCORD_DRAIN_READY_KEY`]). The drain only runs when its
+    /// flag is ON, `DISCORD_BOT_TOKEN` is set and the spine config loads; any
+    /// other state used to queue ops that nothing would ever drain while the
+    /// bundle was told `{"queued":true}`. Now it is a loud, immediate error
+    /// and **nothing is queued**. A readiness probe that itself errors is
+    /// refused too (cannot prove the drain is up), never read as "ready".
+    async fn require_discord_drain_ready(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+    ) -> Result<(), HostResultError> {
+        match self.relay_queue.key_exists(DISCORD_DRAIN_READY_KEY).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                tracing::error!(
+                    provider = "discord",
+                    op = op.as_str(),
+                    app_id = %scope.app_id,
+                    "discord outbound drain is not ready (drain flag off, DISCORD_BOT_TOKEN missing, spine config missing, or drain down); refusing op, nothing queued"
+                );
+                // The guest-facing text names the effect only; the deployment
+                // causes (flag / token / spine config) stay in the host log
+                // above -- a bundle is third-party code.
+                Err(denied(
+                    "relay_unavailable",
+                    format!(
+                        "discord {} refused: the discord outbound drain is not running; nothing was queued",
+                        op.as_str()
+                    ),
+                ))
+            }
+            Err(e) => {
+                tracing::error!(
+                    provider = "discord",
+                    op = op.as_str(),
+                    app_id = %scope.app_id,
+                    error = %e,
+                    "could not verify the discord outbound drain is ready; refusing op, nothing queued"
+                );
+                Err(denied(
+                    "relay_unavailable",
+                    format!(
+                        "discord {} refused: could not verify the discord outbound drain is running: {e}",
+                        op.as_str()
+                    ),
+                ))
+            }
+        }
+    }
+
+    /// The real throttle on `dm.send` (the catalog's `UsageBatcher` is
+    /// write-only metering and never refuses anything). Two fixed-window
+    /// counters in Valkey -- shared by every `svc_action` replica -- both of
+    /// which must admit the call: per `(tenant, community, app)`
+    /// ([`DM_SEND_APP_LIMIT`]) and per target user within the tenant
+    /// ([`DM_SEND_TARGET_LIMIT`], keyed by a hash of the id, never the raw
+    /// id). A limiter that cannot be read fails **closed**.
+    async fn throttle_dm_send(
+        &self,
+        scope: &InvokeScope,
+        user_id: &str,
+    ) -> Result<(), HostResultError> {
+        let app_key = format!(
+            "waddles:ratelimit:dm.send:app:{}:{}:{}",
+            scope.tenant_id, scope.community_id, scope.app_id
+        );
+        let target_key = format!(
+            "waddles:ratelimit:dm.send:target:{}:{}",
+            scope.tenant_id,
+            user_tag(user_id)
+        );
+        for (key, limit, subject) in [
+            (app_key, DM_SEND_APP_LIMIT, "this app in this community"),
+            (target_key, DM_SEND_TARGET_LIMIT, "this recipient"),
+        ] {
+            match self
+                .relay_queue
+                .incr_window(&key, DM_SEND_WINDOW_SECS)
+                .await
+            {
+                Ok(count) if count <= limit => {}
+                Ok(count) => {
+                    tracing::warn!(
+                        provider = "discord",
+                        app_id = %scope.app_id,
+                        count,
+                        limit,
+                        window_secs = DM_SEND_WINDOW_SECS,
+                        subject,
+                        "dm.send rate limit exceeded; refusing op, nothing queued"
+                    );
+                    return Err(denied(
+                        "rate_limited",
+                        format!(
+                            "discord dm.send rate limit exceeded for {subject} \
+                             ({limit} per {DM_SEND_WINDOW_SECS}s)"
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    tracing::error!(
+                        provider = "discord",
+                        app_id = %scope.app_id,
+                        error = %e,
+                        "dm.send rate limiter unavailable; refusing op (fail closed), nothing queued"
+                    );
+                    return Err(denied(
+                        "relay_unavailable",
+                        format!("discord dm.send refused: rate limiter unavailable: {e}"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Waits for the drain's result for `op_id` and maps it onto this host
+    /// call's own result: `Ok` **only** when the platform confirmed it
+    /// performed the op. A drain that accepted the entry but never answers
+    /// (down, wedged, dropped it) is `relay_unconfirmed`, never success -- a
+    /// bundle must not treat "queued" as "done" (the `!secret` bundle would
+    /// otherwise DM a link while the plaintext was still public).
+    async fn await_discord_ack(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+        op_id: &str,
+    ) -> Result<(), HostResultError> {
+        let key = format!("{DISCORD_OP_ACK_KEY_PREFIX}{op_id}");
+        let deadline = tokio::time::Instant::now() + self.discord_ack_timeout;
+        loop {
+            match self.relay_queue.take(&key).await {
+                Ok(Some(raw)) => {
+                    return match parse_ack(&raw) {
+                        Ok(AckOutcome::Confirmed) => Ok(()),
+                        Ok(AckOutcome::Refused(failure)) => {
+                            tracing::warn!(
+                                provider = "discord",
+                                op = op.as_str(),
+                                app_id = %scope.app_id,
+                                reason = ?failure,
+                                "discord op was not performed"
+                            );
+                            Err(match failure {
+                                AckFailure::NotInCommunity => denied(
+                                    "target_not_in_community",
+                                    format!(
+                                        "discord {} refused: the target is not a member of the triggering community",
+                                        op.as_str()
+                                    ),
+                                ),
+                                AckFailure::Unsupported => denied(
+                                    "unsupported_op",
+                                    format!(
+                                        "discord {} is unsupported by the outbound drain",
+                                        op.as_str()
+                                    ),
+                                ),
+                                AckFailure::Failed => denied(
+                                    "relay_failed",
+                                    format!("discord {} failed at the platform", op.as_str()),
+                                ),
+                            })
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                provider = "discord",
+                                op = op.as_str(),
+                                app_id = %scope.app_id,
+                                error = %e,
+                                "malformed discord op result; treating the op as unconfirmed"
+                            );
+                            Err(denied(
+                                "relay_unconfirmed",
+                                format!(
+                                    "discord {} result was unreadable; the op is unconfirmed",
+                                    op.as_str()
+                                ),
+                            ))
+                        }
+                    };
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(
+                        provider = "discord",
+                        op = op.as_str(),
+                        app_id = %scope.app_id,
+                        error = %e,
+                        "could not read the discord op result"
+                    );
+                    return Err(denied(
+                        "relay_unavailable",
+                        format!(
+                            "discord {} could not be confirmed: result read failed: {e}",
+                            op.as_str()
+                        ),
+                    ));
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::error!(
+                    provider = "discord",
+                    op = op.as_str(),
+                    app_id = %scope.app_id,
+                    waited_ms = u64::try_from(self.discord_ack_timeout.as_millis()).unwrap_or(u64::MAX),
+                    "discord op accepted but not confirmed in time (drain slow, wedged or down); reporting failure"
+                );
+                return Err(denied(
+                    "relay_unconfirmed",
+                    format!(
+                        "discord {} was queued but not confirmed by the outbound drain in time; treat it as NOT done",
+                        op.as_str()
+                    ),
+                ));
+            }
+            tokio::time::sleep(DISCORD_OP_ACK_POLL).await;
+        }
+    }
+
+    /// Discord `chat.delete` / `dm.send`: validates the arguments, builds
+    /// the versioned envelope, queues it for svc-ingest's bot-token REST
+    /// sender (`svc_ingest::outbound::run_discord`) and **waits for the
+    /// drain's confirmation** before reporting success.
+    ///
+    /// **Confirmation, not queueing, is the result.** The WIT `relay.push`
+    /// returns nothing to the guest -- it only raises on error -- so a
+    /// bundle can only learn an op failed if this host call fails. Hence:
+    /// the op is refused up front unless the drain is advertising readiness
+    /// ([`Self::require_discord_drain_ready`]); the entry carries an `op_id`
+    /// and an `exp_ms` deadline; and this call returns `Ok` only once the
+    /// drain posts `{"ok":true}` under that id. A refusal, a platform
+    /// failure, or silence until the deadline is an error the bundle sees.
+    ///
+    /// **Security (moderation delete + DM surface).** `chat.delete` targets
+    /// ONLY the triggering event's own channel (`scope.origin_channel_id`,
+    /// same cross-tenant reasoning as `Self::handle_discord_relay`) -- the
+    /// bundle names the message, never the channel. `dm.send` names its
+    /// recipient (the bundle's choice), so the envelope also carries the
+    /// triggering channel and the sender delivers only to a member of that
+    /// channel's community; it is additionally throttled
+    /// ([`Self::throttle_dm_send`]). Every id must be a snowflake (no path
+    /// injection into the REST URL). `dm.send` text goes through the egress
+    /// detokenizer like every other Discord sink. Both ops were already
+    /// authorized by the capability gate in the caller (`chat.delete:discord`
+    /// / `dm.send:discord`, both dangerous).
+    async fn handle_discord_queued_op(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+        message: &serde_json::Value,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let str_field = |name: &str| {
+            message
+                .get(name)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        };
+        let origin = |what: &str| -> Result<&str, HostResultError> {
+            let channel_id = scope.origin_channel_id.as_deref().ok_or_else(|| {
+                denied(
+                    "invalid_args",
+                    format!(
+                        "discord {what} requires an origin channel id on the delivered envelope"
+                    ),
+                )
+            })?;
+            if !is_discord_snowflake(channel_id) {
+                return Err(denied(
+                    "invalid_args",
+                    format!("discord {what} origin channel id is not a valid snowflake"),
+                ));
+            }
+            Ok(channel_id)
+        };
+        // Phase 1: validate arguments only (no I/O), so an invalid call is
+        // refused before it can touch readiness, the rate budget or the
+        // detokenizer.
+        enum Pending<'a> {
+            Delete {
+                channel_id: &'a str,
+                message_id: &'a str,
+            },
+            Dm {
+                origin_channel: &'a str,
+                user_id: &'a str,
+                text: &'a str,
+            },
+            Chat {
+                channel_id: &'a str,
+                text: &'a str,
+            },
+        }
+        let pending = match op {
+            RelayOp::ChatDelete => {
+                let channel_id = origin("chat.delete")?;
+                let message_id = str_field("message_id")
+                    .filter(|id| is_discord_snowflake(id))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            "discord chat.delete requires a snowflake 'message_id'",
+                        )
+                    })?;
+                Pending::Delete {
+                    channel_id,
+                    message_id,
+                }
+            }
+            RelayOp::DmSend => {
+                let origin_channel = origin("dm.send")?;
+                let user_id = str_field("user_id")
+                    .filter(|id| is_discord_snowflake(id))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            "discord dm.send requires a snowflake 'user_id'",
+                        )
+                    })?;
+                let text = str_field("text").ok_or_else(|| {
+                    denied("invalid_args", "discord dm.send requires non-empty 'text'")
+                })?;
+                if text.chars().count() > DISCORD_MAX_CONTENT_CHARS {
+                    return Err(denied(
+                        "invalid_args",
+                        format!(
+                            "discord dm.send 'text' exceeds Discord's {DISCORD_MAX_CONTENT_CHARS}-character message limit"
+                        ),
+                    ));
+                }
+                Pending::Dm {
+                    origin_channel,
+                    user_id,
+                    text,
+                }
+            }
+            RelayOp::ChatSend => {
+                // Reached only from `handle_discord_relay` when the
+                // egress-via-dispatcher flag is ON. The channel is the
+                // event's origin channel, never the bundle's.
+                let channel_id = origin("chat.send")?;
+                let text = str_field("text").ok_or_else(|| {
+                    denied(
+                        "invalid_args",
+                        "discord chat.send requires non-empty 'text'",
+                    )
+                })?;
+                Pending::Chat { channel_id, text }
+            }
+        };
+
+        // Phase 2: producer-side safety checks, cheapest and most
+        // fundamental first -- is anything draining, then is this call within
+        // its rate budget. A refused call costs no detokenizer round-trip.
+        self.require_discord_drain_ready(scope, op).await?;
+        if let Pending::Dm { user_id, .. } = &pending {
+            self.throttle_dm_send(scope, user_id).await?;
+        }
+
+        // Phase 3: build the envelope (the DM text passes through the egress
+        // detokenizer like every other Discord sink) and queue it.
+        let mut payload = match pending {
+            Pending::Delete {
+                channel_id,
+                message_id,
+            } => build_outbound_envelope(
+                op,
+                "discord",
+                &EnvelopeFields {
+                    channel: Some(channel_id),
+                    message_id: Some(message_id),
+                    ..EnvelopeFields::default()
+                },
+            ),
+            Pending::Chat { channel_id, text } => {
+                let text = self
+                    .detokenize_text(&scope.tenant, text, egress_detokenizer::Sink::Discord)
+                    .await;
+                build_outbound_envelope(
+                    op,
+                    "discord",
+                    &EnvelopeFields {
+                        channel: Some(channel_id),
+                        text: Some(&text),
+                        ..EnvelopeFields::default()
+                    },
+                )
+            }
+            Pending::Dm {
+                origin_channel,
+                user_id,
+                text,
+            } => {
+                let text = self
+                    .detokenize_text(&scope.tenant, text, egress_detokenizer::Sink::Discord)
+                    .await;
+                build_outbound_envelope(
+                    op,
+                    "discord",
+                    &EnvelopeFields {
+                        text: Some(&text),
+                        user_id: Some(user_id),
+                        origin_channel: Some(origin_channel),
+                        ..EnvelopeFields::default()
+                    },
+                )
+            }
+        };
+
+        let op_id = uuid::Uuid::new_v4().to_string();
+        let exp_ms = now_epoch_ms().saturating_add(
+            u64::try_from(self.discord_ack_timeout.as_millis()).unwrap_or(u64::MAX),
+        );
+        stamp_handshake(&mut payload, &op_id, exp_ms);
+        let payload = payload.to_string();
+        let outbound_bytes = payload.len() as u64;
+        self.relay_queue
+            .lpush(&outbound_relay_queue_key("discord"), payload)
+            .await
+            .map_err(|e| denied("relay_unavailable", e))?;
+        self.await_discord_ack(scope, op, &op_id).await?;
+        tracing::info!(
+            provider = "discord",
+            op = op.as_str(),
+            app_id = %scope.app_id,
+            "discord outbound op confirmed"
+        );
+        self.usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_relay_call(
+                &scope.tenant,
+                scope.community.as_deref(),
+                "",
+                &scope.app_id,
+                outbound_bytes,
+            );
+        Ok(serde_json::json!({
+            "queued": true,
+            "confirmed": true,
+            "provider": "discord",
+            "op": op.as_str(),
+        }))
     }
 
     /// Discord relay send: a stateless bot REST `POST
@@ -429,6 +1697,13 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
         scope: &InvokeScope,
         text: &str,
     ) -> Result<serde_json::Value, HostResultError> {
+        // Flag ON: route through the dispatcher -> the outbound drain (the
+        // bot token lives with the drain, so no `self.discord` needed). The
+        // grant gate already ran in `handle_relay`. Flag OFF falls through
+        // to the inline REST POST below, unchanged.
+        if self.egress_via_dispatcher().await {
+            return self.dispatch_discord_chat_send(scope, text).await;
+        }
         let Some(discord) = &self.discord else {
             return Err(denied(
                 "relay_unavailable",
@@ -447,6 +1722,11 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
                 "discord relay origin channel id is not a valid snowflake",
             ));
         }
+
+        let text = self
+            .detokenize_text(&scope.tenant, text, egress_detokenizer::Sink::Discord)
+            .await;
+        let text = text.as_str();
 
         // Spec §8.2 steps 6-7's SSRF-pinning discipline, reused here even
         // though `discord.com` is a compiled-in host rather than a
@@ -502,7 +1782,91 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
         Ok(serde_json::json!({"sent": true, "provider": "discord"}))
     }
 
-    fn handle_clock(&self, op: &str) -> Result<serde_json::Value, HostResultError> {
+    /// Flag-ON Discord `chat.send`: routes via
+    /// [`crate::dispatch_destination::route_destination`] and, for the
+    /// stateful platform reply, queues through the shared queued-op path
+    /// (detokenize -> LPUSH -> ack-wait -> meter once). Returns the same
+    /// `{"sent":true,...}` shape as the inline path; a missing ack is
+    /// `relay_unconfirmed` (from the shared ack wait), never success.
+    async fn dispatch_discord_chat_send(
+        &self,
+        scope: &InvokeScope,
+        text: &str,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let routed = crate::dispatch_destination::route_destination("discord", RelayOp::ChatSend);
+        self.dispatch_chat_send_routed(scope, text, routed).await
+    }
+
+    /// Acts on an already-computed routing decision. Split from
+    /// [`Self::dispatch_discord_chat_send`] so the `NoDestination` arm --
+    /// unreachable for Discord `chat.send` today -- is testable directly.
+    async fn dispatch_chat_send_routed(
+        &self,
+        scope: &InvokeScope,
+        text: &str,
+        routed: Result<
+            crate::dispatch_destination::Destination,
+            crate::dispatch_destination::DispatchError,
+        >,
+    ) -> Result<serde_json::Value, HostResultError> {
+        use crate::dispatch_destination::Destination;
+        use tracing::Instrument;
+        let (provider, op, destination) = match &routed {
+            Ok(d @ Destination::StatefulPlatformReply { provider, op }) => {
+                (provider.as_str(), op.as_str(), d.label())
+            }
+            Err(crate::dispatch_destination::DispatchError::NoDestination { provider, op }) => {
+                (provider.as_str(), op.as_str(), "none")
+            }
+        };
+        // Bounded, PII-free attributes only: allowlisted provider, closed op
+        // enum, closed destination label. Never message text or channel ids.
+        let span = tracing::info_span!(
+            "dispatch.route",
+            provider = %provider,
+            op = op,
+            destination = destination,
+            flag_on = true
+        );
+        if routed.is_ok() {
+            metrics::counter!(
+                ROUTED_METRIC,
+                "provider" => provider.to_string(),
+                "op" => op,
+                "destination" => destination
+            )
+            .increment(1);
+        }
+        async {
+            match routed {
+                Ok(Destination::StatefulPlatformReply { .. }) => {
+                    self.handle_discord_queued_op(
+                        scope,
+                        RelayOp::ChatSend,
+                        &serde_json::json!({ "text": text }),
+                    )
+                    .await?;
+                    Ok(serde_json::json!({"sent": true, "provider": "discord"}))
+                }
+                Err(e) => Err(no_destination_error(scope, &e)),
+            }
+        }
+        .instrument(span)
+        .await
+    }
+
+    fn handle_clock(
+        &self,
+        scope: &InvokeScope,
+        op: &str,
+    ) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::PlatformClock,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         match op {
             "now-millis" => {
                 let millis = std::time::SystemTime::now()
@@ -519,13 +1883,29 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
     }
 
     fn handle_context(&self, scope: &InvokeScope) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::PlatformContext,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         // Spec §7.4: "Tenant and community come from the key, never from
         // payload." Never includes a credential or secret.
-        Ok(serde_json::json!({
+        let mut ctx = serde_json::json!({
             "tenant": scope.tenant,
             "community": scope.community,
             "app_id": scope.app_id,
-        }))
+        });
+        // Authoritative numeric scope for `context-v2` guests: the SAME
+        // host-derived ids the dispatch frame/capabilities are bound to
+        // (verified-envelope ids for a v3 envelope). Omitted when
+        // unresolved (0) so a v2 bundle fails closed; v1 ignores the keys.
+        if scope.tenant_id >= 1 && scope.community_id >= 0 {
+            ctx["tenant_id"] = serde_json::json!(i64::from(scope.tenant_id));
+            ctx["community_id"] = serde_json::json!(scope.community_id);
+        }
+        Ok(ctx)
     }
 
     fn handle_log(
@@ -533,6 +1913,13 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
         scope: &InvokeScope,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::PlatformLog,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("info");
         let raw_message = args
             .get("message")
@@ -557,42 +1944,498 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
         }
         Ok(serde_json::json!({}))
     }
+
+    /// `kv.get`/`kv.set`/`kv.delete`/`kv.increment` (`wit/waddle-bundle/
+    /// stage.wit` `interface kv`). Every argument shape here matches
+    /// exactly what `core/bundle_executor::host::imports`'s `kv::Host`
+    /// impl sends (`{"key"}`, `{"key","value","ttl_seconds"}`,
+    /// `{"key","delta","ttl_seconds"}`) and expects back
+    /// (`{"value": ...}`) -- see that module's doc for the wire contract
+    /// this must not drift from. Tenant/community/app_id come from `scope`
+    /// (never `call.app_id`, which is executor-set metadata, not a trust
+    /// boundary this capability re-derives its own scope from -- module
+    /// doc: "every capability here resolves its own scope from `self`").
+    async fn handle_kv(
+        &self,
+        scope: &InvokeScope,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5) -- `storage.kv`, `AppScoped`. This
+        // supersedes `bundle_host_kv::authorize::authorize_kv`'s interim
+        // always-grant stand-in as the real security boundary; that inner
+        // seam remains harmlessly redundant until it is retired in a
+        // follow-on cleanup.
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::StorageKv,
+                ResourceRef::AppScoped(AppScopedResource::KvState),
+            )
+            .map_err(denied_from_gate)?;
+        let Some(kv) = &self.kv else {
+            return Err(denied(
+                "not_implemented",
+                "kv capability is not configured on this stage (no Valkey connection)",
+            ));
+        };
+        let kv_scope = KvScope::new(
+            scope.tenant.clone(),
+            scope.community.clone(),
+            scope.app_id.clone(),
+        );
+
+        match call.op.as_str() {
+            "get" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                let value = kv
+                    .get(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({ "value": value }))
+            }
+            "set" => {
+                let args: KvSetArgs = parse_kv_args(&call.args)?;
+                kv.set(
+                    &kv_scope,
+                    call.call_id,
+                    &args.key,
+                    &args.value,
+                    args.ttl_seconds,
+                )
+                .await
+                .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({}))
+            }
+            "delete" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                kv.delete(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({}))
+            }
+            "increment" => {
+                let args: KvIncrementArgs = parse_kv_args(&call.args)?;
+                let value = kv
+                    .increment(
+                        &kv_scope,
+                        call.call_id,
+                        &args.key,
+                        args.delta,
+                        args.ttl_seconds,
+                    )
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({ "value": value }))
+            }
+            other => Err(denied(
+                "unknown_op",
+                format!("kv op {other:?} not supported"),
+            )),
+        }
+    }
+
+    /// Structured insert/get/update/delete/query against this app's own
+    /// `app_core`/`app_community` table -- byte-for-byte mirror of
+    /// `core/svc_process::capabilities::StageCapabilities::handle_db`
+    /// (same design doc, same `bundle_host_db::DbHost`), rescoped per-call
+    /// to this connection's [`InvokeScope`] instead of a per-connection
+    /// fixed tenant (module doc's "capability scope is resolved per
+    /// invoke, never per connection").
+    ///
+    /// Op/args shape identical to svc_process's `handle_db` doc:
+    /// - `insert`: `args.column_values` = `{col: value, ...}` -> `{row_id, version, columns}`
+    /// - `get`: `args.row_id` (string) -> `{row_id, version, columns}`
+    /// - `update`: `args.row_id`, `args.expected_version` (u64), `args.column_values` -> `{row_id, version, columns}`
+    /// - `delete`: `args.row_id`, `args.expected_version` (u64) -> `{}`
+    /// - `query`: `args.limit`/`args.offset` (both optional u32, clamped to
+    ///   `MAX_QUERY_LIMIT`) -> `{rows: [{row_id, version, columns}, ...]}`
+    ///   -- host-side op ready for the proposed WIT shape, not yet
+    ///   guest-reachable in this landing (see `bundle_host_db`'s PR description)
+    async fn handle_db(
+        &self,
+        scope: &InvokeScope,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5), same pattern as `handle_kv` above --
+        // checked before the feature-flag/wiring state below so an
+        // ungranted call always reports `not_granted`, never
+        // `not_implemented`/`feature_disabled` (which would leak whether
+        // the capability is wired at all to a caller that was never
+        // entitled to ask).
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::StorageTables,
+                ResourceRef::AppScoped(AppScopedResource::Table),
+            )
+            .map_err(denied_from_gate)?;
+        let Some(db) = &self.db else {
+            return Err(denied(
+                "not_implemented",
+                "db capability is not wired in this build -- TODO(M4+)",
+            ));
+        };
+
+        if !db.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "db capability is disabled (waddles.bundle-db-capability is OFF)",
+            ));
+        }
+
+        // Numeric ids (not the slugs): the bundle table's scope columns and
+        // RLS policy are `integer` -- see `bundle_host_db::DbScope`.
+        // `community_id` is `0` for a tenant-wide activation, the same
+        // sentinel `bundle_host_db::TENANT_WIDE_COMMUNITY_ID` stores.
+        let db_scope = DbScope::new(scope.tenant_id, scope.community_id, scope.app_id.clone());
+
+        let column_values =
+            |args: &serde_json::Value| -> Result<Vec<(String, DbValue)>, HostResultError> {
+                let obj = args
+                    .get("column_values")
+                    .and_then(|v| v.as_object())
+                    .ok_or_else(|| denied("invalid_args", "column_values must be a JSON object"))?;
+                obj.iter()
+                    .map(|(k, v)| Ok((k.clone(), json_to_db_value(v)?)))
+                    .collect()
+            };
+
+        let row_id = |args: &serde_json::Value| -> Result<String, HostResultError> {
+            args.get("row_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| denied("invalid_args", "row_id must be a string"))
+        };
+
+        let expected_version = |args: &serde_json::Value| -> Result<u64, HostResultError> {
+            args.get("expected_version")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| denied("invalid_args", "expected_version must be a u64"))
+        };
+
+        let result = match call.op.as_str() {
+            "insert" => {
+                let values = column_values(&call.args)?;
+                db.host
+                    .insert(&db_scope, &db.schemas, &db.capabilities, values)
+                    .await
+            }
+            "get" => {
+                let id = row_id(&call.args)?;
+                db.host
+                    .get(&db_scope, &db.schemas, &db.capabilities, &id)
+                    .await
+            }
+            "update" => {
+                let id = row_id(&call.args)?;
+                let version = expected_version(&call.args)?;
+                let values = column_values(&call.args)?;
+                db.host
+                    .update(
+                        &db_scope,
+                        &db.schemas,
+                        &db.capabilities,
+                        &id,
+                        version,
+                        values,
+                    )
+                    .await
+            }
+            "delete" => {
+                let id = row_id(&call.args)?;
+                let version = expected_version(&call.args)?;
+                return db
+                    .host
+                    .delete(&db_scope, &db.schemas, &db.capabilities, &id, version)
+                    .await
+                    .map(|()| serde_json::json!({}))
+                    .map_err(db_error_to_host_error);
+            }
+            "query" => {
+                let limit = call
+                    .args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(bundle_host_db::MAX_QUERY_LIMIT);
+                let offset = call
+                    .args
+                    .get("offset")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(0);
+                let order_by = match parse_order_by(&call.args) {
+                    Ok(o) => o,
+                    Err(e) => return Err(e),
+                };
+                return db
+                    .host
+                    .query(
+                        &db_scope,
+                        &db.schemas,
+                        &db.capabilities,
+                        limit,
+                        offset,
+                        order_by,
+                    )
+                    .await
+                    .map(|rows| {
+                        serde_json::json!({
+                            "rows": rows.into_iter().map(row_to_json).collect::<Vec<_>>(),
+                        })
+                    })
+                    .map_err(db_error_to_host_error);
+            }
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("db op {other:?} not supported"),
+                ))
+            }
+        };
+
+        result.map(row_to_json).map_err(db_error_to_host_error)
+    }
+
+    /// `enabled` op: `{"key": String, "default_value": bool}` ->
+    /// `{"enabled": bool}` -- un-stubs the `flags` WIT capability via
+    /// `crate::flags::resolve_flag`'s real `penguin_licensing::
+    /// LicenseClient`-backed fallback chain (live -> cached -> this
+    /// call's own `default_value`; see that function's doc). Never
+    /// returns an error for a well-formed call -- see `core/svc_process::
+    /// capabilities::StageCapabilities::handle_flags`'s identical doc for
+    /// why. `tier` is not wired in this landing.
+    async fn handle_flags(
+        &self,
+        scope: &InvokeScope,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5), same pattern as `handle_kv`/`handle_db`.
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::FlagsRead,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
+        match call.op.as_str() {
+            "enabled" => {
+                let args: FlagsEnabledArgs =
+                    serde_json::from_value(call.args.clone()).map_err(|e| {
+                        denied(
+                            "invalid_args",
+                            format!("malformed flags.enabled host-call args: {e}"),
+                        )
+                    })?;
+                let value = crate::flags::resolve_flag(&args.key, args.default_value).await;
+                Ok(serde_json::json!({ "enabled": value }))
+            }
+            other => Err(denied(
+                "not_implemented",
+                format!("flags op {other:?} is not wired in this build -- TODO(M3+)"),
+            )),
+        }
+    }
 }
 
-impl<Q: RelayQueue> CapabilityHandler for StageCapabilities<Q> {
+/// `{"key": String, "default_value": bool}` -- `flags.enabled`'s args.
+#[derive(serde::Deserialize)]
+struct FlagsEnabledArgs {
+    key: String,
+    default_value: bool,
+}
+
+fn json_to_db_value(v: &serde_json::Value) -> Result<DbValue, HostResultError> {
+    Ok(match v {
+        serde_json::Value::Null => DbValue::Null,
+        serde_json::Value::Bool(b) => DbValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                DbValue::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                DbValue::Float(f)
+            } else {
+                return Err(denied("invalid_args", "unsupported numeric value"));
+            }
+        }
+        serde_json::Value::String(s) => DbValue::Text(s.clone()),
+        _ => {
+            return Err(denied(
+                "invalid_args",
+                "unsupported value shape (array/object)",
+            ))
+        }
+    })
+}
+
+/// Parses `query`'s optional `order_by` arg: `{"random": true}` or
+/// `{"column": "<name>", "descending": <bool>}` -- `None`/absent means the
+/// backend's own default (`row_id ASC`). Column-name validation itself
+/// happens host-side in `bundle_host_db::backend::order_by_sql` (never
+/// trusted from this JSON alone) -- this function only shapes the
+/// wire-level args into [`bundle_host_db::OrderBy`]. Mirrors
+/// `svc_process::capabilities::parse_order_by` (not shared/exported from
+/// `bundle_host_db`, so duplicated here).
+fn parse_order_by(
+    args: &serde_json::Value,
+) -> Result<Option<bundle_host_db::OrderBy>, HostResultError> {
+    let Some(order_by) = args.get("order_by") else {
+        return Ok(None);
+    };
+    if order_by.is_null() {
+        return Ok(None);
+    }
+    if order_by.get("random").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(Some(bundle_host_db::OrderBy::Random));
+    }
+    let name = order_by
+        .get("column")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            denied(
+                "invalid_args",
+                "order_by must be {\"random\": true} or {\"column\": string, \"descending\": bool}",
+            )
+        })?;
+    let descending = order_by
+        .get("descending")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(Some(bundle_host_db::OrderBy::Column {
+        name: name.to_string(),
+        descending,
+    }))
+}
+
+fn db_value_to_json(v: &DbValue) -> serde_json::Value {
+    match v {
+        DbValue::Null => serde_json::Value::Null,
+        DbValue::Bool(b) => serde_json::json!(b),
+        DbValue::Int(i) => serde_json::json!(i),
+        DbValue::Float(f) => serde_json::json!(f),
+        DbValue::Text(s) => serde_json::json!(s),
+        DbValue::Bytes(b) => serde_json::json!(b),
+    }
+}
+
+fn row_to_json(row: bundle_host_db::Row) -> serde_json::Value {
+    let columns: serde_json::Map<String, serde_json::Value> = row
+        .columns
+        .into_iter()
+        .map(|(k, v)| (k, db_value_to_json(&v)))
+        .collect();
+    serde_json::json!({
+        "row_id": row.row_id,
+        "version": row.version,
+        "columns": columns,
+    })
+}
+
+/// Maps [`DbError`] to the `{code, message}` shape the executor forwards to
+/// the guest -- byte-for-byte the same as
+/// `core/svc_process::capabilities::db_error_to_host_error`.
+fn db_error_to_host_error(err: DbError) -> HostResultError {
+    denied(err.code(), err.to_string())
+}
+
+/// `{"key": String}` -- `kv.get`/`kv.delete`'s args.
+#[derive(serde::Deserialize)]
+struct KvKeyArgs {
+    key: String,
+}
+
+/// `{"key": String, "value": Vec<u8>, "ttl_seconds": u32}` -- `kv.set`'s args.
+#[derive(serde::Deserialize)]
+struct KvSetArgs {
+    key: String,
+    value: Vec<u8>,
+    ttl_seconds: u32,
+}
+
+/// `{"key": String, "delta": i64, "ttl_seconds": u32}` -- `kv.increment`'s args.
+#[derive(serde::Deserialize)]
+struct KvIncrementArgs {
+    key: String,
+    delta: i64,
+    ttl_seconds: u32,
+}
+
+fn parse_kv_args<T: serde::de::DeserializeOwned>(
+    args: &serde_json::Value,
+) -> Result<T, HostResultError> {
+    serde_json::from_value(args.clone())
+        .map_err(|e| denied("invalid_args", format!("malformed kv host-call args: {e}")))
+}
+
+/// Maps [`KvError`] onto the `{code, message}` shape every `host-call`
+/// error reply carries -- [`KvError::wire_code`]/[`KvError::wire_message`]
+/// already collapse to exactly the two `kv.error` variants a bundle SDK
+/// knows how to render (`too_large`/everything else), so this is a direct
+/// pass-through, not a second mapping layer.
+fn kv_err_to_host(err: KvError) -> HostResultError {
+    denied(err.wire_code(), err.wire_message())
+}
+
+impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> {
     fn handle<'a>(
         &'a self,
         scope: &'a InvokeScope,
         call: HostCallBody,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, HostResultError>> + Send + 'a>> {
         Box::pin(async move {
-            match call.capability {
-                CapabilityKind::Relay => self.handle_relay(scope, &call.args).await,
-                CapabilityKind::Clock => self.handle_clock(&call.op),
-                CapabilityKind::Context => self.handle_context(scope),
-                CapabilityKind::Log => self.handle_log(scope, &call.args),
-                CapabilityKind::Http => self.egress.send(&scope.app_id, &call.args).await,
-                // TODO(M3+): `db`/`kv`/`flags` (spec §7.4's SQL-parser-gated
-                // statement execution, the per-bundle KV hash, and the
-                // `penguin-licensing` two-gate flag check) are not wired in
-                // this landing. Denying (never silently succeeding) is the
-                // correct behavior for an unimplemented capability: a
-                // bundle calling it sees `access-denied`, not a fabricated
-                // success.
-                CapabilityKind::Db => Err(denied(
-                    "not_implemented",
-                    "db capability is not wired in this build -- TODO(M3+)",
-                )),
-                CapabilityKind::Kv => Err(denied(
-                    "not_implemented",
-                    "kv capability is not wired in this build -- TODO(M3+)",
-                )),
-                CapabilityKind::Flags => Err(denied(
-                    "not_implemented",
-                    "flags capability is not wired in this build -- TODO(M3+)",
-                )),
-            }
+            let (capability, op) = stage_metrics::host_call_labels(call.capability, &call.op);
+            let started = std::time::Instant::now();
+            let outcome = self.dispatch(scope, call).await;
+            let result =
+                stage_metrics::host_call_result(outcome.as_ref().err().map(|e| e.code.as_str()));
+            self.stage_metrics
+                .record_host_call(capability, op, result, started.elapsed());
+            outcome
         })
+    }
+}
+
+impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
+    /// Routes one `host-call` to its capability arm. Split out of
+    /// [`CapabilityHandler::handle`] so that wrapper can time the whole call
+    /// (early `?` returns included) and label its outcome without every arm
+    /// touching telemetry; routing and behavior are unchanged.
+    async fn dispatch(
+        &self,
+        scope: &InvokeScope,
+        call: HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        // Load this scope's grants on first use (cold-cache fix) before any
+        // arm's sync `authorize()` reads the snapshot.
+        self.gate.ensure_grants_loaded(&scope.gate_scope()).await;
+        match call.capability {
+            CapabilityKind::Relay => self.handle_relay(scope, &call.args).await,
+            CapabilityKind::Clock => self.handle_clock(scope, &call.op),
+            CapabilityKind::Context => self.handle_context(scope),
+            CapabilityKind::Log => self.handle_log(scope, &call.args),
+            CapabilityKind::Http => {
+                let host = extract_http_host(&call.args)
+                    .ok_or_else(|| denied("invalid_args", "http.send requires a 'url' string"))?;
+                self.gate
+                    .authorize(
+                        &scope.gate_scope(),
+                        classify_net_http_permission(&host),
+                        ResourceRef::AppScoped(AppScopedResource::None),
+                    )
+                    .map_err(denied_from_gate)?;
+                self.egress.send(&scope.app_id, &call.args).await
+            }
+            CapabilityKind::Kv => self.handle_kv(scope, &call).await,
+            // `db` is wired below (mirrors svc_process); `handle_db`
+            // itself gate-checks FIRST (spec SS5) before consulting its
+            // own feature-flag/wiring state.
+            CapabilityKind::Db => self.handle_db(scope, &call).await,
+            // `enabled` is wired to a real `penguin_licensing::
+            // LicenseClient` (`crate::flags::resolve_flag`) -- see
+            // `handle_flags`'s doc for the fallback semantics.
+            // `handle_flags` itself gate-checks FIRST (spec SS5).
+            CapabilityKind::Flags => self.handle_flags(scope, &call).await,
+        }
     }
 }
 
@@ -630,10 +2473,54 @@ mod tests {
     use crate::distribution::BundleCatalog;
     use std::sync::Mutex;
 
+    /// In-memory [`RelayQueue`] standing in for Valkey plus the Discord drain
+    /// on the other end of it.
+    ///
+    /// * `pushed` -- every `lpush`, in order.
+    /// * `ready` -- whether the drain-ready key "exists" (what a live drain's
+    ///   heartbeat would assert). Default `false` = no drain.
+    /// * `auto_ack` -- `Some(json)`: a live drain that executes every pushed
+    ///   entry carrying an `op_id` and posts `json` as its result. `None`
+    ///   (default) with `ready` set: a drain that is advertised ready but
+    ///   accepts entries and never answers (the async-drop case).
+    /// * `fail*` -- inject a Valkey outage on one primitive.
     #[derive(Default)]
     struct FakeRelayQueue {
         pushed: Mutex<Vec<(String, String)>>,
         fail: bool,
+        fail_key_exists: bool,
+        fail_incr: bool,
+        fail_take: bool,
+        ready: bool,
+        auto_ack: Option<String>,
+        acks: Mutex<std::collections::HashMap<String, String>>,
+        windows: Mutex<std::collections::HashMap<String, u64>>,
+    }
+
+    impl FakeRelayQueue {
+        /// A queue with a live, healthy drain: ready, and every op acked `ok`.
+        fn with_live_drain() -> Self {
+            Self::with_drain_result(r#"{"ok":true}"#)
+        }
+
+        /// A queue with a live drain that answers every op with `ack_json`.
+        fn with_drain_result(ack_json: &str) -> Self {
+            Self {
+                ready: true,
+                auto_ack: Some(ack_json.to_string()),
+                ..Self::default()
+            }
+        }
+
+        /// The parsed envelopes pushed so far.
+        fn envelopes(&self) -> Vec<serde_json::Value> {
+            self.pushed
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, raw)| serde_json::from_str(raw).unwrap())
+                .collect()
+        }
     }
 
     impl RelayQueue for FakeRelayQueue {
@@ -646,15 +2533,186 @@ mod tests {
                 if self.fail {
                     return Err("simulated relay outage".to_string());
                 }
+                if let Some(ack) = &self.auto_ack {
+                    if let Some(op_id) = serde_json::from_str::<serde_json::Value>(&value)
+                        .ok()
+                        .and_then(|v| v.get("op_id").and_then(|i| i.as_str()).map(str::to_string))
+                    {
+                        self.acks
+                            .lock()
+                            .unwrap()
+                            .insert(format!("{DISCORD_OP_ACK_KEY_PREFIX}{op_id}"), ack.clone());
+                    }
+                }
                 self.pushed.lock().unwrap().push((key.to_string(), value));
                 Ok(())
             })
+        }
+
+        fn key_exists<'a>(
+            &'a self,
+            key: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.fail_key_exists {
+                    return Err("simulated readiness-probe outage".to_string());
+                }
+                Ok(key == DISCORD_DRAIN_READY_KEY && self.ready)
+            })
+        }
+
+        fn incr_window<'a>(
+            &'a self,
+            key: &'a str,
+            _window_secs: u64,
+        ) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.fail_incr {
+                    return Err("simulated limiter outage".to_string());
+                }
+                let mut windows = self.windows.lock().unwrap();
+                let count = windows.entry(key.to_string()).or_insert(0);
+                *count += 1;
+                Ok(*count)
+            })
+        }
+
+        fn take<'a>(
+            &'a self,
+            key: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.fail_take {
+                    return Err("simulated result-read outage".to_string());
+                }
+                Ok(self.acks.lock().unwrap().remove(key))
+            })
+        }
+    }
+
+    /// A minimal in-memory [`KvBackend`] fake, mirroring
+    /// `bundle_host_kv::backend::fake::FakeBackend`'s semantics (that one
+    /// is crate-private to `bundle_host_kv`, so `handle_kv`'s own
+    /// argument-parsing/error-mapping is exercised here against a fresh,
+    /// independent implementation of the public `KvBackend` trait -- no
+    /// live Valkey server needed for this module's own tests).
+    #[derive(Default)]
+    struct FakeKvBackend {
+        data: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+        counts: Mutex<std::collections::HashMap<String, u64>>,
+    }
+
+    impl KvBackend for FakeKvBackend {
+        fn get<'a>(
+            &'a self,
+            data_key: &'a str,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+            let value = self.data.lock().unwrap().get(data_key).cloned();
+            Box::pin(async move { Ok(value) })
+        }
+
+        fn set_with_quota<'a>(
+            &'a self,
+            data_key: &'a str,
+            count_key: &'a str,
+            value: &'a [u8],
+            _ttl_seconds: u32,
+            max_keys: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bundle_host_kv::QuotaOutcome<()>, String>>
+        {
+            let mut data = self.data.lock().unwrap();
+            let existed = data.contains_key(data_key);
+            if !existed {
+                let mut counts = self.counts.lock().unwrap();
+                let count = *counts.get(count_key).unwrap_or(&0);
+                if count >= max_keys {
+                    return Box::pin(
+                        async move { Ok(bundle_host_kv::QuotaOutcome::QuotaExceeded) },
+                    );
+                }
+                counts.insert(count_key.to_string(), count + 1);
+            }
+            data.insert(data_key.to_string(), value.to_vec());
+            Box::pin(async move { Ok(bundle_host_kv::QuotaOutcome::Admitted(())) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            data_key: &'a str,
+            count_key: &'a str,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bool, String>> {
+            let existed = self.data.lock().unwrap().remove(data_key).is_some();
+            if existed {
+                let mut counts = self.counts.lock().unwrap();
+                let count = *counts.get(count_key).unwrap_or(&0);
+                counts.insert(count_key.to_string(), count.saturating_sub(1));
+            }
+            Box::pin(async move { Ok(existed) })
+        }
+
+        fn increment_with_quota<'a>(
+            &'a self,
+            data_key: &'a str,
+            count_key: &'a str,
+            delta: i64,
+            _ttl_seconds: u32,
+            max_keys: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bundle_host_kv::QuotaOutcome<i64>, String>>
+        {
+            let mut data = self.data.lock().unwrap();
+            let existed = data.contains_key(data_key);
+            if !existed {
+                let mut counts = self.counts.lock().unwrap();
+                let count = *counts.get(count_key).unwrap_or(&0);
+                if count >= max_keys {
+                    return Box::pin(
+                        async move { Ok(bundle_host_kv::QuotaOutcome::QuotaExceeded) },
+                    );
+                }
+                counts.insert(count_key.to_string(), count + 1);
+            }
+            let current = data
+                .get(data_key)
+                .and_then(|v| std::str::from_utf8(v).ok())
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
+            let new_value = current + delta;
+            data.insert(data_key.to_string(), new_value.to_string().into_bytes());
+            Box::pin(async move { Ok(bundle_host_kv::QuotaOutcome::Admitted(new_value)) })
+        }
+
+        fn increment_rate<'a>(
+            &'a self,
+            _rate_key: &'a str,
+            _window_seconds: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<u64, String>> {
+            // Unbounded in this fake -- `handle_kv`'s own rate limit is
+            // `bundle_host_kv::KvHost`'s responsibility, already covered by
+            // that crate's own tests; this module only needs to prove its
+            // argument parsing/error mapping, not re-prove the limiter.
+            Box::pin(async move { Ok(1) })
+        }
+
+        fn reconcile_count_if_missing<'a>(
+            &'a self,
+            _count_key: &'a str,
+            _data_scan_pattern: &'a str,
+            _lock_key: &'a str,
+            _lock_ttl_ms: u64,
+            _scan_limit: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bundle_host_kv::ReconcileOutcome, String>>
+        {
+            // Always "already present" -- the eviction self-heal path is
+            // `bundle_host_kv`'s own responsibility, covered by that
+            // crate's tests; this module only needs argument parsing/error
+            // mapping.
+            Box::pin(async move { Ok(bundle_host_kv::ReconcileOutcome::AlreadyPresent) })
         }
     }
 
     fn test_egress() -> Arc<EgressGuard> {
         Arc::new(EgressGuard::new(
-            Arc::new(crate::egress::ReqwestTransport),
+            Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
                 allow_private_hosts: false,
                 rate_limit_rps: 10,
@@ -662,6 +2720,8 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
             },
             Arc::new(BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -673,15 +2733,128 @@ mod tests {
         ))
     }
 
+    /// Grants every permission this file's existing (pre-gate) tests
+    /// already exercised, for both app ids this suite uses
+    /// (`kv_two_apps_in_the_same_tenant_are_isolated_through_the_handler`'s
+    /// `waddles.bot.other` included) under `scope()`'s `(7, 3, 1)` -- so
+    /// every happy-path test keeps proving its own capability logic, not
+    /// this landing's gate wiring (which the dedicated `gate_*` tests below
+    /// exercise directly, including the deny-without-grant cases).
+    fn permissive_gate() -> Arc<CapabilityGate> {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        for app_id in ["waddles.bot.commands.default", "waddles.bot.other"] {
+            let mut grants = std::collections::HashMap::new();
+            for id in [
+                "platform.context",
+                "platform.clock",
+                "platform.log",
+                "storage.kv",
+                "chat.send:twitch",
+                "chat.send:discord",
+                "chat.delete:twitch",
+                "chat.delete:discord",
+                "dm.send:twitch",
+                "dm.send:discord",
+                "net.http.fqdn:example.com",
+                "storage.tables",
+                "flags.read",
+            ] {
+                grants.insert(
+                    id.to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: id.to_string(),
+                        params: serde_json::json!({}),
+                    },
+                );
+            }
+            snapshot.set(
+                bundle_capability_gate::GrantScopeKey {
+                    tenant_id: 7,
+                    community_id: 3,
+                    app_id: app_id.to_string(),
+                    app_version: 1,
+                },
+                bundle_capability_gate::GrantSet {
+                    permission_snapshot_hash: "test".to_string(),
+                    grants,
+                },
+            );
+        }
+        Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ))
+    }
+
+    /// A gate with an empty snapshot -- every permission fails closed
+    /// `not_granted`, for tests proving the gate is actually consulted.
+    fn deny_all_gate() -> Arc<CapabilityGate> {
+        Arc::new(CapabilityGate::new(
+            Arc::new(bundle_capability_gate::InMemoryGrantSnapshot::new()),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ))
+    }
+
     fn caps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
         caps_with_usage(queue, Arc::new(Mutex::new(UsageBatcher::new())))
+    }
+
+    #[tokio::test]
+    async fn caps_without_flag_default_off() {
+        let c = caps(FakeRelayQueue::default());
+        assert!(!c.egress_via_dispatcher().await);
+    }
+
+    #[tokio::test]
+    async fn caps_with_static_on_flag() {
+        let c = caps(FakeRelayQueue::default())
+            .with_egress_dispatcher_flag(crate::flags::boxed(crate::flags::StaticFlag(true)));
+        assert!(c.egress_via_dispatcher().await);
+        let off = caps(FakeRelayQueue::default())
+            .with_egress_dispatcher_flag(crate::flags::boxed(crate::flags::StaticFlag(false)));
+        assert!(!off.egress_via_dispatcher().await);
     }
 
     fn caps_with_usage(
         queue: FakeRelayQueue,
         usage: Arc<Mutex<UsageBatcher>>,
     ) -> StageCapabilities<FakeRelayQueue> {
-        StageCapabilities::new(queue, test_egress(), usage)
+        StageCapabilities::new(queue, test_egress(), usage, permissive_gate())
+    }
+
+    /// Grants `storage.kv` to `"waddles.bot.commands.default"` -- the
+    /// `app_id` every `scope()`/`call()` helper in this module uses -- so
+    /// every existing `kv_*` test below (which is testing `handle_kv`'s
+    /// argument parsing/error mapping, not the gate itself) is unaffected
+    /// by the "undeclared means denied" default.
+    /// `kv_call_is_denied_when_storage_kv_is_undeclared` below is the one
+    /// test exercising an ungranted app.
+    fn caps_with_kv(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
+        caps_with_kv_and_capabilities(queue, &["waddles.bot.commands.default"])
+    }
+
+    fn caps_with_kv_and_capabilities(
+        queue: FakeRelayQueue,
+        granted_app_ids: &[&str],
+    ) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
+        let snapshot = bundle_host_kv::CapabilitySnapshot::new();
+        for app_id in granted_app_ids {
+            snapshot.update(
+                *app_id,
+                [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
+            );
+        }
+        StageCapabilities::new(
+            queue,
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            permissive_gate(),
+        )
+        .with_kv(FakeKvBackend::default(), Arc::new(snapshot))
     }
 
     fn scope() -> InvokeScope {
@@ -690,7 +2863,19 @@ mod tests {
             community: Some("main".to_string()),
             app_id: "waddles.bot.commands.default".to_string(),
             origin_channel_id: None,
+            tenant_id: 7,
+            community_id: 3,
+            app_version: 1,
         }
+    }
+
+    /// `context.get-context` hands a v2 guest the host-derived numeric ids.
+    #[test]
+    fn get_context_supplies_the_host_derived_numeric_ids() {
+        let h = caps(FakeRelayQueue::default());
+        let ctx = h.handle_context(&scope()).expect("context");
+        assert_eq!(ctx["tenant_id"], 7);
+        assert_eq!(ctx["community_id"], 3);
     }
 
     /// Same as [`scope`] but carrying an origin channel id, as
@@ -754,6 +2939,369 @@ mod tests {
             args,
             call_id: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn kv_is_not_implemented_when_no_backend_was_configured() {
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn kv_call_is_denied_when_storage_kv_is_undeclared() {
+        // A configured `kv` backend, but the app's `CapabilitySnapshot`
+        // grants nothing -- "undeclared means denied", distinct from
+        // `kv_is_not_implemented_when_no_backend_was_configured`'s
+        // "backend never configured at all" case.
+        let caps = caps_with_kv_and_capabilities(FakeRelayQueue::default(), &[]);
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "backend"); // KvError::wire_code() collapse
+    }
+
+    #[tokio::test]
+    async fn kv_call_succeeds_when_storage_kv_is_declared() {
+        let caps = caps_with_kv_and_capabilities(
+            FakeRelayQueue::default(),
+            &["waddles.bot.commands.default"],
+        );
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Kv,
+                "set",
+                serde_json::json!({"key": "k", "value": [1], "ttl_seconds": 0}),
+            ),
+        )
+        .await
+        .expect("set succeeds when storage.kv is declared");
+    }
+
+    #[tokio::test]
+    async fn kv_set_then_get_round_trips_through_the_handler() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Kv,
+                "set",
+                serde_json::json!({"key": "counter", "value": [1, 2, 3], "ttl_seconds": 0}),
+            ),
+        )
+        .await
+        .expect("set succeeds");
+
+        let result = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Kv,
+                    "get",
+                    serde_json::json!({"key": "counter"}),
+                ),
+            )
+            .await
+            .expect("get succeeds");
+        assert_eq!(result["value"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn kv_get_of_an_absent_key_returns_a_null_value_not_an_error() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let result = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Kv,
+                    "get",
+                    serde_json::json!({"key": "absent"}),
+                ),
+            )
+            .await
+            .expect("get succeeds");
+        assert_eq!(result["value"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn kv_delete_then_get_returns_null() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Kv,
+                "set",
+                serde_json::json!({"key": "k", "value": [9], "ttl_seconds": 0}),
+            ),
+        )
+        .await
+        .unwrap();
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Kv,
+                "delete",
+                serde_json::json!({"key": "k"}),
+            ),
+        )
+        .await
+        .expect("delete succeeds");
+        let result = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .expect("get succeeds");
+        assert_eq!(result["value"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn kv_increment_accumulates_across_calls() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let first = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Kv,
+                    "increment",
+                    serde_json::json!({"key": "hits", "delta": 5, "ttl_seconds": 0}),
+                ),
+            )
+            .await
+            .expect("increment succeeds");
+        assert_eq!(first["value"], serde_json::json!(5));
+
+        let second = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Kv,
+                    "increment",
+                    serde_json::json!({"key": "hits", "delta": 3, "ttl_seconds": 0}),
+                ),
+            )
+            .await
+            .expect("increment succeeds");
+        assert_eq!(second["value"], serde_json::json!(8));
+    }
+
+    #[tokio::test]
+    async fn kv_set_with_malformed_args_is_rejected_as_invalid_args() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "set", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn kv_unknown_op_is_rejected() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "bogus", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+    }
+
+    /// Mirrors `core/svc_process::capabilities::tests::mock_db_wiring` --
+    /// same `MockDatabase`-backed `PostgresBackend`, over this crate's own
+    /// `FeatureFlag`/`StaticFlag` instead of svc_process's `FeatureGate`.
+    fn mock_db_wiring(flag_on: bool) -> DbWiring {
+        let conn = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
+        DbWiring {
+            host: Arc::new(DbHost::new(bundle_host_db::PostgresBackend::new(conn))),
+            schemas: Arc::new(SchemaCache::new()),
+            capabilities: Arc::new(DbCapabilitySnapshot::new()),
+            flag: crate::flags::boxed(crate::flags::StaticFlag(flag_on)),
+        }
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_not_implemented_when_never_wired() {
+        let capabilities = caps(FakeRelayQueue::default());
+        let err = capabilities
+            .handle_db(
+                &scope(),
+                &call(
+                    CapabilityKind::Db,
+                    "get",
+                    serde_json::json!({"row_id": "x"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_feature_disabled_when_flag_is_off() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(false));
+        let err = capabilities
+            .handle_db(
+                &scope(),
+                &call(
+                    CapabilityKind::Db,
+                    "get",
+                    serde_json::json!({"row_id": "x"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_no_table_when_flag_on_but_unprovisioned() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(
+                &scope(),
+                &call(
+                    CapabilityKind::Db,
+                    "get",
+                    serde_json::json!({"row_id": "00000000-0000-0000-0000-000000000000"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
+    }
+
+    #[tokio::test]
+    async fn db_capability_query_op_denies_no_table_when_unprovisioned() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(
+                &scope(),
+                &call(
+                    CapabilityKind::Db,
+                    "query",
+                    serde_json::json!({"limit": 10, "offset": 0}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
+    }
+
+    #[tokio::test]
+    async fn db_capability_rejects_an_unknown_op() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        let err = capabilities
+            .handle_db(
+                &scope(),
+                &call(CapabilityKind::Db, "truncate", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+    }
+
+    #[tokio::test]
+    async fn kv_rejects_a_guest_key_that_attempts_a_namespace_escape() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Kv,
+                    "set",
+                    serde_json::json!({"key": "other:app:data:secret", "value": [1], "ttl_seconds": 0}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        // `KvError::wire_code` collapses every non-`too_large` reason to
+        // `"backend"` at the host-call boundary (module doc) -- the
+        // finer-grained `invalid_key` reason is what `bundle_host_kv`'s own
+        // tests assert against `KvError::code()` directly.
+        assert_eq!(err.code, "backend");
+    }
+
+    #[tokio::test]
+    async fn kv_two_apps_in_the_same_tenant_are_isolated_through_the_handler() {
+        let caps = caps_with_kv_and_capabilities(
+            FakeRelayQueue::default(),
+            &["waddles.bot.commands.default", "waddles.bot.other"],
+        );
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Kv,
+                "set",
+                serde_json::json!({"key": "secret", "value": [42], "ttl_seconds": 0}),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let other_app = InvokeScope {
+            app_id: "waddles.bot.other".to_string(),
+            ..scope()
+        };
+        let result = caps
+            .handle(
+                &other_app,
+                call(
+                    CapabilityKind::Kv,
+                    "get",
+                    serde_json::json!({"key": "secret"}),
+                ),
+            )
+            .await
+            .expect("get succeeds");
+        assert_eq!(
+            result["value"],
+            serde_json::Value::Null,
+            "a different app_id must never see this app's value"
+        );
+    }
+
+    #[tokio::test]
+    async fn db_capability_dispatches_through_the_handle_match_arm() {
+        // Proves `CapabilityKind::Db` in `StageCapabilities::handle` itself
+        // reaches `handle_db` (not just the direct-call unit tests above).
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(false));
+        let err = CapabilityHandler::handle(
+            &capabilities,
+            &scope(),
+            call(
+                CapabilityKind::Db,
+                "get",
+                serde_json::json!({"row_id": "x"}),
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
     }
 
     #[test]
@@ -823,6 +3371,818 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
         assert_eq!(parsed["channel"], "#somechannel");
         assert_eq!(parsed["text"], "hi");
+        // Versioned op envelope (provider-framework Step 0) alongside the
+        // legacy top-level fields.
+        assert_eq!(parsed["v"], 1);
+        assert_eq!(parsed["op"], "chat.send");
+        assert_eq!(parsed["platform"], "twitch");
+    }
+
+    #[test]
+    fn relay_op_parse_round_trips_and_rejects_unknown() {
+        for op in [RelayOp::ChatSend, RelayOp::ChatDelete, RelayOp::DmSend] {
+            assert_eq!(RelayOp::parse(op.as_str()), Some(op));
+        }
+        assert_eq!(RelayOp::parse("chat.nuke"), None);
+        assert!(relay_op_supported("twitch", RelayOp::ChatSend));
+        assert!(!relay_op_supported("twitch", RelayOp::ChatDelete));
+        assert!(relay_op_supported("discord", RelayOp::ChatSend));
+        assert!(relay_op_supported("discord", RelayOp::ChatDelete));
+        assert!(relay_op_supported("discord", RelayOp::DmSend));
+        assert!(!relay_op_supported("twitch", RelayOp::DmSend));
+    }
+
+    /// Regression (adversarial review, LOW): `relay_op_supported` used to have
+    /// a `(_, ChatSend)` wildcard, so a provider added to `RELAY_PROVIDERS`
+    /// was auto-"supported" and its sends queued to a key nothing drains. The
+    /// table is now explicit opt-in. This test pins it row by row, and fails
+    /// when someone adds a `RELAY_PROVIDERS` entry without stating here what
+    /// that provider supports.
+    #[test]
+    fn every_relay_provider_has_an_explicit_support_decision() {
+        let expected: &[(&str, [bool; 3])] = &[
+            // chat.send, chat.delete, dm.send
+            ("twitch", [true, false, false]),
+            ("discord", [true, true, true]),
+        ];
+        assert_eq!(
+            RELAY_PROVIDERS.len(),
+            expected.len(),
+            "every RELAY_PROVIDERS entry needs an explicit row in this test (and in relay_op_supported)"
+        );
+        for (provider, supported) in expected {
+            assert!(RELAY_PROVIDERS.contains(provider), "{provider}");
+            for (op, want) in [RelayOp::ChatSend, RelayOp::ChatDelete, RelayOp::DmSend]
+                .into_iter()
+                .zip(supported)
+            {
+                assert_eq!(relay_op_supported(provider, op), *want, "{provider} {op:?}");
+            }
+        }
+        // A provider with no row is unsupported for every op -- the default.
+        for provider in ["slack", "kick", "youtube", "some-new-provider"] {
+            for op in [RelayOp::ChatSend, RelayOp::ChatDelete, RelayOp::DmSend] {
+                assert!(!relay_op_supported(provider, op), "{provider} {op:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn outbound_envelope_builder_emits_only_op_fields() {
+        let del = build_outbound_envelope(
+            RelayOp::ChatDelete,
+            "discord",
+            &EnvelopeFields {
+                channel: Some("1"),
+                message_id: Some("2"),
+                ..EnvelopeFields::default()
+            },
+        );
+        assert_eq!(
+            del,
+            serde_json::json!({"v":1,"op":"chat.delete","platform":"discord","channel":"1","message_id":"2"})
+        );
+        let dm = build_outbound_envelope(
+            RelayOp::DmSend,
+            "discord",
+            &EnvelopeFields {
+                text: Some("hi"),
+                user_id: Some("3"),
+                origin_channel: Some("1"),
+                ..EnvelopeFields::default()
+            },
+        );
+        assert_eq!(
+            dm,
+            serde_json::json!({"v":1,"op":"dm.send","platform":"discord","text":"hi","user_id":"3","origin_channel":"1"})
+        );
+    }
+
+    #[test]
+    fn stamp_handshake_adds_the_op_id_and_deadline() {
+        let mut env = serde_json::json!({"v":1,"op":"chat.delete"});
+        stamp_handshake(&mut env, "abc-1", 1_700_000_003_000);
+        assert_eq!(env["op_id"], "abc-1");
+        assert_eq!(env["exp_ms"], 1_700_000_003_000_u64);
+        assert_eq!(env["op"], "chat.delete");
+    }
+
+    /// The three cross-crate Valkey names are duplicated in `svc_ingest`
+    /// (separate crates, no shared code): pin the literals here and in that
+    /// crate's own test so neither side drifts.
+    #[test]
+    fn drain_handshake_keys_match_the_svc_ingest_literals() {
+        assert_eq!(
+            outbound_relay_queue_key("discord"),
+            "waddles:transport:irc:discord:outbound"
+        );
+        assert_eq!(
+            DISCORD_DRAIN_READY_KEY,
+            "waddles:transport:discord:drain-ready"
+        );
+        assert_eq!(DISCORD_OP_ACK_KEY_PREFIX, "waddles:transport:discord:ack:");
+    }
+
+    fn discord_call(message: &serde_json::Value) -> HostCallBody {
+        call(
+            CapabilityKind::Relay,
+            "send",
+            serde_json::json!({"provider":"discord","message_json":message.to_string()}),
+        )
+    }
+
+    fn delete_message() -> serde_json::Value {
+        serde_json::json!({"op":"chat.delete","message_id":"222"})
+    }
+
+    fn dm_message(user_id: &str) -> serde_json::Value {
+        serde_json::json!({"op":"dm.send","user_id":user_id,"text":"hello"})
+    }
+
+    /// Discord chat.delete/dm.send are queued for svc-ingest's REST sender and
+    /// reported successful only after the drain confirms; the delete channel
+    /// is the event's origin channel, never the bundle's, and the DM carries
+    /// that origin channel so the sender can bind the target to its community.
+    #[tokio::test]
+    async fn discord_delete_and_dm_are_queued_and_confirmed_with_origin_channel() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        let del = serde_json::json!({"op":"chat.delete","message_id":"222","channel":"999999999999999999"});
+        let out = caps
+            .handle(&discord_scope(), discord_call(&del))
+            .await
+            .unwrap();
+        assert_eq!(out["queued"], true);
+        assert_eq!(out["confirmed"], true);
+        assert_eq!(out["op"], "chat.delete");
+        let out = caps
+            .handle(&discord_scope(), discord_call(&dm_message("333")))
+            .await
+            .unwrap();
+        assert_eq!(out["confirmed"], true);
+
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 2);
+        assert_eq!(pushed[0].0, "waddles:transport:irc:discord:outbound");
+        drop(pushed);
+        let envelopes = caps.relay_queue.envelopes();
+        let (d, m) = (&envelopes[0], &envelopes[1]);
+        assert_eq!(d["op"], "chat.delete");
+        assert_eq!(
+            d["channel"], "123456789012345678",
+            "origin channel, not the bundle's"
+        );
+        assert_eq!(d["message_id"], "222");
+        assert_eq!(m["op"], "dm.send");
+        assert_eq!(m["user_id"], "333");
+        assert_eq!(m["text"], "hello");
+        assert_eq!(
+            m["origin_channel"], "123456789012345678",
+            "dm.send is bound to the triggering event's channel"
+        );
+        for e in [d, m] {
+            assert!(
+                e["op_id"].as_str().is_some_and(|id| !id.is_empty()),
+                "handshake op_id present: {e}"
+            );
+            assert!(
+                e["exp_ms"].as_u64().is_some_and(|ms| ms > now_epoch_ms()),
+                "handshake deadline is in the future: {e}"
+            );
+        }
+        assert_ne!(d["op_id"], m["op_id"], "each op gets its own id");
+    }
+
+    #[tokio::test]
+    async fn discord_queued_ops_reject_bad_arguments_and_queue_nothing() {
+        let bad_origin = InvokeScope {
+            origin_channel_id: Some("not-a-snowflake".to_string()),
+            ..scope()
+        };
+        let cases = [
+            (discord_scope(), serde_json::json!({"op":"chat.delete"})),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"chat.delete","message_id":"../x"}),
+            ),
+            (
+                scope(),
+                serde_json::json!({"op":"chat.delete","message_id":"2"}),
+            ),
+            (
+                bad_origin.clone(),
+                serde_json::json!({"op":"chat.delete","message_id":"2"}),
+            ),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"dm.send","text":"x"}),
+            ),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"dm.send","user_id":"u","text":"x"}),
+            ),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"dm.send","user_id":"3"}),
+            ),
+            // Longer than Discord accepts: refused up front, never queued.
+            (
+                discord_scope(),
+                serde_json::json!({
+                    "op":"dm.send",
+                    "user_id":"3",
+                    "text":"x".repeat(DISCORD_MAX_CONTENT_CHARS + 1)
+                }),
+            ),
+            // dm.send is only valid in response to a channel event: it needs
+            // the origin channel to bind the target's community.
+            (
+                scope(),
+                serde_json::json!({"op":"dm.send","user_id":"3","text":"x"}),
+            ),
+            (
+                bad_origin,
+                serde_json::json!({"op":"dm.send","user_id":"3","text":"x"}),
+            ),
+        ];
+        for (sc, message) in cases {
+            let caps = caps(FakeRelayQueue::with_live_drain());
+            let err = caps.handle(&sc, discord_call(&message)).await.unwrap_err();
+            assert_eq!(err.code, "invalid_args", "{message}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+            assert!(
+                caps.relay_queue.windows.lock().unwrap().is_empty(),
+                "an invalid call must not consume rate budget: {message}"
+            );
+        }
+    }
+
+    /// A `dm.send` exactly at Discord's content limit is still delivered.
+    #[tokio::test]
+    async fn dm_send_text_at_the_discord_limit_is_accepted() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        let message = serde_json::json!({
+            "op":"dm.send",
+            "user_id":"333",
+            "text":"x".repeat(DISCORD_MAX_CONTENT_CHARS)
+        });
+        let out = caps
+            .handle(&discord_scope(), discord_call(&message))
+            .await
+            .unwrap();
+        assert_eq!(out["confirmed"], true);
+    }
+
+    /// The dangerous Discord ops are gate-denied (and never queued) without
+    /// their own grant.
+    #[tokio::test]
+    async fn discord_queued_ops_require_their_own_grant() {
+        for message in [delete_message(), dm_message("333")] {
+            let caps = caps_denied(FakeRelayQueue::with_live_drain());
+            let err = caps
+                .handle(&discord_scope(), discord_call(&message))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted", "{message}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_queued_op_surfaces_queue_outage() {
+        let caps = caps(FakeRelayQueue {
+            fail: true,
+            ..FakeRelayQueue::with_live_drain()
+        });
+        let err = caps
+            .handle(&discord_scope(), discord_call(&dm_message("333")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+    }
+
+    /// Regression (adversarial review, HIGH): with no drain running (flag
+    /// off / `DISCORD_BOT_TOKEN` unset / spine config missing) the op used to
+    /// be `LPUSH`ed and acknowledged `{"queued":true}` into a list nothing
+    /// would ever drain. It is now refused loudly and NOTHING is queued, and
+    /// no rate budget is spent on it.
+    #[tokio::test]
+    async fn discord_ops_are_refused_loudly_and_queue_nothing_when_no_drain_is_ready() {
+        for message in [delete_message(), dm_message("333")] {
+            let caps = caps(FakeRelayQueue::default());
+            let err = caps
+                .handle(&discord_scope(), discord_call(&message))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "relay_unavailable", "{message}");
+            assert!(
+                err.message.contains("drain is not running"),
+                "the error names the cause: {}",
+                err.message
+            );
+            assert!(
+                err.message.contains("nothing was queued"),
+                "{}",
+                err.message
+            );
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+            assert!(caps.relay_queue.windows.lock().unwrap().is_empty());
+        }
+    }
+
+    /// A readiness probe that itself fails cannot prove the drain is up: the
+    /// op is refused (fail closed), never treated as ready.
+    #[tokio::test]
+    async fn discord_ops_are_refused_when_the_readiness_probe_errors() {
+        let caps = caps(FakeRelayQueue {
+            fail_key_exists: true,
+            ..FakeRelayQueue::with_live_drain()
+        });
+        let err = caps
+            .handle(&discord_scope(), discord_call(&delete_message()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    /// Regression (adversarial review, HIGH, the `!secret` hole): a drain
+    /// that is advertised ready but ACCEPTS the entry and never confirms it
+    /// (down mid-flight, wedged, dropped it) must be an ERROR for the bundle,
+    /// not `{"queued":true}`. The `relay.push` WIT call returns nothing to
+    /// the guest, so an error here is the only way `!secret` can learn the
+    /// plaintext delete did not happen and skip the DM.
+    #[tokio::test(start_paused = true)]
+    async fn discord_op_accepted_but_never_confirmed_is_an_error_not_success() {
+        for message in [delete_message(), dm_message("333")] {
+            let usage = Arc::new(Mutex::new(UsageBatcher::new()));
+            let caps = caps_with_usage(
+                FakeRelayQueue {
+                    ready: true,
+                    auto_ack: None, // accepts, never answers
+                    ..FakeRelayQueue::default()
+                },
+                Arc::clone(&usage),
+            );
+            let err = caps
+                .handle(&discord_scope(), discord_call(&message))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "relay_unconfirmed", "{message}");
+            assert!(err.message.contains("NOT done"), "{}", err.message);
+            assert_eq!(
+                caps.relay_queue.pushed.lock().unwrap().len(),
+                1,
+                "the entry WAS accepted -- this is the async-drop case"
+            );
+            assert_eq!(
+                usage.lock().unwrap().pending_len(),
+                0,
+                "an unconfirmed op is not metered as delivered"
+            );
+        }
+    }
+
+    /// Whatever the drain reports as not-performed becomes a distinct error
+    /// the bundle sees; an unreadable result is "unconfirmed", never success.
+    #[tokio::test]
+    async fn discord_drain_failure_results_surface_as_errors() {
+        for (ack, code) in [
+            (r#"{"ok":false,"code":"failed"}"#, "relay_failed"),
+            (r#"{"ok":false,"code":"mystery"}"#, "relay_failed"),
+            (r#"{"ok":false}"#, "relay_failed"),
+            (
+                r#"{"ok":false,"code":"not_in_community"}"#,
+                "target_not_in_community",
+            ),
+            (r#"{"ok":false,"code":"unsupported"}"#, "unsupported_op"),
+            ("not json", "relay_unconfirmed"),
+            (r#"{"nope":1}"#, "relay_unconfirmed"),
+        ] {
+            let usage = Arc::new(Mutex::new(UsageBatcher::new()));
+            let caps = caps_with_usage(FakeRelayQueue::with_drain_result(ack), Arc::clone(&usage));
+            let err = caps
+                .handle(&discord_scope(), discord_call(&delete_message()))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code, "ack {ack}");
+            assert_eq!(usage.lock().unwrap().pending_len(), 0, "ack {ack}");
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_op_result_read_outage_is_reported_not_swallowed() {
+        let caps = caps(FakeRelayQueue {
+            fail_take: true,
+            ..FakeRelayQueue::with_live_drain()
+        });
+        let err = caps
+            .handle(&discord_scope(), discord_call(&delete_message()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+    }
+
+    /// A confirmed op is metered exactly once.
+    #[tokio::test]
+    async fn confirmed_discord_op_records_one_relay_call() {
+        let usage = Arc::new(Mutex::new(UsageBatcher::new()));
+        let caps = caps_with_usage(FakeRelayQueue::with_live_drain(), Arc::clone(&usage));
+        caps.handle(&discord_scope(), discord_call(&delete_message()))
+            .await
+            .unwrap();
+        assert_eq!(usage.lock().unwrap().pending_len(), 1);
+    }
+
+    /// Regression (adversarial review, MED): `dm.send` had no real throttle
+    /// (the catalog's `UsageBatcher` is write-only metering). Per
+    /// `(tenant, community, app)`: the 11th DM in a window is refused and
+    /// never queued.
+    #[tokio::test]
+    async fn dm_send_is_throttled_per_app_and_community() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        for i in 0..DM_SEND_APP_LIMIT {
+            let admitted = caps
+                .handle(
+                    &discord_scope(),
+                    discord_call(&dm_message(&format!("30{i}"))),
+                )
+                .await;
+            assert!(admitted.is_ok(), "dm {i} should be admitted: {admitted:?}");
+        }
+        let err = caps
+            .handle(&discord_scope(), discord_call(&dm_message("399")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "rate_limited");
+        assert_eq!(
+            caps.relay_queue.pushed.lock().unwrap().len(),
+            usize::try_from(DM_SEND_APP_LIMIT).unwrap(),
+            "the throttled DM was never queued"
+        );
+        // The budget is keyed by tenant + community + app, so another
+        // community (or app) never shares it.
+        let windows = caps.relay_queue.windows.lock().unwrap();
+        assert!(
+            windows.contains_key("waddles:ratelimit:dm.send:app:7:3:waddles.bot.commands.default"),
+            "{:?}",
+            windows.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// One person cannot be hammered: the 4th DM to the same target in a
+    /// window is refused even though the app-level budget has room.
+    #[tokio::test]
+    async fn dm_send_is_throttled_per_target_user() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        for _ in 0..DM_SEND_TARGET_LIMIT {
+            caps.handle(&discord_scope(), discord_call(&dm_message("333")))
+                .await
+                .unwrap();
+        }
+        let err = caps
+            .handle(&discord_scope(), discord_call(&dm_message("333")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "rate_limited");
+        assert!(err.message.contains("recipient"), "{}", err.message);
+        // A different recipient is unaffected.
+        caps.handle(&discord_scope(), discord_call(&dm_message("334")))
+            .await
+            .unwrap();
+    }
+
+    /// A limiter that cannot be read fails CLOSED -- the DM is refused and
+    /// nothing is queued, rather than the throttle silently disappearing.
+    #[tokio::test]
+    async fn dm_send_limiter_outage_fails_closed() {
+        let caps = caps(FakeRelayQueue {
+            fail_incr: true,
+            ..FakeRelayQueue::with_live_drain()
+        });
+        let err = caps
+            .handle(&discord_scope(), discord_call(&dm_message("333")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+        assert!(err.message.contains("rate limiter unavailable"));
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    /// The throttle is a `dm.send` control: `chat.delete` is not counted
+    /// against it.
+    #[tokio::test]
+    async fn chat_delete_is_not_subject_to_the_dm_throttle() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        for _ in 0..(DM_SEND_APP_LIMIT + 5) {
+            caps.handle(&discord_scope(), discord_call(&delete_message()))
+                .await
+                .unwrap();
+        }
+        assert!(caps.relay_queue.windows.lock().unwrap().is_empty());
+    }
+
+    /// Rate-limit keys never embed the raw platform user id.
+    #[tokio::test]
+    async fn dm_throttle_keys_never_contain_the_raw_user_id() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        caps.handle(&discord_scope(), discord_call(&dm_message("777888999")))
+            .await
+            .unwrap();
+        let windows = caps.relay_queue.windows.lock().unwrap();
+        assert_eq!(windows.len(), 2);
+        for key in windows.keys() {
+            assert!(!key.contains("777888999"), "{key}");
+        }
+    }
+
+    #[test]
+    fn user_tag_is_short_stable_hex_and_not_the_id() {
+        let tag = user_tag("123456789012345678");
+        assert_eq!(tag.len(), 16);
+        assert!(tag.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(tag, user_tag("123456789012345678"));
+        assert_ne!(tag, user_tag("123456789012345679"));
+    }
+
+    #[test]
+    fn parse_ack_distinguishes_confirmed_refused_and_unreadable() {
+        assert_eq!(parse_ack(r#"{"ok":true}"#), Ok(AckOutcome::Confirmed));
+        assert_eq!(
+            parse_ack(r#"{"ok":false,"code":"not_in_community"}"#),
+            Ok(AckOutcome::Refused(AckFailure::NotInCommunity))
+        );
+        assert_eq!(
+            parse_ack(r#"{"ok":false,"code":"unsupported"}"#),
+            Ok(AckOutcome::Refused(AckFailure::Unsupported))
+        );
+        assert_eq!(
+            parse_ack(r#"{"ok":false,"code":"anything-else"}"#),
+            Ok(AckOutcome::Refused(AckFailure::Failed))
+        );
+        assert!(parse_ack("not json").is_err());
+        assert!(parse_ack(r#"{"ok":"yes"}"#).is_err());
+        assert!(parse_ack("{}").is_err());
+    }
+
+    /// The production push is ONE atomic `MULTI`/`EXEC`: push, trim to the
+    /// newest `OUTBOUND_QUEUE_MAX_LEN` entries, re-arm the TTL -- in that
+    /// order, so a list is never left unbounded or immortal between steps.
+    #[test]
+    fn bounded_push_pipeline_pushes_trims_and_arms_ttl_atomically() {
+        let packed = bounded_push_pipeline("waddles:transport:irc:discord:outbound", "{}")
+            .get_packed_pipeline();
+        let wire = String::from_utf8_lossy(&packed).to_string();
+        let pos = |needle: &str| {
+            wire.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from pipeline: {wire:?}"))
+        };
+        assert!(pos("MULTI") < pos("LPUSH"));
+        assert!(pos("LPUSH") < pos("LTRIM"));
+        assert!(pos("LTRIM") < pos("EXPIRE"));
+        assert!(pos("EXPIRE") < pos("EXEC"));
+        assert!(wire.contains(&(OUTBOUND_QUEUE_MAX_LEN - 1).to_string()));
+        assert!(wire.contains(&OUTBOUND_QUEUE_TTL_SECS.to_string()));
+        const {
+            assert!(OUTBOUND_QUEUE_MAX_LEN > 0 && OUTBOUND_QUEUE_TTL_SECS > 0);
+        }
+    }
+
+    /// A queue that only implements `lpush` (as the simple fakes do) gets
+    /// LOUD errors from the handshake primitives -- never a silent
+    /// "not ready" / "within limit" / "no result" default.
+    #[tokio::test]
+    async fn default_relay_queue_primitives_fail_loud() {
+        struct PushOnly;
+        impl RelayQueue for PushOnly {
+            fn lpush<'a>(
+                &'a self,
+                _key: &'a str,
+                _value: String,
+            ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+        let q = PushOnly;
+        assert!(q.key_exists("k").await.is_err());
+        assert!(q.incr_window("k", 60).await.is_err());
+        assert!(q.take("k").await.is_err());
+    }
+
+    #[test]
+    fn peek_relay_op_defaults_to_chat_send_and_flags_unknown() {
+        let legacy = serde_json::json!({"message_json": r#"{"channel":"c","text":"hi"}"#});
+        assert_eq!(peek_relay_op(&legacy), Ok(RelayOp::ChatSend));
+        assert_eq!(
+            peek_relay_op(&serde_json::json!({"provider": "twitch"})),
+            Ok(RelayOp::ChatSend)
+        );
+        let del = serde_json::json!({"message_json": r#"{"op":"chat.delete"}"#});
+        assert_eq!(peek_relay_op(&del), Ok(RelayOp::ChatDelete));
+        let bad = serde_json::json!({"message_json": r#"{"op":"bogus"}"#});
+        assert_eq!(peek_relay_op(&bad), Err("bogus".to_string()));
+    }
+
+    #[tokio::test]
+    async fn relay_unknown_op_fails_loud_and_queues_nothing() {
+        let caps = caps(FakeRelayQueue::default());
+        let message_json = serde_json::json!({"op": "bogus", "channel": "#c", "text": "hi"});
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": message_json.to_string()}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relay_new_ops_fail_loud_unsupported_and_queue_nothing() {
+        for (provider, message) in [
+            (
+                "twitch",
+                serde_json::json!({"op": "chat.delete", "channel": "#c", "message_id": "m1"}),
+            ),
+            (
+                "twitch",
+                serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"}),
+            ),
+        ] {
+            let caps = caps(FakeRelayQueue::default());
+            let err = caps
+                .handle(
+                    &scope(),
+                    call(
+                        CapabilityKind::Relay,
+                        "send",
+                        serde_json::json!({"provider": provider, "message_json": message.to_string()}),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "unsupported_op", "{provider} {message}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_new_ops_require_their_own_grant_not_chat_send() {
+        // `caps_denied` has an empty grant snapshot; a `chat.send` grant must
+        // never stand in for `chat.delete:`/`dm.send:`.
+        let caps = caps_denied(FakeRelayQueue::default());
+        let message = serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"});
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": message.to_string()}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    /// Minimal [`egress_detokenizer::DisplayNameResolver`] test fixture:
+    /// resolves every token in `self.0` to its mapped name, nothing else.
+    struct FixtureResolver(std::collections::HashMap<String, String>);
+
+    impl egress_detokenizer::DisplayNameResolver for FixtureResolver {
+        fn resolve_many<'a>(
+            &'a self,
+            _tenant_id: &'a str,
+            tokens: Vec<String>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            std::collections::HashMap<String, String>,
+                            egress_detokenizer::DetokenizeError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let map = self.0.clone();
+            Box::pin(async move {
+                Ok(tokens
+                    .into_iter()
+                    .filter_map(|t| map.get(&t).cloned().map(|n| (t, n)))
+                    .collect())
+            })
+        }
+    }
+
+    /// PII boundary hard invariant: a Twitch relay send with detokenization
+    /// wired and enabled substitutes the token with the resolved display
+    /// name before the message is queued -- a user never sees a raw
+    /// `{user:<token>}` placeholder in chat.
+    #[tokio::test]
+    async fn relay_send_detokenizes_the_token_before_queuing_when_wired_and_enabled() {
+        let resolver: Arc<dyn egress_detokenizer::DisplayNameResolver> = Arc::new(FixtureResolver(
+            [("abc-1".to_string(), "CoolStreamer".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let gate: Arc<dyn FeatureFlag> = Arc::new(crate::flags::StaticFlag(true));
+        let caps = caps(FakeRelayQueue::default()).with_detokenize(resolver, gate);
+        let result = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi {user:abc-1}\"}"}),
+                ),
+            )
+            .await
+            .expect("relay send succeeds");
+        assert_eq!(result["queued"], serde_json::json!(true));
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(parsed["text"], "hi CoolStreamer");
+        assert!(!parsed["text"].as_str().unwrap().contains("abc-1"));
+    }
+
+    /// Fail-safe-empty regression: an unresolved token (resolver has no
+    /// entry for it) substitutes the neutral label, never the raw token.
+    #[tokio::test]
+    async fn relay_send_detokenizes_an_unresolved_token_to_the_neutral_label() {
+        let resolver: Arc<dyn egress_detokenizer::DisplayNameResolver> =
+            Arc::new(FixtureResolver(std::collections::HashMap::new()));
+        let gate: Arc<dyn FeatureFlag> = Arc::new(crate::flags::StaticFlag(true));
+        let caps = caps(FakeRelayQueue::default()).with_detokenize(resolver, gate);
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi {user:missing}\"}"}),
+            ),
+        )
+        .await
+        .expect("relay send succeeds");
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(
+            parsed["text"],
+            format!("hi {}", egress_detokenizer::NEUTRAL_LABEL)
+        );
+    }
+
+    /// Kill-switch + not-configured-yet regression: with no resolver wired
+    /// at all, a relay send falls back to showing the raw token -- the
+    /// degraded, but never-PII-leaking, fallback (`detokenize_text`'s doc).
+    #[tokio::test]
+    async fn relay_send_passes_the_raw_token_through_when_detokenize_is_not_configured() {
+        let caps = caps(FakeRelayQueue::default());
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi {user:abc-1}\"}"}),
+            ),
+        )
+        .await
+        .expect("relay send succeeds");
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(parsed["text"], "hi {user:abc-1}");
+    }
+
+    /// Kill-switch regression: wired but disabled (gate OFF) behaves
+    /// identically to not-configured-at-all -- raw token passes through.
+    #[tokio::test]
+    async fn relay_send_passes_the_raw_token_through_when_the_kill_switch_is_on() {
+        let resolver: Arc<dyn egress_detokenizer::DisplayNameResolver> = Arc::new(FixtureResolver(
+            [("abc-1".to_string(), "CoolStreamer".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let gate: Arc<dyn FeatureFlag> = Arc::new(crate::flags::StaticFlag(false));
+        let caps = caps(FakeRelayQueue::default()).with_detokenize(resolver, gate);
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi {user:abc-1}\"}"}),
+            ),
+        )
+        .await
+        .expect("relay send succeeds");
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(parsed["text"], "hi {user:abc-1}");
     }
 
     /// Regression coverage for the CRITICAL usage-metering finding:
@@ -1027,6 +4387,45 @@ mod tests {
         assert_eq!(parsed["content"], "pong");
     }
 
+    /// PII boundary hard invariant, Discord sink: a resolved display name
+    /// containing Discord markdown control characters is escaped so it
+    /// can't smuggle a mention/formatting out of its position in the
+    /// rendered content.
+    #[tokio::test]
+    async fn relay_send_discord_detokenizes_and_escapes_the_resolved_name() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let resolver: Arc<dyn egress_detokenizer::DisplayNameResolver> = Arc::new(FixtureResolver(
+            [("abc-1".to_string(), "@everyone".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let gate: Arc<dyn FeatureFlag> = Arc::new(crate::flags::StaticFlag(true));
+        let caps = caps(FakeRelayQueue::default())
+            .with_discord(
+                transport.clone(),
+                crate::config::Secret::new("test-bot-token"),
+            )
+            .with_detokenize(resolver, gate);
+
+        caps.handle(
+            &discord_scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "discord", "message_json": r#"{"text":"hi {user:abc-1}"}"#}),
+            ),
+        )
+        .await
+        .expect("discord relay send succeeds");
+
+        let requests = transport.requests.lock().unwrap();
+        let body = requests[0].body.as_ref().expect("body present");
+        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let content = parsed["content"].as_str().unwrap();
+        assert_eq!(content, "hi \\@everyone");
+        assert!(!content.contains("abc-1"));
+    }
+
     /// A bundle-supplied `channel` in `message_json` is silently ignored for
     /// Discord -- `handle_discord_relay`'s whole reason for existing is that
     /// the channel comes from the envelope, never bundle args.
@@ -1218,6 +4617,157 @@ mod tests {
         assert_eq!(err.code, "unknown_op");
     }
 
+    /// Builds an isolated OTel harness plus a `StageMetrics` on it, so a
+    /// test reads back exactly the host calls made through the capability
+    /// set it injects the metrics into.
+    fn isolated_metrics() -> (
+        crate::stage_metrics::test_support::Harness,
+        Arc<StageMetrics>,
+    ) {
+        let harness = crate::stage_metrics::test_support::Harness::new();
+        let metrics = Arc::new(StageMetrics::new(&harness.meter()));
+        (harness, metrics)
+    }
+
+    #[tokio::test]
+    async fn host_calls_are_timed_per_capability_op_and_result() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps(FakeRelayQueue::default()).with_stage_metrics(metrics);
+        let call_clock = |op: &'static str| call(CapabilityKind::Clock, op, serde_json::json!({}));
+
+        c.handle(&scope(), call_clock("now-millis"))
+            .await
+            .expect("clock succeeds");
+        c.handle(&scope(), call_clock("now-millis"))
+            .await
+            .expect("clock succeeds");
+        c.handle(
+            &scope(),
+            call(CapabilityKind::Context, "get", serde_json::json!({})),
+        )
+        .await
+        .expect("context succeeds");
+        // An unknown clock op is an operational error, not a policy denial.
+        c.handle(&scope(), call_clock("bogus")).await.unwrap_err();
+
+        let name = "waddles_host_call_latency_seconds";
+        let count = |capability: &str, op: &str, result: &str| {
+            h.count(
+                name,
+                &[
+                    ("stage", "action"),
+                    ("capability", capability),
+                    ("op", op),
+                    ("result", result),
+                ],
+            )
+        };
+        assert_eq!(count("clock", "now-millis", "ok"), 2.0);
+        assert_eq!(count("context", "get", "ok"), 1.0);
+        assert_eq!(count("clock", "other", "error"), 1.0);
+        let timed = h.last(name, &[("capability", "clock"), ("op", "now-millis")]);
+        assert!(timed.expect("series exported").sum >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_gate_denial_is_labeled_denied_not_error() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps_denied(FakeRelayQueue::default()).with_stage_metrics(metrics);
+        c.handle(
+            &scope(),
+            call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            h.count(
+                "waddles_host_call_latency_seconds",
+                &[("capability", "kv"), ("op", "get"), ("result", "denied")]
+            ),
+            1.0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hostile_op_string_never_becomes_a_label_value() {
+        let (h, metrics) = isolated_metrics();
+        let c = caps(FakeRelayQueue::default()).with_stage_metrics(metrics);
+        for i in 0..20 {
+            let hostile = format!("evil-op-{i}; drop table users");
+            c.handle(
+                &scope(),
+                call(CapabilityKind::Clock, &hostile, serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        }
+        let points: Vec<_> = h
+            .points()
+            .into_iter()
+            .filter(|p| p.name == "waddles_host_call_latency")
+            .collect();
+        assert_eq!(points.len(), 1, "20 hostile ops must fold into one series");
+        assert_eq!(points[0].attrs.get("op").map(String::as_str), Some("other"));
+        assert_eq!(points[0].value, 20.0);
+    }
+
+    /// The reason `crate::metrics_facade` exists: the gate's own `authorize()`
+    /// audit counters (recorded through the `metrics` facade) must reach OTel.
+    #[test]
+    fn the_real_gate_audit_counters_reach_otel_through_the_bridge() {
+        let harness = crate::stage_metrics::test_support::Harness::new();
+        let recorder = crate::metrics_facade::OtelRecorder::new(harness.meter());
+        let granted = caps(FakeRelayQueue::default());
+        let denying = caps_denied(FakeRelayQueue::default());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                granted
+                    .handle(
+                        &scope(),
+                        call(CapabilityKind::Clock, "now-millis", serde_json::json!({})),
+                    )
+                    .await
+                    .expect("clock is always granted");
+                let denied = denying
+                    .handle(
+                        &scope(),
+                        call(
+                            CapabilityKind::Http,
+                            "send",
+                            serde_json::json!({"url": "https://hostile-1.example/x"}),
+                        ),
+                    )
+                    .await;
+                assert!(denied.is_err(), "ungranted http must be denied");
+            });
+        });
+
+        assert!(
+            harness.count(
+                "waddles_bundle_capability_authorized_total",
+                &[("app_id", "waddles.bot.commands.default")]
+            ) >= 1.0,
+            "the gate's authorize() audit counter must reach OTel"
+        );
+        assert_eq!(
+            harness.count(
+                "waddles_bundle_capability_denied_total",
+                &[
+                    ("app_id", "waddles.bot.commands.default"),
+                    ("permission", "net.http.fqdn"),
+                    ("reason", "not_granted"),
+                ]
+            ),
+            1.0,
+            "the gate's denial must reach OTel with the host folded away"
+        );
+    }
+
     #[tokio::test]
     async fn context_reports_scope_without_secrets() {
         let caps = caps(FakeRelayQueue::default());
@@ -1275,13 +4825,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_kv_flags_capabilities_are_documented_seams() {
+    async fn db_and_flags_capabilities_are_documented_seams() {
+        // `kv` is no longer an unconditional seam -- see
+        // `kv_is_not_implemented_when_no_backend_was_configured` for its
+        // own (backend-unconfigured) not_implemented case, and the
+        // `kv_*` tests above for the fully-wired behavior.
         let caps = caps(FakeRelayQueue::default());
-        for capability in [
-            CapabilityKind::Db,
-            CapabilityKind::Kv,
-            CapabilityKind::Flags,
-        ] {
+        for capability in [CapabilityKind::Db, CapabilityKind::Flags] {
             let err = caps
                 .handle(
                     &scope(),
@@ -1291,6 +4841,286 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err.code, "not_implemented");
         }
+    }
+
+    /// A [`StageCapabilities`] wired to `deny_all_gate()` -- every arm below
+    /// exercises `gate.authorize()` actually being consulted first, not
+    /// bypassed.
+    fn caps_denied(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
+        StageCapabilities::new(
+            queue,
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            deny_all_gate(),
+        )
+        .with_kv(
+            FakeKvBackend::default(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        )
+    }
+
+    /// Regression (gh-433): the dispatch-time `InvokeScope.app_version` this
+    /// module's own `gate_scope()` builds must be the REAL resolved
+    /// `app_versions.id` (never the `0` interim placeholder
+    /// `crate::dispatch::invoke_dispatch` used to hardcode) for a seeded
+    /// grant to ever match -- `permissive_gate()`'s grants are seeded under
+    /// `app_version: 1` (`scope()`'s own value, the same value a real
+    /// dispatch loop now threads through via `crate::dispatch::
+    /// resolve_action_app_version`), so an invoke carrying that resolved
+    /// version is ALLOWED.
+    #[tokio::test]
+    async fn dispatch_invocation_with_the_resolved_app_version_is_allowed_by_a_seeded_grant() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let result = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .expect("a grant seeded under the resolved app_version allows the call");
+        assert_eq!(result["value"], serde_json::Value::Null);
+    }
+
+    /// Regression (gh-433): an invoke whose `app_version` cannot be
+    /// resolved to the version a grant was actually issued for -- modeled
+    /// here as a scope carrying a version no grant was ever seeded under --
+    /// is DENIED, never silently authorized under the wrong version's
+    /// permissions (which is exactly what the old `app_version: 0`
+    /// placeholder would have risked had any grant ever been seeded under
+    /// `0`).
+    #[tokio::test]
+    async fn dispatch_invocation_with_an_unresolved_app_version_is_denied() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let unresolved_scope = InvokeScope {
+            app_version: 999,
+            ..scope()
+        };
+        let err = caps
+            .handle(
+                &unresolved_scope,
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_kv_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_relay_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": r#"{"channel":"c","text":"hi"}"#}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_http_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Http,
+                    "send",
+                    serde_json::json!({"method": "GET", "url": "https://example.com/"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_db_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Db, "execute", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_flags_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Flags, "get", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    /// The "Always granted, zero-config" platform capabilities (spec SS1)
+    /// still route through `gate.authorize()` (module doc: "so every call is
+    /// still audited uniformly") -- with no grant data at all, they deny
+    /// exactly like any other permission; `crate::grant_gate::
+    /// AlwaysGrantedLoader` (not exercised by this gate double) is what
+    /// makes them unconditionally present in production.
+    #[tokio::test]
+    async fn gate_denies_context_clock_log_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        for capability in [
+            CapabilityKind::Context,
+            CapabilityKind::Clock,
+            CapabilityKind::Log,
+        ] {
+            let err = caps
+                .handle(
+                    &scope(),
+                    call(capability, "now-millis", serde_json::json!({})),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted");
+        }
+    }
+
+    /// An undeclared permission (granted set has entries, but not the one
+    /// this call needs) denies exactly like an empty grant set -- proving
+    /// `authorize()` checks the specific permission id, not just "some
+    /// grant exists for this app."
+    #[tokio::test]
+    async fn gate_denies_a_permission_the_app_was_never_granted() {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 7,
+                community_id: 3,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: 1,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "flags.read".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "flags.read".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let gate = Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ));
+        let caps = StageCapabilities::new(
+            FakeRelayQueue::default(),
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            gate,
+        )
+        .with_kv(
+            FakeKvBackend::default(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        );
+
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    /// Revocation mid-stream (spec SS4/SS5.3, task instruction): a grant
+    /// present at the start of the connection, then invalidated (simulating
+    /// a `bundle:grants:invalidate` push notification landing between two
+    /// calls), denies the very next call -- proving `StageCapabilities`
+    /// reads through a live [`bundle_capability_gate::GrantCache`], not a
+    /// one-shot snapshot copied at construction time.
+    #[tokio::test]
+    async fn gate_revocation_mid_stream_denies_the_next_call() {
+        let key = bundle_capability_gate::GrantScopeKey {
+            tenant_id: 7,
+            community_id: 3,
+            app_id: "waddles.bot.commands.default".to_string(),
+            app_version: 1,
+        };
+        let loader = Arc::new(bundle_capability_gate::InMemoryGrantLoader::new());
+        loader.set(
+            key.clone(),
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "v1".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "storage.kv".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "storage.kv".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let cache = Arc::new(bundle_capability_gate::GrantCache::new(loader));
+        cache.refresh(&key).await.unwrap();
+        let gate = Arc::new(CapabilityGate::new(
+            cache.clone(),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ));
+        let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
+        kv_capabilities.update(
+            "waddles.bot.commands.default",
+            [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
+        );
+        let caps = StageCapabilities::new(
+            FakeRelayQueue::default(),
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            gate,
+        )
+        .with_kv(FakeKvBackend::default(), Arc::new(kv_capabilities));
+
+        caps.handle(
+            &scope(),
+            call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+        )
+        .await
+        .expect("granted before revocation");
+
+        cache.invalidate(&key);
+
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
     }
 
     #[tokio::test]
@@ -1315,5 +5145,483 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    // ---- handle_flags: authorize() allow/deny + op dispatch ------------
+
+    /// `permissive_gate()` grants `flags.read` to this scope's app id --
+    /// the gate's allow branch must fall through to the real
+    /// `crate::flags::resolve_flag` resolution, not short-circuit deny.
+    /// Asserts `true` regardless of `default_value` (rather than asserting
+    /// a specific value derived from it) because this test process has no
+    /// license env vars configured, so `resolve_flag`'s hardcoded-domain
+    /// bypass (`crate::flags`'s own `bypass_active_resolves_true_
+    /// regardless_of_default` test) is what actually answers the call --
+    /// the point here is that `handle_flags` reached that resolution at
+    /// all, not which fallback tier inside it fired.
+    #[tokio::test]
+    async fn flags_enabled_resolves_through_the_gate_when_granted() {
+        let caps = caps(FakeRelayQueue::default());
+        let result = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Flags,
+                    "enabled",
+                    serde_json::json!({"key": "waddles.some-capability", "default_value": false}),
+                ),
+            )
+            .await
+            .expect("flags.read is granted by permissive_gate()");
+        assert_eq!(result["enabled"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn flags_enabled_malformed_args_is_invalid_args() {
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Flags, "enabled", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn flags_unknown_op_is_not_implemented() {
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Flags, "bogus-op", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+    }
+
+    // ---- db/JSON value mapping helpers (handle_db's building blocks) ---
+
+    #[test]
+    fn json_to_db_value_maps_every_supported_json_shape() {
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(null)).unwrap(),
+            DbValue::Null
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(true)).unwrap(),
+            DbValue::Bool(true)
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(42)).unwrap(),
+            DbValue::Int(42)
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(1.5)).unwrap(),
+            DbValue::Float(1.5)
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!("hi")).unwrap(),
+            DbValue::Text("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn json_to_db_value_rejects_arrays_and_objects() {
+        assert_eq!(
+            json_to_db_value(&serde_json::json!([1, 2]))
+                .unwrap_err()
+                .code,
+            "invalid_args"
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!({"a": 1}))
+                .unwrap_err()
+                .code,
+            "invalid_args"
+        );
+    }
+
+    #[test]
+    fn parse_order_by_defaults_to_none_when_absent_or_null() {
+        assert_eq!(parse_order_by(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            parse_order_by(&serde_json::json!({"order_by": null})).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_order_by_parses_random() {
+        assert_eq!(
+            parse_order_by(&serde_json::json!({"order_by": {"random": true}})).unwrap(),
+            Some(bundle_host_db::OrderBy::Random)
+        );
+    }
+
+    #[test]
+    fn parse_order_by_parses_a_column_with_explicit_descending() {
+        assert_eq!(
+            parse_order_by(&serde_json::json!({
+                "order_by": {"column": "created_at", "descending": true}
+            }))
+            .unwrap(),
+            Some(bundle_host_db::OrderBy::Column {
+                name: "created_at".to_string(),
+                descending: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_order_by_defaults_descending_to_false() {
+        assert_eq!(
+            parse_order_by(&serde_json::json!({"order_by": {"column": "row_id"}})).unwrap(),
+            Some(bundle_host_db::OrderBy::Column {
+                name: "row_id".to_string(),
+                descending: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_order_by_rejects_a_malformed_order_by_object() {
+        let err = parse_order_by(&serde_json::json!({"order_by": {}})).unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[test]
+    fn db_value_to_json_maps_every_variant() {
+        assert_eq!(db_value_to_json(&DbValue::Null), serde_json::Value::Null);
+        assert_eq!(
+            db_value_to_json(&DbValue::Bool(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(db_value_to_json(&DbValue::Int(7)), serde_json::json!(7));
+        assert_eq!(
+            db_value_to_json(&DbValue::Float(2.5)),
+            serde_json::json!(2.5)
+        );
+        assert_eq!(
+            db_value_to_json(&DbValue::Text("x".to_string())),
+            serde_json::json!("x")
+        );
+        assert_eq!(
+            db_value_to_json(&DbValue::Bytes(vec![1, 2, 3])),
+            serde_json::json!([1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn row_to_json_shapes_row_id_version_and_columns() {
+        let row = bundle_host_db::Row {
+            row_id: "r1".to_string(),
+            version: 3,
+            columns: vec![("name".to_string(), DbValue::Text("quote".to_string()))],
+        };
+        let json = row_to_json(row);
+        assert_eq!(json["row_id"], serde_json::json!("r1"));
+        assert_eq!(json["version"], serde_json::json!(3));
+        assert_eq!(json["columns"]["name"], serde_json::json!("quote"));
+    }
+
+    #[test]
+    fn db_error_to_host_error_carries_the_stable_reason_code() {
+        let err = db_error_to_host_error(DbError::NoTable);
+        assert_eq!(err.code, "no_table");
+        let err = db_error_to_host_error(DbError::Conflict);
+        assert_eq!(err.code, "conflict");
+    }
+    /// Collects every flushed delta so a test can read exact counters.
+    #[derive(Default)]
+    struct CollectSink(Mutex<Vec<crate::usage::UsageDelta>>);
+
+    impl crate::usage::UsageSink for CollectSink {
+        fn write(
+            &self,
+            delta: &crate::usage::UsageDelta,
+        ) -> Pin<Box<dyn Future<Output = Result<(), crate::usage::UsageError>> + Send + '_>>
+        {
+            let d = crate::usage::UsageDelta {
+                stage: delta.stage,
+                tenant_id: delta.tenant_id.clone(),
+                community_id: delta.community_id.clone(),
+                workstream_id: delta.workstream_id.clone(),
+                app_id: delta.app_id.clone(),
+                actions_delivered: delta.actions_delivered,
+                host_calls_relay: delta.host_calls_relay,
+                outbound_bytes: delta.outbound_bytes,
+            };
+            self.0.lock().unwrap().push(d);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn chat_send_call(text: &str) -> HostCallBody {
+        call(
+            CapabilityKind::Relay,
+            "send",
+            serde_json::json!({
+                "provider": "discord",
+                "message_json": serde_json::json!({"text": text, "channel": "999999999999999999"}).to_string(),
+            }),
+        )
+    }
+
+    fn flag(on: bool) -> Arc<dyn FeatureFlag> {
+        crate::flags::boxed(crate::flags::StaticFlag(on))
+    }
+
+    // FLAG ON: chat.send is LPUSHed to the drain queue (not sent inline),
+    // channel is the origin channel, and the text is detokenized.
+    #[tokio::test]
+    async fn flag_on_queues_chat_send_to_drain() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let resolver: Arc<dyn egress_detokenizer::DisplayNameResolver> = Arc::new(FixtureResolver(
+            [("abc-1".to_string(), "Alice".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let caps = caps(FakeRelayQueue::with_live_drain())
+            .with_discord(transport.clone(), crate::config::Secret::new("t"))
+            .with_egress_dispatcher_flag(flag(true))
+            .with_detokenize(resolver, flag(true));
+        let out = caps
+            .handle(&discord_scope(), chat_send_call("hi {user:abc-1}"))
+            .await
+            .expect("chat.send via drain");
+        assert_eq!(out["sent"], true);
+        assert!(
+            transport.requests.lock().unwrap().is_empty(),
+            "no inline send"
+        );
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0].0, "waddles:transport:irc:discord:outbound");
+        drop(pushed);
+        let env = &caps.relay_queue.envelopes()[0];
+        assert_eq!(env["op"], "chat.send");
+        assert_eq!(env["platform"], "discord");
+        assert_eq!(env["channel"], "123456789012345678");
+        assert_eq!(env["text"], "hi Alice");
+        assert!(env["op_id"].as_str().is_some_and(|i| !i.is_empty()));
+    }
+
+    // FLAG ON: a posted ack {ok:true} => success; no ack => relay_unconfirmed.
+    #[tokio::test]
+    async fn flag_on_missing_ack_is_unconfirmed() {
+        // Advertised ready, never answers.
+        let q = FakeRelayQueue {
+            ready: true,
+            ..FakeRelayQueue::default()
+        };
+        let caps = caps(q)
+            .with_discord_ack_timeout(Duration::from_millis(50))
+            .with_egress_dispatcher_flag(flag(true));
+        let err = caps
+            .handle(&discord_scope(), chat_send_call("pong"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unconfirmed");
+        assert_eq!(caps.relay_queue.pushed.lock().unwrap().len(), 1);
+    }
+
+    // FLAG OFF: unchanged inline path.
+    #[tokio::test]
+    async fn flag_off_keeps_inline_path() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let caps = caps(FakeRelayQueue::with_live_drain())
+            .with_discord(transport.clone(), crate::config::Secret::new("t"))
+            .with_egress_dispatcher_flag(flag(false));
+        let out = caps
+            .handle(&discord_scope(), chat_send_call("pong"))
+            .await
+            .expect("inline send");
+        assert_eq!(
+            out,
+            serde_json::json!({"sent": true, "provider": "discord"})
+        );
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        let reqs = transport.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].url,
+            "https://discord.com/api/v10/channels/123456789012345678/messages"
+        );
+    }
+
+    // Grant gate runs before routing, in both flag states.
+    #[tokio::test]
+    async fn denied_grant_short_circuits_before_dispatch() {
+        for on in [true, false] {
+            let transport = Arc::new(FakeDiscordTransport::default());
+            let caps: StageCapabilities<FakeRelayQueue> = StageCapabilities::new(
+                FakeRelayQueue::with_live_drain(),
+                test_egress(),
+                Arc::new(Mutex::new(UsageBatcher::new())),
+                deny_all_gate(),
+            )
+            .with_discord(transport.clone(), crate::config::Secret::new("t"))
+            .with_egress_dispatcher_flag(flag(on));
+            let err = caps
+                .handle(&discord_scope(), chat_send_call("pong"))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted", "flag {on}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+            assert!(transport.requests.lock().unwrap().is_empty());
+        }
+    }
+
+    // Usage recorded exactly once on the ON route.
+    #[tokio::test]
+    async fn flag_on_meters_once() {
+        let usage = Arc::new(Mutex::new(UsageBatcher::new()));
+        let caps = caps_with_usage(FakeRelayQueue::with_live_drain(), Arc::clone(&usage))
+            .with_egress_dispatcher_flag(flag(true));
+        caps.handle(&discord_scope(), chat_send_call("pong"))
+            .await
+            .expect("chat.send via drain");
+        let sink = CollectSink::default();
+        let mut batcher = std::mem::take(&mut *usage.lock().unwrap());
+        let flushed = batcher.flush(&sink).await;
+        assert_eq!(flushed, 1);
+        let deltas = sink.0.lock().unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].host_calls_relay, 1, "metered exactly once");
+    }
+
+    // Channel pinning: bundle-supplied channel is ignored; origin used.
+    #[tokio::test]
+    async fn flag_on_pins_channel_to_origin() {
+        let caps = caps(FakeRelayQueue::with_live_drain()).with_egress_dispatcher_flag(flag(true));
+        caps.handle(&discord_scope(), chat_send_call("pong"))
+            .await
+            .expect("chat.send via drain");
+        let env = &caps.relay_queue.envelopes()[0];
+        assert_eq!(env["channel"], "123456789012345678");
+        assert_ne!(env["channel"], "999999999999999999");
+        // Missing origin channel fails loud on the ON path too.
+        let err = caps
+            .handle(&scope(), chat_send_call("pong"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+        assert_eq!(caps.relay_queue.pushed.lock().unwrap().len(), 1);
+    }
+
+    // NoDestination is loud: refused (never Ok), nothing queued/sent, and the
+    // counter increments with bounded labels.
+    #[tokio::test]
+    async fn no_destination_is_loud_not_dropped() {
+        use crate::dispatch_destination::DispatchError;
+        let harness = crate::stage_metrics::test_support::Harness::new();
+        let recorder = crate::metrics_facade::OtelRecorder::new(harness.meter());
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let caps = caps(FakeRelayQueue::with_live_drain())
+            .with_discord(transport.clone(), crate::config::Secret::new("t"))
+            .with_egress_dispatcher_flag(flag(true));
+        // Direct arm: a routing decision of NoDestination.
+        let direct = {
+            let _g = metrics::set_default_local_recorder(&recorder);
+            caps.dispatch_chat_send_routed(
+                &discord_scope(),
+                "pong",
+                Err(DispatchError::NoDestination {
+                    provider: "discord".to_string(),
+                    op: RelayOp::ChatSend,
+                }),
+            )
+            .await
+        };
+        assert_eq!(direct.unwrap_err().code, "unsupported_op");
+        // Real relay boundary, flag ON: twitch dm.send has no route.
+        let via_relay = {
+            let _g = metrics::set_default_local_recorder(&recorder);
+            caps.handle(
+                &discord_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({
+                        "provider": "twitch",
+                        "message_json": serde_json::json!({"op": "dm.send", "text": "x"}).to_string(),
+                    }),
+                ),
+            )
+            .await
+        };
+        assert!(via_relay.is_err(), "must not be acked as success");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        assert!(transport.requests.lock().unwrap().is_empty());
+        assert_eq!(
+            harness.count(
+                NO_DESTINATION_METRIC,
+                &[("provider", "discord"), ("op", "chat.send")]
+            ),
+            1.0
+        );
+        assert_eq!(
+            harness.count(
+                NO_DESTINATION_METRIC,
+                &[("provider", "twitch"), ("op", "dm.send")]
+            ),
+            1.0
+        );
+    }
+
+    // Grant gate denying ONLY chat.send:discord (everything else granted)
+    // still short-circuits before routing, in both flag states.
+    #[tokio::test]
+    async fn flag_on_denies_only_chat_send_grant() {
+        for on in [true, false] {
+            let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+            let mut grants = std::collections::HashMap::new();
+            for id in ["platform.log", "chat.delete:discord", "dm.send:discord"] {
+                grants.insert(
+                    id.to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: id.to_string(),
+                        params: serde_json::json!({}),
+                    },
+                );
+            }
+            snapshot.set(
+                bundle_capability_gate::GrantScopeKey {
+                    tenant_id: 7,
+                    community_id: 3,
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_version: 1,
+                },
+                bundle_capability_gate::GrantSet {
+                    permission_snapshot_hash: "test".to_string(),
+                    grants,
+                },
+            );
+            let gate = Arc::new(CapabilityGate::new(
+                Arc::new(snapshot),
+                Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+                Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+                Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+            ));
+            let transport = Arc::new(FakeDiscordTransport::default());
+            let caps: StageCapabilities<FakeRelayQueue> = StageCapabilities::new(
+                FakeRelayQueue::with_live_drain(),
+                test_egress(),
+                Arc::new(Mutex::new(UsageBatcher::new())),
+                gate,
+            )
+            .with_discord(transport.clone(), crate::config::Secret::new("t"))
+            .with_egress_dispatcher_flag(flag(on));
+            let err = caps
+                .handle(&discord_scope(), chat_send_call("pong"))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted", "flag {on}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+            assert!(transport.requests.lock().unwrap().is_empty());
+        }
     }
 }

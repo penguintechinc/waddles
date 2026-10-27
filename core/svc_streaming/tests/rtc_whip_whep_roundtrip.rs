@@ -42,6 +42,7 @@
 //! unit tests, which exercise the same code without going through a real
 //! `PeerConnection` and are unaffected by this gap.
 
+mod otel_common;
 mod rtc_common;
 
 use std::sync::Arc;
@@ -60,6 +61,10 @@ use svc_streaming::rtc::pc_factory::PeerConnectionFactory;
 
 #[tokio::test]
 async fn whip_publish_negotiates_and_feeds_a_whep_viewer_session() {
+    // Before any fanout exists: `MediaFanouts::new` binds the latency
+    // instruments to whichever global meter provider is installed.
+    let otel = otel_common::OtelSink::install();
+
     // Four non-overlapping loopback port ranges: the WHIP router's own
     // ingest `PeerConnectionFactory`, the test's external "publisher" peer,
     // the WHEP router's own egress `PeerConnectionFactory`, and the test's
@@ -167,7 +172,9 @@ async fn whip_publish_negotiates_and_feeds_a_whep_viewer_session() {
     // will do once it exists -- resolve the WHIP token's copy-path fanout
     // onto a `PipelineId` a WHEP viewer can subscribe to. ---
     let pipeline_id = Uuid::new_v4();
-    whep_state.register_fanout(pipeline_id, fanout).await;
+    whep_state
+        .register_fanout(pipeline_id, fanout.clone())
+        .await;
     assert_eq!(whep_state.viewer_count(pipeline_id).await, 0);
 
     // --- Viewer: negotiate against the WHEP router. ---
@@ -188,6 +195,35 @@ async fn whip_publish_negotiates_and_feeds_a_whep_viewer_session() {
         .await
         .expect("viewer reaches Connected within 5s");
     assert_eq!(whep_state.viewer_count(pipeline_id).await, 1);
+
+    // --- Telemetry gate (`rules/testing.md` Telemetry Validation). The note
+    // above explains why RTP does not cross the in-process
+    // `PeerConnection`s, but the *fanout* hop is real regardless: packets
+    // published into the WHIP copy-path fanout reach the WHEP viewer's
+    // forwarding subscriber, which samples their dwell time into
+    // `stream_fanout_latency_seconds`. The viewer's task subscribes
+    // asynchronously after the answer is applied, so keep publishing until
+    // the first sample lands (a packet sent before it subscribes is simply
+    // not delivered to it).
+    let mut seq = 0u16;
+    otel_common::wait_for(
+        "stream_fanout_latency_seconds{kind=audio} to emit",
+        Duration::from_secs(10),
+        || {
+            fanout.audio.publish(synthetic_packet(seq, 0x00A1_1D10));
+            seq = seq.wrapping_add(1);
+            otel.histogram("stream_fanout_latency_seconds", &[("kind", "audio")])
+                .0
+                >= 1
+        },
+    )
+    .await;
+    let (samples, sum) = otel.histogram("stream_fanout_latency_seconds", &[("kind", "audio")]);
+    println!("telemetry: stream_fanout_latency_seconds{{kind=audio}}: {samples} data point(s), sum={sum}s");
+    assert!(
+        (0.0..5.0).contains(&sum),
+        "in-process fanout dwell time is a small non-negative interval, got {sum}s"
+    );
 
     // Drain the ingest hand-off channel -- confirms `create_session` really
     // did push an `IngestSession` for the pipeline supervisor, keyed by the

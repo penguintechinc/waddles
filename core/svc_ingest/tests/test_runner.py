@@ -59,7 +59,7 @@ class TestRunOnce:
 
         Seed a raw event onto the bundle's real `:ingest` Valkey key
         (fakeredis LPUSH), run the real ingest loop against the real
-        `bundles.echo_ingest.normalize` entrypoint, and assert the
+        `builtin_handlers.echo_ingest.normalize` entrypoint, and assert the
         normalized envelope actually landed on the bundle's real
         `:process` key -- both ends of the round trip verified against
         genuine LIST semantics, not a mocked call.
@@ -70,7 +70,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_ingest:normalize",
+                    "entrypoint": "builtin_handlers.echo_ingest:normalize",
                     "spec": {},
                     "config": {},
                 }
@@ -113,7 +113,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_ingest:normalize",
+                    "entrypoint": "builtin_handlers.echo_ingest:normalize",
                     "spec": {},
                     "config": {},
                 }
@@ -140,7 +140,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_ingest:normalize",
+                    "entrypoint": "builtin_handlers.echo_ingest:normalize",
                     "spec": {},
                     "config": {},
                 }
@@ -179,7 +179,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_ingest:normalize",
+                    "entrypoint": "builtin_handlers.echo_ingest:normalize",
                     "spec": {},
                     "config": {},
                 }
@@ -207,7 +207,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.no_such_module:normalize",
+                    "entrypoint": "builtin_handlers.no_such_module:normalize",
                     "spec": {},
                     "config": {},
                 }
@@ -247,7 +247,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_ingest:normalize",
+                    "entrypoint": "builtin_handlers.echo_ingest:normalize",
                     "spec": {},
                     "config": {},
                 }

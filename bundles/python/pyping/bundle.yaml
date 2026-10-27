@@ -1,10 +1,13 @@
 schema_version: 2
 app_id: waddles.core.example.pyping
 name: Ping Example Bundle (Python)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/pyping
 language: python
 artifact: component
 execution_model: wasi-component

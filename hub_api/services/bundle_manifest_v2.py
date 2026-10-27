@@ -14,11 +14,30 @@ any compiler Job would be created.
 
 from __future__ import annotations
 
+import enum
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from flask_core.app_manifest import KNOWN_MODULES
+from flask_core.bundle_attribution import (
+    MARKETPLACE_CATEGORIES,
+    is_https_url,
+    is_known_spdx,
+    license_requires_review,
+    valid_alternative_to_entry,
+    valid_notice,
+)
+
+from services.bundle_permission_catalog import (
+    NET_HTTP_IP_PREFIXES,
+    NET_HTTP_PREFIXES,
+    is_valid_egress_host,
+    resolve_risk,
+)
+
+logger = logging.getLogger(__name__)
 
 _SEGMENT = r"[a-z0-9][a-z0-9_-]*"
 _APP_ID_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
@@ -37,11 +56,15 @@ _ALLOWED_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"})
 _RESERVED_TABLES = frozenset(
     {"users", "tenants", "communities", "app_catalog", "app_activations", "app_tenant_availability"}
 )
-_ALLOWED_LANGUAGES = frozenset({"python", "rust", "javascript", "typescript", "other"})
+_ALLOWED_LANGUAGES = frozenset({"python", "rust", "javascript", "typescript", "csharp", "other"})
 _ALLOWED_STAGES = frozenset({"process", "action", "presentation"})
 _MAX_TIMEOUT_MS = 10000
 _MAX_MEMORY_MB = 256
 _MAX_EGRESS_RPS = 10
+#: First-party ingest/chat platforms a bundle may name in `supported_platforms`
+#: (a `custom:<name>` entry is additionally validated against the tenant's
+#: registered custom platforms, same as `consumes[].platform`).
+KNOWN_SUPPORTED_PLATFORMS = frozenset({"discord", "twitch", "slack", "youtube", "kick"})
 
 
 class ManifestV2Error(ValueError):
@@ -63,6 +86,38 @@ class ConsumeRule:
     filters: dict[str, Any] = field(default_factory=dict)
 
 
+#: Slash-command declaration constants (`commands:` manifest field). Values mirror
+#: the `app_commands` table (migration 0062): `command_types` bitmask 1..3 and the
+#: command-name CHECK regex.
+COMMAND_WILDCARD = "*"
+COMMAND_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+_MAX_COMMAND_DESCRIPTION_LEN = 100
+
+
+class CommandType(enum.IntFlag):
+    """Delivery kinds a declared command supports; values equal the DB `command_types` bitmask."""
+
+    STANDARD = 1
+    WEBHOOK = 2
+
+
+_COMMAND_TYPE_BY_NAME = {"standard": CommandType.STANDARD, "webhook": CommandType.WEBHOOK}
+
+
+@dataclass(slots=True, frozen=True)
+class CommandDeclaration:
+    """One `commands:` entry -- a command name this bundle serves, its types and platforms.
+
+    `platforms` of `None` means unrestricted (resolved against the bundle's
+    `supported_platforms` by the registry); `*` is the standard-only catch-all.
+    """
+
+    name: str
+    types: CommandType
+    platforms: tuple[str, ...] | None
+    description: str | None
+
+
 @dataclass(slots=True, frozen=True)
 class EgressRule:
     """One `egress` entry -- an allowed outbound host and its permitted HTTP methods."""
@@ -78,6 +133,22 @@ class Limits:
     timeout_ms: int
     memory_mb: int
     egress_rps: int
+
+
+@dataclass(slots=True, frozen=True)
+class PermissionDeclaration:
+    """One structured `permissions:` entry (spec Sec2.1) -- id, justification, per-id params.
+
+    Replaces the dead free-form `permissions: []` string-list parsing
+    (spec Sec2.4) -- `id` is a catalog member (`bundle_permission_catalog.
+    resolve_risk`), `justification` is mandatory 1-280 chars of plain text,
+    `params` is the permission-specific dict validated per Sec2.2.
+    """
+
+    id: str
+    risk: str
+    justification: str
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)
@@ -102,12 +173,196 @@ class BundleManifestV2:
     permissions: tuple[str, ...]
     routes_to: tuple[str, ...]
     consumes: tuple[ConsumeRule, ...]
+    # Attribution/marketplace metadata (migration 0026) -- defaulted so
+    # every pre-existing direct `BundleManifestV2(...)` construction site
+    # (test fixtures building one by hand, not through `parse_bundle_
+    # manifest_v2`) keeps working unchanged; `parse_bundle_manifest_v2` and
+    # `bundle_approval_service._reparse_trusted` both always pass these
+    # explicitly.
+    author: str | None = None
+    license: str | None = None
+    license_requires_review: bool = False
+    source_url: str | None = None
+    alternative_to: tuple[str, ...] = ()
+    homepage_url: str | None = None
+    notice: str | None = None
+    category: str | None = None
+    # spec Sec2.1 -- the structured permission-catalog block, replacing the
+    # dead `permissions: []` string-list parsing above. Defaulted so every
+    # pre-existing direct `BundleManifestV2(...)` construction site (test
+    # fixtures, `bundle_approval_service._reparse_trusted`) keeps working
+    # unchanged; `parse_bundle_manifest_v2` always passes it explicitly.
+    permission_declarations: tuple[PermissionDeclaration, ...] = ()
+    # Issue #685 -- platforms this bundle may run on. `None` (field absent)
+    # means ALL platforms (back-compat for every pre-existing bundle). Rides
+    # in the stored `manifest_json` blob; no DB column.
+    supported_platforms: tuple[str, ...] | None = None
+    # Slash-command registry (phase 1) -- the validated `commands:` block.
+    # Defaulted last so hand-built manifests in existing fixtures keep working.
+    command_declarations: tuple[CommandDeclaration, ...] = ()
+
+    def supports_platform(self, platform: str) -> bool:
+        """Return True when this bundle may run on `platform` (absent field = every platform)."""
+        return self.supported_platforms is None or platform in self.supported_platforms
+
+
+def _parse_supported_platforms(
+    raw_value: Any, *, known_custom_platforms: frozenset[str]
+) -> tuple[str, ...] | None:
+    """Validate the optional `supported_platforms` list; `None` when absent (all platforms)."""
+    if raw_value is None:
+        return None
+    _require(
+        isinstance(raw_value, list) and bool(raw_value),
+        "invalid_supported_platforms",
+        "supported_platforms must be a non-empty list when present",
+    )
+    seen: list[str] = []
+    for entry in raw_value:
+        _require(
+            isinstance(entry, str), "invalid_supported_platforms", f"{entry!r} is not a string"
+        )
+        if entry.startswith("custom:"):
+            _require(
+                entry.removeprefix("custom:") in known_custom_platforms,
+                "invalid_supported_platforms",
+                f"{entry!r} is not registered for this tenant",
+            )
+        else:
+            _require(
+                entry in KNOWN_SUPPORTED_PLATFORMS,
+                "invalid_supported_platforms",
+                f"{entry!r} is not one of {sorted(KNOWN_SUPPORTED_PLATFORMS)}",
+            )
+        if entry not in seen:
+            seen.append(entry)
+    return tuple(seen)
 
 
 def _require(condition: bool, reason: str, detail: str) -> None:
     """Raise `ManifestV2Error(reason, detail)` when `condition` is false."""
     if not condition:
         raise ManifestV2Error(reason, detail)
+
+
+def _parse_command_types(raw_types: Any, *, name: str) -> CommandType:
+    """Validate one command's `types` list (default `[standard]`) into a `CommandType` mask."""
+    if raw_types is None:
+        raw_types = ["standard"]
+    _require(
+        isinstance(raw_types, list) and bool(raw_types),
+        "invalid_command_type",
+        f"command {name!r}: types must be a non-empty list",
+    )
+    mask = CommandType(0)
+    for entry in raw_types:
+        _require(
+            isinstance(entry, str) and entry in _COMMAND_TYPE_BY_NAME,
+            "invalid_command_type",
+            f"command {name!r}: types entries must be one of {sorted(_COMMAND_TYPE_BY_NAME)}",
+        )
+        mask |= _COMMAND_TYPE_BY_NAME[entry]
+    _require(
+        name != COMMAND_WILDCARD or mask == CommandType.STANDARD,
+        "invalid_command_type",
+        "the '*' wildcard command is standard-only",
+    )
+    return mask
+
+
+def _parse_command_platforms(
+    raw_platforms: Any,
+    *,
+    name: str,
+    known_custom_platforms: frozenset[str],
+    supported_platforms: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    """Validate one command's optional `platforms` list; `None` when absent (unrestricted)."""
+    if raw_platforms is None:
+        return None
+    _require(
+        isinstance(raw_platforms, list) and bool(raw_platforms),
+        "invalid_command_platforms",
+        f"command {name!r}: platforms must be a non-empty list when present",
+    )
+    seen: list[str] = []
+    for entry in raw_platforms:
+        _require(
+            isinstance(entry, str),
+            "invalid_command_platforms",
+            f"command {name!r}: platforms entries must be strings",
+        )
+        if entry.startswith("custom:"):
+            _require(
+                entry.removeprefix("custom:") in known_custom_platforms,
+                "invalid_command_platforms",
+                f"command {name!r}: {entry!r} is not registered for this tenant",
+            )
+        else:
+            _require(
+                entry in KNOWN_SUPPORTED_PLATFORMS,
+                "invalid_command_platforms",
+                f"command {name!r}: {entry!r} is not one of {sorted(KNOWN_SUPPORTED_PLATFORMS)}",
+            )
+        _require(
+            supported_platforms is None or entry in supported_platforms,
+            "command_platform_unsupported",
+            f"command {name!r}: platform {entry!r} is not in supported_platforms",
+        )
+        if entry not in seen:
+            seen.append(entry)
+    return tuple(seen)
+
+
+def parse_command_declarations(
+    raw_entries: Any,
+    *,
+    known_custom_platforms: frozenset[str],
+    supported_platforms: tuple[str, ...] | None,
+) -> tuple[CommandDeclaration, ...]:
+    """Validate the optional `commands:` list; absent (`None`) parses to no declarations.
+
+    Each entry is `{name, types?, platforms?, description?}`. Raises
+    `ManifestV2Error` with a command-specific reason code on any violation.
+    """
+    if raw_entries is None:
+        return ()
+    _require(isinstance(raw_entries, list), "invalid_commands", "commands must be a list")
+    declarations: list[CommandDeclaration] = []
+    seen_names: set[str] = set()
+    for entry in raw_entries:
+        _require(
+            isinstance(entry, dict), "invalid_commands", "each commands entry must be a mapping"
+        )
+        name = entry.get("name")
+        _require(
+            isinstance(name, str)
+            and (name == COMMAND_WILDCARD or bool(COMMAND_NAME_RE.fullmatch(name))),
+            "invalid_command_name",
+            "command name must be '*' or match [a-z0-9][a-z0-9_-]{0,31}",
+        )
+        assert isinstance(name, str)  # narrowed by _require above, for mypy
+        _require(name not in seen_names, "duplicate_command", f"command {name!r} declared twice")
+        seen_names.add(name)
+        types = _parse_command_types(entry.get("types"), name=name)
+        platforms = _parse_command_platforms(
+            entry.get("platforms"),
+            name=name,
+            known_custom_platforms=known_custom_platforms,
+            supported_platforms=supported_platforms,
+        )
+        description = entry.get("description")
+        if description is not None:
+            _require(
+                isinstance(description, str)
+                and 1 <= len(description) <= _MAX_COMMAND_DESCRIPTION_LEN,
+                "invalid_command_description",
+                f"command {name!r}: description must be 1-{_MAX_COMMAND_DESCRIPTION_LEN} chars",
+            )
+        declarations.append(
+            CommandDeclaration(name=name, types=types, platforms=platforms, description=description)
+        )
+    return tuple(declarations)
 
 
 def _parse_consumes(
@@ -152,6 +407,149 @@ def _parse_consumes(
             )
         )
     return tuple(rules)
+
+
+_MAX_JUSTIFICATION_LEN = 280
+_MAX_OVERLAY_DURATION_S = 30
+_MAX_REPUTATION_DELTA = 5
+#: Mirrors the Rust catalog's `economy.wager`/`economy.transfer`
+#: `per_call_abs_max` (`core/bundle_capability_gate/src/permission.rs`); the
+#: gate re-clamps a declared bound to it, this is the approval-time check.
+_MAX_ECONOMY_AMOUNT = 1_000
+#: Declared per-call bound param name per money-moving economy permission.
+_ECONOMY_BOUND_PARAM = {"economy.wager": "max_bet", "economy.transfer": "max_amount"}
+_REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_.]*$")
+
+
+def parse_permission_declarations(
+    raw_entries: list[dict[str, Any]],
+) -> tuple[PermissionDeclaration, ...]:
+    """Validate+build every structured `permissions:` entry (spec Sec2.1/2.2/2.3).
+
+    The catalog is closed (`unknown_permission` on anything `resolve_risk`
+    doesn't recognize); every `dangerous`-risk entry requires a non-empty
+    `justification` (Sec2.3); `storage.tables` requires `params.schema` and
+    vice versa (Sec2.3's mutual-requirement rule); `overlay.media` requires
+    a non-empty `allowed_hosts` and a `max_duration_seconds` within the
+    catalog ceiling; `reputation.*.write` bounds `delta_min`/`delta_max`
+    within `|delta| <= 5` and validates every `reason_codes` entry;
+    `economy.wager`/`economy.transfer` (issue #714) each require their own
+    declared per-call bound (`params.max_bet` / `params.max_amount`) as an
+    integer in `1..=1000`, and reject the other permission's bound param.
+    `interaction.pii.receive` (raw PII in form/modal/interaction inputs,
+    DEFAULT NO/`dangerous`) takes no special `params` -- like any other
+    dangerous, non-parameterized catalog entry it only needs the
+    justification above; the host's default-filter behavior when it is
+    NOT granted is enforced at delivery time, not at manifest-parse time.
+    """
+    declarations: list[PermissionDeclaration] = []
+    for entry in raw_entries:
+        permission_id = entry.get("id", "")
+        risk = resolve_risk(permission_id)
+        _require(risk is not None, "unknown_permission", f"{permission_id!r}")
+        assert risk is not None  # nosec B101 -- _require already raised above otherwise
+
+        justification = entry.get("justification", "")
+        _require(
+            0 < len(justification) <= _MAX_JUSTIFICATION_LEN,
+            "missing_justification",
+            f"{permission_id!r} requires justification (1-{_MAX_JUSTIFICATION_LEN} chars)",
+        )
+
+        params = dict(entry.get("params") or {})
+
+        if permission_id.startswith(NET_HTTP_PREFIXES):
+            methods = params.get("methods")
+            _require(
+                isinstance(methods, list) and bool(methods) and set(methods) <= _ALLOWED_METHODS,
+                "invalid_net_http_method",
+                f"{permission_id!r} params.methods must be a non-empty subset of "
+                f"{sorted(_ALLOWED_METHODS)}, got {methods!r}",
+            )
+            if permission_id.startswith(NET_HTTP_IP_PREFIXES):
+                logger.warning(
+                    "bundle manifest declares an IP-literal outbound permission %r -- "
+                    "prefer net.http.fqdn:<host> where a stable hostname is available; "
+                    "net.http.public-ip/private-ip are dangerous-risk and require explicit "
+                    "per-tenant/community re-consent",
+                    permission_id,
+                )
+        elif "methods" in params:
+            _require(
+                False,
+                "invalid_net_http_method",
+                "params.methods is only valid for a net.http.fqdn/public-ip/private-ip permission",
+            )
+
+        if permission_id == "storage.tables":
+            _require(
+                bool(params.get("schema")),
+                "storage_tables_requires_schema",
+                "storage.tables requires params.schema",
+            )
+        elif "schema" in params:
+            _require(
+                False,
+                "storage_tables_requires_schema",
+                "params.schema is only valid for storage.tables",
+            )
+
+        if permission_id == "overlay.media":
+            allowed_hosts = params.get("allowed_hosts") or []
+            _require(
+                bool(allowed_hosts), "invalid_overlay_hosts", "overlay.media requires allowed_hosts"
+            )
+            for host in allowed_hosts:
+                _require(
+                    is_valid_egress_host(host, allow_wildcard=False),
+                    "invalid_overlay_hosts",
+                    f"{host!r} is not a valid, non-wildcard host",
+                )
+            max_duration = int(params.get("max_duration_seconds", 0))
+            _require(
+                0 < max_duration <= _MAX_OVERLAY_DURATION_S,
+                "invalid_overlay_duration",
+                f"max_duration_seconds={max_duration}",
+            )
+
+        if permission_id in ("reputation.community.write", "reputation.tenant.write"):
+            delta_min = int(params.get("delta_min", 0))
+            delta_max = int(params.get("delta_max", 0))
+            _require(
+                -_MAX_REPUTATION_DELTA <= delta_min <= 0 <= delta_max <= _MAX_REPUTATION_DELTA,
+                "delta_out_of_bounds",
+                f"delta_min={delta_min} delta_max={delta_max}",
+            )
+            reason_codes = params.get("reason_codes") or []
+            _require(bool(reason_codes), "missing_reason_codes", f"{permission_id!r}")
+            for code in reason_codes:
+                _require(bool(_REASON_CODE_RE.match(code)), "invalid_reason_code", f"{code!r}")
+
+        if permission_id in _ECONOMY_BOUND_PARAM:
+            bound_param = _ECONOMY_BOUND_PARAM[permission_id]
+            declared = params.get(bound_param)
+            _require(
+                isinstance(declared, int)
+                and not isinstance(declared, bool)
+                and 1 <= declared <= _MAX_ECONOMY_AMOUNT,
+                "invalid_economy_bound",
+                f"{permission_id!r} requires params.{bound_param} as an integer in "
+                f"1..={_MAX_ECONOMY_AMOUNT}, got {declared!r}",
+            )
+        for other_id, other_param in _ECONOMY_BOUND_PARAM.items():
+            if permission_id != other_id and other_param in params:
+                _require(
+                    False,
+                    "invalid_economy_bound",
+                    f"params.{other_param} is only valid for {other_id}",
+                )
+
+        declarations.append(
+            PermissionDeclaration(
+                id=permission_id, risk=risk, justification=justification, params=params
+            )
+        )
+    return tuple(declarations)
 
 
 def parse_bundle_manifest_v2(
@@ -225,6 +623,66 @@ def parse_bundle_manifest_v2(
     if raw["artifact"] == "prebuilt":
         _require(allow_prebuilt, "prebuilt_not_allowed", "bundles.allow_prebuilt is false")
 
+    # Attribution/marketplace metadata (optional for a first-party
+    # `builtin` bundle; mandatory for a `thirdparty` -- i.e. vendor --
+    # bundle, per house supply-chain policy: a vendor port must be
+    # credited and its license terms known before it is ever onboarded).
+    is_vendor_bundle = raw["provider"] == "thirdparty"
+    author = raw.get("author")
+    _require(
+        bool(author) or not is_vendor_bundle,
+        "vendor_author_required",
+        "author is required for provider: thirdparty (vendor) bundles",
+    )
+    license_id = raw.get("license")
+    _require(
+        bool(license_id) or not is_vendor_bundle,
+        "vendor_license_required",
+        "license is required for provider: thirdparty (vendor) bundles",
+    )
+    requires_review = False
+    if license_id:
+        _require(
+            is_known_spdx(license_id),
+            "unknown_spdx_license",
+            f"{license_id!r} is not an allowlisted SPDX identifier",
+        )
+        requires_review = license_requires_review(license_id)
+
+    source_url = raw.get("source_url")
+    if source_url is not None:
+        _require(
+            is_https_url(source_url),
+            "invalid_source_url",
+            f"{source_url!r} must be an https:// URL",
+        )
+
+    homepage_url = raw.get("homepage_url")
+    if homepage_url is not None:
+        _require(
+            is_https_url(homepage_url),
+            "invalid_homepage_url",
+            f"{homepage_url!r} must be an https:// URL",
+        )
+
+    alternative_to = tuple(raw.get("alternative_to") or [])
+    for entry in alternative_to:
+        _require(valid_alternative_to_entry(entry), "invalid_alternative_to", f"{entry!r}")
+
+    notice = raw.get("notice")
+    if notice is not None:
+        _require(
+            valid_notice(notice), "invalid_notice", "notice must be non-empty and <=10000 chars"
+        )
+
+    category = raw.get("category")
+    if category is not None:
+        _require(
+            category in MARKETPLACE_CATEGORIES,
+            "invalid_category",
+            f"{category!r} is not one of {sorted(MARKETPLACE_CATEGORIES)}",
+        )
+
     stages = raw["stages"]
     _require(bool(stages), "no_stages_declared", "stages must be non-empty")
     _require(
@@ -251,6 +709,23 @@ def parse_bundle_manifest_v2(
             "an action stage must not declare consumes",
         )
 
+    supported_platforms = _parse_supported_platforms(
+        raw.get("supported_platforms"), known_custom_platforms=known_custom_platforms
+    )
+    if supported_platforms is not None:
+        for rule in consumes:
+            _require(
+                rule.platform in supported_platforms,
+                "consumes_platform_unsupported",
+                f"consumes platform {rule.platform!r} is not in supported_platforms",
+            )
+
+    command_declarations = parse_command_declarations(
+        raw.get("commands"),
+        known_custom_platforms=known_custom_platforms,
+        supported_platforms=supported_platforms,
+    )
+
     egress_rules: list[EgressRule] = []
     for entry in raw.get("egress") or []:
         host = entry.get("host", "")
@@ -272,6 +747,15 @@ def parse_bundle_manifest_v2(
             f"{table!r} is a reserved identity table",
         )
         tables.append(table)
+
+    permission_entries = raw.get("permissions") or []
+    # Back-compat: a pre-existing bare string-list `permissions: [...]`
+    # (the dead, never-enforced shape, spec Sec2.4) parses to zero
+    # structured declarations rather than erroring -- only dict entries
+    # (the new, real schema) are validated against the catalog.
+    permission_declarations = parse_permission_declarations(
+        [e for e in permission_entries if isinstance(e, dict)]
+    )
 
     raw_limits = raw.get("limits") or {}
     timeout_ms = int(raw_limits.get("timeout_ms", 2000))
@@ -297,7 +781,18 @@ def parse_bundle_manifest_v2(
         egress=tuple(egress_rules),
         data_tables=tuple(tables),
         limits=Limits(timeout_ms=timeout_ms, memory_mb=memory_mb, egress_rps=egress_rps),
-        permissions=tuple(raw.get("permissions") or []),
+        permissions=tuple(e for e in permission_entries if isinstance(e, str)),
+        permission_declarations=permission_declarations,
         routes_to=tuple(raw.get("routes_to") or []),
         consumes=consumes,
+        author=author,
+        license=license_id,
+        license_requires_review=requires_review,
+        source_url=source_url,
+        alternative_to=alternative_to,
+        homepage_url=homepage_url,
+        notice=notice,
+        category=category,
+        supported_platforms=supported_platforms,
+        command_declarations=command_declarations,
     )

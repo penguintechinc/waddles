@@ -12,7 +12,7 @@ convention = "google"
 # Test names are self-documenting (pytest convention); S101 (assert) is
 # standard pytest usage; SLF001 (private-member access) is a deliberate
 # test-only override to exercise ReputationService's private
-# _update_global_reputation() directly (isolates reputation_global's upsert
+# _update_tenant_reputation() directly (isolates reputation_tenant's upsert
 # from the separate, pre-existing community_members.hub_user_id bug that
 # adjust()/get_reputation() also hit -- see test_reputation_tables.py's
 # module docstring). S105/S106/S107 flag fixed test-only JWT signing

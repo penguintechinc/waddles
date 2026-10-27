@@ -1,0 +1,48 @@
+# feature/hub-api-internal-grpc -- CiliumNetworkPolicy restricting ingress
+# to hub-api's internal gRPC port (waddles.hub.internal.v1: IdentityService,
+# KeyService) to svc-ingest/svc-process/svc-action (Python AND Rust
+# variants -- both are live during the Rust data-plane migration, see
+# critical-rules.md Data Plane) ONLY.
+#
+# R5 posture: this is now a HARD network-layer boundary (the previously documented
+# KNOWN GAP is closed). Cilium unions every applicable allow rule, so the old
+# namespace-wide allow-all-ports same-namespace policy used to swallow this one; that policy is
+# gone (templates/network-policies.yaml) and hub-api's own per-workload policy
+# (templates/_networkpolicy.tpl, included from hub-api.yaml with excludePorts=grpcPort)
+# deliberately omits this port -- so ONLY the callers listed below can reach it. The app-layer
+# boundary (`hub_api/grpc_internal/interceptors.py::AuthInterceptor` -- every RPC fails closed
+# without a valid, correctly-scoped hub-api-issued machine JWT) remains the second layer.
+{{- if .Values.pipeline.hubApi.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-hub-api-grpc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub-api
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: hub-api
+  ingress:
+    - fromEndpoints:
+        - matchExpressions:
+            - key: app.kubernetes.io/component
+              operator: In
+              values:
+                - svc-ingest
+                - svc-ingest-rust
+                - svc-process
+                - svc-process-rust
+                - svc-action
+                - svc-action-rust
+                # Rust svc-presentation resolves identities over this gRPC port too
+                # (rustDataPlane.hubApiGrpcEndpoint in templates/svc-presentation-rust.yaml).
+                - svc-presentation
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.hubApi.grpcPort | quote }}
+              protocol: TCP
+{{- end }}

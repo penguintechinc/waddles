@@ -1,8 +1,15 @@
 {{- if .Values.networkPolicy.enabled }}
-# Default deny all ingress traffic from outside the namespace.
-# With this policy in place, only explicitly allowed traffic can reach pods.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
+# R5 posture -- namespace default-deny ingress, as a CiliumNetworkPolicy (house rule: never a plain
+# K8s NetworkPolicy; every cluster targets Cilium). This replaces the old plain-NetworkPolicy pair
+# (`default-deny-ingress` + `allow-same-namespace-and-ingress`): the broad allow-all-ports
+# same-namespace rule is GONE. Each workload instead gets its own per-port allow, rendered next to the
+# workload by `waddlebot.workloadPolicies` (templates/_networkpolicy.tpl): same-namespace callers
+# on the workload's declared containerPort(s) only, plus the ingress controller / Gateway on those same
+# ports for `networkPolicy.externalIngressComponents`. Pods with no per-workload policy (Jobs/CronJobs
+# have no listeners; spire ships its own CNPs) get nothing inbound -- default deny.
+# An empty ingress rule (`- {}`) is Cilium's documented "select, allow nothing" default-deny form.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
 metadata:
   name: default-deny-ingress
   namespace: {{ .Values.namespace }}
@@ -11,33 +18,7 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 spec:
-  podSelector: {}
-  policyTypes:
-    - Ingress
----
-# Allow ingress from same-namespace pods and from the ingress controller.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-same-namespace-and-ingress
-  namespace: {{ .Values.namespace }}
-  labels:
-    app.kubernetes.io/name: waddlebot
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
-spec:
-  podSelector: {}
-  policyTypes:
-    - Ingress
+  endpointSelector: {}
   ingress:
-    # Allow all traffic from pods within the waddlebot namespace
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.namespace }}
-    # Allow traffic from the ingress controller namespace
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace | default "ingress-nginx" }}
+    - {}
 {{- end }}

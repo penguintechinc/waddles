@@ -89,7 +89,7 @@ The video_proxy_module is a stateless, horizontally-scalable microservice that:
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌──────────────────┐  ┌─────────────────────┐  ┌────────────┐ │
-│  │   OBS/Encoder    │  │   MarchProxy gRPC   │  │  MinIO     │ │
+│  │   OBS/Encoder    │  │   MarchProxy gRPC   │  │  SeaweedFS     │ │
 │  │                  │  │   (50050, RTMPing)  │  │  (storage) │ │
 │  │  RTMP Ingest:    │  │                     │  │            │ │
 │  │  rtmp://localhost│  │  - Stream proxy     │  │  - Thumbs  │ │
@@ -189,7 +189,7 @@ DATABASE_URL         # PyDAL connection string
 MODULE_PORT          # REST API port (8092)
 GRPC_PORT           # gRPC service port (50065)
 JWT_SECRET_KEY      # JWT signing key
-MINIO_ENDPOINT      # Object storage
+S3_ENDPOINT_URL      # Object storage
 LICENSE_SERVER_URL  # Feature licensing
 FREE_MAX_DESTINATIONS # Free tier limit (3)
 ```
@@ -413,7 +413,7 @@ service MarchProxyService {
 }
 ```
 
-### MinIO (S3-compatible Object Storage)
+### SeaweedFS (S3-compatible Object Storage)
 
 **Purpose**: Video preview thumbnails and metadata
 
@@ -424,10 +424,10 @@ service MarchProxyService {
 
 **Configuration**:
 ```python
-MINIO_ENDPOINT = "minio:9000"
-MINIO_ACCESS_KEY = "minioadmin"
-MINIO_SECRET_KEY = "minioadmin"
-MINIO_BUCKET = "video-proxy"
+S3_ENDPOINT_URL = "infra-seaweedfs:8333"
+S3_ACCESS_KEY_ID = "waddlebot"
+S3_SECRET_ACCESS_KEY = "waddlebot"
+S3_BUCKET_NAME = "video-proxy"
 ```
 
 ---

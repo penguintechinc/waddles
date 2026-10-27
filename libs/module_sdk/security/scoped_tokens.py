@@ -227,7 +227,7 @@ class ScopedTokenService:
             return token
 
         except Exception as e:
-            logger.error(f"Failed to generate token: {e}")
+            logger.error("Failed to generate token: %s", type(e).__name__)
             raise
 
     def validate_token(self, token: str) -> Optional[Dict[str, Any]]:
@@ -264,7 +264,7 @@ class ScopedTokenService:
             # Check expiration
             if token_data.is_expired():
                 logger.warning(
-                    f"Token expired",
+                    "Token expired",
                     extra={'jti': token_data.jti, 'expired_at': token_data.expires_at}
                 )
                 return None
@@ -272,13 +272,13 @@ class ScopedTokenService:
             # Check revocation
             if self._is_token_revoked(token):
                 logger.warning(
-                    f"Token has been revoked",
+                    "Token has been revoked",
                     extra={'jti': token_data.jti}
                 )
                 return None
 
             logger.debug(
-                f"Token validated successfully",
+                "Token validated successfully",
                 extra={
                     'community_id': token_data.community_id,
                     'module_name': token_data.module_name,
@@ -295,10 +295,10 @@ class ScopedTokenService:
             logger.error("Invalid token signature")
             return None
         except jwt.DecodeError as e:
-            logger.error(f"Token decode error: {e}")
+            logger.error("Token decode error: %s", type(e).__name__)
             return None
         except Exception as e:
-            logger.error(f"Unexpected token validation error: {e}")
+            logger.error("Unexpected token validation error: %s", type(e).__name__)
             return None
 
     def revoke_token(self, token: str) -> bool:
@@ -340,7 +340,7 @@ class ScopedTokenService:
             self._revoked_tokens.add(token_hash)
 
             logger.info(
-                f"Token revoked",
+                "Token revoked",
                 extra={
                     'jti': jti,
                     'community_id': payload.get('community_id'),
@@ -351,7 +351,7 @@ class ScopedTokenService:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to revoke token: {e}")
+            logger.error("Failed to revoke token: %s", type(e).__name__)
             return False
 
     def get_granted_scopes(self, community_id: str, module_name: str) -> List[str]:
@@ -384,7 +384,7 @@ class ScopedTokenService:
 
             # Note: This is a placeholder. Actual implementation depends on dal setup
             logger.info(
-                f"Retrieving granted scopes",
+                "Retrieving granted scopes",
                 extra={'community_id': community_id, 'module_name': module_name}
             )
 
@@ -392,7 +392,7 @@ class ScopedTokenService:
             return []
 
         except Exception as e:
-            logger.error(f"Failed to get granted scopes: {e}")
+            logger.error("Failed to get granted scopes: %s", type(e).__name__)
             return []
 
     def grant_scope(
@@ -439,7 +439,7 @@ class ScopedTokenService:
                 raise ValueError(f"Invalid scope format: {scope}")
 
             logger.info(
-                f"Granting scope",
+                "Granting scope",
                 extra={
                     'community_id': community_id,
                     'module_name': module_name,
@@ -454,7 +454,7 @@ class ScopedTokenService:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to grant scope: {e}")
+            logger.error("Failed to grant scope: %s", type(e).__name__)
             return False
 
     def revoke_scope(
@@ -493,7 +493,7 @@ class ScopedTokenService:
             scope = self._sanitize_string(scope)
 
             logger.info(
-                f"Revoking scope",
+                "Revoking scope",
                 extra={
                     'community_id': community_id,
                     'module_name': module_name,
@@ -507,7 +507,7 @@ class ScopedTokenService:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to revoke scope: {e}")
+            logger.error("Failed to revoke scope: %s", type(e).__name__)
             return False
 
     # Private helper methods
@@ -669,7 +669,7 @@ class ScopedTokenService:
 
             if existing:
                 logger.info(
-                    f"Scope already granted",
+                    "Scope already granted",
                     extra={
                         'community_id': community_id,
                         'module_name': module_name,
@@ -689,7 +689,7 @@ class ScopedTokenService:
             )
 
             logger.info(
-                f"Scope granted successfully",
+                "Scope granted successfully",
                 extra={
                     'community_id': community_id,
                     'module_name': module_name,
@@ -701,7 +701,7 @@ class ScopedTokenService:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to grant scope: {e}")
+            logger.error("Failed to grant scope: %s", type(e).__name__)
             return False
 
     async def revoke_scope_async(
@@ -745,7 +745,7 @@ class ScopedTokenService:
 
             if deleted > 0:
                 logger.info(
-                    f"Scope revoked successfully",
+                    "Scope revoked successfully",
                     extra={
                         'community_id': community_id,
                         'module_name': module_name,
@@ -755,7 +755,7 @@ class ScopedTokenService:
                 return True
             else:
                 logger.warning(
-                    f"Scope not found for revocation",
+                    "Scope not found for revocation",
                     extra={
                         'community_id': community_id,
                         'module_name': module_name,
@@ -765,7 +765,7 @@ class ScopedTokenService:
                 return False
 
         except Exception as e:
-            logger.error(f"Failed to revoke scope: {e}")
+            logger.error("Failed to revoke scope: %s", type(e).__name__)
             return False
 
     async def get_granted_scopes_async(
@@ -802,7 +802,7 @@ class ScopedTokenService:
             scopes = [row.scope for row in rows]
 
             logger.debug(
-                f"Retrieved granted scopes",
+                "Retrieved granted scopes",
                 extra={
                     'community_id': community_id,
                     'module_name': module_name,
@@ -813,7 +813,7 @@ class ScopedTokenService:
             return scopes
 
         except Exception as e:
-            logger.error(f"Failed to get granted scopes: {e}")
+            logger.error("Failed to get granted scopes: %s", type(e).__name__)
             return []
 
 

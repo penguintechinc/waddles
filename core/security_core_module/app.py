@@ -73,6 +73,7 @@ async def _require_internal_service_key():
         return error_response("Unauthorized: invalid service key", 401)
     return None
 
+
 # Logger setup
 logger = setup_aaa_logging(Config.MODULE_NAME, Config.MODULE_VERSION)
 

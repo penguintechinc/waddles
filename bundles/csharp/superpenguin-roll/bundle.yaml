@@ -1,0 +1,87 @@
+schema_version: 2
+app_id: waddles.integrations.superpenguin.roll
+name: Roll (SuperPenguinTV PastyGames)
+version: 1.0.0
+feature: waddles.integrations.superpenguin
+module: integrations
+provider: thirdparty
+language: csharp
+artifact: component
+execution_model: wasi-component
+is_default: false
+# --- Marketplace / alternatives metadata -----------------------------------
+# First bundle to carry these fields: a third-party port credited to its
+# original author (permission granted -- see task context), listed under the
+# "alternatives" category rather than as a Waddles-native feature.
+author: "superpenguintv (Psychoboy)"
+license: MIT
+category: alternatives
+source_url: https://github.com/Psychoboy/PenguinTwitchBot
+notice: |
+  Ported from PenguinTwitchBot (PastyGames/Roll.cs, github.com/Psychoboy/
+  PenguinTwitchBot) by superpenguintv (Psychoboy), used with permission.
+
+  MIT License
+
+  Copyright (c) 2023 Psychoboy
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to
+  deal in the Software without restriction, including without limitation the
+  rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+  sell copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  DEALINGS IN THE SOFTWARE.
+# No Waddles-native dice/roll feature exists at time of writing -- omitted
+# rather than pointing `alternative_to` at a non-existent app_id.
+# -----------------------------------------------------------------------------
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!roll", "!dice"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!roll", "!dice"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- the ported cooldown uses `kv` only (host `kv`/`db` are
+# currently hardcoded to deny every call in svc-process/svc-action while the
+# real backend lands; the SDK's `CooldownGuard` degrades gracefully when
+# denied, see sdk/waddle-sdk-cs/README.md "kv/db availability").
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

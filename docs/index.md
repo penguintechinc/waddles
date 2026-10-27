@@ -108,6 +108,10 @@ Full detail, per-container table, typed stage contract, and current build status
 - **[Quick Start](QUICKSTART.md)** — step-by-step deployment
 - **[Architecture](ARCHITECTURE.md)** — 8-container pipeline, App Bundle model, build status
 - **[App Bundle SDK](plans/2026-08-31-app-bundle-sdk-design.md)** — bundle authoring spec
+- **[Enterprise SSO](SSO.md)** — SAML 2.0 / OIDC (Enterprise) and Google (Professional) sign-in: deployment, setup, security model
+- **[JWT Verification](JWT_VERIFICATION.md)** — verifier hardening (one alg per verifier, enforced `iss`/`aud`/claims, `kid`), rejection reasons, per-algorithm metric
+- **[Session Revocation](TOKEN_REVOCATION.md)** — 15-minute access tokens, rotating refresh tokens, server-side revocation (jti / session / revoke-all), outage policy, Rust follow-up contract
+- **[Provider connections](PROVIDER_CONNECTIONS.md)** — standard Twitch/Discord/Slack connection API: per-community encrypted token store, adapter interface, data-plane contract
 - **[Contributing](CONTRIBUTING.md)** — how to contribute
 
 ## Community & Support

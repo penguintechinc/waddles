@@ -4,6 +4,10 @@ Python SDK for Waddles app bundles: a `penguin_dal`-compatible database facade
 plus `flask_core` compatibility shims, implemented over the
 `waddle:bundle/stage@1.0.0` WIT world (`wit/waddle-bundle/stage.wit`).
 
+See [`AUTHORING.md`](AUTHORING.md) for the standard `!<command>` grammar
+(`waddle_sdk.command`), default-OFF sub-modules (`waddle_sdk.sub_modules`),
+and community-scoped state (`waddle_sdk.community_kv`).
+
 ## Writing a bundle
 
 A bundle author writes only plain, testable module-level coroutines and
@@ -61,6 +65,23 @@ wasm-tools component wit <bundle>.wasm | grep '^  export waddle:bundle'
 # export waddle:bundle/process-stage@1.0.0;
 # export waddle:bundle/action-stage@1.0.0;
 ```
+
+## Outbound HTTP permissions
+
+`dispatch()`'s `http_client` (and any other outbound call your bundle makes)
+is gated by the manifest's `permissions:` block
+(`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+§1.1). Declare a **stable public hostname** with `net.http.fqdn:<host>` —
+this is the preferred, lowest-risk form and the one you should reach for
+first. `net.http.public-ip:<ip>` (a bare IP, no FQDN) is high risk.
+**Bundles should never see or target private IP addresses** —
+`net.http.private-ip:<ip|cidr>` exists only for the exceptional self-hosted/
+on-prem case, requires its own separate explicit approval, is flagged high
+risk on every consent screen, and is never available for the platform's own
+cluster networks (loopback, link-local, metadata, and this cluster's own
+pod/service/node CIDRs are always denied, regardless of grant). Reviewers
+and admins should treat any `net.http.private-ip` request in your manifest
+as a red flag, so avoid it unless there is genuinely no alternative.
 
 ## Testing
 

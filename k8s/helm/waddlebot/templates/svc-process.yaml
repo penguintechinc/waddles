@@ -15,23 +15,35 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-process
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcProcess")) }}
   replicas: {{ .Values.pipeline.svcProcess.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: svc-process
   template:
     metadata:
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      annotations:
+        checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}
+      {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-process
     spec:
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      # Dedicated identity (feature/eddsa-machine-jwt, security review HIGH
+      # finding) -- distinguishes this deployment's pods from every other
+      # workload in the namespace for `flask_core.service_jwt`'s TokenReview
+      # bootstrap; see templates/service-jwt-rbac.yaml.
+      serviceAccountName: svc-process
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
-      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own /ready.
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-process
         # fix/alpha-helm-deploy -- core/svc_process/Dockerfile now exists; no longer the
@@ -40,6 +52,7 @@ spec:
         # scripts/deploy-alpha.sh.
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-process" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -52,6 +65,10 @@ spec:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_process;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
         - name: MODULE_NAME
           value: "svc-process"
         - name: PIPELINE_STAGE
@@ -63,11 +80,20 @@ spec:
         # deliberately UNSET -- tenant-wide per roadmap DATA-MODEL GAPS), hub-api
         # callback URL, and the JWT signing key shared with hub-api (same Secret key
         # SECRET_KEY as hub-api.yaml -- see templates/secrets.yaml).
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        # TLS-only durable Valkey: rediss:// URL w/ password + CA path (secrets.yaml VALKEY_DURABLE_URL_TLS_AUTH).
         - name: VALKEY_URL
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL
+              key: VALKEY_DURABLE_URL_TLS_AUTH
+        {{- else }}
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_DURABLE_URL
+        {{- end }}
         - name: RUNNER_TENANT_SLUG
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
@@ -98,6 +124,7 @@ spec:
         - name: MODULE_LOAD_MARKETING
           value: "true"
         {{- end }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
@@ -121,11 +148,19 @@ spec:
           mountPath: /var/log/waddlebotlog
         - name: tmp
           mountPath: /tmp
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
+        {{- end }}
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: logs
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
+      {{- end }}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
 ---
 apiVersion: v1
 kind: Service
@@ -144,4 +179,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-process
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-process" "ports" (list $.Values.pipeline.svcProcess.port) "runtime" "python") }}
 {{- end }}

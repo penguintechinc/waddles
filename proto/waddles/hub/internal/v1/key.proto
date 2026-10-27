@@ -1,0 +1,42 @@
+// KeyService: internal gRPC contract for per-stream data-encryption-key
+// (DEK) distribution to svc-ingest/svc-process/svc-action. hub-api never
+// hands out a raw DEK -- every DEK is sealed (ECDH-wrapped) to the
+// caller's own ephemeral X25519 public key so the DEK plaintext exists
+// only inside hub-api's process and the requesting pod's memory, never
+// on the wire or in a log.
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+service KeyService {
+  // Returns a sealed stream DEK for (tenant_id, purpose[, version]).
+  // Required scope: "key:stream-dek:read".
+  rpc GetStreamDek(GetStreamDekRequest) returns (GetStreamDekResponse);
+}
+
+message GetStreamDekRequest {
+  string tenant_id = 1;
+  // Logical key purpose, e.g. "ingest-stream", "action-payload" -- keeps
+  // one tenant's DEKs partitioned by use rather than one key covering
+  // every stream.
+  string purpose = 2;
+  // 0 (unset) requests the current active version.
+  uint32 version = 3;
+  // Caller's ephemeral X25519 public key (32 raw bytes), freshly
+  // generated per request -- never reused across calls, so a compromised
+  // sealed response can't be replayed against a different ephemeral key.
+  bytes caller_ephemeral_public_key = 4;
+}
+
+message GetStreamDekResponse {
+  // The DEK sealed (X25519 ECDH + HKDF + AES-256-GCM, RFC 9180-style)
+  // to `caller_ephemeral_public_key`. Never the raw DEK.
+  bytes sealed_dek = 1;
+  uint32 version = 2;
+  // Seconds the caller may cache the unsealed DEK before it must
+  // re-request (key rotation window), not the sealed response's own
+  // validity -- the sealed response is single-use per ephemeral key.
+  uint32 ttl_seconds = 3;
+}

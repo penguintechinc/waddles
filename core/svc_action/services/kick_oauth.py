@@ -11,13 +11,13 @@ two credential MODES rather than one grant type, in precedence order
 "explicit credential first, else exchange for one" precedent):
 
 1. A STORED access token (`stored_access_token` -- resolved by the caller
-   from `KICK_ACCESS_TOKEN`/`config["access_token_ref"]`, see `bundles/
+   from `KICK_ACCESS_TOKEN`/`config["access_token_ref"]`, see `builtin_handlers/
    kick_send_action.py`) -- already a live token (issued via Kick's
    Authorization Code + PKCE flow, provisioned externally; that flow is
    out of scope here), used as-is. This module can never refresh a token
    it didn't mint -- `get_access_token(force_refresh=True, ...)` in this
    mode is a documented no-op, it simply returns the same stored value
-   again (see `bundles/kick_send_action.py`'s own docstring for how its
+   again (see `builtin_handlers/kick_send_action.py`'s own docstring for how its
    single retry-on-401 still makes sense given this).
 2. `client_id`/`client_secret` -- exchanged for an app access token via
    Kick's own OAuth2 `client_credentials` grant (`POST https://id.
@@ -109,7 +109,7 @@ async def get_access_token(
     (`force_refresh` has no effect in this mode -- see module docstring).
     Otherwise `client_id`/`client_secret` are exchanged for a cached app
     access token; `force_refresh` bypasses that cache (the caller's single
-    retry after an observed 401 -- `bundles/kick_send_action.py`'s own
+    retry after an observed 401 -- `builtin_handlers/kick_send_action.py`'s own
     single retry point).
 
     Raises `KickOAuthError` if neither mode is usable (no stored token AND

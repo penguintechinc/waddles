@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    xUnit test project for waddle-sdk-cs, run in the pinned containerized
+    .NET SDK image (see this repo's `Makefile` `test-waddle-sdk-cs` target
+    and `bundles/csharp/csping/Dockerfile` for the same pinned
+    `mcr.microsoft.com/dotnet/sdk` image this uses) - never a host-machine
+    SDK (rules/client.md Build & Distribution). Runs on a normal (non-wasi)
+    target: this SDK's own code has zero WASI-only surface (see
+    waddle-sdk-cs.csproj's header comment), so it is fully testable on the
+    host CLR with ordinary xUnit, no wasmtime harness needed.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>WaddleSdk.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Exact-version pins only (rules/critical-rules.md Dependency Pinning),
+       confirmed to exist on nuget.org's own flat-container index, not
+       guessed. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="coverlet.collector" Version="10.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../waddle-sdk-cs.csproj" />
+  </ItemGroup>
+
+</Project>

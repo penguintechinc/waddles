@@ -228,9 +228,9 @@ The bundle **rails** are real and complete. The bundle **inventory** is almost e
 - **Exactly one end-to-end bundle exists**, and it's a demo:
   `config/postgres/migrations/071_app_catalog_stages.sql` seeds `app_id =
   waddles.core.demo.echo` with `ingest`/`process` entrypoints
-  (`core/svc_ingest/bundles/echo_ingest.py`, `core/svc_process/bundles/echo_process.py`) —
+  (`core/svc_ingest/builtin_handlers/echo_ingest.py`, `core/svc_process/builtin_handlers/echo_process.py`) —
   no `action` stage. Grepped every migration for `entrypoint`: 071 is the only one.
-- **`svc-action` ships zero bundles** — no `core/svc_action/bundles/` directory exists at all
+- **`svc-action` ships zero bundles** — no `core/svc_action/builtin_handlers/` directory exists at all
   (unlike `svc_ingest`/`svc_process`, which each have one).
 - **The Bot module's "default Apps" are metadata-only manifests.**
   `libs/bot_module/features.py:107-152` defines 4 dicts (shoutout, commands, connectors,

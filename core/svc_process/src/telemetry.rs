@@ -48,6 +48,29 @@ pub fn render_metrics(registry: &prometheus::Registry) -> anyhow::Result<String>
     Ok(String::from_utf8(buf)?)
 }
 
+/// `svc_process_flags_evaluated_total{result}` -- `crate::license::
+/// resolve_flag_with`'s per-evaluation counter (labeled by
+/// `live`/`cached`/`default`/`bypass`/`no_client`/`capability_disabled`;
+/// never by flag key -- `rules/critical-rules.md` Observability
+/// cardinality note). Registered into *this* crate's own registry (like
+/// every other metric here, unlike a process-global default registry)
+/// and wired into `crate::license` via [`crate::license::set_flags_metric`]
+/// -- see `crate::lib::run_with_shutdown`'s call site.
+pub fn register_flags_metrics(registry: &prometheus::Registry) -> prometheus::IntCounterVec {
+    let counter = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_flags_evaluated_total",
+            "Bundle flags.enabled host-call evaluations by result source",
+        ),
+        &["result"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(counter.clone()))
+        .expect("register svc_process_flags_evaluated_total");
+    counter
+}
+
 /// Base HTTP request metrics registered once against the Prometheus
 /// registry and shared via [`crate::http::AppState`] so the request-path
 /// middleware can record into them without re-registering (a
@@ -132,6 +155,120 @@ pub fn register_bundle_loader_excluded_metrics(
     excluded_total
 }
 
+/// Registers `svc_process_egress_denied_total{app_id,reason}` (spec §8.2)
+/// for this stage's `http` bundle capability (`crate::capabilities::
+/// StageCapabilities`'s `egress` field) -- same shape as
+/// `svc_action::telemetry::register_egress_metrics`'s
+/// `svc_action_egress_denied_total`, per-service-prefixed following this
+/// crate's own metric-naming convention.
+pub fn register_egress_metrics(registry: &prometheus::Registry) -> prometheus::IntCounterVec {
+    let denied_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_egress_denied_total",
+            "Bundle http.send calls denied by the egress guard, by app_id/reason",
+        ),
+        &["app_id", "reason"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(denied_total.clone()))
+        .expect("register svc_process_egress_denied_total");
+    denied_total
+}
+
+/// Prometheus handles for `crate::host_api`'s heartbeat/dead-letter
+/// visibility (fix/executor-link-heartbeat, alpha 2026-10-02 incident: a
+/// rolled svc pod left the executor bound to a terminated peer with zero
+/// observable signal -- every pod showed `Running`/`Ready` while silently
+/// dead-lettering everything). `connected_executors` is a gauge (0 or 1 in
+/// this M3/M4 single-active-connection model -- see `ConnectionRegistry`'s
+/// own `TODO(M3+)` on multiplexing several connections); the two counters
+/// are monotonic so a dashboard can alert on rate-of-change, not just the
+/// current value.
+#[derive(Clone)]
+pub struct HostApiMetrics {
+    pub connected_executors: prometheus::IntGauge,
+    pub heartbeat_timeouts_total: prometheus::IntCounter,
+    pub dead_lettered_no_executor_total: prometheus::IntCounter,
+    /// Producer found the bounded writer channel full and had to await
+    /// capacity (backpressure engaged).
+    pub writer_backpressure_total: prometheus::IntCounter,
+    /// Frames shed because the writer channel stayed full past the send
+    /// timeout (or a non-blocking send found it full).
+    pub writer_shed_total: prometheus::IntCounter,
+    /// `host-call`s shed (error reply) because the per-connection
+    /// concurrent-handler cap was reached.
+    pub host_calls_shed_total: prometheus::IntCounter,
+    /// Inbound host-API connections refused at the connection cap.
+    pub connections_rejected_total: prometheus::IntCounter,
+}
+
+/// Registers [`HostApiMetrics`]. Must be called exactly once per `registry`
+/// -- see [`register_request_metrics`]'s identical constraint.
+pub fn register_host_api_metrics(registry: &prometheus::Registry) -> HostApiMetrics {
+    let connected_executors = prometheus::IntGauge::new(
+        "host_api_connected_executors",
+        "Number of live bundle-executor sessions this stage currently holds (0 or 1 in the \
+         current single-active-connection model)",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(connected_executors.clone()))
+        .expect("register host_api_connected_executors");
+
+    let heartbeat_timeouts_total = prometheus::IntCounter::new(
+        "host_api_heartbeat_timeouts_total",
+        "Executor sessions dropped after missing HEARTBEAT_MISSED_LIMIT consecutive heartbeats",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(heartbeat_timeouts_total.clone()))
+        .expect("register host_api_heartbeat_timeouts_total");
+
+    let dead_lettered_no_executor_total = prometheus::IntCounter::new(
+        "dispatch_dead_lettered_no_executor_total",
+        "Dispatch entries dead-lettered because no executor connection was available",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(dead_lettered_no_executor_total.clone()))
+        .expect("register dispatch_dead_lettered_no_executor_total");
+
+    let counter = |name: &str, help: &str| -> prometheus::IntCounter {
+        let c = prometheus::IntCounter::new(name, help).expect("valid metric definition");
+        registry
+            .register(Box::new(c.clone()))
+            .expect("register host-api bound counter");
+        c
+    };
+    let writer_backpressure_total = counter(
+        "host_api_writer_backpressure_total",
+        "Times a producer found the bounded host-API writer channel full and awaited capacity",
+    );
+    let writer_shed_total = counter(
+        "host_api_writer_shed_total",
+        "Host-API frames shed because the bounded writer channel stayed full past the send timeout",
+    );
+    let host_calls_shed_total = counter(
+        "host_api_host_calls_shed_total",
+        "Host-calls shed (overloaded error reply) at the per-connection concurrent-handler cap",
+    );
+    let connections_rejected_total = counter(
+        "host_api_connections_rejected_total",
+        "Inbound host-API connections refused at the connection cap",
+    );
+
+    HostApiMetrics {
+        connected_executors,
+        heartbeat_timeouts_total,
+        dead_lettered_no_executor_total,
+        writer_backpressure_total,
+        writer_shed_total,
+        host_calls_shed_total,
+        connections_rejected_total,
+    }
+}
+
 /// Prometheus handles for `crate::source_supervisor`: a gauge tracking how
 /// many per-`(app_id, platform, source_id)` binding consumer tasks are
 /// currently running, and a counter (labeled `action` = `"spawn"`/`"stop"`)
@@ -178,6 +315,334 @@ pub fn register_source_binding_supervisor_metrics(
     }
 }
 
+/// Prometheus-backed `circuit_breaker::CircuitBreakerMetrics` impl
+/// (connector spec SS0 condition 5) -- one `IntCounterVec` labeled by
+/// `action` ("opened"/"closed", the only two transitions the
+/// `circuit_breaker` crate reports; deliberately NO per-key label -- the
+/// key space is unbounded, see `circuit_breaker::CircuitBreakerMetrics`), registered once at startup and shared
+/// (behind the trait object) across every `ProcessDeps::breaker`/
+/// `SupervisorDeps::breaker` instance this pod constructs.
+#[derive(Clone)]
+pub struct CircuitBreakerPromMetrics {
+    transitions_total: prometheus::IntCounterVec,
+}
+
+impl circuit_breaker::CircuitBreakerMetrics for CircuitBreakerPromMetrics {
+    fn transition(&self, action: &str) {
+        self.transitions_total.with_label_values(&[action]).inc();
+    }
+}
+
+/// Registers [`CircuitBreakerPromMetrics`] against `registry`. Must be
+/// called exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_circuit_breaker_metrics(
+    registry: &prometheus::Registry,
+) -> CircuitBreakerPromMetrics {
+    let transitions_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_circuit_breaker_transitions_total",
+            "Per-source circuit breaker open/close transitions, labeled by action",
+        ),
+        &["action"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(transitions_total.clone()))
+        .expect("register svc_process_circuit_breaker_transitions_total");
+
+    CircuitBreakerPromMetrics { transitions_total }
+}
+
+/// Prometheus handles for `crate::changelog_consumer` (dataplane scale
+/// design rev 4, §7/§8 step 2 -- multi-tenant, change-log-driven active-set
+/// loader). Histograms/gauges for load/latency and current state come
+/// alongside counters per `rules/critical-rules.md` Observability -- a lone
+/// counter is not instrumentation.
+#[derive(Clone)]
+pub struct ChangelogConsumerMetrics {
+    /// Total `(tenant_id, community_id)` scopes successfully re-read and
+    /// applied, across every incremental tick and full reconcile.
+    pub applied_scopes_total: prometheus::IntCounter,
+    /// Per-scope re-read/resolution failures, fail-closed (skip that scope,
+    /// never abort the whole tick) -- labeled by `reason`
+    /// (`"read_failed"`/`"resolve_failed"`).
+    pub scope_failures_total: prometheus::IntCounterVec,
+    /// `safe_seq - last_seq` after the most recent incremental tick --
+    /// `bundle_active_set::ChangeLogTracker::lag`'s exact value.
+    pub changelog_lag: prometheus::IntGauge,
+    /// Wall-clock duration of each periodic full active-set reconcile.
+    pub reconcile_duration_seconds: prometheus::Histogram,
+    /// Active-app count per tenant, summed across every community that
+    /// tenant owns -- labeled by `tenant_id` ONLY (bounded cardinality:
+    /// 100s of tenants, `rules/critical-rules.md` Observability), never by
+    /// `(tenant_id, community_id)` or `app_id` (10,000s-30,000s wide).
+    pub tenant_active_apps: prometheus::IntGaugeVec,
+    /// A scope evicted after failing its active-set re-read for longer than
+    /// `changelog_consumer::SCOPE_STALE_EVICTION_BOUND` -- fail-closed
+    /// (never serve an unboundedly stale bundle set), never silent.
+    pub scope_stale_evicted_total: prometheus::IntCounter,
+    /// A change-log gap detected (the lowest returned `seq` exceeded
+    /// `last_seq + 1`, most plausibly retention truncation) -- forces a full
+    /// reconcile instead of a partial apply, never silent.
+    pub changelog_gap_detected_total: prometheus::IntCounter,
+    /// `last_seq + 1 < min_retained_seq` detected via the primary's
+    /// authoritative `bundle_active_set_watermark.min_retained_seq` column
+    /// (hub-api migration `0026`/PR #397) -- forces a full reconcile, never
+    /// silent. Distinct from `changelog_gap_detected_total` (the heuristic
+    /// fallback) so on-call can tell "confirmed by the primary" apart from
+    /// "inferred from a returned row's seq".
+    pub changelog_retention_exceeded_total: prometheus::IntCounter,
+    /// A NEW executor connection detected (by pointer identity), never
+    /// silent -- gh security review item 4 on PR #406: the executor wipes
+    /// its bundle registry on every disconnect, so this consumer resets its
+    /// own `loaded` bookkeeping in lockstep and resends the full
+    /// authoritative active set.
+    pub executor_reconnect_detected_total: prometheus::IntCounter,
+    /// Per-bundle `Load` outcomes, labeled by `result` (`"success"`/
+    /// `"failure"`) -- regression: loads waited for 15-min full reconcile
+    /// after startup/reconnect, UnknownBundle (alpha 2026-10-03).
+    pub bundle_loads_total: prometheus::IntCounterVec,
+    /// Forced full authoritative active-set sends, labeled by `reason`
+    /// (`"startup"`/`"reconnect"`/`"reconcile"`/`"diverged"`) -- see
+    /// `bundle_active_set::FullSyncReason`.
+    pub bundle_full_sync_total: prometheus::IntCounterVec,
+    /// Current count of `(session, AppScope)` pairs this consumer believes
+    /// are loaded across every live executor session, refreshed after every
+    /// apply -- per-session fix (alpha 2026-10-03): a bundle loaded on two
+    /// live sessions now counts twice, surfacing fan-out, not just presence.
+    pub bundles_loaded: prometheus::IntGauge,
+    /// An active bundle found loaded on ZERO live executor sessions after a
+    /// sync -- fail-closed, never silent: regression: bundles loaded only
+    /// onto a terminating executor during rollout; live executor got none
+    /// (alpha 2026-10-03).
+    pub bundle_zero_session_total: prometheus::IntCounter,
+}
+
+/// Registers [`ChangelogConsumerMetrics`] against `registry`. Must be
+/// called exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_changelog_consumer_metrics(
+    registry: &prometheus::Registry,
+) -> ChangelogConsumerMetrics {
+    let applied_scopes_total = prometheus::IntCounter::new(
+        "svc_process_changelog_applied_scopes_total",
+        "Tenant/community scopes successfully re-read and applied by the change-log consumer",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(applied_scopes_total.clone()))
+        .expect("register svc_process_changelog_applied_scopes_total");
+
+    let scope_failures_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_changelog_scope_failures_total",
+            "Per-scope re-read/resolution failures, fail-closed (skip, never abort the tick), by reason",
+        ),
+        &["reason"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(scope_failures_total.clone()))
+        .expect("register svc_process_changelog_scope_failures_total");
+
+    let changelog_lag = prometheus::IntGauge::new(
+        "svc_process_changelog_lag",
+        "safe_seq minus last_seq after the most recent incremental change-log poll",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(changelog_lag.clone()))
+        .expect("register svc_process_changelog_lag");
+
+    let reconcile_duration_seconds = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_process_changelog_reconcile_duration_seconds",
+            "Wall-clock duration of each periodic full active-set reconcile",
+        )
+        .buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(reconcile_duration_seconds.clone()))
+        .expect("register svc_process_changelog_reconcile_duration_seconds");
+
+    let tenant_active_apps = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "svc_process_tenant_active_apps",
+            "Active app count per tenant, summed across every community it owns",
+        ),
+        &["tenant_id"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(tenant_active_apps.clone()))
+        .expect("register svc_process_tenant_active_apps");
+
+    let scope_stale_evicted_total = prometheus::IntCounter::new(
+        "svc_process_changelog_scope_stale_evicted_total",
+        "Scopes evicted after failing their active-set re-read longer than the staleness bound",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(scope_stale_evicted_total.clone()))
+        .expect("register svc_process_changelog_scope_stale_evicted_total");
+
+    let changelog_gap_detected_total = prometheus::IntCounter::new(
+        "svc_process_changelog_gap_detected_total",
+        "Change-log gaps detected (likely retention truncation), forcing a full reconcile",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(changelog_gap_detected_total.clone()))
+        .expect("register svc_process_changelog_gap_detected_total");
+
+    let changelog_retention_exceeded_total = prometheus::IntCounter::new(
+        "svc_process_changelog_retention_exceeded_total",
+        "last_seq fell behind min_retained_seq (primary-confirmed), forcing a full reconcile",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(changelog_retention_exceeded_total.clone()))
+        .expect("register svc_process_changelog_retention_exceeded_total");
+
+    let executor_reconnect_detected_total = prometheus::IntCounter::new(
+        "svc_process_executor_reconnect_detected_total",
+        "New executor connections detected (by pointer identity), resetting loaded-state",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(executor_reconnect_detected_total.clone()))
+        .expect("register svc_process_executor_reconnect_detected_total");
+
+    let bundle_loads_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_bundle_loads_total",
+            "Per-bundle Load outcomes, by result (success/failure)",
+        ),
+        &["result"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(bundle_loads_total.clone()))
+        .expect("register svc_process_bundle_loads_total");
+
+    let bundle_full_sync_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_bundle_full_sync_total",
+            "Forced full authoritative active-set sends, by reason \
+             (startup/reconnect/reconcile/diverged)",
+        ),
+        &["reason"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(bundle_full_sync_total.clone()))
+        .expect("register svc_process_bundle_full_sync_total");
+
+    let bundles_loaded = prometheus::IntGauge::new(
+        "svc_process_bundles_loaded",
+        "Current count of AppScopes this consumer believes are loaded on the connected executor",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(bundles_loaded.clone()))
+        .expect("register svc_process_bundles_loaded");
+
+    let bundle_zero_session_total = prometheus::IntCounter::new(
+        "svc_process_bundle_zero_session_total",
+        "An active bundle found loaded on zero live executor sessions after a sync (fail-closed)",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(bundle_zero_session_total.clone()))
+        .expect("register svc_process_bundle_zero_session_total");
+
+    ChangelogConsumerMetrics {
+        applied_scopes_total,
+        scope_failures_total,
+        changelog_lag,
+        reconcile_duration_seconds,
+        tenant_active_apps,
+        scope_stale_evicted_total,
+        changelog_gap_detected_total,
+        changelog_retention_exceeded_total,
+        executor_reconnect_detected_total,
+        bundle_loads_total,
+        bundle_full_sync_total,
+        bundles_loaded,
+        bundle_zero_session_total,
+    }
+}
+
+/// Prometheus handles for the legacy single-consumer drain loop's
+/// connect/self-heal retry (`crate::lib::try_start_process_loop`) --
+/// regression: drain loop exited on NOGROUP (alpha 2026-10-02).
+#[derive(Clone)]
+pub struct DrainLoopMetrics {
+    /// Total spine connect attempts, labeled by loop name -- every retry
+    /// increments this, so a flat line means the loop is stuck retrying
+    /// (or never started).
+    pub spine_connect_attempts_total: prometheus::IntCounterVec,
+    /// 1 while the drain loop is connected and actively reading, 0 while
+    /// down/retrying, labeled by loop name.
+    pub consumer_loop_running: prometheus::IntGaugeVec,
+    /// Total times `crate::spine::ensure_consumer_group` actually created a
+    /// (previously-missing) consumer group -- a `BUSYGROUP` (already
+    /// existed) never increments this.
+    pub consumer_group_created_total: prometheus::IntCounterVec,
+}
+
+/// Registers [`DrainLoopMetrics`] against `registry`. Must be called
+/// exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_drain_loop_metrics(registry: &prometheus::Registry) -> DrainLoopMetrics {
+    let spine_connect_attempts_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_spine_connect_attempts_total",
+            "Total spine connect attempts made by a drain loop's connect-retry wrapper, \
+             labeled by loop",
+        ),
+        &["loop"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(spine_connect_attempts_total.clone()))
+        .expect("register svc_process_spine_connect_attempts_total");
+
+    let consumer_loop_running = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "svc_process_consumer_loop_running",
+            "1 while a drain loop is connected and actively reading, 0 while down/retrying, \
+             labeled by loop",
+        ),
+        &["loop"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(consumer_loop_running.clone()))
+        .expect("register svc_process_consumer_loop_running");
+
+    let consumer_group_created_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_consumer_group_created_total",
+            "Total times a Valkey consumer group was newly created (XGROUP CREATE, not \
+             BUSYGROUP) by the self-heal/startup provisioning step, labeled by loop",
+        ),
+        &["loop"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(consumer_group_created_total.clone()))
+        .expect("register svc_process_consumer_group_created_total");
+
+    DrainLoopMetrics {
+        spine_connect_attempts_total,
+        consumer_loop_running,
+        consumer_group_created_total,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +680,47 @@ mod tests {
     }
 
     #[test]
+    fn register_changelog_consumer_metrics_produces_the_expected_series() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_changelog_consumer_metrics(&registry);
+        metrics.applied_scopes_total.inc();
+        metrics
+            .scope_failures_total
+            .with_label_values(&["read_failed"])
+            .inc();
+        metrics.changelog_lag.set(42);
+        metrics.reconcile_duration_seconds.observe(0.25);
+        metrics.tenant_active_apps.with_label_values(&["7"]).set(3);
+        metrics.scope_stale_evicted_total.inc();
+        metrics.changelog_gap_detected_total.inc();
+        metrics.changelog_retention_exceeded_total.inc();
+        metrics.executor_reconnect_detected_total.inc();
+        metrics
+            .bundle_loads_total
+            .with_label_values(&["success"])
+            .inc();
+        metrics
+            .bundle_full_sync_total
+            .with_label_values(&["startup"])
+            .inc();
+        metrics.bundles_loaded.set(3);
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_process_changelog_applied_scopes_total 1"));
+        assert!(rendered.contains(r#"result="success""#));
+        assert!(rendered.contains(r#"reason="startup""#));
+        assert!(rendered.contains("svc_process_bundles_loaded 3"));
+        assert!(rendered.contains(r#"reason="read_failed""#));
+        assert!(rendered.contains("svc_process_changelog_lag 42"));
+        assert!(rendered.contains("svc_process_changelog_reconcile_duration_seconds"));
+        assert!(rendered.contains(r#"tenant_id="7""#));
+        assert!(rendered.contains("svc_process_changelog_scope_stale_evicted_total 1"));
+        assert!(rendered.contains("svc_process_changelog_gap_detected_total 1"));
+        assert!(rendered.contains("svc_process_changelog_retention_exceeded_total 1"));
+        assert!(rendered.contains("svc_process_executor_reconnect_detected_total 1"));
+    }
+
+    #[test]
     fn up_gauge_alone_is_a_non_empty_series_before_any_request() {
         let registry = prometheus::Registry::new();
         register_request_metrics(&registry);
@@ -227,6 +733,31 @@ mod tests {
         let registry = prometheus::Registry::new();
         let rendered = render_metrics(&registry).expect("empty registry still encodes");
         assert!(rendered.is_empty());
+    }
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    #[test]
+    fn register_drain_loop_metrics_produces_the_expected_series() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_drain_loop_metrics(&registry);
+        metrics
+            .spine_connect_attempts_total
+            .with_label_values(&["legacy"])
+            .inc();
+        metrics
+            .consumer_loop_running
+            .with_label_values(&["legacy"])
+            .set(1);
+        metrics
+            .consumer_group_created_total
+            .with_label_values(&["legacy"])
+            .inc();
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_process_spine_connect_attempts_total"));
+        assert!(rendered.contains("svc_process_consumer_loop_running"));
+        assert!(rendered.contains("svc_process_consumer_group_created_total"));
+        assert!(rendered.contains(r#"loop="legacy""#));
     }
 
     #[test]

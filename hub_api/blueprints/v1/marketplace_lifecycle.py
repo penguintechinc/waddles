@@ -44,12 +44,14 @@ unaffected by that crash (a different code path) and may nest freely.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.tenancy import get_tenant_context, tenant_middleware
+from penguin_dal import AsyncDB
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
@@ -59,6 +61,8 @@ from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.tenant_service import require_matching_tenant
 
+logger = logging.getLogger(__name__)
+
 marketplace_lifecycle_bp = Blueprint(
     "v1_marketplace_lifecycle", __name__, url_prefix="/api/v1/marketplace"
 )
@@ -67,6 +71,21 @@ marketplace_lifecycle_bp = Blueprint(
 def _dal() -> tuple[Any, Any]:
     """Return `(async_dal, dal)` from app config -- same accessor shape as every other group."""
     return current_app.config["async_dal"], current_app.config["dal"]
+
+
+def _install_dal() -> AsyncDB | None:
+    """The penguin-dal `AsyncDB` handle -- feeds `_guard_*_reconsent()`'s permission-grant reads.
+
+    `None` (not a `KeyError`) when unset -- a handful of this group's own
+    test fixtures build a narrower Quart app that never populates
+    `install_dal` (this blueprint's pre-existing tables never needed it
+    before the permission-reconsent gate); `services.marketplace_
+    lifecycle_service`'s own `install_dal: AsyncDB | None = None` default
+    treats that the same as an explicit opt-out (its docstring covers
+    why: the reconsent gate is additive, not a hard dependency for the
+    older, non-permission-catalog `AppManifest` pipeline).
+    """
+    return cast("AsyncDB | None", current_app.config.get("install_dal"))
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -148,6 +167,13 @@ class InstallBundleRequest:
     platformCompatibility: PlatformCompatibilityInput = field(
         default_factory=PlatformCompatibilityInput
     )
+    author: str | None = None
+    license: str | None = None
+    sourceUrl: str | None = None
+    alternativeTo: list[str] = field(default_factory=list)
+    homepageUrl: str | None = None
+    notice: str | None = None
+    category: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -166,6 +192,14 @@ class BundleDTO:
     incompatibleWith: list[str]
     status: str
     installedAt: str | None
+    author: str | None
+    license: str | None
+    licenseReviewRequired: bool
+    sourceUrl: str | None
+    alternativeTo: list[str]
+    homepageUrl: str | None
+    notice: str | None
+    category: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -289,6 +323,13 @@ def _manifest_payload(data: InstallBundleRequest) -> dict[str, Any]:
             "min_version": data.platformCompatibility.minVersion,
             "max_version": data.platformCompatibility.maxVersion,
         },
+        "author": data.author,
+        "license": data.license,
+        "source_url": data.sourceUrl,
+        "alternative_to": list(data.alternativeTo),
+        "homepage_url": data.homepageUrl,
+        "notice": data.notice,
+        "category": data.category,
     }
 
 
@@ -306,6 +347,14 @@ def _bundle_dto(row: Any) -> BundleDTO:
         incompatibleWith=list(row.incompatible_with or []),
         status=row.status,
         installedAt=_iso(row.installed_at),
+        author=row.author,
+        license=row.license,
+        licenseReviewRequired=bool(row.license_review_required),
+        sourceUrl=row.source_url,
+        alternativeTo=list(row.alternative_to or []),
+        homepageUrl=row.homepage_url,
+        notice=row.notice,
+        category=row.category,
     )
 
 
@@ -345,7 +394,7 @@ def _activation_dto(row: Any) -> ActivationDTO:
 
 
 @marketplace_lifecycle_bp.route("/bundles", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(BundleListResponse)
 async def list_bundles() -> BundleListResponse:
     """List installed bundles (global catalog) -- any authenticated tenant member."""
@@ -355,8 +404,16 @@ async def list_bundles() -> BundleListResponse:
     feat = request.args.get("feature")
     provider = request.args.get("provider")
     status = request.args.get("status")
+    category = request.args.get("category")
     rows, total, total_pages = await svc.list_installed(
-        dal, module=module, feature=feat, provider=provider, status=status, page=page, limit=limit
+        dal,
+        module=module,
+        feature=feat,
+        provider=provider,
+        status=status,
+        category=category,
+        page=page,
+        limit=limit,
     )
     return BundleListResponse(
         success=True,
@@ -366,8 +423,8 @@ async def list_bundles() -> BundleListResponse:
 
 
 @marketplace_lifecycle_bp.route("/bundles", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(InstallBundleRequest)
 @validate_response(MessageResponse, 201)
 async def install_bundle(
@@ -383,8 +440,8 @@ async def install_bundle(
 
 
 @marketplace_lifecycle_bp.route("/bundles/<app_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def uninstall_bundle(app_id: str) -> MessageResponse | tuple[dict[str, object], int]:
     """Uninstall (soft-delete -> `status='yanked'`) a bundle from the global catalog."""
@@ -402,7 +459,7 @@ async def uninstall_bundle(app_id: str) -> MessageResponse | tuple[dict[str, obj
 
 
 @marketplace_lifecycle_bp.route("/tenant/<tenant_slug>/bundles", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(AvailabilityListResponse)
 async def list_available(
     tenant_slug: str,
@@ -436,8 +493,8 @@ async def list_available(
 
 
 @marketplace_lifecycle_bp.route("/tenant/<tenant_slug>/bundles", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(MakeAvailableRequest)
 @validate_response(MessageResponse, 201)
 async def make_available(
@@ -453,15 +510,23 @@ async def make_available(
             tenant_id=tenant_id,
             app_id=data.appId,
             config_defaults=data.configDefaults,
+            install_dal=_install_dal(),
         )
     except ApiError as exc:
+        logger.warning(
+            "make_available failed for tenant=%s app=%s: %s (%s)",
+            tenant_slug,
+            data.appId,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     return MessageResponse(success=True, message=f"Bundle {data.appId} made available"), 201
 
 
 @marketplace_lifecycle_bp.route("/tenant/<tenant_slug>/bundles/<app_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def make_unavailable(
     tenant_slug: str, app_id: str
@@ -482,7 +547,7 @@ async def make_unavailable(
 
 
 @marketplace_lifecycle_bp.route("/community/<int:community_id>/bundles", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ActivationListResponse)
 async def list_activated(
     community_id: int,
@@ -516,7 +581,7 @@ async def list_activated(
 
 
 @marketplace_lifecycle_bp.route("/community/<int:community_id>/bundles", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(ActivateBundleRequest)
 @validate_response(MessageResponse, 201)
 async def activate_bundle(
@@ -542,8 +607,16 @@ async def activate_bundle(
             app_id=data.appId,
             config=data.config,
             activated_by=caller_id,
+            install_dal=_install_dal(),
         )
     except ApiError as exc:
+        logger.warning(
+            "activate_bundle failed for community=%s app=%s: %s (%s)",
+            community_id,
+            data.appId,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     return MessageResponse(success=True, message=f"Bundle {data.appId} activated"), 201
 
@@ -551,7 +624,7 @@ async def activate_bundle(
 @marketplace_lifecycle_bp.route(
     "/community/<int:community_id>/bundles/<app_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def deactivate_bundle(
     community_id: int, app_id: str
@@ -572,7 +645,7 @@ async def deactivate_bundle(
 
 
 @marketplace_lifecycle_bp.route("/community/<int:community_id>/resolved", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ResolvedBundlesResponse)
 async def get_resolved_bundles(
     community_id: int,

@@ -215,6 +215,165 @@ class TestUpdatePreferences:
         assert body["data"]["preferences"]["analytics"] is True
 
 
+class TestDoNotSellPersistence:
+    """Regression (CCPA/CPRA statutory right): `doNotSell` must survive later writes.
+
+    Before the fix `update_preferences()`/`revoke_consent()` replaced the
+    stored preferences object wholesale with a payload that never carried
+    `doNotSell`, and `save_consent()` replaced it with a request DTO whose
+    `doNotSell` defaulted to `False` when omitted -- each silently reverted
+    a user's opt-out to "sell/share allowed". These tests assert the
+    opt-out (explicit or GPC-originated) survives every subsequent write
+    and that an *explicit* opt-back-in still works.
+    """
+
+    async def _opt_out(self, client: Any, user_id: int, **extra_headers: str) -> None:
+        response = await client.post(
+            "/api/v1/cookie",
+            headers={**_headers(user_id), **extra_headers},
+            json={"preferences": {"functional": True, "doNotSell": True}},
+        )
+        assert response.status_code == 200
+        assert (await response.get_json())["data"]["preferences"]["doNotSell"] is True
+
+    async def _stored_do_not_sell(self, client: Any, user_id: int) -> bool:
+        # No Sec-GPC header on the read: it reflects only what is STORED.
+        response = await client.get("/api/v1/cookie", headers=_headers(user_id))
+        body = await response.get_json()
+        assert body["data"]["gpcApplied"] is False
+        return bool(body["data"]["preferences"]["doNotSell"])
+
+    async def test_do_not_sell_survives_unrelated_preferences_update(self, client: Any) -> None:
+        await self._opt_out(client, 30)
+
+        response = await client.patch(
+            "/api/v1/cookie/preferences",
+            headers=_headers(30),
+            json={"preferences": {"functional": True, "analytics": True}},
+        )
+
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert body["data"]["preferences"]["analytics"] is True
+        assert body["data"]["preferences"]["doNotSell"] is True
+        assert await self._stored_do_not_sell(client, 30) is True
+
+    async def test_gpc_originated_opt_out_survives_preferences_update(self, client: Any) -> None:
+        """GPC state persists: stored via a `Sec-GPC: 1` POST, kept by a later header-less PATCH."""
+        response = await client.post(
+            "/api/v1/cookie",
+            headers={**_headers(31), "Sec-GPC": "1"},
+            json={"preferences": {"analytics": True}},
+        )
+        assert (await response.get_json())["data"]["preferences"]["doNotSell"] is True
+
+        await client.patch(
+            "/api/v1/cookie/preferences",
+            headers=_headers(31),
+            json={"preferences": {"functional": True}},
+        )
+
+        assert await self._stored_do_not_sell(client, 31) is True
+
+    async def test_gpc_header_on_preferences_update_is_honored(self, client: Any) -> None:
+        await client.post("/api/v1/cookie", headers=_headers(32), json={"preferences": {}})
+
+        response = await client.patch(
+            "/api/v1/cookie/preferences",
+            headers={**_headers(32), "Sec-GPC": "1"},
+            json={"preferences": {"marketing": True}},
+        )
+
+        body = await response.get_json()
+        assert body["data"]["gpcApplied"] is True
+        assert body["data"]["preferences"]["marketing"] is False
+        assert body["data"]["preferences"]["doNotSell"] is True
+        assert await self._stored_do_not_sell(client, 32) is True
+
+    async def test_do_not_sell_survives_revoke(self, client: Any) -> None:
+        await self._opt_out(client, 33)
+
+        response = await client.delete("/api/v1/cookie", headers=_headers(33))
+
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert body["data"]["preferences"]["marketing"] is False
+        assert body["data"]["preferences"]["doNotSell"] is True
+        assert await self._stored_do_not_sell(client, 33) is True
+
+    async def test_do_not_sell_survives_save_that_omits_it(self, client: Any) -> None:
+        await self._opt_out(client, 34)
+
+        response = await client.post(
+            "/api/v1/cookie", headers=_headers(34), json={"preferences": {"analytics": True}}
+        )
+
+        body = await response.get_json()
+        assert body["data"]["preferences"]["analytics"] is True
+        assert body["data"]["preferences"]["doNotSell"] is True
+        assert await self._stored_do_not_sell(client, 34) is True
+
+    async def test_explicit_opt_back_in_is_still_honored(self, client: Any) -> None:
+        """Merge must not make the opt-out sticky: an explicit `doNotSell: false` wins."""
+        await self._opt_out(client, 35)
+
+        response = await client.post(
+            "/api/v1/cookie",
+            headers=_headers(35),
+            json={"preferences": {"functional": True, "doNotSell": False}},
+        )
+
+        assert (await response.get_json())["data"]["preferences"]["doNotSell"] is False
+        assert await self._stored_do_not_sell(client, 35) is False
+
+    async def test_new_record_without_do_not_sell_defaults_to_false(self, client: Any) -> None:
+        response = await client.post(
+            "/api/v1/cookie", headers=_headers(36), json={"preferences": {"functional": True}}
+        )
+        assert (await response.get_json())["data"]["preferences"]["doNotSell"] is False
+
+    async def test_unknown_stored_keys_are_preserved_by_update_and_revoke(
+        self, client: Any, privacy_db: Any
+    ) -> None:
+        """Key-by-key merge: keys this endpoint never writes are never dropped."""
+        await client.post(
+            "/api/v1/cookie", headers=_headers(37), json={"preferences": {"doNotSell": True}}
+        )
+        stored = {
+            "necessary": True,
+            "functional": False,
+            "analytics": False,
+            "marketing": False,
+            "doNotSell": True,
+            "sharingOptOutScope": "all",
+        }
+        await privacy_db.update_async(
+            privacy_db.dal.cookie_consent.user_id == 37, preferences=stored
+        )
+
+        await client.patch(
+            "/api/v1/cookie/preferences",
+            headers=_headers(37),
+            json={"preferences": {"functional": True}},
+        )
+        rows = await privacy_db.select_async(
+            privacy_db.dal(privacy_db.dal.cookie_consent.user_id == 37)
+        )
+        after_patch = dict(rows[0].preferences)
+        assert after_patch["sharingOptOutScope"] == "all"
+        assert after_patch["doNotSell"] is True
+        assert after_patch["functional"] is True
+
+        await client.delete("/api/v1/cookie", headers=_headers(37))
+        rows = await privacy_db.select_async(
+            privacy_db.dal(privacy_db.dal.cookie_consent.user_id == 37)
+        )
+        after_revoke = dict(rows[0].preferences)
+        assert after_revoke["sharingOptOutScope"] == "all"
+        assert after_revoke["doNotSell"] is True
+        assert after_revoke["functional"] is False
+
+
 class TestRevokeConsent:
     async def test_revoke_without_token_is_401(self, client: Any) -> None:
         response = await client.delete("/api/v1/cookie")

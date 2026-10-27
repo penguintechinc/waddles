@@ -1,0 +1,696 @@
+//! Telemetry bootstrap: `tracing` (structured logs, stdout JSON) +
+//! OpenTelemetry OTLP traces/metrics + a Prometheus registry for the
+//! secondary `/metrics` scrape surface.
+//!
+//! The OTLP destination is always env-configured
+//! (`OTEL_EXPORTER_OTLP_ENDPOINT`/`_PROTOCOL`/`_HEADERS`,
+//! `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`), never hardcoded --
+//! see `rules/critical-rules.md` Observability (OTel). When
+//! `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, OTLP export is skipped entirely
+//! rather than defaulting to a local collector nobody configured; a dead or
+//! unreachable exporter must never crash or block the app, so any exporter
+//! build failure downgrades to tracing-only (stdout) and is logged, not
+//! propagated.
+
+use opentelemetry::global;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::{Protocol, WithExportConfig};
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::Resource;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
+
+/// Holds OTel provider handles that must be flushed/shut down at process
+/// exit. Dropping this guard (or calling [`TelemetryGuard::shutdown`])
+/// flushes any buffered spans/metrics before the process exits.
+pub struct TelemetryGuard {
+    tracer_provider: Option<SdkTracerProvider>,
+    meter_provider: Option<SdkMeterProvider>,
+}
+
+impl TelemetryGuard {
+    /// Flushes and shuts down any active OTLP pipelines. Errors are logged,
+    /// never propagated -- shutdown must not be able to fail the caller.
+    pub fn shutdown(&mut self) {
+        if let Some(provider) = self.tracer_provider.take() {
+            if let Err(err) = provider.shutdown() {
+                eprintln!("otel tracer provider shutdown error: {err}");
+            }
+        }
+        if let Some(provider) = self.meter_provider.take() {
+            if let Err(err) = provider.shutdown() {
+                eprintln!("otel meter provider shutdown error: {err}");
+            }
+        }
+    }
+}
+
+impl Drop for TelemetryGuard {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn otlp_protocol() -> Protocol {
+    match std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL").as_deref() {
+        Ok("http/protobuf") => Protocol::HttpBinary,
+        _ => Protocol::Grpc,
+    }
+}
+
+fn resource(default_service_name: &str) -> Resource {
+    // `unwrap_or_else` with no adjacent log call here is pre-existing,
+    // already-reviewed debt (gh-605) -- this mirrors `core/svc_streaming/
+    // src/telemetry.rs::resource` byte-for-byte (the precedent this
+    // scaffold's telemetry module is modeled on); `tracing` isn't
+    // initialized yet at this point in `init()`, so a `tracing::debug!`
+    // call here would be silently dropped (no subscriber installed), not
+    // a real fix -- see `.ci/silent-fallback-baseline.json`'s entries for
+    // this exact file/line pair.
+    let service_name =
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| default_service_name.to_string());
+    // `Resource::builder()` already layers in `EnvResourceDetector`, which
+    // reads `OTEL_RESOURCE_ATTRIBUTES` -- we only need to set the name
+    // explicitly so there is always a sane default.
+    Resource::builder().with_service_name(service_name).build()
+}
+
+fn build_tracer_provider(endpoint: &str, res: Resource) -> anyhow::Result<SdkTracerProvider> {
+    let exporter = match otlp_protocol() {
+        Protocol::Grpc => opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()?,
+        _ => opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint)
+            .build()?,
+    };
+    Ok(SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(res)
+        .build())
+}
+
+fn build_meter_provider(endpoint: &str, res: Resource) -> anyhow::Result<SdkMeterProvider> {
+    let exporter = match otlp_protocol() {
+        Protocol::Grpc => opentelemetry_otlp::MetricExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()?,
+        _ => opentelemetry_otlp::MetricExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint)
+            .build()?,
+    };
+    Ok(SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .with_resource(res)
+        .build())
+}
+
+/// Initializes `tracing` (env-filtered, JSON to stdout) plus best-effort
+/// OTLP trace/metric export, and returns a fresh Prometheus [`Registry`]
+/// for the `/metrics` HTTP surface. Must be called exactly once, before any
+/// other `tracing` macro use.
+pub fn init(default_service_name: &str) -> (TelemetryGuard, prometheus::Registry) {
+    // Same pre-existing, already-reviewed debt (gh-605) as `resource`
+    // above -- no subscriber exists yet to log to at this point, so this
+    // is the one place in the function a `tracing::` call would be a
+    // silent no-op, not real observability.
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+
+    let (tracer_provider, meter_provider) = match &endpoint {
+        Some(endpoint) => {
+            let res = resource(default_service_name);
+            let tracer = build_tracer_provider(endpoint, res.clone())
+                .inspect_err(|err| {
+                    eprintln!("otel trace exporter init failed, continuing without traces: {err}");
+                })
+                .ok();
+            let meter = build_meter_provider(endpoint, res)
+                .inspect_err(|err| {
+                    eprintln!(
+                        "otel metric exporter init failed, continuing without OTLP metrics: {err}"
+                    );
+                })
+                .ok();
+            (tracer, meter)
+        }
+        None => (None, None),
+    };
+
+    if let Some(provider) = &meter_provider {
+        global::set_meter_provider(provider.clone());
+    }
+
+    let fmt_layer = tracing_subscriber::fmt::layer().json();
+    let registry = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer);
+
+    match &tracer_provider {
+        Some(provider) => {
+            let tracer = provider.tracer(default_service_name.to_string());
+            registry
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .init();
+        }
+        None => registry.init(),
+    }
+
+    (
+        TelemetryGuard {
+            tracer_provider,
+            meter_provider,
+        },
+        prometheus::Registry::new(),
+    )
+}
+
+/// Renders the Prometheus text-format exposition body for `/metrics`.
+pub fn render_metrics(registry: &prometheus::Registry) -> anyhow::Result<String> {
+    use prometheus::Encoder;
+    let metric_families = registry.gather();
+    let mut buf = Vec::new();
+    prometheus::TextEncoder::new().encode(&metric_families, &mut buf)?;
+    Ok(String::from_utf8(buf)?)
+}
+
+/// Base HTTP request metrics registered once against the Prometheus
+/// registry and shared via [`crate::http::AppState`] so the request-path
+/// middleware can record into them without re-registering (a
+/// `prometheus::Registry` panics on duplicate registration). Histograms
+/// for load/latency come first per `rules/critical-rules.md`
+/// Observability -- a lone request counter is not instrumentation.
+#[derive(Clone)]
+pub struct RequestMetrics {
+    pub http_requests_total: prometheus::IntCounterVec,
+    pub http_request_duration_seconds: prometheus::HistogramVec,
+}
+
+/// Registers the service's base Prometheus metrics (an `up` gauge plus a
+/// per-request counter and latency histogram, both labeled by
+/// method/path/status where applicable) against `registry` and returns
+/// handles for request-path code to record into. Must be called exactly
+/// once per `registry` -- see [`crate::http::AppState::new`].
+pub fn register_request_metrics(registry: &prometheus::Registry) -> RequestMetrics {
+    let up = prometheus::IntGauge::new("svc_presentation_up", "1 if the process is running")
+        .expect("valid metric definition");
+    registry
+        .register(Box::new(up.clone()))
+        .expect("register svc_presentation_up");
+    up.set(1);
+
+    let http_requests_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_http_requests_total",
+            "Total HTTP requests handled, labeled by method/path/status",
+        ),
+        &["method", "path", "status"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(http_requests_total.clone()))
+        .expect("register svc_presentation_http_requests_total");
+
+    let http_request_duration_seconds = prometheus::HistogramVec::new(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_http_request_duration_seconds",
+            "HTTP request duration in seconds, labeled by method/path",
+        ),
+        &["method", "path"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(http_request_duration_seconds.clone()))
+        .expect("register svc_presentation_http_request_duration_seconds");
+
+    RequestMetrics {
+        http_requests_total,
+        http_request_duration_seconds,
+    }
+}
+
+/// P6/P9 overlay-image metrics: upload counter (labeled by outcome),
+/// upload-size histogram, and presigned-URL signing-latency histogram --
+/// histograms first per `rules/critical-rules.md` Observability ("a lone
+/// request counter is not instrumentation").
+#[derive(Clone)]
+pub struct ImageMetrics {
+    pub uploads_total: prometheus::IntCounterVec,
+    pub upload_bytes: prometheus::Histogram,
+    pub sign_latency_seconds: prometheus::Histogram,
+}
+
+/// Registers [`ImageMetrics`] against `registry`. Must be called exactly
+/// once per `registry` -- see [`crate::http::AppState::new`].
+pub fn register_image_metrics(registry: &prometheus::Registry) -> ImageMetrics {
+    let uploads_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_image_uploads_total",
+            "Overlay image uploads handled, labeled by outcome (success/rejected/error)",
+        ),
+        &["result"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(uploads_total.clone()))
+        .expect("register svc_presentation_image_uploads_total");
+
+    let upload_bytes = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+        "svc_presentation_image_upload_bytes",
+        "Uploaded overlay image size in bytes",
+    ))
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(upload_bytes.clone()))
+        .expect("register svc_presentation_image_upload_bytes");
+
+    let sign_latency_seconds = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+        "svc_presentation_image_sign_latency_seconds",
+        "Latency of generating a presigned overlay-image GET URL",
+    ))
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(sign_latency_seconds.clone()))
+        .expect("register svc_presentation_image_sign_latency_seconds");
+
+    ImageMetrics {
+        uploads_total,
+        upload_bytes,
+        sign_latency_seconds,
+    }
+}
+
+/// Caption-overlay metrics: ingest outcome counter, ingest-latency and
+/// caption-size histograms, history-replay size histogram, and a websocket
+/// handshake outcome counter -- histograms for load/latency first per
+/// `rules/critical-rules.md` Observability. Live viewer count and
+/// connection lifetime are already recorded per surface (`caption`) by
+/// `crate::overlay::hub`.
+///
+/// Labels are closed sets only (`outcome`); never a community id, user
+/// reference, or any caption text.
+#[derive(Clone)]
+pub struct CaptionMetrics {
+    pub ingest_total: prometheus::IntCounterVec,
+    pub ingest_duration_seconds: prometheus::Histogram,
+    pub text_chars: prometheus::Histogram,
+    pub history_replayed: prometheus::Histogram,
+    pub ws_connections_total: prometheus::IntCounterVec,
+}
+
+/// Registers [`CaptionMetrics`] against `registry`. Must be called exactly
+/// once per `registry` -- see [`crate::http::AppState::new`].
+pub fn register_caption_metrics(registry: &prometheus::Registry) -> CaptionMetrics {
+    let ingest_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_caption_ingest_total",
+            "Caption pushes handled, labeled by outcome (ok/ok_not_persisted/rejected/disabled)",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(ingest_total.clone()))
+        .expect("register svc_presentation_caption_ingest_total");
+
+    let ingest_duration_seconds = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+        "svc_presentation_caption_ingest_duration_seconds",
+        "End-to-end caption ingest handling time (validate, publish, persist)",
+    ))
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(ingest_duration_seconds.clone()))
+        .expect("register svc_presentation_caption_ingest_duration_seconds");
+
+    let text_chars = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_caption_text_chars",
+            "Length in characters of the original text of accepted captions",
+        )
+        .buckets(vec![10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(text_chars.clone()))
+        .expect("register svc_presentation_caption_text_chars");
+
+    let history_replayed = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_caption_history_replayed",
+            "Captions replayed to a websocket client on connect",
+        )
+        .buckets(vec![0.0, 1.0, 2.0, 3.0, 5.0, 10.0]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(history_replayed.clone()))
+        .expect("register svc_presentation_caption_history_replayed");
+
+    let ws_connections_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_caption_ws_connections_total",
+            "Caption websocket handshakes, labeled by outcome (accepted/denied/disabled)",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(ws_connections_total.clone()))
+        .expect("register svc_presentation_caption_ws_connections_total");
+
+    CaptionMetrics {
+        ingest_total,
+        ingest_duration_seconds,
+        text_chars,
+        history_replayed,
+        ws_connections_total,
+    }
+}
+
+/// Metrics for the generic overlay push route (`POST /{overlay_code}/
+/// {surface}/push`): the end-to-end resolve + render + publish path.
+/// Labels are closed sets only (`surface`, `outcome`) -- never a community id,
+/// user reference or push text. Histogram first, per
+/// `rules/critical-rules.md` Observability.
+#[derive(Clone)]
+pub struct PushMetrics {
+    /// Pushes handled, labeled `surface` and `outcome` = `published`
+    /// (rendered and fanned out), `rejected` (the surface's renderer refused
+    /// the push -- a caller error), or `degraded` (published, but the
+    /// community context was unavailable so every user rendered as the
+    /// neutral label).
+    pub pushes_total: prometheus::IntCounterVec,
+    /// End-to-end push handling time: community-context lookup, display-name
+    /// resolution, render, publish.
+    pub push_duration_seconds: prometheus::HistogramVec,
+}
+
+/// Registers [`PushMetrics`] against `registry`. Must be called exactly once
+/// per `registry` -- see [`crate::http::AppState::new`].
+pub fn register_push_metrics(registry: &prometheus::Registry) -> PushMetrics {
+    let pushes_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_overlay_pushes_total",
+            "Overlay pushes handled, labeled by surface and outcome (published/rejected/degraded)",
+        ),
+        &["surface", "outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(pushes_total.clone()))
+        .expect("register svc_presentation_overlay_pushes_total");
+
+    let push_duration_seconds = prometheus::HistogramVec::new(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_overlay_push_duration_seconds",
+            "End-to-end overlay push handling time (context lookup, detokenize, render, publish), by surface",
+        ),
+        &["surface"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(push_duration_seconds.clone()))
+        .expect("register svc_presentation_overlay_push_duration_seconds");
+
+    PushMetrics {
+        pushes_total,
+        push_duration_seconds,
+    }
+}
+
+/// Metrics for the overlay-code -> community lookup every overlay route
+/// performs ([`crate::overlay::code`]). Labels are closed sets only -- never
+/// the code itself (a capability-like URL secret) or a community id.
+#[derive(Clone)]
+pub struct OverlayCodeMetrics {
+    /// Lookups, labeled `outcome` = `malformed` (not `[0-9a-f]{16}`; rejected
+    /// without touching the cache or database), `cache_hit` (a live cached
+    /// mapping), `db_found`, `db_absent` (well-formed but no such community --
+    /// a stale or guessed code), or `db_error` (the lookup itself failed).
+    pub lookups_total: prometheus::IntCounterVec,
+    /// Database lookup latency (cache misses only).
+    pub lookup_duration_seconds: prometheus::Histogram,
+}
+
+/// Registers [`OverlayCodeMetrics`] against `registry`. Must be called
+/// exactly once per registry.
+pub fn register_overlay_code_metrics(registry: &prometheus::Registry) -> OverlayCodeMetrics {
+    let lookups_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_overlay_code_lookups_total",
+            "Overlay code lookups, labeled by outcome \
+             (malformed/cache_hit/db_found/db_absent/db_error)",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(lookups_total.clone()))
+        .expect("register svc_presentation_overlay_code_lookups_total");
+
+    let lookup_duration_seconds = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_presentation_overlay_code_lookup_duration_seconds",
+            "Database latency of an overlay code -> community lookup (cache misses only)",
+        )
+        .buckets(vec![
+            0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+        ]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(lookup_duration_seconds.clone()))
+        .expect("register svc_presentation_overlay_code_lookup_duration_seconds");
+
+    OverlayCodeMetrics {
+        lookups_total,
+        lookup_duration_seconds,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // std::env is process-global; serialize env-mutating tests so parallel
+    // `cargo test` threads don't race on the same variables.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn register_request_metrics_produces_a_non_empty_exposition() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_request_metrics(&registry);
+        metrics
+            .http_requests_total
+            .with_label_values(&["GET", "/health", "200"])
+            .inc();
+        metrics
+            .http_request_duration_seconds
+            .with_label_values(&["GET", "/health"])
+            .observe(0.001);
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_up 1"));
+        assert!(rendered.contains("svc_presentation_http_requests_total"));
+        assert!(rendered.contains("svc_presentation_http_request_duration_seconds"));
+    }
+
+    #[test]
+    fn register_push_metrics_exposes_the_counter_and_histogram() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_push_metrics(&registry);
+        metrics
+            .pushes_total
+            .with_label_values(&["chat", "published"])
+            .inc();
+        metrics
+            .push_duration_seconds
+            .with_label_values(&["chat"])
+            .observe(0.002);
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_overlay_pushes_total"));
+        assert!(rendered.contains("svc_presentation_overlay_push_duration_seconds"));
+    }
+
+    #[test]
+    fn register_overlay_code_metrics_exposes_the_counter_and_histogram() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_overlay_code_metrics(&registry);
+        metrics.lookups_total.with_label_values(&["db_found"]).inc();
+        metrics.lookup_duration_seconds.observe(0.003);
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_overlay_code_lookups_total"));
+        assert!(rendered.contains("svc_presentation_overlay_code_lookup_duration_seconds"));
+    }
+
+    #[test]
+    fn up_gauge_alone_is_a_non_empty_series_before_any_request() {
+        let registry = prometheus::Registry::new();
+        register_request_metrics(&registry);
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_up 1"));
+    }
+
+    #[test]
+    fn register_image_metrics_produces_a_non_empty_exposition() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_image_metrics(&registry);
+        metrics.uploads_total.with_label_values(&["success"]).inc();
+        metrics.upload_bytes.observe(2048.0);
+        metrics.sign_latency_seconds.observe(0.01);
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_image_uploads_total"));
+        assert!(rendered.contains("svc_presentation_image_upload_bytes"));
+        assert!(rendered.contains("svc_presentation_image_sign_latency_seconds"));
+    }
+
+    #[test]
+    fn register_caption_metrics_produces_a_non_empty_exposition() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_caption_metrics(&registry);
+        metrics.ingest_total.with_label_values(&["ok"]).inc();
+        metrics.ingest_duration_seconds.observe(0.002);
+        metrics.text_chars.observe(42.0);
+        metrics.history_replayed.observe(3.0);
+        metrics
+            .ws_connections_total
+            .with_label_values(&["accepted"])
+            .inc();
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        for series in [
+            "svc_presentation_caption_ingest_total",
+            "svc_presentation_caption_ingest_duration_seconds",
+            "svc_presentation_caption_text_chars",
+            "svc_presentation_caption_history_replayed",
+            "svc_presentation_caption_ws_connections_total",
+        ] {
+            assert!(rendered.contains(series), "missing {series}");
+        }
+    }
+
+    #[test]
+    fn otlp_protocol_defaults_to_grpc() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_PROTOCOL") };
+        assert!(matches!(otlp_protocol(), Protocol::Grpc));
+    }
+
+    #[test]
+    fn otlp_protocol_recognizes_http_protobuf() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::set_var("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf") };
+        assert!(matches!(otlp_protocol(), Protocol::HttpBinary));
+        unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_PROTOCOL") };
+    }
+
+    #[test]
+    fn render_metrics_on_empty_registry_is_empty_string() {
+        let registry = prometheus::Registry::new();
+        let rendered = render_metrics(&registry).expect("empty registry still encodes");
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn resource_defaults_to_provided_service_name() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::remove_var("OTEL_SERVICE_NAME") };
+        let res = resource("svc-presentation-test");
+        let value = res.get(&opentelemetry::Key::from_static_str("service.name"));
+        assert_eq!(
+            value.map(|v| v.to_string()),
+            Some("svc-presentation-test".to_string())
+        );
+    }
+
+    /// `build_tracer_provider`/`build_meter_provider` never block on an
+    /// actual connection at construction time (the underlying tonic
+    /// channel is lazy) -- proven directly against an endpoint nothing is
+    /// listening on, with no live OTLP collector needed.
+    #[tokio::test]
+    async fn build_tracer_and_meter_providers_succeed_against_an_unreachable_endpoint() {
+        let res = resource("svc-presentation-build-test");
+        let tracer = build_tracer_provider("http://127.0.0.1:1", res.clone())
+            .expect("provider construction doesn't connect eagerly");
+        let meter = build_meter_provider("http://127.0.0.1:1", res)
+            .expect("provider construction doesn't connect eagerly");
+        tracer.shutdown().ok();
+        meter.shutdown().ok();
+    }
+
+    /// Same as above, but over the `http/protobuf` transport branch
+    /// (`otlp_protocol()`'s `_ =>` arm) rather than the default grpc one.
+    #[tokio::test]
+    async fn build_tracer_and_meter_providers_succeed_over_http_protobuf() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::set_var("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf") };
+        let res = resource("svc-presentation-build-test-http");
+        let tracer = build_tracer_provider("http://127.0.0.1:1", res.clone())
+            .expect("provider construction doesn't connect eagerly");
+        let meter = build_meter_provider("http://127.0.0.1:1", res)
+            .expect("provider construction doesn't connect eagerly");
+        tracer.shutdown().ok();
+        meter.shutdown().ok();
+        unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_PROTOCOL") };
+    }
+
+    /// `TelemetryGuard::shutdown` with both providers populated exercises
+    /// the `Some(provider)` branch of each `if let` -- constructed
+    /// directly (same module, private fields) rather than through
+    /// [`init`], so this doesn't touch the process-global tracing
+    /// subscriber.
+    #[tokio::test]
+    async fn shutdown_with_both_providers_present_takes_and_shuts_down_each() {
+        let res = resource("svc-presentation-shutdown-test");
+        let mut guard = TelemetryGuard {
+            tracer_provider: Some(
+                build_tracer_provider("http://127.0.0.1:1", res.clone()).unwrap(),
+            ),
+            meter_provider: Some(build_meter_provider("http://127.0.0.1:1", res).unwrap()),
+        };
+        guard.shutdown();
+        assert!(guard.tracer_provider.is_none());
+        assert!(guard.meter_provider.is_none());
+        // Idempotent -- `Drop` calls `shutdown()` again on an
+        // already-`None` guard, which must be a no-op, not a panic.
+        guard.shutdown();
+    }
+
+    /// `init()` with `OTEL_EXPORTER_OTLP_ENDPOINT` configured builds both
+    /// providers and installs the OTel tracing layer -- the one test in
+    /// this binary allowed to call the process-global
+    /// `tracing_subscriber::...::init()` (it panics if called twice in
+    /// one process); every other test in this file/crate must not call
+    /// [`init`] directly.
+    #[tokio::test]
+    async fn init_with_otlp_endpoint_configured_builds_both_providers() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK; this is the only test in the
+        // process allowed to set this var / call `init()`.
+        unsafe {
+            std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1");
+            std::env::remove_var("OTEL_EXPORTER_OTLP_PROTOCOL");
+        }
+        let (mut telemetry_guard, registry) = init("svc-presentation-init-test");
+        assert!(telemetry_guard.tracer_provider.is_some());
+        assert!(telemetry_guard.meter_provider.is_some());
+        // The returned Prometheus registry is independent of the OTLP
+        // providers -- still a fresh, empty registry.
+        assert!(render_metrics(&registry).unwrap().is_empty());
+        telemetry_guard.shutdown();
+        unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
+    }
+}

@@ -16,7 +16,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::get;
@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use tower_http::trace::TraceLayer;
 
 use crate::api::SharedEngine;
+use crate::billing::token_ledger::TokenLedgerClient;
 use crate::config::Config;
 use crate::egress::hls::HlsRouterState;
 use crate::egress::whep::{WhepState, DEFAULT_MAX_VIEWERS};
@@ -63,6 +64,11 @@ pub struct AppState {
     /// Shared WHEP (WebRTC egress) signaling state -- always present so
     /// `/whep/*` is always mounted.
     pub whep_state: Arc<WhepState>,
+    /// HTTP client for hub-api's transcode-token ledger
+    /// (`crate::billing::token_ledger`) -- used by
+    /// `crate::api::lifecycle::start`'s TRANSCODE admission check. Always
+    /// present (cheap to construct, holds no connection state).
+    pub token_ledger: Arc<TokenLedgerClient>,
 }
 
 impl AppState {
@@ -130,29 +136,51 @@ impl AppState {
             hls_router_state,
             whip_state,
             whep_state,
+            token_ledger: Arc::new(TokenLedgerClient::new()),
         }
     }
 }
 
+/// Route label used when a request matched no route (404s, scanners). A
+/// single fixed value, so unmatched traffic can never mint new series.
+pub const UNMATCHED_ROUTE: &str = "unmatched";
+
+/// Returns the low-cardinality route *template* a request matched (for
+/// example `/whip/{token}`), never the live URI path.
+///
+/// WHIP puts its bearer token in the path (`/whip/<token>`, and
+/// `/whip/<token>/<session>` for the session resource), so the raw path is a
+/// credential and an unbounded label domain. Everything that needs to name
+/// "which endpoint" in a metric label, span, or log line goes through here
+/// (`rules/critical-rules.md` Token & Secret Hygiene; Observability).
+/// Requests that matched no route collapse to [`UNMATCHED_ROUTE`].
+pub fn route_template<B>(req: &axum::http::Request<B>) -> String {
+    req.extensions()
+        .get::<MatchedPath>()
+        .map_or_else(|| UNMATCHED_ROUTE.to_string(), |m| m.as_str().to_string())
+}
+
 /// Records every request into [`AppState::request_metrics`]: a labeled
-/// counter and a latency histogram. Applied to the whole control-plane
-/// router so `/metrics` always has data once the service has served at
-/// least one request (the `up` gauge covers the window before that).
+/// counter and a latency histogram, keyed by method and matched route
+/// *template* (see [`route_template`]) -- never the raw path, which carries
+/// the WHIP bearer token. Applied to the whole control-plane router so
+/// `/metrics` always has data once the service has served at least one
+/// request (the `up` gauge covers the window before that).
 async fn record_http_metrics(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let method = req.method().to_string();
-    let path = req.uri().path().to_string();
+    let route = route_template(&req);
     let start = Instant::now();
     let response = next.run(req).await;
     let status = response.status().as_u16().to_string();
     state
         .request_metrics
         .http_requests_total
-        .with_label_values(&[&method, &path, &status])
+        .with_label_values(&[&method, &route, &status])
         .inc();
     state
         .request_metrics
         .http_request_duration_seconds
-        .with_label_values(&[&method, &path])
+        .with_label_values(&[&method, &route])
         .observe(start.elapsed().as_secs_f64());
     response
 }
@@ -202,7 +230,13 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             record_http_metrics,
         ))
-        .layer(TraceLayer::new_for_http())
+        // `request_span` parents each request span to an incoming W3C
+        // `traceparent` and records the route template, not the raw URI
+        // (which can carry WHIP/WHEP tokens) -- see `telemetry::trace_context`.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(crate::telemetry::trace_context::request_span::<axum::body::Body>),
+        )
 }
 
 /// Builds the secondary Prometheus metrics router, bound to its own port

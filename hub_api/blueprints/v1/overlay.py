@@ -119,8 +119,8 @@ class OverlayStatsResponse:
 
 
 @overlay_bp.route("/<int:community_id>/overlay", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_overlay(community_id: int) -> Any:
     """Get or create the overlay token for `community_id`."""
     try:
@@ -139,8 +139,8 @@ async def get_overlay(community_id: int) -> Any:
 
 
 @overlay_bp.route("/<int:community_id>/overlay", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(UpdateOverlayRequest)
 async def update_overlay(community_id: int, data: UpdateOverlayRequest) -> Any:
     """Update overlay settings (active flag, theme, enabled sources)."""
@@ -164,8 +164,8 @@ async def update_overlay(community_id: int, data: UpdateOverlayRequest) -> Any:
 
 
 @overlay_bp.route("/<int:community_id>/overlay/rotate", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def rotate_overlay_key(community_id: int) -> Any:
     """Rotate the overlay key; the previous key stays valid for svc-presentation's grace period."""
     try:
@@ -186,8 +186,8 @@ async def rotate_overlay_key(community_id: int) -> Any:
 
 
 @overlay_bp.route("/<int:community_id>/overlay/stats", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_overlay_stats(community_id: int) -> Any:
     """Get daily + total overlay access statistics."""
     days_raw = request.args.get("days", "7")

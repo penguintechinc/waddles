@@ -46,6 +46,7 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::ingest::{IngestKind, IngestListener, IngestSession};
+use crate::redact::fingerprint;
 
 /// FLV/RTMP tag type ids (shared vocabulary between the two formats).
 const FLV_TAG_AUDIO: u8 = 8;
@@ -197,7 +198,10 @@ impl IngestListener for RtmpListener {
                             let active_keys = active_keys.clone();
                             let session_tx = tx.clone();
                             let metrics = self.metrics.clone();
-                            let span = tracing::info_span!("rtmp_connection", %peer_addr);
+                            // No peer address on the span: a publisher's IP is
+                            // personal data and must not reach the trace backend
+                            // (it stays in the local, sanitized log lines).
+                            let span = tracing::info_span!("rtmp_connection");
                             tokio::spawn(
                                 handle_connection(socket, peer_addr, auth, active_keys, session_tx, metrics)
                                     .instrument(span),
@@ -267,7 +271,7 @@ async fn handle_connection(
     // pipeline supervisor is reading from (EOF -> pipeline stops, S3).
     if let Some(published) = ctx.published.take() {
         release_key(&ctx.active_keys, &published.key);
-        tracing::info!(key_hash = %hash_key(&published.key), "rtmp connection closed, stream ended");
+        tracing::info!(key_hash = %fingerprint(&published.key), "rtmp connection closed, stream ended");
     }
 
     metrics.connections_active.dec();
@@ -391,7 +395,7 @@ async fn handle_event(
             request_id,
             app_name,
         } => {
-            tracing::debug!(peer = %ctx.peer_addr, app = %app_name, "rtmp connect requested");
+            tracing::debug!(peer = %ctx.peer_addr, app = %loggable_app(&app_name), "rtmp connect requested");
             Ok(session.accept_request(request_id)?)
         }
         ServerSessionEvent::PublishStreamRequested {
@@ -439,7 +443,7 @@ async fn handle_publish_requested(
     stream_key: String,
     ctx: &mut ConnCtx,
 ) -> anyhow::Result<Vec<ServerSessionResult>> {
-    let key_hash = hash_key(&stream_key);
+    let key_hash = fingerprint(&stream_key);
 
     if !claim_key(&ctx.active_keys, &stream_key) {
         ctx.metrics
@@ -480,6 +484,7 @@ async fn handle_publish_requested(
         kind: IngestKind::Rtmp,
         key: stream_key.clone(),
         stream: Box::new(FlvByteStream::new(flv_rx)),
+        span: tracing::Span::current(),
     };
 
     if ctx.session_tx.send(ingest_session).await.is_err() {
@@ -506,7 +511,7 @@ async fn handle_publish_requested(
         .inc();
     tracing::info!(
         peer = %ctx.peer_addr,
-        app = %app_name,
+        app = %loggable_app(&app_name),
         key_hash = %key_hash,
         community_id = %decision.community_id,
         config_id = %decision.config_id,
@@ -519,7 +524,7 @@ fn handle_publish_finished(stream_key: String, ctx: &mut ConnCtx) {
     let matches_active = matches!(&ctx.published, Some(p) if p.key == stream_key);
     if matches_active {
         release_key(&ctx.active_keys, &stream_key);
-        tracing::info!(peer = %ctx.peer_addr, key_hash = %hash_key(&stream_key), "rtmp publish finished");
+        tracing::info!(peer = %ctx.peer_addr, key_hash = %fingerprint(&stream_key), "rtmp publish finished");
         // Dropping `published` (and its `flv_tx`) closes the FLV stream the
         // pipeline supervisor is reading -- see `IngestSession::stream`.
         ctx.published = None;
@@ -552,7 +557,7 @@ async fn forward_metadata(metadata: &StreamMetadata, ctx: &mut ConnCtx) {
 fn active_flv_sender(ctx: &ConnCtx) -> Option<(mpsc::Sender<Vec<u8>>, String)> {
     ctx.published
         .as_ref()
-        .map(|p| (p.flv_tx.clone(), hash_key(&p.key)))
+        .map(|p| (p.flv_tx.clone(), fingerprint(&p.key)))
 }
 
 /// Sends `tag` onto the FLV channel, honoring [`BACKPRESSURE_TIMEOUT`]. A
@@ -586,14 +591,11 @@ fn release_key(active_keys: &StdMutex<HashSet<String>>, key: &str) {
     keys.remove(key);
 }
 
-/// A short, non-reversible identifier for a stream key suitable for logs --
-/// never the raw key (see `rules/critical-rules.md` Token & Secret
-/// Hygiene: masked, not printed in full).
-fn hash_key(key: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+/// The RTMP `app` name with any `?query` dropped. Clients that authenticate
+/// through the app URL (`rtmp://host/live?token=...`) put a credential in
+/// the query, so only the bare app name is safe to log.
+fn loggable_app(app_name: &str) -> &str {
+    app_name.split_once('?').map_or(app_name, |(app, _)| app)
 }
 
 fn encode_metadata(metadata: &StreamMetadata) -> anyhow::Result<Vec<u8>> {
@@ -805,13 +807,11 @@ mod tests {
     }
 
     #[test]
-    fn hash_key_never_contains_the_raw_key_and_is_stable() {
-        let raw = "sk_super_secret_stream_key";
-        let hashed = hash_key(raw);
-        assert!(!hashed.contains(raw));
-        assert_eq!(hashed.len(), 16, "fixed-width hex hash");
-        assert_eq!(hashed, hash_key(raw), "hashing is deterministic");
-        assert_ne!(hashed, hash_key("a_different_key"));
+    fn loggable_app_drops_the_query_but_keeps_the_app_name() {
+        assert_eq!(loggable_app("live"), "live");
+        assert_eq!(loggable_app("live?token=SECRET"), "live");
+        assert_eq!(loggable_app("live/sub?a=1&b=2"), "live/sub");
+        assert_eq!(loggable_app("?token=SECRET"), "");
     }
 
     #[test]

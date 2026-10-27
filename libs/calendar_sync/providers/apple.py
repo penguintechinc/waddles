@@ -25,17 +25,33 @@ CalDAV (RFC 4791) uses standard HTTP verbs plus WebDAV extensions:
 This implementation parses minimal iCalendar (RFC 5545) manually to avoid a
 hard dependency on icalendar/vobject.  For production use consider adding
 the `icalendar` package and replacing _parse_vcal / _build_vcal with it.
+
+Security (XXE)
+--------------
+``server_url`` is user-configurable, so every CalDAV/WebDAV XML response is
+attacker-influenceable.  All response XML is parsed through ``defusedxml``
+(see ``_parse_xml``) with DTDs, entity declarations and external references
+forbidden — this blocks XXE file-read/SSRF via external entities and
+entity-expansion DoS (billion laughs).  NEVER call the stdlib
+``xml.etree.ElementTree`` parse functions (``fromstring`` / ``XML`` / ``parse``
+/ ``iterparse``) on a CalDAV response; ``tests/unit/test_caldav_xxe.py`` and
+``tests/unit/test_no_unsafe_xml.py`` enforce this.
 """
 import logging
 import re
 import uuid as uuid_mod
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from xml.etree import ElementTree as ET
+
+# Stdlib ElementTree is imported ONLY for the Element type and the (non-parsing)
+# namespace registry.  Every parse goes through defusedxml via _parse_xml().
+from xml.etree.ElementTree import Element, register_namespace  # nosec B405
 
 import httpx
+from defusedxml import ElementTree as SafeET
+from defusedxml.common import DefusedXmlException
 
-from libs.calendar_sync.base import CalendarProviderBase
+from libs.calendar_sync.base import CalendarProviderBase, describe_error
 from libs.calendar_sync.schema import normalize_event
 
 logger = logging.getLogger(__name__)
@@ -49,7 +65,39 @@ _NS = {
 }
 # Register so ET.tostring() uses human-readable prefixes.
 for _prefix, _uri in _NS.items():
-    ET.register_namespace(_prefix, _uri)
+    register_namespace(_prefix, _uri)
+
+# Raised by _parse_xml() for malformed XML (ParseError) or for a hostile
+# construct defusedxml refuses to process (DefusedXmlException: DTD, entity
+# declaration, external reference).  Callers treat both as "no usable data".
+_XML_REJECTED: tuple[type[Exception], ...] = (
+    SafeET.ParseError,
+    DefusedXmlException,
+)
+
+
+def _parse_xml(xml_text: str) -> Element:
+    """Parse an untrusted CalDAV XML response with XXE protections.
+
+    The CalDAV server URL is user-configurable, so the response body is
+    attacker-controlled.  ``defusedxml`` rejects DTDs (``forbid_dtd``), entity
+    declarations (billion laughs / quadratic blowup) and external references
+    (file read / SSRF).  Legitimate CalDAV/WebDAV responses never carry a DTD.
+
+    Args:
+        xml_text: Raw XML response text from the CalDAV server.
+
+    Returns:
+        The parsed root element.
+
+    Raises:
+        ParseError: The text is not well-formed XML.
+        DefusedXmlException: The text contains a DTD, entity declaration or
+            external reference (any hostile XXE / entity-expansion payload).
+    """
+    return SafeET.fromstring(
+        xml_text, forbid_dtd=True, forbid_entities=True, forbid_external=True
+    )
 
 
 class AppleCalendarProvider(CalendarProviderBase):
@@ -523,7 +571,7 @@ class AppleCalendarProvider(CalendarProviderBase):
     def _extract_calendar_home(self, xml_text: str) -> Optional[str]:
         """Parse PROPFIND response to extract calendar-home-set href."""
         try:
-            root = ET.fromstring(xml_text)
+            root = _parse_xml(xml_text)
             # Try calendar-home-set first.
             for tag in (
                 "{urn:ietf:params:xml:ns:caldav}calendar-home-set",
@@ -535,8 +583,10 @@ class AppleCalendarProvider(CalendarProviderBase):
                     if href.startswith("/"):
                         return f"{self._server_url}{href}"
                     return href
-        except ET.ParseError as exc:
-            self.logger.error(f"[APPLE] Failed to parse PROPFIND XML: {exc}")
+        except _XML_REJECTED as exc:
+            self.logger.error(
+                "[APPLE] Failed to parse PROPFIND XML: %s", describe_error(exc)
+            )
         return None
 
     async def _get_ctag(self, calendar_id: str) -> Optional[str]:
@@ -560,11 +610,18 @@ class AppleCalendarProvider(CalendarProviderBase):
                 if resp.status_code not in (207, 200):
                     return None
 
-            root = ET.fromstring(resp.text)
+            root = _parse_xml(resp.text)
             ctag_elem = root.find(
                 ".//{http://calendarserver.org/ns/}getctag"
             )
-            return ctag_elem.text.strip() if ctag_elem is not None else None
+            if ctag_elem is None or not ctag_elem.text:
+                return None
+            return ctag_elem.text.strip()
+        except _XML_REJECTED as exc:
+            self.logger.error(
+                "[APPLE] Failed to parse ctag PROPFIND: %s", describe_error(exc)
+            )
+            return None
         except Exception as exc:
             self._log_error("_get_ctag", exc)
             return None
@@ -575,7 +632,7 @@ class AppleCalendarProvider(CalendarProviderBase):
         """Parse a Depth:1 PROPFIND response to extract calendar collections."""
         calendars: List[Dict[str, Any]] = []
         try:
-            root = ET.fromstring(xml_text)
+            root = _parse_xml(xml_text)
             for response in root.findall("{DAV:}response"):
                 # Skip the home collection itself.
                 href_elem = response.find("{DAV:}href")
@@ -605,8 +662,10 @@ class AppleCalendarProvider(CalendarProviderBase):
                     "time_zone": "UTC",
                     "_ctag": ctag,
                 })
-        except ET.ParseError as exc:
-            self.logger.error(f"[APPLE] Failed to parse calendar PROPFIND: {exc}")
+        except _XML_REJECTED as exc:
+            self.logger.error(
+                "[APPLE] Failed to parse calendar PROPFIND: %s", describe_error(exc)
+            )
         return calendars
 
     def _parse_report_response(
@@ -615,7 +674,7 @@ class AppleCalendarProvider(CalendarProviderBase):
         """Parse a CALENDAR-QUERY REPORT response and extract event dicts."""
         events: List[Dict[str, Any]] = []
         try:
-            root = ET.fromstring(xml_text)
+            root = _parse_xml(xml_text)
             for response in root.findall("{DAV:}response"):
                 etag_elem = response.find(".//{DAV:}getetag")
                 etag = (
@@ -635,8 +694,10 @@ class AppleCalendarProvider(CalendarProviderBase):
                     parsed["etag"] = etag
                     events.append(parsed)
 
-        except ET.ParseError as exc:
-            self.logger.error(f"[APPLE] Failed to parse REPORT response: {exc}")
+        except _XML_REJECTED as exc:
+            self.logger.error(
+                "[APPLE] Failed to parse REPORT response: %s", describe_error(exc)
+            )
         return events
 
     def _parse_vcal(self, ical_text: str) -> Optional[Dict[str, Any]]:

@@ -62,17 +62,7 @@ run_test() {
 run_test "Branding Smoke Test" \
     "cd '$SCRIPT_DIR' && bash smoke-branding.sh"
 
-# === Phase 2: Build tests (toolchain required) ===
-
-# Desktop Go build smoke test (if Go is available)
-if command -v go &> /dev/null; then
-    run_test "Desktop Go Build Smoke Test" \
-        "cd '$SCRIPT_DIR' && bash desktop-smoke.sh"
-else
-    echo -e "${YELLOW}⊘ Skipping Desktop smoke test (Go not installed)${NC}"
-fi
-
-# === Phase 3: Service-dependent tests ===
+# === Phase 2: Service-dependent tests ===
 
 # Run tests based on environment
 if [ "$ENV" = "local" ]; then

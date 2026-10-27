@@ -27,6 +27,7 @@ def _setup_module_imports(module_name: str) -> None:
             del sys.modules[key]
     sys.path.insert(0, os.path.join(_base_dir, module_name))
 
+
 from quart import Quart
 from flask_core import (
     create_health_blueprint,

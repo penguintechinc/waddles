@@ -67,5 +67,5 @@ Premium communities can customize weights. Non-premium use defaults.
 
 - `community_members`: Per-community reputation scores
 - `reputation_events`: Audit log of all reputation changes
-- `reputation_global`: Cross-community global scores
+- `reputation_tenant`: Cross-community, single-tenant scores (never cross-tenant)
 - `reputation_weights`: Custom weight configurations (premium only)

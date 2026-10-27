@@ -394,6 +394,7 @@ async def wipe_balances(community_id: int):
         if result:
             logger.audit(
                 action="wipe_balances",
+                user=str(request.current_user["user_id"]),
                 community=community_id,
                 result="SUCCESS",
                 platform=platform
@@ -523,10 +524,10 @@ async def process_event_earning(validated_data: EventEarningRequest, community_i
         if result.earned:
             logger.audit(
                 action="event_earning",
-                community=validated_data.community_id,
                 user=validated_data.user_id,
+                community=validated_data.community_id,
                 result="SUCCESS",
-                event_type=validated_data.event_type,
+                source_event_type=validated_data.event_type,
                 amount=result.amount
             )
 
@@ -1100,6 +1101,7 @@ async def accept_duel(validated_data: DuelActionRequest, community_id: int):
         if result.success:
             logger.audit(
                 action="accept_duel",
+                user="system",
                 community=validated_data.community_id,
                 result="SUCCESS",
                 duel_id=validated_data.duel_id,

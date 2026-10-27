@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+import logging
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -24,9 +25,12 @@ from cli.seed_core_bundles import (
     CatalogEntry,
     CoreBundleSeederError,
     load_catalog,
+    reconcile_removed_core_bundles,
     seed_one,
 )
+from services.bundle_approval_service import activate_for_community
 from services.bundle_component_validator import ComponentValidationResult
+from services.bundle_permission_service import get_approved_permission_ids
 from services.bundle_version_service import STATUS_PUBLISHED
 from services.errors import ApiError
 from tests.conftest import TENANT_SLUG
@@ -50,11 +54,27 @@ _MANIFEST: dict[str, Any] = {
         },
         "action": {"entry": "waddle:bundle/action-stage#dispatch"},
     },
+    # Sec3.6 GLOBAL/COMMUNITY-tier self-heal regression coverage (PR #433 blocker)
+    # needs a real declared capability so `_grant_core_bundle_permissions()` has
+    # something to grant -- `storage.kv` matches the review's own reproduction.
+    "permissions": [{"id": "storage.kv", "justification": "Persists per-channel counters."}],
 }
 _COMPONENT_BYTES = b"fake-wasm-ping-component-bytes"
 
 
-def _write_bundle(tmp_path: Path, *, manifest: dict[str, Any] = _MANIFEST) -> CatalogEntry:
+async def _seed_community(install_dal: Any, *, tenant_id: int = 1, name: str = "acme") -> int:
+    """A `communities` row -- COMMUNITY-tier activation targets need a real community_id."""
+    return int(await install_dal.communities.async_insert(tenant_id=tenant_id, name=name))
+
+
+def _write_bundle(
+    tmp_path: Path, *, manifest: dict[str, Any] = _MANIFEST, community_id: int | None = None
+) -> CatalogEntry:
+    """`community_id`, when given, makes the default target a full COMMUNITY-tier activation.
+
+    `None` (the default) is TENANT-tier availability only under the
+    3-tier split -- see `ActivationTarget`'s own docstring.
+    """
     (tmp_path / "ping.manifest.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
     (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES)
     return CatalogEntry(
@@ -63,12 +83,12 @@ def _write_bundle(tmp_path: Path, *, manifest: dict[str, Any] = _MANIFEST) -> Ca
         language="rust",
         manifest_path="ping.manifest.yaml",
         artifact_path="ping.wasm",
-        activation_targets=(ActivationTarget(tenant_slug=TENANT_SLUG),),
+        activation_targets=(ActivationTarget(tenant_slug=TENANT_SLUG, community_id=community_id),),
     )
 
 
 def _patch_validator_and_storage(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same monkeypatch shape `test_bundle_version_service.py` uses -- no real wasm-tools/MinIO."""
+    """Same monkeypatch shape `test_bundle_version_service.py` uses -- no real wasm-tools/S3."""
     from services import bundle_version_service as bvs
 
     monkeypatch.setattr(
@@ -145,11 +165,28 @@ async def test_seed_one_publishes_and_activates_under_system_actor(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_validator_and_storage(monkeypatch)
-    entry = _write_bundle(tmp_path)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
 
     results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
 
-    assert [r.outcome for r in results] == ["activated"]
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+
+    installed_row = (
+        await install_dal(install_dal.app_global_installs.app_id == entry.app_id).select()
+    ).first()
+    assert installed_row is not None
+    assert installed_row.installed_by is None  # SYSTEM actor, never a fake hub_users row
+    assert installed_row.install_source == "system:core-seeder"
+
+    availability_row = (
+        await install_dal(
+            (install_dal.bundle_tenant_availability.tenant_id == 1)
+            & (install_dal.bundle_tenant_availability.app_id == entry.app_id)
+        ).select()
+    ).first()
+    assert availability_row is not None
+    assert availability_row.available is True
 
     catalog_row = (
         await install_dal(install_dal.app_catalog.app_id == entry.app_id).select()
@@ -182,12 +219,280 @@ async def test_seed_one_publishes_and_activates_under_system_actor(
     active_row = (
         await install_dal(
             (install_dal.app_active_versions.app_id == entry.app_id)
-            & (install_dal.app_active_versions.community_id == 0)
+            & (install_dal.app_active_versions.community_id == community_id)
         ).select()
     ).first()
     assert active_row is not None
     assert active_row.version_id == version_row.id
     assert active_row.activated_by is None
+
+
+async def test_ensure_app_catalog_row_logs_without_a_reserved_logrecord_key_collision(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression: a brand-new `app_catalog` row must log successfully, not crash.
+
+    `_ensure_app_catalog_row()`'s "row created" log call previously passed
+    `extra={"module": manifest.module}` -- "module" collides with
+    `logging.LogRecord`'s own reserved `module` attribute (the calling module's
+    name, always present on every record), so `Logger.makeRecord()` unconditionally
+    raises `KeyError: "Attempt to overwrite 'module' in LogRecord"` the instant this
+    logger's effective level allows INFO through. That crash was invisible under
+    pytest's default logging config (root logger defaults to WARNING, so
+    `logger.info(...)`'s `isEnabledFor(INFO)` fast-path skips `makeRecord()`
+    entirely) -- but very real under the deployed seeder's `main()`, which calls
+    `logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))`, enabling INFO and
+    triggering the crash on every genuinely first-time catalog entry (a pre-existing
+    row skips this log call entirely via its `if existing: return` early-out, which
+    is why a repeat/upgrade install never surfaced it). `caplog.set_level(INFO, ...)`
+    below reproduces that same "INFO enabled" condition a plain pytest run would
+    otherwise mask.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    caplog.set_level(logging.INFO, logger="waddles.hub_api.core_bundle_seeder")
+    entry = _write_bundle(tmp_path)
+
+    # Must not raise -- a fresh app_id's first seed always hits the "row created"
+    # log call; before the fix this raised KeyError before ever reaching the DB
+    # insert's caller (seed_one), surfacing in _run() as a generic "bundle failed".
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert results
+
+    catalog_row = (
+        await install_dal(install_dal.app_catalog.app_id == entry.app_id).select()
+    ).first()
+    assert catalog_row is not None
+    assert any(
+        record.message == "core-bundle-seeder: app_catalog row created" for record in caplog.records
+    )
+
+
+async def test_seed_one_with_no_community_id_activates_tenant_wide(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`community_id=None` (`bundles/core-bundles.yaml`'s own default) activates tenant-wide.
+
+    Regression: seeder skipped activation for community_id null (alpha
+    2026-10-02) -- a catalog entry with no `community_id` used to make the
+    app available in the tenant's marketplace and then `continue`,
+    permanently skipping `app_active_versions`/`app_source_bindings`
+    (via `services.bundle_approval_service.activate_tenant_wide()`'s
+    schema sentinel split -- see its own docstring). Never silently skip:
+    `bundles/core-bundles.yaml`'s every real entry declares
+    `community_id: null`, so a skip here means the DB-driven data plane
+    never loads waddles.core.* at all.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)  # community_id=None (default)
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+
+    availability_row = (
+        await install_dal(
+            (install_dal.bundle_tenant_availability.tenant_id == 1)
+            & (install_dal.bundle_tenant_availability.app_id == entry.app_id)
+        ).select()
+    ).first()
+    assert availability_row is not None
+    assert availability_row.available is True
+
+    active_row = (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == entry.app_id)
+            & (
+                install_dal.app_active_versions.community_id
+                == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
+            )
+        ).select()
+    ).first()
+    assert active_row is not None
+
+    approval_row = (
+        await install_dal(install_dal.app_install_approvals.app_id == entry.app_id).select()
+    ).first()
+    assert approval_row is not None
+    assert approval_row.community_id is None
+    assert approval_row.approval_source == "system:core-seeder"
+
+
+async def test_seed_one_tenant_wide_grants_ensure_the_sentinel_community_row(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: tenant-wide grants need the sentinel `communities` row (id 0) to exist.
+
+    `community_permission_grants.community_id` FKs `communities(id)` but tenant-wide grants
+    use sentinel 0, which no migration ever created -> `Key (community_id)=(0) is not
+    present` on Postgres (36/40 core bundles failed to grant, #480 kind-e2e). The seeder
+    must create the row itself (idempotently) before granting.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)  # community_id=None -> tenant-wide
+
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())  # idempotent
+
+    sentinel = await install_dal(
+        install_dal.communities.id == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
+    ).select()
+    assert len(sentinel) == 1
+    assert sentinel.first().name == seeder._SENTINEL_COMMUNITY_NAME
+    grants = await install_dal(
+        (install_dal.community_permission_grants.app_id == entry.app_id)
+        & (
+            install_dal.community_permission_grants.community_id
+            == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
+        )
+    ).select()
+    assert {r.permission_id for r in grants} == {"storage.kv"}
+
+
+async def test_grant_helper_logs_and_continues_on_an_unexpected_error(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Defence-in-depth: a non-ApiError (e.g. IntegrityError) never aborts the seeder run."""
+    _patch_validator_and_storage(monkeypatch)
+    monkeypatch.setattr(
+        seeder, "grant_community_permissions", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    entry = _write_bundle(tmp_path)
+    with caplog.at_level(logging.ERROR):
+        results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+    assert "RuntimeError: boom" in caplog.text
+
+
+async def test_seed_one_with_connection_scope_activates_per_community_not_tenant_wide(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tenant-wide catalog target + a resolved connection scope activates at the REAL community.
+
+    svc-ingest routes a guild to its real community's stream, so the seeder must activate there
+    (signing + auto-bind via `activate_for_community`) -- and must NOT also write the sentinel
+    row when every connection resolved.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)  # community_id=None -> tenant-wide target
+    community_id = await _seed_community(install_dal)
+
+    scopes = {
+        TENANT_SLUG: seeder.TenantConnectionScope(
+            community_ids=(community_id,), needs_tenant_wide=False
+        )
+    }
+    results = await seed_one(
+        install_dal, entry, tmp_path, valkey_client=AsyncMock(), connection_scopes=scopes
+    )
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+    assert f"community_id={community_id}" in results[-1].detail
+
+    rows = await install_dal(install_dal.app_active_versions.app_id == entry.app_id).select()
+    assert {r.community_id for r in rows} == {community_id}
+    version_row = (
+        await install_dal(install_dal.app_versions.app_id == entry.app_id).select()
+    ).first()
+    assert version_row.artifact_signature  # signed on activation
+
+
+async def test_seed_one_with_unresolved_connection_keeps_tenant_wide_fallback(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`needs_tenant_wide=True` (some connection resolved to no community) keeps both scopes."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)
+    community_id = await _seed_community(install_dal)
+
+    scopes = {
+        TENANT_SLUG: seeder.TenantConnectionScope(
+            community_ids=(community_id,), needs_tenant_wide=True
+        )
+    }
+    results = await seed_one(
+        install_dal, entry, tmp_path, valkey_client=AsyncMock(), connection_scopes=scopes
+    )
+    assert [r.outcome for r in results] == ["made_available", "activated", "activated"]
+    rows = await install_dal(install_dal.app_active_versions.app_id == entry.app_id).select()
+    assert {r.community_id for r in rows} == {community_id, seeder.TENANT_WIDE_COMMUNITY_SENTINEL}
+
+
+async def test_resolve_connection_community_prefers_verified_link_and_fails_closed(
+    install_dal: Any,
+) -> None:
+    """Verified link wins; none or ambiguous -> None (tenant-wide fallback)."""
+    from services.bundle_install_dal import raw_sql_write
+
+    for ddl in (
+        "ALTER TABLE communities ADD COLUMN platform VARCHAR(50)",
+        "ALTER TABLE communities ADD COLUMN platform_server_id VARCHAR(255)",
+        "ALTER TABLE communities ADD COLUMN is_active BOOLEAN DEFAULT 1",
+        "CREATE TABLE IF NOT EXISTS community_servers (id INTEGER PRIMARY KEY, "
+        "community_id INTEGER, platform VARCHAR(50), platform_server_id VARCHAR(255), "
+        "status VARCHAR(50))",
+    ):
+        try:
+            await raw_sql_write(install_dal, ddl)
+        except Exception:  # noqa: BLE001, S110 -- column may already exist in the fixture schema
+            pass
+    cid = await _seed_community(install_dal, name="demo")
+    other = await _seed_community(install_dal, name="other")
+    await raw_sql_write(
+        install_dal,
+        "INSERT INTO community_servers (community_id, platform, platform_server_id, status) "
+        "VALUES (:c, 'discord', 'g1', 'approved')",
+        {"c": cid},
+    )
+    conn = seeder.PlatformConnection(
+        tenant_slug=TENANT_SLUG, platform="discord", source_id="g1", label="g1"
+    )
+    assert (
+        await seeder.resolve_connection_community(install_dal, tenant_id=1, connection=conn) == cid
+    )
+
+    unknown = seeder.PlatformConnection(
+        tenant_slug=TENANT_SLUG, platform="discord", source_id="nope", label="nope"
+    )
+    assert (
+        await seeder.resolve_connection_community(install_dal, tenant_id=1, connection=unknown)
+        is None
+    )
+
+    await raw_sql_write(
+        install_dal,
+        "INSERT INTO community_servers (community_id, platform, platform_server_id, status) "
+        "VALUES (:c, 'discord', 'g1', 'approved')",
+        {"c": other},
+    )
+    assert (
+        await seeder.resolve_connection_community(install_dal, tenant_id=1, connection=conn) is None
+    )
+    # wrong tenant never resolves
+    assert (
+        await seeder.resolve_connection_community(install_dal, tenant_id=999, connection=conn)
+        is None
+    )
+
+
+async def test_seed_one_with_no_community_id_rerun_is_a_no_op(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tenant-wide activation has its own no-op check, keyed on the DB sentinel, not `None`."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)
+
+    first = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in first] == ["made_available", "activated"]
+
+    second = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in second] == ["no_op"]
+
+    approvals = await install_dal(install_dal.app_install_approvals.app_id == entry.app_id).select()
+    assert len(approvals) == 1, "a no-op re-run must not write a second approval row"
 
 
 # ---------------------------------------------------------------------------
@@ -200,10 +505,11 @@ async def test_seed_one_reruns_are_a_no_op(
 ) -> None:
     """Same app_id+version+digest, already active -> no new approval row, `outcome == "no_op"`."""
     _patch_validator_and_storage(monkeypatch)
-    entry = _write_bundle(tmp_path)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
 
     first = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
-    assert [r.outcome for r in first] == ["activated"]
+    assert [r.outcome for r in first] == ["made_available", "activated"]
 
     second = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
     assert [r.outcome for r in second] == ["no_op"]
@@ -215,12 +521,89 @@ async def test_seed_one_reruns_are_a_no_op(
     assert len(versions) == 1, "a no-op re-run must not publish a second app_versions row"
 
 
+async def test_seed_one_self_heals_permission_grants_for_a_pre_catalog_bundle(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (PR #433 blocker, reviewed and reproduced): backfill GLOBAL + COMMUNITY tiers.
+
+    `_grant_core_bundle_permissions()`'s own docstring already explains the failure mode: a
+    core bundle first installed BEFORE the permission-catalog system existed (count/lurk/rps
+    etc., installed 2026-09-27, one day before the catalog landed 2026-09-28) is
+    `already_installed` forever once re-seeded, and `seed_core_permission_requests()` (the
+    GLOBAL-tier write, `app_permission_requests`) used to run only `if not already_installed:`
+    -- so the GLOBAL tier was never backfilled for it. With the GLOBAL ceiling permanently
+    empty, `grant_community_permissions()` computes `allowed = approved(EMPTY) - restricted`,
+    finds every required permission "not in catalog", and raises
+    `permission_not_in_catalog_grant` (422) -- caught by `_grant_core_bundle_permissions()`'s
+    own `except ApiError` and only logged, so `community_permission_grants` stayed empty
+    forever. Once `bundle_capability_gate::authorize()` (PR #433) is live, that empty grant
+    row makes every `storage.kv` (etc.) host call for that bundle DENY forever.
+
+    This test simulates exactly that pre-existing state: seed once (both tiers populated
+    normally), then delete both tier rows while leaving install/activation state intact --
+    the install/activate steps are then no-ops on a re-run (`already_installed`/`_already_
+    active` both true), isolating the self-heal path under test to the permission-grant calls
+    alone. Must fail on the pre-fix code (GLOBAL tier gated behind `if not already_installed`)
+    and pass after the fix (`seed_core_permission_requests()` called unconditionally every
+    run, `cli/seed_core_bundles.py::seed_one`).
+    """
+    _patch_validator_and_storage(monkeypatch)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
+
+    first = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in first] == ["made_available", "activated"]
+
+    approved_before = await get_approved_permission_ids(
+        install_dal, app_id=entry.app_id, version=entry.version
+    )
+    assert approved_before == frozenset({"storage.kv"})
+    grants_before = await install_dal(
+        (install_dal.community_permission_grants.app_id == entry.app_id)
+        & (install_dal.community_permission_grants.community_id == community_id)
+        & (install_dal.community_permission_grants.revoked_at == None)  # noqa: E711
+    ).select()
+    assert {r.permission_id for r in grants_before} == {"storage.kv"}
+
+    # Simulate a bundle that was installed/activated before the permission-catalog system
+    # existed: wipe BOTH grant tiers, leave `app_global_installs`/`app_active_versions`
+    # (install + activation state) untouched -- `already_installed` and `_already_active`
+    # will both report `True` on the re-run below, exactly like a real pre-existing bundle.
+    await install_dal(install_dal.app_permission_requests.app_id == entry.app_id).delete()
+    await install_dal(install_dal.community_permission_grants.app_id == entry.app_id).delete()
+    assert not await get_approved_permission_ids(
+        install_dal, app_id=entry.app_id, version=entry.version
+    )
+
+    second = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in second] == ["no_op"], "install/activation state is untouched"
+
+    approved_after = await get_approved_permission_ids(
+        install_dal, app_id=entry.app_id, version=entry.version
+    )
+    assert approved_after == frozenset({"storage.kv"}), (
+        "GLOBAL tier (app_permission_requests) must be backfilled on every seeder run, "
+        "not just the first install"
+    )
+    grants_after = await install_dal(
+        (install_dal.community_permission_grants.app_id == entry.app_id)
+        & (install_dal.community_permission_grants.community_id == community_id)
+        & (install_dal.community_permission_grants.revoked_at == None)  # noqa: E711
+    ).select()
+    assert {r.permission_id for r in grants_after} == {"storage.kv"}, (
+        "COMMUNITY tier (community_permission_grants) must be re-granted once the GLOBAL "
+        "ceiling is backfilled -- a pre-existing core bundle must end up with a live grant "
+        "row matching its manifest's declared capabilities"
+    )
+
+
 async def test_seed_one_new_digest_publishes_a_new_version(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A bumped catalog version + new artifact activates a NEW version_id, not a no-op."""
     _patch_validator_and_storage(monkeypatch)
-    entry = _write_bundle(tmp_path)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
     await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
 
     new_manifest = {**_MANIFEST, "version": "1.0.1"}
@@ -252,7 +635,7 @@ async def test_seed_one_new_digest_publishes_a_new_version(
     active_row = (
         await install_dal(
             (install_dal.app_active_versions.app_id == entry.app_id)
-            & (install_dal.app_active_versions.community_id == 0)
+            & (install_dal.app_active_versions.community_id == community_id)
         ).select()
     ).first()
     new_version_row = (
@@ -297,6 +680,10 @@ async def test_seed_one_activates_every_configured_target_independently(
     other_tenant_id = await install_dal.tenants.async_insert(
         slug="other-tenant", display_name="Other Tenant", is_active=True
     )
+    community_id = await _seed_community(install_dal, tenant_id=1, name="acme")
+    other_community_id = await _seed_community(
+        install_dal, tenant_id=int(other_tenant_id), name="other-community"
+    )
     entry = _write_bundle(tmp_path)
     entry = CatalogEntry(
         app_id=entry.app_id,
@@ -305,13 +692,18 @@ async def test_seed_one_activates_every_configured_target_independently(
         manifest_path=entry.manifest_path,
         artifact_path=entry.artifact_path,
         activation_targets=(
-            ActivationTarget(tenant_slug=TENANT_SLUG),
-            ActivationTarget(tenant_slug="other-tenant"),
+            ActivationTarget(tenant_slug=TENANT_SLUG, community_id=community_id),
+            ActivationTarget(tenant_slug="other-tenant", community_id=other_community_id),
         ),
     )
 
     results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
-    assert [r.outcome for r in results] == ["activated", "activated"]
+    assert [r.outcome for r in results] == [
+        "made_available",
+        "activated",
+        "made_available",
+        "activated",
+    ]
 
     active_rows = await install_dal(install_dal.app_active_versions.app_id == entry.app_id).select()
     assert {r.tenant_id for r in active_rows} == {1, int(other_tenant_id)}
@@ -325,12 +717,42 @@ async def test_seed_one_activates_every_configured_target_independently(
 def test_load_catalog_parses_the_real_repo_catalog() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     entries = load_catalog(repo_root / "bundles" / "core-bundles.yaml")
-    assert {e.app_id for e in entries} == {
+
+    # Subset, not exact-match (fix/seed-catalog-subset-assertion): core-bundles.yaml grows
+    # continuously -- the `command` bundle (gh-613-adjacent) and the ~12-bundle bot_process
+    # migration queued behind it both add entries here. An exact `==` against a frozen set
+    # would red this test on every single addition. This proves every KNOWN core bundle is
+    # still present (and the catalog still parses) without forbidding new ones.
+    known_app_ids = {
         "waddles.core.example.ping",
         "waddles.core.example.pyping",
+        "waddles.core.example.csping",
+        # PR batch 1 (2026-10-03): token-safe Python command bundles -- relay/kv only, no
+        # handle echoed back, so these ship ahead of the PII-tokenization pipeline #427/#429.
+        "waddles.core.example.eightball",
+        "waddles.core.example.roll",
+        "waddles.core.example.lurk",
+        "waddles.core.example.count",
     }
+    catalog_app_ids = {e.app_id for e in entries}
+    missing = known_app_ids - catalog_app_ids
+    assert not missing, f"expected core bundles missing from bundles/core-bundles.yaml: {missing}"
+
     for entry in entries:
+        # ActivationTarget(tenant_slug="global") defaults community_id=None -- every real
+        # catalog entry activates tenant-wide, never scoped to one community (seeder.
+        # ActivationTarget's own docstring: community_id=None is NOT a skip, see
+        # activate_tenant_wide()).
         assert entry.activation_targets == (ActivationTarget(tenant_slug="global"),)
+
+    # regression: csping 1.0.0 is permanently retired (fix/csping-version-bump) -- alpha's
+    # app_versions already had a 1.0.0 row published from the pre-#573 Dockerfile.core-bundles
+    # (missing the `COPY sdk/waddle-sdk-cs` layer), and #573's fix changed the compiled
+    # csping.wasm for that same nominal version, so re-seeding 1.0.0 now 409s as
+    # digest_conflict. 1.0.1 is the first version built from the corrected Dockerfile.
+    versions_by_app_id = {e.app_id: e.version for e in entries}
+    # 1.0.1 -> 1.0.2: manifest-only bump declaring `chat.send:<platform>` (least privilege).
+    assert versions_by_app_id["waddles.core.example.csping"] == "1.0.2"
 
 
 def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: Path) -> None:
@@ -409,7 +831,12 @@ async def test_seed_one_refuses_when_catalog_version_does_not_match_manifest(
 async def test_resolve_or_publish_version_reports_a_stalled_upload_clearly(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A prior crashed run left an app_version_uploads row that never reached PUBLISHED."""
+    """Preserved fail-loud path: an INSPECTING row touched moments ago is NOT self-healed.
+
+    `_recover_stalled_core_upload()`'s own grace window (`CORE_BUNDLE_SEEDER_STALL_RECOVERY_
+    SECONDS`, default 30s) refuses to touch a row this fresh -- it cannot yet safely assume
+    the owning process is dead -- so this remains a hard, operator-actionable failure.
+    """
     _patch_validator_and_storage(monkeypatch)
     entry = _write_bundle(tmp_path)
     now = datetime.now(UTC)
@@ -427,6 +854,109 @@ async def test_resolve_or_publish_version_reports_a_stalled_upload_clearly(
     with pytest.raises(ApiError) as excinfo:
         await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
     assert excinfo.value.code == "stalled_core_bundle_upload"
+
+
+# regression: the actual alpha incident this fixes -- a prior seeder Job crashed mid-INSPECTING
+# (e.g. after a SeaweedFS blip) and Kubernetes restarted the Job per its own backoffLimit well
+# inside bundle_version_service's own 15m general-purpose stall-timeout window, so create_version()
+# alone never got a chance to self-heal it; the seeder must recover its OWN orphaned row instead
+# of crashing the whole Helm hook (gh "stalled_core_bundle_upload", alpha stuck at 33/40 bundles).
+async def test_seed_one_self_heals_an_orphaned_stalled_inspecting_row(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)
+    stale = datetime.now(UTC) - timedelta(minutes=5)
+    orphaned_id = await install_dal.app_version_uploads.async_insert(
+        app_id=entry.app_id,
+        version=entry.version,
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="rust",
+        status="INSPECTING",
+        created_at=stale,
+        updated_at=stale,
+        status_changed_at=stale,
+    )
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+
+    upload_row = (
+        await install_dal(install_dal.app_version_uploads.app_id == entry.app_id).select()
+    ).first()
+    assert upload_row.status == STATUS_PUBLISHED
+    # The orphaned row was reused in place (create_version()'s own REJECTED-row-reuse path),
+    # never left behind as a second row alongside a fresh one.
+    assert upload_row.id == orphaned_id
+
+    all_rows = await install_dal(
+        (install_dal.app_version_uploads.app_id == entry.app_id)
+        & (install_dal.app_version_uploads.version == entry.version)
+    ).select()
+    assert len(all_rows) == 1
+
+
+async def test_seed_one_self_heal_is_idempotent_on_a_second_rerun(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second seeder run after a successful self-heal is a clean no_op, not a repeat conflict."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)
+    stale = datetime.now(UTC) - timedelta(minutes=5)
+    await install_dal.app_version_uploads.async_insert(
+        app_id=entry.app_id,
+        version=entry.version,
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="rust",
+        status="INSPECTING",
+        created_at=stale,
+        updated_at=stale,
+        status_changed_at=stale,
+    )
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    assert [r.outcome for r in results] == ["no_op"]
+
+
+async def test_resolve_or_publish_version_still_fails_loud_for_an_ambiguous_published_row(
+    install_dal: Any, tmp_path: Path
+) -> None:
+    """Preserved fail-loud path: a PUBLISHED upload row with no matching app_versions row.
+
+    `_resolve_or_publish_version()` already checked `app_versions` directly first and only
+    reaches `create_version()` when no published version exists there -- so an
+    `app_version_uploads` row claiming PUBLISHED at this point means the two tables disagree.
+    That is a genuine data-integrity gap, never a crash artifact, and `_recover_stalled_core_
+    upload()` must never auto-resolve it no matter how old the row is.
+    """
+    entry = _write_bundle(tmp_path)
+    long_ago = datetime.now(UTC) - timedelta(hours=1)
+    await install_dal.app_version_uploads.async_insert(
+        app_id=entry.app_id,
+        version=entry.version,
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="rust",
+        status=STATUS_PUBLISHED,
+        created_at=long_ago,
+        updated_at=long_ago,
+        status_changed_at=long_ago,
+    )
+
+    with pytest.raises(ApiError) as excinfo:
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert excinfo.value.code == "stalled_core_bundle_upload"
+
+    # Untouched -- still PUBLISHED, never reset/deleted by the self-heal path.
+    upload_row = (
+        await install_dal(install_dal.app_version_uploads.app_id == entry.app_id).select()
+    ).first()
+    assert upload_row.status == STATUS_PUBLISHED
 
 
 # ---------------------------------------------------------------------------
@@ -494,10 +1024,13 @@ async def test_run_examines_every_catalog_entry_and_reports_a_nonzero_exit_on_an
     exit_code = await seeder._run(tmp_path, catalog_path)
 
     assert exit_code == 1  # non-zero: 2 of 3 bundles failed
-    active = await install_dal(
-        install_dal.app_active_versions.app_id == "waddles.core.example.ping"
+    # This catalog's own activation_targets carry no community_id -- TENANT-tier
+    # availability only (see `ActivationTarget`'s own docstring), not COMMUNITY activation.
+    available = await install_dal(
+        (install_dal.bundle_tenant_availability.app_id == "waddles.core.example.ping")
+        & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
     ).select()
-    assert len(active) == 1  # the one good bundle still seeded successfully
+    assert len(available) == 1  # the one good bundle still seeded successfully
 
 
 def _patch_run_dependencies(install_dal: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -561,19 +1094,25 @@ async def test_run_rerun_with_the_same_digest_is_a_clean_no_op_at_process_level(
     assert len(versions) == 1  # never republished
 
 
-async def test_run_reports_a_clear_digest_conflict_and_nonzero_exit(
+async def test_run_reports_a_clear_digest_conflict_as_a_warning_and_clean_exit(
     install_dal: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A different-digest re-seed at the same version fails loudly, exit 1, clear log line.
+    """regression: gh-576 -- a digest conflict is logged clearly but no longer fails the Job.
 
-    Guards against the exact operator-facing regression this fix closes: `str(ApiError(...))`
-    renders as a raw `(message, status_code, code)` args tuple (ApiError has no
+    `digest_conflict` is in `RECOVERABLE_API_ERROR_CODES` (componentize-py's Python bundles
+    can legitimately drift byte-for-byte across rebuilds with no source change -- see that
+    constant's own docstring); `_run()` now logs it at WARNING with the full operator-facing
+    detail and exits 0 rather than blocking every subsequent `helm upgrade` forever on a
+    cosmetic artifact-byte mismatch the operator cannot even durably fix (the NEXT rebuild can
+    drift again). Guards against the original operator-facing regression too: `str(ApiError
+    (...))` renders as a raw `(message, status_code, code)` args tuple (ApiError has no
     `Exception.__init__()` call, see services/errors.py) unless `_run()` special-cases
-    `ApiError` and logs `.message`/`.code` directly -- assert the log record actually carries
-    the human-readable message and the `digest_conflict` code, not the tuple repr.
+    `ApiError` and embeds `.message`/`.code` in the RENDERED log line itself -- not only in
+    `extra` (which `caplog` captures regardless of formatter, masking the gap in CI; a plain
+    `kubectl logs` tail never renders `extra` under this module's bare `logging.basicConfig()`).
     """
     _patch_validator_and_storage(monkeypatch)
     _patch_run_dependencies(install_dal, monkeypatch)
@@ -605,22 +1144,165 @@ async def test_run_reports_a_clear_digest_conflict_and_nonzero_exit(
     # catalog version string (e.g. a non-reproducible build drifting between runs).
     (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-drifted")
 
-    with caplog.at_level("ERROR", logger="waddles.hub_api.core_bundle_seeder"):
+    # INFO (not WARNING) -- need both the WARNING conflict line AND the INFO summary line.
+    with caplog.at_level("INFO", logger="waddles.hub_api.core_bundle_seeder"):
         second_exit = await seeder._run(tmp_path, catalog_path)
 
-    assert second_exit == 1  # fail-closed: never silently overwrites app_versions
+    assert second_exit == 0  # recoverable: never blocks the Helm hook
 
     conflict_records = [
         r
         for r in caplog.records
-        if r.getMessage() == "core-bundle-seeder: bundle failed" and r.app_id == entry.app_id
+        if r.name == "waddles.hub_api.core_bundle_seeder"
+        and r.levelname == "WARNING"
+        and getattr(r, "error_code", None) == "digest_conflict"
     ]
-    assert conflict_records, "expected a logged failure for the conflicting bundle"
+    assert conflict_records, "expected a logged warning for the conflicting bundle"
     record = conflict_records[0]
+    # The app_id, version, code, and message are in the RENDERED message itself -- never
+    # only in `extra`.
+    rendered = record.getMessage()
+    assert entry.app_id in rendered
+    assert "digest_conflict" in rendered
+    assert "ACTION REQUIRED" in rendered
+    assert "DIFFERENT digest" in rendered
     assert record.error_code == "digest_conflict"
     assert record.status_code == 409
-    assert "ACTION REQUIRED" in record.error
-    assert "DIFFERENT digest" in record.error
+
+    summary_records = [
+        r for r in caplog.records if r.getMessage().startswith("core-bundle-seeder: summary")
+    ]
+    assert summary_records, "expected a summary log line"
+    expected = f"{entry.app_id}@{entry.version} (digest_conflict)"
+    assert expected in summary_records[-1].skipped_conflicts[0]
+
+
+async def test_run_a_fatal_api_error_still_fails_the_run_and_other_bundles_still_seed(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every ApiError code outside RECOVERABLE_API_ERROR_CODES still fails the run.
+
+    Full detail still lands in the rendered line (not only in `extra`), and one bundle's
+    failure never stops the remaining catalog entries from being processed.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+
+    _write_bundle(tmp_path)  # ping.manifest.yaml + ping.wasm at tmp_path
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": "waddles.core.example.ping",
+                        "version": "1.0.0",
+                        "language": "rust",
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": "no-such-tenant"}],
+                    },
+                    {
+                        "app_id": "waddles.core.example.ping",
+                        "version": "1.0.0",
+                        "language": "rust",
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("ERROR", logger="waddles.hub_api.core_bundle_seeder"):
+        exit_code = await seeder._run(tmp_path, catalog_path)
+
+    assert exit_code == 1  # tenant_not_found is NOT in RECOVERABLE_API_ERROR_CODES
+
+    failure_records = [
+        r for r in caplog.records if r.levelname == "ERROR" and "tenant_not_found" in r.getMessage()
+    ]
+    assert failure_records, "expected the tenant_not_found ApiError logged with full detail"
+    assert "no-such-tenant" in failure_records[0].getMessage()
+
+    # The second catalog entry (same bundle, a valid tenant) still seeded despite the first
+    # entry's failure -- one bundle's fatal error never aborts the batch.
+    available = await install_dal(
+        (install_dal.bundle_tenant_availability.app_id == "waddles.core.example.ping")
+        & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
+    ).select()
+    assert len(available) == 1
+
+
+async def test_run_logs_the_exception_type_and_message_on_an_unexpected_storage_failure(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """regression: the alpha `!ping` blocker.
+
+    A boto3 `ClientError` (bad S3 credentials / bucket-grant mismatch, see storage_service's
+    `BUNDLE_BUCKET_NAME` split) landed in `_run()`'s generic `except Exception` branch and
+    rendered as a bare "core-bundle-seeder: bundle failed" with NO detail under this module's
+    own `logging.basicConfig()` (default format drops every `extra` key). The exception's type
+    and message must now be in the message string itself, not only in `extra` (which `caplog`
+    captures regardless, but a plain `kubectl logs` tail never renders).
+    """
+    from services import bundle_version_service as bvs
+
+    monkeypatch.setattr(
+        bvs, "validate_component", AsyncMock(return_value=ComponentValidationResult(ok=True))
+    )
+    monkeypatch.setattr(
+        bvs.storage_service,
+        "upload_bundle_component",
+        AsyncMock(side_effect=ConnectionError("access denied: dummy InvalidAccessKeyId")),
+    )
+    _patch_run_dependencies(install_dal, monkeypatch)
+
+    entry = _write_bundle(tmp_path)
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": entry.app_id,
+                        "version": entry.version,
+                        "language": "rust",
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("ERROR", logger="waddles.hub_api.core_bundle_seeder"):
+        exit_code = await seeder._run(tmp_path, catalog_path)
+
+    assert exit_code == 1
+
+    failure_records = [
+        r
+        for r in caplog.records
+        if getattr(r, "app_id", None) == entry.app_id and r.levelname == "ERROR"
+    ]
+    assert failure_records, "expected a logged failure for the storage exception"
+    record = failure_records[0]
+    # The error type/message are in the rendered message itself -- never only in `extra`.
+    assert "ConnectionError" in record.getMessage()
+    assert "access denied: dummy InvalidAccessKeyId" in record.getMessage()
+    assert record.error_type == "ConnectionError"
+    assert record.error == "access denied: dummy InvalidAccessKeyId"
 
 
 # ---------------------------------------------------------------------------
@@ -804,6 +1486,12 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
     monkeypatch.setattr(seeder.HubAPIConfig, "from_env", staticmethod(lambda: _FakeConfig()))
     monkeypatch.setattr(install_dal, "close", AsyncMock())
 
+    # Auto-bind (app_source_binding_service.sync_bindings()) only runs at COMMUNITY-tier
+    # activation under the 3-tier split -- both the platform connection AND the bundle's
+    # own activation target need the SAME real community_id (sync_bindings() matches
+    # ingest_sources.community_id exactly, no tenant-wide fallback for a real community_id).
+    community_id = await _seed_community(install_dal)
+
     _write_pyping_bundle(tmp_path)
     catalog_path = tmp_path / "core-bundles.yaml"
     catalog_path.write_text(
@@ -815,6 +1503,7 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
                         "platform": "discord",
                         "source_id": "dg-474965105759748096",
                         "label": "svc-ingest Discord guild",
+                        "community_id": community_id,
                     }
                 ],
                 "bundles": [
@@ -824,7 +1513,9 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
                         "language": "python",
                         "manifest_path": "pyping.manifest.yaml",
                         "artifact_path": "pyping.wasm",
-                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                        "activation_targets": [
+                            {"tenant_slug": TENANT_SLUG, "community_id": community_id}
+                        ],
                     }
                 ],
             }
@@ -846,3 +1537,355 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
     ).select()
     assert {b.platform for b in bindings} == {"discord"}
     assert bindings.first().source_id == "dg-474965105759748096"
+
+
+async def test_run_registers_platform_connection_and_binds_tenant_wide_to_discord(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL shape: `bundles/core-bundles.yaml` declares `community_id: null` everywhere.
+
+    Regression: seeder skipped activation for community_id null (alpha
+    2026-10-02) -- this is the end-to-end reproduction of the alpha bug,
+    `CORE_BUNDLES_PLATFORM_CONNECTIONS`-shaped connection included (the
+    exact object shape `k8s/helm/waddlebot/templates/core-bundle-seeder-
+    job.yaml` renders from `pipeline.rustDataPlane.svcProcess.
+    processIngestPlatform`/`processIngestSourceId`), proving the fix
+    activates tenant-wide AND auto-binds the tenant-wide Discord ingest
+    source in one `_run()` pass -- no real `communities` row anywhere in
+    this test.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    digest = hashlib.sha256(_PYPING_COMPONENT_BYTES).hexdigest()
+    from services import bundle_version_service as bvs
+
+    monkeypatch.setattr(
+        bvs.storage_service,
+        "upload_bundle_component",
+        AsyncMock(return_value=f"bundles/waddles.core.example.pyping/1.0.0/{digest}.wasm"),
+    )
+    monkeypatch.setattr(bvs.valkey_admin_client, "build_client", lambda: AsyncMock())
+
+    async def _fake_build_install_dal(database_url: str, pool_size: int) -> Any:
+        return install_dal
+
+    class _FakeConfig:
+        database_url = "sqlite://"
+
+    monkeypatch.setattr(seeder, "build_install_dal", _fake_build_install_dal)
+    monkeypatch.setattr(seeder.HubAPIConfig, "from_env", staticmethod(lambda: _FakeConfig()))
+    monkeypatch.setattr(install_dal, "close", AsyncMock())
+
+    _write_pyping_bundle(tmp_path)
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "platform_connections": [
+                    {
+                        "tenant_slug": TENANT_SLUG,
+                        "platform": "discord",
+                        "source_id": "dg-474965105759748096",
+                        "label": "svc-ingest platform connection",
+                        "community_id": None,
+                    }
+                ],
+                "bundles": [
+                    {
+                        "app_id": "waddles.core.example.pyping",
+                        "version": "1.0.0",
+                        "language": "python",
+                        "manifest_path": "pyping.manifest.yaml",
+                        "artifact_path": "pyping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG, "community_id": None}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = await seeder._run(tmp_path, catalog_path)
+
+    assert exit_code == 0
+    connection_row = (
+        await install_dal(install_dal.ingest_sources.source_id == "dg-474965105759748096").select()
+    ).first()
+    assert connection_row is not None
+    assert connection_row.community_id is None
+
+    active_row = (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == "waddles.core.example.pyping")
+            & (
+                install_dal.app_active_versions.community_id
+                == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
+            )
+        ).select()
+    ).first()
+    assert active_row is not None
+
+    bindings = await install_dal(
+        install_dal.app_source_bindings.app_id == "waddles.core.example.pyping"
+    ).select()
+    assert {b.platform for b in bindings} == {"discord"}
+    assert bindings.first().source_id == "dg-474965105759748096"
+    assert bindings.first().community_id == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
+
+
+# ---------------------------------------------------------------------------
+# `reconcile_removed_core_bundles()` -- regression for the uninstall/scale-
+# sync symmetry gap (requirement, Justin: "uninstall should delete them just
+# like install adds them, otherwise our scale will get out of sync" --
+# horizontally-scaled hub-api replicas, and the Rust data plane, all read
+# `app_active_versions` directly). Scoping to `approval_source="system:
+# core-seeder"` CURRENT rows is the safety boundary under test here.
+# ---------------------------------------------------------------------------
+
+
+async def _seeded_system_activation(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    app_id: str = "waddles.core.example.ping",
+) -> tuple[str, int]:
+    """Seed one SYSTEM-owned COMMUNITY-tier activation via the real `seed_one()` path.
+
+    Returns `(app_id, community_id)` -- the caller drives `reconcile_removed_core_bundles()`
+    against it directly, rather than through `_run()`'s own catalog-loading/looping layer.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(
+        tmp_path, manifest={**_MANIFEST, "app_id": app_id}, community_id=community_id
+    )
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    return app_id, community_id
+
+
+async def _active_row(install_dal: Any, *, app_id: str, community_id: int) -> Any:
+    return (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == app_id)
+            & (install_dal.app_active_versions.community_id == community_id)
+        ).select()
+    ).first()
+
+
+async def test_reconcile_removed_core_bundles_deletes_a_dropped_system_bundle(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`app_id` dropped from the catalog -- its SYSTEM-owned `app_active_versions` row is GONE.
+
+    Regression for the requirement itself: before this fix the seeder only ever activated,
+    never uninstalled, so a bundle removed from `bundles/core-bundles.yaml` left a stale row
+    behind forever -- exactly the horizontal-scale drift the requirement names.
+    """
+    app_id, community_id = await _seeded_system_activation(install_dal, tmp_path, monkeypatch)
+    assert await _active_row(install_dal, app_id=app_id, community_id=community_id) is not None
+
+    results, failures = await reconcile_removed_core_bundles(
+        install_dal,
+        catalog_app_ids=frozenset(),  # app_id no longer in the catalog
+    )
+
+    assert failures == 0
+    assert [r.outcome for r in results] == ["uninstalled_reconcile"]
+    assert results[0].app_id == app_id
+    assert await _active_row(install_dal, app_id=app_id, community_id=community_id) is None
+
+
+async def test_reconcile_removed_core_bundles_preserves_an_app_still_in_the_catalog(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The common case every real seeder run hits: nothing dropped, nothing deleted."""
+    app_id, community_id = await _seeded_system_activation(install_dal, tmp_path, monkeypatch)
+
+    results, failures = await reconcile_removed_core_bundles(
+        install_dal, catalog_app_ids=frozenset({app_id})
+    )
+
+    assert failures == 0
+    assert results == []
+    assert await _active_row(install_dal, app_id=app_id, community_id=community_id) is not None
+
+
+async def test_reconcile_removed_core_bundles_never_touches_a_human_reactivated_app(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CRITICAL scoping test: a human-owned activation must never be deleted by this sweep.
+
+    A community-admin who later re-activates a dropped core bundle through the human-gated
+    `activate_for_community()` path supersedes the SYSTEM-owned `app_install_approvals` row
+    with their own `approval_source="human"` one -- the exact same upsert `activate_for_
+    community()` already performs on `app_active_versions` for a re-activation. The reconcile
+    sweep's query predicate (`approval_source == SYSTEM_ACTOR`) must no longer match this row,
+    by construction, even though `app_id` is still absent from the catalog.
+    """
+    app_id, community_id = await _seeded_system_activation(install_dal, tmp_path, monkeypatch)
+
+    # A human community-admin takes ownership of the same (tenant, community, app_id).
+    await activate_for_community(
+        install_dal,
+        tenant_id=1,
+        community_id=community_id,
+        app_id=app_id,
+        activated_by=7,  # a real human actor id -- never SYSTEM
+    )
+    approval_row = (
+        await install_dal(
+            (install_dal.app_install_approvals.app_id == app_id)
+            & (install_dal.app_install_approvals.superseded_by == None)  # noqa: E711
+        ).select()
+    ).first()
+    assert approval_row.approval_source == "human"
+
+    results, failures = await reconcile_removed_core_bundles(
+        install_dal,
+        catalog_app_ids=frozenset(),  # still absent from the catalog
+    )
+
+    assert failures == 0
+    assert results == []  # never matched -- the human row is not a reconcile candidate at all
+    assert await _active_row(install_dal, app_id=app_id, community_id=community_id) is not None
+
+
+async def test_reconcile_removed_core_bundles_kill_switch_on_preserves_legacy_behavior(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`waddles.disable-seeder-uninstall-reconcile` ON reverts to the legacy activate-only seeder.
+
+    Opt-out kill-switch (critical-rules.md "Core platform mechanisms... opt-out kill-switch"):
+    ON is the escape hatch for a same-day mitigation without a redeploy, never the default.
+    """
+    app_id, community_id = await _seeded_system_activation(install_dal, tmp_path, monkeypatch)
+    monkeypatch.setattr(seeder, "feature_enabled", AsyncMock(return_value=True))
+
+    results, failures = await reconcile_removed_core_bundles(
+        install_dal, catalog_app_ids=frozenset()
+    )
+
+    assert failures == 0
+    assert results == []  # kill-switch ON -- no deletes performed
+    assert await _active_row(install_dal, app_id=app_id, community_id=community_id) is not None
+
+
+async def test_reconcile_removed_core_bundles_is_idempotent_on_rerun(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second sweep over an already-deleted row is a clean no-op, never a failure."""
+    app_id, community_id = await _seeded_system_activation(install_dal, tmp_path, monkeypatch)
+
+    first_results, first_failures = await reconcile_removed_core_bundles(
+        install_dal, catalog_app_ids=frozenset()
+    )
+    assert first_failures == 0
+    assert len(first_results) == 1
+
+    second_results, second_failures = await reconcile_removed_core_bundles(
+        install_dal, catalog_app_ids=frozenset()
+    )
+    assert second_failures == 0
+    assert second_results == []  # already gone -- NOT_FOUND swallowed, not re-reported
+
+
+async def test_run_wires_the_reconcile_sweep_end_to_end(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_run()` itself, not just the unit, performs the sweep.
+
+    A dropped bundle's second `helm upgrade` run deletes its stale `app_active_versions`
+    row with a clean (0) exit code.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+    community_id = await _seed_community(install_dal)
+    _write_bundle(tmp_path, community_id=community_id)  # ping.manifest.yaml + ping.wasm
+
+    first_catalog = tmp_path / "core-bundles.yaml"
+    first_catalog.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": "waddles.core.example.ping",
+                        "version": "1.0.0",
+                        "language": "rust",
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [
+                            {"tenant_slug": TENANT_SLUG, "community_id": community_id}
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert await seeder._run(tmp_path, first_catalog) == 0
+    assert (
+        await _active_row(
+            install_dal, app_id="waddles.core.example.ping", community_id=community_id
+        )
+        is not None
+    )
+
+    # Second run: the catalog no longer lists the bundle at all (dropped entirely).
+    second_catalog = tmp_path / "core-bundles-empty.yaml"
+    second_catalog.write_text(yaml.safe_dump({"bundles": []}), encoding="utf-8")
+
+    assert await seeder._run(tmp_path, second_catalog) == 0
+    assert (
+        await _active_row(
+            install_dal, app_id="waddles.core.example.ping", community_id=community_id
+        )
+        is None
+    )
+
+
+async def test_raw_guild_connection_resolves_via_raw_id_and_binds_at_dg_prefixed_source(
+    install_dal: Any,
+) -> None:
+    """Raw guild id -> community via raw id; ingest source registered at svc-ingest's dg-{id}."""
+    from services.bundle_install_dal import raw_sql_write
+
+    for ddl in (
+        "ALTER TABLE communities ADD COLUMN platform VARCHAR(50)",
+        "ALTER TABLE communities ADD COLUMN platform_server_id VARCHAR(255)",
+        "ALTER TABLE communities ADD COLUMN is_active BOOLEAN DEFAULT 1",
+        "CREATE TABLE IF NOT EXISTS community_servers (id INTEGER PRIMARY KEY, "
+        "community_id INTEGER, platform VARCHAR(50), platform_server_id VARCHAR(255), "
+        "status VARCHAR(50))",
+    ):
+        try:
+            await raw_sql_write(install_dal, ddl)
+        except Exception:  # noqa: BLE001, S110 -- column may already exist in the fixture schema
+            pass
+    guild = "474965105759748096"
+    cid = await _seed_community(install_dal, name="guild-community")
+    await raw_sql_write(
+        install_dal,
+        "INSERT INTO community_servers (community_id, platform, platform_server_id, status) "
+        "VALUES (:c, 'discord', :g, 'approved')",
+        {"c": cid, "g": guild},
+    )
+    conn = seeder.PlatformConnection(
+        tenant_slug=TENANT_SLUG, platform="discord", source_id=guild, label=guild
+    )
+    assert (
+        await seeder.resolve_connection_community(install_dal, tenant_id=1, connection=conn) == cid
+    )
+
+    result = await seeder.seed_platform_connection(install_dal, conn)
+    assert result.source_id == f"dg-{guild}"
+    assert (
+        len(await install_dal(install_dal.ingest_sources.source_id == f"dg-{guild}").select()) == 1
+    )
+    assert len(await install_dal(install_dal.ingest_sources.source_id == guild).select()) == 0
+
+
+def test_ingest_source_id_matches_svc_ingest_conventions() -> None:
+    assert seeder.ingest_source_id("discord", "123") == "dg-123"
+    assert seeder.ingest_source_id("discord", "dg-123") == "dg-123"
+    assert seeder.ingest_source_id("twitch", "#PenguinzPlays") == "tw-penguinzplays"
+    assert seeder.ingest_source_id("slack", "T1") == "T1"

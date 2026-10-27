@@ -2,13 +2,29 @@
 Calendar Service - Event management with CRUD, permissions, and platform sync
 Implements complete event lifecycle management with approval workflows
 """
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 
+from services.event_discord_sync_client import (
+    EventDiscordSyncClient,
+    get_event_discord_sync_client,
+)
+
 logger = logging.getLogger(__name__)
+
+#: Updating any of these fields is what makes an already-pushed Discord
+#: scheduled event stale -- the set `update_event()` checks `changes`
+#: against before scheduling a re-sync. Deliberately excludes `timezone`
+#: (hub-api's push always reads the current row, `event_date`/`end_date`
+#: already carry the tz-aware instant) and anything not sent to Discord
+#: (max_attendees, category_id, tags, ...).
+_DISCORD_VISIBLE_FIELDS = frozenset({
+    'title', 'description', 'event_date', 'end_date', 'location'
+})
 
 
 @dataclass
@@ -72,10 +88,11 @@ class CalendarService:
     - AAA (Auth/Authz/Audit) logging
     """
 
-    def __init__(self, dal, permission_service=None):
+    def __init__(self, dal, permission_service=None, sync_client: Optional[EventDiscordSyncClient] = None):
         """Initialize calendar service with database abstraction layer."""
         self.dal = dal
         self.permission_service = permission_service
+        self.sync_client = sync_client or get_event_discord_sync_client()
 
     async def create_event(
         self,
@@ -201,6 +218,11 @@ class CalendarService:
                 f"[AUDIT] SUCCESS: Event {event_id} created by {user_context.get('username')} "
                 f"(community={community_id}, status={status})"
             )
+
+            # Auto-approved at creation (no approval workflow needed) -> push to Discord now.
+            # A still-`pending` event waits for `approve_event()` to trigger the first sync.
+            if status == 'approved':
+                await self._maybe_sync_to_discord(event_id, 'create')
 
             # Return created event
             return {
@@ -571,6 +593,18 @@ class CalendarService:
                 f"(fields: {', '.join(data.keys())})"
             )
 
+            # Re-sync only when a Discord-visible field actually changed, on an
+            # approved event that's already been pushed once (`discord_event_id`
+            # set). An edit to a pending/unpushed/never-pushed event has nothing
+            # live on Discord to update.
+            discord_event_id = existing.get('sync', {}).get('discord_event_id')
+            if (
+                existing['status'] == 'approved'
+                and discord_event_id
+                and any(field in _DISCORD_VISIBLE_FIELDS for field in changes)
+            ):
+                await self._maybe_sync_to_discord(event_id, 'update')
+
             # Return updated event
             return await self.get_event(event_id)
 
@@ -638,6 +672,11 @@ class CalendarService:
             logger.info(
                 f"[AUDIT] SUCCESS: Event {event_id} deleted by {user_context.get('username')}"
             )
+
+            # Only cancel on Discord if it was ever actually pushed there.
+            discord_event_id = existing.get('sync', {}).get('discord_event_id')
+            if discord_event_id:
+                await self._maybe_sync_to_discord(event_id, 'cancel')
 
             return True
 
@@ -719,6 +758,10 @@ class CalendarService:
                 f"[AUDIT] SUCCESS: Event {event_id} approved by {user_context.get('username')}"
             )
 
+            # First Discord push happens on approval, not creation, for events
+            # that needed the approval workflow (status was 'pending' until now).
+            await self._maybe_sync_to_discord(event_id, 'create')
+
             # Return updated event
             return await self.get_event(event_id)
 
@@ -765,7 +808,9 @@ class CalendarService:
                 )
                 return False
 
-            # Reject event
+            # No Discord sync trigger here, deliberately: a rejected event was
+            # never approved, so it was never pushed to Discord in the first
+            # place (see create_event()/approve_event()'s own sync hooks).
             query = """
                 UPDATE calendar_events
                 SET status = 'rejected',
@@ -803,6 +848,73 @@ class CalendarService:
         except Exception as e:
             logger.error(f"[AUDIT] ERROR: Event rejection failed: {e}")
             return False
+
+    async def _maybe_sync_to_discord(self, event_id: int, action: str) -> None:
+        """Trigger hub-api's Discord event-sync engine for `event_id` -- never raises.
+
+        Persists `sync_status='pending'` immediately (synchronously, before
+        returning) so `GET .../sync/status` reflects "a sync is in flight"
+        right away -- hub-api's own `sync_event()` overwrites this with the
+        real outcome once its push completes. The actual HTTP call to
+        hub-api is then handed to `asyncio.create_task` (fire-and-forget):
+        Discord/hub-api latency or an outage must never block the calendar
+        HTTP response this is called from. Anything the background task
+        fails to converge is picked up by the reconcile CronJob, since the
+        row is left in (or returns to) `sync_status='pending'`.
+        """
+        try:
+            await self.dal.execute(
+                "UPDATE calendar_events SET sync_status = 'pending', updated_at = NOW() "
+                "WHERE id = $1",
+                [event_id]
+            )
+        except Exception as e:
+            logger.error(
+                f"[SYNC] ERROR: Failed to mark event {event_id} pending before sync "
+                f"(action={action}): {e}"
+            )
+
+        try:
+            asyncio.create_task(self._push_to_discord(event_id, action))
+        except RuntimeError as e:
+            # No running event loop (e.g. a sync test harness) -- log and
+            # let the reconcile CronJob pick it up; never raise into the caller.
+            logger.error(
+                f"[SYNC] ERROR: Could not schedule Discord sync task for event {event_id} "
+                f"(action={action}): {e}"
+            )
+
+    async def _push_to_discord(self, event_id: int, action: str) -> None:
+        """Background task: the actual hub-api call `_maybe_sync_to_discord` schedules.
+
+        `self.sync_client` is itself fail-closed (never raises) -- the
+        `except Exception` here is belt-and-suspenders only, so a bug in
+        the client can never crash this fire-and-forget task silently.
+        """
+        try:
+            result = await self.sync_client.sync_event(event_id, action)
+        except Exception as e:
+            logger.error(
+                f"[SYNC] ERROR: Unexpected error syncing event {event_id} "
+                f"(action={action}): {e}"
+            )
+            return
+
+        if not result.ok:
+            logger.error(
+                f"[SYNC] ERROR: Discord sync call failed for event {event_id} "
+                f"(action={action}): {result.sync_error}"
+            )
+        elif result.sync_status == 'sync_error':
+            logger.warning(
+                f"[SYNC] WARNING: Discord sync reported an error for event {event_id} "
+                f"(action={action}): {result.sync_error}"
+            )
+        else:
+            logger.info(
+                f"[SYNC] SUCCESS: Discord sync triggered for event {event_id} "
+                f"(action={action}, sync_status={result.sync_status})"
+            )
 
     async def search_events(
         self,

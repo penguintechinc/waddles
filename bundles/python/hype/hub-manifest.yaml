@@ -1,0 +1,40 @@
+schema_version: 2
+app_id: waddles.core.example.hype
+name: Hype Counter (Python)
+version: 1.0.3
+feature: waddles.core.example
+module: core
+provider: builtin
+language: python
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!hype"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!hype"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists the per-community hype counter total"
+  - id: "chat.send:discord"
+    justification: "hype replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "hype replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+routes_to: []

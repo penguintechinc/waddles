@@ -1,0 +1,43 @@
+# Combined Webhook Receiver Service - Dependencies
+
+# Core Framework
+quart>=0.20.0
+hypercorn>=0.16.0
+
+# HTTP Client (async)
+httpx>=0.27.0,<0.28.0
+
+# Slack SDK and Bolt (event-driven framework)
+slack-bolt>=1.18.0
+slack-sdk>=3.21.0
+
+# Microsoft Bot Framework and Teams SDK
+botbuilder-core>=4.16.0
+botbuilder-schema>=4.16.0
+botbuilder-integration-aiohttp>=4.16.0
+botframework-connector>=4.16.0
+
+# Mattermost SDK and WebSocket
+mattermostdriver>=7.3.0
+websockets>=12.0
+
+# Google Chat API and Auth
+google-api-python-client>=2.100
+google-auth>=2.25
+google-auth-httplib2>=0.2
+google-auth-oauthlib>=1.0
+
+# Common dependencies
+aiohttp>=3.9.0
+python-dotenv>=1.0.0
+
+# Database (required transitively: libs/flask_core imports penguin_dal
+# directly but does not declare it as its own dependency; every sibling
+# service in services/ already lists it explicitly)
+penguin-dal>=0.3.0
+pydal>=20240601.1
+
+# Development
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0

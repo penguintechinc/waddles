@@ -34,6 +34,7 @@ def _setup_module_imports(module_name: str) -> None:
             del sys.modules[key]
     sys.path.insert(0, os.path.join(_base_dir, module_name))
 
+
 # Import each module with isolated sys.path to avoid services/ collision
 _setup_module_imports('slack_action_module')
 from slack_action_module.config import Config as SlackConfig
@@ -559,7 +560,7 @@ async def startup():
     """Application startup"""
     logger.info("Starting Action Platforms Service...")
     init_services()
-    logger.info(f"Action Platforms Service started on port 8102")
+    logger.info("Action Platforms Service started on port 8102")
 
 
 @app.after_serving

@@ -197,7 +197,7 @@ async def _command_reload_listener(command_registry, redis_url):
                     import json
                     data = json.loads(message['data']) if isinstance(message['data'], str) else message['data']
                     logger.info(
-                        f"Command reload event received from marketplace",
+                        "Command reload event received from marketplace",
                         data=data
                     )
 

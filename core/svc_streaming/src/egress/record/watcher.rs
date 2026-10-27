@@ -22,6 +22,7 @@ use tokio::time::sleep;
 use tracing::Instrument;
 
 use crate::pipeline::model::PipelineId;
+use crate::telemetry::stream::{ExternalPeer, StreamMetrics};
 
 use super::index::{RecordingIndex, RecordingSegment};
 use super::metrics::RecordMetrics;
@@ -48,6 +49,7 @@ pub(super) struct WatcherContext {
     pub store: Arc<dyn ObjectStore>,
     pub index: RecordingIndex,
     pub metrics: RecordMetrics,
+    pub stream_metrics: StreamMetrics,
     pub free_space_probe: Arc<dyn FreeSpaceProbe>,
     /// `STREAM_DATA_DIR` root -- free space is checked here, not the
     /// per-pipeline subdirectory, since the whole mount is the shared spool
@@ -198,7 +200,14 @@ async fn upload_segment(ctx: &WatcherContext, entry: &SegmentFile) -> Result<(),
     async move {
         for attempt in 0..ctx.max_attempts_per_cycle {
             let attempt_started = Instant::now();
-            match try_upload_once(ctx, entry, &key, started_at).await {
+            match ctx
+                .stream_metrics
+                .time_external(
+                    ExternalPeer::ObjectStore,
+                    try_upload_once(ctx, entry, &key, started_at),
+                )
+                .await
+            {
                 Ok(()) => {
                     let uploaded_at = Utc::now();
                     ctx.metrics
@@ -519,6 +528,7 @@ mod tests {
             store: Arc::new(InMemory::new()),
             index: RecordingIndex::new(),
             metrics: register_metrics(&prometheus::Registry::new()),
+            stream_metrics: StreamMetrics::shared(),
             free_space_probe: Arc::new(DfFreeSpaceProbe),
             local_root: PathBuf::from("/tmp"),
             min_free_bytes: 1024 * 1024 * 1024,

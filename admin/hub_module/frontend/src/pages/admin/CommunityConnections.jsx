@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { LinkIcon } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
+import DiscordBotInstallLink from '../../components/settings/DiscordBotInstallLink';
 
 /**
  * Per-community OAuth connections page (gh-320) — lets a community admin
@@ -205,6 +206,8 @@ function CommunityConnections() {
           </button>
         </div>
       )}
+
+      <DiscordBotInstallLink />
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {PROVIDER_ORDER.map((provider) => {

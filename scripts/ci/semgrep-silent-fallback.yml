@@ -1,0 +1,140 @@
+# Semgrep rules for scripts/ci/check-no-stubs.sh's silent-fallback gate.
+#
+# Regression context: a `flags capability not wired -- TODO(M4+)` stub
+# returned a silent default (never logged, never surfaced) instead of an
+# explicit error, and shipped labeled "done" -- it took a multi-hour alpha
+# outage to notice the capability was never actually wired. The fix in
+# core/{svc_action,svc_process}/src/capabilities.rs now returns a loud,
+# explicit `not_implemented` error (see .ci/stub-allowlist.yml gh-598/599);
+# these rules catch the *next* version of that same mistake: a path that
+# swallows an error and substitutes a default value with no log/trace of
+# what happened.
+#
+# A loud `return Err(...)` / `raise ...` / explicit `not_implemented`
+# response is NOT a silent fallback and does not match these rules.
+
+rules:
+  # --- Rust: swallow a Result's error and substitute a default, no log call ---
+  - id: rust-silent-unwrap-or-default
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Error discarded and replaced with a default value (unwrap_or_default/
+      unwrap_or_else) with no tracing::warn!/error! call recording why.
+      Log before falling back, or propagate the error with `?`.
+    patterns:
+      - pattern-either:
+          - pattern: $X.unwrap_or_default()
+          - pattern: $X.unwrap_or_else(|$E| $DEFAULT)
+          - pattern: $X.ok().unwrap_or($DEFAULT)
+      - pattern-not-inside: |
+          { tracing::$LEVEL!(...); ... }
+      - pattern-not-inside: |
+          { log::$LEVEL!(...); ... }
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/*_test.rs"
+
+  # --- Python: `except ...: return <default>` with no logger call in the except body ---
+  - id: python-silent-except-return-default
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Exception handler returns a default value without a logging call.
+      Log the exception (type + message, penguin-utils logger) before
+      returning the fallback, or let it propagate.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              try:
+                  ...
+              except $EXC:
+                  return $DEFAULT
+          - pattern: |
+              try:
+                  ...
+              except $EXC as $E:
+                  return $DEFAULT
+      - pattern-not: |
+          try:
+              ...
+          except $EXC:
+              ...
+              logger.$METHOD(...)
+              return $DEFAULT
+      - pattern-not: |
+          try:
+              ...
+          except $EXC as $E:
+              ...
+              logger.$METHOD(...)
+              return $DEFAULT
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/test_*.py"
+
+  # --- Python: bare `except: pass` (or `except Exception: pass`) -- classic silent swallow ---
+  - id: python-bare-except-pass
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Bare except that silently swallows the error (pass, no log, no
+      re-raise). At minimum log the exception; prefer re-raising or
+      returning an explicit error to the caller.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              try:
+                  ...
+              except:
+                  pass
+          - pattern: |
+              try:
+                  ...
+              except $EXC:
+                  pass
+          - pattern: |
+              try:
+                  ...
+              except $EXC as $E:
+                  pass
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/test_*.py"
+
+  # --- Python: capability/handler denial returned with no log call -- the exact
+  #     shape of the gh-regression (a capability silently reports disabled/
+  #     default with nothing surfaced to telemetry).
+  - id: python-capability-silent-denial
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A capability/handler path returns a denial or default response with
+      no accompanying log call in the same except block. Add a logger call
+      before returning.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              try:
+                  ...
+              except $EXC:
+                  return {"enabled": False}
+          - pattern: |
+              try:
+                  ...
+              except $EXC:
+                  return None
+      - pattern-not: |
+          try:
+              ...
+          except $EXC:
+              ...
+              logger.$METHOD(...)
+              return $DEFAULT
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/test_*.py"

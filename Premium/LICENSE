@@ -5,6 +5,8 @@ Copyright (c) 2024 WaddleBot
 
 PREMIUM SOFTWARE LICENSE
 
+This is the COMMERCIAL counterpart to the open-core platform license (AGPL-3.0, see docs/LICENSE.md).
+
 This software is licensed exclusively to users with active WaddleBot Premium subscriptions.
 
 1. GRANT OF LICENSE
@@ -27,7 +29,7 @@ This software is licensed exclusively to users with active WaddleBot Premium sub
 4. PREMIUM FEATURES
    The following features are available exclusively to Premium subscribers:
    - Desktop Bridge Client
-   - Mobile Applications (Android/iOS)
+   - Mobile Applications (Android/iOS, distributed via the penguinm mobile repo)
    - Advanced Community Management
    - Premium Support
    - API Access

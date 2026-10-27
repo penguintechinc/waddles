@@ -71,8 +71,8 @@ def _int_arg(name: str, default: int) -> int:
 
 
 @activity_member_bp.route("/<int:community_id>/leaderboard/watch-time", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.activity:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.activity:read")  # type: ignore[misc]
 @validate_response(LeaderboardResponse)
 async def watch_time_leaderboard(
     community_id: int,
@@ -93,8 +93,8 @@ async def watch_time_leaderboard(
 
 
 @activity_member_bp.route("/<int:community_id>/leaderboard/messages", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.activity:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.activity:read")  # type: ignore[misc]
 @validate_response(LeaderboardResponse)
 async def message_leaderboard(
     community_id: int,
@@ -113,9 +113,9 @@ async def message_leaderboard(
 
 
 @activity_member_bp.route("/<int:community_id>/activity/my-stats", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.activity:read")  # type: ignore[untyped-decorator]
-@auth_required  # type: ignore[untyped-decorator]  # populates get_current_user() for "my" stats
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.activity:read")  # type: ignore[misc]
+@auth_required  # type: ignore[misc]  # populates get_current_user() for "my" stats
 @validate_response(MyActivityStatsResponse)
 async def my_activity_stats(
     community_id: int,
@@ -140,8 +140,8 @@ async def my_activity_stats(
 
 
 @activity_admin_bp.route("/<int:community_id>/leaderboard-config", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.activity:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.activity:admin")  # type: ignore[misc]
 @validate_response(LeaderboardConfigResponse)
 async def leaderboard_config_get(
     community_id: int,
@@ -156,8 +156,8 @@ async def leaderboard_config_get(
 
 
 @activity_admin_bp.route("/<int:community_id>/leaderboard-config", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.activity:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.activity:admin")  # type: ignore[misc]
 async def leaderboard_config_update(community_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/leaderboard-config`."""
     ctx = get_tenant_context(request)

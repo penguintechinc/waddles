@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -65,3 +66,64 @@ def test_build_client_allows_plaintext_when_tls_explicitly_disabled(
     monkeypatch.setenv("SECURITY_TRANSPORT_TLS", "false")
     client = build_client()
     assert client is not None
+
+
+# regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- the chart's
+# VALKEY_URL_TLS secret key is credential-free (password comes from a separate
+# VALKEY_PASSWORD env var, same split the Rust data-plane pods use), and the CA for
+# server-cert verification is mounted as a file, not an env var -- both must reach
+# redis.asyncio.from_url() for a real rediss:// connection to work.
+
+
+def test_build_client_injects_password_into_url_userinfo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VALKEY_URL", "rediss://valkey:6380/0")
+    monkeypatch.setenv("VALKEY_PASSWORD", "s3cret")
+    monkeypatch.setenv("VALKEY_CA_FILE", "/nonexistent/ca.crt")
+    captured: dict[str, object] = {}
+
+    def _fake_from_url(url: str, **kwargs: object) -> str:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return "client"
+
+    monkeypatch.setattr("redis.asyncio.from_url", _fake_from_url)
+    assert build_client() == "client"
+    assert captured["url"] == "rediss://:s3cret@valkey:6380/0"
+    assert "ssl_ca_certs" not in captured["kwargs"]  # CA file doesn't exist on disk
+
+
+def test_build_client_passes_ssl_ca_certs_when_ca_file_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ca_file = tmp_path / "valkey-ca.crt"
+    ca_file.write_text("fake-ca")
+    monkeypatch.setenv("VALKEY_URL", "rediss://valkey:6380/0")
+    monkeypatch.setenv("VALKEY_CA_FILE", str(ca_file))
+    captured: dict[str, object] = {}
+
+    def _fake_from_url(url: str, **kwargs: object) -> str:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return "client"
+
+    monkeypatch.setattr("redis.asyncio.from_url", _fake_from_url)
+    assert build_client() == "client"
+    assert captured["kwargs"] == {"ssl_ca_certs": str(ca_file)}
+
+
+def test_build_client_never_overrides_url_with_embedded_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VALKEY_URL", "rediss://:already-set@valkey:6380/0")
+    monkeypatch.setenv("VALKEY_PASSWORD", "ignored")
+    captured: dict[str, object] = {}
+
+    def _fake_from_url(url: str, **kwargs: object) -> str:
+        captured["url"] = url
+        return "client"
+
+    monkeypatch.setattr("redis.asyncio.from_url", _fake_from_url)
+    build_client()
+    assert captured["url"] == "rediss://:already-set@valkey:6380/0"

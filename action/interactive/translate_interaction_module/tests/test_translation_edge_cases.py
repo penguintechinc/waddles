@@ -84,7 +84,7 @@ async def run_tests():
     print("ENSEMBLE LANGUAGE DETECTION - EDGE CASE TESTS")
     print("=" * 80)
     print()
-    print(f"DETECTOR STATUS:")
+    print("DETECTOR STATUS:")
     print(f"  FastText:   {'✓ Available' if detector.fasttext_model else '✗ Not available'}")
     print(f"  Lingua:     {'✓ Available' if detector.lingua_detector else '✗ Not available'}")
     print(f"  Langdetect: {'✓ Available' if detector.langdetect_ready else '✗ Not available'}")

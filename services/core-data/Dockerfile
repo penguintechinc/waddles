@@ -1,13 +1,15 @@
 # Multi-stage build for core-data service
 # Combines 4 modules: analytics, engagement, reputation, labels
 
-FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7 AS builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 
 WORKDIR /app
 
 # Copy requirements
 COPY services/core-data/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Pin pip itself: base image ships 26.0.1 (PYSEC-2026-2875/2876/196/3721, fixed <=26.1.2/26.2)
+RUN pip install --no-cache-dir --upgrade "pip==26.2.1" && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy all 4 module source directories
 COPY core/analytics_core_module /app/core/analytics_core_module
@@ -27,7 +29,7 @@ COPY services/core-data/config.py /app/config.py
 COPY services/core-data/engagement_bp.py /app/engagement_bp.py
 
 # Final stage
-FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 
 WORKDIR /app
 
@@ -36,8 +38,24 @@ COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY --from=builder /app /app
 
+# This runtime stage's own base image ships an older bundled pip
+# (pip-26.0.1.dist-info) that the COPY above doesn't remove (COPY merges,
+# it doesn't delete stale destination files) -- drop it so only the
+# builder's patched pip metadata (26.2.1) remains.
+RUN find /usr/local/lib/python3.13/site-packages -maxdepth 1 -name 'pip-*.dist-info' ! -name 'pip-26.2.1.dist-info' -exec rm -rf {} +
+
 # Create non-root user for security
 RUN useradd -m -u 1000 app && chown -R app:app /app
+# Remove base image's own bundled pip + ensurepip wheel: pip vendors an
+# outdated msgpack (GHSA-6v7p-g79w-8964) and pkg_resources/setuptools
+# (CVE-2025-47273) that the upstream python:3.13-slim-bookworm rebuild
+# hasn't picked up yet. Neither pip nor its vendor tree is imported by
+# any service at runtime (installs happen at build time via uv/pip
+# above), so removing them is a real fix, not a suppression.
+RUN rm -rf /usr/local/lib/python3.13/site-packages/pip \
+    /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
+    /usr/local/lib/python3.13/ensurepip
+
 USER app
 
 # Health check using native Python (no curl/wget)

@@ -1,5 +1,4 @@
-"""
-Expression Engine for Waddles Workflow System
+"""Expression Engine for Waddles Workflow System.
 
 This module provides safe evaluation of workflow expressions with:
 - Variable substitution from workflow context
@@ -8,171 +7,185 @@ This module provides safe evaluation of workflow expressions with:
 - String methods
 - Safe AST-based evaluation (no arbitrary code execution)
 - Comprehensive error handling
+
+Security: expressions are NEVER passed to ``eval``/``exec``/``compile``.
+``ExpressionParser.validate_ast`` rejects disallowed constructs up front and
+``ExpressionEvaluator`` interprets the validated AST node-by-node with an
+explicit allowlist: literals, arithmetic/boolean/comparison operators,
+variable names, dict-key attribute access, list/dict/tuple subscripts, calls
+to the public ``BuiltInFunction`` set, and a fixed set of string methods.
+Any name or attribute beginning with ``_`` (dunders such as ``__class__``)
+is refused, attribute access never uses ``getattr`` (so
+``().__class__.__bases__[0].__subclasses__()`` style sandbox escapes have no
+surface), and ``**``/``*`` results are size-capped against resource
+exhaustion. The previous ``eval(..., {"__builtins__": {}})`` sandbox was
+bypassable and has been removed.
 """
 
 import ast
-import re
-import random as random_module
 import datetime
 import math
-from typing import Any, Dict, Optional, List, Union
+import operator
+import random as random_module
+import re
 from dataclasses import dataclass
-from enum import Enum
+from typing import Any
 
 
-class ExpressionEngineException(Exception):
-    """Base exception for expression engine errors"""
+class ExpressionEngineException(Exception):  # noqa: N818 -- public name exported in services.__all__
+    """Base exception for expression engine errors."""
     pass
 
 
 class ExpressionSyntaxError(ExpressionEngineException):
-    """Raised when expression syntax is invalid"""
+    """Raised when expression syntax is invalid."""
     pass
 
 
 class ExpressionEvaluationError(ExpressionEngineException):
-    """Raised when expression evaluation fails"""
+    """Raised when expression evaluation fails."""
     pass
 
 
 class ExpressionSecurityError(ExpressionEngineException):
-    """Raised when expression contains potentially unsafe operations"""
+    """Raised when expression contains potentially unsafe operations."""
     pass
 
 
 @dataclass
 class ExpressionResult:
-    """Result of expression evaluation"""
+    """Result of expression evaluation."""
     success: bool
     value: Any = None
-    error: Optional[str] = None
-    expression: Optional[str] = None
+    error: str | None = None
+    expression: str | None = None
 
     def __bool__(self) -> bool:
+        """Truthiness mirrors ``success``."""
         return self.success
 
 
 class BuiltInFunction:
-    """Handler for built-in functions"""
+    """Handler for built-in functions."""
 
     @staticmethod
     def random(min_val: int = 0, max_val: int = 100) -> int:
-        """Generate random integer between min_val and max_val (inclusive)"""
-        return random_module.randint(int(min_val), int(max_val))
+        """Generate random integer between min_val and max_val (inclusive)."""
+        return random_module.randint(int(min_val), int(max_val))  # noqa: S311 -- non-security dice roll
 
     @staticmethod
     def now() -> str:
-        """Get current timestamp in ISO format"""
+        """Get current timestamp in ISO format."""
         return datetime.datetime.now().isoformat()
 
     @staticmethod
     def now_unix() -> float:
-        """Get current Unix timestamp"""
+        """Get current Unix timestamp."""
         return datetime.datetime.now().timestamp()
 
     @staticmethod
     def now_date() -> str:
-        """Get current date in YYYY-MM-DD format"""
+        """Get current date in YYYY-MM-DD format."""
         return datetime.datetime.now().strftime("%Y-%m-%d")
 
     @staticmethod
     def now_time() -> str:
-        """Get current time in HH:MM:SS format"""
+        """Get current time in HH:MM:SS format."""
         return datetime.datetime.now().strftime("%H:%M:%S")
 
     @staticmethod
     def uppercase(text: str) -> str:
-        """Convert text to uppercase"""
+        """Convert text to uppercase."""
         return str(text).upper()
 
     @staticmethod
     def lowercase(text: str) -> str:
-        """Convert text to lowercase"""
+        """Convert text to lowercase."""
         return str(text).lower()
 
     @staticmethod
     def length(obj: Any) -> int:
-        """Get length of string, list, or dict"""
+        """Get length of string, list, or dict."""
         return len(obj)
 
     @staticmethod
     def round(value: float, decimals: int = 0) -> float:
-        """Round number to specified decimal places"""
+        """Round number to specified decimal places."""
         return round(float(value), int(decimals))
 
     @staticmethod
     def floor(value: float) -> int:
-        """Floor function"""
+        """Floor function."""
         return math.floor(float(value))
 
     @staticmethod
     def ceil(value: float) -> int:
-        """Ceiling function"""
+        """Ceiling function."""
         return math.ceil(float(value))
 
     @staticmethod
     def abs(value: float) -> float:
-        """Absolute value"""
+        """Absolute value."""
         return abs(float(value))
 
     @staticmethod
     def sqrt(value: float) -> float:
-        """Square root"""
+        """Square root."""
         return math.sqrt(float(value))
 
     @staticmethod
     def min(*values) -> float:
-        """Return minimum value"""
+        """Return minimum value."""
         return min(float(v) for v in values)
 
     @staticmethod
     def max(*values) -> float:
-        """Return maximum value"""
+        """Return maximum value."""
         return max(float(v) for v in values)
 
     @staticmethod
     def join(delimiter: str, *values) -> str:
-        """Join values with delimiter"""
+        """Join values with delimiter."""
         return str(delimiter).join(str(v) for v in values)
 
     @staticmethod
-    def split(text: str, delimiter: str = ",") -> List[str]:
-        """Split string by delimiter"""
+    def split(text: str, delimiter: str = ",") -> list[str]:
+        """Split string by delimiter."""
         return str(text).split(str(delimiter))
 
     @staticmethod
     def contains(text: str, substring: str) -> bool:
-        """Check if text contains substring"""
+        """Check if text contains substring."""
         return str(substring) in str(text)
 
     @staticmethod
     def startswith(text: str, prefix: str) -> bool:
-        """Check if text starts with prefix"""
+        """Check if text starts with prefix."""
         return str(text).startswith(str(prefix))
 
     @staticmethod
     def endswith(text: str, suffix: str) -> bool:
-        """Check if text ends with suffix"""
+        """Check if text ends with suffix."""
         return str(text).endswith(str(suffix))
 
     @staticmethod
     def replace(text: str, old: str, new: str) -> str:
-        """Replace all occurrences of old with new"""
+        """Replace all occurrences of old with new."""
         return str(text).replace(str(old), str(new))
 
     @staticmethod
     def strip(text: str) -> str:
-        """Remove leading/trailing whitespace"""
+        """Remove leading/trailing whitespace."""
         return str(text).strip()
 
     @staticmethod
     def trim(text: str) -> str:
-        """Alias for strip"""
+        """Alias for strip."""
         return str(text).strip()
 
     @staticmethod
     def bool(value: Any) -> bool:
-        """Convert value to boolean"""
+        """Convert value to boolean."""
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -181,11 +194,11 @@ class BuiltInFunction:
 
 
 class StringMethods:
-    """String method extensions for expressions"""
+    """String method extensions for expressions."""
 
     @staticmethod
     def apply_method(text: str, method: str, *args) -> Any:
-        """Apply string method to text"""
+        """Apply string method to text."""
         text = str(text)
 
         if method == "upper":
@@ -212,7 +225,7 @@ class StringMethods:
         elif method == "join":
             if args and isinstance(args[0], (list, tuple)):
                 return text.join(str(v) for v in args[0])
-            raise ExpressionEvaluationError(f"join() requires an iterable argument")
+            raise ExpressionEvaluationError("join() requires an iterable argument")
         elif method == "startswith":
             if args:
                 return text.startswith(str(args[0]))
@@ -233,8 +246,24 @@ class StringMethods:
             raise ExpressionEvaluationError(f"Unknown string method: {method}")
 
 
+PUBLIC_FUNCTION_NAMES = frozenset(
+    name for name in dir(BuiltInFunction) if not name.startswith("_")
+)
+
+ALLOWED_STRING_METHODS = frozenset({
+    "upper", "lower", "capitalize", "title", "strip", "lstrip", "rstrip",
+    "replace", "split", "join", "startswith", "endswith", "find", "count",
+})
+
+ALLOWED_CONSTANT_TYPES = (str, int, float, bool, type(None))
+
+MAX_EXPRESSION_LENGTH = 4096
+MAX_POW_EXPONENT = 1000
+MAX_REPEAT_LENGTH = 100_000
+
+
 class ExpressionParser:
-    """Parses workflow expressions"""
+    """Parses workflow expressions."""
 
     # Pattern to match template expressions: {{...}}
     EXPRESSION_PATTERN = re.compile(r'\{\{([^}]+)\}\}')
@@ -283,7 +312,7 @@ class ExpressionParser:
 
     @staticmethod
     def validate_ast(node: ast.AST) -> bool:
-        """Recursively validate AST to ensure it's safe to evaluate"""
+        """Recursively validate AST to ensure it's safe to evaluate."""
         # Allow context-related and operator nodes that don't have dangerous side effects
         allowed_context_nodes = {
             ast.Load, ast.Store, ast.Del,
@@ -306,16 +335,30 @@ class ExpressionParser:
                         if node_type not in {ast.And, ast.Or, ast.Not}:
                             return False
 
+            # Never allow private/dunder names or attributes (``__class__``,
+            # ``__subclasses__``, ``_x`` ...) -- the sandbox-escape gadget surface.
+            if isinstance(child, ast.Name) and child.id.startswith("_"):
+                return False
+            if isinstance(child, ast.Attribute) and child.attr.startswith("_"):
+                return False
+            if isinstance(child, ast.Constant) and not isinstance(
+                child.value, ALLOWED_CONSTANT_TYPES
+            ):
+                return False
+
             # Prevent dangerous function calls
             if isinstance(child, ast.Call):
+                if child.keywords or any(isinstance(a, ast.Starred) for a in child.args):
+                    return False
                 if isinstance(child.func, ast.Name):
                     func_name = child.func.id
                     # Only allow whitelisted built-in functions
-                    if not hasattr(BuiltInFunction, func_name):
+                    if func_name not in PUBLIC_FUNCTION_NAMES:
                         return False
                 elif isinstance(child.func, ast.Attribute):
-                    # Allow method calls on objects
-                    pass
+                    # Only a fixed set of string methods may be called
+                    if child.func.attr not in ALLOWED_STRING_METHODS:
+                        return False
                 else:
                     return False
 
@@ -328,13 +371,18 @@ class ExpressionParser:
 
     @staticmethod
     def parse_expression(expression: str) -> ast.Expression:
-        """Parse expression string into AST"""
+        """Parse expression string into AST."""
         expression = expression.strip()
+
+        if len(expression) > MAX_EXPRESSION_LENGTH:
+            raise ExpressionSecurityError(
+                f"Expression exceeds maximum length of {MAX_EXPRESSION_LENGTH}"
+            )
 
         try:
             tree = ast.parse(expression, mode='eval')
         except SyntaxError as e:
-            raise ExpressionSyntaxError(f"Invalid expression syntax: {e}")
+            raise ExpressionSyntaxError(f"Invalid expression syntax: {e}") from e
 
         if not ExpressionParser.validate_ast(tree):
             raise ExpressionSecurityError("Expression contains unsafe operations")
@@ -342,14 +390,14 @@ class ExpressionParser:
         return tree
 
     @staticmethod
-    def extract_expressions(text: str) -> List[str]:
-        """Extract all {{...}} expressions from text"""
+    def extract_expressions(text: str) -> list[str]:
+        """Extract all {{...}} expressions from text."""
         matches = ExpressionParser.EXPRESSION_PATTERN.findall(text)
         return matches
 
     @staticmethod
-    def extract_variables(expression: str) -> List[str]:
-        """Extract variable names from expression"""
+    def extract_variables(expression: str) -> list[str]:
+        """Extract variable names from expression."""
         # Remove function calls and operators
         cleaned = re.sub(r'\([^)]*\)', '', expression)
         cleaned = re.sub(r'[<>=!+\-*/%()]', ' ', cleaned)
@@ -359,15 +407,15 @@ class ExpressionParser:
 
 
 class ExpressionContext:
-    """Manages context variables for expression evaluation"""
+    """Manages context variables for expression evaluation."""
 
-    def __init__(self, variables: Optional[Dict[str, Any]] = None):
-        """Initialize context with variables"""
+    def __init__(self, variables: dict[str, Any] | None = None):
+        """Initialize context with variables."""
         self.variables = variables or {}
         self.functions = self._setup_functions()
 
-    def _setup_functions(self) -> Dict[str, Any]:
-        """Setup available functions"""
+    def _setup_functions(self) -> dict[str, Any]:
+        """Setup available functions."""
         functions = {}
         for name in dir(BuiltInFunction):
             if not name.startswith('_'):
@@ -375,57 +423,64 @@ class ExpressionContext:
         return functions
 
     def set_variable(self, name: str, value: Any) -> None:
-        """Set a variable in context"""
+        """Set a variable in context."""
         self.variables[name] = value
 
     def get_variable(self, name: str) -> Any:
-        """Get a variable from context"""
+        """Get a variable from context."""
         return self.variables.get(name)
 
-    def set_variables(self, variables: Dict[str, Any]) -> None:
-        """Set multiple variables"""
+    def set_variables(self, variables: dict[str, Any]) -> None:
+        """Set multiple variables."""
         self.variables.update(variables)
 
-    def get_all_variables(self) -> Dict[str, Any]:
-        """Get all variables"""
+    def get_all_variables(self) -> dict[str, Any]:
+        """Get all variables."""
         return self.variables.copy()
 
     def has_variable(self, name: str) -> bool:
-        """Check if variable exists"""
+        """Check if variable exists."""
         return name in self.variables
 
-    def get_evaluation_namespace(self) -> Dict[str, Any]:
-        """Get namespace for evaluation (variables + functions)"""
+    def get_evaluation_namespace(self) -> dict[str, Any]:
+        """Get namespace for evaluation (variables + functions)."""
         namespace = self.functions.copy()
         namespace.update(self.variables)
         return namespace
 
 
 class DictAccessor(dict):
-    """Dictionary that allows attribute-style access"""
+    """Dictionary that allows attribute-style access."""
 
     def __getattr__(self, name: str) -> Any:
+        """Resolve attribute access as a dict-key lookup."""
         try:
             return self[name]
-        except KeyError:
-            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        except KeyError as exc:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}'"
+            ) from exc
 
     def __setattr__(self, name: str, value: Any) -> None:
+        """Store attribute assignment as a dict key."""
         self[name] = value
 
     def __delattr__(self, name: str) -> None:
+        """Delete a dict key via attribute deletion."""
         try:
             del self[name]
-        except KeyError:
-            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        except KeyError as exc:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}'"
+            ) from exc
 
 
 class ExpressionEvaluator:
-    """Evaluates parsed expressions safely"""
+    """Evaluates parsed expressions safely."""
 
     @staticmethod
     def _convert_to_accessor(obj: Any) -> Any:
-        """Recursively convert dicts to DictAccessor for attribute access"""
+        """Recursively convert dicts to DictAccessor for attribute access."""
         if isinstance(obj, dict) and not isinstance(obj, DictAccessor):
             accessor = DictAccessor(obj)
             for key, value in obj.items():
@@ -436,9 +491,40 @@ class ExpressionEvaluator:
             return type(obj)(converted) if isinstance(obj, tuple) else converted
         return obj
 
+    _BINOPS = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.FloorDiv: operator.floordiv,
+        ast.Mod: operator.mod,
+        ast.Pow: operator.pow,
+    }
+    _UNARYOPS = {
+        ast.UAdd: operator.pos,
+        ast.USub: operator.neg,
+        ast.Not: operator.not_,
+    }
+    _COMPARES = {
+        ast.Eq: operator.eq,
+        ast.NotEq: operator.ne,
+        ast.Lt: operator.lt,
+        ast.LtE: operator.le,
+        ast.Gt: operator.gt,
+        ast.GtE: operator.ge,
+    }
+
     @staticmethod
     def evaluate_ast(tree: ast.Expression, context: ExpressionContext) -> Any:
-        """Evaluate AST with given context"""
+        """Evaluate a validated AST against the context via an allowlist walker.
+
+        Never calls ``eval``/``exec``/``compile``. Re-validates the tree so a
+        caller handing in an AST that skipped ``ExpressionParser`` is still
+        refused (fail loud with ``ExpressionSecurityError``).
+        """
+        if not isinstance(tree, ast.Expression) or not ExpressionParser.validate_ast(tree):
+            raise ExpressionSecurityError("Expression contains unsafe operations")
+
         namespace = context.get_evaluation_namespace()
 
         # Convert dictionaries to DictAccessor for attribute-style access
@@ -447,48 +533,186 @@ class ExpressionEvaluator:
             converted_namespace[key] = ExpressionEvaluator._convert_to_accessor(value)
 
         try:
-            result = eval(
-                compile(tree, '<expression>', 'eval'),
-                {"__builtins__": {}},
-                converted_namespace
-            )
-            return result
+            return ExpressionEvaluator._eval_node(tree.body, converted_namespace)
+        except ExpressionEngineException:
+            raise
         except KeyError as e:
-            raise ExpressionEvaluationError(f"Undefined variable: {e}")
+            raise ExpressionEvaluationError(f"Undefined variable: {e}") from e
         except AttributeError as e:
-            raise ExpressionEvaluationError(f"Attribute error: {e}")
+            raise ExpressionEvaluationError(f"Attribute error: {e}") from e
         except TypeError as e:
-            raise ExpressionEvaluationError(f"Type error: {e}")
+            raise ExpressionEvaluationError(f"Type error: {e}") from e
         except ZeroDivisionError:
-            raise ExpressionEvaluationError("Division by zero")
+            raise ExpressionEvaluationError("Division by zero") from None
         except ValueError as e:
-            raise ExpressionEvaluationError(f"Value error: {e}")
+            raise ExpressionEvaluationError(f"Value error: {e}") from e
         except Exception as e:
-            raise ExpressionEvaluationError(f"Evaluation error: {e}")
+            raise ExpressionEvaluationError(f"Evaluation error: {e}") from e
+
+    @staticmethod
+    def _check_sizes(op: ast.operator, left: Any, right: Any) -> None:
+        """Refuse ``**``/``*`` operands that would exhaust CPU or memory."""
+        if isinstance(op, ast.Pow):
+            if (
+                isinstance(right, (int, float))
+                and not isinstance(right, bool)
+                and abs(right) > MAX_POW_EXPONENT
+            ):
+                raise ExpressionEvaluationError(
+                    f"Exponent exceeds maximum of {MAX_POW_EXPONENT}"
+                )
+        elif isinstance(op, ast.Mult):
+            for seq, count in ((left, right), (right, left)):
+                if isinstance(seq, (str, list, tuple)) and isinstance(count, int):
+                    if len(seq) * max(count, 0) > MAX_REPEAT_LENGTH:
+                        raise ExpressionEvaluationError(
+                            f"Repeated sequence exceeds maximum length of {MAX_REPEAT_LENGTH}"
+                        )
+
+    @staticmethod
+    def _eval_node(node: ast.AST, ns: dict[str, Any]) -> Any:
+        """Interpret one allowlisted AST node; any other node type is refused."""
+        ev = ExpressionEvaluator._eval_node
+
+        if isinstance(node, ast.Constant):
+            if not isinstance(node.value, ALLOWED_CONSTANT_TYPES):
+                raise ExpressionSecurityError("Disallowed constant type")
+            return node.value
+
+        if isinstance(node, ast.Name):
+            if node.id.startswith("_"):
+                raise ExpressionSecurityError(f"Disallowed name: {node.id}")
+            if node.id not in ns:
+                raise ExpressionEvaluationError(f"Undefined variable: '{node.id}'")
+            return ns[node.id]
+
+        if isinstance(node, ast.BinOp):
+            op = ExpressionEvaluator._BINOPS.get(type(node.op))
+            if op is None:
+                raise ExpressionSecurityError(
+                    f"Disallowed operator: {type(node.op).__name__}"
+                )
+            left, right = ev(node.left, ns), ev(node.right, ns)
+            ExpressionEvaluator._check_sizes(node.op, left, right)
+            return op(left, right)
+
+        if isinstance(node, ast.UnaryOp):
+            op = ExpressionEvaluator._UNARYOPS.get(type(node.op))
+            if op is None:
+                raise ExpressionSecurityError(
+                    f"Disallowed operator: {type(node.op).__name__}"
+                )
+            return op(ev(node.operand, ns))
+
+        if isinstance(node, ast.BoolOp):
+            if isinstance(node.op, ast.And):
+                result: Any = True
+                for value_node in node.values:
+                    result = ev(value_node, ns)
+                    if not result:
+                        return result
+                return result
+            if isinstance(node.op, ast.Or):
+                result = False
+                for value_node in node.values:
+                    result = ev(value_node, ns)
+                    if result:
+                        return result
+                return result
+            raise ExpressionSecurityError("Disallowed boolean operator")
+
+        if isinstance(node, ast.Compare):
+            left = ev(node.left, ns)
+            for cmp_op, comparator in zip(node.ops, node.comparators, strict=True):
+                fn = ExpressionEvaluator._COMPARES.get(type(cmp_op))
+                if fn is None:
+                    raise ExpressionSecurityError(
+                        f"Disallowed comparison: {type(cmp_op).__name__}"
+                    )
+                right = ev(comparator, ns)
+                if not fn(left, right):
+                    return False
+                left = right
+            return True
+
+        if isinstance(node, ast.List):
+            return [ev(elt, ns) for elt in node.elts]
+
+        if isinstance(node, ast.Tuple):
+            return tuple(ev(elt, ns) for elt in node.elts)
+
+        if isinstance(node, ast.Dict):
+            if any(k is None for k in node.keys):
+                raise ExpressionSecurityError("Dict unpacking is not allowed")
+            return {ev(k, ns): ev(v, ns) for k, v in zip(node.keys, node.values, strict=True)}
+
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("_"):
+                raise ExpressionSecurityError(f"Disallowed attribute: {node.attr}")
+            target = ev(node.value, ns)
+            # Dict-key lookup ONLY -- never getattr(), so no object-graph walking.
+            if isinstance(target, dict):
+                if node.attr in target:
+                    return target[node.attr]
+                raise AttributeError(f"object has no attribute '{node.attr}'")
+            raise ExpressionSecurityError(
+                f"Attribute access not allowed on {type(target).__name__}"
+            )
+
+        if isinstance(node, ast.Subscript):
+            target = ev(node.value, ns)
+            if not isinstance(target, (dict, list, tuple, str)):
+                raise ExpressionSecurityError(
+                    f"Subscript not allowed on {type(target).__name__}"
+                )
+            if isinstance(node.slice, ast.Slice):
+                raise ExpressionSecurityError("Slices are not allowed")
+            return target[ev(node.slice, ns)]
+
+        if isinstance(node, ast.Call):
+            if node.keywords or any(isinstance(a, ast.Starred) for a in node.args):
+                raise ExpressionSecurityError("Keyword/starred call arguments are not allowed")
+            args = [ev(a, ns) for a in node.args]
+            func = node.func
+            if isinstance(func, ast.Name):
+                if func.id not in PUBLIC_FUNCTION_NAMES:
+                    raise ExpressionSecurityError(f"Disallowed function: {func.id}")
+                return getattr(BuiltInFunction, func.id)(*args)
+            if isinstance(func, ast.Attribute):
+                if func.attr not in ALLOWED_STRING_METHODS:
+                    raise ExpressionSecurityError(f"Disallowed method: {func.attr}")
+                target = ev(func.value, ns)
+                if not isinstance(target, str):
+                    raise ExpressionSecurityError(
+                        f"Method calls only allowed on strings, not {type(target).__name__}"
+                    )
+                return StringMethods.apply_method(target, func.attr, *args)
+            raise ExpressionSecurityError("Disallowed call target")
+
+        raise ExpressionSecurityError(f"Disallowed expression node: {type(node).__name__}")
 
     @staticmethod
     def evaluate_expression(expression: str, context: ExpressionContext) -> Any:
-        """Parse and evaluate expression"""
+        """Parse and evaluate expression."""
         tree = ExpressionParser.parse_expression(expression)
         return ExpressionEvaluator.evaluate_ast(tree, context)
 
 
 class ExpressionEngine:
-    """Main expression engine for workflow system"""
+    """Main expression engine for workflow system."""
 
-    def __init__(self, context: Optional[ExpressionContext] = None):
-        """Initialize engine with optional context"""
+    def __init__(self, context: ExpressionContext | None = None):
+        """Initialize engine with optional context."""
         self.context = context or ExpressionContext()
         self.parser = ExpressionParser()
         self.evaluator = ExpressionEvaluator()
 
-    def set_context(self, variables: Dict[str, Any]) -> None:
-        """Set workflow context variables"""
+    def set_context(self, variables: dict[str, Any]) -> None:
+        """Set workflow context variables."""
         self.context.set_variables(variables)
 
     def evaluate(self, expression: str) -> ExpressionResult:
-        """
-        Evaluate a single expression
+        """Evaluate a single expression.
 
         Args:
             expression: The expression to evaluate (e.g., "user.level > 5")
@@ -517,8 +741,7 @@ class ExpressionEngine:
             )
 
     def substitute(self, text: str) -> ExpressionResult:
-        """
-        Substitute all {{...}} expressions in text
+        """Substitute all {{...}} expressions in text.
 
         Args:
             text: Text with embedded expressions
@@ -554,9 +777,8 @@ class ExpressionEngine:
                 expression=text
             )
 
-    def substitute_dict(self, data: Dict[str, Any]) -> ExpressionResult:
-        """
-        Recursively substitute expressions in dictionary values
+    def substitute_dict(self, data: dict[str, Any]) -> ExpressionResult:
+        """Recursively substitute expressions in dictionary values.
 
         Args:
             data: Dictionary with potential expressions in string values
@@ -600,16 +822,12 @@ class ExpressionEngine:
                 error=f"Dictionary substitution error: {str(e)}"
             )
 
-    def extract_variables(self, expression: str) -> List[str]:
-        """Extract variable names used in expression"""
-        try:
-            return self.parser.extract_variables(expression)
-        except Exception as e:
-            return []
+    def extract_variables(self, expression: str) -> list[str]:
+        """Extract variable names used in expression."""
+        return self.parser.extract_variables(expression)
 
     def validate_expression(self, expression: str) -> ExpressionResult:
-        """
-        Validate expression without evaluating it
+        """Validate expression without evaluating it.
 
         Args:
             expression: Expression to validate
@@ -631,17 +849,17 @@ class ExpressionEngine:
                 expression=expression
             )
 
-    def get_available_functions(self) -> List[str]:
-        """Get list of available built-in functions"""
+    def get_available_functions(self) -> list[str]:
+        """Get list of available built-in functions."""
         return [name for name in dir(BuiltInFunction) if not name.startswith('_')]
 
-    def get_available_variables(self) -> List[str]:
-        """Get list of available variables in context"""
+    def get_available_variables(self) -> list[str]:
+        """Get list of available variables in context."""
         return list(self.context.get_all_variables().keys())
 
 
 # Convenience function for quick usage
-def create_engine(context: Optional[Dict[str, Any]] = None) -> ExpressionEngine:
-    """Create a new expression engine with optional initial context"""
+def create_engine(context: dict[str, Any] | None = None) -> ExpressionEngine:
+    """Create a new expression engine with optional initial context."""
     expr_context = ExpressionContext(context) if context else ExpressionContext()
     return ExpressionEngine(expr_context)

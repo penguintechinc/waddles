@@ -1,0 +1,59 @@
+schema_version: 2
+app_id: waddles.core.example.countdown
+name: Countdown Bundle (Python)
+# 1.0.0: initial release -- per-community single countdown target, kv-only (feature/bundle-countdown).
+# 1.0.3: activation-gated only -- removed the in-bundle waddles.command-countdown feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.4
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/countdown
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!countdown"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!countdown"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- state lives in `kv` only (see `permissions` below).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists the per-community countdown target time"
+  - id: "chat.send:discord"
+    justification: "countdown replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "countdown replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.4"
+  min_version: "1.0.4"
+  max_version: null

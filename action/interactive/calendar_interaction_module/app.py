@@ -14,7 +14,8 @@ from quart import Blueprint, Quart, request
 from config import Config
 from flask_core import (
     async_endpoint, create_health_blueprint, init_database,
-    setup_aaa_logging, success_response, error_response)
+    setup_aaa_logging, success_response, error_response,
+    verify_service_key)
 from flask_core.validation import validate_json, validate_query
 
 from validation_models import (
@@ -66,16 +67,72 @@ group_availability_service = None
 tournament_service = None
 
 
+def check_service_api_key():
+    """Reject any request lacking a valid `X-API-Key` before anything trusts it.
+
+    SECURITY (live authz bypass fix): this module's Gateway route used to
+    point directly at this service, bypassing hub-api's scope-gated
+    `event_calendar_bp` + `EventCalendarProxyClient`
+    (hub_api/services/event_calendar_proxy.py) -- the only legitimate
+    setter of `X-User-Context`, which it builds post-JWT-validation and
+    always pairs with this `X-API-Key`. `get_user_context()` below
+    `json.loads()`s `X-User-Context` with no verification of its own, so
+    without this gate any direct caller could set an arbitrary role
+    (including 'admin') and be trusted outright. Routing now goes through
+    hub-api too (k8s/httproute-modules.yaml), but this check is the
+    defense-in-depth layer: it must hold even if routing is ever
+    misconfigured again. Fails closed -- registered as a `before_request`
+    on every blueprint in this module (see bottom of file), so it runs
+    before any route body, including `get_user_context()`.
+    """
+    provided = request.headers.get('X-API-Key', '')
+    if not verify_service_key(provided, Config.SERVICE_API_KEY):
+        logger.warning(
+            "Unauthorized calendar request: missing/invalid X-API-Key",
+            extra={
+                'event_type': 'AUTH',
+                'action': 'check_service_api_key',
+                'result': 'FAILURE',
+                'path': request.path,
+            },
+        )
+        return error_response("Unauthorized: invalid service key", 401)
+    return None
+
+
 def get_user_context():
-    """Extract user context from request."""
-    # In production, this would come from authenticated request
-    # For now, extract from headers or request data
+    """Extract the caller's user context from the (now service-key-verified) request.
+
+    Only reached after `check_service_api_key()` has confirmed the request
+    carries a valid `X-API-Key` -- i.e. it came from hub-api's
+    `EventCalendarProxyClient`, the sole legitimate setter of
+    `X-User-Context`. A malformed/non-JSON value (e.g. a hub-api bug)
+    still only degrades to the lowest-privilege anonymous/member context
+    below rather than raising an unhandled 500 -- it can never be used to
+    escalate, only to under-privilege, and the warning log surfaces the
+    upstream bug.
+    """
     auth_header = request.headers.get('X-User-Context')
     if auth_header:
         import json
-        return json.loads(auth_header)
+        try:
+            return json.loads(auth_header)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "Malformed X-User-Context header",
+                extra={'event_type': 'AUTH', 'action': 'get_user_context',
+                       'result': 'FAILURE', 'error': str(exc)},
+            )
+            return {
+                'user_id': None,
+                'username': 'anonymous',
+                'platform': 'api',
+                'platform_user_id': 'anonymous',
+                'role': 'member',
+            }
 
-    # Fallback to mock context for testing
+    # No X-User-Context from hub-api (e.g. an internal health/diagnostic
+    # call) -- lowest-privilege anonymous context, never elevated.
     return {
         'user_id': None,
         'username': 'anonymous',
@@ -391,23 +448,72 @@ async def trending_events(query_params: UpcomingEventsParams, community_id):
 
 
 # ============================================================================
-# PLATFORM SYNC ENDPOINTS (Stubs for Phase 4)
+# PLATFORM SYNC ENDPOINTS
 # ============================================================================
 
 @calendar_bp.route('/<int:community_id>/sync/enable', methods=['POST'])
 @async_endpoint
 async def enable_sync(community_id):
-    """Enable platform sync (Phase 4 implementation)."""
-    # TODO: Implement in Phase 4
-    return success_response({"message": "Sync configuration updated (stub)"})
+    """
+    Toggle Discord event-sync opt-in for every guild paired with this community.
+
+    Body (optional): {"enabled": bool}, defaults to true. Calls hub-api's
+    internal POST /api/v1/internal/calendar/guild-pairings/event-sync,
+    which flips guild_tenant_pairings.event_sync_enabled for every pairing
+    under this community -- the opt-in event_discord_sync_service.py's
+    push engine fans out against.
+    """
+    body = await request.get_json(force=True, silent=True) or {}
+    enabled = bool(body.get('enabled', True))
+
+    result = await calendar_service.sync_client.set_event_sync_enabled(community_id, enabled)
+    if not result.ok:
+        return error_response(
+            f"Failed to update sync configuration: {result.error}", status_code=502
+        )
+
+    return success_response({
+        "community_id": result.community_id,
+        "event_sync_enabled": result.event_sync_enabled,
+        "pairings_updated": result.pairings_updated
+    })
 
 
 @calendar_bp.route('/<int:community_id>/events/<int:event_id>/sync', methods=['POST'])
 @async_endpoint
 async def manual_sync(community_id, event_id):
-    """Manually trigger sync for event (Phase 4 implementation)."""
-    # TODO: Implement in Phase 4
-    return success_response({"message": "Manual sync triggered (stub)"})
+    """
+    Manually (synchronously) trigger a Discord sync for one event.
+
+    Unlike the lifecycle hooks in calendar_service.py (fire-and-forget),
+    this is a direct user action: call hub-api's internal sync-discord
+    endpoint and wait for its result, so the caller sees the real outcome
+    (or a clear failure) immediately rather than polling /sync/status.
+    """
+    event = await calendar_service.get_event(event_id)
+    if not event:
+        return error_response("Event not found", status_code=404)
+
+    if event['status'] == 'cancelled':
+        action = 'cancel'
+    elif event.get('sync', {}).get('discord_event_id'):
+        action = 'update'
+    else:
+        action = 'create'
+
+    result = await calendar_service.sync_client.sync_event(event_id, action)
+    if not result.ok:
+        return error_response(
+            f"Discord sync failed: {result.sync_error}", status_code=502
+        )
+
+    return success_response({
+        "event_id": result.event_id,
+        "action": action,
+        "discord_event_id": result.discord_event_id,
+        "sync_status": result.sync_status,
+        "sync_error": result.sync_error
+    })
 
 
 @calendar_bp.route('/<int:community_id>/events/<int:event_id>/sync/status', methods=['GET'])
@@ -1880,6 +1986,14 @@ async def list_community_tournaments(community_id: int):
         'count': len(tournaments),
     })
 
+
+# Service-key gate on every blueprint -- registered on the Blueprint
+# (not the Quart `app`) so it is enforced identically whether this module
+# runs standalone (this file's `app`) or merged in-process into
+# services/interactive-productivity/app.py, which imports these same
+# Blueprint objects and registers them on its own `app`.
+for _calendar_blueprint in (calendar_bp, context_bp, ticket_bp, tournament_bp):
+    _calendar_blueprint.before_request(check_service_api_key)
 
 # Register blueprints
 app.register_blueprint(calendar_bp)

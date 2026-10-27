@@ -123,12 +123,12 @@ def example_token_types():
     print("\nAccess Token:")
     access_payload = service.validate_token(access_token)
     print(f"  Type: {access_payload['type']}")
-    print(f"  Expires in: 1 hour")
+    print("  Expires in: 1 hour")
 
     print("\nService Token:")
     service_payload = service.validate_token(service_token)
     print(f"  Type: {service_payload['type']}")
-    print(f"  Expires in: 720 hours (30 days)")
+    print("  Expires in: 720 hours (30 days)")
 
 
 def example_token_metadata():

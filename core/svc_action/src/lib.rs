@@ -24,50 +24,73 @@
 //! multi-bundle/hot-swap distribution reconciliation
 //! (`crate::distribution`'s module doc).
 //!
-//! **Bundle-selection path, mutual exclusion (2026-09-27).** Exactly one of
-//! two sources ever selects which bundle this pod runs, resolved ONCE at
-//! startup by [`resolve_db_path_active`] -- never both, never re-evaluated
-//! mid-run (mirrors `core/svc_process`'s identical
-//! `resolve_db_path_active`/`db_path_selected` pair):
+//! **Bundle-*loading* sources (dataplane scale design rev 4, multi-tenant,
+//! 2026-09-28).** Two sources run side by side, neither exclusive of the
+//! other -- both only ever `load`/`unload` bundles onto an executor
+//! connection, neither reads from a Valkey stream, so there is no consumer
+//! group for them to collide on:
 //!
-//! - **DB-driven active-bundle loader** (`crate::bundle_loader`,
-//!   `core/bundle_active_set`) -- the default: hub-api is the sole writer,
-//!   this stage reads ACTIVE, APPROVED bundle config from a READ-ONLY
-//!   Postgres and hot-swaps in/out with no pod restart. Active whenever
-//!   `DB_READER_PASSWORD`/`BUNDLE_SCOPE_TENANT_ID` are configured and the
-//!   `waddles.core.disable-db-bundle-config` kill-switch is not raw-ON.
+//! - **Multi-tenant, change-log-driven active-bundle loader**
+//!   (`crate::changelog_consumer`, `core/bundle_active_set`,
+//!   [`try_start_changelog_consumer`]) -- hub-api is the sole writer, this
+//!   stage reads ACTIVE, APPROVED bundle config from a READ-ONLY Postgres
+//!   and hot-swaps in/out with no pod restart, discovering every
+//!   `(tenant_id, community_id)` scope in the database itself (no
+//!   operator-configured tenant scope -- see `config::CliConfig`'s doc:
+//!   `BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` are retired).
+//!   Active whenever `DB_READER_PASSWORD` is configured and the
+//!   `waddles.core.disable-db-bundle-config`/`waddles.core.
+//!   disable-multi-tenant-watermark` kill-switches are not raw-ON.
 //! - **Legacy `ACTION_BUNDLE_*` env override** (`try_start_env_bundle_loader`,
 //!   `config::CliConfig::action_bundle_digest`'s doc) -- sends `load` for a
 //!   statically configured bundle directly over the host-API connection,
-//!   independent of any external service. Used only when the DB path above
-//!   is inactive.
+//!   independent of any external service. Runs unconditionally alongside
+//!   the DB-driven loader above; the two are gated independently.
+//!
+//! **Dispatch (stream-consumer) sources are a SEPARATE, strictly
+//! mutually-exclusive decision** ([`resolve_multi_tenant_path_decision`],
+//! `run_with_shutdown`) -- unlike the bundle-*loading* sources above, both
+//! the legacy [`try_start_dispatch`] loop and
+//! [`try_start_changelog_consumer`]'s multi-tenant `dispatch_spawner` read
+//! from the action stream via a named consumer group; running both for the
+//! same `app_id` splits one group's deliveries between two consumers
+//! (regression: `waddles.core.example.ping`, alpha 2026-10-03). Exactly one
+//! of the two ever starts per pod.
 //!
 //! The now-retired `GET /api/v1/distribution/bundles?stage=action` poll
-//! (spec §6.7) that used to be the third, primary source has been removed
-//! -- superseded by the DB-driven loader; see `crate::distribution`'s module
-//! doc for what that leaves as a documented seam.
+//! (spec §6.7) that used to be a third source has been removed -- superseded
+//! by the DB-driven loader; see `crate::distribution`'s module doc for what
+//! that leaves as a documented seam.
 
+pub mod active_digests;
 pub mod bundle_loader;
 pub mod capabilities;
+pub mod changelog_consumer;
 pub mod config;
 pub(crate) mod crypto;
 pub mod db;
 pub mod dispatch;
+pub(crate) mod dispatch_destination;
+pub mod dispatch_supervisor;
 pub mod distribution;
 pub mod egress;
 pub mod error;
 pub mod flags;
+pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
 pub mod http;
+pub mod metrics_facade;
 pub mod retry;
 pub mod senders;
+pub mod stage_metrics;
 pub mod telemetry;
 pub mod usage;
 pub mod wiring;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use tokio::signal;
@@ -76,6 +99,120 @@ use tokio::signal;
 /// target and the resource `service.name` when `OTEL_SERVICE_NAME` is
 /// unset.
 pub const SERVICE_NAME: &str = "svc-action";
+
+/// hub-api internal gRPC scope this service requests when bootstrapping its
+/// machine JWT (`hub_api/grpc_internal/servicers.py::REQUIRED_SCOPES`) --
+/// `ResolveDisplayNames` only; this service never calls
+/// `MintEphemeralPseudonyms`/`GetStreamDek`.
+const HUB_IDENTITY_RESOLVE_SCOPE: &str = "identity:displayname:read";
+
+/// Builds and connects the shared `hub_client::HubClient` the outbound
+/// PII-detokenization pass (`egress_detokenizer`) needs, or `Ok(None)` when
+/// `detokenization_enabled` is `false` (the opt-out kill-switch is ON) --
+/// no client is needed in that case; every relay send then falls back to
+/// showing the raw `{user:<token>}` placeholder
+/// (`capabilities::StageCapabilities::detokenize_text`'s doc).
+///
+/// **Fail loud, never silent degraded-UX (user requirement).** See
+/// [`run_with_shutdown`]'s call site for the full rationale: when
+/// `detokenization_enabled` is `true` but `HUB_API_GRPC_ENDPOINT`/
+/// `SERVICE_JWT_TOKEN_ENDPOINT` are unset, or the initial connect attempt
+/// fails, this returns `Err` so the caller can exit non-zero instead of
+/// starting a pod that silently shows `egress_detokenizer::NEUTRAL_LABEL`
+/// for every resolved name. This check is **startup-only** -- a transient
+/// gRPC failure after a successful connect here still degrades to
+/// `egress_detokenizer::detokenize_resolving`'s existing fail-safe-empty
+/// behavior (`hub_client::HubClient`'s own circuit breaker/retries already
+/// bound how long such a blip affects any one call), never a process exit.
+async fn build_hub_client(
+    cli: &config::CliConfig,
+    detokenization_enabled: bool,
+) -> anyhow::Result<Option<Arc<hub_client::HubClient>>> {
+    if !detokenization_enabled {
+        tracing::info!(
+            "waddles.core.disable-pii-detokenization kill-switch is ON; hub_client not \
+             connected (no resolver configured -- every relay send shows the raw \
+             {{user:<token>}} placeholder)"
+        );
+        return Ok(None);
+    }
+    if cli.hub_api_grpc_endpoint.is_empty() || cli.service_jwt_token_endpoint.is_empty() {
+        anyhow::bail!(
+            "PII detokenization is enabled (the default) but HUB_API_GRPC_ENDPOINT/\
+             SERVICE_JWT_TOKEN_ENDPOINT is unset; refusing to start and silently show \
+             {NEUTRAL_LABEL:?} for every resolved name -- set both env vars, or set the \
+             waddles.core.disable-pii-detokenization kill-switch for a deployment without a \
+             working hub_client connection yet",
+            NEUTRAL_LABEL = egress_detokenizer::NEUTRAL_LABEL
+        );
+    }
+    match hub_client::HubClient::connect(
+        cli.hub_api_grpc_endpoint.clone(),
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        HUB_IDENTITY_RESOLVE_SCOPE,
+        // fix/hub-grpc-tls-and-ca-trust (PR #570 review blocker 2) -- empty
+        // means "fall back to system/webpki roots", which this chart's
+        // self-signed internal CA is never part of; HUB_API_GRPC_CA_FILE
+        // is the real path in every deployed environment.
+        (!cli.hub_api_grpc_ca_file.is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str()),
+    )
+    .await
+    {
+        Ok(client) => {
+            tracing::info!(
+                endpoint = %cli.hub_api_grpc_endpoint,
+                "hub_client connected; outbound PII detokenization is live"
+            );
+            Ok(Some(Arc::new(client)))
+        }
+        Err(err) => Err(anyhow::anyhow!(
+            "PII detokenization is enabled but connecting to hub-api's internal gRPC endpoint \
+             {:?} failed: {err}; refusing to start and silently show the neutral label for \
+             every resolved name -- fix the endpoint/credentials, or set the \
+             waddles.core.disable-pii-detokenization kill-switch",
+            cli.hub_api_grpc_endpoint
+        )),
+    }
+}
+
+/// Resolves whether outbound PII detokenization is enabled for this startup.
+///
+/// [`config::CliConfig::pii_detokenization_enabled_override`]'s explicit
+/// `Some(false)` (`PII_DETOKENIZATION_ENABLED=false`) short-circuits to
+/// disabled *before* the `waddles.core.disable-pii-detokenization` PostHog
+/// kill-switch is ever consulted -- field-for-field mirror of
+/// `core/svc_process::resolve_pii_tokenization_enabled`'s identical
+/// rationale (plain env/values off-switch, independent of PostHog, for an
+/// environment with no in-cluster PostHog that would otherwise be stranded
+/// behind [`build_hub_client`]'s fail-loud gate). Any other override state
+/// (`Some(true)` or unset/`None`) falls through unchanged to the existing
+/// PostHog-gated, default-ENABLED behavior -- **this override only ever
+/// disables, never force-enables past the PostHog kill-switch**.
+///
+/// **SECURITY: an explicit, loudly-logged operator escape hatch, never a
+/// silent bypass.** Disabling detokenization means every relay send shows
+/// the raw `{user:<token>}` placeholder instead of a resolved display name
+/// -- a documented, deliberate degraded-UX tradeoff for dev/air-gapped
+/// deployments, never the default in a production tenant.
+async fn resolve_pii_detokenization_enabled(
+    cli: &config::CliConfig,
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> bool {
+    if cli.pii_detokenization_enabled_override == Some(false) {
+        tracing::warn!(
+            "PII_DETOKENIZATION_ENABLED=false env override set; outbound PII detokenization is \
+             DISABLED by explicit operator override, NOT the \
+             waddles.core.disable-pii-detokenization PostHog kill-switch -- hub-api's internal \
+             gRPC will not be contacted and startup will not fail loud. This is an operational \
+             escape hatch for dev/air-gapped deployments and must never be set in a production \
+             tenant: every relay send will show the raw {{user:<token>}} placeholder instead of \
+             a resolved display name."
+        );
+        return false;
+    }
+    flags::pii_detokenization_flag(license).enabled().await
+}
 
 /// Runs the service: loads config, bootstraps telemetry, builds the
 /// control-plane + metrics routers, and serves both until SIGINT/SIGTERM is
@@ -102,6 +239,15 @@ where
     F2: std::future::Future<Output = ()> + Send + 'static,
 {
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
+    // Build the stage's OTel instruments NOW, strictly after `telemetry::init`
+    // installed the global meter provider: an instrument created earlier
+    // would bind to the no-op default provider and silently record nothing.
+    // Every later `stage_metrics::stage_metrics()` call returns this same set.
+    let _ = stage_metrics::stage_metrics();
+    // Route `bundle-capability-gate`'s `metrics`-facade audit counters
+    // (grants and denials) into the same OTel pipeline; without a recorder
+    // the facade drops them.
+    metrics_facade::install();
 
     tracing::info!(
         http_port = config.cli.http_port,
@@ -118,6 +264,16 @@ where
     // capability set's `EgressGuard` (reader, spec §7.4's `http` egress
     // allowlist) -- see `crate::distribution`'s module doc.
     let catalog = Arc::new(distribution::BundleCatalog::new());
+    // Shared between `bundle_loader`'s DB-driven poll (writer -- every
+    // tick's `ActiveBundleRow::declared_capabilities`, `bundle_loader`'s
+    // own doc) and the host-API capability set's `kv` capability (reader,
+    // `bundle_host_kv::authorize::authorize_kv`) -- same "one snapshot,
+    // shared Arc, one writer, one reader" pattern as `catalog` above. The
+    // legacy `ACTION_BUNDLE_*` env path never writes to this snapshot at
+    // all (`try_start_env_bundle_loader` has no active-set row to derive
+    // capabilities from), so `kv` denies by default under that path --
+    // `bundle_host_kv::authorize`'s own module doc.
+    let kv_capabilities = Arc::new(bundle_host_kv::CapabilitySnapshot::new());
     let egress_denied_total = telemetry::register_egress_metrics(&prom_registry);
 
     // Spec §13.5's two-gate check for this service's flags
@@ -152,48 +308,175 @@ where
     // excluded-row counter.
     let bundle_loader_excluded_metric =
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
+    let changelog_consumer_metrics = telemetry::register_changelog_consumer_metrics(&prom_registry);
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // the live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    // snapshot `dispatch::handle_delivered` resolves PER INVOCATION so
+    // `bundle_capability_gate::authorize()` is never called with a
+    // hardcoded `app_version: 0` -- see `dispatch::DispatchDeps::
+    // app_version_snapshot`'s doc. Fed by `try_start_changelog_consumer`
+    // below on every tick; `try_start_dispatch` seeds a one-shot sentinel
+    // when the DB-driven path is unconfigured.
+    let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
+    // regression: svc-action had no multi-tenant dispatch consumers; replies
+    // never sent after legacy env removal (alpha 2026-10-03)
+    let dispatch_supervisor_metrics =
+        telemetry::register_dispatch_supervisor_metrics(&prom_registry);
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    let drain_loop_metrics = telemetry::register_drain_loop_metrics(&prom_registry);
+    // fix/executor-link-heartbeat: `host_api_connected_executors`/
+    // `host_api_heartbeat_timeouts_total`/`dispatch_dead_lettered_no_executor_total`.
+    let host_api_metrics = telemetry::register_host_api_metrics(&prom_registry);
+    // `crate::flags::resolve_flag_with`'s `flags.enabled` host-call
+    // evaluation counter (`svc_action_flags_evaluated_total{result}`) --
+    // registered into this crate's own registry and wired into
+    // `crate::flags` before any bundle invoke can reach
+    // `StageCapabilities::handle_flags`.
+    flags::set_flags_metric(telemetry::register_flags_metrics(&prom_registry));
+    // Connector spec SS0 condition 5: registered here, same "before
+    // `prom_registry` moves" constraint as the metrics above, then threaded
+    // into whichever of `try_start_dispatch`/`try_start_changelog_consumer`
+    // actually starts.
+    let circuit_breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics> =
+        Arc::new(telemetry::register_circuit_breaker_metrics(&prom_registry));
 
-    let state = http::AppState::new(config.clone(), prom_registry);
+    // Outbound PII-detokenization's hub_client startup wiring (closes the
+    // TODO seam `capabilities::StageCapabilities::with_detokenize` used to
+    // leave unwired): resolved ONCE here, before the host-API listener
+    // starts below. See [`build_hub_client`]'s own doc for the fail-loud
+    // contract.
+    let pii_detokenization_enabled =
+        resolve_pii_detokenization_enabled(&config.cli, &license).await;
+    // Over-log the resolved state + source -- visibility fix paired with
+    // `core/svc_process`'s identical log line (`resolve_pii_tokenization_
+    // enabled`'s own doc there), added after that crate's env-override/
+    // kill-switch gate mismatch dead-lettered every inbound event on alpha
+    // (2026-10-04). svc_action does not have the symmetric bug (`with_
+    // detokenize` is only ever wired when `hub_client_conn` is `Some`, so
+    // there is no second gate to disagree with it -- see this function's
+    // own match arm below), but the same startup visibility is still
+    // owed. No secrets/PII in this line -- just booleans and a source
+    // label. Field name deliberately avoids the substring "token" (unlike
+    // the local variable/doc prose) -- `penguin_logging::sanitize`'s
+    // key-pattern redaction matches on it and would otherwise print
+    // `[REDACTED]` for this boolean, defeating the entire point of this
+    // log line (see `core/svc_process`'s identical fix).
+    tracing::info!(
+        pii_outbound_mode_enabled = pii_detokenization_enabled,
+        source = if config.cli.pii_detokenization_enabled_override == Some(false) {
+            "env-override(PII_DETOKENIZATION_ENABLED=false)"
+        } else {
+            "posthog-kill-switch-or-default"
+        },
+        "resolved outbound PII detokenization state"
+    );
+    let hub_client_conn = build_hub_client(&config.cli, pii_detokenization_enabled).await?;
 
     let connections = try_start_host_api(
         &config.cli,
         config.discord_bot_token.clone(),
         Arc::clone(&usage),
         catalog,
+        Arc::clone(&kv_capabilities),
         egress_denied_total,
         license.clone(),
+        config.db_reader_password.clone(),
+        host_api_metrics,
+        hub_client_conn,
     );
-    // Mutual exclusion, resolved ONCE at startup -- see
-    // `resolve_db_path_active`'s own doc for why this is not re-evaluated
-    // per-tick for this specific selection decision, and why that's an
-    // accepted tradeoff (a live kill-switch flip mid-run still stops
-    // DB-driven work via `bundle_loader::run_tick`'s own per-tick gate, it
-    // just doesn't fail OVER to the legacy env override without a pod
-    // restart). Mirrors `core/svc_process`'s identical
-    // `resolve_db_path_active`/`db_path_selected` pair exactly.
-    if resolve_db_path_active(&config, &license).await {
-        if !config.cli.action_bundle_digest.is_empty() {
-            tracing::info!(
-                action_bundle_digest = %config.cli.action_bundle_digest,
-                "DB-driven bundle-config path active at startup; ignoring legacy \
-                 ACTION_BUNDLE_* env override (restart required to fall back)"
+
+    let state = http::AppState::new(config.clone(), prom_registry, Arc::clone(&connections));
+    let consumer_loop_ready = Arc::clone(&state.consumer_loop_ready);
+    let changelog_consumer_ready = Arc::clone(&state.changelog_consumer_ready);
+    // The legacy `ACTION_BUNDLE_*` env bundle-override loader is NOT a
+    // stream consumer (it only sends `load` for a statically configured
+    // digest directly over the host-API connection -- no Valkey consumer
+    // group involved) -- unlike the dispatch path below, it is safe to run
+    // unconditionally alongside the DB-driven loader (this module's top
+    // doc); nothing here changes that.
+    try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
+    // regression: legacy ping consumer competed in the same consumer group as the
+    // multi-tenant one; ping intermittently UnknownBundle (alpha 2026-10-03).
+    //
+    // The legacy single-app dispatch loop ([`try_start_dispatch`]) and the
+    // multi-tenant dispatch-consumer supervisor ([`try_start_changelog_consumer`]'s
+    // `dispatch_spawner`, added by #550) both join a consumer group on the
+    // SAME action stream whenever `ACTION_APP_ID` happens to match an
+    // app_id the DB-driven path also serves (exactly what alpha hit for
+    // `waddles.core.example.ping`): two independent consumers split one
+    // group's deliveries, so the legacy one dead-letters every entry it
+    // receives (its own `Static` digest is empty, `UnknownBundle`). The
+    // crate's top-doc "two sources run side by side, neither exclusive"
+    // description predates #550's dispatch supervisor and only ever applied
+    // to bundle *loading* (the env-override loader above, which has no
+    // consumer group to collide on) -- it was never a safe description of
+    // the *dispatch* path once a second dispatch consumer existed. Resolved
+    // ONCE at startup, same convention as `core/svc_process`'s
+    // `resolve_multi_tenant_path_decision`: a live kill-switch flip mid-run
+    // still stops DB-driven dispatch via `changelog_consumer::run`'s own
+    // per-tick gate check, it just doesn't fail OVER to the legacy loop
+    // without a pod restart.
+    let path_decision = resolve_multi_tenant_path_decision(&config, &license).await;
+    match path_decision {
+        PathDecision::MultiTenant => {
+            if !config.cli.action_app_id.is_empty() {
+                tracing::warn!(
+                    ignored_legacy_env = "ACTION_APP_ID",
+                    "startup path: multi-tenant changelog-consumer (DB_READER_PASSWORD \
+                     configured, kill-switches enabled); legacy ACTION_APP_ID present but \
+                     IGNORED -- the legacy dispatch loop will not start (restart with \
+                     DB_READER_PASSWORD unset to fall back to it)"
+                );
+            } else {
+                tracing::info!(
+                    "startup path: multi-tenant changelog-consumer (DB_READER_PASSWORD \
+                     configured, kill-switches enabled)"
+                );
+            }
+            // Nothing to wait for on the legacy path when it never starts.
+            consumer_loop_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+            try_start_changelog_consumer(
+                &config,
+                Arc::clone(&connections),
+                license.clone(),
+                bundle_loader_excluded_metric,
+                Arc::clone(&kv_capabilities),
+                changelog_consumer_metrics,
+                dispatch_supervisor_metrics,
+                Arc::clone(&usage),
+                changelog_consumer_ready,
+                app_version_snapshot.clone(),
+                Arc::clone(&circuit_breaker_metrics),
             );
         }
-        try_start_db_bundle_loader(
-            &config,
-            Arc::clone(&connections),
-            license.clone(),
-            bundle_loader_excluded_metric,
-        );
-    } else {
-        tracing::info!(
-            "DB-driven bundle-config path inactive at startup (kill-switch on, or \
-             DB_READER_*/BUNDLE_SCOPE_TENANT_ID not configured); using legacy \
-             ACTION_BUNDLE_* env override"
-        );
-        try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
+        PathDecision::NoDbConfig | PathDecision::KillSwitchOn => {
+            if matches!(path_decision, PathDecision::KillSwitchOn) {
+                tracing::warn!(
+                    action_app_id = %config.cli.action_app_id,
+                    "startup path: legacy ACTION_APP_ID dispatch (multi-tenant kill-switch is \
+                     ON)"
+                );
+            } else {
+                tracing::info!(
+                    action_app_id = %config.cli.action_app_id,
+                    "startup path: legacy ACTION_APP_ID dispatch (DB_READER_PASSWORD not \
+                     configured)"
+                );
+            }
+            // Nothing to wait for on the multi-tenant path when it never starts.
+            changelog_consumer_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+            try_start_dispatch(
+                &config,
+                Arc::clone(&connections),
+                Arc::clone(&usage),
+                license.clone(),
+                app_version_snapshot.clone(),
+                drain_loop_metrics,
+                consumer_loop_ready,
+                circuit_breaker_metrics,
+            );
+        }
     }
-    try_start_dispatch(&config, connections, usage, license);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
@@ -269,7 +552,7 @@ const DEPLOYMENT_DOMAIN: &str = "svc-action.waddles.app";
 /// [`flag_or_closed`] to fall back to [`flags::StaticFlag`]`(false)` for
 /// both flags in that case, the same fail-closed-to-OFF posture spec
 /// §13.5 already specifies for a never-seen flag.
-fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
+pub(crate) fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
     let cfg = match penguin_licensing::LicenseConfig::from_env(LICENSE_PRODUCT) {
         Ok(cfg) => cfg,
         Err(err) => {
@@ -317,6 +600,157 @@ fn flag_or_closed(
     }
 }
 
+/// Derives the bundle-`kv` Valkey connection config from the spine config
+/// for the DEDICATED `noeviction` kv instance (`VALKEY_KV_URL` /
+/// `VALKEY_KV_USERNAME` / `VALKEY_KV_PASSWORD`). TLS follows the kv URL
+/// scheme, never the spine's. Returns `None` when `VALKEY_KV_URL` is
+/// unset/blank -- deliberately NO fallback to the durable spine instance.
+fn kv_instance_config(
+    spine: &penguin_spine::SpineConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<penguin_spine::SpineConfig> {
+    let non_empty = |k: &str| lookup(k).filter(|v| !v.trim().is_empty());
+    let url = non_empty("VALKEY_KV_URL")?;
+    let mut cfg = spine.clone();
+    cfg.security_transport_tls = url.starts_with("rediss://");
+    cfg.valkey_url = url;
+    cfg.valkey_username = non_empty("VALKEY_KV_USERNAME");
+    cfg.valkey_password = non_empty("VALKEY_KV_PASSWORD");
+    Some(cfg)
+}
+
+/// Surfaces "bundle-kv is unavailable" loudly: ERROR log with `reason` plus
+/// a `kv` error-counter increment (`kind="kv_instance_unavailable"`). The
+/// caller then leaves `kv` unwired, so every kv host-call denies
+/// `not_implemented` (fail-CLOSED) -- never a fallback to the durable/spine
+/// instance and never an unmetered quota bypass.
+fn kv_degraded(reason: &str, detail: &str) {
+    tracing::error!(
+        reason = %reason,
+        detail = %detail,
+        "kv capability DEGRADED: dedicated kv Valkey instance unavailable; kv disabled \
+         (fail-closed: not_implemented on every kv host-call, NO fallback to the durable instance)"
+    );
+    static COUNTER: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    COUNTER
+        .get_or_init(|| {
+            opentelemetry::global::meter("bundle_host_kv")
+                .u64_counter("waddles_bundle_kv_instance_unavailable_total")
+                .with_description(
+                    "Bundle kv disabled at startup: dedicated kv Valkey unset/unreachable/evicting",
+                )
+                .build()
+        })
+        .add(
+            1,
+            &[opentelemetry::KeyValue::new("reason", reason.to_string())],
+        );
+}
+
+/// Builds (never connects) a [`redis::Client`] from `cfg`'s `VALKEY_URL`/
+/// username/password/TLS/CA-file settings -- the same client-construction
+/// logic as `crate::usage::connect` (duplicated rather than shared: that
+/// function also opens the connection and returns
+/// `Result<MultiplexedConnection, UsageError>`, not the reusable
+/// `redis::Client` `grant_gate::build_production_gate`'s caller needs to
+/// hand to `run_grant_gate_refresh_loop`). `None` (logged) on a malformed
+/// `VALKEY_URL` or a TLS client-build failure.
+fn build_redis_client(cfg: &penguin_spine::SpineConfig) -> Option<redis::Client> {
+    use redis::IntoConnectionInfo;
+
+    let info: redis::ConnectionInfo = match cfg.valkey_url.as_str().into_connection_info() {
+        Ok(info) => info,
+        Err(err) => {
+            tracing::warn!(error = %err, "invalid VALKEY_URL; Valkey-backed features disabled");
+            return None;
+        }
+    };
+    let mut settings = info.redis_settings().clone();
+    if let Some(username) = &cfg.valkey_username {
+        settings = settings.set_username(username);
+    }
+    if let Some(password) = &cfg.valkey_password {
+        settings = settings.set_password(password);
+    }
+    let info = info.set_redis_settings(settings);
+
+    if cfg.security_transport_tls {
+        crate::crypto::ensure_crypto_provider_installed();
+        let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
+        match redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert,
+            },
+        ) {
+            Ok(client) => Some(client),
+            Err(err) => {
+                tracing::warn!(error = %err, "TLS Valkey client build failed; Valkey-backed features disabled");
+                None
+            }
+        }
+    } else {
+        match redis::Client::open(info) {
+            Ok(client) => Some(client),
+            Err(err) => {
+                tracing::warn!(error = %err, "Valkey client build failed; Valkey-backed features disabled");
+                None
+            }
+        }
+    }
+}
+
+/// Builds the production `http` capability's [`egress::EgressGuard`],
+/// wired with the cluster CIDR denylist and instance-wide private-IP
+/// egress policy (`cli.cluster_cidr_denylist()`/`cli.
+/// instance_egress_policy()`) -- pulled out of [`build_stage_capabilities`]
+/// so it can be exercised directly in tests without a live Valkey
+/// connection (`regression: #425 dropped cluster denylist` -- see
+/// `mod tests`, `action_egress_guard_denies_cluster_cidr_even_with_grant`).
+/// `None` mirrors `build_stage_capabilities`'s own fail-closed posture: a
+/// denylist re-parse failure (should be impossible -- `CliConfig::validate`
+/// already parsed it successfully at `Config::load` time) disables
+/// capabilities rather than starting with a silently-empty denylist.
+fn build_action_egress_guard(
+    cli: &config::CliConfig,
+    catalog: Arc<distribution::BundleCatalog>,
+    egress_denied_total: prometheus::IntCounterVec,
+    bundle_egress_flag: Arc<dyn flags::FeatureFlag>,
+) -> Option<Arc<egress::EgressGuard>> {
+    let cluster_denylist = match cli.cluster_cidr_denylist() {
+        Ok(denylist) => denylist,
+        Err(err) => {
+            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; capabilities disabled (DenyAllCapabilities)");
+            return None;
+        }
+    };
+    Some(Arc::new(
+        egress::EgressGuard::new(
+            Arc::new(egress::ReqwestTransport::new()),
+            egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: cli.egress_rate_limit_rps,
+                rate_limit_burst: cli.egress_rate_limit_burst,
+                timeout: std::time::Duration::from_millis(cli.egress_timeout_ms),
+                max_redirects: cli.egress_max_redirects,
+                max_response_bytes: cli.egress_max_response_bytes,
+                // Not yet CLI-tunable -- see `EgressLimits::allowed_ports` doc.
+                allowed_ports: vec![443],
+                proxy_url: None,
+            },
+            catalog,
+            egress_denied_total,
+            bundle_egress_flag,
+        )
+        .with_instance_policy(Arc::new(std::sync::RwLock::new(
+            cli.instance_egress_policy(),
+        )))
+        .with_cluster_denylist(cluster_denylist),
+    ))
+}
+
 /// Builds the real [`capabilities::StageCapabilities`] (a live Valkey
 /// connection for `relay`, [`egress::EgressGuard`] for `http`), or `None`
 /// if either dependency is unavailable right now. `try_start_host_api`
@@ -327,13 +761,17 @@ fn flag_or_closed(
 /// partial capability set without a larger refactor than this landing's
 /// scope; a bundle sees `access-denied` on every capability, never a
 /// crash, until the next connection attempt).
+#[allow(clippy::too_many_arguments)]
 async fn build_stage_capabilities(
     cli: &config::CliConfig,
     discord_bot_token: Option<config::Secret>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    db_reader_password: Option<config::Secret>,
+    hub_client_conn: Option<Arc<hub_client::HubClient>>,
 ) -> Option<Arc<dyn capabilities::CapabilityHandler>> {
     let spine_cfg = match penguin_spine::SpineConfig::from_env() {
         Ok(c) => c,
@@ -349,21 +787,90 @@ async fn build_stage_capabilities(
             return None;
         }
     };
-    let egress = Arc::new(egress::EgressGuard::new(
-        Arc::new(egress::ReqwestTransport),
-        egress::EgressLimits {
-            allow_private_hosts: cli.egress_allow_private_hosts,
-            rate_limit_rps: cli.egress_rate_limit_rps,
-            rate_limit_burst: cli.egress_rate_limit_burst,
-            timeout: std::time::Duration::from_millis(cli.egress_timeout_ms),
-            max_redirects: cli.egress_max_redirects,
-            max_response_bytes: cli.egress_max_response_bytes,
-        },
+    let egress = match build_action_egress_guard(
+        cli,
         catalog,
         egress_denied_total,
         flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
-    ));
-    let caps = capabilities::StageCapabilities::new(relay_conn, egress, usage);
+    ) {
+        Some(guard) => guard,
+        None => return None,
+    };
+    // `kv` gets its OWN connection to the dedicated `noeviction` kv instance
+    // (`VALKEY_KV_URL`, see `kv_instance_config`), never `relay_conn`'s
+    // durable instance. Any unavailability (unset URL, connect failure,
+    // evicting policy) disables only `kv` LOUDLY (`kv_degraded`) and
+    // fail-CLOSED -- never a fallback to the durable instance.
+    let kv_conn = match kv_instance_config(&spine_cfg, |k| std::env::var(k).ok()) {
+        None => {
+            kv_degraded("url_unset", "VALKEY_KV_URL is unset or blank");
+            None
+        }
+        Some(kv_cfg) => match usage::connect(&kv_cfg).await {
+            Ok(mut conn) => {
+                let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut conn).await;
+                bundle_host_kv::policy::log_and_record(&policy_check);
+                if let bundle_host_kv::policy::PolicyCheck::Violation(policy) = &policy_check {
+                    kv_degraded("evicting_policy", policy);
+                    None
+                } else {
+                    Some(conn)
+                }
+            }
+            Err(err) => {
+                kv_degraded("connect_failed", &err.to_string());
+                None
+            }
+        },
+    };
+    // `core/bundle_capability_gate::CapabilityGate` (spec
+    // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    // SS5): `PgGrantLoader` against the RO-replica reader account when
+    // `DB_READER_PASSWORD` is configured (the same account
+    // `crate::changelog_consumer`'s DB-driven path uses),
+    // `InMemoryGrantLoader` (always denies every non-platform permission)
+    // otherwise -- `build_production_gate` unions the always-granted
+    // platform trio over either and spawns the push-invalidation/poll-
+    // refresh loop against this same Valkey connection's client.
+    let redis_client = build_redis_client(&spine_cfg);
+    let poll_interval = cli.bundle_config_poll_interval();
+    let gate = match db_reader_password {
+        Some(password) => {
+            let reader_cfg = bundle_active_set::ReaderConfig {
+                host: cli.db_reader_host.clone(),
+                port: cli.db_reader_port,
+                name: cli.db_reader_name.clone(),
+                user: cli.db_reader_user.clone(),
+            };
+            match bundle_active_set::reader::connect(&reader_cfg, password.expose()).await {
+                Ok(db) => grant_gate::build_production_gate(
+                    grant_gate::PgGrantLoader::new(db),
+                    redis_client,
+                    poll_interval,
+                ),
+                Err(err) => {
+                    tracing::warn!(error = %err, "grant-gate db-reader connection failed; every non-platform permission denies until the next connection attempt");
+                    grant_gate::build_production_gate(
+                        bundle_capability_gate::InMemoryGrantLoader::new(),
+                        redis_client,
+                        poll_interval,
+                    )
+                }
+            }
+        }
+        None => grant_gate::build_production_gate(
+            bundle_capability_gate::InMemoryGrantLoader::new(),
+            redis_client,
+            poll_interval,
+        ),
+    };
+    let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+        relay_conn, egress, usage, gate,
+    );
+    let caps = match kv_conn {
+        Some(kv_conn) => caps.with_kv(kv_conn, kv_capabilities),
+        None => caps,
+    };
     // Discord relay send (spec: relay providers, `discord`) -- graceful
     // degradation, not a startup requirement: a deployment that never sets
     // `DISCORD_BOT_TOKEN` simply never enables this provider, and a bundle
@@ -371,7 +878,7 @@ async fn build_stage_capabilities(
     // than this process failing to start (`config::Config::
     // discord_bot_token`'s doc).
     let caps = match discord_bot_token {
-        Some(token) => caps.with_discord(Arc::new(egress::ReqwestTransport), token),
+        Some(token) => caps.with_discord(Arc::new(egress::ReqwestTransport::new()), token),
         None => {
             tracing::warn!(
                 "DISCORD_BOT_TOKEN not set; discord relay provider disabled \
@@ -380,6 +887,25 @@ async fn build_stage_capabilities(
             caps
         }
     };
+    // Outbound PII-detokenization (`capabilities::StageCapabilities::
+    // with_detokenize`) -- graceful degradation, not a startup requirement
+    // *here*: `run_with_shutdown`'s `build_hub_client` call already fails
+    // loud at process startup when detokenization is enabled and no
+    // `HubClient` could be connected, so `hub_client_conn` is `None` here
+    // ONLY when the opt-out kill-switch is ON (the safe, documented
+    // degraded-UX tradeoff -- `flags::DISABLE_PII_DETOKENIZATION_FLAG`'s
+    // doc), never from an unconfigured-but-expected dependency.
+    let caps = match hub_client_conn {
+        Some(client) => caps.with_detokenize(
+            Arc::new(egress_detokenizer::HubClientResolver(client)),
+            flags::pii_detokenization_flag(&license),
+        ),
+        None => caps,
+    };
+    // Dispatcher egress toggle (`flags::EGRESS_VIA_DISPATCHER_FLAG`) --
+    // default OFF (unseen/absent => inline path); this is the only
+    // production wiring that makes the dispatcher path reachable.
+    let caps = caps.with_egress_dispatcher_flag(flags::egress_dispatcher_flag());
     Some(Arc::new(caps))
 }
 
@@ -392,15 +918,21 @@ async fn build_stage_capabilities(
 /// HTTP/metrics servers served alongside it -- the same graceful-
 /// degradation contract `core/svc_process`'s `try_start_spine_drain`
 /// applies to its own optional dependency.
+#[allow(clippy::too_many_arguments)]
 fn try_start_host_api(
     cli: &config::CliConfig,
     discord_bot_token: Option<config::Secret>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    db_reader_password: Option<config::Secret>,
+    metrics: telemetry::HostApiMetrics,
+    hub_client_conn: Option<Arc<hub_client::HubClient>>,
 ) -> Arc<host_api::ConnectionRegistry> {
     let registry = Arc::new(host_api::ConnectionRegistry::new());
+    registry.set_dead_letter_metric(metrics.dead_lettered_no_executor_total.clone());
     let cli = cli.clone();
     let registry_for_task = Arc::clone(&registry);
     tokio::spawn(async move {
@@ -414,68 +946,21 @@ fn try_start_host_api(
             discord_bot_token,
             usage,
             catalog,
+            kv_capabilities,
             egress_denied_total,
             license,
+            db_reader_password,
+            hub_client_conn,
         )
         .await
         .unwrap_or_else(|| Arc::new(capabilities::DenyAllCapabilities));
-        if let Err(err) = host_api::serve(cli, registry_for_task, capabilities, shutdown_rx).await {
+        if let Err(err) =
+            host_api::serve(cli, registry_for_task, capabilities, shutdown_rx, metrics).await
+        {
             tracing::warn!(error = %err, "host-api listener unavailable; executor integration disabled");
         }
     });
     registry
-}
-
-/// Resolves, ONCE at startup, whether the DB-driven bundle-config path
-/// (`crate::bundle_loader`) or the legacy `ACTION_BUNDLE_*` env override
-/// (`try_start_env_bundle_loader`) is authoritative for this process's
-/// entire lifetime -- **mutual exclusion, not operator discipline**: exactly
-/// one of the two ever starts, regardless of what `ACTION_BUNDLE_DIGEST`
-/// happens to be set to. Field-for-field mirror of `core/svc_process`'s own
-/// `resolve_db_path_active` -- see that function's doc for the full
-/// rationale, reproduced here only where it differs.
-///
-/// Deliberately evaluated only here, once, rather than per-tick the way
-/// `bundle_loader::run_tick` re-checks its own kill-switch gate on every
-/// poll: a live `waddles.core.disable-db-bundle-config` flip mid-run is
-/// still caught by that per-tick gate (DB-driven load/unload stops
-/// immediately), but this function's own path-selection decision does NOT
-/// re-run -- falling back to (or away from) the legacy env override requires
-/// a pod restart. That is an accepted tradeoff, not an oversight: it
-/// guarantees the two paths can never send conflicting `load`/`unload`
-/// frames over the same host-API connection, which a live re-evaluation
-/// racing against an already-spawned loader task could not cleanly
-/// guarantee.
-///
-/// The DB path is active when [`db_path_selected`] says so: DB config
-/// present (`DB_READER_PASSWORD` set, `BUNDLE_SCOPE_TENANT_ID` configured)
-/// AND the kill-switch gate reports enabled (`flags::db_bundle_config_flag`
-/// over the already-built, already-refreshing shared `license` client --
-/// already the negated "is the DB path enabled" answer, default `true` when
-/// the flag is unseen or the license server is unreachable). Reuses the
-/// caller's own `license` rather than constructing a second one, unlike
-/// `core/svc_process`'s equivalent (which has no shared client in scope at
-/// its own call site).
-async fn resolve_db_path_active(
-    config: &config::Config,
-    license: &Option<Arc<penguin_licensing::LicenseClient>>,
-) -> bool {
-    let db_config_present =
-        config.db_reader_password.is_some() && config.cli.bundle_scope_tenant_id.get().is_some();
-    if !db_config_present {
-        return false;
-    }
-    let gate_enabled = flags::db_bundle_config_flag(license).enabled().await;
-    db_path_selected(db_config_present, gate_enabled)
-}
-
-/// Pure boolean combination behind [`resolve_db_path_active`] -- split out
-/// so the "which path wins" decision is directly unit-testable with a fixed
-/// kill-switch-gate value, without needing a live/mocked
-/// `penguin_licensing::LicenseClient` round trip to force a "kill-switch ON"
-/// flag value (not achievable in a unit test against the real client).
-fn db_path_selected(db_config_present: bool, gate_enabled: bool) -> bool {
-    db_config_present && gate_enabled
 }
 
 /// Resolves the digest/config JSON the dispatch loop's `deps.digest` starts
@@ -503,10 +988,10 @@ fn resolve_initial_bundle(env_bundle_digest: &str) -> (String, String) {
 
 /// Sends `load` for a statically-configured bundle (`ACTION_BUNDLE_*` env
 /// vars, `config::CliConfig::action_bundle_digest`'s doc) directly over the
-/// host-API connection -- the legacy bundle-selection path, active only when
-/// [`resolve_db_path_active`] says the DB-driven path is not (this module's
-/// top doc). A no-op (never spawns a task) when `ACTION_BUNDLE_DIGEST` is
-/// unset.
+/// host-API connection -- the legacy bundle-selection path, runs
+/// unconditionally alongside [`try_start_changelog_consumer`] (this
+/// module's top doc). A no-op (never spawns a task) when
+/// `ACTION_BUNDLE_DIGEST` is unset.
 fn try_start_env_bundle_loader(
     cli: &config::CliConfig,
     connections: Arc<host_api::ConnectionRegistry>,
@@ -586,8 +1071,13 @@ async fn env_bundle_loader_loop(
                 {
                     continue;
                 }
+                // `(0, 0)`: see `distribution.rs`'s identical env/catalog-
+                // interim-path sentinel doc -- this `ACTION_BUNDLE_*` env
+                // override has no real tenant row to resolve either.
                 match dispatch::ensure_loaded(
                     &connection,
+                    0,
+                    0,
                     &app_id,
                     &version,
                     &digest,
@@ -613,51 +1103,124 @@ async fn env_bundle_loader_loop(
     }
 }
 
-/// Attempts to start the DB-driven active-bundle loader
-/// (`crate::bundle_loader`, spec: hub-api is the sole writer, this stage
-/// reads ACTIVE, APPROVED bundle config from a READ-ONLY Postgres and
-/// hot-swaps in/out with no pod restart). Two independent reasons this
-/// never starts, both logged and neither an error -- `DB_READER_PASSWORD`
-/// unset (the RO account hasn't been provisioned yet in this environment)
-/// or `BUNDLE_SCOPE_TENANT_ID` unset (`None` -- see `config::TenantScopeId`'s
-/// own doc for why this is no longer collapsed onto `0`, a real, selectable
-/// tenant). Called only when `resolve_db_path_active` has already selected
-/// this path (`run_with_shutdown`'s mutual-exclusion dispatch, this module's
-/// top doc) -- these are defense-in-depth startup gates, not the primary
-/// selection mechanism; the loader is additionally gated per-tick on the
-/// `waddles.core.disable-db-bundle-config` kill-switch
-/// (`flags::db_bundle_config_flag`) inside `bundle_loader::run_tick`
-/// regardless of whether this function's own startup gates pass. Reuses the
-/// already-built, already-refreshing `license` client (`run_with_shutdown`'s
-/// own `build_license_client` call) rather than constructing a second one.
-fn try_start_db_bundle_loader(
+/// Outcome of [`resolve_multi_tenant_path_decision`] -- carries *why*, not
+/// just the boolean choice, same shape as `core/svc_process`'s own
+/// `PathDecision` (`run_with_shutdown`'s startup log line states the reason).
+/// Dispatch (the stream-consumer side, [`try_start_dispatch`] vs.
+/// [`try_start_changelog_consumer`]'s `dispatch_spawner`) is strictly
+/// mutually exclusive on this decision -- see `run_with_shutdown`'s own
+/// regression comment on why ("legacy ping consumer competed in the same
+/// consumer group", alpha 2026-10-03). The legacy `ACTION_BUNDLE_*` env
+/// bundle loader ([`try_start_env_bundle_loader`]) is unaffected: it has no
+/// consumer group to collide on, and keeps running regardless of this
+/// decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathDecision {
+    /// `DB_READER_PASSWORD` configured and both kill-switch gates resolved
+    /// enabled.
+    MultiTenant,
+    /// `DB_READER_PASSWORD` unset/empty -- no DB path exists to select,
+    /// regardless of kill-switch state.
+    NoDbConfig,
+    /// `DB_READER_PASSWORD` configured, but a kill-switch gate resolved
+    /// genuinely disabled.
+    KillSwitchOn,
+}
+
+/// Resolves, once at startup, whether the multi-tenant dispatch path or the
+/// legacy `ACTION_APP_ID` dispatch path is authoritative for this pod --
+/// mirrors `core/svc_process::resolve_multi_tenant_path_decision` exactly
+/// (same two kill-switch flags, same fail-open-on-no-license-client
+/// posture via `flags::db_bundle_config_flag`/`multi_tenant_watermark_flag`,
+/// each already defaulting to `StaticFlag(true)` when `license` is `None`).
+async fn resolve_multi_tenant_path_decision(
+    config: &config::Config,
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> PathDecision {
+    if config.db_reader_password.is_none() {
+        return PathDecision::NoDbConfig;
+    }
+    let flag: Arc<dyn flags::FeatureFlag> = Arc::new(flags::AllFlags(vec![
+        flags::db_bundle_config_flag(license),
+        flags::multi_tenant_watermark_flag(license),
+    ]));
+    if flag.enabled().await {
+        PathDecision::MultiTenant
+    } else {
+        PathDecision::KillSwitchOn
+    }
+}
+
+/// Attempts to start the multi-tenant, change-log-driven active-bundle
+/// loader (`crate::changelog_consumer`, dataplane scale design rev 4,
+/// §7/§8 step 2) -- `run_with_shutdown` only calls this when
+/// [`resolve_multi_tenant_path_decision`] returned [`PathDecision::MultiTenant`];
+/// the legacy `ACTION_APP_ID` dispatch loop ([`try_start_dispatch`]) is never
+/// started in that case (strict mutual exclusion, this module's top doc).
+/// The legacy `ACTION_BUNDLE_*` env override ([`try_start_env_bundle_loader`])
+/// remains the sole other bundle-*loading* source -- unaffected by this
+/// decision, see that function's own doc for why. This loader's DB-driven
+/// bundle load/unload is additionally gated per-tick on BOTH
+/// `waddles.core.disable-db-bundle-config` and
+/// `waddles.core.disable-multi-tenant-watermark` inside
+/// `changelog_consumer::run`, a defense-in-depth recheck of the same two
+/// flags this function's caller already resolved once at startup. Reuses
+/// the already-built, already-refreshing `license` client
+/// (`run_with_shutdown`'s own `build_license_client` call) rather than
+/// constructing a second one.
+///
+/// **`BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` REMOVED**
+/// (dataplane scale design, user requirement: "every svc_process/
+/// svc_action pod serves ALL tenants") -- this loader now discovers and
+/// serves every `(tenant_id, community_id)` scope in the database itself.
+#[allow(clippy::too_many_arguments)]
+fn try_start_changelog_consumer(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     excluded_metric: prometheus::IntCounterVec,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+    changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
+    // regression: svc-action had no multi-tenant dispatch consumers; replies
+    // never sent after legacy env removal (alpha 2026-10-03)
+    dispatch_supervisor_metrics: telemetry::DispatchSupervisorMetrics,
+    usage: Arc<Mutex<usage::UsageBatcher>>,
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // Independent from `try_start_dispatch`'s own `consumer_loop_ready` --
+    // callers now call at most one of this function / `try_start_dispatch`
+    // per pod ([`PathDecision`]'s doc), but the two readiness flags still
+    // must never collapse into one: `run_with_shutdown` explicitly
+    // pre-stores `true` on whichever flag belongs to the path that never
+    // starts, so neither health check hangs waiting on a loop that was
+    // never going to run.
+    changelog_consumer_ready: Arc<std::sync::atomic::AtomicBool>,
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // fed to `changelog_consumer::run` below, kept current every tick so
+    // `dispatch::handle_delivered` never resolves grants against a stale
+    // `app_versions.id`. See `dispatch::DispatchDeps::app_version_snapshot`'s
+    // doc.
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
-            "DB_READER_PASSWORD not set; DB-driven bundle loader not started (unreachable: \
-             resolve_db_path_active already checked this)"
+            "DB_READER_PASSWORD not set; multi-tenant changelog consumer not started (env selection remains authoritative)"
         );
-        return;
-    };
-    let Some(tenant_id) = config.cli.bundle_scope_tenant_id.get() else {
-        tracing::info!(
-            "BUNDLE_SCOPE_TENANT_ID not set; DB-driven bundle loader not started (unreachable: \
-             resolve_db_path_active already checked this)"
-        );
+        changelog_consumer_ready.store(true, std::sync::atomic::Ordering::Relaxed);
         return;
     };
 
-    // `flags::db_bundle_config_flag` (not the generic `flag_or_closed` +
-    // `NegatedFlag` composition) -- this crate's own hardcoded
-    // license-bypass domain (`build_license_client` above) makes
-    // `flag_enabled` read `true` for ANY key, so a bare negation would
-    // report the DB-driven path permanently DISABLED for every deployment
-    // of this service; see `flags::DisableDbBundleConfigFlag`'s doc.
-    let flag = flags::db_bundle_config_flag(&license);
+    // `flags::db_bundle_config_flag`/`multi_tenant_watermark_flag` (not the
+    // generic `flag_or_closed` + `NegatedFlag` composition) -- this crate's
+    // own hardcoded license-bypass domain (`build_license_client` above)
+    // makes `flag_enabled` read `true` for ANY key, so a bare negation
+    // would report the multi-tenant path permanently DISABLED for every
+    // deployment of this service; see `flags::DisableDbBundleConfigFlag`'s
+    // doc.
+    let flag: Arc<dyn flags::FeatureFlag> = Arc::new(flags::AllFlags(vec![
+        flags::db_bundle_config_flag(&license),
+        flags::multi_tenant_watermark_flag(&license),
+    ]));
     let reader_cfg = bundle_active_set::ReaderConfig {
         host: config.cli.db_reader_host.clone(),
         port: config.cli.db_reader_port,
@@ -665,32 +1228,180 @@ fn try_start_db_bundle_loader(
         user: config.cli.db_reader_user.clone(),
     };
     let password = password.expose().to_string();
-    let community_id = config.cli.bundle_scope_community_id;
     let poll_interval = config.cli.bundle_config_poll_interval();
+    let full_reconcile_interval = config.cli.full_reconcile_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
 
+    // Multi-tenant dispatch-consumer supervisor prerequisites (regression:
+    // svc-action had no multi-tenant dispatch consumers; replies never sent
+    // after legacy env removal, alpha 2026-10-03) -- same two synchronous
+    // checks `try_start_dispatch` performs before ever spawning, so a
+    // missing/invalid prerequisite logs and degrades gracefully (the
+    // DB-driven path still loads/unloads bundles via `BundleSink`; it just
+    // never dispatches) rather than panicking.
+    let dispatch_key_ring = match config.envelope_binding_keys.as_ref() {
+        Some(keys_raw) => match hop::KeyRing::parse(keys_raw.expose()) {
+            Ok(r) => Some(r),
+            Err(err) => {
+                tracing::warn!(error = %err, "ENVELOPE_BINDING_KEYS invalid; multi-tenant dispatch-consumer supervisor disabled");
+                None
+            }
+        },
+        None => {
+            tracing::warn!("ENVELOPE_BINDING_KEYS not set; multi-tenant dispatch-consumer supervisor disabled (hop verification must never fail open)");
+            None
+        }
+    };
+    let dispatch_spine_cfg = match penguin_spine::SpineConfig::from_env() {
+        Ok(c) => Some(c),
+        Err(err) => {
+            tracing::warn!(error = %err, "spine config unavailable; multi-tenant dispatch-consumer supervisor disabled");
+            None
+        }
+    };
+    let rust_data_plane = flag_or_closed(&license, flags::RUST_DATA_PLANE_FLAG);
+    let dispatch_retry_policy = dispatch::RetryPolicy {
+        max_retries: config.cli.action_max_retries,
+        base_backoff_ms: config.cli.action_base_backoff_ms,
+        max_backoff_ms: config.cli.action_max_backoff_ms,
+        call_timeout_ms: config.cli.executor_call_timeout_ms,
+    };
+    let dispatch_connections = Arc::clone(&connections);
+    let config_for_dispatch = config.clone();
+
+    let startup_log_flag = Arc::clone(&flag);
+    // Fail loud, never silent (user requirement): this path is selected
+    // (`DB_READER_PASSWORD` configured) -- readiness must gate on it from
+    // the very first instant, not just once `changelog_consumer::run`
+    // reaches its own retry loop.
+    changelog_consumer_ready.store(false, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
+        // Point (e) of the alpha fix (2026-10-02): log at INFO/WARN which
+        // state the kill-switch resolved to before ever attempting to
+        // connect -- `DB_READER_PASSWORD` being configured only means this
+        // path is SELECTED, not that it will actually process anything.
+        if startup_log_flag.enabled().await {
+            tracing::info!(
+                "startup path: multi-tenant changelog-consumer enabled \
+                 (DB_READER_PASSWORD configured, kill-switches enabled)"
+            );
+        } else {
+            tracing::warn!(
+                "multi-tenant changelog-consumer kill-switch is ON at startup; connecting \
+                 anyway, but ticks will no-op until it flips off"
+            );
+        }
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
             Ok(db) => db,
             Err(err) => {
-                tracing::error!(error = %err, "db-reader connection failed; DB-driven bundle loader not started");
-                return;
+                // Point (c) of the alpha fix (2026-10-02, `core/svc_process`'s
+                // identical fix for its own `try_start_changelog_consumer`):
+                // this path was SELECTED (`DB_READER_PASSWORD` configured) --
+                // a connect/auth/query failure here must fail loud
+                // (crashloop) rather than silently leaving the pod running
+                // with no multi-tenant changelog consumer and no indication
+                // why.
+                // regression: multi-app path silently inactive, fell back to stale legacy env (alpha 2026-10-02)
+                tracing::error!(
+                    error = %err,
+                    "db-reader connection failed for the selected multi-tenant \
+                     changelog-consumer path; exiting rather than silently falling back"
+                );
+                std::process::exit(1);
             }
         };
+
+        // Builds the multi-tenant dispatch-consumer spawner, if both
+        // prerequisite checks above passed. A writable DB connection
+        // (distinct from the read-only `db` above -- `DbAuditSink`/
+        // `DbTenantResolver` write `action_dispatch_log` and read
+        // `tenants`/`communities`) is connected here, inside the async
+        // task, mirroring `try_start_dispatch`'s own `db::connect` call.
+        // Any failure here degrades gracefully (logs, `spawner = None`) --
+        // this is a supplementary capability, not the selected path itself
+        // (unlike the RO `db` connect above, which crashloops).
+        let active_digests = Arc::new(active_digests::ActiveDigests::new());
+        // regression: bundles loaded only onto a terminating executor during
+        // rollout; live executor got none (alpha 2026-10-03). Shared the same
+        // way as `active_digests` above -- `crate::changelog_consumer::run`
+        // overwrites `state.loaded` with this exact instance so every spawned
+        // dispatch consumer's `DigestSource::Active` sees the same
+        // per-session loaded-state the changelog consumer writes to.
+        let loaded_sessions = Arc::new(active_digests::LoadedSessions::new());
+        let dispatch_spawner: Option<Arc<dyn dispatch_supervisor::ConsumerSupervisor>> =
+            match (dispatch_key_ring, dispatch_spine_cfg) {
+                (Some(key_ring), Some(spine_cfg)) => {
+                    match db::connect(&config_for_dispatch).await {
+                        Ok(dispatch_db) => {
+                            tracing::info!(
+                                "startup path: multi-tenant dispatch-consumer supervisor enabled \
+                                 (ENVELOPE_BINDING_KEYS + spine config + db present)"
+                            );
+                            let deps = Arc::new(dispatch_supervisor::SupervisorDeps {
+                                spine_cfg,
+                                key_ring,
+                                connections: dispatch_connections,
+                                retry_policy: dispatch_retry_policy,
+                                db: dispatch_db,
+                                usage,
+                                metrics: stage_metrics::stage_metrics(),
+                                rust_data_plane,
+                                active_digests: Arc::clone(&active_digests),
+                                loaded_sessions: Arc::clone(&loaded_sessions),
+                                app_version_snapshot: app_version_snapshot.clone(),
+                                // ONE shared instance for this supervisor
+                                // (`dispatch_supervisor::SupervisorDeps::
+                                // breaker`'s doc) -- built here (no I/O).
+                                breaker: Arc::new(circuit_breaker::CircuitBreaker::new(
+                                    Arc::clone(&breaker_metrics),
+                                )),
+                            });
+                            Some(Arc::new(dispatch_supervisor::SpineConsumerSupervisor {
+                                deps,
+                            }))
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                error = %err,
+                                "db connection failed for the multi-tenant dispatch-consumer \
+                                 supervisor; the DB-driven path will load/unload bundles but \
+                                 dispatch nothing until this is resolved"
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!(
+                        "multi-tenant dispatch-consumer supervisor not started; the DB-driven \
+                         path will load/unload bundles but dispatch nothing until \
+                         ENVELOPE_BINDING_KEYS and spine config are both present"
+                    );
+                    None
+                }
+            };
+
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             shutdown_signal().await;
             let _ = shutdown_tx.send(());
         });
-        bundle_loader::run(
+        changelog_consumer::run(
             db,
-            tenant_id,
-            community_id,
             poll_interval,
+            full_reconcile_interval,
             call_timeout_ms,
             flag,
             connections,
+            dispatch_spawner,
             excluded_metric,
+            dispatch_supervisor_metrics,
+            changelog_consumer_metrics,
+            kv_capabilities,
+            changelog_consumer_ready,
+            active_digests,
+            loaded_sessions,
+            app_version_snapshot,
             shutdown_rx,
         )
         .await;
@@ -704,15 +1415,31 @@ fn try_start_db_bundle_loader(
 /// bundle assigned yet), or `penguin_spine::SpineConfig::from_env()`/
 /// `ENVELOPE_BINDING_KEYS` parsing failing (missing/invalid required
 /// config -- hop verification must never silently fail open, so a missing
-/// keyring disables the loop rather than starting it unverified). Runs
-/// unconditionally alongside whichever bundle-selection path
-/// `run_with_shutdown` chose (this module's top doc) -- this is the
-/// consumer loop, not a bundle-selection path itself.
+/// keyring disables the loop rather than starting it unverified).
+/// `run_with_shutdown` only calls this when
+/// [`resolve_multi_tenant_path_decision`] did NOT select
+/// [`PathDecision::MultiTenant`] -- strictly mutually exclusive with
+/// [`try_start_changelog_consumer`]'s `dispatch_spawner` (regression: both
+/// joined the same consumer group on the action stream when `ACTION_APP_ID`
+/// matched a DB-driven app_id, alpha 2026-10-03). The legacy
+/// `ACTION_BUNDLE_*` env bundle *loader* ([`try_start_env_bundle_loader`])
+/// is a separate, non-consumer mechanism and still runs regardless of this
+/// decision.
+#[allow(clippy::too_many_arguments)]
 fn try_start_dispatch(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // fed the `0`-sentinel fallback below when the DB-driven changelog
+    // consumer is unconfigured, so `dispatch::handle_delivered` still has
+    // a (fail-closed) value to key grants on. See `DispatchDeps::
+    // app_version_snapshot`'s doc.
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    drain_loop_metrics: telemetry::DrainLoopMetrics,
+    consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) {
     if config.cli.action_app_id.is_empty() {
         tracing::info!("ACTION_APP_ID not set; dispatch loop not started (no bundle assigned)");
@@ -750,6 +1477,30 @@ fn try_start_dispatch(
             }
         };
         let (digest, config_json) = resolve_initial_bundle(&config.cli.action_bundle_digest);
+        // `app_version_snapshot` is resolved PER INVOCATION in
+        // `dispatch::handle_delivered`, never captured once here (a bundle
+        // hot-swap must be reflected on the very next invocation, spec
+        // SS4/SS5.1). When the DB-driven changelog consumer path is
+        // unconfigured (`DB_READER_PASSWORD` unset -- `try_start_changelog_
+        // consumer`'s own gate), no poller ever populates the snapshot for
+        // this `app_id`, so seed it ONCE with the `0` sentinel here --
+        // identical posture to `core/svc_process::lib::
+        // try_start_process_loop`'s own documented unconfigured-mode
+        // fallback.
+        if config.db_reader_password.is_none() {
+            app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
+                app_id: app_id.clone(),
+                version: String::new(),
+                version_id: 0,
+                digest: digest.clone(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+                declared_capabilities: Vec::new(),
+            }]);
+        }
         // TODO(M3+): tenant/community scope is hardcoded to the
         // tenant-wide `global` activation until multi-bundle scheduling
         // (module doc) resolves the real set of (tenant, community,
@@ -762,66 +1513,182 @@ fn try_start_dispatch(
             platform: "internal".to_string(),
             source_id: app_id.clone(),
         };
-        let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
-        let spine = match penguin_spine::SpineClient::connect(spine_cfg.clone(), metrics.clone())
-            .await
-        {
-            Ok(c) => c,
-            Err(err) => {
-                tracing::error!(error = %err, "spine client connect failed; dispatch loop not started");
-                return;
-            }
-        };
-        let deps = dispatch::DispatchDeps {
-            app_id: app_id.clone(),
-            digest,
-            config_json,
-            key_ring,
-            connections,
-            retry_policy: dispatch::RetryPolicy {
-                max_retries: config.cli.action_max_retries,
-                base_backoff_ms: config.cli.action_base_backoff_ms,
-                max_backoff_ms: config.cli.action_max_backoff_ms,
-                call_timeout_ms: config.cli.executor_call_timeout_ms,
-            },
-            jitter: retry::Jitter::from_entropy(),
-            audit: wiring::DbAuditSink::new(db.clone()),
-            tenants: wiring::DbTenantResolver::new(db),
-            usage: Arc::clone(&usage),
-            // spec §5.11/D30 (mirrors `penguin_spine::client::claim_stale`'s
-            // own convention): a `DlqError.consumer_id` names the *pod*
-            // handling the entry, not the entry's own stream id.
-            consumer_id: spine_cfg.consumer_id.clone(),
-            spine,
-            metrics,
-        };
+        let metrics: Arc<dyn penguin_spine::SpineMetrics> = stage_metrics::stage_metrics();
 
         try_start_usage_flush(
             config.cli.metering_flush_interval_s,
-            usage,
+            Arc::clone(&usage),
             spine_cfg.clone(),
         );
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (outer_shutdown_tx, mut outer_shutdown_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             shutdown_signal().await;
-            let _ = shutdown_tx.send(());
+            let _ = outer_shutdown_tx.send(());
         });
 
         let rust_data_plane = flag_or_closed(&license, flags::RUST_DATA_PLANE_FLAG);
-        if let Err(err) = dispatch::run(
-            spine_cfg,
-            vec![grant],
-            stream_key,
-            deps,
-            rust_data_plane,
-            shutdown_rx,
-        )
-        .await
-        {
-            tracing::error!(error = %err, "action-stage dispatch loop exited");
+
+        // Capped exponential backoff between (re)connect attempts, never a
+        // one-shot connect/drain. Self-heals NOGROUP by (re)provisioning
+        // the action stream's consumer group before each attempt: on a
+        // fresh Valkey nothing else in this env-driven single-bundle path
+        // ever creates it. regression: drain loop exited on NOGROUP (alpha
+        // 2026-10-02)
+        const BACKOFF_MAX: Duration = Duration::from_secs(30);
+        let mut attempt: u32 = 0;
+        // Built ONCE for this loop's lifetime, never per reconnect attempt
+        // -- see `core/svc_process::try_start_process_loop`'s identical
+        // breaker placement/rationale.
+        let breaker = Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics));
+        loop {
+            attempt += 1;
+            drain_loop_metrics
+                .spine_connect_attempts_total
+                .with_label_values(&["dispatch"])
+                .inc();
+
+            match dispatch::ensure_consumer_group(&spine_cfg, &stream_key, &app_id).await {
+                Ok(true) => {
+                    drain_loop_metrics
+                        .consumer_group_created_total
+                        .with_label_values(&["dispatch"])
+                        .inc();
+                    tracing::info!(stream = %stream_key, group = %app_id, "consumer group created");
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(stream = %stream_key, group = %app_id, error = %err, "ensure consumer group failed, will retry");
+                }
+            }
+
+            let spine = match penguin_spine::SpineClient::connect(
+                spine_cfg.clone(),
+                metrics.clone(),
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(err) => {
+                    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                    drain_loop_metrics
+                        .consumer_loop_running
+                        .with_label_values(&["dispatch"])
+                        .set(0);
+                    tracing::error!(error = %err, attempt, "spine client connect failed, retrying");
+                    if wait_or_shutdown(
+                        &mut outer_shutdown_rx,
+                        backoff_for_attempt(attempt, BACKOFF_MAX),
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            let deps = dispatch::DispatchDeps {
+                app_id: app_id.clone(),
+                digest_source: dispatch::DigestSource::Static(digest.clone()),
+                config_json: config_json.clone(),
+                key_ring: key_ring.clone(),
+                connections: Arc::clone(&connections),
+                retry_policy: dispatch::RetryPolicy {
+                    max_retries: config.cli.action_max_retries,
+                    base_backoff_ms: config.cli.action_base_backoff_ms,
+                    max_backoff_ms: config.cli.action_max_backoff_ms,
+                    call_timeout_ms: config.cli.executor_call_timeout_ms,
+                },
+                jitter: retry::Jitter::from_entropy(),
+                audit: wiring::DbAuditSink::new(db.clone()),
+                tenants: wiring::DbTenantResolver::new(db.clone()),
+                usage: Arc::clone(&usage),
+                // spec §5.11/D30 (mirrors `penguin_spine::client::
+                // claim_stale`'s own convention): a `DlqError.consumer_id`
+                // names the *pod* handling the entry, not the entry's own
+                // stream id.
+                consumer_id: spine_cfg.consumer_id.clone(),
+                spine,
+                metrics: metrics.clone(),
+                app_version_snapshot: app_version_snapshot.clone(),
+                breaker: Arc::clone(&breaker),
+            };
+
+            let (inner_tx, inner_rx) = tokio::sync::oneshot::channel();
+            let run_fut = dispatch::run(
+                spine_cfg.clone(),
+                vec![grant.clone()],
+                stream_key.clone(),
+                deps,
+                Arc::clone(&rust_data_plane),
+                inner_rx,
+            );
+            tokio::pin!(run_fut);
+
+            consumer_loop_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+            drain_loop_metrics
+                .consumer_loop_running
+                .with_label_values(&["dispatch"])
+                .set(1);
+
+            tokio::select! {
+                _ = &mut outer_shutdown_rx => {
+                    let _ = inner_tx.send(());
+                    let _ = run_fut.await;
+                    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                    drain_loop_metrics
+                        .consumer_loop_running
+                        .with_label_values(&["dispatch"])
+                        .set(0);
+                    return;
+                }
+                result = &mut run_fut => {
+                    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                    drain_loop_metrics
+                        .consumer_loop_running
+                        .with_label_values(&["dispatch"])
+                        .set(0);
+                    match result {
+                        // Only reachable via the shutdown branch above in
+                        // practice (`dispatch::run` returns `Ok(())` only
+                        // when its own `shutdown` receiver resolves).
+                        Ok(()) => return,
+                        Err(err) if dispatch::is_nogroup_error(&err) => {
+                            tracing::warn!(attempt, "action-stage dispatch loop: consumer group not yet provisioned (NOGROUP), self-healing and retrying");
+                        }
+                        Err(err) => {
+                            tracing::error!(error = %err, attempt, "action-stage dispatch loop exited, retrying");
+                        }
+                    }
+                    if wait_or_shutdown(&mut outer_shutdown_rx, backoff_for_attempt(attempt, BACKOFF_MAX)).await {
+                        return;
+                    }
+                }
+            }
         }
     });
+}
+
+/// Capped exponential backoff: 1s, 2s, 4s, 8s, 16s, then `max` thereafter.
+/// Shared by [`try_start_dispatch`]'s connect/self-heal retry loop.
+fn backoff_for_attempt(attempt: u32, max: Duration) -> Duration {
+    let secs = 1u64
+        .checked_shl(attempt.saturating_sub(1).min(16))
+        .unwrap_or(u64::MAX);
+    Duration::from_secs(secs).min(max)
+}
+
+/// Sleeps for `dur`, or returns early (reporting `true`) if `shutdown`
+/// resolves first.
+async fn wait_or_shutdown(
+    shutdown: &mut tokio::sync::oneshot::Receiver<()>,
+    dur: Duration,
+) -> bool {
+    tokio::select! {
+        _ = shutdown => true,
+        () = tokio::time::sleep(dur) => false,
+    }
 }
 
 /// Starts the usage-metering flush loop (spec §5.12/D31) as its own
@@ -981,6 +1848,44 @@ mod tests {
         }
     }
 
+    /// Capped exponential sequence: 1s, 2s, 4s, 8s, 16s, then pinned at
+    /// `max` thereafter -- including well past the `u32` shift-overflow
+    /// guard (`attempt` saturating at 16 shifts).
+    #[test]
+    fn backoff_for_attempt_doubles_then_caps_at_max() {
+        let max = Duration::from_secs(30);
+        assert_eq!(backoff_for_attempt(1, max), Duration::from_secs(1));
+        assert_eq!(backoff_for_attempt(2, max), Duration::from_secs(2));
+        assert_eq!(backoff_for_attempt(3, max), Duration::from_secs(4));
+        assert_eq!(backoff_for_attempt(4, max), Duration::from_secs(8));
+        assert_eq!(backoff_for_attempt(5, max), Duration::from_secs(16));
+        // Would be 32s uncapped -- `max` wins.
+        assert_eq!(backoff_for_attempt(6, max), max);
+        // Deliberately huge attempt count: `checked_shl` would overflow
+        // `u64` well before this, but the `.min(16)` shift-amount guard
+        // keeps it defined, and `max` still wins either way.
+        assert_eq!(backoff_for_attempt(1000, max), max);
+    }
+
+    /// `wait_or_shutdown` returns `false` (timer path) when the duration
+    /// elapses before `shutdown` resolves.
+    #[tokio::test]
+    async fn wait_or_shutdown_reports_false_when_the_timer_elapses_first() {
+        let (_tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        let fired = wait_or_shutdown(&mut rx, Duration::from_millis(1)).await;
+        assert!(!fired);
+    }
+
+    /// `wait_or_shutdown` returns `true` (shutdown path) the instant
+    /// `shutdown` resolves, well before a long timer would otherwise fire.
+    #[tokio::test]
+    async fn wait_or_shutdown_reports_true_when_shutdown_resolves_first() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        drop(tx);
+        let fired = wait_or_shutdown(&mut rx, Duration::from_secs(30)).await;
+        assert!(fired);
+    }
+
     #[tokio::test]
     async fn flag_or_closed_fails_closed_to_off_when_no_license_client_is_available() {
         let flag = flag_or_closed(&None, flags::RUST_DATA_PLANE_FLAG);
@@ -1086,64 +1991,41 @@ mod tests {
         assert_eq!(config_json, "{}");
     }
 
-    #[test]
-    fn db_path_selected_requires_both_config_present_and_gate_enabled() {
-        assert!(db_path_selected(true, true));
-        assert!(!db_path_selected(true, false));
-        assert!(!db_path_selected(false, true));
-        assert!(!db_path_selected(false, false));
-    }
-
-    /// Mutual-exclusion regression test, missing-config half: `DB_READER_
-    /// PASSWORD` absent must resolve to "legacy path" without even
-    /// resolving the kill-switch gate -- mirrors
-    /// `try_start_db_bundle_loader_noop_when_db_reader_password_unset`'s
-    /// identical config-presence check, now hoisted to the startup
-    /// path-selection decision.
-    #[tokio::test]
-    async fn resolve_db_path_active_is_false_when_db_reader_password_unset() {
-        let cli = CliConfig::parse_from(["svc-action", "--bundle-scope-tenant-id", "1"]);
-        let mut config = ephemeral_config();
-        config.cli = cli;
-        config.db_reader_password = None;
-        assert!(!resolve_db_path_active(&config, &None).await);
-    }
-
-    #[tokio::test]
-    async fn resolve_db_path_active_is_false_when_tenant_id_unset() {
-        let cli = CliConfig::parse_from(["svc-action"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), None);
-        let mut config = ephemeral_config();
-        config.cli = cli;
-        config.db_reader_password = Some(Secret::new("real-ro-password"));
-        assert!(!resolve_db_path_active(&config, &None).await);
-    }
-
-    /// Mutual-exclusion regression test, DB-path-active half: DB config
-    /// fully present with no license client available (`&None`) must
-    /// resolve `true` -- `flags::db_bundle_config_flag(&None)` fails closed
-    /// to "DB path enabled" (its own doc), so `run_with_shutdown`'s
-    /// `if resolve_db_path_active(...).await` branch is the one taken,
-    /// meaning `try_start_env_bundle_loader` (the legacy path) is
-    /// structurally never called for this config.
-    #[tokio::test]
-    async fn resolve_db_path_active_is_true_when_db_config_present_and_no_license_client() {
-        let cli = CliConfig::parse_from(["svc-action", "--bundle-scope-tenant-id", "1"]);
-        let mut config = ephemeral_config();
-        config.cli = cli;
-        config.db_reader_password = Some(Secret::new("real-ro-password"));
-        assert!(
-            resolve_db_path_active(&config, &None).await,
-            "DB config present + no license client must fail closed to the DB-driven path"
-        );
-    }
-
     #[tokio::test]
     async fn run_with_shutdown_binds_and_shuts_down_cleanly() {
         let _guard = ENV_LOCK.lock().await;
         // SAFETY: serialized by ENV_LOCK; no other test reads OTEL env.
         unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
-        let config = ephemeral_config();
+        // `build_license_client()`'s hardcoded self-domain bypass
+        // (`BYPASS_DOMAIN`'s doc) makes PII detokenization report ENABLED
+        // unconditionally for this service, test included -- so
+        // `run_with_shutdown`'s `build_hub_client` call needs a real,
+        // connectable `HUB_API_GRPC_ENDPOINT` or it fails loud (by design)
+        // before ever reaching the bind/serve logic this test exercises.
+        // `HubClient::connect` only needs a listening TCP peer (it doesn't
+        // perform the actual gRPC handshake until the first RPC) -- a bare
+        // accept-and-drop loop is enough.
+        let hub_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral port for the fake hub-api listener");
+        let hub_addr = hub_listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = hub_listener.accept().await {
+                std::mem::forget(sock);
+            }
+        });
+        let mut config = ephemeral_config();
+        config.cli = CliConfig::parse_from([
+            "svc-action",
+            "--http-port",
+            "0",
+            "--metrics-port",
+            "0",
+            "--hub-api-grpc-endpoint",
+            &format!("http://{hub_addr}"),
+            "--service-jwt-token-endpoint",
+            &format!("http://{hub_addr}/internal/service-token"),
+        ]);
         // Shutdown futures resolve immediately, so the servers bind, log,
         // and drain right away instead of blocking on a real OS signal.
         let result =
@@ -1233,6 +2115,39 @@ mod tests {
         }
     }
 
+    /// Wiring: bundle-kv goes to `VALKEY_KV_URL` (dedicated), the spine config
+    /// stays on the durable `VALKEY_URL`; unset kv URL => None (no fallback).
+    #[test]
+    fn kv_instance_config_routes_kv_to_dedicated_and_leaves_spine_on_durable() {
+        let mut spine = unreachable_spine_config();
+        spine.valkey_url = "rediss://durable:6380/0".to_string();
+        spine.valkey_password = Some("durable-pass".to_string());
+        spine.security_transport_tls = true;
+        let env = |k: &str| match k {
+            "VALKEY_KV_URL" => Some("rediss://infra-redis:6380/0".to_string()),
+            "VALKEY_KV_PASSWORD" => Some("cache-pass".to_string()),
+            _ => None,
+        };
+        let kv = kv_instance_config(&spine, env).expect("kv url set");
+        assert_eq!(kv.valkey_url, "rediss://infra-redis:6380/0");
+        assert_eq!(kv.valkey_password.as_deref(), Some("cache-pass"));
+        assert!(kv.security_transport_tls);
+        assert_eq!(spine.valkey_url, "rediss://durable:6380/0");
+        assert_eq!(spine.valkey_password.as_deref(), Some("durable-pass"));
+
+        let plain = kv_instance_config(&spine, |k| {
+            (k == "VALKEY_KV_URL").then(|| "redis://:p@infra-redis:6379/0".to_string())
+        })
+        .expect("kv url set");
+        assert!(!plain.security_transport_tls);
+        assert!(plain.valkey_password.is_none());
+
+        // Unset/blank: NO fallback to the durable instance.
+        assert!(kv_instance_config(&spine, |_| None).is_none());
+        assert!(kv_instance_config(&spine, |_| Some("  ".to_string())).is_none());
+        kv_degraded("test", "does not panic");
+    }
+
     /// Regression coverage for the CRITICAL usage-metering finding: proves
     /// [`try_start_usage_flush`] doesn't panic and returns control to its
     /// caller immediately (fire-and-forget `tokio::spawn`) when the initial
@@ -1269,7 +2184,16 @@ mod tests {
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
-        try_start_dispatch(&config, connections, usage, None);
+        try_start_dispatch(
+            &config,
+            connections,
+            usage,
+            None,
+            bundle_active_set::ActiveVersionSnapshot::new(),
+            telemetry::register_drain_loop_metrics(&prometheus::Registry::new()),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            Arc::new(()),
+        );
     }
 
     /// `try_start_env_bundle_loader`'s own gate: `ACTION_BUNDLE_DIGEST`
@@ -1282,15 +2206,15 @@ mod tests {
         try_start_env_bundle_loader(&cli, connections);
     }
 
-    /// Security review fix regression test: `db_reader_password: None` (the
-    /// value `config::Config::from_cli` now produces for both a genuinely
-    /// unset `DB_READER_PASSWORD` and Helm's always-rendered-but-empty
-    /// default) must take `try_start_db_bundle_loader`'s documented no-op
-    /// branch rather than attempting a DB connection -- fire-and-forget,
-    /// same shape as `try_start_env_bundle_loader_disabled_without_digest`
-    /// above.
+    /// Security review fix regression test (carried forward): `db_reader_
+    /// password: None` (the value `config::Config::from_cli` now produces
+    /// for both a genuinely unset `DB_READER_PASSWORD` and Helm's
+    /// always-rendered-but-empty default) must take
+    /// `try_start_changelog_consumer`'s documented no-op branch rather than
+    /// attempting a DB connection -- fire-and-forget, same shape as
+    /// `try_start_env_bundle_loader_disabled_without_digest` above.
     #[tokio::test]
-    async fn try_start_db_bundle_loader_noop_when_db_reader_password_unset() {
+    async fn try_start_changelog_consumer_noop_when_db_reader_password_unset() {
         let cli = CliConfig::parse_from(["svc-action"]);
         let config = Config {
             cli,
@@ -1300,16 +2224,72 @@ mod tests {
             db_reader_password: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(&config, connections, None, test_excluded_metric());
+        let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
+        try_start_changelog_consumer(
+            &config,
+            connections,
+            None,
+            test_excluded_metric(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+            test_changelog_consumer_metrics(),
+            test_dispatch_supervisor_metrics(),
+            usage,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bundle_active_set::ActiveVersionSnapshot::new(),
+            Arc::new(()),
+        );
     }
 
-    /// Same no-op contract, the other independent startup gate:
-    /// `BUNDLE_SCOPE_TENANT_ID` unset (`None`, `CliConfig`'s default) even
-    /// with a real reader password present.
+    // regression: legacy ping consumer competed in the same consumer group as the
+    // multi-tenant one; ping intermittently UnknownBundle (alpha 2026-10-03)
+    //
+    // `resolve_multi_tenant_path_decision`'s two outcomes below are what
+    // `run_with_shutdown`'s `match` branches on to decide which ONE of
+    // `try_start_dispatch` (legacy)/`try_start_changelog_consumer`
+    // (multi-tenant) ever runs -- the match itself makes calling both
+    // structurally impossible, so these decision-function tests are the
+    // actual mutual-exclusion regression coverage (same shape as
+    // `core/svc_process`'s identical pair of tests for its own
+    // `resolve_multi_tenant_path_decision`).
+
+    /// Mutual-exclusion regression test, missing-config half: `DB_READER_
+    /// PASSWORD` absent must resolve to the legacy path without even
+    /// constructing a license client, regardless of `ACTION_APP_ID`.
     #[tokio::test]
-    async fn try_start_db_bundle_loader_noop_when_tenant_id_unset() {
-        let cli = CliConfig::parse_from(["svc-action"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), None);
+    async fn resolve_multi_tenant_path_decision_is_no_db_config_when_db_reader_password_unset() {
+        let cli =
+            CliConfig::parse_from(["svc-action", "--action-app-id", "waddles.core.example.ping"]);
+        let config = Config {
+            cli,
+            db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
+            discord_bot_token: None,
+            db_reader_password: None,
+        };
+        assert_eq!(
+            resolve_multi_tenant_path_decision(&config, &None).await,
+            PathDecision::NoDbConfig
+        );
+    }
+
+    /// Mutual-exclusion regression test, path-active half: DB config
+    /// present and no license client (fail-open, same cold-client contract
+    /// `flags::db_bundle_config_flag`/`multi_tenant_watermark_flag` already
+    /// document) resolves [`PathDecision::MultiTenant`] -- proving
+    /// `run_with_shutdown`'s `PathDecision::MultiTenant` match arm is the
+    /// one taken, so `try_start_dispatch` (the legacy consumer that
+    /// competed with the multi-tenant dispatch-consumer supervisor in the
+    /// alpha incident) is structurally never called for this config,
+    /// regardless of `ACTION_APP_ID` being set to the exact app_id the
+    /// DB-driven path also serves. The complementary "kill-switch ON ->
+    /// legacy runs" half requires a live PostHog/license server this
+    /// crate's test suite deliberately never depends on (same documented
+    /// gap as `core/svc_process`'s equivalent test).
+    #[tokio::test]
+    async fn resolve_multi_tenant_path_decision_is_multi_tenant_when_db_config_present_and_kill_switches_unseen(
+    ) {
+        let cli =
+            CliConfig::parse_from(["svc-action", "--action-app-id", "waddles.core.example.ping"]);
         let config = Config {
             cli,
             db_password: Secret::new("test-password"),
@@ -1317,33 +2297,138 @@ mod tests {
             discord_bot_token: None,
             db_reader_password: Some(Secret::new("real-ro-password")),
         };
-        let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(&config, connections, None, test_excluded_metric());
+        assert_eq!(
+            resolve_multi_tenant_path_decision(&config, &None).await,
+            PathDecision::MultiTenant,
+            "DB config present + no license client (fail-open) must select the multi-tenant path"
+        );
     }
 
-    /// Bug fix regression (the actual bug): tenant `0` is a real,
-    /// legitimate tenant and must clear this gate rather than being treated
-    /// as not-configured. Only asserts the gate is cleared (no panic/hang
-    /// from the synchronous portion of the function) -- the spawned task's
-    /// own DB connection failure against an unreachable host isn't
-    /// re-asserted here.
+    // regression: #425 dropped cluster denylist -- both tests below go
+    // through `build_action_egress_guard`, the exact function
+    // `build_stage_capabilities` (the production wiring) calls, so a
+    // future merge that silently drops the `.with_cluster_denylist()`/
+    // `.with_instance_policy()` calls fails these tests, not just the
+    // shared `bundle_host_http::egress` crate's own generic guard suite
+    // (which would keep passing even if this crate stopped wiring the
+    // guard up at all).
+
+    /// The cluster CIDR denylist must win even when a `PrivateIp` grant
+    /// covers the address AND the instance policy has opted into private-IP
+    /// egress -- proves `build_action_egress_guard` actually threads
+    /// `cli.cluster_cidr_denylist()` into the guard via
+    /// `.with_cluster_denylist()`, not just that the shared crate supports
+    /// it.
     #[tokio::test]
-    async fn try_start_db_bundle_loader_clears_tenant_gate_when_tenant_id_is_zero() {
-        let cli = CliConfig::parse_from(["svc-action", "--bundle-scope-tenant-id", "0"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), Some(0));
-        let config = Config {
-            cli,
-            db_password: Secret::new("test-password"),
-            envelope_binding_keys: None,
-            discord_bot_token: None,
-            db_reader_password: Some(Secret::new("real-ro-password")),
-        };
-        let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(&config, connections, None, test_excluded_metric());
+    async fn action_egress_guard_denies_cluster_cidr_even_with_grant_and_policy_allow() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--deployment-tier",
+            "production",
+            "--egress-cluster-cidr-denylist",
+            "10.244.0.0/16",
+            "--instance-egress-allow-private-ip",
+        ]);
+        cli.validate().expect("populated denylist passes");
+        let catalog = Arc::new(distribution::BundleCatalog::new());
+        catalog.update(vec![distribution::BundleRow {
+            app_id: "waddles.a.b.c".to_string(),
+            version: "1.0.0".to_string(),
+            artifact_digest: Some("sha256:00".to_string()),
+            component_key: "k".to_string(),
+            sidecar_key: "s".to_string(),
+            // A private-ip grant that, absent the cluster denylist, would
+            // permit this exact address once instance policy allows it.
+            egress: vec![("10.244.5.6".to_string(), vec!["GET".to_string()])],
+            egress_rps: None,
+            config_json: "{}".to_string(),
+            granted_secret_refs: std::collections::HashMap::new(),
+        }]);
+        let guard = build_action_egress_guard(
+            &cli,
+            catalog,
+            test_egress_denied_metric(),
+            flags::boxed(flags::StaticFlag(true)),
+        )
+        .expect("valid config produces a guard");
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.244.5.6/"}),
+            )
+            .await
+            .expect_err("cluster CIDR denylist must deny despite grant + policy allow");
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    /// The instance-wide private-IP policy denies a `PrivateIp` grant by
+    /// default (no cluster CIDR involved) -- proves `build_action_egress_
+    /// guard` actually threads `cli.instance_egress_policy()` into the
+    /// guard via `.with_instance_policy()`.
+    #[tokio::test]
+    async fn action_egress_guard_denies_private_ip_grant_when_instance_policy_is_default_deny() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--deployment-tier",
+            "production",
+            "--egress-cluster-cidr-denylist",
+            "10.99.0.0/16",
+        ]);
+        cli.validate().expect("populated denylist passes");
+        assert!(
+            !cli.instance_egress_policy().allow_private_ip_egress,
+            "default instance policy must deny private-ip egress"
+        );
+        let catalog = Arc::new(distribution::BundleCatalog::new());
+        catalog.update(vec![distribution::BundleRow {
+            app_id: "waddles.a.b.c".to_string(),
+            version: "1.0.0".to_string(),
+            artifact_digest: Some("sha256:00".to_string()),
+            component_key: "k".to_string(),
+            sidecar_key: "s".to_string(),
+            // 10.0.0.9 is outside the cluster denylist above, so only the
+            // instance policy is under test here.
+            egress: vec![("10.0.0.9".to_string(), vec!["GET".to_string()])],
+            egress_rps: None,
+            config_json: "{}".to_string(),
+            granted_secret_refs: std::collections::HashMap::new(),
+        }]);
+        let guard = build_action_egress_guard(
+            &cli,
+            catalog,
+            test_egress_denied_metric(),
+            flags::boxed(flags::StaticFlag(true)),
+        )
+        .expect("valid config produces a guard");
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.0.0.9/"}),
+            )
+            .await
+            .expect_err("default-deny instance policy must deny an otherwise-granted private IP");
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    fn test_egress_denied_metric() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_action_egress_denied_total", "test"),
+            &["app_id", "reason"],
+        )
+        .unwrap()
+    }
+
+    /// Removal regression (dataplane scale design, multi-tenant): the
+    /// retired `BUNDLE_SCOPE_TENANT_ID`/`--bundle-scope-tenant-id` flag must
+    /// no longer be a recognized CLI arg.
+    #[test]
+    fn bundle_scope_tenant_id_flag_removed_from_svc_action() {
+        let result = CliConfig::try_parse_from(["svc-action", "--bundle-scope-tenant-id", "0"]);
+        assert!(result.is_err());
     }
 
     /// A standalone, unregistered `IntCounterVec` for
-    /// `try_start_db_bundle_loader` tests -- see `bundle_loader::tests::
+    /// `try_start_changelog_consumer` tests -- see `bundle_loader::tests::
     /// test_metric`'s identical rationale (no `Registry` needed for
     /// `.inc()` to work correctly).
     fn test_excluded_metric() -> prometheus::IntCounterVec {
@@ -1352,6 +2437,18 @@ mod tests {
             &["app_id", "reason"],
         )
         .expect("valid metric definition")
+    }
+
+    /// A standalone, unregistered [`telemetry::ChangelogConsumerMetrics`] --
+    /// same rationale as [`test_excluded_metric`].
+    fn test_changelog_consumer_metrics() -> telemetry::ChangelogConsumerMetrics {
+        telemetry::register_changelog_consumer_metrics(&prometheus::Registry::new())
+    }
+
+    /// A standalone, unregistered [`telemetry::DispatchSupervisorMetrics`] --
+    /// same rationale as [`test_excluded_metric`].
+    fn test_dispatch_supervisor_metrics() -> telemetry::DispatchSupervisorMetrics {
+        telemetry::register_dispatch_supervisor_metrics(&prometheus::Registry::new())
     }
 
     /// The core of this PR's fix: once a host-API connection is active,
@@ -1498,5 +2595,91 @@ mod tests {
             .await
             .expect("env_bundle_loader_loop must return promptly once shutdown resolves")
             .expect("loader task must not panic");
+    }
+
+    /// `PII_DETOKENIZATION_ENABLED=false` env override: disabled before the
+    /// PostHog kill-switch is ever consulted -- no license client needed
+    /// (passed `&None` here), no network touched.
+    #[tokio::test]
+    async fn resolve_pii_detokenization_enabled_honors_explicit_env_disable() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--pii-detokenization-enabled-override",
+            "false",
+        ]);
+        assert_eq!(cli.pii_detokenization_enabled_override, Some(false));
+        assert!(!resolve_pii_detokenization_enabled(&cli, &None).await);
+    }
+
+    /// Env override unset (`None`, `CliConfig::parse_from`'s default): falls
+    /// through unchanged to `flags::pii_detokenization_flag`'s existing
+    /// `None`-license-client fallback, which reports ENABLED (the safe
+    /// default -- `flags::pii_detokenization_flag_defaults_enabled_when_
+    /// no_license_client_is_available` in `flags.rs` covers that fallback
+    /// directly; this test is the integration point proving this crate's
+    /// gate actually reaches it).
+    #[tokio::test]
+    async fn resolve_pii_detokenization_enabled_defers_to_posthog_gate_when_override_unset() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        assert_eq!(cli.pii_detokenization_enabled_override, None);
+        assert!(resolve_pii_detokenization_enabled(&cli, &None).await);
+    }
+
+    /// Kill-switch ON (`detokenization_enabled: false`) -- no
+    /// `HUB_API_GRPC_ENDPOINT` needed at all, no client connected, and no
+    /// error: the opt-out path never touches the network.
+    #[tokio::test]
+    async fn build_hub_client_returns_none_when_detokenization_disabled() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        let result = build_hub_client(&cli, false).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    /// Fail-loud regression test (user requirement): detokenization
+    /// enabled but `HUB_API_GRPC_ENDPOINT`/`SERVICE_JWT_TOKEN_ENDPOINT` are
+    /// unset (both default to `""`, `CliConfig::parse_from`'s default)
+    /// must return `Err` -- asserted via this testable startup path, never
+    /// a real `std::process::exit` in-test. `run_with_shutdown` propagates
+    /// this `Err` via `?`, which is what actually crashloops the pod.
+    #[tokio::test]
+    async fn build_hub_client_fails_loud_when_enabled_and_endpoint_unset() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        assert_eq!(cli.hub_api_grpc_endpoint, "");
+        assert_eq!(cli.service_jwt_token_endpoint, "");
+        let err = match build_hub_client(&cli, true).await {
+            Ok(_) => panic!("enabled detokenization with no endpoint configured must fail loud"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("HUB_API_GRPC_ENDPOINT"));
+    }
+
+    /// Fail-loud regression test: detokenization enabled, both endpoints
+    /// configured, but nothing is listening on the configured gRPC
+    /// endpoint (an ephemeral port bound then immediately dropped,
+    /// guaranteeing a prompt connection-refused rather than a hang) --
+    /// `HubClient::connect`'s initial connect attempt fails, and
+    /// `build_hub_client` must surface that as `Err`, never silently start
+    /// with no resolver configured.
+    #[tokio::test]
+    async fn build_hub_client_fails_loud_when_enabled_and_endpoint_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener); // nothing listening now -- connection refused
+
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--hub-api-grpc-endpoint",
+            &format!("http://{addr}"),
+            "--service-jwt-token-endpoint",
+            &format!("http://{addr}/internal/service-token"),
+        ]);
+        let err = match build_hub_client(&cli, true).await {
+            Ok(_) => panic!("an unreachable hub-api gRPC endpoint must fail loud at startup"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("hub-api"));
     }
 }

@@ -8,7 +8,7 @@ Spec wording: "Every bundle under `bundles/python/` that imports
 `flask_core.database.AsyncDAL` or reaches a DAL through `get_bundle_dal()` is
 listed, with the count reported — a zero count is a failure of the inventory,
 not a pass." `bundles/python/` does not exist in this repo (verified: only
-`core/svc_action/bundles`, `core/svc_ingest/bundles`, `core/svc_process/bundles`
+`core/svc_action/builtin_handlers`, `core/svc_ingest/builtin_handlers`, `core/svc_process/builtin_handlers`
 exist under `core/*/bundles/`) — those three are the real scan targets, matching
 the gate script and the in-flight migration branches.
 
@@ -19,9 +19,9 @@ counted via `find`, not assumed):
 
 | Directory | `.py` files |
 |---|---|
-| `core/svc_action/bundles` | 19 |
-| `core/svc_ingest/bundles` | 12 |
-| `core/svc_process/bundles` | 17 |
+| `core/svc_action/builtin_handlers` | 19 |
+| `core/svc_ingest/builtin_handlers` | 12 |
+| `core/svc_process/builtin_handlers` | 17 |
 | **Total** | **48** |
 
 Non-zero denominator confirmed — the inventory below is not a zero-count
@@ -30,7 +30,7 @@ failure.
 ## Legacy DAL usage — 16 bundles (verified, not the 17 a naive grep reports)
 
 A plain `grep -rl get_bundle_dal` returns **17** files. One of those,
-`core/svc_process/bundles/community_context_process.py:12`, is a **false
+`core/svc_process/builtin_handlers/community_context_process.py:12`, is a **false
 positive**: the string appears only in a docstring comparing itself to
 `community_reputation_process`'s pattern ("... same separation-of-concerns as
 `community_reputation_process` calling `get_bundle_dal()` directly instead of
@@ -59,7 +59,7 @@ migration, cross-checked against the independent bundle-migration plan on
 | 15 | `social_shoutout_process.py` | svc_process | `get_bundle_dal()` |
 | 16 | `social_welcome_process.py` | svc_process | `get_bundle_dal()` |
 
-`core/svc_ingest/bundles` (12 files: 7 `*_ingest.py` normalizers + 5
+`core/svc_ingest/builtin_handlers` (12 files: 7 `*_ingest.py` normalizers + 5
 `*_gateway_manifest.py` registration modules): **0** hits — ingest bundles
 normalize platform events and register `AppManifest`s, they don't touch the
 DAL.
@@ -110,7 +110,7 @@ svc_process counterpart) lands and the prose is rewritten alongside the code.
   file exists anywhere on disk today (`find . -iname bundle.yaml -o -iname
   'manifest.y*ml'` → zero results). Manifests live in two places instead:
   (1) in-process Python dict literals (e.g.
-  `core/svc_ingest/bundles/twitch_gateway_manifest.py`'s
+  `core/svc_ingest/builtin_handlers/twitch_gateway_manifest.py`'s
   `TWITCH_GATEWAY_MANIFEST`), parsed by
   `libs/flask_core/flask_core/app_manifest.py`'s `parse_manifest()`/
   `AppManifest`/`StageSpec` (the v1 schema) and registered into

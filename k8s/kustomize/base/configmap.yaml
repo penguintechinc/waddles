@@ -22,12 +22,12 @@ data:
   REDIS_DB: "0"
   REDIS_KEY_PREFIX: "waddlebot:"
 
-  # MinIO Configuration
-  MINIO_ENDPOINT: "infra-minio:9000"
-  MINIO_BUCKET: "waddlebot-assets"
+  # SeaweedFS S3-Compatible Object Storage
   S3_STORAGE_ENABLED: "true"
   S3_BUCKET_NAME: "waddlebot-assets"
-  S3_ENDPOINT_URL: "http://infra-minio:9000"
+  S3_ENDPOINT_URL: "http://infra-seaweedfs:8333"
+  S3_REGION: "us-east-1"
+  S3_FORCE_PATH_STYLE: "true"
 
   # Qdrant Configuration
   QDRANT_HOST: "infra-qdrant"

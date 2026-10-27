@@ -30,6 +30,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.join_request import join_request_bp
 from config import HubAPIConfig
+from services import suppression_keys as keys
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -322,6 +323,153 @@ class TestApproveReject:
         )
         assert req_rows.first().status == "approved"
         assert req_rows.first().reviewed_by == admin_id
+
+    @staticmethod
+    def _suppress(auth_db: Any, *, tenant_id: int, platform_user_id: str) -> None:
+        """Seed a live `suppression_records` row exactly as erasure would have written it."""
+        code = keys.current_code(
+            keys.PlatformKekKeySource(), tenant_id, "discord", platform_user_id
+        )
+        auth_db.dal.suppression_records.insert(
+            tenant_id=tenant_id,
+            platform="discord",
+            key_ver=code.key_ver,
+            hmac=code.hmac,
+            reason_enum="ban",
+            expires_at=None,
+            created_at=datetime.now(UTC),
+        )
+        auth_db.dal.commit()
+
+    @staticmethod
+    def _pending(auth_db: Any, *, community_id: int, applicant_id: int) -> int:
+        request_id: int = auth_db.dal.community_join_requests.insert(
+            community_id=community_id,
+            user_id=applicant_id,
+            status="pending",
+            created_at=datetime.now(UTC),
+        )
+        auth_db.dal.commit()
+        return request_id
+
+    @staticmethod
+    def _link(auth_db: Any, *, user_id: int, platform_user_id: str) -> None:
+        auth_db.dal.hub_user_identities.insert(
+            hub_user_id=user_id,
+            platform="discord",
+            platform_user_id=platform_user_id,
+            linked_at=datetime.now(UTC),
+        )
+        auth_db.dal.commit()
+
+    @staticmethod
+    def _tenant_id(auth_db: Any, slug: str = TENANT_SLUG) -> int:
+        row = auth_db.dal(auth_db.dal.tenants.slug == slug).select().first()
+        auth_db.dal.commit()
+        if row is None:
+            new_id = auth_db.dal.tenants.insert(slug=slug, display_name=slug, is_active=True)
+            auth_db.dal.commit()
+            return int(new_id)
+        return int(row.id)
+
+    async def test_approve_refuses_a_suppressed_applicant_and_reapplies_the_ban(
+        self, client: Any, auth_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A banned user who erased their account and came back is not admitted."""
+        monkeypatch.setenv(keys.ENV_CURRENT, "ab" * 32)
+        tenant_id = self._tenant_id(auth_db)
+        community_id = _seed_community(auth_db)
+        auth_db.dal(auth_db.dal.communities.id == community_id).update(tenant_id=tenant_id)
+        admin_id = _seed_admin(
+            auth_db, community_id=community_id, email="ap-s@example.com", username="ap-s"
+        )
+        applicant_id = _seed_user(auth_db, email="back@example.com", username="back")
+        self._link(auth_db, user_id=applicant_id, platform_user_id="d-banned-1")
+        self._suppress(auth_db, tenant_id=tenant_id, platform_user_id="d-banned-1")
+        request_id = self._pending(auth_db, community_id=community_id, applicant_id=applicant_id)
+
+        response = await client.put(
+            f"/api/v1/admin/{community_id}/join-requests/{request_id}/approve",
+            headers=_auth_header(user_id=admin_id),
+        )
+
+        assert response.status_code == 403
+        member = (
+            auth_db.dal(
+                (auth_db.dal.community_members.community_id == community_id)
+                & (auth_db.dal.community_members.user_id == str(applicant_id))
+            )
+            .select()
+            .first()
+        )
+        request = auth_db.dal(auth_db.dal.community_join_requests.id == request_id).select().first()
+        auth_db.dal.commit()
+        assert (member.role, member.is_active) == ("banned", False)  # restriction re-applied
+        assert (request.status, request.reviewed_by) == ("rejected", admin_id)
+
+    async def test_approve_ignores_a_suppression_from_another_tenant(
+        self, client: Any, auth_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(keys.ENV_CURRENT, "ab" * 32)
+        tenant_id = self._tenant_id(auth_db)
+        other_tenant = self._tenant_id(auth_db, "elsewhere")
+        community_id = _seed_community(auth_db)
+        auth_db.dal(auth_db.dal.communities.id == community_id).update(tenant_id=tenant_id)
+        admin_id = _seed_admin(
+            auth_db, community_id=community_id, email="ap-x@example.com", username="ap-x"
+        )
+        applicant_id = _seed_user(auth_db, email="clean@example.com", username="clean")
+        self._link(auth_db, user_id=applicant_id, platform_user_id="d-banned-2")
+        self._suppress(auth_db, tenant_id=other_tenant, platform_user_id="d-banned-2")
+        request_id = self._pending(auth_db, community_id=community_id, applicant_id=applicant_id)
+
+        response = await client.put(
+            f"/api/v1/admin/{community_id}/join-requests/{request_id}/approve",
+            headers=_auth_header(user_id=admin_id),
+        )
+
+        assert response.status_code == 200
+        member = (
+            auth_db.dal(
+                (auth_db.dal.community_members.community_id == community_id)
+                & (auth_db.dal.community_members.user_id == str(applicant_id))
+            )
+            .select()
+            .first()
+        )
+        auth_db.dal.commit()
+        assert (member.role, member.is_active) == ("member", True)
+
+    async def test_approve_fails_closed_when_rows_exist_but_the_key_is_missing(
+        self, client: Any, auth_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tenant_id = self._tenant_id(auth_db)
+        community_id = _seed_community(auth_db)
+        auth_db.dal(auth_db.dal.communities.id == community_id).update(tenant_id=tenant_id)
+        admin_id = _seed_admin(
+            auth_db, community_id=community_id, email="ap-f@example.com", username="ap-f"
+        )
+        applicant_id = _seed_user(auth_db, email="keyless@example.com", username="keyless")
+        self._link(auth_db, user_id=applicant_id, platform_user_id="d-banned-3")
+        monkeypatch.setenv(keys.ENV_CURRENT, "ab" * 32)
+        self._suppress(auth_db, tenant_id=tenant_id, platform_user_id="d-banned-3")
+        monkeypatch.delenv(keys.ENV_CURRENT)
+        request_id = self._pending(auth_db, community_id=community_id, applicant_id=applicant_id)
+
+        response = await client.put(
+            f"/api/v1/admin/{community_id}/join-requests/{request_id}/approve",
+            headers=_auth_header(user_id=admin_id),
+        )
+
+        assert response.status_code == 500  # never admits a possibly-banned user
+        members = auth_db.dal(
+            (auth_db.dal.community_members.community_id == community_id)
+            & (auth_db.dal.community_members.user_id == str(applicant_id))
+        ).count()
+        request = auth_db.dal(auth_db.dal.community_join_requests.id == request_id).select().first()
+        auth_db.dal.commit()
+        assert members == 0
+        assert request.status == "pending"  # retryable once the key is fixed
 
     async def test_approve_no_pending_request_is_404(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db)

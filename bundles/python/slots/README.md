@@ -1,0 +1,160 @@
+# slots (Python)
+
+`!slots` -- a weighted-random, per-community slot-machine minigame. Community-scoped fun
+content, first-party (`provider: builtin`, `app_id: waddles.core.example.slots`). Net-new
+Waddles content -- no inspiration source, no attribution/notice required (contrast
+`bundles/python/fish`, which credits superpenguintv (Psychoboy) for its catch-and-track
+concept).
+
+Uses the shared command-grammar parser (`waddle_sdk.command.parse_command`/`CommandSpec`,
+merged in #618), same pattern as `fish`'s own `app.py`.
+
+**No real-money/currency ties.** The "payout" tracked here is an abstract point value used
+only to rank the caller's own best spin -- there is no wallet, balance, transfer, or
+redemption path. This is a chat game, not a gambling economy feature.
+
+## Commands
+
+| Command | Grammar shape | Behavior |
+|---|---|---|
+| `!slots` | bare (no verb) | **Spin.** Draws three independent weighted-random reel symbols. All three matching is a win, paying the matched symbol's own point value; anything else is a loss. Updates the caller's total spin count, win count, and best-payout record. Subject to the per-caller cooldown. |
+| `!slots list` | `list` verb, no args | Reads the caller's own stats: total spins, total wins, best payout (points + symbol). |
+| `!slots set cooldown <seconds>` | `set` verb | Broadcaster/moderator only. Sets the community's spin cooldown, `5`-`3600` seconds (default `30`). |
+
+Any other grammar-legal verb (`add`/`sub`/`enable`/`disable`/`remove`/`reset`) or a malformed
+`!slots ...` replies with usage text -- never silently dropped.
+
+## Reel table
+
+Six weighted symbols, each reel drawn independently with replacement (`random.choices(...,
+k=3)`); a win is all three reels landing on the same symbol, paid at that symbol's own point
+value:
+
+| Symbol | Relative weight | Payout (points) |
+|---|---|---|
+| Cherry | 40 | 5 |
+| Lemon | 30 | 8 |
+| Orange | 18 | 10 |
+| Bell | 8 | 25 |
+| Diamond | 3 | 75 |
+| Seven | 1 | 250 |
+
+## State (kv, community-scoped only)
+
+All state goes through `waddle_sdk.community_kv`, keyed by `community_id` -- never global or
+tenant-wide. Per-caller keys use a SHA-256 hash of the actor as the pseudonym (never the raw
+username/actor id -- see `src/app.py::_pseudonym()`), ahead of the PII-tokenization pipeline
+(#427/#429) in case `event.actor` is still a raw username.
+
+| Key | Scope | TTL | Purpose |
+|---|---|---|---|
+| `slots.lastspin.<pseudonym>` | per-(community, caller) | `cooldown` seconds | Cooldown gate -- presence + elapsed time decide allow/deny. |
+| `slots.spins.<pseudonym>` | per-(community, caller) | none | Running total spins (`kv.increment`). |
+| `slots.wins.<pseudonym>` | per-(community, caller) | none | Running total wins (`kv.increment`, win spins only). |
+| `slots.bestpayout.<pseudonym>` | per-(community, caller) | none | JSON `{symbol, payout}` of the caller's best (highest-payout) spin. |
+| `slots.config.cooldown` | per-community | none | Admin-configured spin cooldown in seconds. |
+
+## Deferred to v2 (not stubbed)
+
+**Cross-community leaderboards.** Every key above is scoped to one community
+(`community_kv`'s own rule: reputation and user-details are the platform's only two
+cross-community exceptions, and this bundle is neither). A leaderboard needs a query that
+spans many communities/rows -- `kv` has no scan/list-keys primitive, so this needs a real `db`
+capability with an `order_by`/pagination surface. **Deferred until the in-flight #623 `db`
+order_by API lands** -- no `!slots leaderboard` command is declared, and nothing here is a
+stand-in stub for it.
+
+Also out of scope: any wallet/points-economy integration (betting an actual balance, redeeming
+payouts) -- the no-real-money-ties rule above, not partially stubbed. A shared economy/points
+capability across the gambling bundles is tracked separately (gh-714); until it lands this bundle
+has no balance.
+
+## Examples
+
+```text
+viewer> !slots
+bot>    🎰 viewer spins... 🍒 🍒 🍒 -- triple cherries! You win 5 points! (spin #1)
+viewer> !slots
+bot>    🎰 slow down, viewer! try again in 29s.
+viewer> !slots list
+bot>    Spins: 1. Wins: 1. Best payout: 5 points (Cherry).
+mod>    !slots set cooldown 60
+bot>    slots cooldown set to 60s
+```
+
+## Permissions (V2 structured)
+
+| Id | Why |
+|---|---|
+| `storage.kv` | Persists per-community slot-machine tallies, cooldown timestamps and config. |
+
+No `db` (`data.tables: []`), no egress. Mod gate: `set cooldown` requires a real `is_mod` or
+`is_broadcaster` `True`; **absent** badge fields (e.g. the Discord normalizer today) are **denied**
+(fail closed) with zero `kv` access. Spinning and `list` are open to any caller.
+
+## Platforms
+
+`consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!slots"]`; replies go
+back to the event's own origin platform + channel. A `community` context is required (no
+tenant-wide fallback): without one `dispatch` logs `slots.missing_community` and raises
+`ValueError`.
+
+## Failure semantics (fail loud)
+
+| Condition | Behavior |
+|---|---|
+| `kv` backend error | ERROR `slots.kv_error` (`op` + exception type only), chat reply, `RuntimeError("slots kv <op> failed: <Type>")`. |
+| Corrupt cooldown config / cooldown timestamp / a counter / the best-payout JSON | ERROR `slots.*_corrupt` (community only) and treated as the default / no cooldown / `0` / "none yet" -- logged loudly, never silent; the next better win rewrites the best-payout record. |
+| Missing `channel_id` / unknown command | `ValueError`. |
+
+The best-payout record only moves on a **strictly better** spin (equal/lower payouts never rewrite
+it).
+
+## Logging / PII
+
+Logs carry only `command`, `op`, `community`, `role_signal`, `platform` and exception type names --
+never typed arguments, grammar text or `event.actor`. Regression:
+`tests/test_backfill.py::test_no_log_line_in_any_flow_contains_typed_text_or_the_raw_actor`.
+
+## Gating
+
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
+
+## Files
+
+| File | Role |
+|---|---|
+| `bundle.yaml` | Manifest -- app id, consumes rules, limits, attribution metadata |
+| `hub-manifest.yaml` | hub-api install-pipeline manifest (separate schema consumer, see its own header comment) |
+| `src/app.py` | `transform`/`dispatch` -- the full game |
+| `src/_entry_wiring.py` | Static `bundle_compiler`-shaped entry wiring (see `pyping`'s own) |
+| `tests/` | Host-native pytest suite (fake `wit_world`, no wasmtime) |
+
+## Build
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD":/repo -w /repo python:3.13-slim-bookworm \
+  bash -c "pip install --no-cache-dir componentize-py==0.25.1 && \
+    componentize-py -d wit/waddle-bundle -w stage \
+      componentize -p sdk/waddle-sdk/src -p bundles/python/slots/src \
+      waddle_sdk._component_entry -o /tmp/slots.wasm"
+```
+
+## Test
+
+```bash
+cd bundles/python/slots
+python3.13 -m venv .venv && . .venv/bin/activate
+pip install pytest==8.3.3 pytest-cov==5.0.0
+pytest --cov=src --cov-branch --cov-report=term-missing   # 100% line + branch
+```
+
+`tests/conftest.py` puts `src/` and `sdk/waddle-sdk/src` on `sys.path`, so no package install is
+needed. `test_app.py` covers grammar/game logic; `test_backfill.py` adds the mod-gate matrix, reel
+table + payout invariants, cooldown bounds/TTL, corrupt-state healing, PII-free-log regression and
+`_entry_wiring`.
+
+## Activation
+
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.slots`).

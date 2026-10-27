@@ -1,0 +1,81 @@
+schema_version: 2
+app_id: waddles.core.example.lurk
+name: Lurk Toggle Example Bundle (Python)
+# 1.0.0 retired -- fix/bump-command-bundles-1.0.1, see this bundle's hub-manifest.yaml for why.
+# 1.0.3 (feature/lurk-v1): stateful lurk/unlurk rewrite -- per-community message
+# templates, 24h TTL lurk-start state, and broadcaster/mod-only config commands
+# (`set`/`enable ai`/`disable ai`/`reset`). See src/app.py's own module docstring.
+# 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
+# fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
+# 1.0.5 (fix/lurk-silent-missing-community, gh-655): dispatch() now replies to chat before
+# raising on the "no community" path (fail-loud, matching `_fail_kv`'s own shape), instead of
+# only logging -- the tenant-wide activation (`community_id: null`) hit this on every message,
+# leaving `!lurk` totally silent in Discord.
+# 1.0.6 (this task): dispatch() now actually FUNCTIONS under the tenant-wide sentinel
+# (`community=None`) instead of only replying with an error -- `community is None` is the
+# host's own deliberate tenant-wide signal (`core/bundle_active_set/src/scope.rs::
+# resolve_scope`'s `community_id == 0`), not a bug, and is scoped under
+# `waddle_sdk.community_kv.TENANT_WIDE_SENTINEL` ("0"), same as `community_kv` itself now
+# does. Only an empty-string `community` (never emitted by the host) still fails loud.
+# app_versions is immutable per (app_id, version), so this bump is required to republish the
+# fixed wasm.
+# 1.0.9: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
+# 1.0.10: activation-gated only -- removed the in-bundle waddles.command-lurk feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.11
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/lurk
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!lurk", "!unlurk"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!lurk", "!unlurk"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- state lives in `kv` only (see `permissions` below: the
+# `storage.kv` capability id, required to grant `kv` at all per
+# hub_api/services/bundle_approval_service.py::_derive_capabilities()).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists per-community lurk state"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-lurk feature flag"
+  - id: "chat.send:discord"
+    justification: "lurk replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "lurk replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.11"
+  min_version: "1.0.11"
+  max_version: null

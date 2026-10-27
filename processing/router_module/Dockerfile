@@ -1,7 +1,7 @@
 # Build from parent directory: docker build -f processing/router_module/Dockerfile -t waddlebot/router:latest .
 
 # Use Python 3.12 for better fastText compatibility (C++17 issues with 3.13)
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY libs/flask_core /app/libs/flask_core
 
 # Install shared library
-RUN cd /app/libs/flask_core && pip install --no-cache-dir .
+RUN pip install --no-cache-dir /app/libs/flask_core
 
 # Copy module files
 COPY processing/router_module/requirements.txt /app/
@@ -37,13 +37,22 @@ RUN mkdir -p /app/models && \
 RUN mkdir -p /var/log/waddlebotlog
 
 # Create non-root user
-RUN useradd --create-home --shell /bin/bash appuser
-
 # Set proper permissions for app directory, models, and log directory
-RUN chown -R appuser:appuser /app /var/log/waddlebotlog
+RUN useradd --create-home --shell /bin/bash appuser && \
+    chown -R appuser:appuser /app /var/log/waddlebotlog
 
 # Environment variable for fastText model path
 ENV FASTTEXT_MODEL_PATH=/app/models/lid.176.bin
+
+# Remove base image's own bundled pip + ensurepip wheel: pip vendors an
+# outdated msgpack (GHSA-6v7p-g79w-8964) and pkg_resources/setuptools
+# (CVE-2025-47273) that the upstream python:3.13-slim-bookworm rebuild
+# hasn't picked up yet. Neither pip nor its vendor tree is imported by
+# any service at runtime (installs happen at build time via uv/pip
+# above), so removing them is a real fix, not a suppression.
+RUN rm -rf /usr/local/lib/python3.13/site-packages/pip \
+    /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
+    /usr/local/lib/python3.13/ensurepip
 
 USER appuser
 

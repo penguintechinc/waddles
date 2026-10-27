@@ -1,0 +1,78 @@
+schema_version: 2
+app_id: waddles.core.example.shoutout
+name: Shoutout Bundle (Python)
+# 1.0.0: initial kv-only v1 -- `!so <user>` (post), `!so set <template>`, and two
+# default-OFF sub-modules (`auto`, `ai`). See src/app.py's own module docstring.
+# 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
+# 1.0.4: activation-gated only -- removed the in-bundle waddles.command-shoutout feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
+version: 1.0.5
+feature: waddles.core.example
+module: core
+provider: builtin
+# Attribution: migrated/reimagined from the bot_process monolith's `!so` feature,
+# itself inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot shoutout command
+# (https://github.com/Psychoboy/PenguinTwitchBot) -- same inspiration-only credit
+# shape as bundles/python/fish (contrast bundles/csharp/superpenguin-roll, an
+# actual line-for-line port, which carries the full verbatim MIT notice). No
+# original PenguinTwitchBot source or text is reused here: the grammar, template
+# system, sub-module gating, and all logic below are written fresh for Waddles.
+author: "superpenguintv (Psychoboy)"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/shoutout
+notice: |
+  Shoutout-command concept inspired by superpenguintv (Psychoboy)'s
+  PenguinTwitchBot `!so` feature (https://github.com/Psychoboy/PenguinTwitchBot).
+  This is an original Waddles implementation: the command grammar, template
+  system, auto-shoutout list, and AI-toggle gating are written fresh for this
+  bundle. No original PenguinTwitchBot source code or text is reused.
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!so"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!so"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- v1 is kv-only (see src/app.py module docstring). The
+# auto-shoutout list is a single per-community JSON array of SHA-256 pseudonyms
+# (no raw usernames persisted), so no `db`/scan capability is needed.
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists the per-community shoutout template and auto-shoutout list"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-shoutout feature flag"
+  - id: "chat.send:discord"
+    justification: "shoutout replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "shoutout replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.5"
+  min_version: "1.0.5"
+  max_version: null

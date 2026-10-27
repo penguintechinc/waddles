@@ -17,10 +17,23 @@
 //! matches `approvals.community_id = active.community_id OR
 //! (approvals.community_id IS NULL AND active.community_id = 0)` rather
 //! than assuming either table's convention.
+//!
+//! **`summary_json` (added for `storage.kv` gating, coordinator fix on
+//! PR #425):** the install-time consent summary
+//! (`hub_api/services/permission_summary_service.build_permission_summary`),
+//! written once per approval at `bundle_approval_service.py:365`. This
+//! crate reads only its top-level `"capabilities"` array (a list of
+//! derived capability name strings, e.g. `["context","kv","http",...]`,
+//! `hub_api/services/bundle_approval_service.py::_derive_capabilities`) --
+//! see `crate::query::read_active_set`'s doc for exactly how that array
+//! becomes `ActiveBundleRow::declared_capabilities`. Every other key in
+//! this JSON blob (`egress`, `database`, `limits`, `provenance`, ...) is
+//! consent-screen rendering data this crate has no use for and does not
+//! parse.
 
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "app_install_approvals")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -30,6 +43,8 @@ pub struct Model {
     pub app_id: String,
     pub version: String,
     pub superseded_by: Option<i64>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub summary_json: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

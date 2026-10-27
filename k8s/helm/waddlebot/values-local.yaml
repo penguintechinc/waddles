@@ -6,6 +6,12 @@ global:
   imageRegistry: "localhost:32000/waddlebot"
   imagePullPolicy: Always
   storageClass: "microk8s-hostpath"
+  # feature/helm-auto-provision-keys -- was unset here, silently inheriting values.yaml's
+  # "production" default (values.yaml global.deploymentTier comment), which would have
+  # blocked auto-provisioned-secrets.yaml/auto-provisioned-keys-job.yaml's alpha/local
+  # generation path for local/MicroK8s dev. "local" is the second tier (alongside
+  # "alpha") that path treats as safe to auto-generate platform keys in.
+  deploymentTier: "local"
   jwtSecret: "local-dev-jwt-secret-change-in-production"
   moduleSecretKey: "local-dev-module-secret-change-in-production"
   serviceApiKey: "local-dev-api-key-change-in-production"
@@ -44,7 +50,7 @@ postgres:
   enabled: false
   replicas: 1
 
-minio:
+seaweedfs:
   enabled: false
   replicas: 1
 
@@ -57,9 +63,15 @@ qdrant:
   replicas: 1
 
 # Namespace configuration
-namespace:
-  create: true
-  name: waddlebot
+# feature/helm-auto-provision-keys -- pre-existing bug fix: this was a nested
+# {create, name} map, but every template (including base values.yaml's own
+# `namespace: waddlebot`) treats `.Values.namespace` as a plain string; the map shape
+# rendered literally as the garbage string "map[create:true name:waddlebot]" in several
+# resources (silently, no template error) and broke `lookup`/other string-typed calls
+# outright (hard error) in the new auto-provisioned-secrets.yaml. Namespace *creation*
+# is controlled separately by the top-level `namespaceCreate: true` (values.yaml),
+# already effectively true for local via that default.
+namespace: waddlebot
 
 # Service port configuration for ingress
 hub:
@@ -113,9 +125,18 @@ infrastructure:
   redis:
     enabled: false
     replicas: 1
+    tls:
+      enabled: false
 
-  # MinIO - Single instance for local
-  minio:
+  # Durable delivery-state Valkey: off with the rest of local's infra (clients fall back to the cache URLs).
+  valkeyDurable:
+    enabled: false
+  # Bundle-kv Valkey off too (bundle-kv falls back to the cache instance).
+  valkeyKv:
+    enabled: false
+
+  # SeaweedFS - Single instance for local
+  seaweedfs:
     enabled: false
     replicas: 1
 
@@ -339,63 +360,35 @@ postgres:
 redis:
   password: "redis-password"
 
-# MinIO credentials
-minio:
+# SeaweedFS S3 credentials
+seaweedfs:
   rootUser: "REPLACE_ME"
   rootPassword: "REPLACE_ME"
 
-# AWS credentials (for Lambda)
+# fix/helm-platform-credentials -- AWS/GCP/OpenWhisk/WaddleAI/OAuth
+# CREDENTIALS removed from here; they belong only in the operator-managed
+# `waddlebot-platform-credentials` Secret (values.yaml platformCredentials,
+# docs/PLATFORM_CREDENTIALS.md), never in a chart-rendered values file.
 aws:
-  accessKeyId: ""
-  secretAccessKey: ""
   region: "us-east-1"
-  lambdaRoleArn: ""
 
-# GCP credentials (for Cloud Functions)
-gcp:
-  projectId: ""
-  serviceAccount: ""
+gcp: {}
 
-# OpenWhisk credentials (for OpenWhisk functions)
+# OpenWhisk (self-hosted/local, not an externally-issued credential -- out of
+# scope for this change; left as-is)
 openwhisk:
   apiHost: ""
   authKey: ""
   namespace: ""
   insecure: "true"
 
-# WaddleAI Integration
 waddleai:
   baseUrl: ""
-  apiKey: ""
 
-# OAuth Configuration - Placeholders for local development
+# OAuth non-secret config only (local development)
 oauth:
-  discord:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    applicationId: ""
-  twitch:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
-  slack:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    signingSecret: ""
   youtube:
-    apiKey: ""
-    clientId: ""
-    clientSecret: ""
     webhookCallbackUrl: ""
-  spotify:
-    clientId: ""
-    clientSecret: ""
-  kick:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
 
 # Shared Environment Variables - Local Overrides
 sharedEnv:
@@ -412,8 +405,8 @@ sharedEnv:
   REDIS_PORT: "6379"
   REDIS_DB: "0"
 
-  # MinIO Configuration
-  MINIO_ENDPOINT: "minio:9000"
+  # SeaweedFS S3 gateway configuration (was MinIO)
+  MINIO_ENDPOINT: "seaweedfs:8333"
   MINIO_SECURE: "false"
 
   # Ollama Configuration
@@ -488,6 +481,32 @@ monitoring:
 # Network Policies - Disabled for local
 networkPolicy:
   enabled: false
+
+# Egress lockdown — on by default even locally so the CNP + proxy path is
+# exercised before beta; disable with --set egressProxy.enabled=false only
+# for a throwaway smoke test, never commit that override.
+egressProxy:
+  enabled: true
+  environment: "local"
+  replicas: 1
+  resources:
+    requests: { cpu: "50m", memory: "64Mi" }
+    limits: { cpu: "150m", memory: "128Mi" }
+egressPolicy:
+  enabled: true
+  # R5: dev clusters (MicroK8s/Calico today) exempt from the all-workload egress lockdown; the
+  # data-plane + egress-proxy CNPs above still render. Beta/gamma/prod keep the base default (true).
+  workloadEgress:
+    enabled: false
+  clusterCidrs:
+    podCidr: "10.1.0.0/16"      # MicroK8s default — confirm against cluster before deploy
+    serviceCidr: "10.152.183.0/24"
+    nodeCidr: "10.0.0.0/8"
+
+# R5: local deliberately relaxes runAsNonRoot below, which PSA `restricted` rejects -- so a local
+# namespace enforces `baseline` (still no privileged/host*/added caps) and only warns/audits restricted.
+podSecurity:
+  enforce: baseline
 
 # Pod Security Context - Relaxed for local
 podSecurityContext:
@@ -615,6 +634,13 @@ modules:
       <<: *module_defaults
       enabled: false
 
+# See values-alpha.yaml's spire.enabled comment: false pending
+# https://github.com/penguintechinc/waddles/issues/437 (SPIRE crash-loop
+# breaks the waddlebot-spire-auto-enroll post-upgrade hook Job).
 spire:
-  enabled: true
+  enabled: false
   environment: "alpha"
+
+# R5: no Tetragon agent on local clusters (networkPolicy.enabled is already false above).
+tetragon:
+  enabled: false
