@@ -26,7 +26,7 @@ from penguin_dal import AsyncDB
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from services.errors import bad_request, conflict, not_found
+from services.errors import ApiError, bad_request, conflict, not_found
 from services.marketplace_publisher_attestation import validate_publisher_key
 
 logger = logging.getLogger(__name__)
@@ -326,35 +326,106 @@ async def get_source_pk(dal: AsyncDB, public_id: uuid.UUID) -> int | None:
     return None if row is None else int(row[0])
 
 
-async def approve_update(dal: AsyncDB, public_id: uuid.UUID) -> SourceRecord:
+async def approve_update(
+    dal: AsyncDB,
+    public_id: uuid.UUID,
+    *,
+    expected_pending_sha: str,
+    sandbox_ack: SandboxAck | None = None,
+) -> SourceRecord:
     """Promote `pending_commit_sha` to `pinned_commit_sha` (human-approved update, design 4.5).
 
-    One atomic UPDATE guarded on `pending_commit_sha IS NOT NULL`, so a concurrent approve or a
-    missing pending SHA can never advance the pin to a stale/empty value. The built-in source is
-    refused (its pin is the baked image commit). Status returns to `ACTIVE`.
+    One atomic UPDATE guarded on `pending_commit_sha == expected_pending_sha` (the SHA the admin
+    reviewed -- a concurrent re-scan swapping in another SHA, a concurrent approve, or a missing
+    pending SHA can never advance the pin to something unreviewed) and `status != DISABLED`. The
+    built-in source is refused. A sandbox source passes a fresh `sandbox_ack` (for the NEW commit)
+    which is written in the SAME UPDATE. Status returns to `ACTIVE`.
     """
+    if not _SHA_RE.fullmatch(expected_pending_sha):
+        raise bad_request("pending_commit_sha must be a 40-hex SHA")
     existing = await get_source(dal, public_id)
     if existing is None:
         raise not_found("marketplace source not found")
     if existing.is_builtin:
         raise conflict("the built-in marketplace source has no approvable update")
+    if existing.status == SourceStatus.DISABLED:
+        raise conflict("marketplace source is disabled")
     table = _table(dal)
+    values: dict[str, Any] = {
+        "pinned_commit_sha": table.c.pending_commit_sha,
+        "pending_commit_sha": None,
+        "status": int(SourceStatus.ACTIVE),
+        "last_scan_error": None,
+        "updated_at": datetime.now(UTC),
+    }
+    if sandbox_ack is not None:
+        values |= {
+            "sandbox_ack_by": sandbox_ack.by,
+            "sandbox_ack_at": sandbox_ack.at,
+            "sandbox_ack_text_hash": sandbox_ack.text_hash,
+            "sandbox_ack_commit_sha": expected_pending_sha,
+        }
     async with dal.engine.begin() as conn:
         row = (
             await conn.execute(
                 update(table)
-                .where(table.c.public_id == public_id, table.c.pending_commit_sha.is_not(None))
-                .values(
-                    pinned_commit_sha=table.c.pending_commit_sha,
-                    pending_commit_sha=None,
-                    status=int(SourceStatus.ACTIVE),
-                    last_scan_error=None,
-                    updated_at=datetime.now(UTC),
+                .where(
+                    table.c.public_id == public_id,
+                    table.c.pending_commit_sha == expected_pending_sha,
+                    table.c.status != int(SourceStatus.DISABLED),
                 )
+                .values(**values)
                 .returning(*table.c)
             )
         ).first()
     if row is None:
-        raise conflict("marketplace source has no pending update to approve")
+        raise conflict("marketplace source pending update changed or is not approvable")
     logger.info("marketplace source: update approved", extra={"source_public_id": str(public_id)})
     return _to_record(row)
+
+
+async def source_app_ids(dal: AsyncDB, public_id: uuid.UUID) -> tuple[str, ...]:
+    """Distinct `app_id`s this source supplies (`app_versions` / `app_catalog` `source_id`)."""
+    pk = await get_source_pk(dal, public_id)
+    if pk is None:
+        raise not_found("marketplace source not found")
+    versions = dal.metadata.tables["app_versions"]
+    catalog = dal.metadata.tables["app_catalog"]
+    async with dal.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                select(versions.c.app_id)
+                .where(versions.c.source_id == pk)
+                .union(select(catalog.c.app_id).where(catalog.c.source_id == pk))
+            )
+        ).all()
+    return tuple(sorted(str(r[0]) for r in rows))
+
+
+async def deactivate_source_bundles(
+    dal: AsyncDB, public_id: uuid.UUID, *, revoked_by: int | None
+) -> tuple[str, ...]:
+    """Stop a removed source's code running: globally uninstall every bundle it supplied.
+
+    Reuses `bundle_approval_service.uninstall_globally` (revokes the platform-catalog install and
+    cascades hide + deactivation across every tenant/community). `app_versions` history is kept.
+    Bundles that are not currently installed are skipped. Returns the app_ids deactivated.
+    """
+    from services import bundle_approval_service
+
+    done: list[str] = []
+    for app_id in await source_app_ids(dal, public_id):
+        try:
+            await bundle_approval_service.uninstall_globally(
+                dal, app_id=app_id, revoked_by=revoked_by
+            )
+        except ApiError as exc:
+            if exc.status_code != 404:
+                raise
+            continue
+        done.append(app_id)
+    logger.info(
+        "marketplace source: bundles deactivated",
+        extra={"source_public_id": str(public_id), "count": len(done)},
+    )
+    return tuple(done)

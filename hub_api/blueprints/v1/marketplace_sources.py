@@ -358,7 +358,11 @@ async def remove_source(public_id: str) -> SourceRemoveResponse | tuple[dict[str
         except ApiError as exc:
             if exc.status_code != 409:
                 raise
+            # Disable FIRST (blocks rescan/approve), then stop its installed bundles running.
             await svc.disable_source(dal, record.public_id)
+            await svc.deactivate_source_bundles(
+                dal, record.public_id, revoked_by=get_current_user_id(request)
+            )
             disposition = "disabled"
     except ApiError as exc:
         return _err(exc)
@@ -429,22 +433,67 @@ async def rescan_source(public_id: str) -> ScanSummaryDTO | tuple[dict[str, obje
     )
 
 
+@dataclass(slots=True, frozen=True)
+class ApproveUpdateRequest:
+    """Body for `approve-update`: echo the reviewed pending SHA; sandbox adds a fresh trust ack."""
+
+    pending_commit_sha: str
+    sandbox_trust_ack: str | None = None
+
+
 @sources_bp.route("/<public_id>/approve-update", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @_flag_gate
+@validate_request(ApproveUpdateRequest)
 @validate_response(SourceResponse)
-async def approve_update(public_id: str) -> SourceResponse | tuple[dict[str, object], int]:
-    """Human-approve a pending update: pinned_commit_sha <- pending_commit_sha."""
+async def approve_update(
+    public_id: str, data: ApproveUpdateRequest
+) -> SourceResponse | tuple[dict[str, object], int]:
+    """Human-approve a pending update: pinned_commit_sha <- pending_commit_sha.
+
+    Advancing the pin is privileged, so it re-applies `add`'s gates: not DISABLED (409), license
+    tier (402), SANDBOX needs a fresh trust ack for the new commit (422), and the client echoes
+    the pending SHA it reviewed (mismatch -> 409, enforced atomically in the UPDATE).
+    """
     try:
+        if not _SHA_RE.fullmatch(data.pending_commit_sha):
+            raise bad_request("pending_commit_sha must be a 40-hex SHA")
         record = await _load(public_id)
-        updated = await svc.approve_update(_install_dal(), record.public_id)
+        if record.status == SourceStatus.DISABLED:
+            raise ApiError("source is disabled", 409, "CONFLICT")
+        denied = await _require_tier(record.build_mode)
+        if denied is not None:
+            return denied
+        caller = get_current_user_id(request)
+        ack: SandboxAck | None = None
+        if record.build_mode == BuildMode.SANDBOX:
+            if data.sandbox_trust_ack != WARNING_HASH:
+                raise unprocessable(
+                    "sandbox sources require acknowledging the current trust warning"
+                )
+            ack = SandboxAck(
+                by=caller,
+                at=datetime.now(UTC),
+                text_hash=WARNING_HASH,
+                commit_sha=data.pending_commit_sha,
+            )
+        updated = await svc.approve_update(
+            _install_dal(),
+            record.public_id,
+            expected_pending_sha=data.pending_commit_sha,
+            sandbox_ack=ack,
+        )
     except ApiError as exc:
         return _err(exc)
     _count("approve_update", "ok")
     logger.info(
         "marketplace source: update approved by admin",
-        extra={"source_public_id": public_id, "actor_id": get_current_user_id(request)},
+        extra={
+            "source_public_id": public_id,
+            "actor_id": caller,
+            "sandbox_ack_text_hash": ack.text_hash if ack else None,
+        },
     )
     return SourceResponse(success=True, source=_dto(updated))
 

@@ -213,17 +213,104 @@ async def test_create_with_pin_and_approve_update_promotes_pending(pg_dal: Any) 
 
     rec = await _prebuilt(pg_dal, pinned_commit_sha=SHA)
     assert rec.pinned_commit_sha == SHA
-    with pytest.raises(ApiError) as no_pending:  # nothing pending -> never moves the pin
-        await approve_update(pg_dal, rec.public_id)
-    assert no_pending.value.status_code == 409
     new = "d" * 40
+    with pytest.raises(ApiError) as no_pending:  # nothing pending -> never moves the pin
+        await approve_update(pg_dal, rec.public_id, expected_pending_sha=new)
+    assert no_pending.value.status_code == 409
     await update_status(pg_dal, rec.public_id, SourceStatus.NEEDS_APPROVAL, pending_commit_sha=new)
-    out = await approve_update(pg_dal, rec.public_id)
+    with pytest.raises(ApiError) as swapped:  # echoed SHA != stored pending SHA (TOCTOU guard)
+        await approve_update(pg_dal, rec.public_id, expected_pending_sha="e" * 40)
+    assert swapped.value.status_code == 409
+    assert (await get_source(pg_dal, rec.public_id)).pinned_commit_sha == SHA  # type: ignore[union-attr]
+    out = await approve_update(pg_dal, rec.public_id, expected_pending_sha=new)
     assert (out.pinned_commit_sha, out.pending_commit_sha) == (new, None)
     assert out.status is SourceStatus.ACTIVE
     with pytest.raises(ApiError) as missing:
-        await approve_update(pg_dal, uuid.uuid4())
+        await approve_update(pg_dal, uuid.uuid4(), expected_pending_sha=new)
     assert missing.value.status_code == 404
     with pytest.raises(ApiError) as bad:
         await _prebuilt(pg_dal, pinned_commit_sha="nothex")
     assert bad.value.status_code == 400
+
+
+async def test_approve_update_refuses_disabled_and_writes_sandbox_ack(pg_dal: Any) -> None:
+    from services.marketplace_source_service import approve_update
+
+    new = "d" * 40
+    ack = SandboxAck(by=1, at=datetime.now(UTC), text_hash="h" * 64, commit_sha="stale")
+    sb = await create_source(
+        pg_dal, name="sb", git_url=_url(), ref="main", build_mode=BuildMode.SANDBOX,
+        sandbox_ack=SandboxAck(by=1, at=datetime.now(UTC), text_hash="o" * 64, commit_sha=SHA),
+        pinned_commit_sha=SHA,
+    )  # fmt: skip
+    await update_status(pg_dal, sb.public_id, SourceStatus.NEEDS_APPROVAL, pending_commit_sha=new)
+    out = await approve_update(pg_dal, sb.public_id, expected_pending_sha=new, sandbox_ack=ack)
+    assert out.sandbox_ack_commit_sha == new  # ack bound to the NEW commit, same UPDATE
+    assert (out.sandbox_ack_text_hash, out.sandbox_ack_by) == ("h" * 64, 1)
+
+    dis = await _prebuilt(pg_dal, pinned_commit_sha=SHA)
+    await update_status(pg_dal, dis.public_id, SourceStatus.NEEDS_APPROVAL, pending_commit_sha=new)
+    await disable_source(pg_dal, dis.public_id)
+    with pytest.raises(ApiError) as ei:
+        await approve_update(pg_dal, dis.public_id, expected_pending_sha=new)
+    assert ei.value.status_code == 409
+
+
+async def test_deactivate_source_bundles_revokes_install_keeps_versions(pg_dal: Any) -> None:
+    from services.marketplace_source_service import deactivate_source_bundles, source_app_ids
+
+    rec = await _prebuilt(pg_dal, pinned_commit_sha=SHA)
+    app_id = f"app-{uuid.uuid4().hex[:8]}"
+    other = f"app-{uuid.uuid4().hex[:8]}"  # not from this source: must stay installed
+    async with pg_dal.engine.begin() as conn:
+        pk = (
+            await conn.execute(
+                text("SELECT id FROM marketplace_sources WHERE public_id = :p"),
+                {"p": rec.public_id},
+            )
+        ).scalar_one()
+        for a, src in ((app_id, pk), (other, None)):
+            await conn.execute(
+                text("INSERT INTO app_catalog (app_id, source_id) VALUES (:a, :s)"),
+                {"a": a, "s": src},
+            )
+            vid = (
+                await conn.execute(
+                    text(
+                        "INSERT INTO app_versions (app_id, version, language, artifact_kind, "
+                        "source_id) VALUES (:a, '1.0.0', 'rust', 'prebuilt', :s) RETURNING id"
+                    ),
+                    {"a": a, "s": src},
+                )
+            ).scalar_one()
+            await conn.execute(
+                text(
+                    "INSERT INTO app_global_installs (app_id, version, version_id, "
+                    "permission_hash, summary_json, install_source, installed_at) "
+                    "VALUES (:a, '1.0.0', :v, 'h', '{}', 'human', now())"
+                ),
+                {"a": a, "v": vid},
+            )
+    assert await source_app_ids(pg_dal, rec.public_id) == (app_id,)
+    assert await deactivate_source_bundles(pg_dal, rec.public_id, revoked_by=None) == (app_id,)
+    async with pg_dal.engine.connect() as conn:
+        revoked = dict(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT app_id, revoked_at IS NOT NULL FROM app_global_installs "
+                        "WHERE app_id IN (:a, :b)"
+                    ),
+                    {"a": app_id, "b": other},
+                )
+            ).all()
+        )
+        n_versions = (
+            await conn.execute(
+                text("SELECT count(*) FROM app_versions WHERE app_id = :a"), {"a": app_id}
+            )
+        ).scalar_one()
+    assert revoked == {app_id: True, other: False}
+    assert n_versions == 1  # version history retained
+    # idempotent: already-revoked bundle is skipped, not an error
+    assert await deactivate_source_bundles(pg_dal, rec.public_id, revoked_by=None) == ()

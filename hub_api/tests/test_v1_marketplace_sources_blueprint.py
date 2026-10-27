@@ -8,6 +8,7 @@ what is under test.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,6 +58,7 @@ class Store:
         self.rows: dict[uuid.UUID, SourceRecord] = {}
         self.created_kwargs: dict[str, Any] = {}
         self.has_versions = False
+        self.deactivated: list[uuid.UUID] = []
 
     async def create_source(self, dal: Any, **kw: Any) -> SourceRecord:
         self.created_kwargs = kw
@@ -90,19 +92,34 @@ class Store:
         self.rows[pid] = dataclasses.replace(self.rows[pid], status=SourceStatus.DISABLED)
         return self.rows[pid]
 
-    async def approve_update(self, dal: Any, pid: uuid.UUID) -> SourceRecord:
+    async def approve_update(
+        self, dal: Any, pid: uuid.UUID, *, expected_pending_sha: str, sandbox_ack: Any = None
+    ) -> SourceRecord:
         import dataclasses
 
         r = self.rows.get(pid)
         if r is None:
             raise not_found("x")
-        if r.pending_commit_sha is None:
+        if r.pending_commit_sha is None or r.pending_commit_sha != expected_pending_sha:
             raise conflict("no pending update")
+        extra: dict[str, Any] = {}
+        if sandbox_ack is not None:
+            extra = {
+                "sandbox_ack_by": sandbox_ack.by, "sandbox_ack_at": sandbox_ack.at,
+                "sandbox_ack_text_hash": sandbox_ack.text_hash,
+                "sandbox_ack_commit_sha": expected_pending_sha,
+            }  # fmt: skip
         self.rows[pid] = dataclasses.replace(
             r, pinned_commit_sha=r.pending_commit_sha, pending_commit_sha=None,
-            status=SourceStatus.ACTIVE,
+            status=SourceStatus.ACTIVE, **extra,
         )  # fmt: skip
         return self.rows[pid]
+
+    async def deactivate_source_bundles(
+        self, dal: Any, pid: uuid.UUID, *, revoked_by: int | None
+    ) -> tuple[str, ...]:
+        self.deactivated.append(pid)
+        return ("app.one",)
 
 
 class Env:
@@ -116,7 +133,7 @@ class Env:
 def store(monkeypatch: pytest.MonkeyPatch) -> Store:
     s = Store()
     for name in ("create_source", "get_source", "list_sources", "delete_source",
-                 "disable_source", "approve_update"):  # fmt: skip
+                 "disable_source", "approve_update", "deactivate_source_bundles"):  # fmt: skip
         monkeypatch.setattr(bp.svc, name, getattr(s, name))
     return s
 
@@ -324,20 +341,109 @@ async def test_builtin_cannot_be_deleted(app: Quart, store: Store) -> None:
     assert rec.public_id in store.rows
 
 
+def _approve_url(rec: SourceRecord) -> str:
+    return f"/api/v1/marketplace/sources/{rec.public_id}/approve-update"
+
+
 async def test_approve_update_advances_pin_only_when_pending(app: Quart, store: Store) -> None:
     rec = _record(pending_commit_sha=None)
     store.rows[rec.public_id] = rec
     c = app.test_client()
-    url = f"/api/v1/marketplace/sources/{rec.public_id}/approve-update"
-    assert (await c.post(url, headers=_h())).status_code == 409
+    url = _approve_url(rec)
+    assert (await c.post(url, json={"pending_commit_sha": SHA2}, headers=_h())).status_code == 409
     assert store.rows[rec.public_id].pinned_commit_sha == SHA
-    import dataclasses
-
     store.rows[rec.public_id] = dataclasses.replace(rec, pending_commit_sha=SHA2)
-    r = await c.post(url, headers=_h())
+    r = await c.post(url, json={"pending_commit_sha": SHA2}, headers=_h())
     assert r.status_code == 200
     src = (await r.get_json())["source"]
     assert (src["pinnedCommitSha"], src["pendingCommitSha"]) == (SHA2, None)
+
+
+async def test_approve_update_requires_body_and_valid_sha(app: Quart, store: Store) -> None:
+    rec = _record(pending_commit_sha=SHA2)
+    store.rows[rec.public_id] = rec
+    c = app.test_client()
+    assert (await c.post(_approve_url(rec), headers=_h())).status_code in (400, 415)
+    r = await c.post(_approve_url(rec), json={"pending_commit_sha": "zz"}, headers=_h())
+    assert r.status_code == 400
+    assert store.rows[rec.public_id].pinned_commit_sha == SHA
+
+
+async def test_approve_update_disabled_409(app: Quart, store: Store) -> None:
+    rec = _record(pending_commit_sha=SHA2, status=SourceStatus.DISABLED)
+    store.rows[rec.public_id] = rec
+    r = await app.test_client().post(
+        _approve_url(rec), json={"pending_commit_sha": SHA2}, headers=_h()
+    )
+    assert r.status_code == 409
+    assert store.rows[rec.public_id].pinned_commit_sha == SHA
+
+
+async def test_approve_update_below_tier_402(app: Quart, store: Store, env: Env) -> None:
+    prebuilt = _record(pending_commit_sha=SHA2)
+    sandbox = _record(pending_commit_sha=SHA2, build_mode=BuildMode.SANDBOX)
+    store.rows |= {prebuilt.public_id: prebuilt, sandbox.public_id: sandbox}
+    c = app.test_client()
+    env.tier = "free"
+    r = await c.post(_approve_url(prebuilt), json={"pending_commit_sha": SHA2}, headers=_h())
+    assert r.status_code == 402
+    env.tier = "professional"
+    body = {"pending_commit_sha": SHA2, "sandbox_trust_ack": WARNING_HASH}
+    r = await c.post(_approve_url(sandbox), json=body, headers=_h())
+    assert r.status_code == 402
+    assert store.rows[sandbox.public_id].pinned_commit_sha == SHA
+
+
+@pytest.mark.parametrize("ack", [None, "stale-hash"])
+async def test_approve_update_sandbox_needs_fresh_ack_422(
+    app: Quart, store: Store, ack: str | None
+) -> None:
+    rec = _record(pending_commit_sha=SHA2, build_mode=BuildMode.SANDBOX)
+    store.rows[rec.public_id] = rec
+    r = await app.test_client().post(
+        _approve_url(rec), json={"pending_commit_sha": SHA2, "sandbox_trust_ack": ack},
+        headers=_h(),
+    )  # fmt: skip
+    assert r.status_code == 422
+    assert store.rows[rec.public_id].pinned_commit_sha == SHA
+
+
+async def test_approve_update_sandbox_with_ack_updates_ack_to_new_commit(
+    app: Quart, store: Store
+) -> None:
+    rec = _record(pending_commit_sha=SHA2, build_mode=BuildMode.SANDBOX, sandbox_ack_commit_sha=SHA)
+    store.rows[rec.public_id] = rec
+    r = await app.test_client().post(
+        _approve_url(rec), json={"pending_commit_sha": SHA2, "sandbox_trust_ack": WARNING_HASH},
+        headers=_h(),
+    )  # fmt: skip
+    assert r.status_code == 200
+    row = store.rows[rec.public_id]
+    assert (row.pinned_commit_sha, row.sandbox_ack_commit_sha) == (SHA2, SHA2)
+    assert (row.sandbox_ack_by, row.sandbox_ack_text_hash) == (1, WARNING_HASH)
+    assert row.sandbox_ack_at is not None
+
+
+async def test_approve_update_echoed_sha_mismatch_409(app: Quart, store: Store) -> None:
+    rec = _record(pending_commit_sha=SHA2)
+    store.rows[rec.public_id] = rec
+    r = await app.test_client().post(
+        _approve_url(rec), json={"pending_commit_sha": "c" * 40}, headers=_h()
+    )
+    assert r.status_code == 409
+    assert store.rows[rec.public_id].pinned_commit_sha == SHA
+
+
+async def test_delete_disable_path_deactivates_bundles(app: Quart, store: Store) -> None:
+    a, b = _record(), _record()
+    store.rows |= {a.public_id: a, b.public_id: b}
+    c = app.test_client()
+    await c.delete(f"/api/v1/marketplace/sources/{a.public_id}", headers=_h())
+    assert store.deactivated == []  # hard-deleted: no versions, nothing installed
+    store.has_versions = True
+    r = await c.delete(f"/api/v1/marketplace/sources/{b.public_id}", headers=_h())
+    assert (await r.get_json())["disposition"] == "disabled"
+    assert store.deactivated == [b.public_id]
 
 
 async def test_rescan_runs_scan_then_ingest_with_tenant_ctx(
