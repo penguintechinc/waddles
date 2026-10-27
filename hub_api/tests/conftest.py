@@ -1550,6 +1550,14 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("artifact_signature_key_id", String(100)),
         Column("artifact_signed_approval_id", BigInteger),
         Column("artifact_signed_at", DateTime),
+        # migration 0067 -- nullable FK to marketplace_sources.id.
+        Column("source_id", BigInteger),
+    )
+    Table(
+        "marketplace_sources",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("public_id", String(36), nullable=False),
     )
     Table(
         "app_active_versions",

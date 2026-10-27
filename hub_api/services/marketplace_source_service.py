@@ -308,3 +308,11 @@ async def delete_source(dal: AsyncDB, public_id: uuid.UUID) -> None:
     except IntegrityError as exc:
         raise conflict("marketplace source still has bundle versions; disable it instead") from exc
     logger.info("marketplace source: deleted", extra={"source_public_id": str(public_id)})
+
+
+async def get_source_pk(dal: AsyncDB, public_id: uuid.UUID) -> int | None:
+    """Return the internal numeric `marketplace_sources.id` (FK use only, never exposed)."""
+    table = _table(dal)
+    async with dal.engine.connect() as conn:
+        row = (await conn.execute(select(table.c.id).where(table.c.public_id == public_id))).first()
+    return None if row is None else int(row[0])

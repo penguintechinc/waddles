@@ -105,10 +105,12 @@ async def test_install_version_globally_records_a_row(install_dal: Any) -> None:
 
 async def test_install_version_globally_system_actor_has_no_installed_by(install_dal: Any) -> None:
     """Core-bundle-seeder path: `installed_by=None` is a real SQL NULL, never a fake user."""
-    await _seed_published(install_dal)
+    await _seed_published(
+        install_dal, manifest={**_MANIFEST, "app_id": "waddles.core.music.default"}
+    )
     row = await install_version_globally(
         install_dal,
-        app_id="waddles.socials.music.default",
+        app_id="waddles.core.music.default",
         version="3.0.1",
         installed_by=None,
         install_source="system:core-seeder",

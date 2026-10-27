@@ -462,6 +462,7 @@ async def _publish_prebuilt_version(
     component_key: str,
     sidecar_key: str,
     manifest_json: dict[str, Any] | None,
+    source_id: int | None = None,
 ) -> Any:
     """Create the `app_versions` row for a staged prebuilt component and advance it to PUBLISHED.
 
@@ -506,6 +507,7 @@ async def _publish_prebuilt_version(
         license=license_id,
         license_review_required=license_requires_review(license_id) if license_id else False,
         source_url=manifest_json.get("source_url"),
+        source_id=source_id,
     )
     await install_dal(
         (install_dal.app_version_uploads.app_id == app_id)
@@ -522,6 +524,7 @@ async def process_prebuilt_component(
     component_bytes: bytes,
     tenant_slug: str,
     valkey_client: Any | None = None,
+    source_id: int | None = None,
 ) -> Any:
     """Drive a freshly-`UPLOADED` prebuilt-component row through `INSPECTING` -> `PUBLISHED`.
 
@@ -563,6 +566,9 @@ async def process_prebuilt_component(
          is "staged", not "approved" or "active" -- `approve_version()`
          (`bundle_approval_service.py`, GLOBAL-ADMIN-gated) is the
          separate step that activates it.
+
+    `source_id` (marketplace sources, migration 0067) is the numeric `marketplace_sources.id`
+    stamped onto the `app_versions` row; `None` = a pre-source / direct-upload row.
 
     `valkey_client`, when passed (tests only), is used as-is and left
     open for the caller to manage; when `None` (the real call site) a
@@ -649,6 +655,7 @@ async def process_prebuilt_component(
             component_key=key,
             sidecar_key=sidecar_key,
             manifest_json=row.manifest_json,
+            source_id=source_id,
         )
         logger.info(
             "bundle onboarding: component published",

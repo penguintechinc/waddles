@@ -88,6 +88,9 @@ class BundleCandidate:
     publisher_sig: str | None
     permission_summary: dict[str, Any]
     dep_findings: tuple[DepFinding, ...] = ()
+    #: Namespace-rewritten manifest mapping (the exact input that was validated); Task 5 re-feeds
+    #: it to `create_version`, which re-validates, so nothing unvalidated is ever persisted.
+    raw_manifest: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)
@@ -353,6 +356,7 @@ def _validate_bundle(
         publisher_sig=sig.read_text().strip() if sig.is_file() else None,
         permission_summary=_permission_preview(manifest),
         dep_findings=findings,
+        raw_manifest=raw,
     )
 
 

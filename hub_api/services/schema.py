@@ -2330,6 +2330,8 @@ def bind_lifecycle_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("homepage_url", "text"),
         Field("notice", "text"),
         Field("category", "string", length=50),
+        # migration 0067 -- nullable FK to marketplace_sources.id (NULL = pre-source row).
+        Field("source_id", "integer"),
         primarykey=["app_id"],
         migrate=migrate,
     )
@@ -2420,6 +2422,8 @@ def bind_app_bundle_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("homepage_url", "text"),
         Field("notice", "text"),
         Field("category", "string", length=50),
+        # migration 0067 -- nullable FK to marketplace_sources.id (NULL = pre-source row).
+        Field("source_id", "integer"),
         primarykey=["app_id"],
         migrate=migrate,
     )
