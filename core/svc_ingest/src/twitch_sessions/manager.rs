@@ -252,7 +252,7 @@ pub struct SessionManager<R: ConnectionResolve + 'static, L: SessionLease + 'sta
 
 /// Up to 10% of [`RECONCILE_INTERVAL`], randomized so replicas desynchronize.
 fn jitter(interval: Duration) -> Duration {
-    let max_ms = interval.as_millis() / 10;
+    let max_ms = (interval.as_millis() / 10).min(u64::MAX as u128);
     let ms = uuid::Uuid::new_v4().as_u128() % (max_ms + 1);
     Duration::from_millis(u64::try_from(ms).unwrap_or(0))
 }
@@ -1342,8 +1342,9 @@ mod tests {
     #[test]
     fn extreme_interval_never_overflows() {
         let huge = Duration::MAX;
-        assert_eq!(jitter(huge).min(Duration::MAX), jitter(huge));
-        let sum = huge.saturating_add(jitter(huge));
+        let j = jitter(huge);
+        assert_eq!(j.min(Duration::MAX), j);
+        let sum = huge.saturating_add(j);
         assert_eq!(sum, Duration::MAX);
     }
 

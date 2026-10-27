@@ -162,10 +162,10 @@ def test_hub_api_http_egress_is_scoped_to_svc_ingest_only_on_alpha(
     )
 
 
-def test_hub_api_http_egress_is_not_granted_dataplane_wide(
+def test_hub_api_http_egress_is_present_on_dataplane_wide_for_readiness(
     alpha: list[dict[str, Any]],
 ) -> None:
-    """The shared dataplane-egress-deny CNP must NOT carry the hub-api HTTP port."""
+    """The shared dataplane-egress-deny CNP carries the hub-api HTTP port for readiness probes (#879)."""
     port = _hub_port()
     cnps = [
         d
@@ -174,8 +174,8 @@ def test_hub_api_http_egress_is_not_granted_dataplane_wide(
         and d["metadata"]["name"].endswith("-dataplane-egress-deny")
     ]
     assert len(cnps) == 1, f"expected one dataplane egress CNP, got {len(cnps)}"
-    assert not _hub_http_rules(cnps[0], port), (
-        "hub-api HTTP egress leaked into the all-dataplane policy"
+    assert len(_hub_http_rules(cnps[0], port)) == 1, (
+        "hub-api HTTP readiness port missing from dataplane policy (#879)"
     )
     # the gRPC rule (different port) must still be there: guards a vacuous pass
     assert any(
@@ -210,7 +210,7 @@ def _scoped_cnps(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 def test_scoped_hub_api_egress_follows_each_flag_independently(
     ingest_on: bool, action_on: bool
 ) -> None:
-    """Each consumer gets its own CNP iff its own flag is on; never dataplane-wide."""
+    """Each consumer gets its own dedicated CNP iff its own flag is on."""
     docs = _render(
         "values-alpha.yaml",
         f"{_INGEST_FLAG}={str(ingest_on).lower()}",
@@ -233,7 +233,8 @@ def test_scoped_hub_api_egress_follows_each_flag_independently(
         and d["metadata"]["name"].endswith("-dataplane-egress-deny")
     ]
     assert len(shared) == 1
-    assert not _hub_http_rules(shared[0], port)
+    # #879 added hubApiHttpPort to dataplane-egress-deny for wait-for-hub-api readiness
+    assert len(_hub_http_rules(shared[0], port)) == 1
 
 
 def test_alpha_renders_both_scoped_hub_api_egress_policies(
