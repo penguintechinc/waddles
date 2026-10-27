@@ -54,6 +54,8 @@ tables:
   - sso_identities
   - suppression_records
   - app_commands
+  - marketplace_sources
+  - marketplace_sources_audit_log
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -911,4 +913,54 @@ grants:
     privileges: []
   - role: migration_runner
     table: app_commands
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0067_marketplace_sources: hub-api is the only writer; audit log is trigger-written.
+  - role: hub_api
+    table: marketplace_sources
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: marketplace_sources
+    privileges: []
+  - role: svc_ingest
+    table: marketplace_sources
+    privileges: []
+  - role: svc_process
+    table: marketplace_sources
+    privileges: []
+  - role: svc_action
+    table: marketplace_sources
+    privileges: []
+  - role: svc_streaming
+    table: marketplace_sources
+    privileges: []
+  - role: webui
+    table: marketplace_sources
+    privileges: []
+  - role: migration_runner
+    table: marketplace_sources
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api
+    table: marketplace_sources_audit_log
+    privileges: [SELECT]
+  - role: waddles_publisher
+    table: marketplace_sources_audit_log
+    privileges: []
+  - role: svc_ingest
+    table: marketplace_sources_audit_log
+    privileges: []
+  - role: svc_process
+    table: marketplace_sources_audit_log
+    privileges: []
+  - role: svc_action
+    table: marketplace_sources_audit_log
+    privileges: []
+  - role: svc_streaming
+    table: marketplace_sources_audit_log
+    privileges: []
+  - role: webui
+    table: marketplace_sources_audit_log
+    privileges: []
+  - role: migration_runner
+    table: marketplace_sources_audit_log
     privileges: [SELECT, INSERT, UPDATE, DELETE]
