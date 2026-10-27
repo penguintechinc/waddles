@@ -2,12 +2,14 @@
 # runtime from services/marketplace_sandbox_builder.py::build_job_manifest; THIS template renders
 # the standing policy around them so the lockdown does not depend on the Job spec alone:
 #   - dedicated ServiceAccount (token never mounted) the build pods run as
-#   - minimal Role/RoleBinding letting hub-api create/read/delete build Jobs + their ConfigMaps
+#   - minimal Role/RoleBinding (bound ONLY to hub-api's dedicated SA) letting hub-api create/read/delete build Jobs + their ConfigMaps
 #     and read build-pod logs (the artifact return path) -- nothing else
 #   - deny-ALL-egress (and ingress) CiliumNetworkPolicy for build pods: offline, no DNS, no cluster
 #     or world access, so a malicious build can neither fetch code nor exfiltrate
 #   - Tetragon TracingPolicy: exec allowlist = the builder's toolchain only (SIGKILL)
 #   - `helm test` Job: runs the builder image under the SAME lockdown and asserts egress is denied
+#   - ValidatingAdmissionPolicy confining hub-api's Job-create to sandbox build Jobs
+#   - (follow-up) dedicated build namespace -- deferred: needs cross-ns Role/CNP/Tetragon/PSA + hub config
 # Pod Security Admission `restricted` is the chart-wide namespace posture (values podSecurity...);
 # every pod this renders/creates is restricted-compliant (non-root, no caps, RuntimeDefault seccomp).
 {{- if .Values.sandboxBuilder.enabled }}
@@ -59,9 +61,71 @@ roleRef:
   kind: Role
   name: {{ $name }}-launcher
 subjects:
+  # ONLY hub-api's dedicated ServiceAccount -- never the shared chart SA (privilege escalation).
   - kind: ServiceAccount
-    name: {{ include "waddlebot.serviceAccountName" . }}
+    name: {{ include "waddlebot.hubApiServiceAccountName" . }}
     namespace: {{ .Values.namespace }}
+---
+# Admission constraint (native ValidatingAdmissionPolicy, GA k8s 1.30 -- no Kyverno dependency):
+# a Job created BY hub-api's ServiceAccount must be a sandbox build Job and nothing else, so the
+# Job-create right cannot launch a secret-mounting / hostPath / privileged-identity Job.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}-job-guard
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-builder
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+  matchConditions:
+    - name: from-hub-api-sa
+      expression: {{ printf "request.userInfo.username == 'system:serviceaccount:%s:%s'" .Values.namespace (include "waddlebot.hubApiServiceAccountName" .) | quote }}
+  variables:
+    - name: pod
+      expression: "object.spec.template.spec"
+  validations:
+    - expression: "has(object.metadata.labels) && 'app.kubernetes.io/component' in object.metadata.labels && object.metadata.labels['app.kubernetes.io/component'] == 'sandbox-builder'"
+      message: "hub-api may only create Jobs labelled app.kubernetes.io/component=sandbox-builder"
+    - expression: "has(object.spec.template.metadata) && has(object.spec.template.metadata.labels) && object.spec.template.metadata.labels['app.kubernetes.io/component'] == 'sandbox-builder'"
+      message: "sandbox Job pod template must carry component=sandbox-builder"
+    - expression: {{ printf "has(variables.pod.serviceAccountName) && variables.pod.serviceAccountName == '%s'" $name | quote }}
+      message: "sandbox Job must run as the sandbox-builder ServiceAccount"
+    - expression: "has(variables.pod.automountServiceAccountToken) && variables.pod.automountServiceAccountToken == false"
+      message: "sandbox Job must set automountServiceAccountToken: false"
+    - expression: "!has(variables.pod.volumes) || variables.pod.volumes.all(v, has(v.configMap) || has(v.emptyDir))"
+      message: "sandbox Job may only use configMap/emptyDir volumes (no secret/hostPath/projected)"
+    - expression: "!has(variables.pod.hostNetwork) || variables.pod.hostNetwork == false"
+      message: "sandbox Job must not use hostNetwork"
+    - expression: "!has(variables.pod.hostPID) || variables.pod.hostPID == false"
+      message: "sandbox Job must not use hostPID"
+    - expression: "!has(variables.pod.initContainers) && variables.pod.containers.size() == 1"
+      message: "sandbox Job must have exactly one container and no initContainers"
+    - expression: {{ printf "variables.pod.containers.all(c, c.image == '%s')" (include "waddlebot.legacyModuleImage" (dict "root" . "module" $sb.image "imageTag" $sb.imageTag)) | quote }}
+      message: "sandbox Job must use the pinned sandbox-builder image"
+    - expression: "variables.pod.containers.all(c, !has(c.envFrom) && (!has(c.env) || c.env.all(e, !has(e.valueFrom))))"
+      message: "sandbox Job containers must not reference secrets/configmaps via env"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}-job-guard
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-builder
+spec:
+  policyName: {{ $name }}-job-guard
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.namespace | quote }}
 ---
 # Deny ALL egress (DNS included) and ALL ingress: `- {}` enables default-deny for the direction
 # with no allow rule. Build pods are selected by the component label hub-api stamps on them.

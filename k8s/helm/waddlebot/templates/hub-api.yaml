@@ -35,7 +35,7 @@ spec:
         app.kubernetes.io/component: hub-api
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      serviceAccountName: {{ include "waddlebot.hubApiServiceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}

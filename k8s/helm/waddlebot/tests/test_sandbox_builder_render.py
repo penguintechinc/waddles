@@ -45,7 +45,7 @@ def test_disabled_by_default_renders_nothing() -> None:
 def test_enabled_renders_full_lockdown() -> None:
     docs = _render("--set", "sandboxBuilder.enabled=true")
     kinds = _by_kind(docs)
-    assert len(docs) == 6, [d["kind"] for d in docs]
+    assert len(docs) == 8, [d["kind"] for d in docs]
     assert kinds["ServiceAccount"]["automountServiceAccountToken"] is False
     cnp = kinds["CiliumNetworkPolicy"]["spec"]
     assert cnp["egress"] == [{}] and cnp["ingress"] == [
@@ -112,3 +112,46 @@ def test_entrypoint_forces_cargo_offline_and_injects_vendor_source() -> None:
         'CARGO_NET_OFFLINE": "true"',
     ):
         assert needle in src, needle
+
+
+def test_launcher_bound_only_to_dedicated_hub_api_sa_and_admission_policy() -> None:
+    """Launcher Role must not be bound to the shared SA; VAP confines hub-api's Job-create."""
+    docs = _render("--set", "sandboxBuilder.enabled=true")
+    kinds = _by_kind(docs)
+    subj = kinds["RoleBinding"]["subjects"]
+    assert [s["name"] for s in subj] == ["waddlebot-hub-api"], subj
+    shared = _render(template="templates/serviceaccount.yaml")
+    shared_name = shared[0]["metadata"]["name"]
+    assert shared_name != "waddlebot-hub-api" and shared_name not in [
+        s["name"] for s in subj
+    ]
+    vap = kinds["ValidatingAdmissionPolicy"]["spec"]
+    exprs = " ".join(v["expression"] for v in vap["validations"])
+    for needle in (
+        "sandbox-builder",
+        "automountServiceAccountToken",
+        "configMap",
+        "emptyDir",
+        "c.image ==",
+    ):
+        assert needle in exprs, needle
+    assert "system:serviceaccount:" in vap["matchConditions"][0]["expression"]
+    assert kinds["ValidatingAdmissionPolicyBinding"]["spec"]["validationActions"] == [
+        "Deny"
+    ]
+
+
+def test_hub_api_uses_dedicated_sa_with_tokenreview() -> None:
+    dep = next(
+        d
+        for d in _render(template="templates/hub-api.yaml")
+        if d["kind"] == "Deployment"
+    )
+    assert dep["spec"]["template"]["spec"]["serviceAccountName"] == "waddlebot-hub-api"
+    rbac = _render(template="templates/service-jwt-rbac.yaml")
+    assert any(
+        d["kind"] == "ServiceAccount" and d["metadata"]["name"] == "waddlebot-hub-api"
+        for d in rbac
+    )
+    crb = next(d for d in rbac if d["kind"] == "ClusterRoleBinding")
+    assert [s["name"] for s in crb["subjects"]] == ["waddlebot-hub-api"]

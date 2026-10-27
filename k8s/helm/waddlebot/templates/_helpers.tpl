@@ -107,6 +107,15 @@ Returns the name of the service account to use.
 {{- end }}
 
 {{/*
+hub-api dedicated ServiceAccount name. hub-api alone holds the sandbox-builder Job-launcher
+Role, so it must NOT share the chart-wide ServiceAccount (any pod on that SA could otherwise
+create arbitrary Jobs / read pod logs).
+*/}}
+{{- define "waddlebot.hubApiServiceAccountName" -}}
+{{- printf "%s-hub-api" (include "waddlebot.fullname" .) }}
+{{- end }}
+
+{{/*
 Per-service PostgreSQL access (security findings H-1 / H-3)
 ===========================================================================
 Every workload connects as exactly ONE least-privilege LOGIN role from
