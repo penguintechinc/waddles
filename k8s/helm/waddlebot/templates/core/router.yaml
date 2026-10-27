@@ -8,7 +8,9 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: router
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "router")) }}
   replicas: {{ .Values.modules.router.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
@@ -19,6 +21,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: router
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -30,6 +33,7 @@ spec:
       - name: router
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.modules.router.image) "imageTag" .Values.modules.router.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -48,6 +52,10 @@ spec:
             name: {{ include "waddlebot.fullname" . }}-router-secret
             optional: true
         env:
+        # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_legacy_router;
+        # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+        # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_legacy_router") | nindent 8 }}
         - name: MODULE_NAME
           value: "router"
         - name: MODULE_PORT
@@ -108,4 +116,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: router
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "router" "ports" (list 8000) "runtime" "python" "egress" "https") }}
 {{- end }}

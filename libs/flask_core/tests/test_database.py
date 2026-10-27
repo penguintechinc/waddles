@@ -189,10 +189,12 @@ class TestDbOperation:
     `tenancy.resolve_tenant_context` and any future raw `dal(query).select()`
     caller run through this, not `AsyncDAL`'s own per-method commit/rollback
     above -- see the module docstring's #306/recurring-`InFailedSqlTransaction`
-    rationale. On failure it must log the real exception (type + message +
-    the named operation, not just a downstream cascade) and roll back the
-    connection *before* re-raising, so the connection self-heals for the
-    next request instead of staying poisoned until the process restarts.
+    rationale. On failure it must log the real failure (exception type +
+    SQLSTATE + the named operation, not just a downstream cascade -- but
+    never the raw driver message, which can embed bound values; see
+    `test_db_error_redaction.py`) and roll back the connection *before*
+    re-raising, so the connection self-heals for the next request instead
+    of staying poisoned until the process restarts.
     """
 
     def test_success_does_not_roll_back(self) -> None:
@@ -208,20 +210,27 @@ class TestDbOperation:
     ) -> None:
         dal = MagicMock()
 
+        class InFailedSqlTransaction(Exception):
+            """Driver-shaped (psycopg2 duck type): carries a SQLSTATE in `pgcode`."""
+
+            pgcode = "25P02"
+
         with caplog.at_level(logging.ERROR):
-            with pytest.raises(RuntimeError, match="InFailedSqlTransaction"):
+            with pytest.raises(InFailedSqlTransaction):
                 with db_operation(dal, "resolve_tenant_context:tenants.select"):
-                    raise RuntimeError("InFailedSqlTransaction: current transaction is aborted")
+                    raise InFailedSqlTransaction("current transaction is aborted")
 
         dal.rollback.assert_called_once()
         error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert error_records, "expected an ERROR log line, found none"
         assert any(
             "resolve_tenant_context:tenants.select" in r.message
-            and "RuntimeError" in r.message
             and "InFailedSqlTransaction" in r.message
+            and "sqlstate=25P02" in r.message
+            and "category=in_failed_sql_transaction" in r.message
             for r in error_records
         )
+        assert not any("current transaction is aborted" in r.message for r in error_records)
 
     def test_a_subsequent_operation_on_the_same_dal_succeeds_after_rollback(self) -> None:
         """The connection self-heals: a second `db_operation()` block against

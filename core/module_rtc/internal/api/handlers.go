@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strconv"
 
 	"github.com/gorilla/mux"
 	"github.com/penguintech/waddlebot/module_rtc/internal/services"
@@ -150,7 +149,9 @@ func (h *Handlers) LeaveRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.featuresService.LowerHand(r.Context(), roomName, req.UserID)
+	if err := h.featuresService.LowerHand(r.Context(), roomName, req.UserID); err != nil {
+		log.Printf("Failed to lower hand before leaving room: %v", err)
+	}
 
 	if err := h.roomService.LeaveRoom(r.Context(), roomName, req.UserID); err != nil {
 		log.Printf("Failed to leave room: %v", err)
@@ -250,7 +251,8 @@ func (h *Handlers) MuteParticipant(w http.ResponseWriter, r *http.Request) {
 	userID := vars["userId"]
 
 	var req ModeratorRequest
-	json.NewDecoder(r.Body).Decode(&req)
+	// Body is optional for moderator actions; an empty/invalid body leaves req zero-valued.
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	if err := h.featuresService.MuteParticipant(r.Context(), roomName, userID, req.ModeratorID); err != nil {
 		jsonError(w, "Failed to mute participant", http.StatusInternalServerError)
@@ -266,7 +268,8 @@ func (h *Handlers) UnmuteParticipant(w http.ResponseWriter, r *http.Request) {
 	userID := vars["userId"]
 
 	var req ModeratorRequest
-	json.NewDecoder(r.Body).Decode(&req)
+	// Body is optional for moderator actions; an empty/invalid body leaves req zero-valued.
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	if err := h.featuresService.UnmuteParticipant(r.Context(), roomName, userID, req.ModeratorID); err != nil {
 		jsonError(w, "Failed to unmute participant", http.StatusInternalServerError)
@@ -280,7 +283,8 @@ func (h *Handlers) MuteAll(w http.ResponseWriter, r *http.Request) {
 	roomName := mux.Vars(r)["roomName"]
 
 	var req ModeratorRequest
-	json.NewDecoder(r.Body).Decode(&req)
+	// Body is optional for moderator actions; an empty/invalid body leaves req zero-valued.
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	if err := h.featuresService.MuteAll(r.Context(), roomName, req.ModeratorID); err != nil {
 		jsonError(w, "Failed to mute all", http.StatusInternalServerError)
@@ -298,7 +302,8 @@ func (h *Handlers) KickParticipant(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		AdminID string `json:"admin_id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	// Body is optional; an empty/invalid body leaves req zero-valued.
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	if err := h.featuresService.KickParticipant(r.Context(), roomName, userID, req.AdminID); err != nil {
 		jsonError(w, "Failed to kick participant", http.StatusInternalServerError)
@@ -314,7 +319,8 @@ func (h *Handlers) LockRoom(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		AdminID string `json:"admin_id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	// Body is optional; an empty/invalid body leaves req zero-valued.
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	if err := h.featuresService.LockRoom(r.Context(), roomName, req.AdminID); err != nil {
 		jsonError(w, "Failed to lock room", http.StatusInternalServerError)
@@ -330,7 +336,8 @@ func (h *Handlers) UnlockRoom(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		AdminID string `json:"admin_id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	// Body is optional; an empty/invalid body leaves req zero-valued.
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	if err := h.featuresService.UnlockRoom(r.Context(), roomName, req.AdminID); err != nil {
 		jsonError(w, "Failed to unlock room", http.StatusInternalServerError)
@@ -343,18 +350,11 @@ func (h *Handlers) UnlockRoom(w http.ResponseWriter, r *http.Request) {
 func jsonResponse(w http.ResponseWriter, data interface{}, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("Failed to write JSON response: %v", err)
+	}
 }
 
 func jsonError(w http.ResponseWriter, message string, status int) {
 	jsonResponse(w, map[string]string{"error": message}, status)
-}
-
-func getIntParam(r *http.Request, key string, defaultVal int) int {
-	if val := r.URL.Query().Get(key); val != "" {
-		if i, err := strconv.Atoi(val); err == nil {
-			return i
-		}
-	}
-	return defaultVal
 }

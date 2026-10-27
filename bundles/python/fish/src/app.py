@@ -58,10 +58,8 @@ stub:
   (`docs/superpowers/specs/2026-09-28-superpenguin-fish-game-port.md`) --
   are out of scope for this kv-only v1 entirely, not partially stubbed.
 
-Gated behind the PostHog flag ``waddles.command-fish`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -74,10 +72,12 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-fish"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 #: No sub-modules declared for v1 -- every `VERBS` token other than
 #: `list`/`set` resolves to a usage reply (see `_resolve_command`), never a
@@ -112,7 +112,7 @@ class FishCatch:
     flavor: str
 
 
-#: Weighted catch table. Weights are relative (`random.choices` normalizes
+#: Weighted catch table. Weights are relative (`_RNG.choices` normalizes
 #: them), not percentages -- original content written for this bundle, NOT
 #: copied from PenguinTwitchBot's own fish list (module docstring).
 _CATCH_TABLE: tuple[tuple[FishCatch, float], ...] = (
@@ -135,12 +135,12 @@ _WEIGHT_VARIANCE_MAX = 1.2
 
 def _roll_catch() -> tuple[FishCatch, float]:
     """Pick one weighted-random `FishCatch` and a randomized actual weight (lbs, 2dp)."""
-    fish = random.choices(  # noqa: S311 - a game, not a security decision
+    fish = _RNG.choices(
         [entry[0] for entry in _CATCH_TABLE],
         weights=[entry[1] for entry in _CATCH_TABLE],
         k=1,
     )[0]
-    multiplier = random.uniform(_WEIGHT_VARIANCE_MIN, _WEIGHT_VARIANCE_MAX)  # noqa: S311
+    multiplier = _RNG.uniform(_WEIGHT_VARIANCE_MIN, _WEIGHT_VARIANCE_MAX)
     return fish, round(fish.base_weight_lbs * multiplier, 2)
 
 
@@ -189,14 +189,14 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!fish` and its grammar, via `parse_command`.
 
-    Cheap-skip first (no leading `!fish` token -- `None`, zero cost), flag
-    check second, real grammar parse last -- same ordering as `eightball`'s
+    Cheap-skip first (no leading `!fish` token -- `None`, zero cost), real grammar parse last --
+    same ordering as `eightball`'s
     own documented rationale. A recognized-but-malformed `!fish ...` (a
     `CommandUsageError`, or an option this bundle doesn't implement, e.g.
     `!fish enable`) still produces a reply (`"usage"`) since the caller did
@@ -209,9 +209,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.partition(" ")[0]
     if head.lower() != "!fish":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:
@@ -227,9 +224,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     # Forward the normalized badge signal, if present -- see `count`/`lurk`'s own identical
     # forwarding comment for why absence must reach `dispatch` as absence, not `False`.
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
 
     return PlatformEvent(
         platform=event.platform,

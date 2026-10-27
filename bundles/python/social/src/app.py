@@ -90,11 +90,9 @@ stub:
   bonus) -- out of scope for this kv-only v1 entirely, not partially
   stubbed.
 
-Gated behind the PostHog flag ``waddles.command-social`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-classification last). One flag gates all four commands (`!hug`,
-`!highfive`, `!pat`, `!social`) -- they ship and roll back together.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs. All four commands (`!hug`,
+`!highfive`, `!pat`, `!social`) are activated and deactivated together.
 """
 
 from __future__ import annotations
@@ -106,10 +104,7 @@ from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-social"
 
 #: A plausible username/mention shape: an optional leading `@` (stripped),
 #: then 1-32 chars of letters/digits/underscore/dot/hyphen. Not a lookup
@@ -249,7 +244,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!hug`/`!highfive`/`!pat`/`!social`.
 
     Cheap-skip first (no leading recognized command token -- `None`, zero
-    cost), flag check second, real classification last -- same ordering as
+    cost), real classification last -- same ordering as
     `duel`/`fish`/`eightball`'s own documented rationale. A recognized-but-
     malformed message still produces a reply (`"usage"`) since the caller
     did invoke a known command -- never silently dropped.
@@ -265,9 +260,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     is_social = head_lower == "!social"
     interaction = _COMMAND_TO_INTERACTION.get(head_lower)
     if not is_social and interaction is None:
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     payload: dict[str, Any] = {"channel_id": event.payload.get("channel_id")}

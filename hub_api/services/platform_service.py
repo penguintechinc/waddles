@@ -23,6 +23,7 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from services import session_service
 from services.errors import bad_request, not_found
 
 _VALID_ROLES: tuple[str | None, ...] = ("platform-admin", "support", None)
@@ -162,10 +163,8 @@ async def deactivate_user(
         is_active=False,
         deactivated_at=datetime.now(UTC),
     )
-    await async_dal.update_async(
-        dal.hub_sessions.user_id == user_id,
-        is_active=False,
-        revoked_at=datetime.now(UTC),
+    await session_service.revoke_user_sessions(
+        async_dal, dal, user_id=user_id, reason="user_deactivated"
     )
 
 
@@ -177,7 +176,8 @@ async def list_communities(
     limit = min(100, max(1, limit))
     offset = (page - 1) * limit
 
-    query = dal.communities.is_active == is_active
+    # `id > 0` excludes the tenant-wide sentinel community (id 0), incl. the is_active=False path.
+    query = (dal.communities.is_active == is_active) & (dal.communities.id > 0)
     if search:
         query &= dal.communities.name.like(
             f"%{search}%", case_sensitive=False

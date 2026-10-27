@@ -103,10 +103,8 @@ stub:
 - `!ship` history/tracking -- out of scope for this kv-only v1 entirely
   (see above), not partially stubbed.
 
-Gated behind the PostHog flag ``waddles.command-love`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering (cheap command-match first, flag check second, real
-grammar parse last).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -117,10 +115,7 @@ from typing import Any, NoReturn
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-love"
 
 #: No sub-modules declared for v1 -- every `VERBS` token other than `list`
 #: resolves to a usage reply (see `_resolve_love`), never a silent drop.
@@ -272,7 +267,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!love`/`!ship` and their grammar.
 
     Cheap-skip first (no leading `!love`/`!ship` token -- `None`, zero cost),
-    flag check second, real grammar classification last -- same ordering as
+    real grammar classification last -- same ordering as
     `duel`/`fish`/`eightball`'s own documented rationale. A recognized-but-
     malformed message still produces a reply (`"usage"`) since the caller did
     invoke this bundle -- never silently dropped.
@@ -285,9 +280,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     head = stripped.partition(" ")[0]
     head_lower = head.lower()
     if head_lower not in ("!love", "!ship"):
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     command: str

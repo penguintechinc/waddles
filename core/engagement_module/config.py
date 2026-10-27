@@ -39,26 +39,26 @@ class Config:
     # Credential state management
     _credentials_loaded: bool = False
     _credential_lock: threading.Lock = threading.Lock()
-    
+
     # gRPC Configuration
     GRPC_PORT: int = int(os.getenv("GRPC_PORT", "50061"))
     GRPC_HOST: str = os.getenv("GRPC_HOST", "0.0.0.0")
-    
+
     # JWT Configuration
     JWT_SECRET: str = require_secret_key(
         "JWT_SECRET", default="jwt-secret-key-change-in-prod"
     )
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_EXPIRATION_HOURS: int = int(os.getenv("JWT_EXPIRATION_HOURS", "24"))
-    
+
     # Logging Configuration
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FORMAT: str = os.getenv("LOG_FORMAT", "text")  # text or json
-    
+
     # Environment
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     RELEASE_MODE: bool = os.getenv("RELEASE_MODE", "false").lower() == "true"
-    
+
     # License Configuration (if applicable)
     LICENSE_KEY: Optional[str] = os.getenv("LICENSE_KEY")
     LICENSE_SERVER: str = os.getenv("LICENSE_SERVER", "https://license.penguintech.io")
@@ -153,5 +153,5 @@ class Config:
             raise ValueError(f"Invalid MODULE_PORT: {cls.MODULE_PORT}")
         if not (1 <= cls.GRPC_PORT <= 65535):
             raise ValueError(f"Invalid GRPC_PORT: {cls.GRPC_PORT}")
-        
+
         return True

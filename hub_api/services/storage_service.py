@@ -24,11 +24,16 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 import boto3
 from botocore.client import Config as BotoConfig
+from flask_core.safe_logging import describe_exc, log_exc_safe
+
+from services.object_storage_kms import get_object_storage_sse
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +83,10 @@ async def upload_avatar(data: bytes, original_filename: str, content_type: str) 
     """Upload avatar bytes to `avatars/<uuid><ext>`. Returns the public URL."""
     ext = os.path.splitext(original_filename)[1] or ""
     key = f"avatars/{uuid.uuid4()}{ext}"
+    # security.md: default server-side encryption -- AES256 (SSE-S3) by default, SSE-KMS under the
+    # operator's key when kms.objectStorage.mode=kms (services/object_storage_kms.py; raises
+    # rather than silently writing under the platform key when KMS mode is on but not entitled).
+    sse = await get_object_storage_sse().put_params()
 
     def _put() -> None:
         _client().put_object(
@@ -85,7 +94,7 @@ async def upload_avatar(data: bytes, original_filename: str, content_type: str) 
             Key=key,
             Body=data,
             ContentType=content_type,
-            ServerSideEncryption="AES256",  # security.md: default server-side encryption
+            **sse,
         )
 
     await asyncio.to_thread(_put)
@@ -109,6 +118,7 @@ async def upload_community_asset(
     """
     ext = os.path.splitext(original_filename)[1] or ""
     key = f"{folder}/{uuid.uuid4()}{ext}"
+    sse = await get_object_storage_sse().put_params()  # AES256 baseline, or entitled SSE-KMS
 
     def _put() -> None:
         _client().put_object(
@@ -116,7 +126,7 @@ async def upload_community_asset(
             Key=key,
             Body=data,
             ContentType=content_type,
-            ServerSideEncryption="AES256",  # security.md: default server-side encryption
+            **sse,
         )
 
     await asyncio.to_thread(_put)
@@ -159,6 +169,7 @@ async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, da
     """
     key = bundle_component_key(app_id, version, sha256_hex)
     sidecar_key = bundle_sidecar_key(app_id, version, sha256_hex)
+    sse = await get_object_storage_sse().put_params()  # AES256 baseline, or entitled SSE-KMS
 
     def _put() -> None:
         client = _client()
@@ -167,14 +178,14 @@ async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, da
             Key=key,
             Body=data,
             ContentType="application/wasm",
-            ServerSideEncryption="AES256",  # security.md: default server-side encryption
+            **sse,  # security.md: default server-side encryption
         )
         client.put_object(
             Bucket=_bundle_bucket(),
             Key=sidecar_key,
             Body=b"{}",
             ContentType="application/json",
-            ServerSideEncryption="AES256",
+            **sse,
         )
 
     await asyncio.to_thread(_put)
@@ -197,14 +208,15 @@ async def write_bundle_sidecar(
     """
     key = bundle_sidecar_key(app_id, version, sha256_hex)
     body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    sse = await get_object_storage_sse().put_params()  # AES256 baseline, or entitled SSE-KMS
 
     def _put() -> None:
         _client().put_object(
-            Bucket=_bucket(),
+            Bucket=_bundle_bucket(),
             Key=key,
             Body=body,
             ContentType="application/json",
-            ServerSideEncryption="AES256",  # security.md: default server-side encryption
+            **sse,  # security.md: default server-side encryption
         )
 
     await asyncio.to_thread(_put)
@@ -226,11 +238,11 @@ async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dic
 
     def _get() -> dict[str, Any] | None:
         try:
-            resp = _client().get_object(Bucket=_bucket(), Key=key)
+            resp = _client().get_object(Bucket=_bundle_bucket(), Key=key)
         except _client().exceptions.NoSuchKey:
             logger.debug(
                 "bundle sidecar not found (typed NoSuchKey): bucket=%s key=%s",
-                _bucket(),
+                _bundle_bucket(),
                 key,
             )
             return None
@@ -239,19 +251,20 @@ async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dic
             if "NoSuchKey" in str(exc) or "404" in str(exc):
                 logger.debug(
                     "bundle sidecar not found (generic ClientError 404/NoSuchKey): "
-                    "bucket=%s key=%s exc_type=%s exc=%s",
-                    _bucket(),
+                    "bucket=%s key=%s %s",
+                    _bundle_bucket(),
                     key,
-                    type(exc).__name__,
-                    exc,
+                    describe_exc(exc),
                 )
                 return None
-            logger.error(
-                "bundle sidecar read failed: bucket=%s key=%s exc_type=%s exc=%s",
-                _bucket(),
-                key,
-                type(exc).__name__,
+            # Redacted: type/code/category only -- the botocore message can echo request detail.
+            log_exc_safe(
+                logger,
+                logging.ERROR,
+                "bundle sidecar read failed",
                 exc,
+                bucket=_bundle_bucket(),
+                key=key,
             )
             raise
         body = resp["Body"].read()
@@ -259,6 +272,43 @@ async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dic
         return result
 
     return await asyncio.to_thread(_get)
+
+
+def _key_prefix(key: str) -> str:
+    """Return the key's top-level folder (`avatars`, `community-assets`, ...) or a constant.
+
+    Gives enough context to tell which asset class a failed delete belonged to without
+    logging the object key itself, which embeds a caller-supplied URL path.
+    """
+    prefix = key.split("/", 1)[0]
+    return prefix if re.fullmatch(r"[a-z0-9_-]{1,32}", prefix) else "<unrecognized>"
+
+
+def delete_owned_objects_strict(urls: Iterable[str]) -> int:
+    """Delete the objects behind `urls` that live in THIS deployment's bucket; raise on failure.
+
+    The Art. 17 erasure path (`services/erasure_external.py`): unlike `delete_object()` -- the
+    best-effort cleanup for an avatar replaced mid-session -- an erasure that swallowed a failed
+    delete would report "completed" with the subject's upload still public, so every error here
+    propagates and the caller rolls the erasure back. URLs outside our public base (a platform CDN
+    avatar) are not ours to delete and are skipped. Blocking boto3: call from a worker thread.
+    Returns how many objects were deleted (S3 treats a missing key as success).
+    """
+    base = _public_base_url().rstrip("/") + "/"
+    keys: list[str] = []
+    for url in urls:
+        if not url.startswith(base):
+            continue
+        key = url[len(base) :].split("?", 1)[0].split("#", 1)[0]
+        if key and ".." not in key.split("/"):
+            keys.append(key)
+    if not keys:
+        return 0  # nothing of ours: never build an S3 client (or need credentials) for no work
+    client = _client()
+    bucket = _bucket()
+    for key in keys:
+        client.delete_object(Bucket=bucket, Key=key)
+    return len(keys)
 
 
 async def delete_object(url: str) -> None:
@@ -272,6 +322,15 @@ async def delete_object(url: str) -> None:
         try:
             _client().delete_object(Bucket=_bucket(), Key=key)
         except Exception as exc:  # noqa: BLE001 - best-effort cleanup, matches Node's deleteFile()
-            logger.warning("Failed to delete storage object", extra={"key": key, "error": str(exc)})
+            # Redacted: `key` is derived from a caller-supplied URL (may carry a query-string
+            # signature or other secret) and `str(exc)` can echo it -- log only the key's
+            # top-level folder plus type/code/category.
+            log_exc_safe(
+                logger,
+                logging.WARNING,
+                "Failed to delete storage object",
+                exc,
+                key_prefix=_key_prefix(key),
+            )
 
     await asyncio.to_thread(_delete)

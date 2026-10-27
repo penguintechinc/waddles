@@ -394,7 +394,7 @@ def _activation_dto(row: Any) -> ActivationDTO:
 
 
 @marketplace_lifecycle_bp.route("/bundles", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(BundleListResponse)
 async def list_bundles() -> BundleListResponse:
     """List installed bundles (global catalog) -- any authenticated tenant member."""
@@ -423,8 +423,8 @@ async def list_bundles() -> BundleListResponse:
 
 
 @marketplace_lifecycle_bp.route("/bundles", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(InstallBundleRequest)
 @validate_response(MessageResponse, 201)
 async def install_bundle(
@@ -440,8 +440,8 @@ async def install_bundle(
 
 
 @marketplace_lifecycle_bp.route("/bundles/<app_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def uninstall_bundle(app_id: str) -> MessageResponse | tuple[dict[str, object], int]:
     """Uninstall (soft-delete -> `status='yanked'`) a bundle from the global catalog."""
@@ -459,7 +459,7 @@ async def uninstall_bundle(app_id: str) -> MessageResponse | tuple[dict[str, obj
 
 
 @marketplace_lifecycle_bp.route("/tenant/<tenant_slug>/bundles", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(AvailabilityListResponse)
 async def list_available(
     tenant_slug: str,
@@ -493,8 +493,8 @@ async def list_available(
 
 
 @marketplace_lifecycle_bp.route("/tenant/<tenant_slug>/bundles", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(MakeAvailableRequest)
 @validate_response(MessageResponse, 201)
 async def make_available(
@@ -525,8 +525,8 @@ async def make_available(
 
 
 @marketplace_lifecycle_bp.route("/tenant/<tenant_slug>/bundles/<app_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def make_unavailable(
     tenant_slug: str, app_id: str
@@ -547,7 +547,7 @@ async def make_unavailable(
 
 
 @marketplace_lifecycle_bp.route("/community/<int:community_id>/bundles", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ActivationListResponse)
 async def list_activated(
     community_id: int,
@@ -581,7 +581,7 @@ async def list_activated(
 
 
 @marketplace_lifecycle_bp.route("/community/<int:community_id>/bundles", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(ActivateBundleRequest)
 @validate_response(MessageResponse, 201)
 async def activate_bundle(
@@ -624,7 +624,7 @@ async def activate_bundle(
 @marketplace_lifecycle_bp.route(
     "/community/<int:community_id>/bundles/<app_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def deactivate_bundle(
     community_id: int, app_id: str
@@ -645,7 +645,7 @@ async def deactivate_bundle(
 
 
 @marketplace_lifecycle_bp.route("/community/<int:community_id>/resolved", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ResolvedBundlesResponse)
 async def get_resolved_bundles(
     community_id: int,

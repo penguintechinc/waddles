@@ -24,6 +24,8 @@ RUN pip install --no-cache-dir /app/libs/flask_core
 # package exists). Multi-arch: this Dockerfile's own multi-arch contract
 # (devops.md) selects the matching tarball by `dpkg --print-architecture`.
 ARG WASM_TOOLS_VERSION=1.259.0
+# pipefail so a failed upstream stage of a piped RUN fails the build (DL4006)
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \

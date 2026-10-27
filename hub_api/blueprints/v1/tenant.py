@@ -20,6 +20,7 @@ exists and what it closes off relative to Node's own (bugged) auth chain.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -29,10 +30,13 @@ from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
+from services import branding_service
 from services import tenant_service as svc
-from services.errors import ApiError
+from services.errors import ApiError, payment_required
 from services.pagination import parse_limit
 from services.schema import bind_tenant_tables
+
+logger = logging.getLogger(__name__)
 
 tenant_bp = Blueprint("v1_tenant", __name__, url_prefix="/api/v1/tenant")
 
@@ -53,7 +57,8 @@ def _dal() -> tuple[Any, Any]:
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     """Convert an `ApiError` into the flask_core `error_response()` JSON envelope."""
     return cast(
-        tuple[dict[str, object], int], error_response(exc.message, exc.status_code, exc.code)
+        tuple[dict[str, object], int],
+        error_response(exc.message, exc.status_code, exc.code, exc.details),
     )
 
 
@@ -307,8 +312,8 @@ def _admin_dto(row: Any) -> TenantAdminDTO:
 
 
 @tenant_bp.route("/<tenant_slug>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(TenantResponse)
 async def get_tenant(tenant_slug: str) -> TenantResponse | tuple[dict[str, object], int]:
     """Get tenant."""
@@ -322,8 +327,8 @@ async def get_tenant(tenant_slug: str) -> TenantResponse | tuple[dict[str, objec
 
 
 @tenant_bp.route("/<tenant_slug>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(UpdateTenantRequest)
 @validate_response(MessageResponse)
 async def update_tenant(
@@ -333,6 +338,20 @@ async def update_tenant(
     async_dal, dal = _dal()
     try:
         tenant_id = _tenant_id(tenant_slug)
+        if data.logoUrl is not None or data.config is not None:
+            # Whitelabel gate (Professional, `tenancy.whitelabel`): saving a
+            # a new non-empty branding value (logo/theme/welcome message) needs
+            # entitlement; unrelated edits and clearing never do. Fail-closed 402.
+            current = await svc.get_tenant(async_dal, dal, tenant_id=tenant_id)
+            if branding_service.sets_branding(
+                current_logo_url=current.logo_url,
+                current_config=current.config,
+                new_logo_url=data.logoUrl,
+                new_config=data.config,
+            ) and not await branding_service.whitelabel_enabled(tenant_slug):
+                raise payment_required(
+                    "Custom tenant branding requires a Professional plan or higher"
+                )
         await svc.update_tenant(
             async_dal,
             dal,
@@ -343,13 +362,19 @@ async def update_tenant(
             config=data.config,
         )
     except ApiError as exc:
+        # Includes the whitelabel 402 (Professional gate): log the rejection (no
+        # branding values -- they may embed customer-supplied URLs) before returning.
+        logger.info(
+            "tenant.update_rejected",
+            extra={"status": exc.status_code, "code": exc.code},
+        )
         return _err(exc)
     return MessageResponse(success=True, message="Tenant updated")
 
 
 @tenant_bp.route("/<tenant_slug>/settings", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(SettingsResponse)
 async def get_tenant_settings(
     tenant_slug: str,
@@ -367,8 +392,8 @@ async def get_tenant_settings(
 
 
 @tenant_bp.route("/<tenant_slug>/settings", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(UpdateSettingsRequest)
 @validate_response(MessageResponse)
 async def update_tenant_settings(
@@ -390,8 +415,8 @@ async def update_tenant_settings(
 
 
 @tenant_bp.route("/<tenant_slug>/communities", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(CommunitiesResponse)
 async def get_tenant_communities(
     tenant_slug: str,
@@ -417,8 +442,8 @@ async def get_tenant_communities(
 
 
 @tenant_bp.route("/<tenant_slug>/modules", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(ModulesResponse)
 async def get_tenant_modules(tenant_slug: str) -> ModulesResponse | tuple[dict[str, object], int]:
     """Get tenant modules."""
@@ -436,8 +461,8 @@ async def get_tenant_modules(tenant_slug: str) -> ModulesResponse | tuple[dict[s
 
 
 @tenant_bp.route("/<tenant_slug>/modules", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(UpdateModulesRequest)
 @validate_response(MessageResponse)
 async def update_tenant_modules(
@@ -456,8 +481,8 @@ async def update_tenant_modules(
 
 
 @tenant_bp.route("/<tenant_slug>/admins", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(TenantAdminsResponse)
 async def get_tenant_admins(
     tenant_slug: str,
@@ -473,8 +498,8 @@ async def get_tenant_admins(
 
 
 @tenant_bp.route("/<tenant_slug>/admins", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(AddTenantAdminRequest)
 @validate_response(MessageResponse)
 async def add_tenant_admin(
@@ -482,19 +507,28 @@ async def add_tenant_admin(
 ) -> MessageResponse | tuple[dict[str, object], int]:
     """Add tenant admin."""
     async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
     try:
         tenant_id = _tenant_id(tenant_slug)
         await svc.add_tenant_admin(
-            async_dal, dal, tenant_id=tenant_id, user_id=data.userId, role=data.role
+            async_dal,
+            dal,
+            tenant_id=tenant_id,
+            user_id=data.userId,
+            role=data.role,
+            tenant_slug=tenant_slug,  # TARGET tenant (URL), not the caller's
         )
     except ApiError as exc:
+        logger.info("api_error_rejected", extra={"code": exc.code, "status": exc.status_code})
         return _err(exc)
     return MessageResponse(success=True, message="Tenant admin added")
 
 
 @tenant_bp.route("/<tenant_slug>/admins/<int:user_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def remove_tenant_admin(
     tenant_slug: str, user_id: int

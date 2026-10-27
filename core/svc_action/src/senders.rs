@@ -7,9 +7,17 @@
 //! path in `crate::capabilities::StageCapabilities::handle_relay` (the
 //! platform explicitly called out as the relay-based one, and the simplest
 //! to land completely: no SSRF-guarded `http` capability, no per-platform
-//! credential injection). Discord routes through the REST `http`
-//! capability (`crate::egress::EgressGuard`); Slack/YouTube/Kick remain a
-//! documented `TODO(M3+)` seam -- rather than reimplement connector logic
+//! credential injection).
+//!
+//! **Discord is a bot-token built-in, never a bundle-held credential and
+//! never the bundle `http` capability / `crate::egress::EgressGuard`.**
+//! Three ops, two paths: `chat.send` is an inline bot-REST `POST` from
+//! `StageCapabilities::handle_discord_relay`; `chat.delete` and `dm.send`
+//! are queued to svc-ingest's bot-token REST sender
+//! (`svc_ingest::outbound::run_discord`) -- accepted only while that drain
+//! advertises readiness, and reported successful only once it confirms the
+//! op (`StageCapabilities::handle_discord_queued_op`). Slack/YouTube/Kick
+//! remain a documented `TODO(M3+)` seam -- rather than reimplement connector logic
 //! here, this module leaves an explicit seam per remaining platform naming
 //! the `penguin-connectors` crate that owns it, per the M3 task's own
 //! instruction ("USE penguin-connectors' senders where they exist ... do
@@ -60,7 +68,8 @@ impl Platform {
 /// `TODO(M3+)` seam awaiting a `penguin-connectors` REST sender.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SenderStatus {
-    /// Fully wired end to end (Twitch, via the `relay` host capability).
+    /// Fully wired end to end through the `relay` host capability (Twitch
+    /// via the IRC drain; Discord via bot-token REST -- see the module doc).
     Implemented,
     /// `TODO(M3+): {platform} sender -- pending penguin-connectors
     /// {platform}` -- names exactly which upstream crate/module will back
@@ -75,10 +84,10 @@ pub enum SenderStatus {
 pub fn sender_status(platform: Platform) -> SenderStatus {
     match platform {
         Platform::Twitch => SenderStatus::Implemented,
-        Platform::Discord => SenderStatus::PendingSeam {
-            reason: "TODO(M3+): discord sender -- pending the http host capability \
-                     (crate::capabilities) and penguin-connector-discord's REST sender",
-        },
+        // Bot-token REST (module doc): chat.send inline; chat.delete/dm.send
+        // queued to svc-ingest's Discord REST sender behind the drain-ready
+        // + confirmation handshake (relay capability).
+        Platform::Discord => SenderStatus::Implemented,
         Platform::Slack => SenderStatus::PendingSeam {
             reason: "TODO(M3+): slack sender -- pending the http host capability \
                      (crate::capabilities) and penguin-connectors' Slack scaffold",
@@ -161,6 +170,15 @@ pub fn discord_webhook_url_from_config(config_json: &str) -> Option<String> {
 /// methods: ["POST"]}`); the bundle constructs and issues this call itself
 /// via the wire protocol -- this function documents the expected shape,
 /// mirroring `twitch_relay_args` above for `relay`.
+///
+/// **The returned `url` is a live bearer credential** (the webhook token is
+/// a *path* segment, `/api/webhooks/{id}/{token}`): never log it or put it
+/// in an error/span. Render it for diagnostics only through
+/// [`bundle_host_http::redact::redact_url_for_log`] (host + default-deny
+/// redacted path), the same redaction `bundle_host_http`'s transport
+/// applies to every send error, so a failed webhook send's
+/// `HostResultError` never echoes the token back to the bundle or the
+/// DLQ/log pipeline.
 pub fn discord_webhook_args(webhook_url: &str, content: &str) -> serde_json::Value {
     use base64::Engine;
     let body = serde_json::json!({"content": content}).to_string();
@@ -188,14 +206,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn twitch_is_implemented_every_other_platform_is_a_seam() {
+    fn twitch_and_discord_are_implemented_every_other_platform_is_a_seam() {
         assert_eq!(sender_status(Platform::Twitch), SenderStatus::Implemented);
-        for platform in [
-            Platform::Discord,
-            Platform::Slack,
-            Platform::Youtube,
-            Platform::Kick,
-        ] {
+        assert_eq!(sender_status(Platform::Discord), SenderStatus::Implemented);
+        for platform in [Platform::Slack, Platform::Youtube, Platform::Kick] {
             assert!(matches!(
                 sender_status(platform),
                 SenderStatus::PendingSeam { .. }
@@ -260,6 +274,60 @@ mod tests {
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body_b64).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(parsed["content"], "hello");
+    }
+
+    /// regression: a Discord webhook's bearer token is a URL *path* segment,
+    /// and the old query/fragment-only scrub left it in the error text of a
+    /// failed send (-> `HostResultError.message` -> bundle log / DLQ detail).
+    /// Drives the webhook URL from config through the real
+    /// `ReqwestTransport` against a refused local port -- no mocked
+    /// transport -- and asserts neither the token nor the id appears.
+    #[tokio::test]
+    async fn failed_webhook_send_error_never_carries_the_webhook_token() {
+        use crate::egress::{HttpTransport, ReqwestTransport, TransportRequest};
+
+        const ID: &str = "1234567890123456789";
+        const TOKEN: &str = "Zk3Xw9_tOkEn-s3cr3t-DoNotLeak-Zk3Xw9";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let config = serde_json::json!({
+            "discord_webhook_url":
+                format!("http://localhost:{}/api/webhooks/{ID}/{TOKEN}?wait=true", addr.port())
+        })
+        .to_string();
+        let webhook_url = discord_webhook_url_from_config(&config).unwrap();
+        let args = discord_webhook_args(&webhook_url, "hello");
+
+        let err = ReqwestTransport::new()
+            .send(
+                TransportRequest {
+                    method: args["method"].as_str().unwrap().to_string(),
+                    url: args["url"].as_str().unwrap().to_string(),
+                    pinned_addr: addr,
+                    headers: vec![],
+                    body: None,
+                },
+                std::time::Duration::from_secs(5),
+                1024,
+            )
+            .await
+            .expect_err("nothing is listening, so the send must fail");
+
+        assert_eq!(err.code, "transport");
+        assert!(discord_is_retryable(&err));
+        for needle in [TOKEN, ID, "wait=true"] {
+            assert!(
+                !err.message.contains(needle),
+                "{needle} leaked in {:?}",
+                err.message
+            );
+        }
+        // The helper the doc points callers at renders the same URL safely.
+        let rendered = bundle_host_http::redact::redact_url_for_log(&webhook_url);
+        assert!(!rendered.contains(TOKEN) && !rendered.contains(ID));
+        assert!(rendered.ends_with("/api/webhooks/***/***"), "{rendered}");
     }
 
     #[test]

@@ -253,12 +253,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, flag_enabled=False)
-    assert _run(transform(_sample_event("!hug bob"))) is None
-    assert _run(transform(_sample_event("!social stats"))) is None
-
-
 # -- _resolve_interaction_command() / _resolve_social_command() / _normalize_target() ----------
 
 

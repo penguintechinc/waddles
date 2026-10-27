@@ -164,7 +164,7 @@ async def example_get_license_info():
             community_id=111
         )
 
-        print(f"License Information:")
+        print("License Information:")
         print(f"  Tier: {info['tier']}")
         print(f"  Status: {info['status']}")
         print(f"  Expires: {info['expires_at']}")

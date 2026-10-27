@@ -11,8 +11,8 @@ contrast `bundles/csharp/superpenguin-roll`, which *is* a line-for-line port and
 full verbatim MIT notice because it reuses original code.
 
 **Command-prefix overlap (flagged, not resolved here).** The pre-existing, DB-backed
-`core/svc_process/bundles/community_announcements_process.py` /
-`core/svc_action/bundles/community_announcements_action.py` script bundles already parse
+`core/svc_process/builtin_handlers/community_announcements_process.py` /
+`core/svc_action/builtin_handlers/community_announcements_action.py` built-in stage handlers already parse
 `!announce publish <announcement_id>` against the legacy `flask_core`/`svc_process`/
 `svc_action` runner architecture (not this repo's newer WASI-component `waddle_sdk` bundle SDK
 this bundle is built on), to broadcast a web-UI-authored `announcements` DB row. Both this
@@ -41,6 +41,23 @@ Any other grammar-legal verb (`add`/`sub`/`enable`/`disable`/`delete`/`reset`) o
 `!announce ...` replies with usage text -- never silently dropped. Announcement keys are
 case-insensitive, limited to letters/digits/`_`/`-`, max 32 characters.
 
+```text
+!announce set welcome Welcome to the stream!   (mod) -> saved announcement 'welcome'
+!announce welcome                               -> Welcome to the stream!
+!announce list                                  -> Announcements: welcome
+!announce remove welcome                        (mod) -> removed announcement 'welcome'
+!announce set rules be kind                     (viewer) -> only moderators/broadcasters can configure !announce
+```
+
+Platforms: Twitch + Discord (`chat.message`). Mod/broadcaster gate **fails closed** -- with no
+`is_mod`/`is_broadcaster` on the event (Discord today) `set`/`remove` are denied.
+
+## Permissions (V2)
+
+| id | why |
+|---|---|
+| `storage.kv` | persists the per-community announcement registry |
+
 ## State (kv, community-scoped only)
 
 All state goes through `waddle_sdk.community_kv`, keyed by `community_id` -- never global or
@@ -57,11 +74,9 @@ namespace separator. Individual announcement keys are themselves JSON object key
 one value, not `kv` keys on their own, but are further restricted to a conservative
 letters/digits/`_`/`-` charset regardless.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-announce`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!announce` command-name match and
-before the real grammar resolution.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 
@@ -86,28 +101,20 @@ docker run --rm --user "$(id -u):$(id -g)" \
 
 Same `componentize-py` invocation `bundles/Dockerfile.core-bundles`'s `python-bundles-builder`
 stage uses (driven by `bundles/core-bundles.yaml`), run standalone to confirm this bundle
-compiles to a real WASI 0.2 component today. **Not yet registered in the catalog** --
-`bundles/core-bundles.yaml`/`bundles/Dockerfile.core-bundles` registration is deferred to a
-separate, batched PR per this bundle's own task scope; this bundle's own CI wasm build and
-core-bundle-seeder activation are blocked on that landing, same documented gap as `fish`'s own
-README before its own catalog entry was added.
+compiles to a real WASI 0.2 component.
 
 ## Test
 
 ```bash
 cd bundles/python/announce
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e ../../../sdk/waddle-sdk
-pip install pytest==8.3.3 pytest-cov==5.0.0 mypy==1.14.1 ruff==0.14.1
-pytest --cov=src --cov-report=term-missing
-mypy --strict src
-ruff check .
+python3 -m pytest --cov=app --cov-branch --cov-report=term-missing
 ```
+
+`tests/conftest.py` wires `src/` and `sdk/waddle-sdk/src` onto `sys.path`; no WASM build or
+SDK install needed. Covered: every verb, set/remove lifecycle, 100-entry cap, mod-gate
+fail-closed, corrupt-registry fail-loud (invalid UTF-8 / wrong shape), kv charset (gh-631),
+PII-free logs (gh-674).
 
 ## Activation
 
-Not yet added to `bundles/core-bundles.yaml` -- catalog registration (and the
-`bundles/Dockerfile.core-bundles` wasm build it drives) is deferred to a separate, batched PR
-per this bundle's own task scope. Until that lands, the core-bundle-seeder will not find
-`announce.wasm`/`announce.manifest.yaml` in a built image; this is expected and tracked, not a
-bug in this bundle.
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.announce`).

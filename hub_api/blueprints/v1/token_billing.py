@@ -225,7 +225,7 @@ def _parse_iso(raw: str | None, *, field: str) -> datetime | None:
 
 
 @token_products_bp.route("", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(TokenProductsResponse)
 async def list_token_products() -> TokenProductsResponse:
     """The active token-product catalog -- any authenticated tenant caller."""
@@ -254,7 +254,7 @@ async def list_token_products() -> TokenProductsResponse:
 
 
 @tokens_bp.route("/<int:community_id>/tokens/balances", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(TokenBalancesResponse)
 async def get_balances(
     community_id: int,
@@ -284,7 +284,7 @@ async def get_balances(
 
 
 @tokens_bp.route("/<int:community_id>/tokens/credit", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(CreditTokensRequest)
 @validate_response(TokenLedgerResponse)
 async def credit_tokens(
@@ -314,7 +314,7 @@ async def credit_tokens(
 
 
 @tokens_bp.route("/<int:community_id>/tokens/debit", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(DebitTokensRequest)
 @validate_response(TokenLedgerResponse)
 async def debit_tokens(
@@ -351,7 +351,7 @@ async def debit_tokens(
 
 
 @tokens_bp.route("/<int:community_id>/tokens/transactions", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(TokenTransactionsResponse)
 async def get_transactions(
     community_id: int,

@@ -125,7 +125,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -168,7 +168,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -201,7 +201,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -227,7 +227,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -270,7 +270,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -296,7 +296,7 @@ class TestRunOnce:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.no_such_module:transform",
+                    "entrypoint": "builtin_handlers.no_such_module:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -367,7 +367,7 @@ class TestActivityFeedEmit:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -400,7 +400,7 @@ class TestActivityFeedEmit:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -434,7 +434,7 @@ class TestActivityFeedEmit:
                     {
                         "appId": APP_ID,
                         "communityId": 42,
-                        "entrypoint": "bundles.echo_process:transform",
+                        "entrypoint": "builtin_handlers.echo_process:transform",
                         "spec": {},
                         "config": {},
                     }
@@ -465,7 +465,7 @@ class TestActivityFeedEmit:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -488,8 +488,8 @@ class TestBundleContextWiring:
 
     Monkeypatches `runner.load_entrypoint` (the name imported into
     `runner.py`'s own namespace) to return a stub `transform`, rather than
-    touching any real `core/svc_process/bundles/*.py` file. This is the
-    fix for the gap `bundles/social_welcome_process.py` worked around by
+    touching any real `core/svc_process/builtin_handlers/*.py` file. This is the
+    fix for the gap `builtin_handlers/social_welcome_process.py` worked around by
     reading `event.payload["community_id"]` -- `transform(event)`'s own
     frozen signature never receives the envelope, so this is the only way
     a process bundle reaches its tenant/community scope.
@@ -519,7 +519,7 @@ class TestBundleContextWiring:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -554,7 +554,7 @@ class TestBundleContextWiring:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -600,7 +600,7 @@ class TestBundleContextWiring:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -637,7 +637,7 @@ class TestCrossAppRouting:
         Uses a stub transform (not `community_forums_process`) to isolate the
         runner's routing behavior from the forum bundle's own parsing logic --
         that logic is covered separately in
-        `test_bundles_community_forums_process.py`.
+        `test_builtin_community_forums_process.py`.
         """
 
         async def _stub_transform(event: PlatformEvent) -> PlatformEvent | None:
@@ -656,7 +656,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -697,7 +697,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -748,7 +748,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -787,7 +787,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -821,7 +821,7 @@ class TestCrossAppRouting:
 
         Proves the fix for `community_forums_action.create_forum_post`,
         which reads `envelope.community` directly (`community_id=envelope.
-        community`, `core/svc_action/bundles/community_forums_action.py`) --
+        community`, `core/svc_action/builtin_handlers/community_forums_action.py`) --
         before the fix this landed a `None` `community_id` in
         `hub_forum_posts` for every tenant-wide activation.
         """
@@ -831,7 +831,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -858,7 +858,7 @@ class TestCrossAppRouting:
 
         Community-scoped counterpart to the forum tests above, mirroring
         `!sr`'s real routing shape (`_MUSIC_APP_ID =
-        "waddles.social.music.default"`, `bundles/social_music_process.py`).
+        "waddles.social.music.default"`, `builtin_handlers/social_music_process.py`).
         """
         music_app_id = "waddles.social.music.default"
         poller = _make_poller(
@@ -867,7 +867,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -908,7 +908,7 @@ class TestCrossAppRouting:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.bot_process:transform",
+                    "entrypoint": "builtin_handlers.bot_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -962,7 +962,7 @@ class TestActivationGate:
                     {
                         "appId": APP_ID,
                         "communityId": 42,
-                        "entrypoint": "bundles.echo_process:transform",
+                        "entrypoint": "builtin_handlers.echo_process:transform",
                         "spec": {},
                         "config": {},
                     }
@@ -1000,7 +1000,7 @@ class TestActivationGate:
                     {
                         "appId": APP_ID,
                         "communityId": 42,
-                        "entrypoint": "bundles.echo_process:transform",
+                        "entrypoint": "builtin_handlers.echo_process:transform",
                         "spec": {},
                         "config": {},
                     }
@@ -1040,7 +1040,7 @@ class TestActivationGate:
                     {
                         "appId": APP_ID,
                         "communityId": 42,
-                        "entrypoint": "bundles.echo_process:transform",
+                        "entrypoint": "builtin_handlers.echo_process:transform",
                         "spec": {},
                         "config": {},
                     }
@@ -1102,7 +1102,7 @@ class TestActivationGate:
                     {
                         "appId": APP_ID,
                         "communityId": 42,
-                        "entrypoint": "bundles.echo_process:transform",
+                        "entrypoint": "builtin_handlers.echo_process:transform",
                         "spec": {},
                         "config": {},
                     }
@@ -1134,7 +1134,7 @@ class TestActivationGate:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1185,7 +1185,7 @@ class TestActivationGate:
                     {
                         "appId": APP_ID,
                         "communityId": None,
-                        "entrypoint": "bundles.echo_process:transform",
+                        "entrypoint": "builtin_handlers.echo_process:transform",
                         "spec": {},
                         "config": {},
                     }
@@ -1232,7 +1232,7 @@ class TestModerationGateWiring:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1269,7 +1269,7 @@ class TestModerationGateWiring:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1350,7 +1350,7 @@ class TestModerationEnforcementRouting:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1560,7 +1560,7 @@ class TestCommunityResolution:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1612,7 +1612,7 @@ class TestCommunityResolution:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1656,7 +1656,7 @@ class TestCommunityResolution:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1700,7 +1700,7 @@ class TestCommunityResolution:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1743,7 +1743,7 @@ class TestActivityAccrualHook:
         *,
         text: str,
         event_type: str = "message",
-        entrypoint: str = "bundles.echo_process:transform",
+        entrypoint: str = "builtin_handlers.echo_process:transform",
         raise_error: Exception | None = None,
     ) -> tuple[int, list[dict[str, Any]]]:
         import runner as runner_module
@@ -1839,7 +1839,7 @@ class TestActivityAccrualHook:
             http_client_factory,
             monkeypatch,
             text="just chatting about the game",
-            entrypoint="bundles.bot_process:transform",
+            entrypoint="builtin_handlers.bot_process:transform",
         )
         assert processed == 0  # no reply enqueued
         assert len(calls) == 1
@@ -1883,7 +1883,7 @@ class TestActivityAccrualHook:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1918,7 +1918,7 @@ class TestActivityAccrualHook:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -1966,7 +1966,7 @@ class TestActivityAccrualHook:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2068,7 +2068,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2129,7 +2129,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2165,7 +2165,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2208,7 +2208,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2246,7 +2246,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2293,7 +2293,7 @@ class TestRaidAutoShoutout:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2360,7 +2360,7 @@ class TestRaidAutoShoutout:
                     {
                         "appId": APP_ID,
                         "communityId": 42,
-                        "entrypoint": "bundles.bot_process:transform",
+                        "entrypoint": "builtin_handlers.bot_process:transform",
                         "spec": {},
                         "config": {},
                     }
@@ -2451,7 +2451,7 @@ class TestLiveStatusHook:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2490,7 +2490,7 @@ class TestLiveStatusHook:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.echo_process:transform",
+                    "entrypoint": "builtin_handlers.echo_process:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2530,7 +2530,7 @@ class TestLiveStatusHook:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2567,7 +2567,7 @@ class TestLiveStatusHook:
                 {
                     "appId": APP_ID,
                     "communityId": 42,
-                    "entrypoint": "bundles.stub:transform",
+                    "entrypoint": "builtin_handlers.stub:transform",
                     "spec": {},
                     "config": {},
                 }
@@ -2611,7 +2611,7 @@ class TestLiveStatusHook:
                     {
                         "appId": APP_ID,
                         "communityId": 42,
-                        "entrypoint": "bundles.bot_process:transform",
+                        "entrypoint": "builtin_handlers.bot_process:transform",
                         "spec": {},
                         "config": {},
                     }

@@ -113,7 +113,7 @@ async def example_4_with_retry_configuration():
         max_retry_delay=60.0,             # But cap at 1 minute
     )
 
-    print(f"\nRetry Configuration:")
+    print("\nRetry Configuration:")
     print(f"  Max retries: {adapter.max_retries}")
     print(f"  Initial delay: {adapter.initial_retry_delay}s")
     print(f"  Max delay: {adapter.max_retry_delay}s")
@@ -167,7 +167,7 @@ async def example_5_with_metadata():
         scopes=["community.read", "user.read"],
     )
 
-    print(f"\nRequest Details:")
+    print("\nRequest Details:")
     print(f"  Command: {request.command}")
     print(f"  Args: {request.args}")
     print(f"  Platform: {request.platform}")
@@ -189,7 +189,7 @@ async def example_6_health_tracking():
 
     # Check initial health
     health = adapter.get_health_status()
-    print(f"\nInitial Health Status:")
+    print("\nInitial Health Status:")
     for key, value in health.items():
         print(f"  {key}: {value}")
 
@@ -217,13 +217,13 @@ async def example_7_module_info():
     )
 
     info = adapter.get_module_info()
-    print(f"\nModule Information:")
+    print("\nModule Information:")
     for key, value in info.items():
         if key != "health":
             print(f"  {key}: {value}")
 
     health = info.get("health", {})
-    print(f"\nHealth Information:")
+    print("\nHealth Information:")
     for key, value in health.items():
         print(f"    {key}: {value}")
 
@@ -258,18 +258,18 @@ async def example_8_error_handling():
             print(f"\nSuccess: {response.message}")
             print(f"Data: {response.data}")
         else:
-            print(f"\nOperation failed:")
+            print("\nOperation failed:")
             print(f"  Error: {response.error}")
 
         # Check health after execution
         health = adapter.get_health_status()
         if not adapter.is_healthy():
-            print(f"\nAdapter is unhealthy!")
+            print("\nAdapter is unhealthy!")
             print(f"  Consecutive failures: {health['consecutive_failures']}")
             print(f"  Error rate: {health['error_rate']:.1%}")
 
     except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
+        logger.error("Unexpected error: %s", type(e).__name__)
 
 
 async def example_9_concurrent_invocations():
@@ -373,7 +373,7 @@ async def example_10_complete_workflow():
 
         # Process response
         if response.success:
-            logger.info(f"Analysis completed successfully")
+            logger.info("Analysis completed successfully")
             logger.debug(f"Response data: {response.data}")
 
             # Deliver results to targets
@@ -387,7 +387,7 @@ async def example_10_complete_workflow():
         logger.error("Analysis request timed out")
 
     except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
+        logger.error("Unexpected error: %s", type(e).__name__)
 
     finally:
         # Log final health status

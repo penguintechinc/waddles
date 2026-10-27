@@ -57,9 +57,8 @@ extension that needs either the tokenization pipeline (#429) or the platform's o
 reputation/user-details cross-community lookup (`community_kv`'s module docstring: the
 platform's only two cross-community exceptions) -- never built here, never stubbed.
 
-Gated behind the PostHog flag ``waddles.command-raffle`` -- checked in `transform()` after the
-cheap command-head match and before any grammar resolution (`eightball`'s documented ordering
-rationale, reused verbatim by every bundle in this codebase).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 
 DO NOT BUILD in v1 -- clean, documented extension points, never a silent stub:
 
@@ -82,10 +81,12 @@ from typing import Any, NoReturn, cast
 
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-raffle"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 #: Chat-invoked heads. `!raffle` carries the full grammar (open/close/draw/list/bare);
 #: `!enter` is a pure bare alias for the bare-`!raffle` ENTER action -- see module docstring.
@@ -138,7 +139,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 def _resolve_raffle(rest: str) -> str:
@@ -180,7 +181,7 @@ def _map_parsed(parsed: ParsedCommand) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!raffle`/`!enter`, via `parse_command`.
 
-    Cheap-skip first (no matching head -- `None`, zero cost), flag check second, real
+    Cheap-skip first (no matching head -- `None`, zero cost), real
     grammar resolution last -- same ordering as `eightball`/`fish`/`music`'s own documented
     rationale. A recognized-but-malformed command still produces a reply (`"usage"`), never
     a silent drop.
@@ -200,9 +201,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     else:
         return None
 
-    if not await feature_enabled(FLAG_KEY, default=False):
-        return None
-
     if is_enter_alias:
         # `!enter` takes no further arguments -- it is a pure bare alias, never a free-text
         # add like `!sr`'s own bare command (module docstring).
@@ -216,9 +214,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     # `music`'s own identical forwarding comment for why absence must reach `dispatch` as
     # absence, not `False`.
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
 
     return PlatformEvent(
         platform=event.platform,
@@ -347,7 +345,7 @@ async def _save_entrants(
 
 def _pick_winner(entrants: list[str]) -> str:
     """Pick one uniformly-random entrant pseudonym. Isolated for seeded-RNG testing."""
-    return random.choice(entrants)  # noqa: S311 - a game, not a security decision
+    return _RNG.choice(entrants)
 
 
 async def _handle_open(community: str, *, provider: str, channel_id: str) -> str:

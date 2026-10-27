@@ -13,101 +13,40 @@ const COOKIE_TABLE_DATA = [
     category: 'Essential',
     cookies: [
       {
-        name: 'session_token',
-        purpose: 'Maintains user authentication and session state',
-        duration: 'Session / 7 days',
+        name: 'wb_session',
+        purpose: 'Keeps you signed in. HttpOnly, Secure, SameSite=Lax; never readable by page scripts',
+        duration: '24 hours',
       },
       {
-        name: 'csrf_token',
-        purpose: 'Protects against Cross-Site Request Forgery attacks',
-        duration: '1 hour',
+        name: 'waddlebot_consent_id',
+        purpose: 'Links this browser to your saved cookie-consent record (an opaque identifier)',
+        duration: '12 months',
       },
       {
-        name: 'user_id',
-        purpose: 'Identifies the logged-in user for personalization',
-        duration: 'Session / 7 days',
-      },
-      {
-        name: 'preferences_acknowledged',
-        purpose: 'Tracks cookie consent preference acknowledgement',
-        duration: '1 year',
+        name: 'wb_sso_bind',
+        purpose: 'Secures a single sign-on login attempt against forged logins. Only set while signing in',
+        duration: 'A few minutes (the length of the sign-in attempt)',
       },
     ],
   },
   {
     category: 'Functional',
-    cookies: [
-      {
-        name: 'theme_preference',
-        purpose: 'Remembers user\'s dark/light mode choice',
-        duration: '1 year',
-      },
-      {
-        name: 'language',
-        purpose: 'Stores selected language and locale settings',
-        duration: '1 year',
-      },
-      {
-        name: 'sidebar_collapsed',
-        purpose: 'Remembers UI layout and sidebar state',
-        duration: '30 days',
-      },
-      {
-        name: 'last_visited_community',
-        purpose: 'Restores last viewed community on return',
-        duration: '30 days',
-      },
-    ],
+    cookies: [],
+    notice: 'Waddles does not currently set any functional cookies.',
   },
   {
     category: 'Analytics',
-    cookies: [
-      {
-        name: '_ga',
-        purpose: 'Google Analytics - tracks page visits and sessions',
-        duration: '2 years',
-      },
-      {
-        name: '_gid',
-        purpose: 'Google Analytics - identifies unique users',
-        duration: '24 hours',
-      },
-      {
-        name: '_mixpanel',
-        purpose: 'Mixpanel - tracks user interactions and events',
-        duration: '5 years',
-      },
-      {
-        name: '_hjid',
-        purpose: 'Hotjar - enables session recording and heatmaps',
-        duration: '365 days',
-      },
-    ],
+    cookies: [],
+    notice:
+      'Waddles does not set analytics cookies and does not load third-party analytics scripts '
+      + '(no Google Analytics, Mixpanel, or session-recording tools). Feature flags are evaluated on '
+      + 'our own servers using PostHog with only your workspace (tenant) identifier; no cookie is set '
+      + 'and no personal data is sent to PostHog.',
   },
   {
     category: 'Marketing',
-    cookies: [
-      {
-        name: '_fbp',
-        purpose: 'Facebook Pixel - tracks conversions and conversational ads',
-        duration: '3 months',
-      },
-      {
-        name: '_gcl',
-        purpose: 'Google Ads - measures conversion actions and campaign effectiveness',
-        duration: '3 months',
-      },
-      {
-        name: '_gac_',
-        purpose: 'Google Ads - tracks campaign-related conversions',
-        duration: '3 months',
-      },
-      {
-        name: '_linkedin_partner_id',
-        purpose: 'LinkedIn - tracks website visitor demographics',
-        duration: '1 year',
-      },
-    ],
+    cookies: [],
+    notice: 'Waddles does not set marketing or advertising cookies.',
   },
 ];
 
@@ -205,10 +144,10 @@ export default function CookiePolicy() {
               owners of the site, and help improve your user experience.
             </p>
             <p>
-              We use cookies for several purposes, including to remember your preferences, understand
-              how you interact with our service, and provide you with relevant content and advertising.
-              Most cookies are automatically deleted when you close your web browser (session cookies),
-              while others may persist for a set period (persistent cookies).
+              We use cookies only to keep you signed in, secure sign-in, and remember your cookie
+              choices. We do not use advertising cookies and we do not load third-party analytics
+              scripts. Some cookies are deleted when you close your web browser (session cookies),
+              while others persist for a set period (persistent cookies).
             </p>
           </div>
         </section>
@@ -314,6 +253,9 @@ export default function CookiePolicy() {
                 <h3 className="text-lg font-semibold text-gray-900 mb-3">
                   {categoryData.category} Cookies
                 </h3>
+                {categoryData.cookies.length === 0 ? (
+                  <p className="text-sm text-gray-600">{categoryData.notice}</p>
+                ) : (
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-gray-100 border-b border-gray-200">
@@ -346,6 +288,7 @@ export default function CookiePolicy() {
                     ))}
                   </tbody>
                 </table>
+                )}
               </div>
             ))}
           </div>

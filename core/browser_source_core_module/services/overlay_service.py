@@ -186,7 +186,7 @@ class OverlayService:
         tokens = await self.get_browser_source_tokens(community_id)
 
         # Base URL for browser sources
-        base_url = f"/api/v1/browser-source"
+        base_url = "/api/v1/browser-source"
         background = theme_config.get('background', 'transparent')
 
         # Build iframe elements for each enabled source

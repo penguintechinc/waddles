@@ -33,6 +33,7 @@ from webauthn.helpers.structs import (
 )
 
 from config import HubAPIConfig
+from services import session_service
 from services.errors import bad_request, not_found, unauthorized
 
 RP_NAME = os.getenv("PASSKEY_RP_NAME", "Waddles")
@@ -203,7 +204,7 @@ async def finish_login(
         is_vendor=bool(is_vendor),
         is_analytics_consumer=bool(is_analytics_consumer),
     )
-    token = await create_session_token(async_dal, dal, cfg, user=user)
+    token = await create_session_token(async_dal, dal, cfg, user=user, auth_method="passkey")
     return token, user
 
 
@@ -216,9 +217,26 @@ async def list_credentials(async_dal: Any, dal: Any, *, user_id: int) -> list[An
 
 
 async def remove_credential(
-    async_dal: Any, dal: Any, *, user_id: int, credential_pk_id: int
+    async_dal: Any,
+    dal: Any,
+    *,
+    user_id: int,
+    credential_pk_id: int,
+    keep_session_id: int | None = None,
 ) -> None:
-    """Remove credential."""
-    await async_dal.delete_async(
+    """Remove a passkey and sign the user out everywhere else.
+
+    A removed authenticator means sessions it opened must not outlive it (lost/stolen device), so
+    every OTHER login session ends -- `keep_session_id` (the caller's own) stays signed in.
+    """
+    removed = await async_dal.delete_async(
         (dal.user_passkeys.id == credential_pk_id) & (dal.user_passkeys.user_id == user_id)
     )
+    if removed:
+        await session_service.revoke_other_sessions(
+            async_dal,
+            dal,
+            user_id=user_id,
+            keep_session_id=keep_session_id,
+            reason="passkey_removed",
+        )

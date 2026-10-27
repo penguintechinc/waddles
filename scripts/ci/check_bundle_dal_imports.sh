@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Fails if any App Bundle file imports the legacy flask_core.database/pydal
-# surface instead of penguin-dal (D21b). Scans the three real bundle
-# directories in today's repo layout -- `bundles/python/` does not exist
-# until the M2/M6 directory move.
+# Fails if any built-in stage handler imports the legacy flask_core.database/pydal
+# surface instead of penguin-dal (D21b). Scans the three real handler
+# directories (`core/svc_{process,action,ingest}/builtin_handlers/`) -- the
+# installable WASI bundles under the top-level `bundles/` tree are out of scope here.
 set -euo pipefail
 
 BUNDLE_DIRS=(
-    "core/svc_process/bundles"
-    "core/svc_action/bundles"
-    "core/svc_ingest/bundles"
+    "core/svc_process/builtin_handlers"
+    "core/svc_action/builtin_handlers"
+    "core/svc_ingest/builtin_handlers"
 )
 
 files_scanned=0

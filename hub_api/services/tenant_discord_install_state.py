@@ -16,7 +16,7 @@ tenant admin's SUBMITTED Discord app credentials (`client_secret`/
 screen, so they can be verified (via the callback's code exchange) before
 `services.credential_resolver.store_tenant_credentials()` ever persists
 them. Those two fields are AES-256-GCM encrypted
-(`services.platform_integrations_crypto.encrypt_token`) before being
+(`services.provider_connections.vault.seal_secret`) before being
 JSON-encoded into Redis -- belt-and-suspenders alongside the opaque,
 unguessable token key itself (`security.md` Token & Secret Hygiene: a
 secret is encrypted at rest even in infra that never leaves this
@@ -37,9 +37,8 @@ from quart import current_app
 from config import HubAPIConfig
 from services.platform_integrations_crypto import (
     PlatformCredentialCryptoError,
-    decrypt_value,
-    encrypt_token,
 )
+from services.provider_connections.vault import open_secret, seal_secret
 from services.rate_limiting import RATE_LIMITER_CONFIG_KEY
 
 logger = logging.getLogger(__name__)
@@ -118,8 +117,8 @@ async def create_state(
         "tenant_id": tenant_id,
         "admin_user_id": admin_user_id,
         "application_id": application_id,
-        "client_secret": encrypt_token(client_secret),
-        "bot_token": encrypt_token(bot_token) if bot_token else None,
+        "client_secret": seal_secret(client_secret),
+        "bot_token": seal_secret(bot_token) if bot_token else None,
         "redirect_uri": redirect_uri,
     }
     client = _redis_client()
@@ -153,8 +152,8 @@ async def consume_state(state: str) -> PendingInstall | None:
             tenant_id=int(data["tenant_id"]),
             admin_user_id=int(data["admin_user_id"]),
             application_id=str(data["application_id"]),
-            client_secret=decrypt_value(str(data["client_secret"])),
-            bot_token=decrypt_value(str(encrypted_bot_token)) if encrypted_bot_token else None,
+            client_secret=open_secret(str(data["client_secret"])),
+            bot_token=open_secret(str(encrypted_bot_token)) if encrypted_bot_token else None,
             redirect_uri=str(data["redirect_uri"]),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):

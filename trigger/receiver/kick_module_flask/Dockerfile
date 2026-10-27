@@ -13,8 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY libs/ /app/libs/
 
 # Install shared libraries
-RUN cd /app/libs/flask_core && pip install --no-cache-dir . && \
-    cd /app/libs/platform_receiver && pip install --no-cache-dir .
+RUN pip install --no-cache-dir /app/libs/flask_core && \
+    pip install --no-cache-dir /app/libs/platform_receiver
 
 # Copy requirements and install dependencies
 COPY trigger/receiver/kick_module_flask/requirements.txt .

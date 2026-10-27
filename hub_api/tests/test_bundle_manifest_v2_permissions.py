@@ -446,31 +446,174 @@ def test_core_kv_manifests_parse_to_structured_storage_kv_declaration() -> None:
     assert structured >= 30
 
 
-@pytest.mark.parametrize("name", ["chat", "choose", "eightball", "poll", "roll", "slap", "wave"])
-def test_flag_gated_python_bundles_declare_flags_read(name: str) -> None:
-    """Bundles calling `feature_enabled` must declare `flags.read` (host gate fails closed)."""
+#: App bundles still carrying a flag guard (mirrors scripts/ci/tests/test_bundle_badge_gate.py's
+#: FLAG_GUARD_ALLOWLIST). Exact-match enforced -- the set can only shrink.
+_FLAG_GUARDED_APP_BUNDLES = frozenset({"secret"})
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["chat", "choose", "eightball", "poll", "roll", "slap", "wave", "hug", "boop", "highfive"],
+)
+def test_app_command_bundles_are_flag_free_and_do_not_declare_flags_read(name: str) -> None:
+    """App command bundles are activation-gated only: no flag guard, no `flags.read` grant."""
     root = pathlib.Path(__file__).resolve().parents[2] / "bundles" / "python" / name
-    assert "feature_enabled(" in (root / "src" / "app.py").read_text()
+    src = (root / "src" / "app.py").read_text()
+    assert "feature_enabled" not in src and "FLAG_KEY" not in src, f"{name}: flag guard present"
     for fname in ("bundle.yaml", "hub-manifest.yaml"):
         raw = yaml.safe_load((root / fname).read_text())
-        ids = [e["id"] for e in raw["permissions"]]
-        assert "flags.read" in ids, f"{root / fname}: missing flags.read"
+        ids = [e["id"] for e in raw.get("permissions") or []]
+        assert "flags.read" not in ids, f"{root / fname}: unused flags.read (least privilege)"
 
 
 def test_flag_reading_core_bundles_declare_flags_read() -> None:
-    """Every core bundle calling `feature_enabled` (with permissions) declares flags.read."""
-    examined = 0
+    """Bundles still calling `feature_enabled` declare `flags.read`; only the allowlist does."""
+    scanned = 0
+    readers: set[str] = set()
     missing = []
     for path in _core_hub_manifests():
         raw = yaml.safe_load(path.read_text())
         if not raw.get("permissions"):
             continue
+        scanned += 1
         src = path.parent / "src"
         if not any("await feature_enabled(" in f.read_text() for f in src.rglob("*.py")):
             continue
-        examined += 1
+        readers.add(path.parent.name)
         ids = {e["id"] for e in raw["permissions"] if isinstance(e, dict)}
         if "flags.read" not in ids:
             missing.append(str(path))
-    assert examined >= 30, f"only {examined} flag-reading bundles examined"
+    assert scanned >= 30, f"only {scanned} core bundles scanned"
+    assert readers == _FLAG_GUARDED_APP_BUNDLES, f"flag-reading bundles changed: {sorted(readers)}"
     assert missing == []
+
+
+# --- economy.* (issue #714) -----------------------------------------------
+
+
+def test_economy_ids_are_in_the_closed_catalog_with_the_expected_risk() -> None:
+    from services.bundle_permission_catalog import resolve_risk
+
+    assert resolve_risk("economy.read") == "normal"
+    assert resolve_risk("economy.wager") == "dangerous"
+    assert resolve_risk("economy.transfer") == "dangerous"
+    assert resolve_risk("economy.mint") is None
+
+
+def test_economy_read_needs_no_params_beyond_justification() -> None:
+    manifest = _parse([{"id": "economy.read", "justification": "Shows balances."}])
+    assert manifest.permission_declarations[0].risk == "normal"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("permission_id", "param"),
+    [("economy.wager", "max_bet"), ("economy.transfer", "max_amount")],
+)
+def test_economy_money_moving_permissions_parse_with_a_declared_bound(
+    permission_id: str, param: str
+) -> None:
+    for bound in (1, 50, 1000):
+        manifest = _parse(
+            [
+                {
+                    "id": permission_id,
+                    "justification": "Casino game.",
+                    "params": {param: bound},
+                }
+            ]
+        )
+        decl = manifest.permission_declarations[0]  # type: ignore[attr-defined]
+        assert decl.risk == "dangerous"
+        assert decl.params[param] == bound
+
+
+@pytest.mark.parametrize(
+    ("permission_id", "param"),
+    [("economy.wager", "max_bet"), ("economy.transfer", "max_amount")],
+)
+@pytest.mark.parametrize("bad", [None, 0, -5, 1001, 10**9, "50", 1.5, True])
+def test_economy_money_moving_permissions_reject_a_missing_or_out_of_range_bound(
+    permission_id: str, param: str, bad: object
+) -> None:
+    params: dict[str, object] = {} if bad is None else {param: bad}
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse([{"id": permission_id, "justification": "Casino game.", "params": params}])
+    assert exc.value.reason == "invalid_economy_bound"
+
+
+def test_economy_wager_requires_a_justification_like_every_dangerous_permission() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse([{"id": "economy.wager", "params": {"max_bet": 10}}])
+    assert exc.value.reason == "missing_justification"
+
+
+def test_economy_bound_params_are_rejected_on_the_wrong_permission() -> None:
+    for permission_id, wrong_param in (
+        ("economy.read", "max_bet"),
+        ("economy.transfer", "max_bet"),
+        ("economy.wager", "max_amount"),
+    ):
+        params: dict[str, object] = {wrong_param: 10}
+        if permission_id == "economy.transfer":
+            params["max_amount"] = 10
+        if permission_id == "economy.wager":
+            params["max_bet"] = 10
+        with pytest.raises(ManifestV2Error) as exc:
+            _parse([{"id": permission_id, "justification": "x", "params": params}])
+        assert exc.value.reason == "invalid_economy_bound", permission_id
+
+
+def test_economy_ceiling_mirrors_the_rust_catalog() -> None:
+    import re
+
+    from services.bundle_manifest_v2 import _MAX_ECONOMY_AMOUNT
+
+    rust = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "core"
+        / "bundle_capability_gate"
+        / "src"
+        / "permission.rs"
+    ).read_text()
+    ceilings = {
+        int(m.group(1).replace("_", ""))
+        for m in re.finditer(
+            r"default_quota: Quota::EconomyAmount \{\s*per_call_abs_max: ([\d_]+),", rust
+        )
+    }
+    assert ceilings == {_MAX_ECONOMY_AMOUNT}, ceilings
+
+
+# --- identity.resolve (bundle actor/mention -> community user_uuid) ----------
+
+
+def test_identity_resolve_is_in_the_closed_catalog_as_normal_risk() -> None:
+    from services.bundle_permission_catalog import resolve_risk
+
+    assert resolve_risk("identity.resolve") == "normal"
+    # The catalog is closed: neighbouring/invented ids stay unknown.
+    assert resolve_risk("identity.read") is None
+    assert resolve_risk("identity.resolve.any") is None
+
+
+def test_identity_resolve_needs_no_params_beyond_justification() -> None:
+    manifest = _parse(
+        [{"id": "identity.resolve", "justification": "Names the chatter for the points game."}]
+    )
+    decl = manifest.permission_declarations[0]  # type: ignore[attr-defined]
+    assert decl.id == "identity.resolve"
+    assert decl.risk == "normal"
+
+
+def test_identity_resolve_catalog_id_mirrors_the_rust_catalog() -> None:
+    from services.bundle_permission_catalog import STATIC_PERMISSIONS
+
+    rust = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "core"
+        / "bundle_capability_gate"
+        / "src"
+        / "permission.rs"
+    ).read_text()
+    assert 'Self::IdentityResolve => "identity.resolve"' in rust
+    assert "identity.resolve" in STATIC_PERMISSIONS

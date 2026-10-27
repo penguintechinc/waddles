@@ -19,6 +19,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from flask_core import describe_db_error
+from flask_core.ai_guard import render_search_results, wrap_untrusted
+
 logger = logging.getLogger(__name__)
 
 CLIP_SEARCH_SYSTEM_PROMPT = (
@@ -182,18 +185,15 @@ class ClipResearcherService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'CLIP_SEARCH_SYSTEM_PROMPT',
                 CLIP_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Game: {game_name or 'Unknown'}\n"
-                f"Topic: {topic or 'General'}\n"
-                f"Query: {query}\n\n"
+                f"Game: {wrap_untrusted(game_name or 'Unknown', max_chars=300)}\n"
+                f"Topic: {wrap_untrusted(topic or 'General', max_chars=300)}\n"
+                f"Query: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Curate these clip results with title, creator, URL, "
                 "and a summary of each."
@@ -236,7 +236,7 @@ class ClipResearcherService:
             )
 
         except Exception as exc:
-            logger.error("Clip search failed: %s", exc)
+            logger.error("Clip search failed: %s", describe_db_error(exc))
             return ClipResearcherResult(
                 success=False,
                 content="An internal error occurred during clip search.",
@@ -327,17 +327,14 @@ class ClipResearcherService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'HIGHLIGHT_SEARCH_SYSTEM_PROMPT',
                 HIGHLIGHT_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Player: {player_name or 'Unknown'}\n"
-                f"Query: {query}\n\n"
+                f"Player: {wrap_untrusted(player_name or 'Unknown', max_chars=300)}\n"
+                f"Query: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Analyze these highlights with title, channel, URL, "
                 "and what makes each notable."
@@ -378,7 +375,7 @@ class ClipResearcherService:
             )
 
         except Exception as exc:
-            logger.error("Highlight search failed: %s", exc)
+            logger.error("Highlight search failed: %s", describe_db_error(exc))
             return ClipResearcherResult(
                 success=False,
                 content="An internal error occurred during highlight search.",
@@ -417,7 +414,7 @@ class ClipResearcherService:
             ttl = getattr(self.config, 'CLIP_CACHE_TTL', 3600)
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as exc:
-            logger.warning("Cache set failed: %s", exc)
+            logger.warning("Cache set failed: %s", describe_db_error(exc))
 
     async def _log_search(
         self,
@@ -448,4 +445,4 @@ class ClipResearcherService:
                  was_cached, processing_time_ms],
             )
         except Exception as exc:
-            logger.warning("Failed to log clip search: %s", exc)
+            logger.warning("Failed to log clip search: %s", describe_db_error(exc))

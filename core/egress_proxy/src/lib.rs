@@ -21,6 +21,18 @@
 //! (never trusts the in-process guard's own check), re-resolves DNS
 //! itself (never trusts a caller-supplied address), and connects only to
 //! that freshly-resolved address -- see `proxy::validate`.
+//!
+//! # Graceful shutdown (SIGTERM / SIGINT)
+//!
+//! [`run`] installs SIGTERM and SIGINT handlers. On either signal the
+//! proxy **stops accepting new connections**, lets in-flight HTTP requests
+//! finish (hyper graceful shutdown -- idle keep-alive connections close at
+//! once) and waits for live CONNECT tunnels to end, for at most
+//! `SHUTDOWN_DRAIN_SECONDS` (default 25s, under the Kubernetes default 30s
+//! `terminationGracePeriodSeconds`). It then returns `Ok(())` -- process
+//! exit code 0 -- so a rollout never has to SIGKILL the pod. Work still in
+//! flight when the deadline passes is cut off and logged at WARN with the
+//! count (`egress_proxy.drain_deadline_exceeded`); the exit is still 0.
 
 pub mod assertion;
 pub mod audit;
@@ -113,7 +125,20 @@ pub async fn run() -> anyhow::Result<()> {
     let metrics_server = axum::serve(metrics_listener, metrics_router);
 
     let proxy_listener = TcpListener::bind(proxy_addr).await?;
-    let proxy_server = serve_proxy(proxy_listener, state);
+    let drain = state.cfg.shutdown_drain;
+    let signal = termination_signal()?;
+    let proxy_server = serve_proxy_until(
+        proxy_listener,
+        state,
+        async move {
+            let name = signal.await;
+            tracing::info!(
+                signal = name,
+                "egress_proxy.shutdown_signal_received: no longer accepting, draining"
+            );
+        },
+        drain,
+    );
 
     tokio::select! {
         res = metrics_server => res.map_err(anyhow::Error::from),
@@ -121,33 +146,137 @@ pub async fn run() -> anyhow::Result<()> {
     }
 }
 
+/// Resolves when the process receives SIGTERM or SIGINT, yielding the
+/// signal's name. Signal handlers are registered eagerly (before the
+/// returned future is first polled) so a signal arriving during startup is
+/// never lost, and a registration failure is a hard error rather than a
+/// silently-ignored SIGTERM.
+pub fn termination_signal() -> std::io::Result<impl std::future::Future<Output = &'static str>> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = int.recv() => "SIGINT",
+        }
+    })
+}
+
 /// Drives the CONNECT/forward-HTTP accept loop over an already-bound
-/// listener. `pub` so `tests/e2e.rs` can stand up a real server against an
-/// ephemeral port without going through `run`'s env-based `build_state`.
+/// listener, forever. `pub` so `tests/e2e.rs` can stand up a real server
+/// against an ephemeral port without going through `run`'s env-based
+/// `build_state`. Never shuts down gracefully -- production uses
+/// [`serve_proxy_until`].
 pub async fn serve_proxy(listener: TcpListener, state: Arc<ProxyState>) -> anyhow::Result<()> {
+    serve_proxy_until(
+        listener,
+        state,
+        std::future::pending::<()>(),
+        std::time::Duration::ZERO,
+    )
+    .await
+}
+
+/// [`serve_proxy`] with graceful shutdown: runs the accept loop until
+/// `shutdown` resolves, then (1) drops the listener so no new connection is
+/// accepted, (2) asks every live HTTP connection to finish its in-flight
+/// request and close (`UpgradeableConnection::graceful_shutdown`), and (3) waits for
+/// CONNECT tunnels to end (they hold a `TenantLimiter` slot for their whole
+/// lifetime, so `limiter.active_total() == 0` means nothing is in flight),
+/// all bounded by `drain_deadline`. Returns `Ok(())` either way -- after a
+/// clean drain, or after the deadline with a WARN naming how much work was
+/// cut off -- so the caller can exit 0 and the pod is never SIGKILLed.
+pub async fn serve_proxy_until<F>(
+    listener: TcpListener,
+    state: Arc<ProxyState>,
+    shutdown: F,
+    drain_deadline: std::time::Duration,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()>,
+{
+    // Graceful-shutdown plumbing (hyper-util's `GracefulShutdown` helper
+    // does not cover http1's `UpgradeableConnection`, which CONNECT needs):
+    // `drain_tx` tells every live connection task to finish its in-flight
+    // request; each task holds a clone of `done_tx`, so `done_rx.recv()`
+    // returning `None` means every connection task has ended.
+    let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
+    tokio::pin!(shutdown);
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        let (stream, _peer) = tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => accepted?,
+        };
         let io = TokioIo::new(stream);
-        let state = state.clone();
+        let conn_state = state.clone();
         let header_read_timeout = state.cfg.header_read_timeout;
+        let service = service_fn(move |req| proxy::handle(conn_state.clone(), req));
+        // `header_read_timeout` requires an explicit `Timer` to take
+        // effect at all (hyper 1.x: silently does nothing without one,
+        // rather than falling back to its documented 30s default) --
+        // bounds a slow-loris-style caller trickling request headers in
+        // indefinitely.
+        let conn = hyper::server::conn::http1::Builder::new()
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(header_read_timeout)
+            .serve_connection(io, service)
+            .with_upgrades();
+        let mut drain_rx = drain_rx.clone();
+        let done_tx = done_tx.clone();
         tokio::spawn(async move {
-            let service = service_fn(move |req| proxy::handle(state.clone(), req));
-            // `header_read_timeout` requires an explicit `Timer` to take
-            // effect at all (hyper 1.x: silently does nothing without one,
-            // rather than falling back to its documented 30s default) --
-            // bounds a slow-loris-style caller trickling request headers in
-            // indefinitely.
-            if let Err(err) = hyper::server::conn::http1::Builder::new()
-                .timer(hyper_util::rt::TokioTimer::new())
-                .header_read_timeout(header_read_timeout)
-                .serve_connection(io, service)
-                .with_upgrades()
-                .await
-            {
+            let _done = done_tx;
+            tokio::pin!(conn);
+            let mut draining = false;
+            let result = loop {
+                tokio::select! {
+                    res = conn.as_mut() => break res,
+                    changed = drain_rx.changed(), if !draining => {
+                        draining = true;
+                        if changed.is_ok() {
+                            // Finish the in-flight request (if any), then
+                            // close; an idle keep-alive connection closes
+                            // immediately.
+                            conn.as_mut().graceful_shutdown();
+                        }
+                    }
+                }
+            };
+            if let Err(err) = result {
                 tracing::debug!(error = %err, "egress_proxy.connection_closed");
             }
         });
     }
+
+    // Stop accepting: the listener is closed before the drain begins.
+    drop(listener);
+    drop(done_tx);
+    let _ = drain_tx.send(true);
+    let in_flight_at_start = state.limiter.active_total();
+    tracing::info!(
+        in_flight = in_flight_at_start,
+        drain_deadline_s = drain_deadline.as_secs_f64(),
+        "egress_proxy.draining"
+    );
+    let drained = tokio::time::timeout(drain_deadline, async {
+        // `None` once every connection task (each holds a `done_tx`) ended.
+        let _ = done_rx.recv().await;
+        while state.limiter.active_total() > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    match drained {
+        Ok(()) => tracing::info!("egress_proxy.drain_complete"),
+        Err(_) => tracing::warn!(
+            remaining = state.limiter.active_total(),
+            drain_deadline_s = drain_deadline.as_secs_f64(),
+            "egress_proxy.drain_deadline_exceeded: exiting with work still in flight"
+        ),
+    }
+    Ok(())
 }
 
 /// `--healthcheck` subcommand: a local TCP probe against the metrics
@@ -192,6 +321,7 @@ mod tests {
         "TUNNEL_IDLE_TIMEOUT_SECONDS",
         "TUNNEL_MAX_DURATION_SECONDS",
         "EGRESS_PROXY_ALLOW_PRIVATE_IP",
+        "SHUTDOWN_DRAIN_SECONDS",
     ];
 
     fn clear_config_env() {

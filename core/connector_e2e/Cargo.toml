@@ -1,0 +1,32 @@
+[package]
+name = "connector-e2e"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Real-path harness for the connector-bundle host capability (issue #840 B0). NOT a shipped service and has no Dockerfile: it links svc-ingest (the host: Transport, driver, sink) and bundle-executor (the real wasmtime invoker) into ONE process so a real WASM connector is driven end to end -- transport -> executor on-frame -> normalized event -> StageEnvelope. In production the two are separate processes joined by the host-API wire, which cannot yet carry connector exports (penguin-libs ExportKind); this crate is where the trait contract is proven against the real executor until it can."
+
+[lib]
+name = "connector_e2e"
+path = "src/lib.rs"
+
+# Exact pins only. Every direct dependency matches the pin the two crates under
+# test already use, so the resolver never has to pick between two versions of
+# the same crate for them.
+[dependencies]
+bundle-executor = { path = "../bundle_executor", version = "=0.1.0" }
+svc-ingest = { path = "../svc_ingest", version = "=0.1.0" }
+tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+# The harness library builds the executor's `CliConfig` and digests components
+# (previously test-only; now used by `src/lib.rs`'s `WireRig`).
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+sha2 = "=0.10.9"
+
+[dev-dependencies]
+prometheus = "=0.14.0"
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

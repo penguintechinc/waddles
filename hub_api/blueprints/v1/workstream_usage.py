@@ -105,8 +105,8 @@ class UsageListResponse:
 
 
 @workstream_usage_bp.route("", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(UsageListResponse)
 async def list_usage(tenant_slug: str) -> UsageListResponse | tuple[dict[str, object], int]:
     """Per-community usage, summed by `(community, workstream, stage, app, hour)`, paginated."""

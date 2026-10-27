@@ -65,9 +65,8 @@ form -- `_target_pseudonym()` SHA-256-hashes any username before it reaches
 `community_kv`, and no log line below includes a raw username or rendered
 chat text.
 
-Gated behind the PostHog flag ``waddles.command-shoutout`` -- checked in
-`transform()` after the cheap `!so` command-name match and before the real
-grammar parse (`eightball`'s documented ordering rationale).
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 
 DO NOT BUILD in v1 -- clean, documented extension points, never a silent
 stub:
@@ -103,11 +102,9 @@ from waddle_sdk.command import (
     parse_command,
     substitute_placeholders,
 )
-from waddle_sdk.flask_core.feature_flags import feature_enabled, tier_at_least
+from waddle_sdk.flask_core.feature_flags import tier_at_least
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.sub_modules import SubModuleGate
-
-FLAG_KEY = "waddles.command-shoutout"
 
 #: Chat-invoked command name (see module docstring for why this differs from
 #: the SDK docs' illustrative `"shoutout"` naming).
@@ -232,7 +229,7 @@ def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
     """
     if "is_mod" not in payload and "is_broadcaster" not in payload:
         return None
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 def _validate_target(raw: str) -> tuple[str | None, str | None]:
@@ -265,8 +262,8 @@ def _target_pseudonym(target: str) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!so` and its grammar, via `_resolve`.
 
-    Cheap-skip first (no leading `!so` token -- `None`, zero cost), flag
-    check second, real grammar resolution last -- same ordering as
+    Cheap-skip first (no leading `!so` token -- `None`, zero cost), real grammar resolution last --
+    same ordering as
     `eightball`/`fish`'s own documented rationale. A recognized-but-
     malformed `!so ...` still produces a reply (`"usage"`), never a silent
     drop.
@@ -280,9 +277,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     if head.lower() != "!so":
         return None
 
-    if not await feature_enabled(FLAG_KEY, default=False):
-        return None
-
     command, arg = _resolve(rest.strip())
 
     log.info("shoutout.transform matched", command=command)
@@ -292,9 +286,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     # Forward the normalized badge signal, if present -- see `count`/`lurk`/`fish`'s own
     # identical forwarding comment for why absence must reach `dispatch` as absence, not `False`.
     if "is_mod" in event.payload:
-        payload["is_mod"] = bool(event.payload["is_mod"])
+        payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = bool(event.payload["is_broadcaster"])
+        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
 
     return PlatformEvent(
         platform=event.platform,

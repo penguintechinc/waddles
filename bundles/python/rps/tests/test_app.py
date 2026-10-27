@@ -16,6 +16,7 @@ import pytest
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+import app
 from app import (
     _NO_RECORD_YET,
     _USAGE,
@@ -184,8 +185,8 @@ def _sample_envelope(
 
 
 def _force_bot_choice(monkeypatch: pytest.MonkeyPatch, choice: str) -> None:
-    """Seed the bot's move RNG deterministically -- see `app._handle_play`'s own `random.choice`."""
-    monkeypatch.setattr("random.choice", lambda seq: choice)
+    """Seed the bot's move RNG deterministically -- see `app._handle_play`'s own `_RNG.choice`."""
+    monkeypatch.setattr(app._RNG, "choice", lambda seq: choice)
 
 
 # -- transform() parsing -------------------------------------------------------
@@ -250,12 +251,6 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
         occurred_at="",
     )
     assert _run(transform(event)) is None
-
-
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _FakeHost()
-    _install(monkeypatch, host, flag_enabled=False)
-    assert _run(transform(_sample_event("!rps rock"))) is None
 
 
 def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:

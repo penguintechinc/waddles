@@ -141,12 +141,6 @@ def test_non_matching_text_is_ignored(text: str, fake_host) -> None:
     assert fake_host.kv.calls == []  # cheap-skip: zero kv ops
 
 
-def test_disabled_flag_suppresses_every_reply(fake_host) -> None:
-    fake_host.flag_state["enabled"] = False
-    assert _run(transform(_event("!wheel add tacos", is_mod=True))) is None
-    assert fake_host.kv.calls == []
-
-
 def test_non_chat_payload_is_ignored(fake_host) -> None:
     event = PlatformEvent(
         platform="twitch",
@@ -351,11 +345,11 @@ def test_spin_is_open_to_anyone(fake_host) -> None:
 def test_spin_picks_uniformly_from_options(
     monkeypatch: pytest.MonkeyPatch, fake_host
 ) -> None:
-    """Seeded-RNG spin: `random.choice` is monkeypatched to prove the exact option surfaces."""
+    """Seeded-RNG spin: `_RNG.choice` is monkeypatched to prove the exact option surfaces."""
     _seed_options(fake_host, "comm-1", ["tacos", "pizza", "sushi"])
     import app
 
-    monkeypatch.setattr(app.random, "choice", lambda seq: seq[1])
+    monkeypatch.setattr(app._RNG, "choice", lambda seq: seq[1])
     result = _transform_in("comm-1", "!wheel spin")
     assert "pizza" in _reply_text(result)
 

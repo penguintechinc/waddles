@@ -34,8 +34,7 @@ commands at all -- there is no other way to distinguish "unknown word,
 ignore" from "known custom command, reply" ahead of a lookup. All kv WRITES
 (`!command set/remove/timer ...`) still happen only in `dispatch()`, exactly
 like `lurk`'s own split. Cost tradeoff, accepted: every bang-prefixed chat
-message now pays one `feature_enabled()` check (same as any other command
-bundle) and, for tokens that aren't the literal `!command` management word,
+message now pays, for tokens that aren't the literal `!command` management word,
 one additional `kv.get()` round trip -- unavoidable for a dynamic command
 set that can't be declared in the manifest's static `command_prefix` filter.
 
@@ -56,23 +55,22 @@ functional.
 
 Permission gate platform gap: `set`/`remove`/`timer` require the caller to
 be a broadcaster or moderator, read via `event.payload["is_mod"]`/
-`["is_broadcaster"]` -- booleans `core/svc_ingest/bundles/twitch_ingest.py`
+`["is_broadcaster"]` -- booleans `core/svc_ingest/builtin_handlers/twitch_ingest.py`
 and `kick_ingest.py` already normalize onto every chat `PlatformEvent`
 (no `data.tables` permission is declared here, so the
-`community_members`-role-lookup convention `core/svc_process/bundles/
+`community_members`-role-lookup convention `core/svc_process/builtin_handlers/
 social_alias_process.py` uses is not available to this kv-only bundle).
-`core/svc_ingest/bundles/discord_ingest.py` does not yet normalize an
+`core/svc_ingest/builtin_handlers/discord_ingest.py` does not yet normalize an
 equivalent role signal onto its payload -- `_is_privileged()` fails CLOSED
 (denies) whenever both keys are absent, so Discord callers cannot manage
 commands yet rather than being granted by a missing-key default. Tracked as
 a follow-up, not a new issue (same class of gap `twitch_ingest.py`'s own
 module docstring already documents inline for its own ingest-side fields).
 
-Gated behind the PostHog flag ``waddles.command-customcommands`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering. Checked once, right after the leading `!` is
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs. Checked once, right after the leading `!` is
 confirmed, before any kv access -- same ordering `count`/`eightball`/`lurk`
-use, so a flag-disabled bundle never pays a kv round trip either.
+use, so a non-matching message never pays a kv round trip.
 """
 
 from __future__ import annotations
@@ -83,10 +81,7 @@ from typing import Any
 
 from waddle_sdk import kv, log, relay
 from waddle_sdk.flask_core import get_bundle_context
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-customcommands"
 
 #: The literal word after `!` that routes to command MANAGEMENT, as opposed
 #: to a dynamic, registered custom command name.
@@ -135,7 +130,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     Fails closed -- see module docstring.
     """
     payload = event.payload
-    return bool(payload.get("is_mod")) or bool(payload.get("is_broadcaster"))
+    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
 
 
 def _normalize_name(token: str) -> str | None:
@@ -326,9 +321,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """
     text = event.payload.get("text")
     if not isinstance(text, str) or not text.strip().startswith("!"):
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     stripped = text.strip()

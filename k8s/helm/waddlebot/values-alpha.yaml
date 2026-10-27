@@ -15,7 +15,11 @@ global:
   # here, this chart pulls from here.
   imageRegistry: "localhost:32000/waddlebot"
   imageTag: "alpha"
-  imagePullPolicy: IfNotPresent  # Never makes containerd skip localhost:32000 (ErrImageNeverPull) -- images are pushed, not side-loaded
+  # IfNotPresent: every alpha deploy gets a unique per-deploy global.imageTag (SHA8), and kind e2e /
+  # alpha local builds load images onto the node -- Always would force a registry pull that fails
+  # and hang the pod. (Never would make containerd skip localhost:32000 -> ErrImageNeverPull.)
+  # This now governs EVERY workload incl. hub-api + the Rust svc-*/bundle-executor Deployments.
+  imagePullPolicy: IfNotPresent
   deploymentTier: "alpha"
   # gRPC transport TLS (PR #264) -- alpha is single-node local dev with no cert material
   # provisioned, so it uses flask_core's own documented dev-only escape hatch instead of
@@ -71,6 +75,27 @@ infrastructure:
       enabled: true
     resources:
       requests: { cpu: "50m", memory: "64Mi" }
+      limits: { cpu: "250m", memory: "256Mi" }
+  # Durable delivery-state Valkey (noeviction + AOF + PVC). Single-node laptop alpha: 1 pod
+  # (no replica), cluster-default storageClass (local-path). TLS rides infrastructure.redis.tls.
+  valkeyDurable:
+    enabled: true
+    replicas: 1
+    maxMemory: "128mb"
+    antiAffinity: "soft"
+    pdb: {enabled: false}
+    persistence: {size: 1Gi}
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits: { cpu: "250m", memory: "256Mi" }
+  # Dedicated bundle-kv Valkey (noeviction quota store): single pod, no replication.
+  valkeyKv:
+    enabled: true
+    maxMemory: "64mb"
+    persistence:
+      size: 512Mi
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
       limits: { cpu: "250m", memory: "256Mi" }
   # Issue #287 -- svc-streaming (Rust) recordings target. Min-spec'd for a single-node
   # laptop; service.name overridden to "waddlebot-seaweedfs" so the literal S3_ENDPOINT
@@ -189,7 +214,7 @@ pipeline:
     # independent of svc-process's DB-driven bundle path.
     platformConnections:
       - platform: "discord"
-        sourceId: "dg-474965105759748096"
+        sourceId: "474965105759748096"
         label: "svc-ingest platform connection"
     # fix/seeder-memory (not yet merged as of this branch's base): 64Mi/128Mi was
     # the real OOMKilled cause in CI's kind install (gh PR #480), overriding the
@@ -232,18 +257,23 @@ pipeline:
       limits: { cpu: "500m", memory: "512Mi" }
   svcPresentation:
     enabled: true
+    # Pinned to 1: overlay fan-out is in-process, >1 replica splits frames across pods (the chart
+    # refuses replicas > 1 without sharedFanout.enabled -- see values.yaml).
     replicas: 1
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "500m", memory: "512Mi" }
   # Issue #287 -- transcode-capable min-spec (higher than the generic pipeline tier above)
   # plus fixed alpha NodePorts for direct RTMP/SRT/HTTP media ingest (OBS/ffmpeg target
-  # localhost:31935 for RTMP push). PUBLIC_BASE_URL uses the node LAN IP + the http
-  # NodePort below so playback URLs resolve off-laptop, matching webui.publicUrl's pattern.
+  # localhost:31935 for RTMP push). PUBLIC_BASE_URL is derived at runtime from the node the
+  # pod runs on (downward API status.hostIP) + the http NodePort below, so playback URLs
+  # resolve off-laptop without a hardcoded LAN IP that goes stale when the host's network
+  # changes (it did: 192.168.10.75 -> 192.168.2.210).
   svcStreaming:
     enabled: true
     replicas: 1
-    publicBaseUrl: "http://192.168.10.75:31208"
+    publicBaseUrl: ""
+    publicBaseUrlFromNodeIP: true
     nodePort:
       enabled: true
       rtmpPort: 31935
@@ -293,6 +323,14 @@ pipeline:
       # receiver's envelope signing (core/svc_ingest/src/config.rs) -- DISCORD_BOT_TOKEN
       # already reaches this pod via envFrom/explicit secretKeyRef either way.
       envelopeBindingActiveKid: "e2e1"
+      # F4 -- turns on svc-ingest's machine-JWT grant + SERVICE_JWT_* env + token mount
+      # (alpha only; the base values.yaml default is false so beta/prod never render them).
+      dynamicConnections:
+        enabled: true
+        # Per-community Twitch sessions: new/removed binding picked up within one interval.
+        # Static TWITCH_IRC_NICK/TWITCH_IRC_CHANNEL must NOT be set here (fatal with the flag on).
+        twitchReconcileIntervalSecs: 30
+        twitchResolveTimeoutSecs: 10
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }
@@ -349,6 +387,10 @@ pipeline:
     svcAction:
       replicas: 1
       envelopeBindingActiveKid: "e2e1"
+      # Task 8 -- turns on svc-action's connections:resolve(+:static) grant + SERVICE_JWT env
+      # (alpha only; base default false so beta/prod never render the grant).
+      dynamicConnections:
+        enabled: true
       # fix/alpha-deploy-executor-and-failfast -- see svcProcess's identical
       # comment above: the legacy actionAppId/actionBundleDigest/Version/
       # ComponentKey/SidecarKey fields (including the same stale pinned
@@ -405,16 +447,6 @@ pipeline:
         requests: { cpu: "500m", memory: "1Gi" }
         limits: { cpu: "2000m", memory: "2560Mi" }
 
-  # TEMP: re-enable once hub-api service_jwt issuer + internal gRPC listener
-  # are wired (see fix/hub-api-grpc-issuer). PII tokenization disabled so the
-  # data plane can start. Renders PII_TOKENIZATION_ENABLED=false on
-  # svc-process-rust and PII_DETOKENIZATION_ENABLED=false on svc-action-rust
-  # (see values.yaml's own comment on pipeline.piiTokenization for the full
-  # rationale) -- the PostHog kill-switch alone can't be set here (no
-  # in-cluster PostHog in alpha).
-  piiTokenization:
-    enabled: false
-
 presentation:
   image:
     repository: "localhost:32000/waddlebot/svc-presentation"
@@ -422,9 +454,11 @@ presentation:
   service:
     type: NodePort
     nodePort: 31032
-  # Matches pipeline.svcStreaming.publicBaseUrl above -- same media NodePort host, so
-  # live_stream.py's browser-facing HLS URLs resolve off-laptop like svc-streaming's own.
-  publicStreamingUrl: "http://192.168.10.75:31208"
+  # Matches pipeline.svcStreaming.publicBaseUrl above -- same media NodePort host, derived
+  # from the node IP at runtime, so live_stream.py's browser-facing HLS URLs resolve
+  # off-laptop like svc-streaming's own.
+  publicStreamingUrl: ""
+  publicStreamingUrlFromNodeIP: true
   # chore/deploy-svc-presentation-rust-alpha -- deploy the Rust svc-presentation (overlay +
   # image surface) instead of the Python one. Overlay view/SSE port reachable on-host at
   # localhost:31032 (same NodePort the Python service held). Image built by
@@ -486,6 +520,10 @@ egressProxy:
     limits: { cpu: "150m", memory: "128Mi" }
 egressPolicy:
   enabled: true
+  # R5: dev clusters (MicroK8s/Calico today) exempt from the all-workload egress lockdown; the
+  # data-plane + egress-proxy CNPs above still render. Beta/gamma/prod keep the base default (true).
+  workloadEgress:
+    enabled: false
   clusterCidrs:
     podCidr: "10.1.0.0/16"      # MicroK8s default — confirm against cluster before deploy
     serviceCidr: "10.152.183.0/24"
@@ -735,3 +773,11 @@ posthog:
     resources:
       requests: { cpu: "100m", memory: "512Mi" }
       limits: { cpu: "500m", memory: "1Gi" }
+
+# R5 posture toggles -- alpha is exempt from the shipping-only controls (NodePort Services are reached
+# from the host/world; the cluster has no Tetragon). The same pod specs are still asserted PSA
+# restricted-compliant by tests/test_security_posture_r5_render.py.
+networkPolicy:
+  enabled: false
+tetragon:
+  enabled: false

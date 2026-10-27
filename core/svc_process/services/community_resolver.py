@@ -1,4 +1,4 @@
-"""Community resolution order for the `!cc` bundle and similar callers (gh #311).
+"""Community resolution order for the `!cc` handler and similar callers (gh #311).
 
 Answers "which community does this message belong to" via three sources,
 checked in order, cheapest-semantically-specific first:

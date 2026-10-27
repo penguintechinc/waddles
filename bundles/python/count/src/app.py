@@ -70,9 +70,8 @@ more (`add`/`remove` create: get+set+set/delete = 3 total; `set`: get+set =
 2; `add`/`sub`: get+increment = 2) -- all well under the host's
 `MAX_OPS_PER_INVOKE` (64, `core/bundle_host_kv/src/limits.rs`).
 
-Gated behind the PostHog flag ``waddles.command-count`` -- see
-`bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
-rationale and ordering.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -81,10 +80,7 @@ import json
 from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-
-FLAG_KEY = "waddles.command-count"
 
 #: `!count` itself is always the management command -- never a counter name
 #: (`_validate_counter_name` also rejects "count" outright, so the two can
@@ -220,7 +216,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("count.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 def _normalize_counter_name(raw: str) -> str:
@@ -401,9 +397,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     stripped = text.strip()
     if not stripped.startswith("!"):
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     parts = stripped.split()

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -33,10 +34,20 @@ from urllib.parse import urlencode
 
 import bcrypt
 import httpx
-from flask_core.auth import SCOPE_BUNDLES, create_jwt_token, verify_jwt_token
+from flask_core.auth import (
+    JWT_CLOCK_SKEW_SECONDS,
+    SCOPE_BUNDLES,
+    create_jwt_token,
+    verify_jwt_token,
+)
+from flask_core.token_revocation import get_token_revocation
+from quart import has_request_context
 
 from config import HubAPIConfig
+from services import session_service
+from services.audit_http import record_session_issued, record_session_revoked
 from services.errors import bad_request, conflict, forbidden, not_found, unauthorized
+from services.session_cookie import issue_refresh_cookie
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +127,97 @@ async def validate_captcha(
         return False
 
 
+async def _scopes_for(
+    async_dal: Any, dal: Any, *, user: SessionUser | None, tenant_id: int | None
+) -> tuple[list[str], set[str]]:
+    """Derive a session's `roles` (audit-only) and OIDC scopes from DB flags + tenant role.
+
+    The one place scope bundles are expanded, shared by the login mint and the refresh mint so a
+    refreshed token reflects the user's CURRENT roles (a demotion lands within one refresh).
+    """
+    roles: list[str] = []
+    scopes: set[str] = set(SCOPE_BUNDLES["global"]["viewer"])  # every session gets *:read
+    if user is None:
+        return roles, scopes
+    if user.is_super_admin:
+        roles.extend(["admin", "super_admin"])
+        scopes.update(SCOPE_BUNDLES["global"]["admin"])
+    if user.is_vendor:
+        roles.append("vendor")
+        # `vendor:onboard` gates `POST /apps/{app_id}/versions`'s vendor path
+        # (`services/vendor_bundle_authz.py`) -- a boolean flag on `hub_users` needs a real
+        # scope grant at mint time, not just an audit-only `roles` entry (security.md: scopes
+        # only, never role names).
+        scopes.add("vendor:onboard")
+    if user.is_analytics_consumer:
+        # Analytics-module port (M9): `analytics:read` is the pre-existing scope name from
+        # security.md's own SCOPE_BUNDLES table; `hub_users.is_analytics_consumer` (M1,
+        # `060_analytics_consumer_role.sql`) needs a scope grant at mint time to satisfy
+        # `blueprints/v1/analytics.py`'s platform-overview gate.
+        scopes.add("analytics:read")
+
+    if tenant_id is not None:
+        ta_rows = await async_dal.select_async(
+            dal((dal.tenant_admins.tenant_id == tenant_id) & (dal.tenant_admins.user_id == user.id))
+        )
+        if ta_rows:
+            role = ta_rows.first().role
+            if role == "tenant-owner":
+                scopes.update(SCOPE_BUNDLES["tenant"]["admin"])
+            elif role == "tenant-admin":
+                scopes.update(SCOPE_BUNDLES["tenant"]["maintainer"])
+    return roles, scopes
+
+
+async def _issued_at_after_revocations(user: SessionUser | None) -> int | None:
+    """An `iat` that no earlier revoke-all of `user` can sweep, or `None` to mint with "now".
+
+    `iat` has one-second resolution and a per-user revocation rejects `iat <= cutoff`, so a
+    login in the very second a password changed (or an admin revoked) would be rejected on its
+    first use. When such a cutoff exists the new token is stamped one second past it -- never
+    more than the verifier's clock-skew allowance ahead of now.
+    """
+    if user is None:
+        return None
+    floor: int | None = await get_token_revocation().aissue_floor(str(user.id))
+    if floor is None:
+        return None
+    now = int(time.time())
+    if floor + 1 <= now:
+        return None
+    return int(min(floor + 1, now + int(JWT_CLOCK_SKEW_SECONDS)))
+
+
+def _mint_access_token(
+    cfg: HubAPIConfig,
+    *,
+    user: SessionUser | None,
+    username_override: str | None,
+    roles: list[str],
+    scopes: set[str],
+    tenant: str,
+    session_id: int | None,
+    issued_at: int | None = None,
+) -> str:
+    """Mint the short-lived (15 min) access JWT: `jti` always, `sid` when in a session."""
+    # flask_core is `follow_imports = "skip"` -- create_jwt_token() is typed Any from mypy's
+    # perspective; cast to the real, stable return type.
+    return cast(
+        str,
+        create_jwt_token(
+            user_id=str(user.id if user is not None else 0),
+            username=(user.username if user is not None else username_override) or "",
+            email=(user.email if user is not None else None) or "",
+            roles=roles,
+            secret_key=cfg.secret_key,
+            tenant=tenant,
+            scope=" ".join(sorted(scopes)),
+            session_id=str(session_id) if session_id is not None else None,
+            issued_at=issued_at,
+        ),
+    )
+
+
 async def create_session_token(
     async_dal: Any,
     dal: Any,
@@ -126,89 +228,67 @@ async def create_session_token(
     tenant_id: int | None = None,
     tenant_slug: str | None = None,
     requires_oauth_link: bool = False,
+    auth_method: str = "unspecified",
 ) -> str:
-    """Mint a JWT (`flask_core.auth.create_jwt_token`) and record `hub_sessions`.
+    """Open a login session and mint its first access JWT (`flask_core.auth.create_jwt_token`).
 
     `user` is `None` for the temp-password pending-link flow (Node's
     `createSession({userId: null, ...})`) -- `sub` becomes `"0"` in that
     case (flask_core's `create_jwt_token` requires a `user_id`; there is
-    no "no subject" JWT). `tenant` is always set -- `DEFAULT_TENANT_SLUG`
+    no "no subject" JWT) and no refresh token is issued: a pending-link session lives only its
+    short access TTL. `tenant` is always set -- `DEFAULT_TENANT_SLUG`
     ("global") when the caller has no tenant context, per security.md
     Tenant Isolation ("there is no untenanted token").
+
+    For a real user this also opens the `hub_sessions` row (`services/session_service.py`) and,
+    inside a request, registers the HttpOnly refresh cookie -- so every login path (password /
+    OAuth-SSO / passkey / registration) delivers the rotating refresh token without each route
+    having to remember to. The returned access token carries that session's `sid`.
+
+    Every login path funnels through here, so this is also the one place session issuance
+    (password / OAuth-SSO / passkey) is written to the tamper-evident audit log;
+    `auth_method` names the path (an identifier, never user input). The audit write happens
+    BEFORE the session row is persisted and raises `AuditWriteError` on failure, so a
+    session the audit log cannot account for is never issued (entitled tenants only).
     """
-    roles: list[str] = []
-    scopes: set[str] = set(SCOPE_BUNDLES["global"]["viewer"])  # every session gets *:read
-    if user is not None:
-        if user.is_super_admin:
-            roles.extend(["admin", "super_admin"])
-            scopes.update(SCOPE_BUNDLES["global"]["admin"])
-        if user.is_vendor:
-            roles.append("vendor")
-            # `vendor:onboard` gates `POST /apps/{app_id}/versions`'s
-            # vendor path (`services/vendor_bundle_authz.py`) -- same
-            # pattern as `is_analytics_consumer` below: a boolean flag on
-            # `hub_users` needs a real scope grant at mint time, not just
-            # an audit-only `roles` entry, before any `require_scope`-style
-            # check can key off it (security.md: scopes only, never role
-            # names).
-            scopes.add("vendor:onboard")
-        if user.is_analytics_consumer:
-            # Analytics-module port (M9): `analytics:read` is the pre-
-            # existing scope name from security.md's own SCOPE_BUNDLES
-            # table (`maintainer -> ... analytics:read`), already granted
-            # via the `global`/`tenant` maintainer bundles and the
-            # `global` admin bundle's `*:read` wildcard (superadmins
-            # already pass `require_scope("analytics:read")` without this
-            # branch). What was missing: `hub_users.is_analytics_consumer`
-            # (M1, `060_analytics_consumer_role.sql`) had no corresponding
-            # scope grant at mint time, so no analytics-consumer user
-            # could ever satisfy `blueprints/v1/analytics.py`'s platform-
-            # overview gate -- see that module's docstring.
-            scopes.add("analytics:read")
-
-        if tenant_id is not None:
-            ta_rows = await async_dal.select_async(
-                dal(
-                    (dal.tenant_admins.tenant_id == tenant_id)
-                    & (dal.tenant_admins.user_id == user.id)
-                )
-            )
-            if ta_rows:
-                role = ta_rows.first().role
-                if role == "tenant-owner":
-                    scopes.update(SCOPE_BUNDLES["tenant"]["admin"])
-                elif role == "tenant-admin":
-                    scopes.update(SCOPE_BUNDLES["tenant"]["maintainer"])
-
+    roles, scopes = await _scopes_for(async_dal, dal, user=user, tenant_id=tenant_id)
     resolved_tenant = tenant_slug or "global"
-    # flask_core is `follow_imports = "skip"` -- create_jwt_token() is typed
-    # Any from mypy's perspective; cast to the real, stable return type.
-    token = cast(
-        str,
-        create_jwt_token(
-            user_id=str(user.id if user is not None else 0),
-            username=(user.username if user is not None else username_override) or "",
-            email=(user.email if user is not None else None) or "",
-            roles=roles,
-            secret_key=cfg.secret_key,
-            tenant=resolved_tenant,
-            scope=" ".join(sorted(scopes)),
-            expiration_hours=24,
-        ),
+
+    await record_session_issued(
+        user_id=user.id if user is not None else None,
+        tenant_id=tenant_id,
+        tenant_slug=resolved_tenant,
+        auth_method=auth_method,
+        pending_link=requires_oauth_link,
     )
 
-    now = datetime.now(UTC)
-    await async_dal.insert_async(
-        dal.hub_sessions,
-        session_token=token,
-        user_id=user.id if user is not None else None,
-        platform_username=(user.username if user is not None else username_override),
-        avatar_url=(user.avatar_url if user is not None else None),
-        is_active=True,
-        expires_at=now + timedelta(hours=24),
-        created_at=now,
+    session_id: int | None = None
+    if user is not None:
+        opened = await session_service.open_session(
+            async_dal,
+            dal,
+            cfg,
+            user_id=user.id,
+            tenant_slug=resolved_tenant,
+            username=user.username,
+            avatar_url=user.avatar_url,
+        )
+        session_id = opened.session_id
+        if has_request_context():
+            issue_refresh_cookie(opened.refresh_token, max_age=cfg.refresh_token_ttl_seconds)
+        else:
+            logger.debug("no request context: refresh token not delivered via cookie")
+
+    return _mint_access_token(
+        cfg,
+        user=user,
+        username_override=username_override,
+        roles=roles,
+        scopes=scopes,
+        tenant=resolved_tenant,
+        session_id=session_id,
+        issued_at=await _issued_at_after_revocations(user),
     )
-    return token
 
 
 async def add_user_to_global_community(async_dal: Any, dal: Any, *, user_id: int) -> None:
@@ -324,7 +404,7 @@ async def register(
         return True, None
 
     user = SessionUser(id=user_id, email=email_lower, username=username or email_lower)
-    token = await create_session_token(async_dal, dal, cfg, user=user)
+    token = await create_session_token(async_dal, dal, cfg, user=user, auth_method="register")
     return False, LoginResult(
         token=token,
         user_id=user.id,
@@ -361,7 +441,9 @@ async def verify_email(async_dal: Any, dal: Any, cfg: HubAPIConfig, *, token: st
     )
 
     user = SessionUser(id=row.id, email=row.email, username=row.username)
-    session_token = await create_session_token(async_dal, dal, cfg, user=user)
+    session_token = await create_session_token(
+        async_dal, dal, cfg, user=user, auth_method="email_verification"
+    )
     return LoginResult(
         token=session_token,
         user_id=user.id,
@@ -448,7 +530,13 @@ async def login(
         is_analytics_consumer=bool(row.is_analytics_consumer),
     )
     token = await create_session_token(
-        async_dal, dal, cfg, user=user, tenant_id=tenant_id, tenant_slug=tenant_slug
+        async_dal,
+        dal,
+        cfg,
+        user=user,
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        auth_method="password",
     )
     return LoginResult(
         token=token,
@@ -494,7 +582,7 @@ async def admin_login(
         is_vendor=bool(row.is_vendor),
         is_analytics_consumer=bool(row.is_analytics_consumer),
     )
-    token = await create_session_token(async_dal, dal, cfg, user=user)
+    token = await create_session_token(async_dal, dal, cfg, user=user, auth_method="admin_password")
     return LoginResult(
         token=token,
         user_id=user.id,
@@ -547,30 +635,56 @@ async def temp_password_login(
         user=None,
         username_override=identifier,
         requires_oauth_link=bool(row.force_oauth_link),
+        auth_method="temp_password",
     )
     return TempLoginResult(token=token, requires_oauth_link=bool(row.force_oauth_link))
 
 
-async def refresh_token(async_dal: Any, dal: Any, cfg: HubAPIConfig, *, token: str) -> str:
-    """Refresh token."""
-    if not token:
-        raise bad_request("Token required")
+@dataclass(slots=True, frozen=True)
+class RefreshedSession:
+    """A renewed session: the new access token and (usually) the rotated refresh token.
 
-    payload = verify_jwt_token(token, cfg.secret_key)
-    if payload is None:
-        raise unauthorized("Invalid token")
+    `refresh_token` is `None` for a grace-window replay (a parallel request that presented the
+    token another request had rotated a moment earlier): the browser already holds the rotated
+    cookie from that other response, so only a fresh access token is handed out.
+    """
 
-    session_rows = await async_dal.select_async(
-        dal((dal.hub_sessions.session_token == token) & (dal.hub_sessions.is_active == True))  # noqa: E712
-    )
-    if not session_rows:
-        raise unauthorized("Invalid session")
+    access_token: str
+    refresh_token: str | None
+    user_id: int
 
-    user_id = int(payload["sub"])
-    user_rows = await async_dal.select_async(dal(dal.hub_users.id == user_id))
-    if not user_rows:
+
+async def refresh_session(
+    async_dal: Any, dal: Any, cfg: HubAPIConfig, *, refresh_token: str
+) -> RefreshedSession:
+    """Renew a login session from its rotating refresh token (no forced logout).
+
+    Authenticates the refresh token, re-reads the user and tenant (so a deactivated user or a
+    changed role takes effect within one refresh), rotates the refresh token and mints a fresh
+    short-lived access token under the same `sid`. A refresh token that was already rotated
+    away -- outside the short parallel-request grace window -- revokes the whole session
+    (`services/session_service.py`). Token renewals are not individually audited: the session's
+    issuance, its revocations and any reuse detection are.
+    """
+    if not refresh_token:
+        raise bad_request("Refresh token required")
+
+    ctx = await session_service.authenticate_refresh_token(async_dal, dal, cfg, refresh_token)
+
+    user_rows = await async_dal.select_async(dal(dal.hub_users.id == ctx.user_id))
+    if not user_rows or not user_rows.first().is_active:
+        await session_service.revoke_session(
+            async_dal, dal, session_id=ctx.session_id, reason="user_unavailable"
+        )
         raise unauthorized("Invalid session")
     row = user_rows.first()
+
+    tenant_rows = await async_dal.select_async(
+        dal((dal.tenants.slug == ctx.tenant_slug) & (dal.tenants.is_active == True))  # noqa: E712
+    )
+    tenant_id = tenant_rows.first().id if tenant_rows else None
+
+    rotated = await session_service.complete_refresh(async_dal, dal, cfg, ctx)
 
     user = SessionUser(
         id=row.id,
@@ -581,25 +695,89 @@ async def refresh_token(async_dal: Any, dal: Any, cfg: HubAPIConfig, *, token: s
         is_vendor=bool(row.is_vendor),
         is_analytics_consumer=bool(row.is_analytics_consumer),
     )
-    new_token = await create_session_token(
-        async_dal, dal, cfg, user=user, tenant_slug=payload.get("tenant")
+    roles, scopes = await _scopes_for(async_dal, dal, user=user, tenant_id=tenant_id)
+    access_token = _mint_access_token(
+        cfg,
+        user=user,
+        username_override=None,
+        roles=roles,
+        scopes=scopes,
+        tenant=ctx.tenant_slug,
+        session_id=rotated.session_id,
+        issued_at=await _issued_at_after_revocations(user),
     )
-    await async_dal.update_async(
-        dal.hub_sessions.session_token == token,
-        is_active=False,
-        revoked_at=datetime.now(UTC),
+    return RefreshedSession(
+        access_token=access_token, refresh_token=rotated.refresh_token, user_id=user.id
     )
-    return new_token
 
 
-async def logout(async_dal: Any, dal: Any, *, token: str | None) -> None:
-    """Logout."""
-    if token:
-        await async_dal.update_async(
-            dal.hub_sessions.session_token == token,
-            is_active=False,
-            revoked_at=datetime.now(UTC),
+async def logout(
+    async_dal: Any,
+    dal: Any,
+    cfg: HubAPIConfig,
+    *,
+    access_token: str | None,
+    refresh_token: str | None,
+) -> None:
+    """End the caller's login session and kill the access token they presented.
+
+    Either credential proves the session is theirs (the access token by signature, the refresh
+    token by its HMAC tag); neither present is a harmless no-op, matching the old contract.
+    Revokes: the session's `sid` (every access token it ever minted, immediately), its refresh
+    capability (database), and the presented access token's `jti` (covers a token with no
+    session, e.g. temp-password). Never raises for a revocation-store outage -- the database half
+    already stopped refresh, and the worst case is the access token's remaining <= 15 minutes.
+    """
+    session_ids: set[int] = set()
+    tenant_slug: str | None = None
+
+    parsed = session_service.parse_refresh_token(cfg.secret_key, refresh_token)
+    if parsed is not None:
+        session_ids.add(parsed.session_id)
+        tenant_slug = parsed.tenant_slug
+
+    if access_token:
+        payload = verify_jwt_token(access_token, cfg.secret_key)
+        if payload is not None:
+            jti = payload.get("jti")
+            if isinstance(jti, str):
+                await session_service.revoke_access_token(jti, payload.get("exp"))
+            sid = payload.get("sid")
+            if isinstance(sid, str) and sid.isdigit():
+                session_ids.add(int(sid))
+            tenant_slug = tenant_slug or payload.get("tenant")
+
+    for session_id in sorted(session_ids):
+        owner = await session_service.get_session_owner(async_dal, dal, session_id=session_id)
+        outcome = await session_service.revoke_session(
+            async_dal, dal, session_id=session_id, reason="logout"
         )
+        if owner is not None:
+            await record_session_revoked(
+                user_id=owner,
+                tenant_slug=tenant_slug,
+                reason="logout",
+                kind="session",
+                sessions=outcome.sessions_revoked,
+                session_id=session_id,
+            )
+
+
+async def logout_all(
+    async_dal: Any, dal: Any, *, user_id: int
+) -> session_service.RevocationOutcome:
+    """Sign `user_id` out everywhere: all sessions end, all access tokens issued so far die."""
+    outcome = await session_service.revoke_user_sessions(
+        async_dal, dal, user_id=user_id, reason="logout_all"
+    )
+    await record_session_revoked(
+        user_id=user_id,
+        tenant_slug=None,
+        reason="logout_all",
+        kind="user",
+        sessions=outcome.sessions_revoked,
+    )
+    return outcome
 
 
 @dataclass(slots=True, frozen=True)
@@ -715,6 +893,20 @@ async def set_password(
 
     new_hash = await _hash_password(new_password)
     await async_dal.update_async(dal.hub_users.id == user_id, password_hash=new_hash)
+
+    # A credential change ends every session that was opened with the old one -- including this
+    # one: the caller signs in again with the new password. Access tokens die via the per-user
+    # `iat` cutoff, refresh via the database (`services/session_service.py`).
+    outcome = await session_service.revoke_user_sessions(
+        async_dal, dal, user_id=user_id, reason="password_changed"
+    )
+    await record_session_revoked(
+        user_id=user_id,
+        tenant_slug=None,
+        reason="password_changed",
+        kind="user",
+        sessions=outcome.sessions_revoked,
+    )
 
 
 @dataclass(slots=True, frozen=True)

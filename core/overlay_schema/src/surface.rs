@@ -16,12 +16,14 @@ use std::fmt;
 /// `full_screen`/`media`/`crawler`/`music` are the four surfaces the
 /// existing Python scaffold already renders (`render.py::RENDERERS` +
 /// `render_music`); `alert_box`/`chat`/`goals`/`ticker`/`image` are new,
-/// added for #458's widget palette. The pre-existing `live` (HLS
-/// livestream) surface is intentionally NOT a member of this enum -- it
-/// is svc-streaming-rust's own poll-driven status surface
-/// (`render_live`/`blueprints/live_stream.py`), never pushed to via the
-/// `overlay`/`push` path this crate's [`OverlayPush`](crate::OverlayPush)
-/// describes.
+/// added for #458's widget palette. `caption` is the live closed-caption
+/// (translated chat) overlay ported from `core/browser_source_core_module`'s
+/// `/overlay/captions/<key>` + `/ws/captions/<community_id>` pair. The
+/// pre-existing `live` (HLS livestream) surface is intentionally NOT a
+/// member of this enum -- it is svc-streaming-rust's own poll-driven
+/// status surface (`render_live`/`blueprints/live_stream.py`), never
+/// pushed to via the `overlay`/`push` path this crate's
+/// [`OverlayPush`](crate::OverlayPush) describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
@@ -34,6 +36,7 @@ pub enum Surface {
     Goals,
     Ticker,
     Image,
+    Caption,
 }
 
 impl Surface {
@@ -50,6 +53,7 @@ impl Surface {
         Surface::Goals,
         Surface::Ticker,
         Surface::Image,
+        Surface::Caption,
     ];
 
     /// The route-path / URL-segment form (`"full_screen"`, `"alert_box"`)
@@ -67,6 +71,7 @@ impl Surface {
             Surface::Goals => "goals",
             Surface::Ticker => "ticker",
             Surface::Image => "image",
+            Surface::Caption => "caption",
         }
     }
 }
@@ -102,7 +107,11 @@ mod tests {
                 "{surface:?} listed more than once in ALL"
             );
         }
-        assert_eq!(seen.len(), 9, "Surface::ALL must enumerate all 9 surfaces");
+        assert_eq!(
+            seen.len(),
+            10,
+            "Surface::ALL must enumerate all 10 surfaces"
+        );
     }
 
     #[test]

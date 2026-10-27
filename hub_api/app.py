@@ -20,6 +20,7 @@ privileged port, runs as `USER appuser` in the Dockerfile.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from flask_core import (
@@ -35,9 +36,11 @@ from flask_core.service_jwt import (
     load_identities_from_env,
     load_issuer_from_env,
 )
+from flask_core.token_revocation import get_token_revocation
 from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
+from werkzeug.exceptions import HTTPException
 
 from blueprints import register_blueprints
 from blueprints.service_jwt_bp import service_jwt_bp
@@ -45,18 +48,47 @@ from bootstrap import BootstrapState, BootstrapStatus, run_bootstrap_loop
 from config import HubAPIConfig
 from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_server
 from openapi.routes import register_openapi_docs
+from services.audit_http import AUDIT_SERVICE_CONFIG_KEY, install_audit_hooks
+from services.audit_service import get_audit_service
+from services.ban_suppression import run_purge_loop
 from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
+from services.community_common import api_error
+from services.envelope.runtime import build_envelope_runtime
+from services.identity_resolution_service import run_uuid_availability_monitor
+from services.object_storage_kms import get_object_storage_sse
 from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
     bind_lifecycle_tables,
+    bind_marketplace_billing_tables,
+    bind_marketplace_module_tables,
     bind_music_tables,
     bind_platform_tables,
     bind_token_billing_tables,
 )
 from services.session_cookie import bearer_token_from_cookie
+
+logger = logging.getLogger(__name__)
+
+
+def _install_error_handlers(app: Quart) -> None:
+    """Install the app-wide unhandled-exception handler (gh-893 defense-in-depth).
+
+    Without it Quart answers any unhandled exception with a raw HTML 500
+    page. This logs the full exception (never swallowed) and returns the
+    standard JSON error envelope instead; the exception text is NOT echoed
+    to the client. `HTTPException`s (404/405/413/...) keep their own behavior.
+    """
+
+    @app.errorhandler(Exception)
+    async def _unhandled(exc: Exception) -> Any:
+        """Log the exception, then return the JSON 500 envelope."""
+        if isinstance(exc, HTTPException):
+            return exc
+        logger.exception("unhandled_exception path=%s method=%s", request.path, request.method)
+        return api_error("An unexpected error occurred", 500)
 
 
 def _bind_reference_tables(dal: Any) -> None:
@@ -101,6 +133,12 @@ def _bind_reference_tables(dal: Any) -> None:
         migrate=False,
     )
     bind_platform_tables(dal)
+    # Shared marketplace/module table family (hub_modules, reviews,
+    # installations, marketplace_catalog, subscriptions, settings, discount
+    # tables) -- defined exactly once here; domain binders never redefine them.
+    bind_marketplace_module_tables(dal)
+    # Billing-only tables (payments, premium subs) -- bound once at startup.
+    bind_marketplace_billing_tables(dal)
     # App Bundle 3-tier lifecycle (marketplace_lifecycle group) -- append-only
     # per hub_api/PORTING.md's per-group isolation note; see
     # services/schema.py::bind_lifecycle_tables's own docstring.
@@ -220,7 +258,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     register_blueprints(app)
     register_openapi_docs(app)
 
+    # GRC audit finding #3 -- one app-wide hook gives every scope-protected mutation, every
+    # authenticated 403, and the statutory privacy routes tamper-evident audit coverage
+    # (services/audit_http.py). Entitlement-gated per tenant inside the service; a no-op for
+    # tenants without the Enterprise audit feature.
+    install_audit_hooks(app)
+
     app.before_request(bridge_session_cookie_to_bearer)
+    _install_error_handlers(app)
 
     # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- bootstrap.py's schema
     # check/fresh-install creation, exposed as a dedicated `/ready` route rather
@@ -277,6 +322,8 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # fails closed with 503) rather than crashing hub-api's whole app
         # factory -- most non-prod/local deployments never call
         # /internal/service-token at all.
+        app.config["SPIFFE_PEER_TRUST"] = cfg.spiffe_peer_trust
+        app.config["SPIFFE_PEER_ID_HEADER"] = cfg.spiffe_peer_id_header
         try:
             identities = load_identities_from_env(env=cfg.deployment_env)
             issuer = load_issuer_from_env(identities)
@@ -293,6 +340,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # flask_core.rate_limiter.RateLimiter.connect()'s own fail-open
         # doc comment. Never blocks startup on Redis being down.
         await rate_limiter.connect()
+        # Build the JWT revocation store NOW (from VALKEY_URL/REDIS_URL + JWT_REVOCATION_*) so a
+        # bad setting stops startup loudly instead of surfacing as a 500 on the first
+        # authenticated request. Construction does not connect; a store that is down at boot is
+        # handled by the documented outage policy, never by refusing to start.
+        revocation = get_token_revocation()
+        logger.info(
+            f"JWT revocation store ready: backend={revocation.backend_name} "
+            f"cache_ttl_s={revocation.policy.cache_ttl_seconds} "
+            f"grace_s={revocation.policy.grace_seconds}"
+        )
         async_dal = init_database(
             cfg.database_url,
             pool_size=cfg.db_pool_size,
@@ -315,6 +372,20 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # rather than replacing it.
         install_dal = await build_install_dal(cfg.database_url, pool_size=cfg.db_pool_size)
         app.config["install_dal"] = install_dal
+        # Tamper-evident audit service on the same AsyncDB (migration 0053's `audit_events`).
+        # Published under the key `services/audit_http.py` reads; tests/test_audit_http.py
+        # pins that startup wires it, so a regression cannot silently disable auditing.
+        app.config[AUDIT_SERVICE_CONFIG_KEY] = get_audit_service(install_dal)
+
+        # Enterprise external KMS / BYOK (services/envelope/runtime.py). Inert by
+        # default: the provider registry is empty unless ENVELOPE_KMS_PROVIDERS is
+        # set and the platform KEK is resolved lazily, so the platform-managed
+        # baseline needs zero configuration. An ENABLED provider with bad platform
+        # credentials raises here -- a loud startup failure, not a first-request one.
+        app.config["envelope_runtime"] = build_envelope_runtime(install_dal)
+        # Object-storage SSE posture (baseline AES256 unless kms.objectStorage.mode=kms): a
+        # misconfigured KMS mode raises here; an unentitled one logs a loud ERROR (never silent).
+        await get_object_storage_sse().startup_check()
 
         # data-plane scale design rev4 Sec7 -- the bundle_active_set_watermark
         # safe_seq publisher. Postgres-only: pg_snapshot_xmin() has no sqlite
@@ -343,7 +414,9 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         app.config["grpc_server"] = None
         if cfg.grpc_enabled and issuer is not None:
             try:
-                app.config["grpc_server"] = await start_internal_grpc_server(issuer=issuer)
+                app.config["grpc_server"] = await start_internal_grpc_server(
+                    issuer=issuer, async_dal=async_dal
+                )
             except Exception as exc:  # noqa: BLE001 - see fail-open/fail-closed note above
                 logger.error(
                     f"hub-api internal gRPC server did not start: {exc}",
@@ -353,6 +426,22 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             logger.warning(
                 "hub-api internal gRPC server not started: service_jwt issuer unconfigured",
                 extra={"action": "grpc_startup_skipped"},
+            )
+        # Surfaces community members whose user_uuid the membership trigger could not
+        # derive (alembic 0048 fail-closed NULLs) as a gauge + WARNING -- a dead pass
+        # is logged and retried, never a request failure. Waits for schema readiness.
+        app.config["identity_uuid_monitor"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["identity_uuid_monitor"] = asyncio.create_task(
+                run_uuid_availability_monitor(async_dal, is_ready=lambda: bootstrap_status.is_ready)
+            )
+        # Deletes expired ban-suppression rows (GDPR storage limitation). Lookups already ignore
+        # an expired row, so a late/failed pass never changes a decision; a dead pass is logged
+        # and retried. Waits for schema readiness.
+        app.config["suppression_purge_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["suppression_purge_task"] = asyncio.create_task(
+                run_purge_loop(async_dal, dal, is_ready=lambda: bootstrap_status.is_ready)
             )
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
@@ -379,6 +468,22 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping bootstrap task on shutdown: {exc}")
+        uuid_monitor = app.config.get("identity_uuid_monitor")
+        if uuid_monitor is not None:
+            uuid_monitor.cancel()
+            try:
+                await uuid_monitor
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping identity uuid monitor on shutdown: {exc}")
+        purge_task = app.config.get("suppression_purge_task")
+        if purge_task is not None:
+            purge_task.cancel()
+            try:
+                await purge_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping suppression purge task on shutdown: {exc}")
         watermark_job = app.config.get("bundle_active_set_watermark_job")
         if watermark_job is not None:
             try:
@@ -391,6 +496,12 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
                 await async_dal.close_async()
             except Exception as exc:  # noqa: BLE001 - shutdown must not raise
                 logger.warning(f"Error closing DAL on shutdown: {exc}")
+        envelope_runtime = app.config.get("envelope_runtime")
+        if envelope_runtime is not None:
+            try:
+                await envelope_runtime.aclose()
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                logger.warning(f"Error closing envelope runtime on shutdown: {type(exc).__name__}")
         install_dal = app.config.get("install_dal")
         if install_dal is not None:
             try:
@@ -401,6 +512,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             await rate_limiter.disconnect()
         except Exception as exc:  # noqa: BLE001 - shutdown must not raise
             logger.warning(f"Error closing rate limiter on shutdown: {exc}")
+        try:
+            get_token_revocation().close()
+        except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+            logger.warning(f"Error closing JWT revocation store on shutdown: {type(exc).__name__}")
         grpc_server = app.config.get("grpc_server")
         if grpc_server is not None:
             try:

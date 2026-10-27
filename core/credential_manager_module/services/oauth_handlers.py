@@ -13,18 +13,40 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 import httpx
+from flask_core.safe_logging import describe_exc
 
 logger = logging.getLogger(__name__)
 
+_SLACK_ERROR_RE = re.compile(r"[a-z0-9_]{1,64}")
+
 
 class OAuthRefreshError(Exception):
-    """Base exception for OAuth refresh failures."""
+    """Base exception for OAuth refresh failures.
+
+    SECURITY: the message is always built from `describe_exc()` (exception type,
+    HTTP status, fixed category) or a fixed string -- never from the underlying
+    exception's text, which can carry the request URL/body (`client_secret`,
+    `refresh_token`). Callers log `str(exc)` of this type freely.
+    """
 
     pass
+
+
+def _wrap_refresh_failure(platform: str, exc: Exception) -> OAuthRefreshError:
+    """Log a redacted `platform` refresh failure and return the error to raise.
+
+    Replaces the old `f"...{str(e)}"` pattern: `str(e)` of an HTTP/JSON error can
+    embed the request URL or body, which contains the OAuth `client_secret` and
+    `refresh_token`. Only type/code/category reach the log and the new message.
+    """
+    detail = describe_exc(exc)
+    logger.error("%s token refresh failed: %s", platform, detail)
+    return OAuthRefreshError(f"{platform} refresh failed: {detail}")
 
 
 class BaseOAuthHandler(ABC):
@@ -86,9 +108,22 @@ class BaseOAuthHandler(ABC):
                 response.raise_for_status()
                 return response.json()
         except httpx.HTTPError as e:
-            raise OAuthRefreshError(f"HTTP request failed: {str(e)}") from e
+            # `from None`: the cause (httpx error) carries the request URL/body;
+            # keep it out of any rendered traceback chain.
+            raise OAuthRefreshError(f"HTTP request failed: {describe_exc(e)}") from None
         except Exception as e:
-            raise OAuthRefreshError(f"Request error: {str(e)}") from e
+            raise OAuthRefreshError(f"Request error: {describe_exc(e)}") from None
+
+
+def _slack_error_code(value: object) -> str:
+    """Return Slack's snake_case `error` code, or a fixed label if it is anything else.
+
+    The code is remote-controlled response data that ends up in `OAuthRefreshError`
+    (and so in logs); only a short lowercase identifier is passed through.
+    """
+    if isinstance(value, str) and _SLACK_ERROR_RE.fullmatch(value):
+        return value
+    return "Unknown error"
 
 
 class TwitchOAuthHandler(BaseOAuthHandler):
@@ -125,8 +160,7 @@ class TwitchOAuthHandler(BaseOAuthHandler):
         except OAuthRefreshError:
             raise
         except Exception as e:
-            logger.error("Twitch token refresh failed: %s", e)
-            raise OAuthRefreshError(f"Twitch refresh failed: {str(e)}") from e
+            raise _wrap_refresh_failure("Twitch", e) from None
 
 
 class DiscordOAuthHandler(BaseOAuthHandler):
@@ -163,8 +197,7 @@ class DiscordOAuthHandler(BaseOAuthHandler):
         except OAuthRefreshError:
             raise
         except Exception as e:
-            logger.error("Discord token refresh failed: %s", e)
-            raise OAuthRefreshError(f"Discord refresh failed: {str(e)}") from e
+            raise _wrap_refresh_failure("Discord", e) from None
 
 
 class SlackOAuthHandler(BaseOAuthHandler):
@@ -192,7 +225,7 @@ class SlackOAuthHandler(BaseOAuthHandler):
             )
 
             if not response.get("ok"):
-                raise OAuthRefreshError(response.get("error", "Unknown error"))
+                raise OAuthRefreshError(_slack_error_code(response.get("error")))
 
             return {
                 "access_token": response.get("access_token"),
@@ -204,8 +237,7 @@ class SlackOAuthHandler(BaseOAuthHandler):
         except OAuthRefreshError:
             raise
         except Exception as e:
-            logger.error("Slack token refresh failed: %s", e)
-            raise OAuthRefreshError(f"Slack refresh failed: {str(e)}") from e
+            raise _wrap_refresh_failure("Slack", e) from None
 
 
 class YouTubeOAuthHandler(BaseOAuthHandler):
@@ -242,8 +274,7 @@ class YouTubeOAuthHandler(BaseOAuthHandler):
         except OAuthRefreshError:
             raise
         except Exception as e:
-            logger.error("YouTube token refresh failed: %s", e)
-            raise OAuthRefreshError(f"YouTube refresh failed: {str(e)}") from e
+            raise _wrap_refresh_failure("YouTube", e) from None
 
 
 class SpotifyOAuthHandler(BaseOAuthHandler):
@@ -289,8 +320,7 @@ class SpotifyOAuthHandler(BaseOAuthHandler):
         except OAuthRefreshError:
             raise
         except Exception as e:
-            logger.error("Spotify token refresh failed: %s", e)
-            raise OAuthRefreshError(f"Spotify refresh failed: {str(e)}") from e
+            raise _wrap_refresh_failure("Spotify", e) from None
 
 
 class KickOAuthHandler(BaseOAuthHandler):
@@ -327,8 +357,7 @@ class KickOAuthHandler(BaseOAuthHandler):
         except OAuthRefreshError:
             raise
         except Exception as e:
-            logger.error("Kick token refresh failed: %s", e)
-            raise OAuthRefreshError(f"Kick refresh failed: {str(e)}") from e
+            raise _wrap_refresh_failure("Kick", e) from None
 
 
 def get_handler(platform: str) -> BaseOAuthHandler:

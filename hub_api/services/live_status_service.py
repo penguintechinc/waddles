@@ -5,7 +5,7 @@ Reads the SAME `coordination` (`004_add_missing_tables.sql`) JOIN
 `services/stream_service.py`/`services/public_service.py`/
 `services/community_music_queue_service.py` already read -- the write
 side is `core/svc_process/services/live_status.py`, upserted from Twitch
-EventSub `stream.online`/`stream.offline` (`core/svc_ingest/bundles/
+EventSub `stream.online`/`stream.offline` (`core/svc_ingest/builtin_handlers/
 twitch_eventsub_ingest.py`).
 
 Unlike `stream_service.py`'s own `_join_query` (which filters to

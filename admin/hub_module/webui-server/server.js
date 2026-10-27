@@ -7,7 +7,7 @@
  * on Express instead of nginx per house convention.
  */
 import express from 'express';
-import { createProxyMiddleware } from 'http-proxy-middleware';
+import { createProxy } from './proxy.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -38,18 +38,11 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Reverse proxy /api/* to hub-api. Express strips the '/api' mount prefix
-// from req.url before this middleware ever sees it, so pathRewrite adds it
-// back -- without this, hub-api (routes mounted at /api/v1) 404s on every
-// proxied request (e.g. /api/v1/auth/login arrives as /v1/auth/login).
-app.use(
-  '/api',
-  createProxyMiddleware({
-    target: HUB_API_URL,
-    changeOrigin: true,
-    pathRewrite: { '^/': '/api/' },
-  }),
-);
+// Reverse proxy /api/* to hub-api (dependency-free, see proxy.js). Express
+// strips the '/api' mount prefix from req.url, so the proxy forwards
+// req.originalUrl -- hub-api routes are mounted at /api/v1, so the prefix
+// must be kept (e.g. /api/v1/auth/login stays /api/v1/auth/login).
+app.use('/api', createProxy(HUB_API_URL));
 
 app.use(express.static(DIST_DIR));
 

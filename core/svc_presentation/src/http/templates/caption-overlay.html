@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Caption Overlay</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: transparent;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        .caption-container {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 80%;
+            max-width: 1200px;
+            height: auto;
+            max-height: 300px;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 8px;
+            padding: 15px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            overflow: hidden;
+            pointer-events: none;
+        }
+
+        .captions-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            max-height: 270px;
+            overflow-y: auto;
+            padding-right: 8px;
+        }
+
+        .captions-list::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .captions-list::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+        }
+
+        .captions-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 2px;
+        }
+
+        .captions-list::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.5);
+        }
+
+        .caption-item {
+            background: rgba(255, 255, 255, 0.05);
+            border-left: 3px solid #4A90E2;
+            padding: 10px 12px;
+            border-radius: 4px;
+            animation: slideInCaption 0.4s ease-out;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .caption-item.fading-out {
+            animation: fadeOutCaption 0.5s ease-out forwards;
+        }
+
+        @keyframes slideInCaption {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        @keyframes fadeOutCaption {
+            from {
+                opacity: 1;
+                transform: translateX(0);
+            }
+            to {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+        }
+
+        .caption-username {
+            font-weight: bold;
+            font-size: 14px;
+            letter-spacing: 0.5px;
+        }
+
+        .caption-translated {
+            color: #ffffff;
+            font-size: 15px;
+            line-height: 1.4;
+        }
+
+        .caption-original {
+            color: #999999;
+            font-size: 12px;
+            font-style: italic;
+            margin-top: 4px;
+            opacity: 0.8;
+        }
+
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+            color: white;
+            display: none;
+            z-index: 10;
+        }
+
+        .connection-status.connected {
+            display: block;
+            background: rgba(76, 175, 80, 0.8);
+        }
+
+        .connection-status.disconnected {
+            display: block;
+            background: rgba(244, 67, 54, 0.8);
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+
+        .connection-status.connected .status-dot {
+            background: #4caf50;
+            animation: pulse 2s infinite;
+        }
+
+        .connection-status.disconnected .status-dot {
+            background: #f44336;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .empty-state {
+            color: #999999;
+            text-align: center;
+            padding: 20px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .empty-state.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="connection-status disconnected" id="connectionStatus">
+        <span class="status-dot"></span>
+        <span id="statusText">Connecting...</span>
+    </div>
+
+    <div class="caption-container" id="captionContainer">
+        <div class="empty-state show" id="emptyState">Waiting for captions...</div>
+        <div class="captions-list" id="captionsList"></div>
+    </div>
+
+
+
+    <script>
+        'use strict';
+
+        // This page is static: it embeds no community data, no key and no
+        // caption text. Everything dynamic arrives over the websocket and is
+        // written with textContent only -- never innerHTML/outerHTML/
+        // document.write/eval -- so a hostile chat line can never become
+        // markup. (A unit test in crate::http::captions pins that.)
+
+        // Configuration, parsed from the OBS browser-source URL.
+        const config = {
+            communityId: null,
+            overlayKey: null,
+            showOriginal: true,
+            maxCaptions: 3,
+            duration: 5000,
+            wsUrl: null
+        };
+
+        const DEFAULT_COLOR = '#4A90E2';
+
+        // Language color mapping
+        const languageColors = Object.freeze({
+            'en': '#4A90E2',   // Blue
+            'es': '#E24A4A',   // Red
+            'fr': '#4AE2B8',   // Teal
+            'de': '#E2B84A',   // Orange
+            'ja': '#E24AB8',   // Pink
+            'ko': '#B84AE2',   // Purple
+            'zh': '#4AE24A',   // Green
+            'pt': '#E2904A',   // Coral
+            'ru': '#904AE2',   // Violet
+            'ar': '#E2E24A',   // Yellow
+            'hi': '#4AB8E2',   // Cyan
+            'it': '#E24A90'    // Magenta
+        });
+
+        // State management
+        let ws = null;
+        let captions = [];
+        let reconnectTimeout = null;
+        let pingInterval = null;
+
+        function clamp(value, min, max) {
+            return Math.min(max, Math.max(min, value));
+        }
+
+        // The overlay key is the `key` query parameter, or -- for the
+        // /overlay/captions/<key> URL form -- the last path segment.
+        function keyFromPath(pathname) {
+            const parts = pathname.split('/').filter(Boolean);
+            if (parts.length >= 3 && parts[0] === 'overlay' && parts[1] === 'captions') {
+                try {
+                    return decodeURIComponent(parts[2]);
+                } catch (error) {
+                    return null;
+                }
+            }
+            return null;
+        }
+
+        // Parse URL parameters
+        function parseUrlParams() {
+            const params = new URLSearchParams(window.location.search);
+
+            config.communityId = params.get('community_id');
+            config.overlayKey = params.get('key') || keyFromPath(window.location.pathname);
+            config.showOriginal = params.get('show_original') !== 'false';
+            config.maxCaptions = clamp(parseInt(params.get('max_captions'), 10) || 3, 1, 20);
+            config.duration = clamp(parseInt(params.get('duration'), 10) || 5000, 500, 60000);
+
+            // Validate required parameters
+            if (!/^[0-9]+$/.test(config.communityId || '') || !config.overlayKey) {
+                console.error('Missing required parameters: community_id and key');
+                updateStatus('Missing parameters', false);
+                return false;
+            }
+
+            // Construct WebSocket URL
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host;
+            config.wsUrl = protocol + '//' + host + '/ws/captions/' +
+                encodeURIComponent(config.communityId) +
+                '?key=' + encodeURIComponent(config.overlayKey);
+
+            return true;
+        }
+
+        // Update connection status
+        function updateStatus(text, connected) {
+            const statusElement = document.getElementById('connectionStatus');
+            const statusTextElement = document.getElementById('statusText');
+
+            statusTextElement.textContent = text;
+
+            if (connected) {
+                statusElement.classList.remove('disconnected');
+                statusElement.classList.add('connected');
+            } else {
+                statusElement.classList.remove('connected');
+                statusElement.classList.add('disconnected');
+            }
+        }
+
+        function scheduleReconnect() {
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+            }
+            reconnectTimeout = setTimeout(() => {
+                reconnectTimeout = null;
+                updateStatus('Reconnecting...', false);
+                connectWebSocket();
+            }, 5000);
+        }
+
+        // Connect to WebSocket
+        function connectWebSocket() {
+            try {
+                ws = new WebSocket(config.wsUrl);
+
+                ws.onopen = () => {
+                    updateStatus('Connected', true);
+
+                    // Setup ping interval for keepalive
+                    if (pingInterval) {
+                        clearInterval(pingInterval);
+                    }
+                    pingInterval = setInterval(() => {
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'ping' }));
+                        }
+                    }, 30000);
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+
+                        if (data.type === 'pong') {
+                            // Ignore pong responses
+                            return;
+                        }
+
+                        if (data.type === 'caption') {
+                            addCaption(data);
+                        }
+                    } catch (error) {
+                        console.error('Error parsing message:', error);
+                    }
+                };
+
+                ws.onerror = () => {
+                    updateStatus('Connection error', false);
+                };
+
+                ws.onclose = () => {
+                    updateStatus('Disconnected', false);
+
+                    if (pingInterval) {
+                        clearInterval(pingInterval);
+                        pingInterval = null;
+                    }
+
+                    // Attempt to reconnect after 5 seconds
+                    scheduleReconnect();
+                };
+            } catch (error) {
+                console.error('Failed to connect WebSocket:', error);
+                updateStatus('Connection failed', false);
+                scheduleReconnect();
+            }
+        }
+
+        // Add a new caption
+        function addCaption(captionData) {
+            const emptyState = document.getElementById('emptyState');
+            const captionsList = document.getElementById('captionsList');
+
+            // Hide empty state when first caption arrives
+            if (emptyState.classList.contains('show')) {
+                emptyState.classList.remove('show');
+            }
+
+            // Create caption element
+            const captionItem = document.createElement('div');
+            captionItem.className = 'caption-item';
+
+            // Get language color (own keys only -- the code comes off the wire)
+            const langCode = captionData.target_lang || 'en';
+            const color = Object.prototype.hasOwnProperty.call(languageColors, langCode)
+                ? languageColors[langCode]
+                : DEFAULT_COLOR;
+            captionItem.style.borderLeftColor = color;
+
+            // Display name (absent on replayed history: only a tokenized
+            // user reference is stored, never a name)
+            if (captionData.display_name) {
+                const nameElement = document.createElement('div');
+                nameElement.className = 'caption-username';
+                nameElement.textContent = captionData.display_name;
+                nameElement.style.color = color;
+                captionItem.appendChild(nameElement);
+            }
+
+            // Translated text (falls back to the original)
+            const translatedElement = document.createElement('div');
+            translatedElement.className = 'caption-translated';
+            translatedElement.textContent = captionData.translated || captionData.original || '';
+            captionItem.appendChild(translatedElement);
+
+            // Original text (if show_original is true and original differs from translated)
+            if (config.showOriginal && captionData.original && captionData.original !== captionData.translated) {
+                const originalElement = document.createElement('div');
+                originalElement.className = 'caption-original';
+                originalElement.textContent = captionData.original;
+                captionItem.appendChild(originalElement);
+            }
+
+            // Add to list
+            captionsList.appendChild(captionItem);
+            captions.push({
+                element: captionItem,
+                data: captionData,
+                timestamp: Date.now()
+            });
+
+            // Enforce max captions limit
+            while (captions.length > config.maxCaptions) {
+                const oldCaption = captions.shift();
+                oldCaption.element.classList.add('fading-out');
+                setTimeout(() => {
+                    if (oldCaption.element.parentNode) {
+                        oldCaption.element.remove();
+                    }
+                }, 500);
+            }
+
+            // Set timeout to remove caption after duration
+            setTimeout(() => {
+                removeCaption(captionItem);
+            }, config.duration);
+        }
+
+        // Remove a caption with animation
+        function removeCaption(element) {
+            const caption = captions.find(c => c.element === element);
+            if (!caption) {
+                return;
+            }
+            caption.element.classList.add('fading-out');
+
+            setTimeout(() => {
+                if (caption.element.parentNode) {
+                    caption.element.remove();
+                }
+                // Re-resolve the index: other captions may have come and
+                // gone during the fade-out.
+                const index = captions.indexOf(caption);
+                if (index !== -1) {
+                    captions.splice(index, 1);
+                }
+
+                // Show empty state if no captions
+                if (captions.length === 0) {
+                    document.getElementById('emptyState').classList.add('show');
+                }
+            }, 500);
+        }
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (ws) {
+                ws.close();
+            }
+            if (pingInterval) {
+                clearInterval(pingInterval);
+            }
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+            }
+        });
+
+        // Initialize
+        function init() {
+            if (!parseUrlParams()) {
+                return;
+            }
+            connectWebSocket();
+        }
+
+        // Start initialization when DOM is ready
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

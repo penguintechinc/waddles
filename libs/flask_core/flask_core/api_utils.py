@@ -5,7 +5,7 @@ API Utilities
 Standardized API response formatting, error handling, and decorators.
 """
 
-from quart import jsonify, request, Blueprint
+from quart import jsonify, make_response, request, Blueprint
 from functools import wraps
 from typing import Any, Dict, Optional, Callable, List
 import time
@@ -13,6 +13,8 @@ import logging
 import os
 import psutil
 from datetime import datetime
+
+from .db_errors import describe_db_error, format_sanitized_traceback, is_db_driver_error
 
 logger = logging.getLogger(__name__)
 
@@ -348,16 +350,27 @@ def async_endpoint(f: Callable) -> Callable:
         except Exception as e:
             # Server error
             execution_time = int((time.time() - start_time) * 1000)
+            # A DB driver error's message (and any traceback rendering it) can
+            # embed bound values (PII/tokens) -- log type/SQLSTATE only, and a
+            # frame-only traceback at DEBUG. Non-DB errors keep the full detail.
+            db_failure = is_db_driver_error(e)
             logger.error(
-                f"Request to {f.__name__} failed with exception: {str(e)}",
+                f"Request to {f.__name__} failed with exception: "
+                f"{describe_db_error(e) if db_failure else str(e)}",
                 extra={
                     'event_type': 'API_REQUEST',
                     'action': f.__name__,
                     'result': 'ERROR',
                     'execution_time': execution_time
                 },
-                exc_info=True
+                exc_info=not db_failure
             )
+            if db_failure and logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Request to %s failed: sanitized traceback\n%s",
+                    f.__name__,
+                    format_sanitized_traceback(e),
+                )
             return error_response("Internal server error", status_code=500)
 
     return decorated_function
@@ -479,10 +492,13 @@ def rate_limit(requests_per_minute: int = 60):
             rate_key = f"rate_limit:{user_id}:{f.__name__}"
 
             # Check rate limit
+            # Positional on purpose: RateLimiter.check_rate_limit(identifier, limit, window)
+            # takes no `key=`/`window_seconds=` keywords, so the old keyword call raised
+            # TypeError against the real RateLimiter (-> 500 on every limited route).
             is_allowed = await rate_limiter.check_rate_limit(
-                key=rate_key,
-                limit=requests_per_minute,
-                window_seconds=60
+                rate_key,
+                requests_per_minute,
+                60
             )
 
             if not is_allowed:
@@ -551,7 +567,9 @@ def cors_headers(
 
             # Convert to Response object if needed
             if not hasattr(resp, 'headers'):
-                resp = jsonify(resp) if not isinstance(resp, str) else resp
+                # A bare str has no .headers either -- wrap it in a real Response too,
+                # otherwise the header assignment below raised AttributeError (500).
+                resp = jsonify(resp) if not isinstance(resp, str) else await make_response(resp)
 
             resp.headers['Access-Control-Allow-Origin'] = ', '.join(origins)
             resp.headers['Access-Control-Allow-Methods'] = ', '.join(methods)

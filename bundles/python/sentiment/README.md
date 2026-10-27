@@ -1,0 +1,18 @@
+# sentiment
+
+`!sentiment <text>` -> a friendly mood reply, e.g. `Sentiment: positive (92% confident)`. Stateless.
+
+- AI via `waddle_sdk.ai.generate` (`ai.generate`, DANGEROUS; `stage-next` world), `json=True` (host picks gemma e4b) returning `{sentiment, confidence, emoji}`; one call per command, in `transform()` only.
+- The JSON is untrusted: parsed defensively (closed label set, confidence 0..1, emoji only if non-ASCII/short); malformed output replies "unreadable analysis" and fails loud in `dispatch()`.
+- Activation-gated, no feature flag. Perms: `ai.generate`, `chat.send:{discord,twitch}`.
+- Input capped at 400 chars; host rejects PII. Logs are PII-free (platform, op, sentiment label, input length only).
+- Tests use a mocked AI host; full e2e needs Ollama: `python3 -m pytest` in this dir.
+
+## Output safety
+
+The model-supplied emoji is untrusted text (label and confidence are validated), so it passes through `waddle_sdk.safe_text.sanitize_user_text` last, before it enters the reply: a forged `{user:<token>}` placeholder is escaped and `@everyone`/`@here`/`<@id>` markup is defanged. No `allow_tokens` -- nothing in model output is a host-minted mention.
+
+The emoji leads the reply and `/ban é` passes its check (non-ASCII, printable, <= 8 chars), so a reply
+that would start with a chat-command lead (`/`, `.`, `!` -- Twitch/IRC run `/` and `.` as the bot's
+own commands; `!` re-triggers other bots) is prefixed with a visible speech-balloon. The lead check
+ignores control and invisible characters (they are stripped or invisible on the wire).

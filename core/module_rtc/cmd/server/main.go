@@ -35,8 +35,10 @@ func main() {
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"healthy","module":"%s","version":"%s","timestamp":"%s"}`,
-			cfg.ModuleName, cfg.ModuleVersion, time.Now().UTC().Format(time.RFC3339))
+		if _, err := fmt.Fprintf(w, `{"status":"healthy","module":"%s","version":"%s","timestamp":"%s"}`,
+			cfg.ModuleName, cfg.ModuleVersion, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			log.Printf("health response write failed: %v", err)
+		}
 	}).Methods("GET")
 
 	handlers.RegisterRoutes(r)

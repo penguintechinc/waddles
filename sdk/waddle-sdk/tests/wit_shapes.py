@@ -378,3 +378,19 @@ class UnsupportedStage:
     """Matches the generated ``types.UnsupportedStage`` record."""
 
     stage: str
+
+
+@dataclass
+class WitStageEnvelopeV2:
+    """Matches the generated ``types_v2.StageEnvelope`` record (``world stage-v2``)."""
+
+    tenant_id: int
+    community_id: int
+    tenant: str
+    community: str | None
+    app_id: str
+    stage: str
+    event: WitPlatformEvent
+    ts: str
+    target_app_id: str | None
+    trace_context: str | None

@@ -15,10 +15,17 @@ import asyncio
 
 import httpx
 
+from ._log_safety import describe_error, install_httpx_log_guards
 from .base_provider import BaseMusicProvider, MusicTrack
 
 
 logger = logging.getLogger(__name__)
+
+# httpx logs every request URL at INFO. SoundCloud authenticates with ``oauth_token=`` in
+# the query string, search text rides in ``q=`` and user ids sit in the path: pin the httpx
+# logger to WARNING (and strip the query as defence in depth) so none of it reaches the
+# log stream. Idempotent.
+install_httpx_log_guards()
 
 
 class SoundCloudAuthError(Exception):
@@ -29,6 +36,16 @@ class SoundCloudAuthError(Exception):
 class SoundCloudAPIError(Exception):
     """Raised when SoundCloud API requests fail."""
     pass
+
+
+# Provider-owned exceptions: their messages are static or built from `describe_error`,
+# so `describe_error` may carry their text through (httpx errors never are).
+_OWN_ERRORS = (SoundCloudAuthError, SoundCloudAPIError)
+
+
+def _describe(exc: BaseException) -> str:
+    """Describe `exc` for a log line / raised error: type, status, reason -- never its text."""
+    return describe_error(exc, own_errors=_OWN_ERRORS)
 
 
 class SoundCloudProvider(BaseMusicProvider):
@@ -148,11 +165,13 @@ class SoundCloudProvider(BaseMusicProvider):
 
             return token_data
         except httpx.HTTPStatusError as e:
-            logger.error(f"Token exchange failed: {e.response.text}")
-            raise SoundCloudAuthError(f"Failed to exchange code: {e}")
+            desc = _describe(e)
+            logger.error("SoundCloud token exchange failed: %s", desc)
+            raise SoundCloudAuthError(f"Failed to exchange code: {desc}") from None
         except Exception as e:
-            logger.error(f"Unexpected error during token exchange: {e}")
-            raise SoundCloudAuthError(f"Token exchange error: {e}")
+            desc = _describe(e)
+            logger.error("Unexpected error during SoundCloud token exchange: %s", desc)
+            raise SoundCloudAuthError(f"Token exchange error: {desc}") from None
 
     async def refresh_access_token(self) -> bool:
         """Refresh the access token using the refresh token.
@@ -191,11 +210,13 @@ class SoundCloudProvider(BaseMusicProvider):
             logger.info("Access token refreshed successfully")
             return True
         except httpx.HTTPStatusError as e:
-            logger.error(f"Token refresh failed: {e.response.text}")
-            raise SoundCloudAuthError(f"Failed to refresh token: {e}")
+            desc = _describe(e)
+            logger.error("SoundCloud token refresh failed: %s", desc)
+            raise SoundCloudAuthError(f"Failed to refresh token: {desc}") from None
         except Exception as e:
-            logger.error(f"Unexpected error during token refresh: {e}")
-            raise SoundCloudAuthError(f"Token refresh error: {e}")
+            desc = _describe(e)
+            logger.error("Unexpected error during SoundCloud token refresh: %s", desc)
+            raise SoundCloudAuthError(f"Token refresh error: {desc}") from None
 
     async def _ensure_valid_token(self):
         """Ensure we have a valid access token, refreshing if necessary.
@@ -266,11 +287,13 @@ class SoundCloudProvider(BaseMusicProvider):
 
             return response.json()
         except httpx.HTTPStatusError as e:
-            logger.error(f"SoundCloud API error: {e.response.status_code} - {e.response.text}")
-            raise SoundCloudAPIError(f"API request failed: {e}")
+            desc = _describe(e)
+            logger.error("SoundCloud API error: %s", desc)
+            raise SoundCloudAPIError(f"API request failed: {desc}") from None
         except Exception as e:
-            logger.error(f"Unexpected error during API request: {e}")
-            raise SoundCloudAPIError(f"Request error: {e}")
+            desc = _describe(e)
+            logger.error("Unexpected error during SoundCloud API request: %s", desc)
+            raise SoundCloudAPIError(f"Request error: {desc}") from None
 
     @staticmethod
     def parse_track_url(url: str) -> Optional[str]:
@@ -417,13 +440,13 @@ class SoundCloudProvider(BaseMusicProvider):
             # Get track information first
             track = await self.get_track(track_id)
             if not track:
-                logger.error(f"Track {track_id} not found")
+                logger.error("Track not found")
                 return False
 
             # Get stream URL
             stream_url = await self._get_stream_url(track_id)
             if not stream_url:
-                logger.error(f"Could not get stream URL for track {track_id}")
+                logger.error("Could not get stream URL for track")
                 return False
 
             # Clear queue and add track
@@ -431,10 +454,11 @@ class SoundCloudProvider(BaseMusicProvider):
             self.current_track_index = 0
             self.is_playing = True
 
-            logger.info(f"Started playing track: {track.name}")
+            logger.info("Started playing track (queue_len=%d)", len(self.current_queue))
             return True
         except Exception as e:
-            logger.error(f"Failed to start playback: {e}")
+            desc = _describe(e)
+            logger.error("Failed to start playback: %s", desc)
             return False
 
     async def pause(self) -> bool:
@@ -484,7 +508,7 @@ class SoundCloudProvider(BaseMusicProvider):
             return False
 
         self.current_track_index += 1
-        logger.info(f"Skipped to track index {self.current_track_index}")
+        logger.info("Skipped to track index %d", self.current_track_index)
         return True
 
     async def get_now_playing(self) -> Optional[MusicTrack]:
@@ -561,7 +585,8 @@ class SoundCloudProvider(BaseMusicProvider):
                 logger.error("Invalid credentials format")
                 return False
         except Exception as e:
-            logger.error(f"Authentication failed: {e}")
+            desc = _describe(e)
+            logger.error("SoundCloud authentication failed: %s", desc)
             return False
 
     async def health_check(self) -> bool:
@@ -575,7 +600,8 @@ class SoundCloudProvider(BaseMusicProvider):
             await self._make_request("GET", "/me")
             return True
         except Exception as e:
-            logger.error(f"Health check failed: {e}")
+            desc = _describe(e)
+            logger.error("SoundCloud health check failed: %s", desc)
             return False
 
     # Additional SoundCloud-specific methods
@@ -592,14 +618,15 @@ class SoundCloudProvider(BaseMusicProvider):
         try:
             track = await self.get_track(track_id)
             if not track:
-                logger.error(f"Track {track_id} not found")
+                logger.error("Track not found")
                 return False
 
             self.current_queue.append(track)
-            logger.info(f"Added track to queue: {track.name}")
+            logger.info("Added track to queue (queue_len=%d)", len(self.current_queue))
             return True
         except Exception as e:
-            logger.error(f"Failed to add to queue: {e}")
+            desc = _describe(e)
+            logger.error("Failed to add to queue: %s", desc)
             return False
 
     async def get_queue(self) -> List[MusicTrack]:
@@ -623,7 +650,8 @@ class SoundCloudProvider(BaseMusicProvider):
             logger.info("Cleared queue")
             return True
         except Exception as e:
-            logger.error(f"Failed to clear queue: {e}")
+            desc = _describe(e)
+            logger.error("Failed to clear queue: %s", desc)
             return False
 
     async def get_stream_url(self, track_id: str) -> Optional[str]:

@@ -144,9 +144,17 @@ async def ensure_ingest_source(
     row = existing.first()
     now = datetime.now(UTC)
     if row is not None:
+        updates: dict[str, Any] = {}
         if not row.enabled:
+            updates["enabled"] = True
+        if community_id is not None and row.community_id != community_id:
+            # Re-home a previously tenant-wide (NULL) or stale row onto the REAL community the
+            # seeder resolved -- per-community `sync_bindings()` only matches rows whose
+            # community_id equals the activation's, so an un-rehomed row never binds.
+            updates["community_id"] = community_id
+        if updates:
             await install_dal(install_dal.ingest_sources.id == row.id).update(
-                enabled=True, updated_at=now
+                updated_at=now, **updates
             )
             row = (await install_dal(install_dal.ingest_sources.id == row.id).select()).first()
         return row

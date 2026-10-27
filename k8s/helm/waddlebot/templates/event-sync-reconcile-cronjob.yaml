@@ -46,7 +46,7 @@ spec:
           {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 10 }}
           containers:
           - name: event-sync-reconcile
-            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
             imagePullPolicy: {{ .Values.global.imagePullPolicy }}
             command: ["python3", "-m", "services.event_discord_sync_service"]
             securityContext:
@@ -65,13 +65,12 @@ spec:
             - secretRef:
                 name: {{ include "waddlebot.fullname" . }}-secrets
             env:
+            # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+            # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+            # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 12 }}
             - name: MODULE_NAME
               value: "event-sync-reconcile"
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "waddlebot.fullname" . }}-secrets
-                  key: DATABASE_URL
             resources:
               {{- toYaml .Values.pipeline.eventSync.resources | nindent 14 }}
             volumeMounts:

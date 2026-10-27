@@ -291,6 +291,102 @@ impl FeatureGate for BundleDbCapabilityGate {
     }
 }
 
+/// Gates the bundle `reputation` host capability (`crate::capabilities::
+/// StageCapabilities::handle_reputation`, issue #726) -- a plain opt-in flag,
+/// same shape as [`BUNDLE_DB_CAPABILITY_FLAG`]: unseen/OFF/license-server-
+/// unreachable means every `reputation.*` call is denied `feature_disabled`.
+pub const BUNDLE_REPUTATION_CAPABILITY_FLAG: &str = "waddles.bundle-reputation-capability";
+
+/// Production [`FeatureGate`] for [`BUNDLE_REPUTATION_CAPABILITY_FLAG`] --
+/// plain read of `LicenseClient::flag_enabled` (fail-closed default).
+pub struct BundleReputationCapabilityGate(Arc<LicenseClient>);
+
+impl BundleReputationCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundleReputationCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(BUNDLE_REPUTATION_CAPABILITY_FLAG).await })
+    }
+}
+
+/// Gates the bundle `economy` host capability (`crate::capabilities::
+/// StageCapabilities::handle_economy`, issue #714) -- a plain opt-in flag,
+/// same shape as [`BUNDLE_REPUTATION_CAPABILITY_FLAG`]: unseen/OFF/license-
+/// server-unreachable means every `economy.*` call is denied
+/// `feature_disabled`.
+pub const BUNDLE_ECONOMY_CAPABILITY_FLAG: &str = "waddles.bundle-economy-capability";
+
+/// Production [`FeatureGate`] for [`BUNDLE_ECONOMY_CAPABILITY_FLAG`] -- plain
+/// read of `LicenseClient::flag_enabled` (fail-closed default).
+pub struct BundleEconomyCapabilityGate(Arc<LicenseClient>);
+
+impl BundleEconomyCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundleEconomyCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(BUNDLE_ECONOMY_CAPABILITY_FLAG).await })
+    }
+}
+
+/// Gates the bundle `identity` host capability (`crate::capabilities::
+/// StageCapabilities::handle_identity`) -- a plain opt-in flag, same shape as
+/// [`BUNDLE_ECONOMY_CAPABILITY_FLAG`]: unseen/OFF/license-server-unreachable
+/// means every `identity.*` call is denied `feature_disabled`.
+pub const BUNDLE_IDENTITY_CAPABILITY_FLAG: &str = "waddles.bundle-identity-capability";
+
+/// Production [`FeatureGate`] for [`BUNDLE_IDENTITY_CAPABILITY_FLAG`] -- plain
+/// read of `LicenseClient::flag_enabled` (fail-closed default).
+pub struct BundleIdentityCapabilityGate(Arc<LicenseClient>);
+
+impl BundleIdentityCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundleIdentityCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(BUNDLE_IDENTITY_CAPABILITY_FLAG).await })
+    }
+}
+
+/// Gates the bundle `ai` host capability (`crate::capabilities::
+/// StageCapabilities::handle_ai`) -- a plain opt-in flag, same shape as
+/// [`BUNDLE_IDENTITY_CAPABILITY_FLAG`]: unseen/OFF/license-server-unreachable
+/// means every `ai.generate` call is denied `feature_disabled`.
+///
+/// **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in any environment until issue #858 is resolved.**
+///
+/// Accurate gating today: the default-OFF flag plus the `ai.generate`
+/// 'dangerous' consent-ack. Enterprise-tier enforcement is NOT YET implemented in
+/// code (`gate_scope` hardcodes the Free tier and hub-api does not refuse the
+/// grant below Enterprise) -- tracked in issue #858; do not rely on it.
+pub const BUNDLE_AI_CAPABILITY_FLAG: &str = "waddles.bundle-ai-capability";
+
+/// Production [`FeatureGate`] for [`BUNDLE_AI_CAPABILITY_FLAG`] -- plain read of
+/// `LicenseClient::flag_enabled` (fail-closed default).
+pub struct BundleAiCapabilityGate(Arc<LicenseClient>);
+
+impl BundleAiCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundleAiCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(BUNDLE_AI_CAPABILITY_FLAG).await })
+    }
+}
+
 /// Opt-out kill-switch for the inbound PII-tokenization pre-dispatch pass
 /// (`crate::pii_tokenize`, `rules/critical-rules.md` PII Tokenization) --
 /// same opt-out-kill-switch shape as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]:
@@ -1194,6 +1290,35 @@ mod tests {
     #[test]
     fn rust_data_plane_flag_matches_the_product_flag_key_convention() {
         assert_eq!(RUST_DATA_PLANE_FLAG, "waddles.core.rust-data-plane");
+    }
+
+    #[test]
+    fn bundle_reputation_capability_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            BUNDLE_REPUTATION_CAPABILITY_FLAG,
+            "waddles.bundle-reputation-capability"
+        );
+    }
+
+    #[test]
+    fn bundle_economy_capability_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            BUNDLE_ECONOMY_CAPABILITY_FLAG,
+            "waddles.bundle-economy-capability"
+        );
+    }
+
+    #[test]
+    fn bundle_identity_capability_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            BUNDLE_IDENTITY_CAPABILITY_FLAG,
+            "waddles.bundle-identity-capability"
+        );
+    }
+
+    #[test]
+    fn bundle_ai_capability_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(BUNDLE_AI_CAPABILITY_FLAG, "waddles.bundle-ai-capability");
     }
 
     #[test]

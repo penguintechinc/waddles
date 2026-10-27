@@ -7,6 +7,7 @@ on:
       - 'core/svc_action/**'
       - 'core/bundle_host_kv/**'
       - 'core/bundle_capability_gate/**'
+      - 'core/circuit_breaker/**'
       - 'core/hub_client/**'
       - 'core/egress_detokenizer/**'
       - '.github/workflows/rust-svc-action.yml'
@@ -17,6 +18,7 @@ on:
       - 'core/svc_action/**'
       - 'core/bundle_host_kv/**'
       - 'core/bundle_capability_gate/**'
+      - 'core/circuit_breaker/**'
       - 'core/hub_client/**'
       - 'core/egress_detokenizer/**'
   workflow_dispatch:

@@ -60,6 +60,7 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: egress-proxy
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
@@ -68,6 +69,7 @@ spec:
       - name: egress-proxy
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" .Values.egressProxy.image "imageTag" .Values.egressProxy.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -171,4 +173,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: egress-proxy
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "egress-proxy" "ports" (list $.Values.egressProxy.port $.Values.egressProxy.metricsPort) "runtime" "rust" "binaries" (list "/app/egress-proxy") "egress" "managed") }}
 {{- end }}

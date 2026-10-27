@@ -34,6 +34,24 @@ malformed `!duel ...` (e.g. a two-word target) replies with usage text -- never 
 
 Neither case consumes the caller's cooldown, so a typo doesn't cost a real challenge attempt.
 
+```text
+!duel @penguin           -> ⚔️ viewer-1 challenges penguin to a duel... swords clash in a blur of steel! penguin wins!
+!duel @penguin           -> ⚔️ slow down, viewer-1! try again in 27s.
+!duel viewer-1           -> you can't duel yourself!
+!duel list               -> Record: 3W - 1L.
+!duel set cooldown 60    (mod) -> duel cooldown set to 60s
+!duel set cooldown 60 (viewer) -> only moderators/broadcasters can configure !duel
+```
+
+Platforms: Twitch + Discord (`chat.message`). The mod/broadcaster gate **fails closed** -- with
+no `is_mod`/`is_broadcaster` on the event (Discord today) `set cooldown` is denied.
+
+## Permissions (V2)
+
+| id | why |
+|---|---|
+| `storage.kv` | persists per-community duel state and win/loss tallies |
+
 ## State (kv, community-scoped only)
 
 All state goes through `waddle_sdk.community_kv`, keyed by `community_id` -- never global or
@@ -49,6 +67,8 @@ docstring for the full identity/pseudonymization trade-off.
 | `duel.losses.<pseudonym>` | per-(community, participant) | none | Running total losses (`kv.increment`). |
 | `duel.config.cooldown` | per-community | none | Admin-configured challenge cooldown in seconds. |
 
+Colon-free keys (gh-631) -- the `kv` host rejects `:`; `.` only.
+
 ## Deferred to v2 (not stubbed)
 
 **Cross-community leaderboards / global rankings.** Every key above is scoped to one community
@@ -63,11 +83,9 @@ nonexistent target still resolves as a normal duel; documented v1 limitation, no
 
 Also out of scope for this kv-only v1: wagers/stakes, a ranking ladder, and tournaments.
 
-## Feature flag
+## Gating
 
-Gated behind `waddles.command-duel`, defaulted OFF (`critical-rules.md` Feature Flags &
-License Tiers) -- checked in `transform()` after the cheap `!duel` command-name match and before
-the real grammar classification.
+Activation-gated only (installed -> enabled -> activated), **not** feature-flag gated: `transform()` carries no flag check. Feature flags are reserved for system/health bundles. See `docs/reference/command-bundles.md`.
 
 ## Files
 
@@ -98,19 +116,25 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 
 ```bash
 cd bundles/python/duel
-python3 -m venv .venv && . .venv/bin/activate
-pip install pytest==8.3.3 pytest-cov==6.0.0 mypy==1.14.1 ruff==0.14.1
-# No `pip install -e ../../../sdk/waddle-sdk` needed -- tests/conftest.py puts both the
-# bundle's src/ and the SDK's src/ on sys.path directly. Deliberately NOT pip-installing the
-# SDK for mypy either: waddle-sdk ships no `py.typed` marker, so an installed copy is invisible
-# to strict mode (import-untyped) -- point MYPYPATH at its source tree instead for a clean run.
-pytest --cov=src --cov-report=term-missing --cov-fail-under=90
-MYPYPATH=../../../sdk/waddle-sdk/src mypy --strict src
-ruff check .
+python3 -m pytest --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=90
+MYPYPATH=../../../sdk/waddle-sdk/src mypy --strict src   # waddle-sdk ships no py.typed marker
 ```
+
+`tests/conftest.py` puts the bundle's `src/` and the SDK's `src/` on `sys.path` directly -- no
+SDK install, no WASM build. Covered: every verb, challenge/self/unknown-target/cooldown paths,
+mod-gate fail-closed, kv errors fail loud, corrupt-state self-heal logged at ERROR, PII-free
+logs (gh-674), kv key charset over every key touched (gh-631).
+
+## Behavior notes
+
+- **Fail loud.** A `kv` backend error logs `duel.kv_error` at ERROR (error class only), replies
+  "temporarily unavailable", then raises. Corrupt counters/cooldown state self-heal (0 /
+  default) but always log ERROR (`duel.*_corrupt`).
+- **PII-free logs.** Logs never include the challenger, the typed `<user>` target, either
+  pseudonym, or typed text (gh-674). Names appear only in the public chat reply.
 
 ## Activation
 
-**Not yet registered in `bundles/core-bundles.yaml`.** This bundle is built standalone, awaiting
-batched catalog registration alongside other in-flight command bundles -- intentionally out of
-scope for this PR (see PR description).
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.duel`). Related: a shared
+economy/points capability across bundles is tracked in gh-714; duel deliberately has no wager
+or balance today.

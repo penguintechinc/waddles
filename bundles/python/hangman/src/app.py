@@ -3,7 +3,7 @@
 v1 scope (2026-10-07, feature/bundle-hangman):
 
 - `!hangman start` picks a word from an embedded list (`WORD_BANK`, via
-  `random.choice`) and stores the community's one active game (the word,
+  `_RNG.choice`) and stores the community's one active game (the word,
   guessed letters, and wrong-guess count) in `kv`. If a game is already
   active, `start` does NOT overwrite it -- it re-shows the current masked
   state instead, so a careless double `start` can never silently discard
@@ -43,9 +43,8 @@ stored in this bundle's state: the active-game state tracks only the word,
 guessed letters, and wrong-guess count, none of which are tied to any one
 player's identity.
 
-Gated behind the PostHog flag ``waddles.command-hangman``, default OFF --
-see `bundles/python/first/src/app.py`'s own docstring for the flag-gate
-rationale and ordering.
+Activation-gated only -- no feature flag: the platform's installed -> enabled -> activated check
+decides whether this bundle runs.
 """
 
 from __future__ import annotations
@@ -56,10 +55,12 @@ from typing import Any, NoReturn
 
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-hangman"
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 SPEC = CommandSpec(name="hangman", sub_modules=frozenset({"start", "reveal"}))
 
@@ -145,8 +146,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
 
     No `kv` access here -- only command recognition and forwarding the
     normalized action signal. Returns `None` for any non-chat payload, text
-    that isn't `!hangman`-shaped (cheap-skip, zero `kv` cost), and while
-    `waddles.command-hangman` is disabled.
+    that isn't `!hangman`-shaped (cheap-skip, zero `kv` cost).
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -155,9 +155,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     stripped = text.strip()
     head = stripped.split(maxsplit=1)[0].lower() if stripped else ""
     if head != f"!{SPEC.name}":
-        return None
-
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     action, arg = _classify(stripped)
@@ -271,7 +268,7 @@ async def _handle_start(*, community: str, provider: str, channel_id: str) -> st
         mask = _mask(existing["word"], existing["guessed"])
         return f"A hangman game is already active: {mask} (!hangman guess <letter>)"
 
-    word = random.choice(WORD_BANK)  # noqa: S311 -- a game pick, not crypto
+    word = _RNG.choice(WORD_BANK)
     active = {"word": word, "guessed": [], "wrong": 0}
     await _kv_set(
         _ACTIVE_KEY,

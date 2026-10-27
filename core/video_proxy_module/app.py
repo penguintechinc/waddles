@@ -33,6 +33,7 @@ from services.community_authz import (
 )
 from services.rate_limiting import install_rate_limiting
 
+
 # Custom config dict that provides Quart defaults
 class DefaultConfig(dict):
     """Dict subclass that provides Quart defaults on missing keys."""
@@ -64,6 +65,7 @@ class DefaultConfig(dict):
                 return defaults[key]
             raise
 
+
 # Initialize Flask/Quart app with pre-populated config dict
 class PreConfiguredQuart(Quart):
     """Quart with pre-configured defaults to avoid __init__ KeyError."""
@@ -74,6 +76,7 @@ class PreConfiguredQuart(Quart):
         """Initialize with custom config class."""
         super().__init__(*args, **kwargs)
 
+
 app = PreConfiguredQuart(__name__)
 # security.md A05 hardening -- JSON-only service, default deny-everything CSP.
 install_security_headers(app)
@@ -83,6 +86,7 @@ config = Config()
 for key in dir(config):
     if key.isupper() and not key.startswith('_'):
         app.config[key] = getattr(config, key)
+
 
 # Setup logging
 def setup_logging():
@@ -103,6 +107,7 @@ def setup_logging():
     root_logger.setLevel(getattr(logging, config.LOG_LEVEL.upper()))
     root_logger.addHandler(console_handler)
 
+
 setup_logging()
 logger = logging.getLogger(__name__)
 
@@ -120,10 +125,11 @@ db = DAL(
 # tables are owned by hub-api's own migrations, never created here.
 bind_shared_read_tables(db)
 
+
 # Define database tables
 def init_database():
     """Initialize database tables using PyDAL."""
-    
+
     # Stream configurations table
     db.define_table(
         'stream_configs',
@@ -166,6 +172,7 @@ def init_database():
     db.commit()
     logger.info("Database tables initialized successfully")
 
+
 # JWT Authentication
 def create_jwt_token(data: Dict[str, Any], expires_in: int = 3600) -> str:
     """Create JWT token."""
@@ -175,6 +182,7 @@ def create_jwt_token(data: Dict[str, Any], expires_in: int = 3600) -> str:
         "iat": datetime.utcnow()
     }
     return jwt.encode(payload, config.JWT_SECRET_KEY, algorithm=config.JWT_ALGORITHM)
+
 
 def verify_jwt_token(token: str) -> Optional[Dict[str, Any]]:
     """Verify JWT token."""
@@ -191,6 +199,7 @@ def verify_jwt_token(token: str) -> Optional[Dict[str, Any]]:
     except jwt.InvalidTokenError as e:
         logger.warning(f"Invalid JWT token: {e}")
         return None
+
 
 def require_auth(f):
     """Decorator for JWT authentication."""
@@ -272,6 +281,7 @@ def generate_stream_key() -> str:
     """Generate a secure random stream key."""
     return secrets.token_urlsafe(32)
 
+
 def format_stream_config(row) -> Dict[str, Any]:
     """Format stream config row for JSON response."""
     return {
@@ -283,6 +293,7 @@ def format_stream_config(row) -> Dict[str, Any]:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None
     }
+
 
 def format_destination(row) -> Dict[str, Any]:
     """Format destination row for JSON response."""
@@ -299,6 +310,7 @@ def format_destination(row) -> Dict[str, Any]:
         "updated_at": row.updated_at.isoformat() if row.updated_at else None
     }
 
+
 def format_stream_status(row) -> Dict[str, Any]:
     """Format stream status row for JSON response."""
     return {
@@ -311,6 +323,7 @@ def format_stream_status(row) -> Dict[str, Any]:
     }
 
 # REST API Endpoints
+
 
 @app.route("/health", methods=["GET"])
 async def health():
@@ -332,6 +345,7 @@ async def health():
             "status": "unhealthy",
             "error": str(e)
         }), 503
+
 
 @app.route("/api/v1/stream/config", methods=["POST"])
 @require_auth
@@ -393,6 +407,7 @@ async def create_stream_config():
         db.rollback()
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/v1/stream/config/<community_id>", methods=["GET"])
 @require_auth
 async def get_stream_config(community_id: str):
@@ -415,6 +430,7 @@ async def get_stream_config(community_id: str):
     except Exception as e:
         logger.error(f"Failed to get stream config: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/v1/stream/key/regenerate/<community_id>", methods=["POST"])
 @require_auth
@@ -456,6 +472,7 @@ async def regenerate_stream_key(community_id: str):
         db.rollback()
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/v1/stream/destinations/<int:config_id>", methods=["GET"])
 @require_auth
 async def get_destinations(config_id: int):
@@ -482,6 +499,7 @@ async def get_destinations(config_id: int):
     except Exception as e:
         logger.error(f"Failed to get destinations: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/v1/stream/destinations", methods=["POST"])
 @require_auth
@@ -544,6 +562,7 @@ async def add_destination():
         db.rollback()
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/v1/stream/destinations/<int:destination_id>", methods=["DELETE"])
 @require_auth
 async def remove_destination(destination_id: int):
@@ -575,6 +594,7 @@ async def remove_destination(destination_id: int):
         logger.error(f"Failed to remove destination: {e}", exc_info=True)
         db.rollback()
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/v1/stream/destinations/<int:destination_id>/force-cut", methods=["PUT"])
 @require_auth
@@ -614,6 +634,7 @@ async def toggle_force_cut(destination_id: int):
         db.rollback()
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/v1/stream/status/<int:config_id>", methods=["GET"])
 @require_auth
 async def get_stream_status(config_id: int):
@@ -645,6 +666,7 @@ async def get_stream_status(config_id: int):
 
 # Application Lifecycle
 
+
 @app.before_serving
 async def startup():
     """Application startup."""
@@ -666,6 +688,7 @@ async def startup():
 
     logger.info(f"Video Proxy Module started on port {config.MODULE_PORT}")
 
+
 @app.after_serving
 async def shutdown():
     """Application shutdown."""
@@ -675,6 +698,7 @@ async def shutdown():
     db.close()
 
     logger.info("Video Proxy Module stopped")
+
 
 if __name__ == "__main__":
     # Run with Hypercorn in production

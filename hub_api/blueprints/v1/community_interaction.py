@@ -79,8 +79,8 @@ def _tenant_ok(community_id: int) -> bool:
 
 
 @interaction_admin_bp.route("/<int:community_id>/interaction/channels", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:read")  # type: ignore[misc]
 async def admin_list_channels(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/interaction/channels`."""
     ctx = get_tenant_context(request)
@@ -94,9 +94,9 @@ async def admin_list_channels(community_id: int) -> tuple[dict[str, object], int
 
 
 @interaction_admin_bp.route("/<int:community_id>/interaction/channels", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:write")  # type: ignore[untyped-decorator]
-@auth_required  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:write")  # type: ignore[misc]
+@auth_required  # type: ignore[misc]
 async def admin_create_channel(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/interaction/channels`."""
     if not _tenant_ok(community_id):
@@ -114,8 +114,8 @@ async def admin_create_channel(community_id: int) -> tuple[dict[str, object], in
 @interaction_admin_bp.route(
     "/<int:community_id>/interaction/channels/<int:channel_id>", methods=["PUT"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:write")  # type: ignore[misc]
 async def admin_update_channel(community_id: int, channel_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/interaction/channels/<id>`."""
     if not _tenant_ok(community_id):
@@ -130,8 +130,8 @@ async def admin_update_channel(community_id: int, channel_id: int) -> tuple[dict
 @interaction_admin_bp.route(
     "/<int:community_id>/interaction/channels/<int:channel_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:write")  # type: ignore[misc]
 async def admin_delete_channel(community_id: int, channel_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/interaction/channels/<id>`."""
     if not _tenant_ok(community_id):
@@ -144,8 +144,8 @@ async def admin_delete_channel(community_id: int, channel_id: int) -> tuple[dict
 @interaction_admin_bp.route(
     "/<int:community_id>/interaction/forum/posts/<int:post_id>", methods=["PUT"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:write")  # type: ignore[misc]
 async def admin_moderate_post(community_id: int, post_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/interaction/forum/posts/<id>` -- pin/lock/delete."""
     if not _tenant_ok(community_id):
@@ -160,8 +160,8 @@ async def admin_moderate_post(community_id: int, post_id: int) -> tuple[dict[str
 @interaction_admin_bp.route(
     "/<int:community_id>/interaction/forum/replies/<int:reply_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:write")  # type: ignore[misc]
 async def admin_delete_reply(community_id: int, reply_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/interaction/forum/replies/<id>`."""
     if not _tenant_ok(community_id):
@@ -175,8 +175,8 @@ async def admin_delete_reply(community_id: int, reply_id: int) -> tuple[dict[str
 
 
 @interaction_admin_bp.route("/<int:community_id>/interaction/roles", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:read")  # type: ignore[misc]
 async def admin_list_roles(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/interaction/roles`."""
     if not _tenant_ok(community_id):
@@ -188,8 +188,8 @@ async def admin_list_roles(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @interaction_admin_bp.route("/<int:community_id>/interaction/roles", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:manage_roles")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:manage_roles")  # type: ignore[misc]
 async def admin_create_role(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/interaction/roles`."""
     if not _tenant_ok(community_id):
@@ -203,8 +203,8 @@ async def admin_create_role(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @interaction_admin_bp.route("/<int:community_id>/interaction/roles/<int:role_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:manage_roles")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:manage_roles")  # type: ignore[misc]
 async def admin_update_role(community_id: int, role_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/interaction/roles/<roleId>`."""
     if not _tenant_ok(community_id):
@@ -219,8 +219,8 @@ async def admin_update_role(community_id: int, role_id: int) -> tuple[dict[str, 
 @interaction_admin_bp.route(
     "/<int:community_id>/interaction/roles/<int:role_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:manage_roles")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:manage_roles")  # type: ignore[misc]
 async def admin_delete_role(community_id: int, role_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/interaction/roles/<roleId>`."""
     if not _tenant_ok(community_id):
@@ -239,8 +239,8 @@ async def admin_delete_role(community_id: int, role_id: int) -> tuple[dict[str, 
 @interaction_admin_bp.route(
     "/<int:community_id>/interaction/channels/<int:channel_id>/permissions", methods=["GET"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:read")  # type: ignore[misc]
 async def admin_get_overrides(community_id: int, channel_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/interaction/channels/<id>/permissions`."""
     if not _tenant_ok(community_id):
@@ -256,8 +256,8 @@ async def admin_get_overrides(community_id: int, channel_id: int) -> tuple[dict[
 @interaction_admin_bp.route(
     "/<int:community_id>/interaction/channels/<int:channel_id>/permissions", methods=["PUT"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:manage_channels")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:manage_channels")  # type: ignore[misc]
 async def admin_update_overrides(
     community_id: int, channel_id: int
 ) -> tuple[dict[str, object], int]:
@@ -280,8 +280,8 @@ async def admin_update_overrides(
 
 
 @interaction_member_bp.route("/<int:community_id>/interact/channels", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:read")  # type: ignore[misc]
 async def member_list_channels(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/interact/channels`."""
     if not _tenant_ok(community_id):
@@ -296,9 +296,9 @@ async def member_list_channels(community_id: int) -> tuple[dict[str, object], in
 
 
 @interaction_member_bp.route("/<int:community_id>/interact/channels", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:write")  # type: ignore[untyped-decorator]
-@auth_required  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:write")  # type: ignore[misc]
+@auth_required  # type: ignore[misc]
 async def member_create_channel(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/community/<id>/interact/channels` -- gated by `channel_creation_policy`."""
     if not _tenant_ok(community_id):
@@ -318,8 +318,8 @@ async def member_create_channel(community_id: int) -> tuple[dict[str, object], i
 @interaction_member_bp.route(
     "/<int:community_id>/interact/forum/<int:channel_id>/posts", methods=["GET"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:read")  # type: ignore[misc]
 async def member_forum_posts(community_id: int, channel_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/interact/forum/<channelId>/posts`."""
     ctx = get_tenant_context(request)
@@ -343,8 +343,8 @@ async def member_forum_posts(community_id: int, channel_id: int) -> tuple[dict[s
 @interaction_member_bp.route(
     "/<int:community_id>/interact/forum/<int:channel_id>/posts/<int:post_id>", methods=["GET"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:read")  # type: ignore[misc]
 async def member_forum_post(
     community_id: int, channel_id: int, post_id: int
 ) -> tuple[dict[str, object], int]:
@@ -360,9 +360,9 @@ async def member_forum_post(
 @interaction_member_bp.route(
     "/<int:community_id>/interact/forum/<int:channel_id>/posts", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:write")  # type: ignore[untyped-decorator]
-@auth_required  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:write")  # type: ignore[misc]
+@auth_required  # type: ignore[misc]
 async def member_create_forum_post(
     community_id: int, channel_id: int
 ) -> tuple[dict[str, object], int]:
@@ -381,9 +381,9 @@ async def member_create_forum_post(
 @interaction_member_bp.route(
     "/<int:community_id>/interact/forum/posts/<int:post_id>/replies", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.interaction:write")  # type: ignore[untyped-decorator]
-@auth_required  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.interaction:write")  # type: ignore[misc]
+@auth_required  # type: ignore[misc]
 async def member_create_forum_reply(
     community_id: int, post_id: int
 ) -> tuple[dict[str, object], int]:
