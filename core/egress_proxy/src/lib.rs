@@ -39,6 +39,7 @@ pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod dns;
+pub mod git_proxy;
 pub mod ip_policy;
 pub mod limits;
 pub mod metrics;

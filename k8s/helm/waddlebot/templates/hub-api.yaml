@@ -121,6 +121,12 @@ spec:
         - name: SERVICE_JWT_PUBLIC_KEY_{{ $kid }}
           value: {{ $pem | quote }}
         {{- end }}
+        {{- if .Values.gitProxy.enabled }}
+        # Marketplace source scanner clones external git repos ONLY through the allowlisting
+        # git-proxy (templates/infrastructure/git-proxy.yaml); absent => scanner fails closed.
+        - name: MARKETPLACE_GIT_PROXY_URL
+          value: "http://{{ include "waddlebot.fullname" . }}-git-proxy:{{ .Values.gitProxy.port }}"
+        {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
         - name: SERVICE_JWT_BOOTSTRAP_AUDIENCE

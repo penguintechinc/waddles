@@ -42,7 +42,7 @@ _ALL_ENVS = (*_SHIPPING, "values-alpha.yaml", "values-local.yaml", "values-ci.ya
 _RESTRICTED_ENVS = (*_SHIPPING, "values-alpha.yaml", "values-ci.yaml")
 # Workloads whose egress/ingress is governed by a dedicated, pre-existing CNP rather than the
 # generic per-workload one (bundle-executors have no listener and an explicit deny-all ingress).
-_OWN_CNP_COMPONENTS = ("bundle-executor", "bundle-executor-action")
+_OWN_CNP_COMPONENTS = ("bundle-executor", "bundle-executor-action", "git-proxy")
 _RFC1918_AND_METADATA = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8")
 # Rootfs must be read-only on the workloads this fix newly locked down.
 _READONLY_ROOTFS = ("postgres", "redis", "qdrant", "ollama", "discord-collector", "twitch-collector",
@@ -391,7 +391,9 @@ class TestDefaultDenyEgress:
 
     def test_https_fqdn_pin(self) -> None:
         docs = _render("values-production.yaml", ["egressPolicy.httpsFqdns[0].matchName=license.penguintech.io"])
-        rules = [r for c in _cnps(docs) for r in c["spec"].get("egress") or [] if "toFQDNs" in r]
+        # git-proxy has its own dedicated FQDN CNP (TestGitProxy) -- not part of the https profile.
+        rules = [r for c in _cnps(docs) if not c["metadata"]["name"].endswith("-git-proxy-egress")
+                 for r in c["spec"].get("egress") or [] if "toFQDNs" in r]
         assert rules, "httpsFqdns set but no toFQDNs rule rendered"
         assert all(r["toFQDNs"] == [{"matchName": "license.penguintech.io"}] for r in rules)
         # FQDN rules need the DNS proxy: the DNS rule must carry a dns rules block.
@@ -399,6 +401,31 @@ class TestDefaultDenyEgress:
                if r.get("toEndpoints") and r["toEndpoints"][0]["matchLabels"].get("k8s-app") == "kube-dns"
                and "rules" in (r["toPorts"][0])]
         assert dns
+
+
+class TestGitProxy:
+    """marketplace-sources Task 7A: git-proxy is reachable only by hub-api and reaches only git FQDNs:443."""
+
+    @pytest.mark.parametrize("values", _SHIPPING)
+    def test_git_proxy_ingress_hub_api_only_and_egress_fqdn_443_only(self, values: str) -> None:
+        docs = _render(values)
+        by_name = {c["metadata"]["name"]: c for c in _cnps(docs)}
+        ing = next(c for n, c in by_name.items() if n.endswith("-git-proxy-ingress"))
+        rules = ing["spec"]["ingress"]
+        assert len(rules) == 1
+        src = rules[0]["fromEndpoints"][0]["matchLabels"]
+        assert src["app.kubernetes.io/component"] == "hub-api"
+        assert [p["port"] for p in rules[0]["toPorts"][0]["ports"]] == ["8444"]
+        egr = next(c for n, c in by_name.items() if n.endswith("-git-proxy-egress"))
+        fq = [r for r in egr["spec"]["egress"] if "toFQDNs" in r]
+        assert len(fq) == 1
+        assert [p["port"] for p in fq[0]["toPorts"][0]["ports"]] == ["443"]
+        assert {f["matchName"] for f in fq[0]["toFQDNs"]} == {"github.com", "gitlab.com"}
+        assert not any("toCIDRSet" in r or "toEntities" in r for r in egr["spec"]["egress"])
+        env = {e["name"]: e.get("value") for d in docs if d.get("kind") == "Deployment"
+               and d["metadata"]["name"].endswith("-hub-api-v3")
+               for e in d["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert env["MARKETPLACE_GIT_PROXY_URL"].endswith("-git-proxy:8444")
 
 
 class TestPortScopedIngress:

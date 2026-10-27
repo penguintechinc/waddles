@@ -1,0 +1,212 @@
+# git-proxy -- marketplace-sources Phase 1 (Task 7A). A dedicated, rootless, CONNECT-only
+# forward proxy the marketplace source scanner (hub-api) uses to clone external git repos via
+# MARKETPLACE_GIT_PROXY_URL. The regular egress-proxy cannot serve git (it requires a machine-JWT +
+# EdDSA assertion header git cannot send), so this runs the SAME image/binary in `git-proxy` mode
+# (core/egress_proxy/src/git_proxy.rs): host allowlist + port 443 only + fresh in-proxy DNS +
+# SSRF/cluster-CIDR re-check of every resolved address. hub-api never resolves or dials the git
+# host itself (closes the url_guard DNS-rebind gap). Defense in depth at the network layer: this
+# pod's egress CNP only permits DNS + the allowlisted FQDNs on 443; ingress admits ONLY hub-api.
+{{- if .Values.gitProxy.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-git-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git-proxy
+spec:
+  replicas: {{ .Values.gitProxy.replicas }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: git-proxy
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: git-proxy
+    spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: git-proxy
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" .Values.gitProxy.image "imageTag" .Values.gitProxy.imageTag) }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        args: ["git-proxy"]
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        ports:
+        - name: proxy
+          containerPort: {{ .Values.gitProxy.port }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.gitProxy.metricsPort }}
+          protocol: TCP
+        env:
+        - name: PROXY_LISTEN_PORT
+          value: {{ .Values.gitProxy.port | quote }}
+        - name: METRICS_PORT
+          value: {{ .Values.gitProxy.metricsPort | quote }}
+        - name: GIT_PROXY_ALLOWED_HOSTS
+          value: {{ required "gitProxy.allowedHosts must list at least one git host" .Values.gitProxy.allowedHosts | join "," | quote }}
+        - name: DENY_CIDRS
+          value: {{ .Values.egressPolicy.denyCidrs | join "," | quote }}
+        # Plain comma string (no `quote` inside a folded scalar -- see egress-proxy.yaml).
+        - name: DENY_CLUSTER_CIDRS
+          value: >-
+            {{ printf "%s,%s,%s"
+                 .Values.egressPolicy.clusterCidrs.podCidr
+                 .Values.egressPolicy.clusterCidrs.serviceCidr
+                 .Values.egressPolicy.clusterCidrs.nodeCidr }}
+        - name: GIT_PROXY_MAX_CONNECTIONS
+          value: {{ .Values.gitProxy.maxConnections | quote }}
+        - name: CONNECT_TIMEOUT_SECONDS
+          value: {{ .Values.gitProxy.connectTimeoutSeconds | quote }}
+        - name: TUNNEL_MAX_DURATION_SECONDS
+          value: {{ .Values.gitProxy.tunnelMaxDurationSeconds | quote }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: metrics
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.gitProxy.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-git-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git-proxy
+spec:
+  type: ClusterIP
+  ports:
+  - port: {{ .Values.gitProxy.port }}
+    targetPort: proxy
+    protocol: TCP
+    name: proxy
+  - port: {{ .Values.gitProxy.metricsPort }}
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  selector:
+    {{- include "waddlebot.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: git-proxy
+---
+# Ingress: ONLY hub-api may open the proxy port (the scanner lives there). Cilium unions allows
+# across CNPs, so the Tetragon-only workloadPolicies include below (cnp=false) adds no broader one.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-git-proxy-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git-proxy
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: git-proxy
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: hub-api
+      toPorts:
+        - ports:
+            - port: {{ .Values.gitProxy.port | quote }}
+              protocol: TCP
+{{- if .Values.egressPolicy.enabled }}
+---
+# Egress: DNS + the allowlisted git FQDNs on 443 ONLY (modeled on egress-proxy-egress, narrowed
+# from "the world" to toFQDNs). The DNS rule is required for Cilium to learn FQDN->IP mappings.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-git-proxy-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: git-proxy
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: UDP
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: TCP
+          rules:
+            dns:
+              {{- range .Values.gitProxy.allowedHosts }}
+              - matchName: {{ . | quote }}
+              {{- end }}
+    - toFQDNs:
+        {{- range .Values.gitProxy.allowedHosts }}
+        - matchName: {{ . | quote }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# hub-api -> git-proxy (the scanner's only route to git hosts). hub-api's workload CNP already
+# allows same-namespace egress; this makes the dependency explicit and survives any tightening.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-hub-api-git-proxy-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: hub-api
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: git-proxy
+      toPorts:
+        - ports:
+            - port: {{ .Values.gitProxy.port | quote }}
+              protocol: TCP
+{{- end }}
+# R5 posture: Tetragon exec allowlist only (cnp=false -- dedicated CNPs above).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "git-proxy" "ports" (list $.Values.gitProxy.port $.Values.gitProxy.metricsPort) "runtime" "rust" "binaries" (list "/app/egress-proxy") "egress" "managed" "cnp" false) }}
+{{- end }}

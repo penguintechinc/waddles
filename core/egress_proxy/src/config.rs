@@ -68,7 +68,7 @@ pub enum ConfigError {
     Invalid(&'static str, String),
 }
 
-fn env_or(name: &str, default: &str) -> String {
+pub(crate) fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
@@ -83,7 +83,7 @@ fn parse_ports(raw: &str) -> Result<Vec<u16>, ConfigError> {
         .collect()
 }
 
-fn parse_cidrs(raw: &str, var: &'static str) -> Result<Vec<IpNet>, ConfigError> {
+pub(crate) fn parse_cidrs(raw: &str, var: &'static str) -> Result<Vec<IpNet>, ConfigError> {
     raw.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -121,7 +121,7 @@ fn parse_cidrs(raw: &str, var: &'static str) -> Result<Vec<IpNet>, ConfigError> 
         .collect()
 }
 
-fn parse_list(raw: &str) -> Vec<String> {
+pub(crate) fn parse_list(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())

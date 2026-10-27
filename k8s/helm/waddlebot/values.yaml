@@ -3216,6 +3216,34 @@ egressPolicy:
 # design write-up). SKELETON: no Dockerfile/CI image yet, pinned to the
 # same debian:bookworm-slim digest already used as pipeline.goRuntimeImage
 # as a placeholder — replace once the crate has its own CI-built image.
+# git-proxy (marketplace-sources Phase 1, Task 7A) -- allowlist-only CONNECT proxy so the
+# marketplace scanner (hub-api) can clone external git repos without hub-api resolving/dialing
+# them itself. Same image + binary as egressProxy, run as `egress-proxy git-proxy`
+# (core/egress_proxy/src/git_proxy.rs). Templates: templates/infrastructure/git-proxy.yaml.
+# CI fills imageTag (digest/epoch tag) exactly as for egressProxy.
+gitProxy:
+  enabled: true
+  image: "waddlebot-egress-proxy"
+  imageTag: ""
+  port: 8444
+  metricsPort: 9090
+  replicas: 1
+  # Exact-match git hosts (no wildcards); CONNECT is permitted to these on 443 ONLY. Drives both
+  # the in-proxy allowlist and the egress CNP toFQDNs list.
+  allowedHosts:
+    - github.com
+    - gitlab.com
+  maxConnections: 32
+  connectTimeoutSeconds: 10
+  tunnelMaxDurationSeconds: 900
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "250m"
+      memory: "128Mi"
+
 egressProxy:
   enabled: true
   environment: "alpha"

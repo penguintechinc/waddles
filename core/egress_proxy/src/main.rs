@@ -7,5 +7,10 @@ async fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--healthcheck") {
         return egress_proxy::run_healthcheck().await;
     }
+    // `git-proxy` run mode: allowlist-only CONNECT proxy for git clones
+    // (no machine-JWT gate) -- see `egress_proxy::git_proxy`.
+    if std::env::args().nth(1).as_deref() == Some("git-proxy") {
+        return egress_proxy::git_proxy::run().await;
+    }
     egress_proxy::run().await
 }
