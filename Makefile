@@ -1,4 +1,4 @@
-.PHONY: reseal-connections test-connection-resolver-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -149,6 +149,11 @@ test-security:
 # HUB_PYTHON must have hub_api/requirements*.txt installed (default python3).
 test-connection-resolver-live:
 	@bash scripts/ci/connection-resolver-live.sh
+
+# Live e2e: svc-ingest per-community Twitch sessions <-> real hub-api <-> real Postgres + Valkey
+# <-> in-process IRC server (docker + helm + cargo; HUB_PYTHON as above).
+test-svc-ingest-twitch-live:
+	@bash scripts/ci/twitch-sessions-live.sh
 
 # Seeded-failure proof that the lint/security gates can fail (crashed scanner,
 # non-numeric counter, new finding above baseline) -- Verification Integrity.
