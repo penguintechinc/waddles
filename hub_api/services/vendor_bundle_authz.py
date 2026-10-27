@@ -37,6 +37,7 @@ here explicitly since it is a security-relevant naming decision.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from flask_core.auth import verify_jwt_token
@@ -152,6 +153,14 @@ def enforce_vendor_namespace(*, app_id: str, caller_id: int) -> None:
 
 SOURCE_SHORT_LEN = 12
 
+#: Install-source constants (never an arbitrary caller string).
+INSTALL_SOURCE_HUMAN = "human"
+INSTALL_SOURCE_SYSTEM_CORE_SEEDER = "system:core-seeder"
+VALID_INSTALL_SOURCES = frozenset({INSTALL_SOURCE_HUMAN, INSTALL_SOURCE_SYSTEM_CORE_SEEDER})
+
+#: Dotted lowercase ASCII segments; always used with `.fullmatch()` (ReDoS/`$`-newline safe).
+_REMAINDER_RE = re.compile(r"[a-z0-9_-]+(\.[a-z0-9_-]+)*", re.ASCII)
+
 
 def source_short(source: SourceRecord) -> str:
     """First 12 hex chars of the source's `public_id` -- its namespace token."""
@@ -163,6 +172,16 @@ def source_namespace_prefix(source_short_id: str) -> str:
     return f"waddles.integrations.src-{source_short_id}."
 
 
+def _remainder_ok(remainder: str, *, external: bool) -> bool:
+    """True iff the post-prefix remainder is well-formed and cannot re-enter a reserved ns."""
+    if not remainder.isascii() or _REMAINDER_RE.fullmatch(remainder) is None:
+        return False
+    segments = remainder.split(".")
+    if "waddles" in segments:
+        return False
+    return not (external and segments[0] == "core")
+
+
 def enforce_source_namespace(*, app_id: str, source: SourceRecord | None) -> None:
     """403s unless `app_id` is legal for `source` (fail-closed: None => external, no prefix).
 
@@ -172,11 +191,17 @@ def enforce_source_namespace(*, app_id: str, source: SourceRecord | None) -> Non
     A missing/unknown source can match no prefix, so everything is refused.
     """
     if source is not None and source.is_builtin:
-        if app_id.startswith(CORE_NAMESPACE_PREFIX):
+        if app_id.startswith(CORE_NAMESPACE_PREFIX) and _remainder_ok(
+            app_id[len(CORE_NAMESPACE_PREFIX) :], external=False
+        ):
             return
         raise forbidden(f"built-in source may only publish {CORE_NAMESPACE_PREFIX}* app_ids")
     required = source_namespace_prefix(source_short(source)) if source is not None else None
-    if required is None or not app_id.startswith(required) or app_id == required:
+    if (
+        required is None
+        or not app_id.startswith(required)
+        or not _remainder_ok(app_id[len(required) :], external=True)
+    ):
         logger.warning(
             "marketplace source: app_id outside source namespace",
             extra={
@@ -201,9 +226,11 @@ def require_install_authority(
     Fail-closed -- a missing/unknown `source` is treated as external. Non-built-in sources
     must arrive with `install_source="human"` and a concrete `installed_by` (platform:admin).
     """
+    if install_source not in VALID_INSTALL_SOURCES:
+        raise forbidden("unknown install_source")
     if source is not None and source.is_builtin:
         return
-    if install_source != "human" or installed_by is None:
+    if install_source != INSTALL_SOURCE_HUMAN or installed_by is None:
         raise forbidden(
             "bundles from non-built-in (or unknown) sources require human platform:admin "
             "approval; SYSTEM auto-install is refused"

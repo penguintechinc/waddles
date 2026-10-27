@@ -176,3 +176,27 @@ async def test_delete_source_with_referencing_catalog_row_conflicts(pg_dal: Any)
     with pytest.raises(ApiError) as ei:
         await delete_source(pg_dal, rec.public_id)
     assert ei.value.status_code == 409
+
+
+async def test_source_short_unique_index_and_create_retries_collision(
+    pg_dal: Any, monkeypatch: Any
+) -> None:
+    from sqlalchemy import text
+
+    first = await _prebuilt(pg_dal)
+    clash = uuid.UUID(first.public_id.hex[:12] + "4" + "0" * 19)
+    fresh = uuid.uuid4()
+    seq = iter([clash, fresh])
+    monkeypatch.setattr("services.marketplace_source_service.uuid.uuid4", lambda: next(seq))
+    second = await _prebuilt(pg_dal)
+    assert second.public_id == fresh
+    async with pg_dal.engine.begin() as conn:
+        n = (
+            await conn.execute(
+                text(
+                    "SELECT count(DISTINCT left(replace(public_id::text,'-',''),12)) = count(*) "
+                    "FROM marketplace_sources"
+                )
+            )
+        ).scalar_one()
+    assert n is True

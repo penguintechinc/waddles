@@ -156,6 +156,10 @@ def _validate_create(
             raise bad_request("sandbox acknowledgement commit_sha must be a 40-hex SHA")
 
 
+_SHORT_INDEX_NAME = "uq_marketplace_sources_short"
+_MAX_SHORT_RETRIES = 5
+
+
 async def create_source(
     dal: AsyncDB,
     *,
@@ -196,11 +200,20 @@ async def create_source(
             sandbox_ack_text_hash=sandbox_ack.text_hash,
             sandbox_ack_commit_sha=sandbox_ack.commit_sha,
         )
-    try:
-        async with dal.engine.begin() as conn:
-            row = (await conn.execute(insert(table).values(**values).returning(*table.c))).one()
-    except IntegrityError as exc:
-        raise conflict("marketplace source violates a constraint") from exc
+    row = None
+    for _ in range(_MAX_SHORT_RETRIES):
+        # Server-generated public_id; the 12-hex namespace token must be unique (DB index
+        # uq_marketplace_sources_short), so a collision just retries with a fresh uuid4.
+        values["public_id"] = uuid.uuid4()
+        try:
+            async with dal.engine.begin() as conn:
+                row = (await conn.execute(insert(table).values(**values).returning(*table.c))).one()
+            break
+        except IntegrityError as exc:
+            if _SHORT_INDEX_NAME not in str(exc):
+                raise conflict("marketplace source violates a constraint") from exc
+    if row is None:
+        raise conflict("could not allocate a unique source namespace token")
     record = _to_record(row)
     logger.info(
         "marketplace source: created",

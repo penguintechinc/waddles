@@ -124,7 +124,11 @@ from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, a
 from services.errors import ApiError, conflict, not_found
 from services.marketplace_source_service import SourceRecord
 from services.permission_summary_service import build_permission_summary, permission_hash
-from services.vendor_bundle_authz import require_install_authority
+from services.vendor_bundle_authz import (
+    INSTALL_SOURCE_HUMAN,
+    enforce_source_namespace,
+    require_install_authority,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -487,7 +491,7 @@ async def install_version_globally(
     version: str,
     installed_by: int | None,
     expected_permission_hash: str | None = None,
-    install_source: str = "human",
+    install_source: str = INSTALL_SOURCE_HUMAN,
     source: SourceRecord | None = None,
 ) -> Any:
     """GLOBAL tier: install `version` into the platform catalog. Does NOT activate it anywhere.
@@ -512,6 +516,11 @@ async def install_version_globally(
     require_install_authority(
         source=source, install_source=install_source, installed_by=installed_by
     )
+    # Defense in depth: re-check the namespace at install, not only at upload/approve. A
+    # `source` is supplied for source-backed installs; legacy pre-source rows (source=None,
+    # human platform:admin route) keep their upload-time vendor-namespace check.
+    if source is not None:
+        enforce_source_namespace(app_id=app_id, source=source)
     upload_rows = await install_dal(
         (install_dal.app_version_uploads.app_id == app_id)
         & (install_dal.app_version_uploads.version == version)

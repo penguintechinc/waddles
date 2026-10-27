@@ -114,6 +114,11 @@ def upgrade() -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_marketplace_sources_one_builtin "
         "ON marketplace_sources (is_builtin) WHERE is_builtin"
     )
+    # The namespace token `src-{first 12 hex of public_id}` must be unique (48-bit collision).
+    op.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_marketplace_sources_short "
+        "ON marketplace_sources (left(replace(public_id::text, '-', ''), 12))"
+    )
     op.execute(
         "CREATE INDEX IF NOT EXISTS idx_marketplace_sources_status ON marketplace_sources (status)"
     )

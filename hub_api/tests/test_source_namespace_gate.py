@@ -122,3 +122,78 @@ def test_app_id_regex_unchanged() -> None:
         rf"^waddles\.{bundle_manifest_v2._SEGMENT}\.{bundle_manifest_v2._SEGMENT}"
         rf"\.{bundle_manifest_v2._SEGMENT}$"
     )
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "waddles.core.x",  # reserved namespace re-entry
+        "core.x",  # leading core segment
+        ".y",  # empty segment (src-X..y)
+        "a..y",
+        "a.",
+        "myäpp.sub",  # non-ASCII
+        "my​app",  # zero-width
+        "my\napp",  # control / newline
+        "my\x00app",
+        "My_App",  # uppercase
+        "a b",
+    ],
+)
+def test_external_rejects_bad_remainder(tail: str) -> None:
+    s = _src(builtin=False)
+    with pytest.raises(ApiError):
+        va.enforce_source_namespace(
+            app_id=f"{va.source_namespace_prefix(va.source_short(s))}{tail}", source=s
+        )
+
+
+def test_external_accepts_valid_remainder() -> None:
+    s = _src(builtin=False)
+    va.enforce_source_namespace(
+        app_id=f"{va.source_namespace_prefix(va.source_short(s))}my_app.sub", source=s
+    )
+
+
+def test_builtin_rejects_bad_remainder() -> None:
+    b = _src(builtin=True)
+    for bad in ("waddles.core.waddles.x", "waddles.core..x", "waddles.core.x\n"):
+        with pytest.raises(ApiError):
+            va.enforce_source_namespace(app_id=bad, source=b)
+
+
+def test_install_source_is_constant_set() -> None:
+    with pytest.raises(ApiError):
+        va.require_install_authority(
+            source=_src(builtin=True), install_source="evil", installed_by=1
+        )
+
+
+@pytest.mark.asyncio
+async def test_install_path_invokes_namespace_gate() -> None:
+    from services import bundle_approval_service as svc
+
+    # Human install with a concrete installer passes require_install_authority, so only the
+    # namespace re-check can refuse this app_id -- and it must do so before any DB access.
+    with pytest.raises(ApiError):
+        await svc.install_version_globally(
+            None,  # type: ignore[arg-type]
+            app_id="waddles.core.a.b",
+            version="1.0.0",
+            installed_by=7,
+            install_source="human",
+            source=_src(builtin=False),
+        )
+
+
+def test_approve_route_scope_and_token_derived_installer() -> None:
+    import inspect
+
+    from blueprints.v1 import bundle_approvals as bp
+
+    src = inspect.getsource(bp.post_approve)
+    assert '@require_scope("platform:admin")' in inspect.getsource(bp)  # route decorator present
+    assert "installed_by=get_current_user_id(request)" in src or (
+        "caller_id = get_current_user_id(request)" in src and "installed_by=caller_id" in src
+    )
+    assert "data.installed_by" not in src
