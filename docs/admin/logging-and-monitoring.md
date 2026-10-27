@@ -4,6 +4,8 @@
 
 Waddles implements comprehensive Authentication, Authorization, and Auditing (AAA) logging across all container modules to ensure security, compliance, and operational visibility. This document outlines the logging standards, implementation requirements, and monitoring strategies.
 
+> **Enterprise audit trail:** security-relevant events (authz denials, tenant/role changes, DSAR/erasure, logins, admin actions, license changes) are also written to a tamper-evident, hash-chained store with verification and export tooling -- see [Enterprise Audit Logging](../compliance/audit-logging.md).
+
 ## Logging Requirements
 
 ### Universal Implementation

@@ -102,7 +102,7 @@ class Config:
     #: Where `record_enabled` streams are segmented to (an emptyDir/PVC
     #: mount in the Helm chart, `k8s/helm/waddlebot/templates/
     #: svc-streaming.yaml`) -- object-store upload of finished segments is
-    #: follow-up work (design spec §8.5, MinIO), out of scope tonight.
+    #: follow-up work (design spec §8.5, S3-compatible object store), out of scope tonight.
     recordings_dir: str
 
     #: Fixed per-job token cost for admitting a TRANSCODE-enabled forward

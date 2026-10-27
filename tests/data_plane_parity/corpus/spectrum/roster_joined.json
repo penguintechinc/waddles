@@ -1,0 +1,46 @@
+{
+  "context": {},
+  "frame": {
+    "change": "joined",
+    "display_name": "NewRecruit",
+    "kind": "roster",
+    "member_id": "member-1",
+    "observed_at": "2026-09-11T00:00:00Z",
+    "platform": "spectrum",
+    "role_names": [
+      "recruit"
+    ],
+    "roles_added": [
+      "recruit"
+    ],
+    "roles_removed": [],
+    "source_id": "org-1"
+  },
+  "golden": {
+    "actor": "member-1",
+    "event_type": "member_joined",
+    "payload": {
+      "display_name": "NewRecruit",
+      "kind": "roster",
+      "member_id": "member-1",
+      "role_names": [
+        "recruit"
+      ],
+      "roles_added": [
+        "recruit"
+      ],
+      "roles_removed": [],
+      "source_id": "org-1"
+    },
+    "platform": "spectrum"
+  },
+  "golden_origin": "python",
+  "id": "spectrum/roster_joined",
+  "outcome": "event",
+  "path": "spectrum_org",
+  "pii_classifier": "reject:kind,member_id,role_names,roles_added,roles_removed,source_id",
+  "platform": "spectrum",
+  "python_divergences": [],
+  "rust_path": null,
+  "seed": "core/svc_ingest/tests/test_receivers_spectrum_org.py"
+}

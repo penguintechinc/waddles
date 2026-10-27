@@ -6,7 +6,8 @@ workflow_core_module`) -- so its own directory has to be put on sys.path
 explicitly for `from config import Config` / `import app` / `from
 services...` to resolve. Sets `RELEASE_MODE`-adjacent env vars needed for
 `config.py`'s module-level `Config()` construction to succeed without a
-real Postgres/MinIO/license server reachable in the test sandbox.
+real Postgres/S3-compatible object store/license server reachable in the
+test sandbox.
 """
 
 from __future__ import annotations

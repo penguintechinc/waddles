@@ -25,22 +25,158 @@
 //! discovering them.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use penguin_bundle_host::wire::{
     ExportKind, InvokeBody, LoadBody, LoadLimits, LoadedBody, Message, TraceContext, UnloadBody,
     UnloadedBody,
 };
 use penguin_spine::{
-    Delivered, Grant, GroupReader, SpineClient, SpineConfig, SpineError, SpineMetrics, Stage,
-    StageEnvelope,
+    Delivered, Grant, GroupReader, GroupStats, SpineClient, SpineConfig, SpineError, SpineMetrics,
+    Stage, StageEnvelope,
 };
 use serde::Deserialize;
 
+use crate::active_digests::{ActiveDigests, LoadedSessions};
 use crate::capabilities::InvokeScope;
 use crate::hop::KeyRing;
 use crate::host_api::{Connection, ConnectionRegistry, HostApiError};
 use crate::retry::{dispatch_with_retry, AttemptOutcome, DispatchRecord, Jitter};
+use crate::stage_metrics::{self, StageResult};
 use crate::usage::UsageBatcher;
+
+/// Whether an `InvokeError::ExecutorError` names a guest fault -- a
+/// bundle-executor trap, epoch/fuel timeout, or memory-cap OOM -- as opposed
+/// to a broken bundle registration, a connection-level problem, or executor
+/// `pool_exhausted` back-pressure. `code` is the `Debug`-formatted
+/// `penguin_bundle_host::wire::ErrorCode` (this module only sees it
+/// stringified); `detail` is the executor's `ErrorBody::detail`. The
+/// back-pressure case arrives with wire code `ExecutorDeadline` (the pinned
+/// wire crate has no dedicated code) but says nothing about the guest, so it
+/// must never trip the breaker for innocent destinations.
+fn is_guest_fault(code: &str, detail: Option<&str>) -> bool {
+    if detail == Some("pool_exhausted") {
+        return false;
+    }
+    matches!(code, "ExecutorDeadline" | "MemoryLimit" | "WasmTrap")
+}
+
+/// Connector spec SS0 condition 5's composite circuit-breaker key for
+/// action-stage dispatch: `{app_id}|{tenant}:{community}|{channel_id}`
+/// (same `{app_id}|...` scheme `svc_process` keys on). Unlike
+/// `svc_process`'s `(app, stream)` key, a dispatch attempt's isolation unit
+/// is all three dimensions together -- the same bundle can serve multiple
+/// tenants/communities (scope) and send to multiple platform channels
+/// (destination), and a fault talking to one destination must never disable
+/// the bundle for every other destination or tenant it also serves.
+///
+/// Returns `None` for an event with no `channel_id`: there is no
+/// destination to isolate, and folding all such events onto one shared
+/// placeholder key would let a single bad one disable every channel-less
+/// event. Keyless events simply bypass the breaker (they still dispatch,
+/// retry and dead-letter normally).
+fn breaker_key(app_id: &str, env: &StageEnvelope) -> Option<String> {
+    let channel_id = env.event.source.as_ref()?.channel_id.as_deref()?;
+    Some(format!(
+        "{app_id}|{}:{}|{channel_id}",
+        env.tenant,
+        env.community.as_deref().unwrap_or("-"),
+    ))
+}
+
+/// Where [`DispatchDeps`] gets the digest to `load`/`invoke` with on every
+/// single delivered entry -- direct port of `core/svc_process/src/
+/// spine.rs::DigestSource` under this stage's own module. See that type's
+/// doc for the full rationale; reproduced narrowly here since the two
+/// crates don't share a dependency this seam could live in.
+#[derive(Clone)]
+pub enum DigestSource {
+    /// The legacy, single-bundle-per-pod, env-configured path
+    /// (`crate::lib::try_start_dispatch`'s `ACTION_BUNDLE_DIGEST`) --
+    /// unchanged behavior from before this change. Empty disables nothing
+    /// by itself: an empty digest is simply sent as-is and the executor
+    /// reports `UNKNOWN_BUNDLE`, mapped to a non-retryable attempt like any
+    /// other unloaded-bundle invoke. This variant must never be selected by
+    /// the multi-tenant path (`crate::dispatch_supervisor`'s own doc).
+    Static(String),
+    /// The DB-driven multi-tenant path: the CURRENT canonical digest for
+    /// this consumer's own `(tenant_id, community_id, app_id)` scope, read
+    /// fresh from `crate::changelog_consumer`'s shared [`ActiveDigests`]
+    /// map on every single invoke -- never a value captured once at spawn
+    /// time, so a hot-swapped bundle takes effect on the very next message
+    /// with no consumer restart. [`DigestSource::current`] returns `None`
+    /// when this scope has no active digest right now (never seen,
+    /// unloaded, or its scope is currently failing to resolve); callers
+    /// MUST dead-letter rather than ever invoke with an empty digest.
+    ///
+    /// regression: svc-action had no multi-tenant dispatch consumers;
+    /// replies never sent after legacy env removal (alpha 2026-10-03)
+    ///
+    /// `sessions` is the per-session counterpart `crate::changelog_consumer`
+    /// writes to in lock-step with `digests` -- [`DigestSource::session_for`]
+    /// uses it to pick a live executor session that actually has the
+    /// resolved digest loaded, never just whichever connection
+    /// `ConnectionRegistry::active()` calls "newest" (regression: bundles
+    /// loaded only onto a terminating executor during rollout; live
+    /// executor got none, alpha 2026-10-03).
+    Active {
+        scope: bundle_active_set::AppScope,
+        digests: Arc<ActiveDigests>,
+        sessions: Arc<LoadedSessions>,
+    },
+}
+
+impl DigestSource {
+    /// Resolves the digest to `invoke` with right now. See each variant's
+    /// own doc for what `None`/empty means.
+    fn current(&self) -> Option<String> {
+        match self {
+            DigestSource::Static(d) => Some(d.clone()),
+            DigestSource::Active { scope, digests, .. } => digests.get(scope),
+        }
+    }
+
+    /// Like [`Self::current`], but additionally treats an `Active`-path
+    /// digest that resolved to an empty string the same as "no active
+    /// digest known" (`None`) -- the one call [`handle_delivered`]'s own
+    /// `NO_ACTIVE_DIGEST` guard must use, never [`Self::current`] directly,
+    /// so that guard can never be bypassed by an empty-but-`Some` digest
+    /// (regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest -- `digest_prefix=""` reached
+    /// `invoke_dispatch` and failed non-retryably as `UnknownBundle` instead
+    /// of dead-lettering pre-flight, alpha 2026-10-03).
+    ///
+    /// `DigestSource::Static`'s own intentionally-empty "no bundle
+    /// configured yet" sentinel is deliberately left untouched here (see
+    /// that variant's own doc) -- only the multi-tenant `Active` path's
+    /// "never invoke with an empty digest" invariant is enforced, since an
+    /// empty `ActiveDigests` entry is never valid under any circumstance
+    /// (unlike `Static`'s legacy env-unset case).
+    fn usable_digest(&self) -> Option<String> {
+        match self {
+            DigestSource::Active { .. } => self.current().filter(|d| !d.is_empty()),
+            DigestSource::Static(_) => self.current(),
+        }
+    }
+
+    /// The live executor session (if any) that should serve this `digest` --
+    /// `DigestSource::Static` has no per-session tracking at all (the
+    /// legacy, single-bundle-per-pod path predates multi-session executors)
+    /// so it is not resolvable here; `handle_delivered` falls back to
+    /// `ConnectionRegistry::active()` for that variant only, unchanged from
+    /// before this fix. `DigestSource::Active` MUST use this instead of
+    /// `ConnectionRegistry::active()` -- picking a live session that merely
+    /// happens to be newest, without checking it actually has `digest`
+    /// loaded, is exactly the alpha 2026-10-03 failure mode.
+    fn session_for_digest(&self, digest: &str) -> Option<bundle_active_set::SessionId> {
+        match self {
+            DigestSource::Static(_) => None,
+            DigestSource::Active {
+                scope, sessions, ..
+            } => sessions.pick_session_with_digest(scope, digest),
+        }
+    }
+}
 
 /// Tunables `run()` needs beyond what `penguin_spine::SpineConfig` already
 /// covers (spec §4.3).
@@ -68,7 +204,14 @@ pub enum InvokeError {
     #[error("host-api error: {0}")]
     HostApi(#[from] HostApiError),
     #[error("executor reported error {code:?}: {message}")]
-    ExecutorError { code: String, message: String },
+    ExecutorError {
+        code: String,
+        message: String,
+        /// The executor's wire `detail` discriminator (`ErrorBody::detail`),
+        /// e.g. `pool_exhausted` (back-pressure, NOT a guest fault) or
+        /// `fuel_exhausted`. `None` for synthesized (non-wire) errors.
+        detail: Option<String>,
+    },
     #[error("invoke result payload was not valid JSON: {0}")]
     MalformedPayload(String),
 }
@@ -79,6 +222,50 @@ pub enum InvokeError {
 /// (deciding *when*/*which* digest to load).
 #[allow(clippy::too_many_arguments)]
 pub async fn ensure_loaded(
+    conn: &Connection,
+    tenant_id: i32,
+    community_id: i32,
+    app_id: &str,
+    version: &str,
+    digest: &str,
+    component_key: &str,
+    sidecar_key: &str,
+    limits: LoadLimits,
+) -> Result<LoadedBody, InvokeError> {
+    let started = std::time::Instant::now();
+    let outcome = load_round_trip(
+        conn,
+        tenant_id,
+        community_id,
+        app_id,
+        version,
+        digest,
+        component_key,
+        sidecar_key,
+        limits,
+    )
+    .await;
+    let metrics = stage_metrics::stage_metrics();
+    let result = if outcome.is_ok() { "ok" } else { "error" };
+    metrics.record_bundle_load(app_id, "load", result, started.elapsed());
+    if let Ok(loaded) = &outcome {
+        // The executor's own account of the load (`precompile_ms`, covering
+        // fetch + verify + compile on its side) -- the stage cannot see
+        // inside the round trip, so this is the only per-phase signal.
+        metrics.record_bundle_load(
+            app_id,
+            "precompile",
+            "ok",
+            Duration::from_millis(loaded.precompile_ms),
+        );
+    }
+    outcome
+}
+
+/// The `load` request/reply exchange behind [`ensure_loaded`], split out so
+/// the wrapper can time the whole round trip and label its outcome.
+#[allow(clippy::too_many_arguments)]
+async fn load_round_trip(
     conn: &Connection,
     tenant_id: i32,
     community_id: i32,
@@ -107,10 +294,12 @@ pub async fn ensure_loaded(
         Message::Error(e) => Err(InvokeError::ExecutorError {
             code: format!("{:?}", e.code),
             message: e.message,
+            detail: e.detail,
         }),
         _ => Err(InvokeError::ExecutorError {
             code: "UNEXPECTED_FRAME".to_string(),
             message: "expected loaded or error".to_string(),
+            detail: None,
         }),
     }
 }
@@ -144,10 +333,12 @@ pub async fn ensure_unloaded(
         Message::Error(e) => Err(InvokeError::ExecutorError {
             code: format!("{:?}", e.code),
             message: e.message,
+            detail: e.detail,
         }),
         _ => Err(InvokeError::ExecutorError {
             code: "UNEXPECTED_FRAME".to_string(),
             message: "expected unloaded or error".to_string(),
+            detail: None,
         }),
     }
 }
@@ -176,7 +367,7 @@ pub async fn ensure_unloaded(
 fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, InvokeError> {
     let payload_json = serde_json::to_string(&env.event.payload)
         .map_err(|e| InvokeError::MalformedPayload(e.to_string()))?;
-    Ok(serde_json::json!({
+    let mut wire = serde_json::json!({
         "tenant": env.tenant,
         "community": env.community,
         "app_id": env.app_id,
@@ -191,7 +382,88 @@ fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, Invok
         "ts": env.ts,
         "target_app_id": env.target_app_id,
         "trace_context": env.trace.as_ref().map(|t| t.traceparent.clone()),
-    }))
+    });
+    // v2 (`stage-v2`) shape: add the authoritative numeric scope ONLY when the
+    // MAC-verified inbound envelope carries it (a v3 envelope). Copied from
+    // `env` and nowhere else; a v1/legacy envelope keeps the v1 frame
+    // unchanged (a `stage-v2` bundle then fails closed in the executor).
+    if let (Some(tenant_id), Some(community_id)) = (env.tenant_id, env.community_id) {
+        wire["tenant_id"] = serde_json::json!(tenant_id);
+        wire["community_id"] = serde_json::json!(community_id);
+    }
+    Ok(wire)
+}
+
+/// The numeric `(tenant_id, community_id)` of a MAC-verified v3 envelope,
+/// narrowed to the executor's i32 scope. `Ok(None)` for a legacy (v2-schema)
+/// envelope; `Err` when a v3 id cannot be represented (> `i32::MAX`) -- the
+/// caller dead-letters rather than letting an id silently wrap or mis-match.
+fn verified_numeric_scope(env: &StageEnvelope) -> Result<Option<(i32, i32)>, String> {
+    match (env.tenant_id, env.community_id) {
+        (Some(t), Some(c)) => {
+            // Defense in depth (independent of the MAC): real ids are
+            // `tenant_id >= 1`, `community_id >= 0` (0 = tenant-wide); never
+            // let a zero/negative id reach deps/grants.
+            if t < 1 || c < 0 {
+                return Err(format!(
+                    "envelope numeric scope out of range (tenant_id {t}, community_id {c})"
+                ));
+            }
+            let t = i32::try_from(t)
+                .map_err(|_| format!("envelope tenant_id {t} exceeds the executor's i32 scope"))?;
+            Ok(Some((t, c)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Resolves the `(tenant_id, community_id)` this entry is scoped to. A v3
+/// envelope's MAC-verified numeric ids are authoritative but must ALSO equal
+/// the ids its own tenant/community slugs resolve to (bound-scope equality,
+/// independent of the MAC); a mismatch or unresolvable slug is `Err` and the
+/// caller dead-letters `TENANT_BOUNDARY`. A legacy envelope resolves by slug
+/// alone, falling back to the fail-closed `(0, 0)` sentinel.
+async fn resolve_scope<T: TenantResolver>(
+    env: &StageEnvelope,
+    tenants: &T,
+) -> Result<(i32, i32), String> {
+    let resolved = tenants.resolve(&env.tenant, env.community.as_deref()).await;
+    match verified_numeric_scope(env)? {
+        None => Ok(resolved.map(|(t, c)| (t, c.unwrap_or(0))).unwrap_or((0, 0))),
+        Some((t, c)) => match resolved {
+            Some((rt, rc)) if rt == t && rc.unwrap_or(0) == c => Ok((t, c)),
+            other => Err(format!(
+                "envelope numeric scope ({t}, {c}) does not match the ids its slugs resolve to ({other:?})"
+            )),
+        },
+    }
+}
+
+/// Records the executor-call histogram for one `invoke` reply and, when the
+/// executor reported a sandbox trip, the trip counter. `result` is `ok` for a
+/// result frame, `executor_error` for an error frame, `malformed` for any
+/// other frame and `host_api_error` when no reply arrived at all.
+fn record_executor_call(
+    app_id: &str,
+    export: &'static str,
+    reply: &Result<penguin_bundle_host::wire::Frame, HostApiError>,
+    elapsed: Duration,
+) {
+    let metrics = stage_metrics::stage_metrics();
+    let result = match reply {
+        Ok(frame) => match &frame.message {
+            Message::Result(_) => "ok",
+            Message::Error(e) => {
+                if let Some(limit) = stage_metrics::sandbox_limit_for(e.code, e.detail.as_deref()) {
+                    metrics.record_sandbox_trip(app_id, limit);
+                }
+                "executor_error"
+            }
+            _ => "malformed",
+        },
+        Err(_) => "host_api_error",
+    };
+    metrics.record_executor_call(app_id, export, result, elapsed);
 }
 
 /// Invokes the bundle's `dispatch` export for one delivered envelope. The
@@ -201,6 +473,7 @@ fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, Invok
 /// [`envelope_to_wire_json`] -- see that function's doc for the wire-shape
 /// bug this replaced. Returns the raw `result.payload` JSON for
 /// [`interpret_dispatch_payload`] to classify.
+#[allow(clippy::too_many_arguments)]
 pub async fn invoke_dispatch(
     conn: &Connection,
     app_id: &str,
@@ -208,6 +481,9 @@ pub async fn invoke_dispatch(
     env: &StageEnvelope,
     config_json: &str,
     deadline_ms: u64,
+    tenant_id: i32,
+    community_id: i32,
+    app_version: i64,
 ) -> Result<serde_json::Value, InvokeError> {
     let trace = env.trace.as_ref().map(|t| TraceContext {
         traceparent: t.traceparent.clone(),
@@ -230,7 +506,18 @@ pub async fn invoke_dispatch(
         // discord) -- `None` when the platform/event has no channel
         // concept. Never re-derived from anything a bundle returns.
         origin_channel_id: env.event.source.as_ref().and_then(|s| s.channel_id.clone()),
+        tenant_id,
+        community_id,
+        // Resolved once at startup from the active-set row that loaded
+        // `digest` (`crate::lib::try_start_dispatch`'s `resolve_action_app_version`
+        // call, mirroring `core/svc_process::lib::resolve_app_version_id`) --
+        // never `0` for a live invocation (spec SS4/SS5.1: grants are keyed
+        // `(tenant, community, app, app_version)`; `0` only ever matches a
+        // grant row also written under version `0`, never a real approved
+        // version).
+        app_version,
     };
+    let started = std::time::Instant::now();
     let reply = conn
         .invoke(
             InvokeBody {
@@ -243,16 +530,20 @@ pub async fn invoke_dispatch(
             },
             scope,
         )
-        .await?;
+        .await;
+    record_executor_call(app_id, "dispatch", &reply, started.elapsed());
+    let reply = reply?;
     match reply.message {
         Message::Result(body) => Ok(body.payload),
         Message::Error(e) => Err(InvokeError::ExecutorError {
             code: format!("{:?}", e.code),
             message: e.message,
+            detail: e.detail,
         }),
         _ => Err(InvokeError::ExecutorError {
             code: "UNEXPECTED_FRAME".to_string(),
             message: "expected result or error".to_string(),
+            detail: None,
         }),
     }
 }
@@ -435,7 +726,24 @@ impl SpineOps for SpineClient {
 /// ever-growing parameter list.
 pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
     pub app_id: String,
-    pub digest: String,
+    /// See [`DigestSource`]'s own doc -- resolved fresh on every single
+    /// delivered entry, never captured once at spawn time (regression:
+    /// svc-action had no multi-tenant dispatch consumers; replies never
+    /// sent after legacy env removal, alpha 2026-10-03).
+    pub digest_source: DigestSource,
+    /// The live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    /// snapshot (`crate::lib::try_start_dispatch`/`try_start_changelog_
+    /// consumer`'s shared handle, populated every tick by
+    /// `crate::bundle_loader`/`crate::changelog_consumer`) -- resolved PER
+    /// INVOCATION in [`handle_delivered`] against whatever digest
+    /// [`DigestSource`] just picked, never captured once as a plain `i64`:
+    /// a bundle hot-swap must be reflected on the very next invocation
+    /// (spec SS4/SS5.1). [`DigestSource`] (not this snapshot) owns
+    /// dead-letter-vs-redirect decisions for a superseded/absent digest --
+    /// this snapshot's only job is resolving the matching `app_versions.id`
+    /// for the gate's `GrantScopeKey`, fail-closed to `0` (never matches a
+    /// real grant row) if the two maps ever briefly disagree.
+    pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     pub config_json: String,
     pub key_ring: KeyRing,
     pub connections: Arc<ConnectionRegistry>,
@@ -453,6 +761,9 @@ pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
     pub consumer_id: String,
     pub spine: S,
     pub metrics: Arc<dyn SpineMetrics>,
+    /// Connector spec SS0 condition 5: per-(app_id, scope, destination)
+    /// circuit breaker -- see [`breaker_key`]'s doc for the key shape.
+    pub breaker: Arc<circuit_breaker::CircuitBreaker>,
 }
 
 /// Handles exactly one delivered entry end to end. Returns `Ok(())` in
@@ -465,6 +776,28 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     stream_key: &str,
     deps: &DispatchDeps<A, T, S>,
 ) -> Result<(), SpineError> {
+    let started = std::time::Instant::now();
+    let outcome = handle_delivered_inner(d, stream_key, deps).await;
+    let result = match &outcome {
+        Ok(result) => result.as_str(),
+        // The ack/DLQ write itself failed: the entry stays pending for
+        // redelivery, so it has no terminal dispatch outcome yet.
+        Err(_) => "spine_error",
+    };
+    stage_metrics::stage_metrics().record_stage(&deps.app_id, result, started.elapsed());
+    outcome.map(|_| ())
+}
+
+/// The body of [`handle_delivered`], returning the terminal [`StageResult`]
+/// so the wrapper can label `waddles_stage_latency_seconds` without every
+/// exit path touching telemetry. Behavior is unchanged from before the
+/// metrics wrapper existed: each former `return` still performs exactly the
+/// same ack/DLQ write and now also names its outcome.
+async fn handle_delivered_inner<A: AuditSink, T: TenantResolver, S: SpineOps>(
+    d: &Delivered,
+    stream_key: &str,
+    deps: &DispatchDeps<A, T, S>,
+) -> Result<StageResult, SpineError> {
     // Spec §5.11: hop verification runs before any other processing.
     if let Err(reason) = crate::hop::verify_hop(&deps.key_ring, &d.env, stream_key, &deps.app_id) {
         deps.metrics
@@ -480,23 +813,187 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             code: "TENANT_BOUNDARY".to_string(),
             message: reason.to_string(),
             detail: None,
-            artifact_digest: Some(deps.digest.clone()),
+            artifact_digest: deps.digest_source.current(),
             consumer_id: deps.consumer_id.clone(),
         };
-        return deps.spine.dead_letter(d, &err).await;
+        return deps
+            .spine
+            .dead_letter(d, &err)
+            .await
+            .map(|()| StageResult::DeadLettered);
     }
 
-    let Some(connection) = deps.connections.active() else {
-        tracing::warn!(app_id = %deps.app_id, "no executor connection available, dead-lettering for redelivery");
+    // Connector spec SS0 condition 5: a (app_id, scope, destination) tuple
+    // with too many recent guest faults is disabled -- dead-lettered
+    // without ever reaching the executor, so a bad destination (or a
+    // faulting bundle version for one tenant) cannot burn executor capacity
+    // other destinations/tenants need. NOTE the entry is parked in the DLQ
+    // (`dead_letter_raw` is XADD-to-DLQ then XACK): consumed, NOT
+    // redelivered, and nothing auto-replays it when the backoff elapses.
+    let breaker_key = breaker_key(&deps.app_id, &d.env);
+    if let Some(key) = breaker_key.as_deref() {
+        if !deps.breaker.allow(key) {
+            // debug, not warn: while the breaker is open EVERY entry for
+            // this key lands here, so a per-entry warn is a log flood under
+            // load. The one operator-visible signal is the `error!(alert)`
+            // the breaker itself emits on the OPEN transition.
+            tracing::debug!(
+                app_id = %deps.app_id,
+                key = %key,
+                "circuit breaker open for this app/scope/destination, dead-lettering without invoking (parked in DLQ)"
+            );
+            let err = penguin_spine::DlqError {
+                kind: penguin_spine::DlqErrorKind::ExecutorUnavailable,
+                code: "DISPATCH_CIRCUIT_OPEN".to_string(),
+                message: format!("{key} disabled by circuit breaker"),
+                detail: None,
+                artifact_digest: deps.digest_source.current(),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps
+                .spine
+                .dead_letter(d, &err)
+                .await
+                .map(|()| StageResult::DeadLettered);
+        }
+    }
+
+    // Resolve the digest to invoke with BEFORE ever checking for an
+    // executor connection -- "if no active digest is known for an app when
+    // a message arrives, log ERROR and dead-letter for redelivery; never
+    // invoke with an empty digest" (regression: svc-action had no
+    // multi-tenant dispatch consumers; replies never sent after legacy env
+    // removal, alpha 2026-10-03). `DigestSource::Static` always resolves
+    // (possibly to an intentionally empty string, unchanged legacy
+    // behavior); only `DigestSource::Active` with no entry for this scope
+    // yields `None` here.
+    let Some(digest) = deps.digest_source.usable_digest() else {
+        tracing::error!(
+            app_id = %deps.app_id,
+            tenant = %d.env.tenant,
+            community = ?d.env.community,
+            "no active bundle digest known for this app's scope; dead-lettering for redelivery"
+        );
+        let err = penguin_spine::DlqError {
+            kind: penguin_spine::DlqErrorKind::BundleError,
+            code: "NO_ACTIVE_DIGEST".to_string(),
+            message: "no active bundle digest known for this (tenant, community, app) scope"
+                .to_string(),
+            detail: None,
+            artifact_digest: None,
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps
+            .spine
+            .dead_letter(d, &err)
+            .await
+            .map(|()| StageResult::DeadLettered);
+    };
+
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // the `app_versions.id` this invoke's grants are keyed on (spec
+    // SS4/SS5.1), resolved PER INVOCATION against the already-chosen
+    // `digest` -- never a value captured once at startup. `digest_source`
+    // above (not this lookup) already owns every dead-letter-vs-redirect
+    // decision for a superseded/absent digest; `app_version_snapshot` is
+    // fed by the exact same active-set reads (`crate::changelog_consumer`/
+    // `crate::bundle_loader`), so it should always agree with whatever
+    // `digest` was just resolved to. A momentary disagreement (the two
+    // live maps refresh independently) fails closed to `0` -- which never
+    // matches a real grant row -- rather than blocking dispatch on it.
+    let app_version = deps
+        .app_version_snapshot
+        .resolve_for_digest(&deps.app_id, &digest)
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                app_id = %deps.app_id,
+                digest_prefix = %bundle_active_set::digest_prefix(&digest),
+                "no app_version found in the active-version snapshot for this digest; \
+                 falling back to the fail-closed 0 sentinel (every non-platform \
+                 permission will deny for this invoke)"
+            );
+            0
+        });
+
+    // Pick the executor session to invoke on. `DigestSource::Active` MUST
+    // pick a live session that actually has `digest` loaded
+    // (`bundle_active_set::pick_session_with_digest`, via `DigestSource::
+    // session_for_digest`), never just whichever connection
+    // `ConnectionRegistry::active()` calls "newest" -- that is exactly the
+    // alpha 2026-10-03 failure mode (a rolling pod's about-to-terminate
+    // executor session briefly "newest", so every invoke routed there and
+    // got `UnknownBundle`/silence while the real live executor held
+    // everything). `DigestSource::Static` has no per-session tracking at all
+    // (the legacy, single-bundle-per-pod path predates multi-session
+    // executors) and keeps the unchanged `ConnectionRegistry::active()`
+    // fallback.
+    let no_loaded_session = matches!(deps.digest_source, DigestSource::Active { .. })
+        && deps.digest_source.session_for_digest(&digest).is_none();
+    let connection = if no_loaded_session {
+        None
+    } else {
+        match deps.digest_source.session_for_digest(&digest) {
+            Some(session_id) => deps.connections.get(session_id),
+            None => deps.connections.active(),
+        }
+    };
+
+    let Some(connection) = connection else {
+        if no_loaded_session {
+            // Fail-closed, distinct from "no executor at all" below: at
+            // least one executor is connected, but none of them has this
+            // exact digest loaded right now -- never invoke a session that
+            // lacks the bundle (regression: bundles loaded only onto a
+            // terminating executor during rollout; live executor got none,
+            // alpha 2026-10-03).
+            tracing::error!(
+                app_id = %deps.app_id,
+                digest_prefix = %bundle_active_set::digest_prefix(&digest),
+                "no live executor session has this bundle's digest loaded; dead-lettering for redelivery"
+            );
+            let err = penguin_spine::DlqError {
+                kind: penguin_spine::DlqErrorKind::ExecutorUnavailable,
+                code: "NO_LOADED_EXECUTOR".to_string(),
+                message: "no live executor session has the target digest loaded".to_string(),
+                detail: None,
+                artifact_digest: Some(digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps
+                .spine
+                .dead_letter(d, &err)
+                .await
+                .map(|()| StageResult::DeadLettered);
+        }
+        // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
+        // 2026-10-02 incident: svc-process/svc-action were rolled and each
+        // bundle-executor stayed bound to its old, terminated pod; the new
+        // svc had zero executors and silently dead-lettered every entry at
+        // WARN -- nobody noticed until a user reported it). The outage
+        // duration is named in the rendered message itself, not only a
+        // structured field, per the "over-log, never swallow errors" rule.
+        let app_id = &deps.app_id;
+        let no_executor_for_s = deps.connections.duration_without_executor().as_secs();
+        deps.connections.record_dead_letter_no_executor();
+        tracing::error!(
+            app_id = %app_id,
+            no_executor_for_s,
+            "no executor connection available for {no_executor_for_s}s (app_id {app_id}), \
+             dead-lettering for redelivery"
+        );
         let err = penguin_spine::DlqError {
             kind: penguin_spine::DlqErrorKind::ExecutorUnavailable,
             code: "EXECUTOR_UNAVAILABLE".to_string(),
             message: "no active host-api connection".to_string(),
             detail: None,
-            artifact_digest: Some(deps.digest.clone()),
+            artifact_digest: Some(digest.clone()),
             consumer_id: deps.consumer_id.clone(),
         };
-        return deps.spine.dead_letter(d, &err).await;
+        return deps
+            .spine
+            .dead_letter(d, &err)
+            .await
+            .map(|()| StageResult::DeadLettered);
     };
 
     // Every attempt -- including the first -- goes through the same
@@ -508,27 +1005,98 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     // error) is distinct from the bundle's own classified
     // retryable/non-retryable outcome; this landing records it as a
     // non-retryable attempt (detail names the invoke failure) rather than
-    // a separate DLQ path -- `deps.connections.active()` above already
-    // catches the "no executor at all" case before ever entering this
-    // loop, which is the one infra failure worth a distinct DLQ kind at
-    // this stage's current scope.
-    let (record, _attempts) = dispatch_with_retry(
+    // a separate DLQ path -- the connection resolution above already
+    // catches the "no executor at all"/"no session has this digest" cases
+    // before ever entering this loop, which is the one infra failure worth
+    // a distinct DLQ kind at this stage's current scope.
+    //
+    // Resolved once per delivered envelope (memoized by `deps.tenants` after
+    // the first lookup for this `(tenant, community)` pair) and threaded
+    // into every capability `authorize()` call this invoke makes (spec
+    // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    // SS5.1) -- an unresolvable tenant/community falls back to the `(0, 0)`
+    // sentinel, which fails closed (never matches a real grant row) rather
+    // than skipping the gate.
+    // A v3 envelope's numeric ids are MAC-verified (hop check above) and
+    // authoritative AND must equal the ids their slugs resolve to (see
+    // `resolve_scope`); they scope the capabilities and are what the guest
+    // sees. A legacy envelope still resolves by slug.
+    let (tenant_id, community_id) = match resolve_scope(&d.env, &deps.tenants).await {
+        Ok(ids) => ids,
+        Err(message) => {
+            tracing::error!(app_id = %deps.app_id, %message, "numeric scope invalid or mismatched, dead-lettering");
+            deps.metrics
+                .tenant_boundary_violation("action", "numeric_scope_invalid");
+            let err = penguin_spine::DlqError {
+                kind: penguin_spine::DlqErrorKind::TenantBoundary,
+                code: "TENANT_BOUNDARY".to_string(),
+                message,
+                detail: None,
+                artifact_digest: Some(digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps
+                .spine
+                .dead_letter(d, &err)
+                .await
+                .map(|()| StageResult::DeadLettered);
+        }
+    };
+
+    let (record, attempts) = dispatch_with_retry(
         |_attempt| async {
             match invoke_dispatch(
                 &connection,
                 &deps.app_id,
-                &deps.digest,
+                &digest,
                 &d.env,
                 &deps.config_json,
                 deps.retry_policy.call_timeout_ms,
+                tenant_id,
+                community_id,
+                app_version,
             )
             .await
             {
-                Ok(p) => interpret_dispatch_payload(&p, "irc_relay"),
-                Err(e) => AttemptOutcome::NonRetryable {
-                    http_status: None,
-                    detail: format!("invoke failed: {e}"),
-                },
+                Ok(p) => {
+                    if let Some(key) = breaker_key.as_deref() {
+                        deps.breaker.record_success(key);
+                    }
+                    interpret_dispatch_payload(&p, "irc_relay")
+                }
+                Err(e) => {
+                    // Connector spec SS0 condition 5: only an actual GUEST
+                    // fault counts against this (app_id, scope, destination)
+                    // tuple's breaker -- a broken bundle registration or a
+                    // connection-level problem is not evidence this
+                    // destination's guest code is misbehaving.
+                    if let (Some(key), InvokeError::ExecutorError { code, detail, .. }) =
+                        (breaker_key.as_deref(), &e)
+                    {
+                        if is_guest_fault(code, detail.as_deref()) {
+                            deps.breaker.record_failure(key);
+                        }
+                    }
+                    // Diagnosability fix (regression: multi_tenant path
+                    // sent bare-hex digest to Invoke, UnknownBundle despite
+                    // loaded bundle (alpha 2026-10-03)): `UnknownBundle`'s
+                    // `message` IS the digest the executor echoed back
+                    // (`bundle_executor::invoke::on_invoke`'s
+                    // `error_body`), so an empty/unresolved digest renders
+                    // here with nothing to grep on -- log the resolved
+                    // digest's own prefix explicitly, matching
+                    // `core/svc_process/src/spine.rs`'s identical fix.
+                    tracing::error!(
+                        app_id = %deps.app_id,
+                        digest_prefix = bundle_active_set::digest_prefix(&digest),
+                        error = %e,
+                        "action invoke failed, recording non-retryable attempt"
+                    );
+                    AttemptOutcome::NonRetryable {
+                        http_status: None,
+                        detail: format!("invoke failed: {e}"),
+                    }
+                }
             }
         },
         deps.retry_policy.max_retries,
@@ -559,7 +1127,9 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             &d.env.app_id,
         );
 
-    deps.spine.ack(d, &deps.app_id).await
+    let result = StageResult::from_record_status(record.status);
+    stage_metrics::stage_metrics().record_attempts(&deps.app_id, result.as_str(), attempts);
+    deps.spine.ack(d, &deps.app_id).await.map(|()| result)
 }
 
 /// Reads and dispatches exactly one batch, returning how many entries were
@@ -570,6 +1140,7 @@ async fn drain_batch<R: StreamReader, A: AuditSink, T: TenantResolver, S: SpineO
     deps: &DispatchDeps<A, T, S>,
 ) -> Result<usize, SpineError> {
     let batch = reader.read().await?;
+    stage_metrics::stage_metrics().record_batch(batch.len());
     for d in &batch {
         handle_delivered(d, stream_key, deps).await?;
     }
@@ -627,6 +1198,8 @@ pub async fn run<A: AuditSink, T: TenantResolver>(
 ) -> Result<(), SpineError> {
     let app_id = deps.app_id.clone();
     let dlq = SpineClient::connect(cfg.clone(), deps.metrics.clone()).await?;
+    let streams: Vec<String> = grants.iter().map(|g| g.stream.clone()).collect();
+    let sampler_client = dlq.clone();
     let reader = GroupReader::connect(
         &cfg,
         grants,
@@ -636,13 +1209,338 @@ pub async fn run<A: AuditSink, T: TenantResolver>(
         deps.metrics.clone(),
     )
     .await?;
+    // Dropped (and the task aborted) when the drain loop returns.
+    let _backlog_sampler = spawn_group_backlog_sampler(
+        sampler_client,
+        streams,
+        cfg.stats_interval_ms,
+        cfg.pel_alert,
+    );
     drain_loop(reader, stream_key, deps, rust_data_plane, shutdown).await
+}
+
+/// Source of consumer-group backlog samples (spec §5.6, `XINFO GROUPS`).
+/// Production is [`SpineClient::group_stats`], which feeds `group_lag` /
+/// `group_pending` into the [`SpineMetrics`] it was connected with -- the
+/// stuck-bundle signal `waddles_spine_queue_depth` / `waddles_group_pending`
+/// carry -- and returns the stats so the sampler can alert on them.
+trait GroupStatsSource: Send + 'static {
+    fn group_stats(
+        &self,
+        stream: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<GroupStats>, SpineError>> + Send;
+}
+
+impl GroupStatsSource for SpineClient {
+    async fn group_stats(&self, stream: &str) -> Result<Vec<GroupStats>, SpineError> {
+        SpineClient::group_stats(self, stream).await
+    }
+}
+
+/// Aborts the wrapped task when dropped, so a sampler can never outlive the
+/// drain loop it observes.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Starts the periodic backlog sampler for `streams`, every `interval_ms`
+/// (`SPINE_STATS_INTERVAL_MS`, the spine's own knob for exactly this). `None`
+/// -- no sampler -- when the interval is `0` (operator opt-out) or there is
+/// nothing to sample.
+fn spawn_group_backlog_sampler<G: GroupStatsSource>(
+    source: G,
+    streams: Vec<String>,
+    interval_ms: u64,
+    pel_alert: u64,
+) -> Option<AbortOnDrop> {
+    if interval_ms == 0 || streams.is_empty() {
+        return None;
+    }
+    Some(AbortOnDrop(tokio::spawn(sample_group_backlog(
+        source,
+        streams,
+        Duration::from_millis(interval_ms),
+        pel_alert,
+    ))))
+}
+
+/// Samples every stream's consumer-group stats each `interval`, forever (until
+/// aborted). The first sample is one full interval after start, so consumers
+/// spawned together do not all query at once. A failed sample is logged at
+/// DEBUG and retried next interval -- observing backlog must never disturb the
+/// consumer it observes; a Valkey outage surfaces loudly through the drain
+/// loop itself. A group whose pending-entries list exceeds `pel_alert`
+/// (`SPINE_PEL_ALERT`) is logged at WARN: that is the stuck-bundle signal,
+/// logged by `app_id` and counts only (stream names embed tenant slugs).
+async fn sample_group_backlog<G: GroupStatsSource>(
+    source: G,
+    streams: Vec<String>,
+    interval: Duration,
+    pel_alert: u64,
+) {
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        for stream in &streams {
+            match source.group_stats(stream).await {
+                Ok(stats) => {
+                    for stat in stats.iter().filter(|stat| stat.pending > pel_alert) {
+                        tracing::warn!(
+                            app_id = %stat.app_id,
+                            pending = stat.pending,
+                            pel_alert,
+                            "consumer group pending-entries list is above SPINE_PEL_ALERT \
+                             (a stuck bundle is not acking)"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        error = %err,
+                        "consumer-group backlog sample failed; retrying next interval"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Builds a raw `redis::Client` for `cfg`'s transport -- the same
+/// connection-building logic as `core/svc_ingest/src/outbound.rs::
+/// build_redis_client`/`core/svc_process/src/spine.rs::build_raw_client`
+/// (duplicated rather than imported: `penguin_spine`'s own equivalent is
+/// `pub(crate)` to that crate). Used only by [`ensure_consumer_group`].
+fn build_raw_client(cfg: &SpineConfig) -> Result<redis::Client, redis::RedisError> {
+    let base: redis::ConnectionInfo =
+        redis::IntoConnectionInfo::into_connection_info(cfg.valkey_url.as_str())?;
+    let mut settings = base.redis_settings().clone();
+    if let Some(username) = &cfg.valkey_username {
+        settings = settings.set_username(username);
+    }
+    if let Some(password) = &cfg.valkey_password {
+        settings = settings.set_password(password);
+    }
+    let info = base.set_redis_settings(settings);
+
+    if cfg.security_transport_tls {
+        crate::crypto::ensure_crypto_provider_installed();
+        let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
+        redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert,
+            },
+        )
+    } else {
+        redis::Client::open(info)
+    }
+}
+
+/// Idempotently ensures `group` exists on `stream` via `XGROUP CREATE
+/// <stream> <group> $ MKSTREAM` -- `BUSYGROUP` (already exists) is treated
+/// as success, never an error. Called once at startup and again as the
+/// self-heal step whenever a [`is_nogroup_error`] error surfaces mid-drain
+/// (`crate::lib::try_start_dispatch`'s retry wrapper) -- on a fresh Valkey
+/// nothing else in this env-driven single-bundle path ever creates the
+/// group. Returns `Ok(true)` if newly created, `Ok(false)` if it already
+/// existed (`BUSYGROUP`).
+///
+/// regression: drain loop exited on NOGROUP (alpha 2026-10-02) -- same bug
+/// class as `core/svc_process`'s legacy process loop, fixed identically.
+pub(crate) async fn ensure_consumer_group(
+    cfg: &SpineConfig,
+    stream: &str,
+    group: &str,
+) -> Result<bool, SpineError> {
+    let client = build_raw_client(cfg)?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg(stream)
+        .arg(group)
+        .arg("$")
+        .arg("MKSTREAM")
+        .query_async(&mut conn)
+        .await;
+    match result {
+        Ok(()) => Ok(true),
+        Err(e) if e.code() == Some("BUSYGROUP") => Ok(false),
+        Err(e) => Err(SpineError::from(e)),
+    }
+}
+
+/// `true` when `err` is Valkey's `NOGROUP` reply -- matches on
+/// [`redis::RedisError::code`], same rationale as `core/svc_process::
+/// source_supervisor::is_nogroup_error`'s identical check.
+pub(crate) fn is_nogroup_error(err: &SpineError) -> bool {
+    matches!(err, SpineError::Redis(e) if e.code() == Some("NOGROUP"))
+}
+
+/// Test-only helpers mirroring `core/svc_process/src/spine.rs::
+/// test_support` -- a real local Valkey/Redis on the default port when one
+/// happens to be reachable, skipped honestly (never a failure) otherwise.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::SpineConfig;
+
+    pub(crate) fn local_valkey_config() -> Option<SpineConfig> {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").ok()?;
+        let mut conn = client.get_connection().ok()?;
+        let _: String = redis::cmd("PING").query(&mut conn).ok()?;
+        Some(SpineConfig {
+            valkey_url: "redis://127.0.0.1:6379/".to_string(),
+            valkey_username: None,
+            valkey_password: None,
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: false,
+            security_transport_auth: false,
+            consumer_id: "test-consumer".to_string(),
+            stream_maxlen: 1_000,
+            read_count: 16,
+            block_ms: 200,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 1_000,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 5,
+            relay_block_timeout_s: 5,
+        })
+    }
+
+    pub(crate) fn unique_key(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("waddles:test:{prefix}:{nanos}")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hop::BoundaryReason;
+
+    // regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    // emptied svc-action dispatch digest (alpha 2026-10-03)
+    mod digest_source_usable_digest {
+        use super::*;
+
+        #[test]
+        fn active_with_no_entry_is_none() {
+            let src = DigestSource::Active {
+                scope: (1, 0, "waddles.a".to_string()),
+                digests: Arc::new(ActiveDigests::new()),
+                sessions: Arc::new(LoadedSessions::new()),
+            };
+            assert_eq!(src.usable_digest(), None);
+        }
+
+        #[test]
+        fn active_with_a_real_digest_returns_it() {
+            let digests = Arc::new(ActiveDigests::new());
+            let scope = (1, 0, "waddles.a".to_string());
+            digests.set(scope.clone(), "sha256:aa".to_string());
+            let src = DigestSource::Active {
+                scope,
+                digests,
+                sessions: Arc::new(LoadedSessions::new()),
+            };
+            assert_eq!(src.usable_digest(), Some("sha256:aa".to_string()));
+        }
+
+        /// The exact bypass this fix closes: an `Active` entry that somehow
+        /// resolved to an empty string must be treated identically to "no
+        /// entry at all" -- never passed through as a `Some("")` that
+        /// `handle_delivered`'s `None`-only guard would have let through.
+        #[test]
+        fn active_with_an_empty_digest_is_treated_as_none() {
+            let digests = Arc::new(ActiveDigests::new());
+            let scope = (1, 0, "waddles.a".to_string());
+            digests.force_set_for_test(scope.clone(), String::new());
+            let src = DigestSource::Active {
+                scope,
+                digests,
+                sessions: Arc::new(LoadedSessions::new()),
+            };
+            assert_eq!(src.usable_digest(), None);
+        }
+
+        /// `Static`'s own intentionally-empty "no bundle configured" legacy
+        /// sentinel is unchanged by this fix -- only the multi-tenant
+        /// `Active` path's empty-digest invariant is enforced.
+        #[test]
+        fn static_with_an_empty_digest_is_unchanged_legacy_behavior() {
+            let src = DigestSource::Static(String::new());
+            assert_eq!(src.usable_digest(), Some(String::new()));
+        }
+
+        #[test]
+        fn static_with_a_real_digest_returns_it() {
+            let src = DigestSource::Static("sha256:aa".to_string());
+            assert_eq!(src.usable_digest(), Some("sha256:aa".to_string()));
+        }
+    }
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    #[test]
+    fn is_nogroup_error_matches_on_the_redis_error_code_not_message_wording() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "NOGROUP".to_string(),
+            Some(
+                "No such key 'waddles:t:global:c:_tenant:app:waddles.a:action' or consumer \
+                 group 'waddles.a' in XREADGROUP with GROUP option"
+                    .to_string(),
+            ),
+        ));
+        assert!(is_nogroup_error(&err));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_different_redis_error_code() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "WRONGTYPE".to_string(),
+            Some("Operation against a key holding the wrong kind of value".to_string()),
+        ));
+        assert!(!is_nogroup_error(&err));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_non_redis_spine_error() {
+        let err = SpineError::Config("unrelated config error".to_string());
+        assert!(!is_nogroup_error(&err));
+    }
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02) -- proves
+    // `ensure_consumer_group` self-heals on a fresh Valkey (no group, no
+    // stream) rather than ever surfacing NOGROUP to the dispatch loop.
+    #[tokio::test]
+    async fn ensure_consumer_group_creates_the_group_and_stream_on_a_fresh_valkey() {
+        let Some(cfg) = test_support::local_valkey_config() else {
+            eprintln!("skipping: no local Valkey reachable at 127.0.0.1:6379");
+            return;
+        };
+        let stream = test_support::unique_key("action-ensure-group-stream");
+        let group = test_support::unique_key("action-ensure-group-group");
+
+        let created = ensure_consumer_group(&cfg, &stream, &group)
+            .await
+            .expect("first create succeeds");
+        assert!(created);
+
+        let created_again = ensure_consumer_group(&cfg, &stream, &group)
+            .await
+            .expect("second create (BUSYGROUP) must not error");
+        assert!(!created_again);
+    }
 
     #[test]
     fn envelope_to_wire_json_matches_the_wit_stage_envelope_shape() {
@@ -680,6 +1578,28 @@ mod tests {
         assert!(wire.get("event_id").is_none());
         assert!(wire.get("session_id").is_none());
         assert!(wire.get("binding").is_none());
+    }
+
+    #[test]
+    fn wire_frame_carries_numeric_scope_only_from_a_v3_envelope() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let mut d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        // legacy envelope: the v1 frame is unchanged (no ids at all).
+        let v1 = envelope_to_wire_json(&d.env).expect("serializes");
+        assert!(v1.get("tenant_id").is_none() && v1.get("community_id").is_none());
+        assert_eq!(verified_numeric_scope(&d.env), Ok(None));
+        // v3 envelope: the v2 frame carries exactly the envelope's ids.
+        d.env.schema_version = penguin_spine::ENVELOPE_SCHEMA_VERSION;
+        d.env.tenant_id = Some(10);
+        d.env.community_id = Some(7);
+        let v2 = envelope_to_wire_json(&d.env).expect("serializes");
+        assert_eq!(v2["tenant_id"], 10);
+        assert_eq!(v2["community_id"], 7);
+        assert_eq!(verified_numeric_scope(&d.env), Ok(Some((10, 7))));
+        // an id the i32 executor scope cannot hold is refused, never wrapped.
+        d.env.tenant_id = Some(i64::from(i32::MAX) + 1);
+        assert!(verified_numeric_scope(&d.env).is_err());
     }
 
     #[test]
@@ -837,7 +1757,7 @@ mod tests {
     }
 
     fn mac_for(ring: &KeyRing, tenant: &str) -> String {
-        crate::hop::compute_mac(
+        penguin_spine::compute_binding_mac(
             ring,
             "k1",
             tenant,
@@ -892,6 +1812,98 @@ mod tests {
             crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
                 .is_ok()
         );
+    }
+
+    /// Builds a v3 fixture envelope with a genuine `compute_binding_mac_v3`.
+    fn v3_delivered(ring: &KeyRing, tenant_id: i64, community_id: i32) -> Delivered {
+        let mut d = fixture_delivered("acme", "waddles.bot.commands.default", "0".repeat(64), "k1");
+        let mac = penguin_spine::compute_binding_mac_v3(
+            ring,
+            "k1",
+            tenant_id,
+            community_id,
+            "acme",
+            Some("main"),
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+            None,
+        )
+        .unwrap();
+        d.env.binding.mac = mac;
+        d.env.schema_version = penguin_spine::ENVELOPE_SCHEMA_VERSION;
+        d.env.tenant_id = Some(tenant_id);
+        d.env.community_id = Some(community_id);
+        d
+    }
+
+    // regression: confused-deputy -- a v2-MAC envelope relabelled v3 with
+    // forged ids must fail hop verification (so the guest is never invoked).
+    #[test]
+    fn relabelled_v2_to_v3_envelope_with_forged_ids_fails_verify_hop() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let mut d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        d.env.schema_version = penguin_spine::ENVELOPE_SCHEMA_VERSION;
+        d.env.tenant_id = Some(99);
+        d.env.community_id = Some(98);
+        let err = crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
+            .unwrap_err();
+        assert_eq!(err.as_metric_reason(), "mac_mismatch");
+    }
+
+    #[tokio::test]
+    async fn genuine_v3_envelope_passes_hop_and_resolves_its_ids() {
+        let ring = test_ring();
+        // FixedTenantResolver resolves every slug pair to (1, Some(2)).
+        let d = v3_delivered(&ring, 1, 2);
+        assert!(
+            crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
+                .is_ok()
+        );
+        assert_eq!(
+            resolve_scope(&d.env, &FixedTenantResolver).await,
+            Ok((1, 2))
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_ids_not_matching_slug_resolved_ids_are_rejected() {
+        let ring = test_ring();
+        // genuine MAC over ids (10, 7), but the slugs resolve to (1, 2).
+        let d = v3_delivered(&ring, 10, 7);
+        assert!(
+            crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
+                .is_ok()
+        );
+        let err = resolve_scope(&d.env, &FixedTenantResolver)
+            .await
+            .unwrap_err();
+        assert!(err.contains("does not match"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn v2_envelope_still_resolves_by_slug() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        assert_eq!(
+            resolve_scope(&d.env, &FixedTenantResolver).await,
+            Ok((1, 2))
+        );
+    }
+
+    #[test]
+    fn non_positive_numeric_scope_is_rejected() {
+        let ring = test_ring();
+        let mut d = v3_delivered(&ring, 1, 2);
+        for (t, c) in [(0, 2), (-1, 2), (1, -1)] {
+            d.env.tenant_id = Some(t);
+            d.env.community_id = Some(c);
+            assert!(verified_numeric_scope(&d.env).is_err(), "({t},{c})");
+        }
+        d.env.tenant_id = Some(1);
+        d.env.community_id = Some(0);
+        assert_eq!(verified_numeric_scope(&d.env), Ok(Some((1, 0))));
     }
 
     #[test]
@@ -949,6 +1961,9 @@ mod tests {
         /// (gh review: both DLQ sites previously set `consumer_id:
         /// d.entry_id.clone()`).
         dead_lettered: std::sync::Mutex<Vec<(String, penguin_spine::DlqErrorKind, String)>>,
+        /// When set, `ack` fails -- the ack write itself erroring is the one
+        /// path that leaves an entry pending for redelivery.
+        fail_ack: std::sync::atomic::AtomicBool,
     }
 
     impl SpineOps for FakeSpineOps {
@@ -958,6 +1973,11 @@ mod tests {
             _app_id: &'a str,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SpineError>> + Send + 'a>>
         {
+            if self.fail_ack.load(std::sync::atomic::Ordering::Relaxed) {
+                return Box::pin(async {
+                    Err(SpineError::Config("scripted ack failure".to_string()))
+                });
+            }
             self.acked.lock().unwrap().push(d.entry_id.clone());
             Box::pin(async { Ok(()) })
         }
@@ -981,9 +2001,23 @@ mod tests {
         spine: FakeSpineOps,
         connections: Arc<ConnectionRegistry>,
     ) -> DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps> {
+        let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
+        app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
+            app_id: "waddles.bot.commands.default".to_string(),
+            version: "1".to_string(),
+            version_id: 1,
+            digest: "sha256:00".to_string(),
+            component_key: String::new(),
+            sidecar_key: String::new(),
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
+            declared_capabilities: Vec::new(),
+        }]);
         DispatchDeps {
             app_id: "waddles.bot.commands.default".to_string(),
-            digest: "sha256:00".to_string(),
+            digest_source: DigestSource::Static("sha256:00".to_string()),
+            app_version_snapshot,
             config_json: "{}".to_string(),
             key_ring: test_ring(),
             connections,
@@ -1000,6 +2034,7 @@ mod tests {
             consumer_id: "test-pod-consumer".to_string(),
             spine,
             metrics: Arc::new(RecordingSpineMetrics::default()),
+            breaker: Arc::new(circuit_breaker::CircuitBreaker::new(Arc::new(()))),
         }
     }
 
@@ -1129,6 +2164,84 @@ mod tests {
         registry
     }
 
+    /// Same as [`connected_registry_with_fake_executor`], but answers
+    /// `invoke_count` invokes with the same `response` -- for tests that
+    /// drive `handle_delivered` more than once against the same live
+    /// connection (e.g. the app-version-resolution-per-invocation
+    /// regression).
+    async fn connected_registry_with_fake_executor_multi(
+        response: serde_json::Value,
+        invoke_count: usize,
+    ) -> Arc<ConnectionRegistry> {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, ResultBody, SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+
+            for _ in 0..invoke_count {
+                let invoke = read_frame(&mut executor_io).await.unwrap();
+                write_frame(
+                    &mut executor_io,
+                    &Frame::new(
+                        invoke.id,
+                        Message::Result(ResultBody {
+                            payload: response.clone(),
+                            duration_ms: 1,
+                            fuel_used: 0,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(connection);
+        registry
+    }
+
     #[tokio::test]
     async fn handle_delivered_success_records_audit_usage_and_acks() {
         let ring = test_ring();
@@ -1151,6 +2264,221 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, "success");
         assert_eq!(deps.usage.lock().unwrap().pending_len(), 1);
+    }
+
+    // regression: svc-action had no multi-tenant dispatch consumers; replies
+    // never sent after legacy env removal (alpha 2026-10-03)
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_with_no_active_digest_and_never_invokes() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        // Empty `ActiveDigests`: this (tenant, community, app) scope has no
+        // active digest known -- `connections` is deliberately a registry
+        // with NO fake executor at all, proving the digest check happens
+        // (and dead-letters) BEFORE any invoke is ever attempted.
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.digest_source = DigestSource::Active {
+            scope: (1, 0, "waddles.bot.commands.default".to_string()),
+            digests: Arc::new(ActiveDigests::new()),
+            sessions: Arc::new(LoadedSessions::new()),
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 0);
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, penguin_spine::DlqErrorKind::BundleError);
+        assert_eq!(dead_lettered[0].2, deps.consumer_id);
+    }
+
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03). An `Active`
+    /// scope whose `ActiveDigests` entry somehow resolves to an empty
+    /// string (adversarial seam: `ActiveDigests::set`'s own non-empty guard
+    /// is a SEPARATE layer -- this proves `handle_delivered` independently
+    /// never invokes with it) must be treated exactly like "no active
+    /// digest known": `NO_ACTIVE_DIGEST`, dead-lettered BEFORE ever reaching
+    /// `invoke_dispatch` -- never the `digest_prefix=""` / `UnknownBundle`
+    /// non-retryable failure the live alpha incident recorded.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_no_active_digest_when_the_resolved_digest_is_empty() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        // A connection IS live (proving the empty-digest guard fires before
+        // ANY connection/session resolution is even attempted, not just
+        // before invoke) -- unlike the "no entry at all" test above, which
+        // uses no executor.
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+        )
+        .await;
+        let scope = (1, 0, "waddles.bot.commands.default".to_string());
+        let digests = Arc::new(ActiveDigests::new());
+        digests.force_set_for_test(scope.clone(), String::new());
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope,
+            digests,
+            sessions: Arc::new(LoadedSessions::new()),
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 0);
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, penguin_spine::DlqErrorKind::BundleError);
+        assert_eq!(dead_lettered[0].2, deps.consumer_id);
+    }
+
+    /// Fail-closed requirement: at least one executor is connected, but no
+    /// live session has this scope's active digest loaded -- must
+    /// dead-letter `NO_LOADED_EXECUTOR`, never fall back to `ConnectionRegistry::
+    /// active()` and invoke a session that lacks the bundle (regression:
+    /// bundles loaded only onto a terminating executor during rollout; live
+    /// executor got none, alpha 2026-10-03).
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_no_loaded_executor_when_no_session_has_the_digest() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        // A connection IS live (unlike the "no executor at all" test above),
+        // but `sessions` has nothing loaded for this scope/digest at all.
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+        )
+        .await;
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(
+            (1, 0, "waddles.bot.commands.default".to_string()),
+            "sha256:aa".to_string(),
+        );
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope: (1, 0, "waddles.bot.commands.default".to_string()),
+            digests,
+            sessions: Arc::new(LoadedSessions::new()),
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 0);
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(
+            dead_lettered[0].1,
+            penguin_spine::DlqErrorKind::ExecutorUnavailable
+        );
+    }
+
+    // regression: svc-action had no multi-tenant dispatch consumers; replies
+    // never sent after legacy env removal (alpha 2026-10-03)
+    #[tokio::test]
+    async fn handle_delivered_active_digest_source_invokes_with_the_scopes_active_digest() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+        )
+        .await;
+        let scope = (1, 0, "waddles.bot.commands.default".to_string());
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(scope.clone(), "sha256:aa".to_string());
+        // `pick_session_with_digest` must find the fake executor's session
+        // holding exactly this digest -- never fall back to `ConnectionRegistry::
+        // active()` alone (regression: bundles loaded only onto a
+        // terminating executor during rollout; live executor got none,
+        // alpha 2026-10-03).
+        let sessions = Arc::new(LoadedSessions::new());
+        let session_id = connections
+            .live_session_ids()
+            .into_iter()
+            .next()
+            .expect("the fake executor registered exactly one live session");
+        sessions.mark_loaded(session_id, scope.clone(), "sha256:aa".to_string());
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope,
+            digests,
+            sessions,
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.dead_lettered.lock().unwrap().len(), 0);
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    /// Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4)
+    /// regression: `app_version` must be resolved PER INVOCATION against the
+    /// live `app_version_snapshot`, never a value captured once -- a hot
+    /// swap (the poller's next tick seeding a NEW `app_versions.id` for this
+    /// SAME digest/app_id) must be reflected on the very next delivery
+    /// without a consumer restart.
+    #[tokio::test]
+    async fn handle_delivered_resolves_app_version_from_the_live_snapshot_per_invocation() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        let connections = connected_registry_with_fake_executor_multi(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+            2,
+        )
+        .await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        // `test_deps` seeds `app_version_snapshot` with version_id 1 for
+        // digest "sha256:00" (the `Static` digest it also configures) --
+        // the first delivery must succeed under that resolved version.
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+
+        // Hot swap: the poller's next tick seeds a NEW version_id for the
+        // SAME digest -- the very next delivery must resolve the NEW
+        // version, never a value cached from the first call.
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: "waddles.bot.commands.default".to_string(),
+                version: "2".to_string(),
+                version_id: 2,
+                digest: "sha256:00".to_string(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+                declared_capabilities: Vec::new(),
+            }]);
+        assert_eq!(
+            deps.app_version_snapshot
+                .resolve_for_digest("waddles.bot.commands.default", "sha256:00"),
+            Some(2),
+            "the live snapshot must reflect the hot swap immediately"
+        );
+
+        let mac2 = mac_for(&ring, "acme");
+        let d2 = fixture_delivered("acme", "waddles.bot.commands.default", mac2, "k1");
+        handle_delivered(&d2, &stream_key, &deps).await.unwrap();
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 2);
     }
 
     /// A [`crate::usage::UsageSink`] that records every delta it is asked
@@ -1438,5 +2766,1092 @@ mod tests {
         .expect("load succeeds");
         assert_eq!(loaded.app_id, "waddles.bot.commands.default");
         assert_eq!(loaded.exports, vec!["dispatch".to_string()]);
+    }
+
+    /// `Message::Error` reply to a `load` request maps to
+    /// `InvokeError::ExecutorError` -- distinct from the `Loaded` success
+    /// path above, never previously exercised.
+    #[tokio::test]
+    async fn ensure_loaded_returns_executor_error_on_error_reply() {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, ErrorBody, ErrorCode, Frame, HelloBody, HelloOkBody,
+            SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap();
+
+            let load = read_frame(&mut executor_io).await.unwrap();
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    load.id,
+                    Message::Error(ErrorBody {
+                        code: ErrorCode::DigestMismatch,
+                        message: "digest mismatch".to_string(),
+                        detail: None,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let err = ensure_loaded(
+            &connection,
+            1,
+            0,
+            "waddles.bot.commands.default",
+            "1",
+            "sha256:00",
+            "component-key",
+            "sidecar-key",
+            LoadLimits {
+                timeout_ms: 2000,
+                memory_mb: 64,
+            },
+        )
+        .await
+        .expect_err("executor error reply must surface as an error");
+        match err {
+            InvokeError::ExecutorError { code, message, .. } => {
+                assert_eq!(code, "DigestMismatch");
+                assert_eq!(message, "digest mismatch");
+            }
+            other => panic!("expected ExecutorError, got {other:?}"),
+        }
+    }
+
+    /// `ensure_unloaded`'s own success path -- never previously exercised
+    /// (mirrors `ensure_loaded_sends_load_and_returns_the_loaded_reply`
+    /// above exactly, swapped for `unload`/`Unloaded`).
+    #[tokio::test]
+    async fn ensure_unloaded_sends_unload_and_returns_the_unloaded_reply() {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, SandboxInfo, UnloadedBody,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap();
+
+            let unload = read_frame(&mut executor_io).await.unwrap();
+            let unload_body = match unload.message {
+                Message::Unload(b) => b,
+                other => panic!("expected unload, got {other:?}"),
+            };
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    unload.id,
+                    Message::Unloaded(UnloadedBody {
+                        app_id: unload_body.app_id,
+                        digest: unload_body.digest,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let unloaded = ensure_unloaded(
+            &connection,
+            1,
+            0,
+            "waddles.bot.commands.default",
+            "sha256:00",
+        )
+        .await
+        .expect("unload succeeds");
+        assert_eq!(unloaded.app_id, "waddles.bot.commands.default");
+        assert_eq!(unloaded.digest, "sha256:00");
+    }
+
+    /// Metric-emission tests: each drives a REAL `handle_delivered` /
+    /// `ensure_loaded` / `invoke_dispatch` / `drain_batch` path and reads the
+    /// data points back out of an in-memory OTel exporter -- proving the
+    /// instruments emit, not that they merely exist. They share the
+    /// process-wide harness (`stage_metrics::test_support::shared`), so every
+    /// series is selected by a per-test unique `app_id`.
+    mod metrics_emission {
+        use super::*;
+        use crate::stage_metrics::test_support::shared;
+        use penguin_bundle_host::wire::{ErrorBody, ErrorCode};
+
+        /// Like [`connected_registry_with_fake_executor`], but the executor
+        /// answers its first request (`load` or `invoke`) with `reply`
+        /// instead of a result -- e.g. a sandbox-trip `error` frame.
+        pub(super) async fn connected_registry_replying_with(
+            reply: Message,
+        ) -> Arc<ConnectionRegistry> {
+            use penguin_bundle_host::wire::{
+                read_frame, write_frame, Frame, HelloBody, HelloOkBody, SandboxInfo,
+            };
+
+            let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                write_frame(
+                    &mut executor_io,
+                    &Frame::new(
+                        1,
+                        Message::Hello(HelloBody {
+                            protocol_version: 1,
+                            executor_version: "0.1.0".to_string(),
+                            wasmtime_version: "test".to_string(),
+                            wasmtime_abi: "test".to_string(),
+                            collector: "drc".to_string(),
+                            sandbox: SandboxInfo {
+                                runtime: "runc".to_string(),
+                                verified: false,
+                            },
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+                read_frame(&mut executor_io).await.unwrap();
+                let request = read_frame(&mut executor_io).await.unwrap();
+                write_frame(&mut executor_io, &Frame::new(request.id, reply))
+                    .await
+                    .unwrap();
+            });
+            let (connection, read_loop) = crate::host_api::run_connection(
+                stage_io,
+                HelloOkBody {
+                    stage: "svc-action".to_string(),
+                    protocol_version: 1,
+                    limits: penguin_bundle_host::wire::HelloLimits {
+                        call_timeout_ms: 2000,
+                        memory_mb: 64,
+                        max_concurrent_calls: 32,
+                    },
+                },
+                false,
+                Arc::new(crate::capabilities::DenyAllCapabilities),
+            )
+            .await
+            .expect("handshake succeeds");
+            tokio::spawn(read_loop);
+            let registry = Arc::new(ConnectionRegistry::new());
+            registry.set_active(connection);
+            registry
+        }
+
+        fn error_frame(code: ErrorCode) -> Message {
+            Message::Error(ErrorBody {
+                code,
+                message: "scripted".to_string(),
+                detail: None,
+            })
+        }
+
+        /// A delivered entry whose envelope AND the returned deps both carry
+        /// the unique `app` id, so hop verification passes and the metrics
+        /// series are isolated to this test.
+        fn delivered_and_deps(
+            app: &str,
+            connections: Arc<ConnectionRegistry>,
+        ) -> (
+            Delivered,
+            String,
+            DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps>,
+        ) {
+            let ring = test_ring();
+            let mac = mac_for(&ring, "acme");
+            let d = fixture_delivered("acme", app, mac, "k1");
+            let stream_key = d.stream.clone();
+            let mut deps = test_deps(FakeSpineOps::default(), connections);
+            deps.app_id = app.to_string();
+            (d, stream_key, deps)
+        }
+
+        #[tokio::test]
+        async fn a_successful_dispatch_records_stage_latency_executor_call_and_one_attempt() {
+            let app = "waddles.mtest.success.v1";
+            let connections = connected_registry_with_fake_executor(
+                serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+            )
+            .await;
+            let (d, key, deps) = delivered_and_deps(app, connections);
+
+            handle_delivered(&d, &key, &deps).await.unwrap();
+
+            let h = shared();
+            assert_eq!(
+                h.count(
+                    "waddles_stage_latency_seconds",
+                    &[("app_id", app), ("result", "success"), ("stage", "action")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_executor_call_seconds",
+                    &[("app_id", app), ("export", "dispatch"), ("result", "ok")]
+                ),
+                1.0
+            );
+            let attempts = h
+                .last(
+                    "waddles_action_dispatch_attempts",
+                    &[("app_id", app), ("result", "success")],
+                )
+                .expect("attempts exported");
+            assert_eq!((attempts.value, attempts.sum), (1.0, 1.0));
+        }
+
+        #[tokio::test]
+        async fn a_non_retryable_failure_is_labeled_as_such() {
+            let app = "waddles.mtest.nonretryable.v1";
+            let connections = connected_registry_with_fake_executor(serde_json::json!({
+                "transport_error": {"retryable": false, "code": "BAD_REQUEST", "message": "bad"}
+            }))
+            .await;
+            let (d, key, deps) = delivered_and_deps(app, connections);
+            handle_delivered(&d, &key, &deps).await.unwrap();
+            assert_eq!(
+                shared().count(
+                    "waddles_stage_latency_seconds",
+                    &[("app_id", app), ("result", "non_retryable_failure")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn an_exhausted_retry_budget_records_every_attempt() {
+            let app = "waddles.mtest.exhausted.v1";
+            // max_retries = 2 in `test_deps` -> 3 attempts, each answered
+            // with the same retryable transport error.
+            let connections = connected_registry_with_fake_executor_multi(
+                serde_json::json!({
+                    "transport_error": {"retryable": true, "code": "RATE_LIMITED", "message": "slow"}
+                }),
+                3,
+            )
+            .await;
+            let (d, key, deps) = delivered_and_deps(app, connections);
+
+            handle_delivered(&d, &key, &deps).await.unwrap();
+
+            let h = shared();
+            assert_eq!(
+                h.count(
+                    "waddles_stage_latency_seconds",
+                    &[("app_id", app), ("result", "retryable_failure")]
+                ),
+                1.0
+            );
+            // One executor call PER attempt, all answered ok at the wire level.
+            assert_eq!(
+                h.count(
+                    "waddles_executor_call_seconds",
+                    &[("app_id", app), ("result", "ok")]
+                ),
+                3.0
+            );
+            let attempts = h
+                .last(
+                    "waddles_action_dispatch_attempts",
+                    &[("app_id", app), ("result", "retryable_failure")],
+                )
+                .expect("attempts exported");
+            assert_eq!((attempts.value, attempts.sum), (1.0, 3.0));
+        }
+
+        #[tokio::test]
+        async fn no_executor_records_a_dead_lettered_stage_with_no_executor_call() {
+            let app = "waddles.mtest.noexecutor.v1";
+            let (d, key, deps) = delivered_and_deps(app, Arc::new(ConnectionRegistry::new()));
+            handle_delivered(&d, &key, &deps).await.unwrap();
+            let h = shared();
+            assert_eq!(
+                h.count(
+                    "waddles_stage_latency_seconds",
+                    &[("app_id", app), ("result", "dead_lettered")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count("waddles_executor_call_seconds", &[("app_id", app)]),
+                0.0,
+                "no executor was reached, so no executor call may be recorded"
+            );
+            assert_eq!(
+                h.count("waddles_action_dispatch_attempts", &[("app_id", app)]),
+                0.0,
+                "a dead-lettered entry never reached the retry loop"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_hop_failure_records_a_dead_lettered_stage() {
+            let app = "waddles.mtest.hopfail.v1";
+            let (d, _key, deps) = delivered_and_deps(app, Arc::new(ConnectionRegistry::new()));
+            let wrong_key = "waddles:t:other-tenant:c:main:app:waddles.mtest.hopfail.v1:action";
+            handle_delivered(&d, wrong_key, &deps).await.unwrap();
+            assert_eq!(
+                shared().count(
+                    "waddles_stage_latency_seconds",
+                    &[("app_id", app), ("result", "dead_lettered")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn each_sandbox_trip_code_increments_its_limit_counter() {
+            let cases = [
+                (
+                    ErrorCode::ExecutorDeadline,
+                    "timeout",
+                    "waddles.mtest.triptimeout.v1",
+                ),
+                (
+                    ErrorCode::MemoryLimit,
+                    "memory",
+                    "waddles.mtest.tripmemory.v1",
+                ),
+                (ErrorCode::WasmTrap, "trap", "waddles.mtest.triptrap.v1"),
+                (
+                    ErrorCode::HostCallDenied,
+                    "denied",
+                    "waddles.mtest.tripdenied.v1",
+                ),
+            ];
+            for (code, limit, app) in cases {
+                let (d, key, deps) = delivered_and_deps(
+                    app,
+                    connected_registry_replying_with(error_frame(code)).await,
+                );
+                handle_delivered(&d, &key, &deps).await.unwrap();
+
+                let h = shared();
+                assert_eq!(
+                    h.count(
+                        "waddles_sandbox_trip_total",
+                        &[("app_id", app), ("limit", limit)]
+                    ),
+                    1.0,
+                    "{code:?} must count as limit={limit}"
+                );
+                assert_eq!(
+                    h.count(
+                        "waddles_executor_call_seconds",
+                        &[("app_id", app), ("result", "executor_error")]
+                    ),
+                    1.0
+                );
+                // An infra-level invoke failure is recorded as a terminal,
+                // non-retryable dispatch (never retried).
+                assert_eq!(
+                    h.count(
+                        "waddles_stage_latency_seconds",
+                        &[("app_id", app), ("result", "non_retryable_failure")]
+                    ),
+                    1.0
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_non_sandbox_executor_error_is_not_counted_as_a_trip() {
+            let app = "waddles.mtest.unknownbundle.v1";
+            let (d, key, deps) = delivered_and_deps(
+                app,
+                connected_registry_replying_with(error_frame(ErrorCode::UnknownBundle)).await,
+            );
+            handle_delivered(&d, &key, &deps).await.unwrap();
+            let h = shared();
+            assert_eq!(
+                h.count("waddles_sandbox_trip_total", &[("app_id", app)]),
+                0.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_executor_call_seconds",
+                    &[("app_id", app), ("result", "executor_error")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unexpected_frame_kind_records_a_malformed_executor_call() {
+            let app = "waddles.mtest.malformed.v1";
+            let (d, key, deps) =
+                delivered_and_deps(app, connected_registry_replying_with(Message::Pong).await);
+            handle_delivered(&d, &key, &deps).await.unwrap();
+            assert_eq!(
+                shared().count(
+                    "waddles_executor_call_seconds",
+                    &[("app_id", app), ("result", "malformed")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_closed_connection_records_a_host_api_error_executor_call() {
+            let app = "waddles.mtest.hostapierr.v1";
+            let registry = connected_registry_replying_with(Message::Pong).await;
+            let conn = registry.active().expect("active connection");
+            // The read loop observed EOF / the heartbeat declared the session
+            // dead: the stage must fail the invoke, not hang, and say so.
+            conn.mark_closed();
+
+            let ring = test_ring();
+            let d = fixture_delivered("acme", app, mac_for(&ring, "acme"), "k1");
+            let outcome =
+                invoke_dispatch(&conn, app, "sha256:00", &d.env, "{}", 2000, 1, 1, 1).await;
+            assert!(matches!(outcome, Err(InvokeError::HostApi(_))));
+
+            assert_eq!(
+                shared().count(
+                    "waddles_executor_call_seconds",
+                    &[("app_id", app), ("result", "host_api_error")]
+                ),
+                1.0
+            );
+        }
+
+        #[tokio::test]
+        async fn a_failed_ack_write_records_spine_error() {
+            let app = "waddles.mtest.spineerror.v1";
+            let connections = connected_registry_with_fake_executor(
+                serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+            )
+            .await;
+            let (d, key, deps) = delivered_and_deps(app, connections);
+            deps.spine
+                .fail_ack
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+
+            let outcome = handle_delivered(&d, &key, &deps).await;
+            assert!(outcome.is_err(), "the ack failure must still propagate");
+            assert_eq!(
+                shared().count(
+                    "waddles_stage_latency_seconds",
+                    &[("app_id", app), ("result", "spine_error")]
+                ),
+                1.0
+            );
+        }
+
+        fn loaded_reply(precompile_ms: u64) -> Message {
+            Message::Loaded(LoadedBody {
+                app_id: "x".to_string(),
+                digest: "sha256:abc".to_string(),
+                precompile_ms,
+                exports: vec!["dispatch".to_string()],
+            })
+        }
+
+        async fn load(app: &str, conn: &Connection) -> Result<LoadedBody, InvokeError> {
+            ensure_loaded(
+                conn,
+                1,
+                1,
+                app,
+                "1",
+                "sha256:abc",
+                "ck",
+                "sk",
+                LoadLimits {
+                    timeout_ms: 2000,
+                    memory_mb: 64,
+                },
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn ensure_loaded_records_the_round_trip_and_the_executor_reported_time() {
+            let app = "waddles.mtest.loadok.v1";
+            let registry = connected_registry_replying_with(loaded_reply(42)).await;
+            let conn = registry.active().expect("active connection");
+            load(app, &conn).await.expect("load succeeds");
+
+            let h = shared();
+            assert_eq!(
+                h.count(
+                    "waddles_bundle_load_seconds",
+                    &[("app_id", app), ("phase", "load"), ("result", "ok")]
+                ),
+                1.0
+            );
+            let precompile = h
+                .last(
+                    "waddles_bundle_load_seconds",
+                    &[("app_id", app), ("phase", "precompile")],
+                )
+                .expect("executor-reported phase exported");
+            assert!(
+                (precompile.sum - 0.042).abs() < 1e-9,
+                "precompile_ms=42 must be recorded as 0.042s, got {}",
+                precompile.sum
+            );
+        }
+
+        #[tokio::test]
+        async fn ensure_loaded_failure_records_an_error_result_and_no_precompile_phase() {
+            let app = "waddles.mtest.loaderr.v1";
+            let registry =
+                connected_registry_replying_with(error_frame(ErrorCode::LoadFailed)).await;
+            let conn = registry.active().expect("active connection");
+            assert!(load(app, &conn).await.is_err());
+
+            let h = shared();
+            assert_eq!(
+                h.count(
+                    "waddles_bundle_load_seconds",
+                    &[("app_id", app), ("phase", "load"), ("result", "error")]
+                ),
+                1.0
+            );
+            assert_eq!(
+                h.count(
+                    "waddles_bundle_load_seconds",
+                    &[("app_id", app), ("phase", "precompile")]
+                ),
+                0.0
+            );
+        }
+
+        /// A `StreamReader` fake returning one scripted batch, then nothing.
+        struct OneBatch(Vec<Delivered>);
+
+        impl StreamReader for OneBatch {
+            async fn read(&mut self) -> Result<Vec<Delivered>, SpineError> {
+                Ok(std::mem::take(&mut self.0))
+            }
+        }
+
+        #[tokio::test]
+        async fn drain_batch_records_the_batch_size_including_an_idle_zero() {
+            let app = "waddles.mtest.batch.v1";
+            let (d, key, deps) = delivered_and_deps(app, Arc::new(ConnectionRegistry::new()));
+            let before = shared()
+                .last("waddles_spine_batch_size", &[("stage", "action")])
+                .map_or((0.0, 0.0), |p| (p.value, p.sum));
+
+            let mut reader = OneBatch(vec![d.clone(), d]);
+            assert_eq!(drain_batch(&mut reader, &key, &deps).await.unwrap(), 2);
+            assert_eq!(drain_batch(&mut reader, &key, &deps).await.unwrap(), 0);
+
+            let after = shared()
+                .last("waddles_spine_batch_size", &[("stage", "action")])
+                .expect("batch size exported");
+            // Other tests drain concurrently into the same label-less series,
+            // so assert "at least these two samples (2 and 0) landed".
+            assert!(after.value >= before.0 + 2.0, "{before:?} -> {after:?}");
+            assert!(after.sum >= before.1 + 2.0, "{before:?} -> {after:?}");
+        }
+    }
+
+    /// Circuit-breaker SEMANTICS (adversarial review of #467): executor
+    /// back-pressure is not a guest fault, and an event with no destination
+    /// has no breaker key. Each test drives a REAL `handle_delivered`
+    /// against a scripted executor connection.
+    mod breaker_semantics {
+        use super::metrics_emission::connected_registry_replying_with;
+        use super::*;
+        use circuit_breaker::FAILURE_THRESHOLD;
+        use penguin_bundle_host::wire::{ErrorBody, ErrorCode};
+
+        fn error_with_detail(code: ErrorCode, detail: Option<&str>) -> Message {
+            Message::Error(ErrorBody {
+                code,
+                message: "scripted".to_string(),
+                detail: detail.map(str::to_string),
+            })
+        }
+
+        /// A delivered entry for `app` whose event names a destination
+        /// (`channel_id`), plus deps carrying that same app id.
+        fn delivered_with_channel(
+            app: &str,
+            channel_id: Option<&str>,
+        ) -> (
+            Delivered,
+            String,
+            DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps>,
+        ) {
+            let ring = test_ring();
+            let mac = mac_for(&ring, "acme");
+            let mut d = fixture_delivered("acme", app, mac, "k1");
+            d.env.event.source = channel_id.map(|c| {
+                serde_json::from_value(serde_json::json!({
+                    "platform": "twitch",
+                    "account_id": "bot-1",
+                    "channel_id": c,
+                }))
+                .unwrap()
+            });
+            let stream_key = d.stream.clone();
+            let mut deps = test_deps(FakeSpineOps::default(), Arc::new(ConnectionRegistry::new()));
+            deps.app_id = app.to_string();
+            (d, stream_key, deps)
+        }
+
+        /// Runs `n` deliveries of `d`, each against a fresh executor
+        /// connection answering `reply`.
+        async fn deliver_n(
+            deps: &mut DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps>,
+            d: &Delivered,
+            key: &str,
+            n: u32,
+            reply: impl Fn() -> Message,
+        ) {
+            for _ in 0..n {
+                deps.connections = connected_registry_replying_with(reply()).await;
+                handle_delivered(d, key, deps).await.unwrap();
+            }
+        }
+
+        /// regression: #467 review HIGH 1 -- saturating the executor's pool
+        /// (`pool_exhausted`, wire code `ExecutorDeadline`) fails innocent
+        /// destinations but must leave their breaker CLOSED.
+        #[tokio::test]
+        async fn pool_exhausted_back_pressure_never_opens_the_breaker() {
+            let app = "waddles.btest.pool.v1";
+            let (d, key, mut deps) = delivered_with_channel(app, Some("chan-1"));
+            let n = FAILURE_THRESHOLD + 1;
+            deliver_n(&mut deps, &d, &key, n, || {
+                error_with_detail(ErrorCode::ExecutorDeadline, Some("pool_exhausted"))
+            })
+            .await;
+
+            let bkey = breaker_key(app, &d.env).expect("event has a destination");
+            assert!(
+                deps.breaker.allow(&bkey),
+                "back-pressure must leave the breaker CLOSED"
+            );
+            assert!(
+                deps.spine.dead_lettered.lock().unwrap().is_empty(),
+                "no entry may be short-circuited by an open breaker"
+            );
+            assert_eq!(deps.spine.acked.lock().unwrap().len() as u32, n);
+        }
+
+        /// The control: genuine guest faults DO open the breaker, after which
+        /// the next entry is dead-lettered without reaching the executor.
+        #[tokio::test]
+        async fn genuine_guest_faults_still_open_the_breaker() {
+            for (i, (code, detail)) in [
+                (ErrorCode::ExecutorDeadline, None),
+                (ErrorCode::ExecutorDeadline, Some("fuel_exhausted")),
+                (ErrorCode::WasmTrap, None),
+                (ErrorCode::MemoryLimit, None),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let app = format!("waddles.btest.fault{i}.v1");
+                let (d, key, mut deps) = delivered_with_channel(&app, Some("chan-1"));
+                deliver_n(&mut deps, &d, &key, FAILURE_THRESHOLD, || {
+                    error_with_detail(code, detail)
+                })
+                .await;
+                let bkey = breaker_key(&app, &d.env).unwrap();
+                assert!(
+                    !deps.breaker.allow(&bkey),
+                    "{code:?}/{detail:?} must open the breaker"
+                );
+                handle_delivered(&d, &key, &deps).await.unwrap();
+                let dl = deps.spine.dead_lettered.lock().unwrap();
+                assert_eq!(dl.len(), 1);
+                assert_eq!(dl[0].1, penguin_spine::DlqErrorKind::ExecutorUnavailable);
+            }
+        }
+
+        /// Per-channel isolation: one destination's faults never disable
+        /// another destination of the same app.
+        #[tokio::test]
+        async fn one_destinations_faults_never_block_another_destination() {
+            let app = "waddles.btest.dest.v1";
+            let (d_bad, key, mut deps) = delivered_with_channel(app, Some("chan-bad"));
+            deliver_n(&mut deps, &d_bad, &key, FAILURE_THRESHOLD, || {
+                error_with_detail(ErrorCode::WasmTrap, None)
+            })
+            .await;
+            let (d_ok, _, _) = delivered_with_channel(app, Some("chan-ok"));
+            assert!(!deps.breaker.allow(&breaker_key(app, &d_bad.env).unwrap()));
+            assert!(deps.breaker.allow(&breaker_key(app, &d_ok.env).unwrap()));
+        }
+
+        /// An event with no `channel_id` has no destination to isolate: it
+        /// must bypass the breaker rather than share one global "unknown"
+        /// key that a single bad event could open for every keyless event.
+        #[tokio::test]
+        async fn keyless_events_bypass_the_breaker_instead_of_sharing_a_key() {
+            let app = "waddles.btest.keyless.v1";
+            let (d, key, mut deps) = delivered_with_channel(app, None);
+            assert!(breaker_key(app, &d.env).is_none());
+            let n = FAILURE_THRESHOLD + 2;
+            deliver_n(&mut deps, &d, &key, n, || {
+                error_with_detail(ErrorCode::WasmTrap, None)
+            })
+            .await;
+            assert_eq!(
+                deps.breaker.tracked_keys(),
+                0,
+                "a keyless event must never create breaker state"
+            );
+            assert!(
+                deps.spine.dead_lettered.lock().unwrap().is_empty(),
+                "keyless events are never short-circuited"
+            );
+        }
+
+        #[test]
+        fn breaker_key_is_app_prefixed_and_destination_scoped() {
+            let ring = test_ring();
+            let mk = |app: &str, ch: Option<&str>| {
+                let mut d = fixture_delivered("acme", app, mac_for(&ring, "acme"), "k1");
+                d.env.event.source = ch.map(|c| {
+                    serde_json::from_value(serde_json::json!({
+                        "platform": "twitch", "account_id": "b", "channel_id": c
+                    }))
+                    .unwrap()
+                });
+                d.env
+            };
+            assert_eq!(
+                breaker_key("waddles.app.a.v1", &mk("waddles.app.a.v1", Some("c1"))).as_deref(),
+                Some("waddles.app.a.v1|acme:main|c1")
+            );
+            assert_ne!(
+                breaker_key("waddles.app.a.v1", &mk("waddles.app.a.v1", Some("c1"))),
+                breaker_key("waddles.app.b.v1", &mk("waddles.app.b.v1", Some("c1")))
+            );
+            assert_eq!(
+                breaker_key("waddles.app.a.v1", &mk("waddles.app.a.v1", None)),
+                None
+            );
+        }
+
+        #[test]
+        fn is_guest_fault_excludes_only_pool_exhausted_back_pressure() {
+            assert!(is_guest_fault("ExecutorDeadline", None));
+            assert!(is_guest_fault("ExecutorDeadline", Some("fuel_exhausted")));
+            assert!(is_guest_fault("WasmTrap", None));
+            assert!(is_guest_fault("MemoryLimit", None));
+            assert!(!is_guest_fault("ExecutorDeadline", Some("pool_exhausted")));
+            assert!(!is_guest_fault("LoadFailed", None));
+            assert!(!is_guest_fault("UNEXPECTED_FRAME", None));
+        }
+    }
+
+    /// The consumer-group backlog sampler: the periodic `XINFO GROUPS` poll
+    /// that makes `waddles_spine_queue_depth` / `waddles_group_pending` carry
+    /// data. The loop is proven against a scripted source (no Valkey needed);
+    /// one test additionally drives a REAL `SpineClient` against a local
+    /// Valkey (skipped when none is reachable) to prove the spine's own
+    /// callbacks land in the OTel instruments.
+    mod backlog_sampler {
+        use super::*;
+        use crate::stage_metrics::test_support::Harness;
+        use crate::stage_metrics::StageMetrics;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct ScriptedStats {
+            calls: Arc<Mutex<Vec<String>>>,
+            fail: Arc<AtomicBool>,
+            stats: Vec<GroupStats>,
+        }
+
+        impl GroupStatsSource for ScriptedStats {
+            async fn group_stats(&self, stream: &str) -> Result<Vec<GroupStats>, SpineError> {
+                self.calls.lock().unwrap().push(stream.to_string());
+                if self.fail.load(Ordering::Relaxed) {
+                    return Err(SpineError::Config("scripted stats failure".to_string()));
+                }
+                Ok(self.stats.clone())
+            }
+        }
+
+        fn scripted(
+            stats: Vec<GroupStats>,
+        ) -> (ScriptedStats, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let fail = Arc::new(AtomicBool::new(false));
+            (
+                ScriptedStats {
+                    calls: Arc::clone(&calls),
+                    fail: Arc::clone(&fail),
+                    stats,
+                },
+                calls,
+                fail,
+            )
+        }
+
+        /// Polls until `calls` holds at least `n` entries (real time, tiny
+        /// intervals), failing loudly instead of hanging.
+        async fn wait_for_calls(calls: &Arc<Mutex<Vec<String>>>, n: usize) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while calls.lock().unwrap().len() < n {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "sampler made only {} of {n} expected calls",
+                    calls.lock().unwrap().len()
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        fn stat(app_id: &str, pending: u64) -> GroupStats {
+            GroupStats {
+                app_id: app_id.to_string(),
+                stream: "waddles:t:acme:c:main:app:x:action".to_string(),
+                lag: Some(0),
+                pending,
+            }
+        }
+
+        #[tokio::test]
+        async fn every_stream_is_sampled_each_interval_until_the_guard_drops() {
+            let (source, calls, _fail) = scripted(vec![stat("waddles.mx.sampler.v1", 0)]);
+            let streams = vec!["stream-a".to_string(), "stream-b".to_string()];
+            let guard = spawn_group_backlog_sampler(source, streams, 20, 5_000)
+                .expect("a sampler is spawned for a non-zero interval");
+
+            wait_for_calls(&calls, 4).await;
+            let seen: std::collections::BTreeSet<String> =
+                calls.lock().unwrap().iter().cloned().collect();
+            assert_eq!(
+                seen,
+                std::collections::BTreeSet::from(["stream-a".to_string(), "stream-b".to_string()])
+            );
+
+            drop(guard);
+            // Let any in-flight tick settle, then prove no further calls land.
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            let after_drop = calls.lock().unwrap().len();
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            assert_eq!(
+                calls.lock().unwrap().len(),
+                after_drop,
+                "the sampler must stop with its guard"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_failing_sample_never_stops_the_sampler() {
+            let (source, calls, fail) = scripted(Vec::new());
+            fail.store(true, Ordering::Relaxed);
+            let _guard =
+                spawn_group_backlog_sampler(source, vec!["stream-a".to_string()], 15, 5_000)
+                    .expect("sampler spawned");
+            wait_for_calls(&calls, 3).await;
+            // Recovers and keeps going once the source works again.
+            fail.store(false, Ordering::Relaxed);
+            let before = calls.lock().unwrap().len();
+            wait_for_calls(&calls, before + 2).await;
+        }
+
+        #[tokio::test]
+        async fn a_group_above_the_pel_alert_is_still_sampled_without_disturbing_the_loop() {
+            let (source, calls, _fail) = scripted(vec![
+                stat("waddles.mx.stuck.v1", 9_999),
+                stat("waddles.mx.fine.v1", 1),
+            ]);
+            let _guard = spawn_group_backlog_sampler(source, vec!["s".to_string()], 15, 5_000)
+                .expect("sampler spawned");
+            wait_for_calls(&calls, 3).await;
+        }
+
+        #[tokio::test]
+        async fn a_zero_interval_or_no_streams_spawns_no_sampler() {
+            let (source, _calls, _fail) = scripted(Vec::new());
+            assert!(spawn_group_backlog_sampler(source, vec!["s".to_string()], 0, 5_000).is_none());
+            let (source, _calls, _fail) = scripted(Vec::new());
+            assert!(spawn_group_backlog_sampler(source, Vec::new(), 10_000, 5_000).is_none());
+        }
+
+        #[tokio::test]
+        async fn the_first_sample_waits_a_full_interval() {
+            let (source, calls, _fail) = scripted(Vec::new());
+            let _guard = spawn_group_backlog_sampler(source, vec!["s".to_string()], 400, 5_000)
+                .expect("sampler spawned");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                calls.lock().unwrap().len(),
+                0,
+                "consumers started together must not all query at t=0"
+            );
+            wait_for_calls(&calls, 1).await;
+        }
+
+        /// Real `SpineClient` + real Valkey (skipped when none answers on
+        /// 127.0.0.1:6379): the spine's own `group_stats` -> `group_lag` /
+        /// `group_pending` callbacks reach this crate's OTel instruments with
+        /// the real server's numbers.
+        #[tokio::test]
+        async fn a_real_spine_client_feeds_lag_and_pending_into_otel() {
+            let Some(mut cfg) = test_support::local_valkey_config() else {
+                eprintln!("skipping: no local Valkey reachable at 127.0.0.1:6379");
+                return;
+            };
+            // `SpineClient::connect` validates the socket timeout against the
+            // relay block timeout; the shared fixture only feeds raw clients.
+            cfg.drain_socket_timeout_s = 65;
+            let harness = Harness::new();
+            let metrics: Arc<dyn SpineMetrics> = Arc::new(StageMetrics::new(&harness.meter()));
+            let client = SpineClient::connect(cfg.clone(), metrics)
+                .await
+                .expect("connect");
+            let stream = test_support::unique_key("backlog-sampler-stream");
+            let group = "waddles.mx.backlog.v1";
+            client.ensure_group(&stream, group).await.expect("group");
+
+            // Three entries; read two without acking -> pending 2, lag 1.
+            let raw = redis::Client::open(cfg.valkey_url.as_str()).expect("redis client");
+            let mut conn = raw
+                .get_multiplexed_async_connection()
+                .await
+                .expect("raw connection");
+            for _ in 0..3 {
+                let _: String = redis::cmd("XADD")
+                    .arg(&stream)
+                    .arg("*")
+                    .arg("env")
+                    .arg("{}")
+                    .query_async(&mut conn)
+                    .await
+                    .expect("xadd");
+            }
+            let _: redis::Value = redis::cmd("XREADGROUP")
+                .arg("GROUP")
+                .arg(group)
+                .arg("c1")
+                .arg("COUNT")
+                .arg(2)
+                .arg("STREAMS")
+                .arg(&stream)
+                .arg(">")
+                .query_async(&mut conn)
+                .await
+                .expect("xreadgroup");
+
+            let stats = GroupStatsSource::group_stats(&client, &stream)
+                .await
+                .expect("group_stats");
+            let ours = stats
+                .iter()
+                .find(|s| s.app_id == group)
+                .expect("our group is reported");
+            assert_eq!(ours.pending, 2);
+
+            let pending = harness
+                .last("waddles_group_pending", &[("app_id", group)])
+                .expect("pending exported");
+            assert_eq!((pending.value, pending.sum), (1.0, 2.0));
+            let depth = harness
+                .last("waddles_spine_queue_depth", &[("stage", "action")])
+                .expect("queue depth exported");
+            assert_eq!(depth.value, 1.0);
+            assert_eq!(depth.sum, 1.0, "one undelivered entry remained");
+
+            let _: i64 = redis::cmd("DEL")
+                .arg(&stream)
+                .query_async(&mut conn)
+                .await
+                .expect("cleanup");
+        }
+
+        #[tokio::test]
+        async fn a_guard_drop_aborts_the_task() {
+            let started = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&started);
+            let guard = AbortOnDrop(tokio::spawn(async move {
+                loop {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }));
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(guard);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let after = started.load(Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            assert_eq!(started.load(Ordering::Relaxed), after);
+        }
     }
 }

@@ -32,8 +32,8 @@ fi
 # Export required variables for docker-compose
 export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-waddlebot123}"
 export REDIS_PASSWORD="${REDIS_PASSWORD:-redis123}"
-export MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
-export MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
+export S3_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-waddlebot}"
+export S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-waddlebot-dev-secret}"
 # SECURITY (CWE-798): dev/local-only bootstrap credential -- matches the
 # default in docker-compose.yml's db-migrations service. Override via .env
 # to change the local admin login; never used as a fallback in beta/prod.
@@ -162,11 +162,11 @@ stop_containers() {
 
 clean_volumes() {
     log_step "Removing volumes (this will DELETE all data)..."
-    log_warning "Removing: postgres-data, redis-data, minio-data, ollama-data, qdrant-data"
+    log_warning "Removing: postgres-data, redis-data, seaweedfs-data, ollama-data, qdrant-data"
 
     docker volume rm waddlebot_postgres-data 2>/dev/null || true
     docker volume rm waddlebot_redis-data 2>/dev/null || true
-    docker volume rm waddlebot_minio-data 2>/dev/null || true
+    docker volume rm waddlebot_seaweedfs-data 2>/dev/null || true
     docker volume rm waddlebot_ollama-data 2>/dev/null || true
     docker volume rm waddlebot_qdrant-data 2>/dev/null || true
 
@@ -177,7 +177,7 @@ start_services() {
     log_step "Starting infrastructure services..."
 
     cd "$PROJECT_ROOT"
-    docker-compose -f "$DOCKER_COMPOSE_FILE" up -d postgres redis minio
+    docker-compose -f "$DOCKER_COMPOSE_FILE" up -d infra-postgres infra-redis infra-seaweedfs
 
     log_warning "Waiting for PostgreSQL to be ready..."
     local max_attempts=30
@@ -205,10 +205,10 @@ start_services() {
         log_success "Redis is ready"
     fi
 
-    # Verify MinIO
-    log_warning "Waiting for MinIO to be ready..."
+    # Verify SeaweedFS
+    log_warning "Waiting for SeaweedFS to be ready..."
     sleep 2
-    log_success "MinIO is ready"
+    log_success "SeaweedFS is ready"
 }
 
 run_migrations() {
@@ -282,7 +282,7 @@ seed_admin() {
 verify_services() {
     log_step "Verifying all services..."
 
-    local services=("postgres" "redis" "minio")
+    local services=("infra-postgres" "infra-redis" "infra-seaweedfs")
     local all_healthy=true
 
     for service in "${services[@]}"; do
@@ -307,7 +307,7 @@ show_summary() {
 
     echo ""
     echo -e "${CYAN}Infrastructure Services:${NC}"
-    docker-compose -f "$DOCKER_COMPOSE_FILE" ps postgres redis minio 2>/dev/null | tail -n +2 || true
+    docker-compose -f "$DOCKER_COMPOSE_FILE" ps infra-postgres infra-redis infra-seaweedfs 2>/dev/null | tail -n +2 || true
 
     echo ""
     echo -e "${CYAN}Database Connection:${NC}"
@@ -322,11 +322,11 @@ show_summary() {
     echo -e "  Password: ${BLUE}${REDIS_PASSWORD}${NC}"
 
     echo ""
-    echo -e "${CYAN}MinIO Access:${NC}"
+    echo -e "${CYAN}SeaweedFS Access:${NC}"
     echo -e "  API: ${BLUE}http://localhost:9000${NC}"
     echo -e "  Console: ${BLUE}http://localhost:9001${NC}"
-    echo -e "  User: ${BLUE}${MINIO_ROOT_USER}${NC}"
-    echo -e "  Password: ${BLUE}${MINIO_ROOT_PASSWORD}${NC}"
+    echo -e "  Access Key: ${BLUE}${S3_ACCESS_KEY_ID}${NC}"
+    echo -e "  Secret Key: ${BLUE}${S3_SECRET_ACCESS_KEY}${NC}"
 
     if [ "$SKIP_SEED" = false ]; then
         echo ""
@@ -354,7 +354,7 @@ main() {
         log_warning "This will DELETE all data including:"
         log_warning "  - PostgreSQL data"
         log_warning "  - Redis cache"
-        log_warning "  - MinIO files"
+        log_warning "  - SeaweedFS files"
         echo ""
         read -p "Are you sure? Type 'yes' to continue: " -r
         echo

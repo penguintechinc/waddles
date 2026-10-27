@@ -9,6 +9,9 @@ webui:
   # to publicUrl above when blank. See values-alpha.yaml for why this needs its own
   # override in some environments.
   connectionsCallbackBaseUrl: ""
+  # IDENTITY_CALLBACK_BASE_URL for hub-api (Discord bot-install + identity callbacks).
+  # Empty = env not set, hub-api defaults to http://localhost:8204.
+  identityCallbackBaseUrl: ""
 
 # Global settings
 global:
@@ -21,7 +24,11 @@ global:
   # Image tag to deploy (e.g., "latest", commit SHA, or version tag)
   imageTag: "latest"
 
-  # Image pull policy
+  # Image pull policy -- applied to EVERY workload container (hub-api, svc-*-rust,
+  # bundle-executor included; no template hardcodes a policy). IfNotPresent is correct
+  # given unique per-deploy global.imageTag values; and mandatory for locally-loaded images
+  # (kind e2e, alpha local builds), where Always forces a registry pull the node cannot
+  # satisfy. Override to Always per-env only for a mutable tag.
   imagePullPolicy: IfNotPresent
 
   # Secrets for pulling from private registries (if needed)
@@ -90,12 +97,17 @@ global:
   # link simply never establishes (svc-action's host-api listener logs a warning and keeps
   # its HTTP/metrics servers up regardless -- see try_start_host_api's graceful-degradation
   # comment -- and bundle-executor retries the dial forever with capped exponential backoff,
-  # so neither pod crashloops); only the executor-invoked-bundle path stays inert. Real PEM
-  # material is therefore an OVERRIDE REQUIRED operator step in every environment, alpha
-  # included -- populate via `helm upgrade --set-file global.hostApiTls.ca.crt=...
-  # --set-file global.hostApiTls.tls.crt=... --set-file global.hostApiTls.tls.key=...`
-  # before setting pipeline.rustDataPlane.enabled=true, exactly like global.grpcTls already
-  # requires for beta/gamma/production.
+  # so neither pod crashloops); only the executor-invoked-bundle path stays inert.
+  #
+  # fix/alpha-host-api-tls -- templates/host-api-tls-secret.yaml now guarantees the
+  # <fullname>-host-api-tls Secret exists (kept, explicitly supplied, generated alpha/local,
+  # or the whole release fails to render) whenever pipeline.rustDataPlane.enabled is true,
+  # exactly mirroring global.valkeyTls's self-provisioning policy -- alpha/local no longer
+  # need real PEM material supplied out of band. beta/gamma/production still REQUIRE real
+  # material (--set-file global.hostApiTls.ca.crt=... --set-file global.hostApiTls.tls.crt=...
+  # --set-file global.hostApiTls.tls.key=...), cert-manager (certManager.enabled=true), or
+  # externalSecret: true delegating to an out-of-band controller -- auto-generation is
+  # alpha/local only, fails closed otherwise.
   hostApiTls:
     certManager:
       enabled: false
@@ -111,6 +123,39 @@ global:
     tls:
       crt: ""
       key: ""
+    # fix/alpha-host-api-tls -- true delegates provisioning of the <fullname>-host-api-tls
+    # Secret to an out-of-band ExternalSecret/SealedSecret controller instead of failing the
+    # render on beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated
+    # instead, see templates/host-api-tls-secret.yaml).
+    externalSecret: false
+    # fix/chart-host-api-stage-identity -- core/bundle_executor/src/config.rs requires
+    # HOST_API_STAGE_IDENTITY (the stage cert's pinned CN/URI SAN, see
+    # waddlebot.hostApiStageIdentity in _helpers.tpl). Left empty, the chart derives this
+    # itself ONLY when it also mints the cert (alpha/local genSignedCert path, or
+    # certManager.enabled=true). When ca.crt/tls.crt/tls.key are supplied directly, or
+    # externalSecret is true, the chart has no visibility into that cert's actual identity --
+    # set this explicitly to the matching CN/URI SAN, or the render fails closed.
+    stageIdentity: ""
+
+  # fix/hub-grpc-tls-and-ca-trust (PR #570 review blockers 1/2) -- TLS material for
+  # hub-api's internal gRPC listener (hub_api/grpc_internal/server.py, mandatory TLS, no
+  # insecureDev escape hatch). SEPARATE from global.grpcTls (the core-data/core-identity/
+  # interactive-productivity/action-serverless identity) -- hub-api needs its own
+  # alpha/local auto-generate fallback (templates/hub-api-grpc-tls-secret.yaml), which
+  # global.grpcTls's static-only Secret doesn't have. Also the CA core/hub_client::
+  # HubClient::connect trusts via HUB_API_GRPC_CA_FILE (svc-process-rust/svc-action-rust).
+  # NEVER a literal cert/key in git in any environment; populate via --set-file or an
+  # out-of-git values override / ExternalSecret.
+  hubApiGrpcTls:
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+    # true delegates provisioning of the <fullname>-hub-api-grpc-tls Secret to an
+    # out-of-band ExternalSecret/SealedSecret controller instead of failing the render on
+    # beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated instead).
+    externalSecret: false
 
   # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams
   # listener. `penguin_spine::SpineConfig::validate()` (core/svc_process, core/svc_action,
@@ -157,9 +202,30 @@ global:
   # Deployment tier (alpha/beta/production) — used by services for environment-specific behavior
   deploymentTier: "production"
 
+# Per-family image-tag override for the `hub-api` image family -- pins hub-api independently
+# of global.imageTag (every other workload keeps reading global.imageTag). Empty (default)
+# falls back to global.imageTag, so unset = unchanged behavior for every environment.
+# Applies ONLY to workloads pulling the `hub-api` image repository: the hub-api Deployment
+# + role-sync / event-sync-reconcile / odoo-sync / bundle-signing-reconciler CronJobs + the
+# bundle-signing-backfill hook Job. The SEPARATE images (core-bundle-seeder, waddlebot-migrations,
+# svc-*, bundle-executor, hub-webui, ...) are NOT affected -- they stay on global.imageTag.
+# (Distinct from `pipeline.hubApi`, which holds hub-api's port/replicas/resources.)
+hubApi:
+  imageTag: ""
+
 # Namespace configuration
 namespace: waddlebot
 namespaceCreate: true  # Create namespace if it doesn't exist
+
+# fix/no-empty-kept-secrets -- test-only probe (templates/debug-helper-probe.yaml)
+# that renders waddlebot.secretKeyNonEmpty/waddlebot.tlsSecretComplete (_helpers.tpl)
+# against synthetic dicts, independent of `lookup` (which always returns empty
+# outside a real `helm install`/`upgrade` -- see auto-provisioned-secrets.yaml's
+# header comment). NEVER true in any real values file (values-alpha/beta/gamma/
+# production.yaml) -- set only via `--set debugHelperProbe.enabled=true` in
+# k8s/helm/waddlebot/tests/test_no_empty_kept_secrets_render.py.
+debugHelperProbe:
+  enabled: false
 
 # Service Account
 serviceAccount:
@@ -194,6 +260,24 @@ infrastructure:
     database: "waddlebot"
     password: "REPLACE_ME"  # Only used for secrets, actual DB already running
     image: postgres:16-bookworm@sha256:a0fd72825431f4b7fd3f9d5def9f370b9c22012f1a9e37ece1a5749b95333fb7
+    # R5 posture: rootless. uid/gid 999 is the official image's own `postgres` user; fsGroup chowns
+    # the PVC so an existing volume (formerly initialised by root->gosu as the same uid) stays
+    # writable. Rootfs is read-only; the socket dir and /tmp are emptyDirs (templates/infrastructure/postgres.yaml).
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      fsGroup: 999
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      capabilities:
+        drop: ["ALL"]
     service:
       name: "infra-postgres"
       port: 5432
@@ -217,6 +301,17 @@ infrastructure:
       POSTGRES_DB: waddlebot
       POSTGRES_USER: waddlebot
       # POSTGRES_PASSWORD should be set via secrets
+    # waddles_bundle_reader (alembic/versions/0032_bundle_reader_role.py) --
+    # the Rust data-plane's real, now-provisioned RO role for the DB-driven
+    # multi-app active-bundle loader (core/svc_process, core/svc_action,
+    # core/bundle_active_set). Empty ("", never "REPLACE_ME"-prefixed) is
+    # treated as "unset" by templates/secrets.yaml's autoSecretValue lookup
+    # -- auto-generated in alpha/local, required (must be set here) in
+    # beta/gamma/production, same posture as postgresql.password above. An
+    # unset value is NOT graceful-degradation safe here the way bundle
+    # Migrator/RuntimePassword below are: it leaves the multi-app data-plane
+    # path disabled, so beta/prod must set a real value.
+    readerPassword: ""
     # Bundle app-schema roles (Phase 0, docs/superpowers/specs/2026-09-28-
     # bundle-db-capability-and-schemas.md Sec2) -- waddles_bundle_migrator
     # (DDL owner of app_core/app_community, hub-api only) and
@@ -229,6 +324,63 @@ infrastructure:
     # real traffic.
     bundleMigratorPassword: ""
     bundleRuntimePassword: ""
+    # ---- Per-service database accounts (security findings H-1 / H-3) -----------------
+    # `username`/`password` above are the database OWNER (superuser) credential. It is
+    # rendered into <release>-db-admin (consumed ONLY by the Postgres Deployment's
+    # POSTGRES_PASSWORD) and the db-migrate hook Secret -- NOT into waddlebot-secrets,
+    # which ~40 pods envFrom. Every other workload connects as ITS OWN least-privilege role
+    # from config/postgres/service-roles.yaml (provisioned by alembic 0055 and re-asserted
+    # on every db-migrate Job run); see docs/DATABASE_CREDENTIALS.md.
+    admin:
+      # Operator/ExternalSecret-managed Secret with a POSTGRES_PASSWORD key. Empty =>
+      # the chart renders <release>-db-admin (alpha/local: generated; beta/gamma/prod:
+      # `password` above must be set explicitly, or the Secret pre-populated).
+      existingSecret: ""
+    serviceRoles:
+      # Operator/ExternalSecret-managed Secret with a PW_<ROLE_UPPERCASE> key for EVERY
+      # role below (e.g. PW_WADDLES_HUB_API). Empty => the chart renders
+      # <release>-db-credentials: passwords are generated in alpha/local (and KEPT across
+      # upgrades), and REQUIRED -- via `passwords` below or a pre-populated Secret -- in
+      # beta/gamma/production. Values must be >=16 chars of [A-Za-z0-9._~-]; placeholder /
+      # `changeme`-style values are rejected at render time. Never commit real values.
+      existingSecret: ""
+      passwords: {}   # {waddles_hub_api: "<secret>", ...} -- out-of-git override file only
+      # MUST equal the role names in config/postgres/service-roles.yaml (drift-tested by
+      # alembic/tests/test_service_roles_catalog.py). Order is irrelevant to the chart.
+      roles:
+        - waddles_hub_api
+        - waddles_svc_ingest
+        - waddles_svc_process
+        - waddles_svc_core
+        - waddles_svc_action
+        - waddles_svc_presentation
+        - waddles_svc_streaming
+        - waddles_reputation
+        - waddles_legacy_discord_collector
+        - waddles_legacy_googlechat_collector
+        - waddles_legacy_kick_collector
+        - waddles_legacy_mattermost_collector
+        - waddles_legacy_slack_collector
+        - waddles_legacy_teams_collector
+        - waddles_legacy_twitch_collector
+        - waddles_legacy_youtube_live_collector
+        - waddles_legacy_ai_researcher
+        - waddles_legacy_core_community
+        - waddles_legacy_core_data
+        - waddles_legacy_core_identity
+        - waddles_legacy_hub
+        - waddles_legacy_marketplace
+        - waddles_legacy_router
+        - waddles_legacy_interactive_ai
+        - waddles_legacy_interactive_gaming
+        - waddles_legacy_interactive_media
+        - waddles_legacy_interactive_productivity
+        - waddles_legacy_interactive_social
+        - waddles_legacy_interactive_loyalty
+        - waddles_legacy_action_platforms
+        - waddles_legacy_action_serverless
+        - waddles_legacy_trigger_streaming
+        - waddles_legacy_trigger_webhooks
     readReplicas:
       enabled: false
       count: 2
@@ -237,6 +389,22 @@ infrastructure:
   redis:
     enabled: true
     image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571  # Valkey (Redis-compatible fork); Debian bookworm, digest-pinned
+    # R5 posture: rootless (uid 999 = the image's `valkey` user); only /data (PVC/emptyDir) is written.
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      fsGroup: 999
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      capabilities:
+        drop: ["ALL"]
     port: 6379
     password: "REPLACE_ME"  # Only used for secrets, actual Redis already running
     # Module-specific Redis passwords (matches docker-compose.yml ACL setup)
@@ -255,6 +423,30 @@ infrastructure:
       discord: "REPLACE_ME"
       slack: "REPLACE_ME"
     maxMemory: "256mb"
+    # SECURITY REVIEW FINDING (PR #425, low severity): this default,
+    # `allkeys-lru`, is an eviction policy that CAN evict the Rust
+    # data-plane's `bundlekv:...:count` keys (the per-app `storage.kv`
+    # live-key-count quota counter -- `core/bundle_host_kv::scope::
+    # KvScope::count_key`). Those counter keys are deliberately set with
+    # NO TTL (non-volatile), so only an `allkeys-*` policy can evict them --
+    # a `volatile-*` policy never touches a non-volatile key, and
+    # `noeviction` never evicts anything. An evicted counter silently
+    # resets an app's kv quota to what a background `SCAN`-based
+    # reconciliation (`core/bundle_host_kv::backend::KvBackend::
+    # reconcile_count_if_missing`) recomputes on the next write -- a
+    # self-heal, not a substitute for the right policy. Both
+    # `svc-process-rust`/`svc-action-rust` runtime-check this setting at
+    # startup (`CONFIG GET maxmemory-policy`) and log `ERROR` + emit
+    # `waddles_bundle_kv_maxmemory_policy_violation_total` if it is still
+    # `allkeys-*` when they connect. **Recommended for any deployment
+    # actually using `storage.kv`:** `noeviction` (refuses new writes at
+    # capacity rather than evicting) or a `volatile-*` policy (safe for
+    # `storage.kv` specifically, since its own keys never carry a TTL) --
+    # left as `allkeys-lru` here only because other consumers of this same
+    # instance (spine streams, usage-metering, relay queues) may
+    # legitimately want size-bounded eviction; changing the cluster-wide
+    # default is a capacity-planning decision, not something this fix
+    # makes unilaterally.
     maxMemoryPolicy: "allkeys-lru"
     # fix/valkey-tls-alpha -- adds a `tls-port` listener ALONGSIDE the existing plaintext
     # `port` above (dual-listener: `redis-server --port 6379 --tls-port <this>` runs both),
@@ -266,7 +458,10 @@ infrastructure:
     # SECURITY_TRANSPORT_TLS=false as the alternative -- that weakens a fail-closed check
     # `penguin_spine::SpineConfig::validate()` deliberately enforces.
     tls:
-      enabled: false
+      # Default ON: the durable delivery Valkey is TLS-only and the render FAILS if it is
+      # enabled without TLS (waddlebot.assertDurableTls). Non-alpha tiers must supply
+      # global.valkeyTls material (cert rotation) -- see docs/valkey-durability.md.
+      enabled: true
       port: 6380
     service:
       name: "infra-redis"
@@ -287,25 +482,196 @@ infrastructure:
       accessMode: ReadWriteOnce
       storageClass: ""
 
-  # MinIO Object Storage
-  minio:
+  # Durable Valkey for in-flight delivery state (spine streams, outbound drain queues
+  # `waddles:transport:*`, op_id acks, future interaction-token store). Split from the
+  # LRU cache instance above (`infrastructure.redis`, sessions/bundlekv/cache) so delivery
+  # state can NEVER be evicted: maxmemory-policy is hard-wired to `noeviction` in the
+  # template and is deliberately NOT a value. Required for the 99.99% delivery SLA.
+  #
+  # STATEFUL EXCEPTION (approved) -- StatefulSet + volumeClaimTemplates instead of the
+  # chart's Deployment+Recreate+PVC convention; user approval 2026-10-23 for the delivery SLA.
+  #
+  # Topology: valkey-durable-0 = primary, valkey-durable-1..N-1 = warm replicas (`replicaof`
+  # ordinal 0). The `service` below pins to ordinal 0 only. NO Sentinel: the Rust
+  # `penguin_spine` client (ce638ec / 0.2.0) cannot do Sentinel/Cluster discovery, so
+  # automatic failover would promote a replica the clients never find. Recovery today =
+  # StatefulSet reschedules ordinal 0 on its own PVC (crash-durable via AOF); replicas are a
+  # warm copy for manual promotion. See docs/valkey-durability.md.
+  # When disabled, the VALKEY_DURABLE_* secret keys fall back to the cache instance (legacy behaviour).
+  valkeyDurable:
     enabled: true
-    # MinIO API server — moved from Docker Hub (deprecated) to quay.io/minio/minio
-    # License: AGPL-3.0 (self-hosted object store, not linked into our code)
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    # MinIO client (mc) used for bucket initialization — same license
-    initImage: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-    apiPort: 9000
-    consolePort: 9001
-    bucketName: "waddlebot-assets"
-    # Default credentials (matches docker-compose.yml)
-    rootUser: "REPLACE_ME"
-    rootPassword: "REPLACE_ME"
+    image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+    # Dedicated password (own secret key VALKEY_DURABLE_PASSWORD). REPLACE_ME => auto-generated
+    # alpha/local only; beta/gamma/prod must set it explicitly (or pre-populate the Secret).
+    password: "REPLACE_ME"
+    # Full-access ACL `admin` user (replication masteruser + break-glass); app clients use the
+    # restricted `default` user (password above). alpha/local: auto-generated when REPLACE_ME.
+    # beta/gamma/prod: REQUIRED -- set a FRESH value (the old admin password is COMPROMISED); the
+    # render fails closed if unset/REPLACE_ME*.
+    adminPassword: "REPLACE_ME"
+    # Non-secret rotation trigger rendered as pod annotation valkey.waddles/admin-revision.
+    # Rotating the admin password? Update the value/Secret AND bump this -> primary+replicas restart.
+    adminPasswordRevision: "1"
+    port: 6379
+    # 1 primary + (replicas-1) warm replicas.
+    replicas: 2
+    # Headroom under resources.limits.memory (~60%): AOF-rewrite fork COW + replication
+    # buffers + client buffers live OUTSIDE maxmemory. At maxmemory writes fail LOUDLY (OOM
+    # error) rather than evicting -- alert on used_memory/maxmemory > 0.8.
+    maxMemory: "600mb"
+    aof:
+      # `everysec` = <=1s loss on host crash. `always` fsyncs every write (zero-loss for
+      # acks/tokens) at a large throughput cost -- instance-wide, Valkey has no per-key fsync.
+      appendfsync: "everysec"
+      rewritePercentage: 100
+      rewriteMinSize: "64mb"
+    persistence:
+      # Rendering FAILS if false -- durable state never lands on emptyDir.
+      enabled: true
+      size: 5Gi
+      accessMode: ReadWriteOnce
+      # alpha: cluster default (local-path); beta: longhorn.
+      storageClass: ""
+    # soft = preferred anti-affinity (single-node alpha); hard = required (prod).
+    antiAffinity: "soft"
+    pdb:
+      enabled: true
     service:
-      name: "infra-minio"
+      name: "infra-valkey-durable"
+      port: 6379
+      headlessName: "valkey-durable-headless"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "512Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+
+  # Dedicated bundle-kv Valkey (quota counters / bundle key-value state). SIMPLE by design:
+  # a single pod, NO replication/Sentinel/admin user -- quota is not on the 99.99% delivery
+  # path (a brief restart degrades quota checks, never delivery). Split from BOTH other
+  # instances: bundle-kv quota counters are integrity-critical, so they must NOT be evicted
+  # (eviction = quota bypass -> `maxmemory-policy noeviction` is hard-wired in the template,
+  # deliberately NOT a value) and must NOT fill the durable delivery instance.
+  #
+  # STATEFUL EXCEPTION (approved) -- 2026-10-23: StatefulSet + volumeClaimTemplates (PVC
+  # retained) so quota survives restarts. Rootless (uid 999) preserved.
+  # Password lives in its OWN Secret <fullname>-valkey-kv (never the envFrom'd shared one).
+  # When disabled (local), bundle-kv env falls back to the cache instance.
+  valkeyKv:
+    enabled: true
+    image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+    # REPLACE_ME => auto-generated alpha/local only; beta/gamma/prod must set it explicitly
+    # (or pre-populate the <fullname>-valkey-kv Secret).
+    password: "REPLACE_ME"
+    port: 6379
+    # Headroom under resources.limits.memory (~50%): AOF-rewrite fork COW + client buffers.
+    # At maxmemory writes fail LOUDLY (never evict) -- alert on used_memory/maxmemory > 0.8.
+    maxMemory: "128mb"
+    aof:
+      appendfsync: "everysec"
+      rewritePercentage: 100
+      rewriteMinSize: "32mb"
+    persistence:
+      # Rendering FAILS if false -- quota state never lands on emptyDir.
+      enabled: true
+      size: 1Gi
+      accessMode: ReadWriteOnce
+      storageClass: ""
+    service:
+      name: "infra-valkey-kv"
+      port: 6379
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
+
+  # SeaweedFS Object Storage (replaces MinIO -- quay.io/minio/{minio,mc} started
+  # returning 401 on anonymous pulls and Docker Hub never carried them; see
+  # feature/seaweedfs-object-storage PR description for the full rationale).
+  # PVC/Secret key names below intentionally still say "minio"/"MINIO_ROOT_*" in
+  # a few spots for backward compatibility with existing alpha installs -- see
+  # inline notes.
+  seaweedfs:
+    enabled: true
+    # chrislusf/seaweedfs (Apache-2.0), official multi-arch image (linux/amd64,
+    # linux/arm64, linux/arm/v7, linux/386), digest verified against an
+    # anonymous `docker manifest inspect` pull on 2026-09-29.
+    image: docker.io/chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    # amazon/aws-cli (Apache-2.0) used for idempotent bucket + default-encryption
+    # initialization -- SeaweedFS's S3 API is AWS-S3-compatible so the stock
+    # aws-cli works unmodified (no SeaweedFS-specific client needed).
+    bucketInitImage: docker.io/amazon/aws-cli:2.37.6@sha256:82905aa8fdab6e2403b40dceec12dc33aea2535a4c2a6f13d596d98501951105
+    s3Port: 8333
+    masterPort: 9333
+    bucketName: "waddlebot-assets"
+    # Least-privilege S3 identities (one per workload, each its own
+    # accessKey/secretKey pair), rendered into SeaweedFS's `weed server
+    # -s3.config` identities.json at container start (templates/infrastructure/
+    # seaweedfs.yaml). The former unscoped "waddlebot" admin identity
+    # (Read/Write/List/Tagging/Admin across every bucket, fed by rootUser/
+    # rootPassword/MINIO_ROOT_* below) has been REMOVED -- every consumer,
+    # including svc-streaming's recordings path, now has its own
+    # bucket-scoped identity. Same lookup(KEEP)-then-generate(alpha/local)-
+    # or-require(else) provisioning policy for every identity below (see
+    # templates/secrets.yaml waddlebot.autoSecretValue and _helpers.tpl):
+    # "REPLACE_ME" here means "unset" -- alpha/local auto-generate and persist
+    # via `lookup`+`resource-policy: keep`, beta/gamma/production MUST set a
+    # real value (or pre-populate the waddlebot-secrets Secret out-of-band) or
+    # the render fails.
+    identities:
+      # hub_api/services/storage_service.py -- reads/writes bundle components,
+      # avatars, community logos. Read/Write/List/Tagging, scoped to BOTH
+      # bucketName ("waddlebot-assets", avatars/community logos) AND
+      # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles",
+      # bundle components/sidecars -- shared with core-bundle-seeder-job.yaml,
+      # which reuses this same identity) -- see templates/infrastructure/
+      # seaweedfs.yaml's s3-identities.json rendering. regression: bundle
+      # publish/fetch bucket split after SeaweedFS migration (#508/#509) --
+      # this identity used to be scoped to bucketName only, so a bundle
+      # publish "succeeded" into the wrong bucket and 404'd for every
+      # bundle-executor fetch (that identity, below, is correctly Read/List-
+      # only on this SAME "waddles-bundles" bucket).
+      hubApi:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # core/bundle_executor (templates/bundle-executor.yaml,
+      # bundle-executor-action.yaml) -- the Rust data-plane's one credentialed
+      # egress path (bucket.rs), a single unsigned-body GET of a compiled
+      # component + its JSON sidecar. Read/List ONLY, scoped to
+      # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles") --
+      # this identity must NOT be able to PUT.
+      dataPlane:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # templates/infrastructure/seaweedfs.yaml's seaweedfs-bucket-init Job
+      # ONLY -- Admin (bucket create/head + PutBucketEncryption), unscoped
+      # since it must be able to create buckets that don't exist yet. Never
+      # mounted by a long-running Deployment.
+      bucketInit:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # core/svc_streaming (templates/svc-streaming.yaml) -- egress::record's
+      # only S3 calls are `put_opts`/`put_multipart_opts` against the
+      # "recordings" bucket (finished HLS/recording segments); Read is also
+      # granted for parity with the standard object_store Put-then-verify
+      # path. Read/Write ONLY, scoped to the literal "recordings" bucket --
+      # this identity must NOT reach "waddlebot-assets" or
+      # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles").
+      # Replaces the former "waddlebot" full-admin back-compat identity this
+      # was the last consumer of.
+      streaming:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+    service:
+      name: "infra-seaweedfs"
       type: ClusterIP
-      apiPort: 9000
-      consolePort: 9001
+      s3Port: 8333
+      masterPort: 9333
     replicas: 1
     resources:
       requests:
@@ -314,42 +680,61 @@ infrastructure:
       limits:
         cpu: "1000m"
         memory: "1Gi"
-    # name/accessMode/storageClass added alongside the Issue #287 alpha bring-up (missing
-    # here previously -- templates/infrastructure/minio.yaml's PVC needs all three and
-    # every environment that flips infrastructure.minio.enabled=true render-fails the PVC
-    # without them; postgresql/redis above already carry the equivalent keys).
+    # PVC name kept as "minio-data" on purpose -- existing alpha installs already
+    # have this PVC bound; reusing the name lets the chart reattach to it without
+    # a manual migration. Fresh installs get a PVC literally named "minio-data"
+    # too, which is cosmetic only (see README.md Migration Notes for the
+    # documented rename-and-copy path if a clean name is ever wanted).
     persistence:
       enabled: true
       name: "minio-data"
       accessMode: ReadWriteOnce
       storageClass: ""
       size: 50Gi
-    env:
-      MINIO_BROWSER: "on"
-    # At-rest encryption (security.md Encryption: Storage — mandatory baseline, no
-    # opt-out) requires MinIO to have a KMS configured; without one, hub-api's
-    # put_object(..., ServerSideEncryption="AES256") fails with "Server side
-    # encryption specified but KMS is not configured". Static single-key KMS via
-    # MINIO_KMS_SECRET_KEY sourced from a pre-created Secret (never a literal key
-    # in git, never chart-managed) -- generate with `make generate-minio-kms-key`
-    # / scripts/generate-minio-kms-key.sh. secretName is empty here (fail-closed
-    # baseline for beta/gamma/production, see templates/infrastructure/minio.yaml's
-    # fail guard); alpha documents its own default in values-alpha.yaml. For
-    # production, a real external KMS (KES/Vault) is recommended over this static
-    # key -- see README.md MinIO KMS section and security.md Encryption tiering.
-    kms:
+    # At-rest encryption (security.md Encryption: Storage -- mandatory baseline,
+    # no opt-out). SeaweedFS's S3 gateway implements SSE-S3 with envelope
+    # encryption: a KEK (key-encryption-key) wraps a per-object DEK. Without an
+    # explicit KEK, SeaweedFS auto-generates one and persists it on the filer --
+    # fine for throwaway alpha, not acceptable for beta/gamma/production where
+    # losing the filer volume must not silently rotate the encryption key.
+    # secretName sources WEED_S3_SSE_KEK (hex-encoded 256-bit key) from a
+    # pre-created Secret (never a literal key in git, never chart-managed) --
+    # generate with `make generate-seaweedfs-sse-key` /
+    # scripts/generate-seaweedfs-sse-key.sh. This replaces the former MinIO
+    # KMS/minio-kms Secret -- see autoProvisionedKeys.seaweedfsSseKek below.
+    # secretName is empty here (fail-closed baseline for beta/gamma/production,
+    # see templates/infrastructure/seaweedfs.yaml's fail guard); alpha documents
+    # its own default in values-alpha.yaml.
+    encryption:
       enabled: true
       secretName: ""
-      secretKey: "MINIO_KMS_SECRET_KEY"
-      # SSE-S3 auto-encryption applied to chart-created buckets via `mc encrypt set`
-      # in the minio-init Job, so objects written without explicit SSE headers are
-      # still encrypted at rest.
+      secretKey: "WEED_S3_SSE_KEK"
+      # Default bucket encryption (SSE-S3) applied via the S3 PutBucketEncryption
+      # API in the bucket-init Job, so objects written without explicit SSE
+      # headers are still encrypted at rest.
       autoEncryptBucket: true
 
   # Ollama AI Backend
   ollama:
     enabled: true
     image: ollama/ollama:latest@sha256:bfc9c6d53cc6989aa5131a6fde6b162b2802d4d337657f3253b5f69579bddeee
+    # R5 posture: rootless. The model store moves from /root/.ollama to $HOME/.ollama
+    # (HOME=/home/ollama, same PVC, so already-pulled models are kept); /tmp is an emptyDir.
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      capabilities:
+        drop: ["ALL"]
     port: 11434
     defaultProvider: "ollama"
     defaultModel: "tinyllama"
@@ -366,6 +751,8 @@ infrastructure:
         memory: "2Gi"
     persistence:
       enabled: true
+      name: "ollama-data"   # templates/infrastructure/ollama.yaml PVC name (was unset: empty-name PVC, `helm lint` warning)
+      accessMode: ReadWriteOnce
       size: 30Gi
     gpu:
       enabled: false
@@ -375,6 +762,23 @@ infrastructure:
   qdrant:
     enabled: true
     image: qdrant/qdrant:latest@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
+    # R5 posture: rootless. The image defaults to root; qdrant only needs /qdrant/storage (PVC),
+    # /qdrant/snapshots and /tmp (emptyDirs, templates/infrastructure/qdrant.yaml).
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      capabilities:
+        drop: ["ALL"]
     port: 6333
     grpcPort: 6334
     service:
@@ -390,6 +794,8 @@ infrastructure:
         memory: "1Gi"
     persistence:
       enabled: true
+      name: "qdrant-data"   # templates/infrastructure/qdrant.yaml PVC name (was unset: empty-name PVC, `helm lint` warning)
+      accessMode: ReadWriteOnce
       size: 10Gi
 
   # Apache OpenWhisk (Serverless)
@@ -426,9 +832,10 @@ posthog:
   # hosted default (https://license.penguintech.io).
   host: ""
 
-  # POSTHOG_API_KEY — personal/project API key (feature_flag:read scope).
-  # NEVER commit a literal value; set via --set or an out-of-git values file.
-  apiKey: ""
+  # POSTHOG_API_KEY (personal/project API key, feature_flag:read scope) moved
+  # to the `waddlebot-platform-credentials` Secret -- see `platformCredentials`
+  # above -- so an untouched/placeholder value here can never overwrite a
+  # real key on `helm upgrade` (fix/helm-platform-credentials).
 
   # PostHog's OWN secrets (SECRET_KEY / POSTGRES_PASSWORD / CLICKHOUSE_PASSWORD)
   # — distinct from apiKey above. NEVER commit literals. Provide ONE of:
@@ -443,6 +850,44 @@ posthog:
     SECRET_KEY: ""
     POSTGRES_PASSWORD: ""
     CLICKHOUSE_PASSWORD: ""
+
+  # feature/alpha-localized-posthog -- auto-provisioning for the in-cluster
+  # PostHog above. A post-install/post-upgrade hook Job (templates/
+  # infrastructure/posthog/bootstrap.yaml) signs up the first admin user,
+  # resolves the org/project, mints a personal API key, and writes it to a
+  # NEW, chart-owned Secret (bootstrap.secretName) -- NEVER into
+  # `waddlebot-platform-credentials` (see platformCredentials above /
+  # docs/PLATFORM_CREDENTIALS.md; that Secret stays exclusively
+  # operator-managed). Idempotent: skips entirely once POSTHOG_API_KEY is
+  # already present in that Secret, so a repeat `helm upgrade` never mints a
+  # second orphaned key. Admin password is generated inside the Job itself
+  # (never a values.yaml literal) and stored alongside the key.
+  #
+  # Disabled by default (posthog.enabled=false means this never renders
+  # regardless). Enable alongside posthog.enabled=true for alpha only --
+  # beta/gamma/production keep posthog.enabled=false and never run this Job.
+  bootstrap:
+    enabled: false
+    secretName: "posthog-bootstrap-secret"
+    adminEmail: "alpha-admin@waddlebot.localhost.local"
+    orgName: "Waddlebot Alpha"
+    # Deployment name SUFFIX (prefixed with the release fullname by the
+    # template) to roll after the key is written, so the primary flag/
+    # license consumer picks it up without a manual restart. Leave blank to
+    # skip the restart (e.g. svc-process-rust/svc-action-rust pick the key
+    # up on their own next natural redeploy).
+    restartDeployment: "hub-api-v3"
+    # Seeded ENABLED, 100% rollout, in the in-cluster PostHog as soon as it's
+    # provisioned -- explicit alpha-only enablement (critical-rules.md's
+    # "default OFF" rule governs the product-code default, not this one-time
+    # alpha seed) so these are immediately testable. NOTE: as of this change
+    # no command dispatcher actually gates on `waddles.command-*` keys yet --
+    # see PR description "Command-flag eval path" for the trace and the gap.
+    seedFlags:
+      - "waddles.command-eightball"
+      - "waddles.command-roll"
+      - "waddles.command-lurk"
+      - "waddles.command-count"
 
   # PostHog self-host has NO dated/semver releases — images are commit-tagged
   # off master. Pinned to the exact commit tag + digest named in
@@ -559,7 +1004,7 @@ posthog:
 # Dockerfile/CI-built image yet. Replace per-container once each does.
 pipeline:
   pythonBaseImage: "python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb"
-  nodeBaseImage: "node:20-bookworm-slim@sha256:1e85773c98c31d4fe5b545e4cb17379e617b348832fb3738b22a08f68dec30f3"
+  nodeBaseImage: "node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
 
   # T10 (v3 demo) — shared runner identity across svc-ingest/svc-process/svc-action.
   # RUNNER_TENANT_SLUG scopes stage_runner.py to one tenant; deliberately NOT paired
@@ -582,6 +1027,19 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
+  # Idempotent super-admin seed (templates/hub-admin-seed-job.yaml): post-install/post-upgrade
+  # hook re-applying config/postgres/migrations/081_seed_default_hub_admin.sql (no-op once any
+  # super-admin exists) -- SQL migrations never replay on an existing DB, so without this a
+  # deploy over an existing DB never seeds the admin.
+  hubAdminSeedJob:
+    enabled: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
   # Activates first-party waddles.core.* App Bundles under the platform's SYSTEM identity at
   # deploy time (hub_api/cli/seed_core_bundles.py) -- no human global-admin approval, unlike a
   # third-party vendor bundle. `tenantSlugs` is a comma-separated CORE_BUNDLES_TENANT_SLUGS
@@ -590,8 +1048,38 @@ pipeline:
   coreBundleSeeder:
     enabled: true
     backoffLimit: 2
+    # fix/seeder-deadline: real per-bundle work (component inspect/stage/publish,
+    # catalog install, source-binding sync, tenant activation, Ed25519 signing) runs
+    # ~20s/bundle; ~39 first-party core bundles need 13+ min end to end. 1800s (30min)
+    # gives comfortable headroom over that real workload -- was hardcoded at 300s in
+    # templates/core-bundle-seeder-job.yaml, which killed the Job via DeadlineExceeded
+    # partway through every seed run (only 13-15/39 bundles seeded,
+    # community_permission_grants never fully populated).
+    #
+    # fix/seeder-throughput: 1800s still wasn't enough -- values-alpha.yaml's
+    # 100m/300m CPU override throttled the seeder to ~75s/bundle (not the ~20s
+    # assumed above), hitting this deadline at 24/39 bundles with the
+    # capability-grants phase (which runs after seeding) never reached. The CPU
+    # fix below (1000m/2000m) removes the throttling; this bump to 3000s (50min)
+    # is belt-and-suspenders headroom in case CPU alone isn't sufficient on a
+    # loaded alpha node.
+    activeDeadlineSeconds: 3000
     defaultTenantSlug: "global"
     tenantSlugs: ""
+    # fix/preexisting-test-failures (2026-10-02): dedicated seeder-owned ingest-source
+    # list, decoupled from rustDataPlane.svcProcess's legacy single-app PROCESS_INGEST_*
+    # fields (removed from alpha in fix/alpha-deploy-executor-and-failfast, PR #538, now
+    # that the DB-driven multi-tenant active-bundle loader is the sole bundle-selection
+    # path -- see values-alpha.yaml's rustDataPlane.svcProcess comment). The seeder still
+    # needs to register ingest sources independently of whether svc-process's legacy env
+    # is set, so this list is the seeder's own source of truth, each entry rendered into
+    # CORE_BUNDLES_PLATFORM_CONNECTIONS (templates/core-bundle-seeder-job.yaml):
+    #   - platform: "<ingest platform, e.g. discord>"
+    #     sourceId: "<ingest source id, e.g. dg-<guild id>>"
+    #     tenantSlug: "<optional, defaults to defaultTenantSlug above>"
+    #     communityId: <optional, defaults to null>
+    #     label: "<optional, defaults to '<platform> platform connection'>"
+    platformConnections: []
     resources:
       requests:
         cpu: "100m"
@@ -599,7 +1087,47 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
-  goRuntimeImage: "debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a"
+  # Odoo / external-WaddleDB connector (hub_api/services/odoo_sync_service.py) -- deploy-time
+  # kill switch, defaulted OFF. Odoo creds come ONLY from an operator-created Secret holding
+  # ODOO_URL/ODOO_DB/ODOO_LOGIN/ODOO_API_KEY/ODOO_SYNC_REF_KEY -- never rendered here.
+  odooSync:
+    enabled: false
+    envBaseline: false
+    secretName: "waddlebot-odoo-credentials"
+    schedule: "*/30 * * * *"
+    backoffLimit: 2
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+  # Bar Citizen role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
+  # deploy-time kill switch, defaulted OFF (critical-rules.md Feature Flags: every feature
+  # flagged OFF until validated) -- see templates/role-sync-cronjob.yaml's own header comment.
+  # The engine's own FEATURE_BAR_CITIZEN_ROLE_SYNC PostHog flag is the separate per-tenant
+  # RUNTIME gate; this value controls whether the CronJob is deployed at all.
+  roleSync:
+    enabled: false
+    # 1-minute cadence (near-real-time, demo-ready; Helix limits make sub-minute pointless).
+    # Covers both directions in one pass; concurrencyPolicy Forbid prevents overlap.
+    schedule: "*/1 * * * *"
+    # Opt-in demote-on-role-remove (Discord -> platform): comma-separated pairing ids.
+    # Empty = grant-only (default). Baseline role = what a demoted member falls back to.
+    demotePairingIds: ""
+    demoteBaselineRole: "community-member"
+    backoffLimit: 2
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+  goRuntimeImage: "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587"
 
   svcIngest:
     enabled: true
@@ -661,6 +1189,11 @@ pipeline:
     enabled: true
     port: 8204
     grpcPort: 50204
+    # SPIFFE_PEER_TRUST / SPIFFE_PEER_ID_HEADER (hub_api/services/machine_auth.py). Default OFF.
+    # Enable ONLY behind an mTLS terminator that strips the header from non-mTLS traffic AND
+    # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.
+    spiffePeerTrust: false
+    spiffePeerIdHeader: "X-Spiffe-Peer-Id"
     replicas: 2
     # Maps to WADDLES_AI_ENABLED (hub_api/config.py) -- deploy-time
     # kill-switch for the whole services/ai_routing/ subsystem, so
@@ -683,6 +1216,50 @@ pipeline:
       limits:
         cpu: "1000m"
         memory: "1Gi"
+    # feature/bundle-artifact-signing -- BUNDLE_SIGNING_PRIVATE_KEY/BUNDLE_SIGNING_KEY_ID
+    # (hub_api/services/bundle_signing_service.py) are wired via secretKeyRef against this
+    # externally-managed Secret, NEVER templated from values (the private key must never
+    # pass through `helm template`/`helm install --set`/a values file). Generate + apply
+    # with `make generate-bundle-signing-key` (scripts/generate-bundle-signing-key.sh)
+    # BEFORE deploying hub-api -- see the chart README's rollout-order section. `optional:
+    # true` on the env's secretKeyRef so hub-api still starts (approvals just fail closed
+    # per PlatformSigner.from_env()) before that script has been run once.
+    bundleSigning:
+      secretName: ""  # default: "{{ fullname }}-bundle-signing" -- computed in the template when empty
+    # One-off backfill CLI (hub_api/cli/sign_approved_bundles.py) as a Helm Job --
+    # templates/bundle-signing-backfill-job.yaml. Disabled by default: this is a deliberate
+    # rollout step (create secret -> deploy hub-api -> run this Job once -> deploy
+    # executor), not a hook that should fire on every `helm upgrade`. Flip to true for one
+    # `helm upgrade --set pipeline.hubApi.bundleSigningBackfill.enabled=true`, then back to
+    # false -- idempotent either way (module docstring), so a stray extra run is harmless.
+    bundleSigningBackfill:
+      enabled: false
+      backoffLimit: 2
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+    # MEDIUM security-review finding -- CronJob that re-uploads any missing signed bucket
+    # sidecar for a version that IS signed in Postgres (artifact_signature NOT NULL) but
+    # whose sidecar object is missing/stale (e.g. a prior upload_signed_sidecar() failure
+    # that was only ever recorded as a backfill-CLI row outcome, never retried). Runs
+    # hub_api/cli/reconcile_signed_sidecars.py on a schedule; metrics via the same
+    # bundle_telemetry meter the backfill CLI uses.
+    bundleSigningReconciler:
+      enabled: true
+      schedule: "*/30 * * * *"
+      backoffLimit: 3
+      concurrencyPolicy: Forbid
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
 
   hubWebui:
     enabled: true
@@ -693,6 +1270,14 @@ pipeline:
     replicas: 2
     service:
       type: ClusterIP
+    # Direct host-IP NodePort exposure (no /etc/hosts or Host-header routing) -- alpha
+    # only; base/beta/gamma/production stay ClusterIP+Ingress-only (see
+    # templates/hub-webui.yaml's second Service block). 30879 matches
+    # webui.publicUrl/connectionsCallbackBaseUrl in values-alpha.yaml, which already
+    # reserved this port for "hub-webui NodePort" ahead of this Service existing.
+    nodePort:
+      enabled: false
+      port: 30879
     resources:
       requests:
         cpu: "100m"
@@ -720,7 +1305,17 @@ pipeline:
   svcPresentation:
     enabled: true
     port: 8207
-    replicas: 2
+    # MUST stay 1. The overlay fan-out is IN-PROCESS: each pod only knows the websocket/SSE
+    # clients connected to itself, so with >1 replica a pushed frame reaches only the clients on
+    # the pod that received it -- frames split across pods. The chart REFUSES to render
+    # replicas > 1 (waddlebot.presentationReplicaGuard) unless sharedFanout.enabled is true.
+    # No HPA/PDB either (not in waddlebot.scaleTargets).
+    replicas: 1
+    sharedFanout:
+      # Shared cross-pod fan-out backend (e.g. Valkey pub/sub) -- NOT BUILT YET (roadmap item).
+      # Flip to true only once svc_presentation ships it; until then this only exists so the
+      # replicas guard has an explicit, auditable override rather than a silent footgun.
+      enabled: false
     resources:
       requests:
         cpu: "250m"
@@ -728,6 +1323,26 @@ pipeline:
       limits:
         cpu: "1000m"
         memory: "1Gi"
+
+  # Discord event-sync reconcile CronJob (hub_api/services/event_discord_sync_service.py::main) --
+  # periodic backstop sweeping calendar_events rows left pending/sync_error (SoT push engine's
+  # own `sync_event()` entry point handles the immediate, webhook-triggered path; this CronJob
+  # is the "reconciliation-by-polling never fully replaced by push" backstop, same philosophy
+  # as role-sync's own reconcile worker). Disabled by default -- the engine itself is also
+  # gated behind the waddles.calendar.event_discord_sync PostHog flag (defaulted OFF), so this
+  # is a belt-and-suspenders double-gate until the feature is validated.
+  eventSync:
+    enabled: false
+    schedule: "*/5 * * * *"
+    backoffLimit: 2
+    activeDeadlineSeconds: 240
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
 
   # v3.0.x — Rust data-plane rewrite (Issue #287, core/svc_streaming crate). Supersedes the
   # earlier Python/ffmpeg control+data plane (own DB tables, migration 078). Adds the
@@ -746,6 +1361,10 @@ pipeline:
   # pod, not a generic pipeline-stage skeleton.
   svcStreaming:
     enabled: true
+    # Stateful singleton (RTMP/SRT listeners + local stream dir): Deployment strategy is
+    # Recreate and replicas must stay 1. No HPA/PDB (not in waddlebot.scaleTargets).
+    # Longer drain than the chart default so in-flight streams/recordings can finalize.
+    terminationGracePeriodSeconds: 60
     port: 8208
     grpcPort: 50208
     metricsPort: 9090
@@ -754,7 +1373,17 @@ pipeline:
     webrtcRangeStart: 40000
     webrtcRangeEnd: 40100
     streamDataDir: "/var/lib/waddlebot/stream"
+    # Externally-reachable base URL svc-streaming embeds in playback URLs and uses as
+    # the WebRTC ICE host. Empty = unset (service default http://localhost:8208).
+    # Set an explicit URL for stable-DNS environments; it always wins over the node-IP
+    # derivation below.
     publicBaseUrl: ""
+    # Derive PUBLIC_BASE_URL at runtime as http://<node hostIP>:<nodePort.httpPort> via the
+    # downward API (status.hostIP) instead of baking a LAN IP into a values file -- the
+    # node IP changes when a host moves networks, and a stale literal silently points
+    # playback URLs at a dead address. Only used when publicBaseUrl is empty; requires
+    # nodePort.enabled (the chart fails to render otherwise).
+    publicBaseUrlFromNodeIP: false
     replicas: 1
     # Direct NodePort media exposure (RTMP/SRT/HTTP) -- alpha-only; base/beta stay
     # ClusterIP-only (see templates/svc-streaming.yaml's second Service block).
@@ -771,38 +1400,116 @@ pipeline:
         cpu: "4000m"
         memory: "4Gi"
 
-  # feature/e2e-helm-rust-dataplane -- Rust data-plane Deployments (core/svc_ingest,
-  # core/svc_process, core/svc_action, core/bundle_executor). ADDITIVE, never replaces
-  # pipeline.svcIngest/svcProcess/svcAction above -- gated behind this single top-level
-  # `enabled` flag, defaulted false so the chart's existing Python deploy is completely
-  # undisturbed until deliberately flipped for an e2e run. Resource names all carry a
-  # `-rust` suffix (templates/svc-ingest-rust.yaml et al) so both stacks can be rendered
-  # (and, if ever needed, scheduled) side by side with zero K8s object-name collision --
-  # deliberately NOT reusing the Python Deployments' bare names even though
-  # core/svc_action/Dockerfile.rust's own build comment tags the Rust image with the exact
-  # same `svc-action:alpha` repo:tag the Python image uses (cutover-in-place image
-  # convention, M6). Image repository/tag values below intentionally mirror that same
-  # tag via `waddlebot.legacyModuleImage` for svc-ingest/svc-process/svc-action -- an
-  # operator doing the e2e cutover builds+pushes the Rust image over the same tag, then
-  # sets pipeline.svcIngest/svcProcess/svcAction.enabled=false alongside this flag so
-  # exactly one binary (Rust) is actually behind that tag while both flags are live.
+  # Rust data-plane Deployments (core/svc_ingest, core/svc_process, core/svc_action,
+  # core/bundle_executor). ADDITIVE, never replaces pipeline.svcIngest/svcProcess/svcAction
+  # above. Gated behind this top-level `enabled` flag (default false) so the Python deploy is
+  # undisturbed until deliberately flipped. Resource names carry a `-rust` suffix
+  # (templates/svc-ingest-rust.yaml et al) so both stacks render side by side with no K8s
+  # object-name collision. Image repositories are distinct `<module>-rust` repos
+  # (waddlebot.legacyModuleImage), built by CI / scripts/alpha-deploy.sh.
   #
-  # KNOWN GAPS this Helm-only change cannot close (read-only reference: core/*/src/*.rs):
-  #   - core/svc_ingest is an M5-blocked skeleton -- no VALKEY_URL/DB/Discord+Twitch
-  #     receiver-credential fields exist in its CliConfig yet. The env wired into
-  #     templates/svc-ingest-rust.yaml is forward-compatible only (extra env vars clap
-  #     silently ignores); no further chart change needed once M5 lands.
-  #   - core/svc_process's host-API/executor integration is TODO(M4) -- HOST_API_PORT
-  #     doesn't exist in its CliConfig yet, so bundleExecutor.stageTarget below defaults
-  #     to svc-action-rust (M3, landed and real) rather than svc-process-rust.
-  #   - core/bundle_executor has no Dockerfile at all yet (not even a `Dockerfile.rust`
-  #     skeleton like the three services above already have) -- must be authored+built
-  #     before this flag can be flipped for a real e2e run.
-  #   - The executor<->stage mTLS material (global.hostApiTls) has no insecureDev escape
-  #     hatch (unlike global.grpcTls) -- real PEM material is an OVERRIDE REQUIRED
-  #     operator step (see global.hostApiTls's own comment) even in alpha.
+  # ACTUAL STATE (verified against core/*/src, 2026-10-12):
+  #   - svc_ingest is NOT a skeleton (~13k lines). Native Twitch IRC, Discord Gateway (OP_RESUME
+  #     + fleet-wide IDENTIFY budget), Twitch EventSub with HMAC verification, and Twitch +
+  #     Discord outbound drains are implemented. Valkey comes from
+  #     penguin_spine::SpineConfig::from_env() (VALKEY_URL); receiver tokens come from its
+  #     Config. No DB by design (spec S4.1: the stage owns no tables).
+  #   - svc_process host-API EXISTS: HOST_API_PORT (default 8301, core/svc_process/src/config.rs,
+  #     server in src/host_api.rs). bundleExecutor.stageTarget below defaults to svc-action-rust;
+  #     point it at svc-process-rust for the PROCESS_BUNDLE_* ping proof (templates/svc-process-rust.yaml).
+  #   - Executor<->stage mTLS (global.hostApiTls) self-provisions on alpha/local (generated under
+  #     the same Secret name) and fails closed on beta/gamma/production. No insecureDev escape
+  #     hatch is needed; beta/prod require real material (cert-manager or ExternalSecret).
+  #
+  # REMAINING REAL GAPS:
+  #   - No Slack / YouTube / Kick / Spectrum Rust receivers yet (TODO(M5) in svc_ingest's
+  #     lib.rs); the generic webhook/JWT intake and D31 usage metering are also TODO(M5).
+  #   - Source configuration is static single-source config (env/CLI), not per-community.
+  #   - Connector bundles (#840 B0): the executor library can now invoke connector exports
+  #     (core/bundle_executor/src/connector.rs ConnectorHost) and svc_ingest has the host-side
+  #     Transport/driver skeleton (core/svc_ingest/src/connector), proven end to end by
+  #     core/connector_e2e. The deployed pods cannot yet run a connector: the executor host-API
+  #     wire (penguin-libs ExportKind) has no connector export kinds, so svc_ingest's production
+  #     invoker is UnwiredInvoker, which fails every call loudly. No real platform Transport exists yet.
+  #   - svc_ingest has no host-API listener.
+  #
+  # HIDDEN SECOND GATE -- read before enabling (src/license.rs:32 flag key, :115 check):
+  #   core/svc_ingest only starts its receivers and outbound drains when the PostHog flag
+  #   `waddles.core.rust-data-plane` is ON. Default OFF, fail-closed: a never-seen flag, an
+  #   unreachable license server, or a license client that cannot be built (invalid license
+  #   config) all evaluate OFF. With the flag OFF the pod still runs its HTTP/metrics servers
+  #   but logs a WARN and starts no receivers, so svc_action refuses Discord chat.delete and
+  #   dm.send. Setting pipeline.rustDataPlane.enabled=true alone yields an INERT svc-ingest-rust
+  #   pod -- the flag must also be ON in PostHog (or a domain bypass applies).
   rustDataPlane:
     enabled: false
+
+    # Security review fix (PR #468, MEDIUM): bundle_host_http::egress::EgressGuard's
+    # operator-configured cluster pod/Service/node CIDR denylist, shared by every Rust
+    # data-plane stage (svcAction/svcProcess -- templates/svc-action-rust.yaml,
+    # templates/svc-process-rust.yaml -- EGRESS_CLUSTER_CIDR_DENYLIST env). Never liftable
+    # by any bundle egress grant or by instanceEgressAllowPrivateIp below -- this is the
+    # hard SSRF backstop against a bundle reaching this cluster's own control plane/other
+    # pods via the `http` capability. Empty (this default) is accepted only when
+    # global.deploymentTier is alpha/local -- CliConfig::validate hard-fails startup
+    # otherwise. OVERRIDE REQUIRED in beta/gamma/production: set to this cluster's actual
+    # pod CIDR, Service CIDR, and node CIDR/subnet (e.g. dal2's `kubectl cluster-info
+    # dump | grep -m3 -E 'cluster-cidr|service-cluster-ip-range'` output, plus the node
+    # subnet) -- values-alpha.yaml is exempt via deploymentTier: "alpha".
+    egressClusterCidrDenylist: []
+    # Interim, config-sourced bundle_host_http::egress::InstanceEgressPolicy (Justin's
+    # decision: "private-ip is also subject to the INSTANCE policy -- default deny,
+    # global-admin opt-in"). PR #428/#432's capability-gate grant snapshot is the eventual
+    # live source; `false` (deny, the default) until an operator opts in at the pod level.
+    instanceEgressAllowPrivateIp: false
+
+    # feature/bundle-artifact-signing -- BUNDLE_SIGNING_PUBLIC_KEYS (core/bundle_executor/
+    # src/config.rs, core/bundle_executor/src/signing.rs::PlatformPublicKeys), shared by
+    # both bundleExecutor and bundleExecutorAction below (each executor verifies against
+    # the same platform key set regardless of which stage it dials). Map of
+    # `key_id -> base64(32-byte Ed25519 public key)` -- NOT secret (public keys), so this
+    # is safe to carry directly in values (unlike hubApi.bundleSigning's private-key
+    # secretKeyRef above). Rendered into the container env as a JSON object.
+    #
+    # fix/chart-autogen-bundle-signing-key -- empty by default is now the NORMAL,
+    # zero-manual-step path: templates/bundle-executor.yaml and
+    # bundle-executor-action.yaml fall back to sourcing BUNDLE_SIGNING_PUBLIC_KEYS from
+    # the `{{ fullname }}-bundle-signing-public` ConfigMap that templates/
+    # auto-provisioned-keys-job.yaml's pre-install/pre-upgrade hook keeps in sync with
+    # whatever private key lives in autoProvisionedKeys.bundleSigning.secretName, in
+    # every environment (see that values key's own comment). Only set this map
+    # explicitly for a multi-key rotation window or to pin a value printed by a manual
+    # `make generate-bundle-signing-key` run -- an explicit value here always wins over
+    # the ConfigMap. `crate::signing::PlatformPublicKeys::from_cli_required` still fails
+    # closed at startup with zero keys configured either way.
+    bundleSigningPublicKeys: {}
+
+    # feature/hub-grpc-env-wiring -- closes #569's startup seam: svc-process-rust/
+    # svc-action-rust's `core/hub_client::HubClient` (PII tokenization/detokenization,
+    # #561) needs hub-api's internal gRPC endpoint + machine-JWT bootstrap endpoint to
+    # connect at startup, or it fails loud (exits non-zero) per #569's "fail loud, not
+    # silent dead-letter" design. Empty here (the default) means "compute from
+    # pipeline.hubApi's own Service port in-template" (see svc-process-rust.yaml/
+    # svc-action-rust.yaml) -- correct unmodified in every environment since hub-api is
+    # always colocated in the same Helm release/namespace; override only if that ever
+    # stops being true. TLS is mandatory on hub-api's gRPC listener (hub_api/
+    # grpc_internal/server.py, no insecure option) -- scheme is always "https".
+    #
+    # KNOWN GAP (follow-up required, do not assume this "just works"): (1) hub-api's
+    # own Deployment (templates/hub-api.yaml) does not yet wire
+    # `waddlebot.grpcTlsServerEnv`/volume the way templates/core/core-identity.yaml
+    # does, so its gRPC listener never starts (hub_api/app.py fails OPEN for the
+    # surrounding HTTP app but CLOSED for gRPC) until that's added. (2)
+    # `core/hub_client::HubClient::connect` calls `ClientTlsConfig::new().
+    # with_enabled_roots()` -- the bundled webpki/Mozilla root store only, no
+    # custom-CA support -- so even once hub-api's listener is up, a cert signed by
+    # this chart's own `global.grpcTls` CA (cert-manager `waddlebot-internal-ca` or
+    # the static dev CA) will fail TLS verification. Until hub_client supports CA
+    # pinning, use the `waddles.core.disable-pii-tokenization`/
+    # `disable-pii-detokenization` kill-switches in any environment where this isn't
+    # resolved yet, rather than deploying straight into a crash-loop.
+    hubApiGrpcEndpoint: ""
+    serviceJwtTokenEndpoint: ""
 
     svcIngest:
       enabled: true
@@ -823,6 +1530,20 @@ pipeline:
       # global.envelopeBindingKeys once any receiver is used, same requirement as
       # svcAction's own field below.
       envelopeBindingActiveKid: ""
+      # feature/svc-ingest-connections-scope (F4) -- dynamic provider-connections wiring.
+      # `dynamicConnections.enabled` gates svc-ingest's `serviceJwt.identities.svc-ingest` grant
+      # (scope connections:resolve on the cross-tenant `system` tenant), the SERVICE_JWT_* env
+      # and the audience-scoped SA-token mount in templates/svc-ingest-rust.yaml. svc-ingest is
+      # internet-facing (webhooks/IRC/Discord): while the feature is OFF a compromised pod must
+      # not be able to mint a `system` token and resolve every tenant's decrypted OAuth tokens,
+      # so NOTHING renders unless this is true. Default false; only values-alpha.yaml enables it.
+      dynamicConnections:
+        enabled: false
+        # Per-community Twitch session reconcile cadence (TWITCH_RECONCILE_INTERVAL_SECS, bounds
+        # 10..3600) and per-call hub-api timeout (TWITCH_RESOLVE_TIMEOUT_SECS). Rendered only while
+        # enabled. A new/removed Twitch binding takes effect within <= one reconcile interval.
+        twitchReconcileIntervalSecs: 60
+        twitchResolveTimeoutSecs: 10
       resources:
         requests:
           cpu: "100m"
@@ -882,10 +1603,11 @@ pipeline:
       dbReaderPort: ""
       dbReaderName: ""
       # A distinct, SELECT-only Postgres role -- never infrastructure.postgresql.username
-      # (the primary read-write account). See core/bundle_active_set's crate-root doc for
-      # the exact GRANT statements this role needs; provisioning the role itself is a
-      # follow-up (not a Helm change) tracked outside this chart.
-      dbReaderUser: "svc_process_ro"
+      # (the primary read-write account). feature/bundle-reader-role: the role is now
+      # actually provisioned (alembic/versions/0032_bundle_reader_role.py), under the
+      # same name migrations 0025/0028 already grant SELECT to -- "svc_process_ro" was
+      # never backed by any migration.
+      dbReaderUser: "waddles_bundle_reader"
       # BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED (dataplane scale
       # design, multi-tenant change-log consumer): the loader now discovers and
       # serves every (tenant_id, community_id) scope in the database itself
@@ -899,6 +1621,11 @@ pipeline:
       # full_reconcile_interval). Periodic full active-set reconcile -- bounds the
       # blast radius of any change-log defect to one interval.
       bundleConfigFullReconcileMinutes: 15
+      # feature/alpha-command-flag-envs -- arbitrary FLAG_<KEY>=true passthrough env
+      # vars, consumed by waddle_sdk's feature_enabled() as a baseline PostHog
+      # overrides when connected. Empty by default (unchanged behavior); see
+      # templates/svc-process-rust.yaml's identical comment on this key.
+      extraEnv: {}
       resources:
         requests:
           cpu: "100m"
@@ -918,6 +1645,13 @@ pipeline:
       # mTLS host-API listener core/bundle_executor dials (spec SS6.6/SS7.1) -- matches
       # HOST_API_PORT's own CliConfig default (core/svc_action/src/config.rs).
       hostApiPort: 8302
+      # feature/edge-reshape-chunk2-conn-store (Task 8) -- gates svc-action's
+      # `connections:resolve` + `connections:resolve:static` grant in
+      # `serviceJwt.identities.svc-action` (stripped from hub-api's SERVICE_JWT_IDENTITIES while
+      # false) and the SERVICE_JWT_* env/mount both svc-action pods use to mint it. Default false;
+      # only values-alpha.yaml enables it (same posture as svcIngest.dynamicConnections).
+      dynamicConnections:
+        enabled: false
       # ACTION_APP_ID (core/svc_action/src/config.rs) -- empty (default) disables the
       # dispatch drain loop entirely. values-alpha.yaml sets this to the migration-083
       # seeded demo app_id.
@@ -946,7 +1680,10 @@ pipeline:
       dbReaderHost: ""
       dbReaderPort: ""
       dbReaderName: ""
-      dbReaderUser: "svc_action_ro"
+      # feature/bundle-reader-role -- see svcProcess's identical field's own comment
+      # above: "svc_action_ro" was never backed by any migration, the role migrations
+      # 0025/0028 already grant SELECT to is "waddles_bundle_reader".
+      dbReaderUser: "waddles_bundle_reader"
       # BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED -- see
       # svcProcess's identical field's own comment above for the full rationale.
       bundleConfigPollSeconds: 300
@@ -970,7 +1707,8 @@ pipeline:
       # Which stage's host-API this executor dials -- short Service-name suffix, prefixed
       # with the release fullname by the template (spec SS6.6/SS7.1 -- "svc-process:8301"
       # or "svc-action:8302"). "svc-action-rust" (M3, real) is the only server-side
-      # implementation that exists today -- see KNOWN GAPS above re: svc-process's M4 gap.
+      # implementation the e2e path uses today -- svc-process's host-API also exists (see the
+      # ACTUAL STATE block above the rustDataPlane key).
       stageTarget: "svc-action-rust"
       stagePort: 8302
       stageConnections: 4
@@ -988,19 +1726,37 @@ pipeline:
       # executor's one sanctioned credentialed egress path (spec SS7.6/SS12.7), now that
       # BucketComponentSource replaces UnimplementedBucketSource in production (crate::run).
       # bucketName/bucketRegion are static across environments; the endpoint is derived in
-      # the template from infrastructure.minio.service.name/apiPort (alpha: in-cluster MinIO,
-      # plain http:// -- no BUNDLE_BUCKET_CA_FILE needed) and the access key/secret come from
-      # the shared MINIO_ROOT_USER/MINIO_ROOT_PASSWORD secret keys, individually referenced
-      # (not envFrom) to keep this pod's credential surface to exactly what bucket.rs needs.
+      # the template from infrastructure.seaweedfs.service.name/s3Port (alpha: in-cluster
+      # SeaweedFS, plain http:// -- no BUNDLE_BUCKET_CA_FILE needed) and the access
+      # key/secret come from the dedicated "bundle-executor" (data-plane) S3 identity
+      # (DATAPLANE_S3_ACCESS_KEY_ID/_SECRET_ACCESS_KEY, Read/List only -- see
+      # infrastructure.seaweedfs.identities.dataPlane above and templates/secrets.yaml),
+      # individually referenced (not envFrom) to keep this pod's credential surface to
+      # exactly what bucket.rs needs.
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
+      # fix/alpha-deploy-executor-and-failfast -- these are the chart DEFAULTS
+      # (inherited by beta/gamma/production, none of which override this block
+      # today). values-alpha.yaml overrides to 1Gi/2560Mi request/limit memory
+      # after alpha OOMKilled at this tier compiling a 21MB CPython component
+      # plus a .NET component via Cranelift. NEEDS A DECISION before beta:
+      # whether beta/prod sizing should match alpha's bump, scale down (smaller
+      # bundles only), or scale up further (larger worst-case bundles) -- not
+      # decided here, left as the pre-existing chart default in the meantime.
+      #
+      # fix/bundle-defaults-signing-grants-percommunity -- the 512Mi default OOMKills on a clean
+      # deploy: the executor EAGER-LOADS (Cranelift-compiles) the ENTIRE active set at startup.
+      # Default raised to the alpha-proven 2560Mi ceiling (request stays modest).
+      # TODO(core/bundle_executor): the real healthy fix is lazy/bounded loading -- compile a
+      # bundle on first invoke and LRU-evict under a memory budget -- so peak RSS no longer
+      # scales with the number of activated bundles. Then this limit can shrink again.
       resources:
         requests:
           cpu: "250m"
-          memory: "128Mi"
+          memory: "512Mi"
         limits:
           cpu: "1000m"
-          memory: "512Mi"
+          memory: "2560Mi"
 
     # fix/svc-action-bundle-executor-alpha-wiring -- a bundle-executor dials exactly ONE
     # stage (see STAGE_HOST_API_ADDR above); bundleExecutor above is alpha's proven
@@ -1033,6 +1789,9 @@ pipeline:
       sandboxGvisor: true
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
+      # fix/alpha-deploy-executor-and-failfast -- see bundleExecutor.resources'
+      # identical comment above (same compile workload, same open beta/prod
+      # sizing decision, same alpha override to 1Gi/2560Mi).
       resources:
         requests:
           cpu: "250m"
@@ -1040,6 +1799,29 @@ pipeline:
         limits:
           cpu: "1000m"
           memory: "512Mi"
+
+  # fix/pii-tokenization-env-override -- plain env/values off-switch for PII
+  # tokenization/detokenization, independent of PostHog
+  # (`waddles.core.disable-pii-tokenization`/`disable-pii-detokenization`).
+  # The PostHog kill-switch alone can't be set in an environment with no
+  # in-cluster PostHog (e.g. alpha), stranding that deployment behind
+  # `core/svc_process`/`core/svc_action`'s fail-loud `build_hub_client` gate
+  # whenever hub-api's internal gRPC isn't reachable yet -- see
+  # `rules/critical-rules.md` Feature Flags & License Tiers' opt-out
+  # kill-switch principle ("keeps unseen-flags-OFF without stranding
+  # air-gapped deploys"). `true` (the default) renders no override env var
+  # on either Rust stage, so `core/svc_process`/`core/svc_action`'s own
+  # PostHog-gated, default-ENABLED, fail-loud-when-unreachable behavior is
+  # unchanged. `false` renders `PII_TOKENIZATION_ENABLED=false` on
+  # svc-process-rust and `PII_DETOKENIZATION_ENABLED=false` on
+  # svc-action-rust and svc-presentation-rust -- both gates short-circuit to disabled (no hub_client
+  # connect attempt, no fail-loud exit) and log a WARN naming the override.
+  # SECURITY: ON by default in EVERY environment (alpha included) -- no
+  # values-*.yaml may set this false. Opt-out is the PostHog kill-switch
+  # `waddles.core.disable-pii-tokenization` only. This key is an explicit,
+  # loudly-logged operator escape hatch, never a silent bypass.
+  piiTokenization:
+    enabled: true
 
 # v3.0.x — svc-presentation (8th container, 4th stage-runner). Music overlay + per-community
 # OBS browser-source surfaces. Own image placeholder (core/svc_presentation/ builds with
@@ -1058,22 +1840,88 @@ presentation:
   # public hostname when unset (never a broken/empty player src). Alpha overrides to the
   # svc-streaming media NodePort's LAN URL -- see values-alpha.yaml.
   publicStreamingUrl: ""
+  # Same node-IP derivation as pipeline.svcStreaming.publicBaseUrlFromNodeIP: when
+  # publicStreamingUrl is empty, build http://<node hostIP>:<svcStreaming.nodePort.httpPort>
+  # from the downward API instead of a hardcoded LAN IP. Requires
+  # pipeline.svcStreaming.nodePort.enabled.
+  publicStreamingUrlFromNodeIP: false
+  # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (core/svc_presentation,
+  # Dockerfile.rust) replaces the Python Deployment above WHEN enabled: same Deployment/
+  # Service names (in-place swap, Service/NodePort unchanged), templates/svc-presentation-
+  # rust.yaml renders instead of templates/svc-presentation.yaml. Default false (Python
+  # stays the base/beta/prod path until the overlay PRs land and the cutover is approved);
+  # values-alpha.yaml flips it on. Image repo is a bare name resolved via global.imageRegistry
+  # + global.imageTag (per-commit tag built by scripts/alpha-deploy.sh), like svc-action-rust.
+  rust:
+    enabled: false
+    imageRepository: "svc-presentation-rust"
+    # Alpha-only on-host access to the overlay view/SSE port: when true the Service becomes
+    # NodePort (presentation.rust.nodePort.port). Base/beta/prod stay ClusterIP
+    # (devops-kubernetes.md: no NodePort outside alpha).
+    nodePort:
+      enabled: false
+      port: 31032
+    # Overlay image bucket (IMAGE_BUCKET_*). Credentials are NEVER set here -- they are
+    # sourced via secretKeyRef from the existing <release>-secrets Secret's
+    # HUB_API_S3_ACCESS_KEY_ID/HUB_API_S3_SECRET_ACCESS_KEY (the hub-api SeaweedFS identity,
+    # which already holds Read/Write/List/Tagging on infrastructure.seaweedfs.bucketName).
+    # Empty bucketName falls back to infrastructure.seaweedfs.bucketName.
+    imageBucket:
+      bucketName: ""
+      prefix: "overlay-images"
+      region: "us-east-1"
+    # Empty = OTLP export disabled (svc-presentation degrades to local logs/metrics; a dead
+    # or absent exporter never breaks the app). Set per environment, never hardcoded.
+    otlpEndpoint: ""
+    otlpProtocol: "grpc"
 
 # v3.0.x — Rust svc-streaming image (Issue #287). Own Dockerfile
 # (core/svc_streaming/Dockerfile.rust), not the shared pipeline.pythonBaseImage
 # placeholder -- mirrors the presentation.image block's shape above.
 streaming:
+  # svc-streaming image variant for this deploy: cpu | amd | nvidia. The variant is appended to
+  # the image tag (<tag>-<variant>); CI publishes all three. Pick per node pool: cpu where no GPU,
+  # amd on Radeon/VA-API nodes, nvidia on NVIDIA nodes. Node-pool wiring and the degrade-to-CPU
+  # behavior per variant: core/svc_streaming/README.md "Choosing a variant".
+  gpuVariant: cpu
+  # STREAM_ENCODER handed to the service: auto | cpu | nvenc | vaapi.
+  encoder: auto
   image:
     repository: "waddlebot-svc-streaming"
     tag: ""
+  # Node selection for the svc-streaming Deployment (every variant).
+  nodeSelector: {}
+  amd:
+    # Device-plugin resource that exposes /dev/dri to the pod (AMD k8s-device-plugin). This is the
+    # working path for non-privileged pods: the runtime's device cgroup only allows devices the
+    # plugin declares. Requested as a limit; the pod is Pending on nodes without the resource.
+    deviceResource: "amd.com/gpu"
+    # hostPath mount of /dev/dri. Used ONLY when deviceResource is empty. Alone it is not enough
+    # for a non-privileged pod -- open(/dev/dri/renderD128) fails with EPERM (device cgroup),
+    # verified on penguin-frame. Also rejected by Pod Security Admission `restricted`.
+    devDri: true
+    # Pod supplementalGroups: the host GID(s) owning /dev/dri/renderD* (`getent group render`).
+    # REQUIRED when gpuVariant=amd -- render fails loudly when empty, never a silent CPU fallback.
+    supplementalGroups: []
+  nvidia:
+    # RuntimeClass selecting the NVIDIA container runtime (nvidia-container-toolkit). Empty = omit.
+    runtimeClassName: nvidia
+    # nvidia.com/gpu limit (NVIDIA device plugin). 0 = omit the limit: the pod is schedulable on
+    # any node and runs CPU-only unless the node's default runtime exposes GPUs.
+    gpuLimit: 1
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
 
 # feature/e2e-helm-rust-dataplane -- bundle-executor (M2, core/bundle_executor). Brand-new
 # module (not a rewrite of an existing Python image), so it needs its own image block same
 # as streaming.image above -- bare repository name here (no global.imageRegistry
 # concatenation, template renders this literally), values-alpha.yaml overrides to the full
-# localhost:32000 path. NOTE: no Dockerfile exists for this crate yet, not even a
-# `Dockerfile.rust` skeleton -- see pipeline.rustDataPlane.bundleExecutor's KNOWN GAPS
-# comment; this image cannot actually be built+pushed until one is authored.
+# localhost:32000 path. fix/alpha-deploy-executor-and-failfast: core/bundle_executor/
+# Dockerfile.rust now exists and scripts/alpha-deploy.sh builds+pushes it under the same
+# per-commit SHA8 tag as every other alpha image (values-alpha.yaml's own tag is left
+# unset so it falls through to global.imageTag) -- this is no longer a KNOWN GAP.
 bundleExecutor:
   image:
     repository: "waddlebot-bundle-executor"
@@ -1131,11 +1979,9 @@ modules:
       port: 8000
     replicas: 2
     resourcePreset: large
-    autoscaling:
-      enabled: true
-      minReplicas: 2
-      maxReplicas: 10
-      targetCPUUtilizationPercentage: 70
+    # Autoscaling for the router is configured centrally: autoscaling.services.router
+    # (see the top-level `autoscaling:` block). The old per-module `autoscaling:` key was never
+    # consumed by any template.
     env:
       MODULE_NAME: "router_module"
       MODULE_VERSION: "1.0.0"
@@ -1871,11 +2717,16 @@ ingress:
           pathType: Prefix
           service: interactive-media
           port: 8105
-        # Interactive Productivity consolidated routes (calendar, memories, translate)
+        # SECURITY: calendar routed through hub-api (NOT interactive-productivity
+        # directly) -- hub-api's scope-gated event_calendar_bp +
+        # EventCalendarProxyClient are the only legitimate JWT-validators/
+        # setters of the X-User-Context/X-API-Key headers
+        # calendar_interaction_module trusts (live authz bypass, fixed 2026-10).
         - path: /api/v1/calendar
           pathType: Prefix
-          service: interactive-productivity
-          port: 8030
+          service: hub
+          port: 8060
+        # Interactive Productivity consolidated routes (memories, translate)
         - path: /api/v1/memories
           pathType: Prefix
           service: interactive-productivity
@@ -1894,69 +2745,49 @@ ingress:
       hosts:
         - waddlebot.local
 
-# OAuth Configuration (set via secrets and environment variables)
+# fix/helm-platform-credentials -- externally-issued platform/third-party
+# CREDENTIALS (client secrets, bot/OAuth/access/refresh tokens, webhook &
+# signing secrets, service-account keys) are no longer set here. This chart
+# never rendered a safe way to update them in place: an untouched values.yaml
+# default (or a dev-only placeholder like `oauth.discord.botToken` used to be)
+# was written into `waddlebot-secrets` on every `helm upgrade`, silently
+# overwriting a real credential an operator had set out-of-band -- the alpha
+# Discord-bot-token incident this branch fixes. They now live ONLY in the
+# `waddlebot-platform-credentials` Secret (see `platformCredentials` below
+# and docs/PLATFORM_CREDENTIALS.md), which this chart never writes.
+#
+# Non-secret companion config for the same platforms (URLs, tenant/project
+# IDs, IRC nick/channels) stays below -- it isn't a credential.
+platformCredentials:
+  # Name of a pre-existing Secret holding externally-issued platform
+  # credentials. Leave blank to use the default name
+  # "<release-fullname>-platform-credentials". See docs/PLATFORM_CREDENTIALS.md
+  # for the operator setup command (alpha/local) and the External
+  # Secrets/Sealed Secrets pattern (beta/gamma/prod).
+  existingSecret: ""
+
 oauth:
-  discord:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    applicationId: ""
   twitch:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
-    # T10 (v3 demo) -- IRC bot account credentials for svc-ingest's held-socket
-    # twitch_irc.py receiver / CANON-LIB relay outbound (waddle_transports/irc_relay.py).
-    # oauthToken is an IRC OAuth token ("oauth:...", NOT the OAuth2 clientSecret above).
-    # NEVER a real value in git -- see values-alpha.yaml for the dev-only placeholder.
-    oauthToken: ""
     nick: ""
     channels: ""
-  slack:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    signingSecret: ""
-    appToken: ""
   youtube:
-    apiKey: ""
-    clientId: ""
-    clientSecret: ""
-    # OAuth refresh token from the one-time consent flow; YouTube Data API v3 search works with either apiKey or clientId+clientSecret+refreshToken
-    refreshToken: ""
     webhookCallbackUrl: ""
-  spotify:
-    clientId: ""
-    clientSecret: ""
-  kick:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
-    accessToken: ""
   teams:
-    appId: ""
-    appPassword: ""
     tenantId: ""
   mattermost:
     url: ""
-    botToken: ""
-    webhookSecret: ""
   googlechat:
-    serviceAccountKey: ""
     projectId: ""
 
-# Cloud Provider Configuration (AWS Lambda, GCP Functions, etc.)
+# Cloud Provider Configuration (AWS Lambda, GCP Functions, etc.) -- non-secret
+# region/project config only; access keys/service-account keys live in
+# platformCredentials above.
 aws:
-  accessKeyId: ""
-  secretAccessKey: ""
   region: "us-east-1"
-  lambdaRoleArn: ""
 
 gcp:
   projectId: ""
   region: "us-central1"
-  serviceAccountKey: ""
-  serviceAccountEmail: ""
 
 openwhisk:
   apiHost: "http://openwhisk-service:3233"
@@ -1966,7 +2797,6 @@ openwhisk:
 
 waddleai:
   baseUrl: ""
-  apiKey: ""
 
 # Connector Configuration (svc-ingest channels and overrides)
 config:
@@ -1980,6 +2810,26 @@ config:
   kickPusherCluster: ""
   # YouTube Live poll receiver — comma-separated list of channel IDs to monitor
   youtubeLiveChannels: ""
+  # RSI Spectrum one-way ingest (gh #101) — comma-separated forum channel ids / lobby ids
+  spectrumForumChannels: ""
+  spectrumLobbies: ""
+  # ENV baseline for flag waddles.spectrum-integration (default OFF; PostHog overrides when connected)
+  spectrumIntegrationEnabled: false
+  # Spectrum org sync (gh #101) — comma-separated Spectrum community ids; each gets a roster + an
+  # events poller (snapshot-diffed in Valkey). Needs spectrumIntegrationEnabled AND spectrumOrgSyncEnabled.
+  spectrumOrgCommunities: ""
+  # ENV baseline for flag waddles.spectrum-org-sync (default OFF; PostHog overrides when connected)
+  spectrumOrgSyncEnabled: false
+  # ENV baseline for flag waddles.calendar.event_discord_sync (default OFF; PostHog overrides when connected)
+  eventDiscordSyncEnabled: false
+  # ENV baseline for flag waddles.bar_citizen.role_sync -> FLAG_WADDLES_BAR_CITIZEN_ROLE_SYNC (default OFF;
+  # PostHog overrides when connected). Also needs pipeline.roleSync.enabled for the reconcile CronJob.
+  barCitizenRoleSyncEnabled: false
+  spectrumOrgPollIntervalS: 300
+  # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
+  spectrumRosterMaxDepartureRatio: 0.5
+  # Emit the whole current roster/event list as joined/created on the first poll (bootstrap only)
+  spectrumOrgEmitBacklog: false
 
 # Dependencies Configuration
 dependencies:
@@ -2009,8 +2859,8 @@ sharedEnv:
   REDIS_DB: "0"
   # REDIS_PASSWORD should be set via secrets
 
-  # MinIO Configuration
-  MINIO_ENDPOINT: "minio:9000"
+  # SeaweedFS S3 gateway configuration (was MinIO)
+  MINIO_ENDPOINT: "seaweedfs:8333"
   MINIO_SECURE: "false"
   # MINIO_ACCESS_KEY and MINIO_SECRET_KEY should be set via secrets
 
@@ -2061,6 +2911,50 @@ serviceAccount:
   name: "waddlebot"
 
 # Pod Security Context
+# Graceful shutdown (templates/_resilience.tpl), applied to EVERY Deployment: a preStop sleep
+# lets the pod drop out of Service endpoints before SIGTERM, then the app has
+# terminationGracePeriodSeconds (minus the sleep) to drain before SIGKILL. 0 disables the
+# preStop hook. terminationGracePeriodSeconds must exceed preStopSleepSeconds (render fails).
+shutdown:
+  terminationGracePeriodSeconds: 30
+  preStopSleepSeconds: 5
+
+# startupProbe budget (failureThreshold x periodSeconds = 150s by default) for the slow-start
+# workloads: hub-api, the Rust data-plane stages, the Python pipeline stages, svc-streaming and
+# svc-presentation. Liveness/readiness only begin once it passes.
+startupProbe:
+  periodSeconds: 5
+  failureThreshold: 30
+
+# HorizontalPodAutoscalers -- templates/autoscaling.yaml, registry in templates/_autoscaling.tpl
+# (waddlebot.scaleTargets). Only horizontally-scalable stateless services are registered; the
+# singletons svc-streaming + svc-presentation (and stateful infra, collectors, svc-ingest*)
+# NEVER get an HPA. Off by default everywhere; production enables it per service. When a
+# service's HPA is on, its Deployment omits spec.replicas so `helm upgrade` does not reset the
+# autoscaler. Needs metrics-server and container resource requests. Keys under `services:`:
+# hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor
+# bundleExecutorAction reputation router. A service entry overrides `defaults` field-by-field.
+autoscaling:
+  defaults:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: ""   # unset = CPU only
+    behavior: {}                            # optional autoscaling/v2 behavior block
+  services: {}
+
+# PodDisruptionBudgets -- same registry (adds svcIngest/svcIngestRust: PDB only, no HPA).
+# Rendered only for a service that effectively runs >1 replica (HPA minReplicas, else
+# `replicas`), so single-replica alpha/beta/gamma get none (a minAvailable PDB on one replica
+# would block node drains). Never rendered for singletons. Use `maxUnavailable` (int or "25%")
+# instead of `minAvailable` to switch the budget style; per-service overrides under `services:`.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: ""
+  services: {}
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
@@ -2077,6 +2971,88 @@ securityContext:
   capabilities:
     drop:
       - ALL
+
+# Pod Security Admission (R5) -- labels stamped on the chart-managed Namespace
+# (templates/namespace.yaml). `restricted` is the shipping posture: every pod template in this chart
+# is asserted restricted-compliant by tests/test_security_posture_r5_render.py. Only applies when
+# `namespaceCreate: true`; operators who pre-create the namespace must apply the same labels.
+podSecurity:
+  enabled: true
+  enforce: restricted
+  audit: restricted
+  warn: restricted
+  version: latest
+
+# Tetragon runtime enforcement (R5) -- one TracingPolicyNamespaced per app workload
+# (templates/_networkpolicy.tpl `waddlebot.workloadPolicies`). ENFORCED, not observe-only: a
+# sys_execve of any binary outside the workload's own runtime is SIGKILLed (e.g. a shell/curl/nc/wget
+# dropped by a compromised dependency). Needs the Tetragon agent + TracingPolicyNamespaced CRD in the
+# cluster (cluster add-on, not part of this chart); alpha/local/ci set enabled:false.
+# `action: Post` is a temporary audit-only escape hatch for validating a new image's exec set —
+# never ship it.
+tetragon:
+  enabled: true
+  action: Sigkill
+  # Binaries allowed in EVERY covered pod: the preStop exec fallback (kube < 1.30) and the
+  # python wait-for-hub-api initContainer (waddlebot.waitForHubApiInitContainer) — Tetragon's
+  # podSelector spans every container in the pod, init containers included.
+  commonBinaries:
+    - /usr/local/bin/python3
+    - /bin/sleep
+    - /usr/bin/sleep
+  # Per-runtime base allowlists (execve arg0 as resolved by the runtime). A workload adds its own
+  # binaries via the `binaries` include arg; legacy `sh -c` CMDs opt in with `shell: true`.
+  runtimes:
+    python:
+      - /usr/local/bin/python
+      - /usr/local/bin/python3
+      - /usr/local/bin/python3.13
+      - /usr/local/bin/hypercorn
+    node:
+      - /usr/bin/dumb-init
+      - /usr/local/bin/node
+    rust: []
+    go: []
+  shellBinaries:
+    - /bin/sh
+    - /usr/bin/sh
+    - /bin/dash
+    - /usr/bin/dash
+  # Container-runtime exec support (kubelet exec probes + `kubectl exec`/`debug`) in covered pods.
+  # runc >= 1.2 re-execs itself as `execve("/proc/self/fd/<N>", ["runc","init"])` (a sealed clone of
+  # its own binary; N varies) from a child born INSIDE the pod's cgroup (CLONE_INTO_CGROUP), so the
+  # allowlist above SIGKILLs it ("error copying bootstrap data to pipe: write init-p: broken pipe")
+  # and every exec probe / kubectl exec in the pod fails. Reproduced with runc 1.5.2 under strace.
+  # NOT "/proc/self/exe" and NOT the runc path: neither is the execve filename Tetragon sees.
+  # Allowing `/proc/self/fd/` for EVERY process would reopen fileless exec (memfd_create + execve),
+  # so it is allowed ONLY when the calling process's binary is one of `callerBinaries` (the runc
+  # fork child, which has not exec'd yet, still carries runc's binary) -- a second selector in the
+  # policy SIGKILLs any `/proc/self/fd/` exec from any other binary. Everything else stays on the
+  # allowlist above (no shells, no interpreters, no wildcards added).
+  # TODO(tighten): once Tetragon events are flowing on the target cluster, confirm the observed
+  # filename shape + runc path (`tetra getevents -o compact --namespace <ns>`), then trim this list.
+  runcInit:
+    enabled: true
+    # Absolute path(s) of the node's runc binary (as exec'd by containerd-shim-runc-v2). Must be
+    # non-empty while enabled -- the chart fails loudly rather than allow /proc/self/fd/ unscoped.
+    # Add your node's path in the env overlay if it is elsewhere. Keep <= 4 entries (matchBinaries
+    # In-list limit on older Tetragon).
+    callerBinaries:
+      - /usr/bin/runc
+      - /usr/sbin/runc
+      - /usr/local/sbin/runc
+      - /usr/local/bin/runc
+
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- shared wait-for-hub-api
+# initContainer config (waddlebot.waitForHubApiInitContainer, _helpers.tpl), applied to
+# every non-hub-api, non-infrastructure Deployment/Job in this chart. Image pinned to the
+# exact digest hub_api/Dockerfile's own FROM line already uses (Debian-only per
+# devops-containers.md; no new image to track/scan).
+waitForHubApi:
+  image: "python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641"
+  stableChecks: 3
+  stableIntervalSeconds: 5
+  maxBackoffSeconds: 30
 
 # Monitoring & Observability
 monitoring:
@@ -2102,9 +3078,202 @@ httproute:
 # Network Policies — namespace-level ingress isolation
 # When enabled, denies all cross-namespace ingress and allows only
 # same-namespace traffic + ingress controller traffic.
+#
+# R5 posture (release-audit): every policy is a CiliumNetworkPolicy (house rule — never plain
+# NetworkPolicy). When enabled the chart renders (a) a namespace-wide default-deny-ingress CNP
+# and (b) one per-workload CNP (templates/_networkpolicy.tpl, included by each workload
+# template) that admits ingress ONLY on that workload's declared containerPort(s) from the same
+# namespace. Ports are never opened wholesale. `base` default is the shipping (beta/gamma/prod)
+# posture; alpha keeps it off because its NodePort Services are reached from the host/world.
 networkPolicy:
-  enabled: false
+  enabled: true
   ingressNamespace: ingress-nginx
+  # Components (app.kubernetes.io/component) that ALSO accept ingress-controller / Gateway-API
+  # traffic on their declared ports. Everything else is reachable from inside the namespace only.
+  externalIngressComponents:
+    - hub
+    - hub-api
+    - hub-webui
+    - hub-webui-v3
+    - router
+    - marketplace
+    - trigger-webhooks
+    - svc-presentation
+    - svc-streaming
+    - svc-rtc
+  # Per-component egress profile override, e.g. { seaweedfs: https } when an external KMS is in
+  # use. Profiles: internal (DNS + same namespace) | https (+ world TCP/443) | world (+ any
+  # world port) | managed (egress governed by another CNP — set automatically for
+  # egressPolicy.dataPlaneComponents).
+  egressProfileOverrides: {}
+
+# OTel collector — not yet deployed by this chart (tracked separately);
+# stub so egressPolicy can conditionally allow data-plane egress to it once
+# it exists, without another chart-wide feature landing first.
+otel:
+  collector:
+    enabled: false
+
+# Egress lockdown (CiliumNetworkPolicy) — feature/bundle-egress-gateway.
+# All bundle network access (app bundles' net.http via the in-process guard
+# core/bundle_host_http, feature/svc-process-http-capability, PLUS connector
+# bundles' platform traffic run by svc-ingest/svc-action) goes through the
+# host's egress proxy below. Data-plane pods (svc-ingest/svc-process/
+# svc-action, Rust AND legacy per-module Deployments performing the same
+# role) are default-deny for egress to the internet; the only path out is
+# the egress-proxy Service. Disabled == the CNPs below aren't rendered at
+# all, which is a real security regression outside alpha/local — enforced
+# by a `fail` guard in templates/infrastructure/egress-proxy.yaml.
+egressPolicy:
+  enabled: true
+  # R5 posture: default-deny egress for EVERY long-running workload (not just the data plane).
+  # Each workload gets DNS + same-namespace (destination ingress CNPs scope the ports) + only the
+  # outbound profile it needs (networkPolicy.egressProfileOverrides / the include in its
+  # template). RFC1918/CGNAT/link-local/loopback/cluster CIDRs are NEVER reachable via the
+  # world rules below (169.254.169.254 metadata included); only the egress-proxy's explicit
+  # customer private-ip grants reach private space. Alpha sets this false (dev clusters).
+  workloadEgress:
+    enabled: true
+  # Optional FQDN pin for the `https` profile (Cilium toFQDNs entries, e.g.
+  # `- matchName: license.penguintech.io` / `- matchPattern: "*.discord.com"`). Empty = TLS (443) to
+  # any PUBLIC address (private/link-local/metadata/cluster ranges still excluded).
+  httpsFqdns: []
+  # Private ranges excluded from every workload "world" allow (in addition to denyCidrs +
+  # clusterCidrs). Not reachable except through an explicit per-workload allowlist.
+  privateCidrs:
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+    - "100.64.0.0/10"    # CGNAT / some cloud-internal ranges
+    - "fc00::/7"         # ULA v6
+  # Components (app.kubernetes.io/component label values) subject to the
+  # egress default-deny. Extend as more Rust dataplane Deployments land.
+  dataPlaneComponents:
+    - svc-ingest
+    - svc-ingest-rust
+    - svc-process
+    - svc-process-rust
+    - svc-action
+    - svc-action-rust
+    - discord-collector
+    - twitch-collector
+    - slack-collector
+    - teams-collector
+    - kick-collector
+    - mattermost-collector
+    - googlechat-collector
+    - youtube-live-collector
+    - trigger-webhooks
+    - trigger-streaming
+    - action-platforms
+    - action-serverless
+  # In-cluster destinations the data plane is still allowed to reach
+  # directly (everything else in-cluster is same-namespace-only via
+  # network-policies.yaml; these are the specific service ports needed).
+  # postgresReplicaPort currently points at the same primary Postgres
+  # (infrastructure.postgresql) — no read replica is provisioned yet (see
+  # pipeline.rustDataPlane.svcProcess.dbReaderHost's own comment); this
+  # becomes a distinct endpoint once one exists, no CNP change needed.
+  # NOTE: values.yaml is raw YAML, not template-evaluated — these mirror
+  # infrastructure.redis.service.port / infrastructure.postgresql.service.port
+  # / pipeline.hubApi.grpcPort / infrastructure.seaweedfs.service.s3Port above;
+  # keep in sync if those change.
+  inCluster:
+    dnsPort: 53
+    valkeyPort: 6379
+    postgresReplicaPort: 5432
+    hubApiGrpcPort: 50204
+    # hub-api HTTP port (pipeline.hubApi.port) -- the data-plane `wait-for-hub-api`
+    # init container probes /ready here, so the dataplane egress CNP must allow it.
+    hubApiHttpPort: 8204
+    seaweedfsPort: 8333
+    otelGrpcPort: 4317
+  # CIDRs that must NEVER be reachable via the egress proxy's "world" allow,
+  # even though the proxy needs broad internet + customer-private-range
+  # reach for net.http.private-ip grants. Set podCidr/serviceCidr/nodeCidr
+  # per-cluster in each env's values file — these vary per install.
+  denyCidrs:
+    - "127.0.0.0/8"      # loopback
+    - "::1/128"          # loopback v6
+    - "169.254.0.0/16"   # link-local incl. cloud metadata (169.254.169.254)
+    - "fe80::/10"        # link-local v6
+  clusterCidrs:
+    podCidr: "10.244.0.0/16"
+    serviceCidr: "10.96.0.0/12"
+    nodeCidr: "10.0.0.0/8"
+
+# Egress proxy — the ONLY data-plane component allowed to reach external
+# addresses (net.http.fqdn / .public-ip / .private-ip grants). Design:
+# dedicated rootless Rust CONNECT/forward proxy (crates/egress-proxy, new
+# crate — in-line-of-traffic mandates Rust per critical-rules.md Data
+# Plane); not Squid/etc — none of the org's already-pinned forward proxies
+# support the per-request signed-allowlist re-check this needs, and a bare
+# Cilium egress-gateway/FQDN policy can't express per-tenant/app identity
+# either (see templates/network-policies-egress.yaml header for the full
+# design write-up). SKELETON: no Dockerfile/CI image yet, pinned to the
+# same debian:bookworm-slim digest already used as pipeline.goRuntimeImage
+# as a placeholder — replace once the crate has its own CI-built image.
+egressProxy:
+  enabled: true
+  environment: "alpha"
+  # core/egress_proxy (feature/egress-proxy-service) -- bare repo name,
+  # composed with global.imageRegistry/imageTag via the same
+  # `waddlebot.legacyModuleImage` helper svc-action-rust/svc-process-rust
+  # use (templates/infrastructure/egress-proxy.yaml). Build target:
+  # `docker build -f egress_proxy/Dockerfile.rust -t
+  # <registry>/waddlebot-egress-proxy:<tag> .` run from `core/` (the
+  # PARENT of core/egress_proxy -- see that Dockerfile's own header
+  # comment for why). CI fills imageTag with the built digest/tag; leave
+  # empty here to fall back to global.imageTag.
+  image: "waddlebot-egress-proxy"
+  imageTag: ""
+  port: 8443
+  metricsPort: 9090
+  replicas: 1
+  # Ports the proxy itself is allowed to reach externally.
+  allowedPorts:
+    - 80    # plain HTTP (net.http.fqdn / .public-ip)
+    - 443   # HTTPS + Discord gateway (wss over 443)
+    - 6697  # Twitch IRC (TLS)
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  # Signed allowlist header: hub-api signs a per-tenant/app grant set
+  # (net.http.fqdn / .public-ip / .private-ip) that the in-process guard
+  # (core/bundle_host_http, feature/svc-process-http-capability) attaches
+  # to every proxied request; the proxy verifies the signature and
+  # re-checks the destination against it — including which private-ip
+  # ranges were actually granted — before opening the upstream connection.
+  # So a compromised data-plane pod can reach the proxy but nothing beyond
+  # what was actually granted to that tenant/app; a compromised proxy host
+  # still can't reach loopback/link-local/metadata/cluster CIDRs (egressPolicy
+  # .denyCidrs/.clusterCidrs, enforced at the network layer as a backstop).
+  # Machine-JWT auth (core/service_auth) -- callers additionally need
+  # `egress:connect` granted in serviceJwt.identities[*].allowedScopes
+  # (see that block's own comment) on top of hub-api's existing
+  # per-service scopes.
+  machineJwtRequiredScope: "egress:connect"
+  allowedCallerServices:
+    - svc-ingest
+    - svc-process
+    - svc-action
+  perTenantMaxConnections: 50
+  # Quoted (not a bare int) -- Helm/Sprig's `quote` on a large value.yaml
+  # int round-trips through Go's JSON-decoded float64 and can render in
+  # scientific notation (e.g. "1.048576e+07"), which egress_proxy's
+  # `u64` env parser then rejects. Quoting here keeps it a plain string
+  # end to end.
+  perTenantBandwidthBytesPerSec: "10485760"  # 10 MiB/s
+  connectTimeoutSeconds: 10
+  # Deliberately short (connector spec's egress assertion is minted
+  # per-request, not cached like the machine JWT) -- bounds the replay
+  # window if an assertion were ever intercepted. See
+  # core/egress_proxy/src/assertion.rs module doc.
+  assertionMaxTtlSeconds: 60
 
 # SPIFFE/SPIRE workload identity (subchart: charts/spire). Off by default
 # (opt-in per environment via values-alpha.yaml/values-beta.yaml/
@@ -2120,6 +3289,123 @@ spire:
     upstreamRoot:
       enabled: false
 
+# Per-service EdDSA machine JWTs (feature/eddsa-machine-jwt) -- replaces
+# the platform-wide HS256 shared SECRET_KEY / static API keys for
+# service-to-service calls, starting with the new internal PII endpoints.
+# SPIFFE-ready by design (see libs/flask_core/flask_core/service_jwt.py
+# module docstring): retiring hub-api issuance for Skauswatch JWT-SVIDs
+# later is a config change here, not a template rewrite.
+serviceJwt:
+  # hub-api-only: private key material comes from an externally-managed
+  # Secret (`make generate-service-jwt-key`), never from values -- see
+  # scripts/generate-service-jwt-key.sh. This block only names the Secret.
+  signingSecretName: service-jwt-signing-key
+  # Public half of every key still valid for verification, keyed by kid.
+  # Safe to commit -- these are public keys. Populated by the "Public key"
+  # line `make generate-service-jwt-key` prints after each rotation.
+  publicKeys: {}
+  audience: waddlebot-internal
+  # Audience the bootstrap ServiceAccount token projection (below) must
+  # request -- hub-api's TokenReview call rejects any other audience.
+  # "hub-api" (not a generic "waddlebot-internal-bootstrap" string, security
+  # review HIGH finding) -- binding the projected token's audience to the
+  # specific resource server it authenticates to is what makes a stolen
+  # bootstrap token useless against any other in-cluster TokenReview
+  # consumer, standard "aud" scoping practice for workload-identity tokens.
+  bootstrapAudience: hub-api
+  # Per-service allow-list mapping a k8s ServiceAccount identity to a
+  # SPIFFE-shaped service id + permitted scopes. hub-api is the only
+  # consumer; it never trusts a caller-supplied service id.
+  # `tenant` is stamped into every issued token's `tenant` claim (never taken from
+  # the caller): `system` = operator plane (svc-process/svc-action serve every
+  # tenant, so they may name any tenant in a request); any other value confines
+  # the token to that one tenant. hub-api's internal gRPC server rejects tokens
+  # with no tenant claim -- an identity with `tenant` unset cannot call identity RPCs.
+  identities:
+    svc-process:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-process"
+      serviceAccount: svc-process
+      tenant: system
+      allowedScopes:
+        - "identity:ephemeral:mint"
+        # bundle `identity` host capability (stage-next) -- svc-process resolves
+        # a free-text @handle mention through IdentityService.ResolveHandle
+        # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES) with a second,
+        # single-scope hub_client. Without this entry hub-api's token endpoint
+        # rejects the scope and handle mentions are `unavailable` (fail-closed);
+        # the actor and <@id> mentions never call hub-api.
+        - "identity:handle:resolve"
+        # feature/egress-proxy-service -- required to call core/egress_proxy
+        # for any bundle net.http/CONNECT egress.
+        - "egress:connect"
+    svc-action:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
+      serviceAccount: svc-action
+      tenant: system
+      allowedScopes:
+        # feature/hub-grpc-env-wiring -- was "users:display-name:resolve", which does
+        # not match hub_api/grpc_internal/servicers.py REQUIRED_SCOPES's
+        # "identity:displayname:read" for ResolveDisplayNames (core/svc_action's
+        # HUB_IDENTITY_RESOLVE_SCOPE). The mismatch would have minted a machine JWT
+        # missing the scope the server's AuthInterceptor actually checks, so every
+        # ResolveDisplayNames call would 403 even with a working connection.
+        - "identity:displayname:read"
+        - "egress:connect"
+        # feature/edge-reshape-chunk2-conn-store (Task 8) -- svc-action is the per-send EGRESS
+        # consumer of the connection store: `connections:resolve` mints a community-bound token
+        # for twitch OAuth / youtube / moderation sends and `connections:resolve:static` is the
+        # separate (least-privilege) scope hub-api demands for the static Lambda/GCP/HTTP kinds.
+        # It does NOT get `connections:list` (binding discovery is svc-ingest's job). Both are
+        # filtered out of the rendered allow-list unless
+        # pipeline.rustDataPlane.svcAction.dynamicConnections.enabled (default false).
+        - "connections:resolve"
+        - "connections:resolve:static"
+    # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
+    # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
+    # pseudonyms or calls egress, so exactly one scope.
+    svc-presentation:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-presentation"
+      serviceAccount: svc-presentation
+      tenant: system
+      allowedScopes:
+        - "identity:displayname:read"
+    # feature/svc-ingest-connections-scope -- Rust svc-ingest is a data-plane CONSUMER of the
+    # provider-connections store: it lists usable bindings and resolves a fresh token through
+    # hub-api's internal routes (hub_api/blueprints/v1/provider_connections.py
+    # `_service_authenticated`), which demand a machine JWT with scope `connections:resolve`
+    # AND `tenant == system` (the routes deliberately span tenants). Exactly that one scope --
+    # least privilege: no identity/egress scope rides along. `egress:connect` (svc-ingest is in
+    # egressProxy.allowedCallerServices) is deliberately NOT granted here; add it in its own
+    # change when svc-ingest actually dials the egress proxy. The identity is pinned to the
+    # DEDICATED `svc-ingest` ServiceAccount (templates/service-jwt-rbac.yaml), never the
+    # chart-wide shared one, so no other pod can bootstrap this identity.
+    svc-ingest:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-ingest"
+      serviceAccount: svc-ingest
+      tenant: system
+      allowedScopes:
+        - "connections:resolve"
+        # feature/edge-reshape-chunk2-conn-store (Task 8) -- unbound binding discovery
+        # (GET /api/v1/internal/provider-connections) for the twitch OAuth kind. NOT the
+        # `connections:resolve:static` scope: svc-ingest never resolves Lambda/GCP/HTTP secrets.
+        - "connections:list"
+        # feature/dataplane-scope-resolver (numeric-id migration, Slice A) -- svc-ingest has no DB;
+        # it resolves (platform, guild/channel) -> numeric (tenant_id, community_id) through
+        # hub-api's GET /api/v1/internal/dataplane/resolve-scope. A SEPARATE scope from
+        # connections:resolve (least privilege: this one returns ids only, never a token), granted
+        # to this identity alone and, like the grant above, only rendered while
+        # pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled is true.
+        - "dataplane:resolve-scope"
+  # Every calling pod projects its own ServiceAccount token bound to
+  # `bootstrapAudience` -- this is the bootstrap credential, no shared
+  # secret distributed to callers. Reusable via the
+  # `waddlebot.serviceJwtBootstrapVolume` named template
+  # (templates/_service_jwt.tpl) -- add its volume/volumeMount output to
+  # any deployment that calls hub-api's /internal/service-token endpoint.
+  bootstrapTokenProjection:
+    expirationSeconds: 3600
+    path: service-jwt-bootstrap-token
+
 # feature/helm-auto-provision-keys -- deploys must never require a human to run a
 # script before `helm install`/`helm upgrade` succeeds. Every Secret below is looked
 # up first (an existing Secret is KEPT untouched, never regenerated/rotated by this
@@ -2133,14 +3419,17 @@ spire:
 # has no Ed25519-pubkey-from-privkey primitive) + chart README "Self-provisioned
 # platform keys" section.
 autoProvisionedKeys:
-  # fix/minio-kms-sse (PR #439) -- MinIO static-KMS symmetric key
-  # (infrastructure.minio.kms.secretName should point at this same name once that
-  # chart wiring lands). Value format is MinIO's own requirement:
-  # "<key-label>:<base64 32 random bytes>".
-  minioKms:
-    secretName: "minio-kms"
-    secretKey: "MINIO_KMS_SECRET_KEY"
-    keyLabel: "waddlebot-minio"
+  # feature/seaweedfs-object-storage -- SeaweedFS S3 gateway SSE-S3 KEK (replaces
+  # the former MinIO static-KMS key from PR #439; renamed off "minio" since the
+  # backing store changed, secretName kept distinct from the old "minio-kms" so
+  # existing alpha installs get a fresh key rather than silently reusing one in
+  # a format MinIO required (label:base64) that SeaweedFS does not accept).
+  # infrastructure.seaweedfs.encryption.secretName should point at this same
+  # name. Value format: 64 lowercase hex chars (256-bit key), per SeaweedFS's
+  # WEED_S3_SSE_KEK requirement.
+  seaweedfsSseKek:
+    secretName: "seaweedfs-sse-kek"
+    secretKey: "WEED_S3_SSE_KEK"
     externalSecret: false
   # feature/tenant-dek-broker (PR #442) -- platform-baseline root KEK wrapping every
   # tenant's DEK (hub_api/services/tenant_keystore.py::K8sSecretKekProvider,
@@ -2168,5 +3457,159 @@ autoProvisionedKeys:
   serviceJwt:
     secretName: "service-jwt-signing-key"
     publicKeyConfigMapName: ""  # default: "<fullname>-service-jwt-public" when empty
-    keyId: "waddlebot-1"
+    # fix/hub-api-grpc-service-jwt-issuer -- NOT "waddlebot-1" (bundleSigning's
+    # value): this keyId becomes the `SERVICE_JWT_PRIVATE_KEY_<keyId>` SECRET KEY
+    # NAME (auto-provisioned-keys-job.yaml), which reaches the hub-api container as
+    # an env var of the identical name via `envFrom.secretRef` (hub-api.yaml). A
+    # hyphen there makes it an invalid POSIX env var name -- kubelet silently drops
+    # it from the container's environment (logs an `InvalidVariableNames` Event,
+    # does not fail the pod), so `flask_core.service_jwt.load_issuer_from_env`'s
+    # `SERVICE_JWT_PRIVATE_KEY_` prefix scan finds nothing and issuance stays
+    # disabled. Must stay `[A-Za-z_][A-Za-z0-9_]*` if ever changed.
+    keyId: "waddlebot1"
     externalSecret: false
+  # #684 / PR #718 secret messaging (one-time secrets) -- AES-256-GCM key, 64 lowercase
+  # hex chars, hub-api env ONE_TIME_SECRET_ENCRYPTION_KEY. Generated once, never rotated.
+  # Feature flag waddles.secret-messaging stays OFF by default (PostHog/ENV baseline).
+  oneTimeSecret:
+    secretName: "waddlebot-ots-encryption-key"
+    secretKey: "ONE_TIME_SECRET_ENCRYPTION_KEY"
+    externalSecret: false
+
+# Enterprise external KMS / BYOK (customer-managed keys) -- the Enterprise-tier upsell ON TOP OF
+# the platform-managed at-rest baseline, NEVER a substitute (security.md Encryption: Storage).
+# Default OFF: with kms.enabled=false NOTHING below renders and the baseline keeps working with
+# zero KMS configuration. Design + per-provider setup: docs/guides/external-kms-byok.md.
+#
+# All provider credentials are `existingSecret` references to Secrets you create out-of-band
+# (kubectl / ExternalSecret / SealedSecret) -- no credential value ever lives in this file. The
+# Secret KEY NAMES are fixed (they are the env var names hub-api reads), listed per provider
+# below. Licence gating (`compliance.external_kms`, Enterprise) is enforced at RUNTIME per tenant
+# by hub-api; Helm cannot ask the licence server, so this chart only wires the providers.
+# Misconfiguration (a sub-feature on without kms.enabled, missing credentials, a bad key id)
+# fails the render loudly -- see templates/_kms.tpl `waddlebot.kms.validate`.
+kms:
+  # Master switch. Must be true for either sub-feature below.
+  enabled: false
+
+  # Per-tenant customer-managed keys wrapping each tenant's data-encryption keys (hub-api,
+  # hub_api/services/envelope/). Tenants opt in via PUT /api/v1/tenant/<slug>/kms.
+  tenantKeys:
+    enabled: false
+    # Which providers hub-api accepts tenant keys for: any of aws_kms, gcp_kms, azure_key_vault.
+    providers: []
+    timeoutSeconds: 10
+    aws:
+      # The AWS principal customers put in their key role's trust policy (Waddles' own role/user
+      # ARN, e.g. the IRSA role hub-api runs as). Public identifier shown by GET .../kms.
+      platformPrincipal: ""
+      # Optional https:// overrides (VPC / FIPS / GovCloud endpoints). Empty = AWS default.
+      kmsEndpointUrl: ""
+      stsEndpointUrl: ""
+      # Optional Secret (keys AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) for clusters WITHOUT IRSA /
+      # Pod Identity. Empty = the ambient identity (IRSA / Pod Identity) -- preferred.
+      credentialsSecret: ""
+    gcp:
+      kmsEndpoint: ""             # empty = https://cloudkms.googleapis.com/v1
+      # Service-account email customers grant on their key. Derived automatically when a
+      # service-account key is supplied; set it here only for Workload Identity / metadata auth.
+      platformPrincipal: ""
+      # Optional Secret with key ENVELOPE_GCP_CREDENTIALS_JSON (a service-account key document).
+      # Empty = GKE Workload Identity / the GCE metadata-server identity -- preferred.
+      credentialsSecret: ""
+    azure:
+      authority: ""               # empty = https://login.microsoftonline.com
+      # REQUIRED when azure_key_vault is enabled: Secret with keys ENVELOPE_AZURE_CLIENT_ID and
+      # ENVELOPE_AZURE_CLIENT_SECRET (the multi-tenant Entra application customers consent to).
+      credentialsSecret: ""
+
+  # SeaweedFS object-storage SSE-KMS under the OPERATOR's key (deployment-wide, not per tenant).
+  #   off   baseline only: SSE-S3 (AES256) via WEED_S3_SSE_KEK -- the default
+  #   kms   bucket default + hub-api uploads use the KMS key (hub-api enforces the Enterprise
+  #         entitlement of `entitlementTenant`; unentitled writes FAIL LOUDLY, never fall back)
+  #   drain exit ramp (never entitlement-gated): bucket default and new uploads return to the
+  #         baseline while the KMS provider stays LOADED so objects already written under KMS
+  #         remain readable. Re-encrypt them (docs/guides/external-kms-byok.md), then set `off`.
+  # SeaweedFS ships aws and gcp KMS providers only (no native Azure Key Vault provider).
+  objectStorage:
+    mode: "off"
+    provider: ""                  # aws_kms | gcp_kms
+    keyId: ""                     # AWS key ARN/alias, or GCP CryptoKey resource name
+    entitlementTenant: "system"   # tenant slug whose Enterprise entitlement gates `kms` mode
+    aws:
+      region: ""
+      endpoint: ""                # optional https:// (VPC endpoint); empty = AWS default
+      credentialsSecret:
+        name: ""                  # existingSecret with the KMS client's access key pair
+        accessKeyIdKey: "AWS_ACCESS_KEY_ID"
+        secretAccessKeyKey: "AWS_SECRET_ACCESS_KEY"
+    gcp:
+      projectId: ""
+      credentialsSecret:
+        name: ""                  # existingSecret holding a service-account key JSON
+        key: "credentials.json"
+
+# Enterprise SSO (SAML 2.0 / OIDC -- Enterprise tier, Google OAuth2 -- Professional tier).
+# Backend: hub_api/services/sso_*.py, migration 0049_sso_connections. Entitlement is
+# enforced in code by the two-gate feature check (flags `waddles.auth.sso_saml` /
+# `waddles.auth.sso_custom`, both default OFF), so this subtree only provisions the
+# plumbing -- a deployment that never uses SSO needs nothing here.
+#
+# templates/sso.yaml owns the encryption-key Secret; templates/_sso.tpl renders the hub-api
+# env block (a single include in templates/hub-api.yaml). Unlike every key in
+# `autoProvisionedKeys` above, a missing SSO key NEVER fails the release outside
+# alpha/local: SSO is entitlement-gated, so an unentitled deployment must still install.
+# hub-api's `secretKeyRef` is `optional: true` and SSO then fails loudly at request time
+# (503 `SSO_UNAVAILABLE`, log code `sso_key_missing`) instead of the chart failing.
+# Ban-evasion suppression (GDPR Art. 6(1)(f), counsel to verify -- docs/compliance/suppression-LIA.md).
+# An erased user with an ACTIVE ban leaves one `suppression_records` row: a per-tenant keyed
+# one-way code of the platform id (HMAC under an HKDF key derived from the platform tenant KEK,
+# `autoProvisionedKeys.tenantKek`, mounted into hub-api only), a closed restriction enum and an
+# expiry. A user with no active ban leaves nothing behind.
+suppression:
+  # Optional ceiling, in days, on how long ANY suppression row lives (1-3650). Empty (default) =
+  # a ban with no expiry is kept until a moderator lifts it. Set it to bound retention
+  # (Art. 5(1)(e) storage limitation) once counsel has chosen a period.
+  maxRetentionDays: ""
+sso:
+  # false -> render nothing and inject no SSO env into hub-api.
+  enabled: true
+  # SSO_ENCRYPTION_KEY: 64 lowercase hex chars (256-bit). HKDF-derives (a) the AES-256-GCM
+  # key protecting stored OIDC/Google client secrets and (b) the HMAC key binding each
+  # login flow to the browser that started it. Generated once (alpha/local only), kept
+  # across upgrades, never rotated automatically -- rotating invalidates stored secrets.
+  encryptionKey:
+    secretName: "waddlebot-sso-encryption-key"
+    secretKey: "SSO_ENCRYPTION_KEY"
+    # true -> an ExternalSecret/SealedSecret controller owns this Secret; the chart
+    # neither generates nor requires it.
+    externalSecret: false
+  # Hostnames of IdPs that legitimately resolve to private/loopback addresses (an on-prem
+  # Keycloak/ADFS). Operator-controlled allowlist for the SSRF guard (SSO_ALLOWED_PRIVATE_HOSTS);
+  # a tenant admin cannot add to it. Everything not listed must resolve to a public address
+  # and be reached over https.
+  allowedPrivateHosts: []
+  # Single-use login-flow state lifetime (60-3600 s) and tolerated IdP clock skew (0-300 s).
+  stateTtlSeconds: 600
+  clockSkewSeconds: 120
+  # Optional operator-provided shared Google OAuth client so Professional tenants can offer
+  # "Sign in with Google" without registering their own client. Empty `existingSecret` ->
+  # tenants must bring their own client id/secret. Never inline the values here.
+  google:
+    existingSecret: ""
+    clientIdKey: "SSO_GOOGLE_CLIENT_ID"
+    clientSecretKey: "SSO_GOOGLE_CLIENT_SECRET"
+
+# Supply-chain admission (templates/supply-chain/). Verifies that Waddles images were
+# signed by this repo's release workflow and carry an SPDX SBOM attestation.
+# Requires Kyverno CRDs in the cluster when enabled. Off by default: unsigned images
+# from before this pipeline existed would be rejected. See docs/SUPPLY_CHAIN.md.
+supplyChain:
+  verifyImages:
+    enabled: false
+    # false = Audit (report only), true = Enforce (reject unverified pods).
+    enforce: false
+    imageReference: "ghcr.io/penguintechinc/waddles/*"
+    issuer: "https://token.actions.githubusercontent.com"
+    # Must match the identity regex in scripts/ci/supply-chain.sh (test enforces parity).
+    subjectRegExp: "^https://github\\.com/penguintechinc/waddles/\\.github/workflows/containers\\.yml@refs/(heads|tags)/.+$"

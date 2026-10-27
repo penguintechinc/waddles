@@ -26,6 +26,7 @@ from services.token_manager import TokenManager
 from services.twitch_service import TwitchService
 from services.grpc_handler import TwitchActionServicer, GrpcServer
 
+
 # Custom config dict that provides Quart defaults
 class DefaultConfig(dict):
     """Dict subclass that provides Quart defaults on missing keys."""
@@ -57,6 +58,7 @@ class DefaultConfig(dict):
                 return defaults[key]
             raise
 
+
 # Initialize Flask/Quart app with pre-populated config dict
 class PreConfiguredQuart(Quart):
     """Quart with pre-configured defaults to avoid __init__ KeyError."""
@@ -67,12 +69,14 @@ class PreConfiguredQuart(Quart):
         """Initialize with custom config class."""
         super().__init__(*args, **kwargs)
 
+
 app = PreConfiguredQuart(__name__)
 
 # Load config from Config class
 for key in dir(Config):
     if key.isupper() and not key.startswith('_'):
         app.config[key] = getattr(Config, key)
+
 
 # Setup logging
 def setup_logging():
@@ -118,6 +122,7 @@ def setup_logging():
         except Exception as e:
             print(f"Failed to setup syslog: {e}")
 
+
 setup_logging()
 logger = logging.getLogger(__name__)
 
@@ -131,6 +136,7 @@ twitch_service = TwitchService(token_manager)
 grpc_servicer = TwitchActionServicer(twitch_service)
 grpc_server = GrpcServer(grpc_servicer, Config.GRPC_PORT)
 
+
 # JWT Authentication
 def create_jwt_token(data: Dict[str, Any], expires_in: int = 3600) -> str:
     """Create JWT token."""
@@ -140,6 +146,7 @@ def create_jwt_token(data: Dict[str, Any], expires_in: int = 3600) -> str:
         "iat": datetime.utcnow()
     }
     return jwt.encode(payload, Config.MODULE_SECRET_KEY, algorithm=Config.JWT_ALGORITHM)
+
 
 def verify_jwt_token(token: str) -> Optional[Dict[str, Any]]:
     """Verify JWT token."""
@@ -156,6 +163,7 @@ def verify_jwt_token(token: str) -> Optional[Dict[str, Any]]:
     except jwt.InvalidTokenError as e:
         logger.warning(f"Invalid JWT token: {e}")
         return None
+
 
 def require_auth(f):
     """Decorator for JWT authentication."""
@@ -180,6 +188,7 @@ def require_auth(f):
 
 # REST API Endpoints
 
+
 @app.route("/health", methods=["GET"])
 async def health():
     """Health check endpoint."""
@@ -203,6 +212,7 @@ async def health():
             "error": str(e)
         }), 503
 
+
 @app.route("/api/v1/auth/token", methods=["POST"])
 async def generate_token():
     """Generate JWT token for API access."""
@@ -224,6 +234,7 @@ async def generate_token():
         "token": token,
         "expires_in": Config.JWT_EXPIRATION_SECONDS
     })
+
 
 @app.route("/api/v1/actions/execute", methods=["POST"])
 @require_auth
@@ -261,6 +272,7 @@ async def execute_action():
             "success": False,
             "error": str(e)
         }), 500
+
 
 @app.route("/api/v1/actions/batch", methods=["POST"])
 @require_auth
@@ -303,6 +315,7 @@ async def batch_execute_actions():
             "success": False,
             "error": str(e)
         }), 500
+
 
 @app.route("/api/v1/tokens/store", methods=["POST"])
 @require_auth
@@ -348,6 +361,7 @@ async def store_token():
             "error": str(e)
         }), 500
 
+
 @app.route("/api/v1/tokens/revoke", methods=["POST"])
 @require_auth
 async def revoke_token():
@@ -378,6 +392,7 @@ async def revoke_token():
             "success": False,
             "error": str(e)
         }), 500
+
 
 @app.route("/api/v1/tokens/force-reauth", methods=["POST"])
 @require_auth
@@ -455,6 +470,7 @@ async def get_stats():
 
 # Application Lifecycle
 
+
 @app.before_serving
 async def startup():
     """Application startup."""
@@ -476,6 +492,7 @@ async def startup():
         f"REST: {Config.REST_PORT}, gRPC: {Config.GRPC_PORT}"
     )
 
+
 @app.after_serving
 async def shutdown():
     """Application shutdown."""
@@ -488,6 +505,7 @@ async def shutdown():
     db.close()
 
     logger.info("Twitch Action Module stopped")
+
 
 if __name__ == "__main__":
     # Run with Hypercorn in production

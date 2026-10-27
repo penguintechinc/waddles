@@ -1,0 +1,227 @@
+{{- if .Values.infrastructure.valkeyKv.enabled }}
+{{- $k := .Values.infrastructure.valkeyKv }}
+{{- $tls := eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+{{- $tlsPort := .Values.infrastructure.redis.tls.port }}
+{{- /* Fail loud, never silently degrade: quota state must be on a PVC. */}}
+{{- if not $k.persistence.enabled }}
+{{- fail "infrastructure.valkeyKv.persistence.enabled=false is not allowed -- the kv Valkey holds integrity-critical bundle-kv quota counters and must never run on emptyDir (a restart would reset every quota). Disable the whole instance (infrastructure.valkeyKv.enabled=false, bundle-kv falls back to the cache instance -- NOT recommended: eviction = quota bypass) instead." }}
+{{- end }}
+{{- if not (has $k.aof.appendfsync (list "everysec" "always")) }}
+{{- fail (printf "infrastructure.valkeyKv.aof.appendfsync must be everysec|always, got %q" $k.aof.appendfsync) }}
+{{- end }}
+{{- $name := "valkey-kv" }}
+{{- /* Password lives in its OWN Secret, never in the envFrom'd shared one. */}}
+{{- $kvSecret := printf "%s-valkey-kv" (include "waddlebot.fullname" .) }}
+---
+# STATEFUL EXCEPTION (approved) -- 2026-10-23: bundle-kv quota counters are integrity-critical
+# (eviction = quota bypass) and must survive restarts, so they need a per-pod PVC
+# (volumeClaimTemplates, retained) on their own instance -- not the LRU cache and not the
+# delivery (durable) instance. Single pod, no replication/Sentinel/admin user: quota is off the
+# 99.99% delivery path, a brief restart degrades quota checks, never delivery. Rootless (uid 999).
+# Eviction hazard removed: `--maxmemory-policy noeviction` is hard-wired (NOT a value).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: kv-store
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  serviceName: {{ $k.service.name }}
+  replicas: 1
+  updateStrategy:
+    type: RollingUpdate
+  # Never auto-delete the quota volume on scale-down / StatefulSet deletion.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      {{- if $tls }}
+      annotations:
+        # Rolls the pod when the valkey-tls identity/SANs change (same helper as redis.yaml
+        # and every client) -- see waddlebot.valkeyTlsPodChecksum. Non-secret by construction.
+        checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: kv-store
+    spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.infrastructure.redis.podSecurityContext | nindent 8 }}
+      initContainers:
+      # volumeClaimTemplates mounts a fresh volume; create the rootless data dir as uid 999.
+      - name: init-data-dir
+        image: {{ $k.image }}
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          {{- toYaml .Values.infrastructure.redis.securityContext | nindent 10 }}
+        command: ["sh", "-c", "set -eu; mkdir -p /data/valkey"]
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          requests: {memory: 16Mi, cpu: 10m}
+          limits: {memory: 64Mi, cpu: 100m}
+      containers:
+      - name: valkey
+        image: {{ $k.image }}
+        imagePullPolicy: IfNotPresent
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          {{- toYaml .Values.infrastructure.redis.securityContext | nindent 10 }}
+        # `set -- ... ; exec "$@"` keeps valkey as PID 1 for signals.
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          # ACL: single password-only `default` user (every client sends AUTH <pw>), an
+          # ALLOW-list: -@all then only the categories bundle-kv uses (GET/SET/INCR/EXPIRE/DEL/
+          # SCAN/EVAL...). `-@dangerous` strips what @write/@keyspace drag in (FLUSHALL/FLUSHDB/
+          # KEYS/MIGRATE). `+config|get` is granted AFTER `-@dangerous` (CONFIG GET is itself
+          # @dangerous, so the order matters -- verified against the pinned image) so ONLY the
+          # `CONFIG GET maxmemory-policy` probe works with no NOPERM; CONFIG SET/INFO/ACL/
+          # SHUTDOWN/REPLICAOF/DEBUG stay NOPERM. Password passed as a SHA-256 hash (`#hex`),
+          # never cleartext in the ACL rules. No admin user, no replication.
+          APP_HASH="$(printf %s "$VALKEY_PASSWORD" | sha256sum | cut -d' ' -f1)"
+          set -- valkey-server \
+            --dir /data/valkey \
+            --user default on "#$APP_HASH" '~*' '&*' -@all +@connection +@read +@write +@keyspace +@transaction +@scripting -@dangerous '+config|get' \
+            --appendonly yes \
+            --appendfsync {{ $k.aof.appendfsync }} \
+            --no-appendfsync-on-rewrite no \
+            --auto-aof-rewrite-percentage {{ $k.aof.rewritePercentage }} \
+            --auto-aof-rewrite-min-size {{ $k.aof.rewriteMinSize }} \
+            --maxmemory {{ $k.maxMemory }} \
+            --maxmemory-policy noeviction
+          {{- if $tls }}
+          # TLS-only: plaintext listener DISABLED (--port 0) so the password never crosses the
+          # wire in cleartext.
+          set -- "$@" \
+            --port 0 \
+            --tls-port {{ $tlsPort }} \
+            --tls-cert-file /etc/valkey/tls/tls.crt \
+            --tls-key-file /etc/valkey/tls/tls.key \
+            --tls-ca-cert-file /etc/valkey/tls/ca.crt \
+            --tls-auth-clients no \
+            --tls-protocols "TLSv1.2 TLSv1.3"
+          {{- else }}
+          # TLS disabled (local/ci only): plaintext port stays.
+          set -- "$@" --port {{ $k.port }}
+          {{- end }}
+          exec "$@"
+        ports:
+        {{- if $tls }}
+        - name: valkey-tls
+          containerPort: {{ $tlsPort }}
+          protocol: TCP
+        {{- else }}
+        - name: valkey
+          containerPort: {{ $k.port }}
+          protocol: TCP
+        {{- end }}
+        env:
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $kvSecret }}
+              key: VALKEY_KV_PASSWORD
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        {{- if $tls }}
+        {{- include "waddlebot.valkeyTlsServerVolumeMount" . | nindent 8 }}
+        {{- end }}
+        resources:
+          {{- toYaml $k.resources | nindent 10 }}
+        livenessProbe:
+          exec:
+            command:
+            {{- if $tls }}
+              # Loopback probe over TLS (plaintext listener is off); --insecure only skips
+              # hostname/chain verification of the pod's own 127.0.0.1 connection.
+              ["sh", "-c", "valkey-cli --tls --insecure -p {{ $tlsPort }} -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            {{- else }}
+              ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            {{- end }}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            {{- if $tls }}
+              ["sh", "-c", "valkey-cli --tls --insecure -p {{ $tlsPort }} -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            {{- else }}
+              ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            {{- end }}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      {{- if $tls }}
+      volumes:
+      {{- include "waddlebot.valkeyTlsServerVolume" . | nindent 6 }}
+      {{- end }}
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: kv-store
+    spec:
+      accessModes:
+        - {{ $k.persistence.accessMode }}
+      {{- if $k.persistence.storageClass }}
+      storageClassName: {{ $k.persistence.storageClass }}
+      {{- end }}
+      resources:
+        requests:
+          storage: {{ $k.persistence.size }}
+---
+# Single client Service for the kv pod (no replicas, no Sentinel).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $k.service.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: kv-store
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  type: ClusterIP
+  ports:
+  {{- if $tls }}
+  # TLS-only: no plaintext Service port when TLS is on.
+  - port: {{ $tlsPort }}
+    targetPort: valkey-tls
+    protocol: TCP
+    name: valkey-tls
+  {{- else }}
+  - port: {{ $k.service.port }}
+    targetPort: valkey
+    protocol: TCP
+    name: valkey
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- $ports := list $k.port }}
+{{- if $tls }}{{- $ports = list $tlsPort }}{{- end }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "kv-store" "name" $name "selector" (dict "app.kubernetes.io/name" $name "app.kubernetes.io/instance" $.Release.Name) "ports" $ports "egress" "internal" "tetragon" false) }}
+{{- end }}

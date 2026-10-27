@@ -131,7 +131,13 @@ async def add_config(community_id: int):
             alert_on_outage=data.get('alert_on_outage', True),
             poll_interval_minutes=data.get('poll_interval_minutes'),
         )
-        logger.audit(action="add_config", community=community_id, game=game_name, result="SUCCESS")
+        logger.audit(
+            action="add_config",
+            user="system",
+            community=community_id,
+            result="SUCCESS",
+            game=game_name
+        )
         return success_response(config)
     except Exception as exc:
         logger.error("Failed to add config: %s", exc)
@@ -145,7 +151,13 @@ async def remove_config(community_id: int, game_name: str):
         removed = await status_service.remove_config(community_id, game_name)
         if not removed:
             return error_response("Config not found or already inactive", status_code=404)
-        logger.audit(action="remove_config", community=community_id, game=game_name, result="SUCCESS")
+        logger.audit(
+            action="remove_config",
+            user="system",
+            community=community_id,
+            result="SUCCESS",
+            game=game_name
+        )
         return success_response({'message': 'Config removed'})
     except Exception as exc:
         logger.error("Failed to remove config: %s", exc)

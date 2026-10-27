@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'libs/module_sdk/secu
 
 import scoped_tokens
 
+
 def test_basic_functionality():
     """Test basic token generation and validation"""
     print("\n=== Testing Basic Functionality ===")
@@ -44,6 +45,7 @@ def test_basic_functionality():
         print('✗ Token validation failed')
         return False
 
+
 def test_token_data():
     """Test TokenData helper class"""
     print("\n=== Testing TokenData Class ===")
@@ -63,6 +65,7 @@ def test_token_data():
     print(f'  Is expired: {token_data.is_expired()}')
 
     return True
+
 
 def test_token_revocation():
     """Test token revocation"""
@@ -92,6 +95,7 @@ def test_token_revocation():
     print(f'✓ Token invalid after revocation: {payload_after is None}')
 
     return payload_before is not None and payload_after is None
+
 
 def test_token_types():
     """Test different token types"""
@@ -125,6 +129,7 @@ def test_token_types():
 
     return access_payload["type"] == "access" and service_payload["type"] == "service"
 
+
 def test_wildcard_scope():
     """Test wildcard scope"""
     print("\n=== Testing Wildcard Scope ===")
@@ -153,12 +158,13 @@ def test_wildcard_scope():
         expires_at=datetime.utcnow() + timedelta(hours=1)
     )
 
-    print(f'✓ Wildcard grants all scopes:')
+    print('✓ Wildcard grants all scopes:')
     print(f'  Has "read": {token_data.has_scope("read")}')
     print(f'  Has "write": {token_data.has_scope("write")}')
     print(f'  Has "anything": {token_data.has_scope("anything")}')
 
     return True
+
 
 def test_metadata():
     """Test custom metadata"""
@@ -181,6 +187,7 @@ def test_metadata():
     print(f'✓ Metadata preserved: {payload["metadata"]}')
 
     return payload["metadata"] == metadata
+
 
 def test_error_handling():
     """Test error handling"""
@@ -236,6 +243,7 @@ def test_error_handling():
     print(f'\nTotal errors caught: {errors_caught}/6')
     return errors_caught == 6
 
+
 def main():
     """Run all tests"""
     print("=" * 60)
@@ -273,6 +281,7 @@ def main():
     print("=" * 60)
 
     return failed == 0
+
 
 if __name__ == '__main__':
     success = main()

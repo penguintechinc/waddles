@@ -1,0 +1,19 @@
+# hub-api dev/test-only dependencies -- never installed in the production
+# image (Dockerfile installs requirements.txt only). Mirrors
+# core/svc_presentation/requirements-dev.in's shape.
+-r requirements.in
+pytest>=9.0.3,<10.0.0
+pytest-asyncio>=1.0.0,<2.0.0
+pytest-cov>=5.0.0,<6.0.0
+mypy>=1.13.0,<2.0.0
+ruff>=0.7.0,<1.0.0
+bandit>=1.7.10,<2.0.0
+# tests/test_bundle_data_ddl.py -- real-Postgres golden-DDL rendering (a
+# live connection/cursor is required to render psycopg2.sql.Composable ->
+# text; there is no offline renderer) and RLS cross-tenant isolation test.
+# postgres:17-bookworm is the image this repo already pins elsewhere
+# (config/postgres), so the test container matches production Postgres.
+testcontainers[postgres]>=4.8.0,<5.0.0
+# bundle_data_ddl.py's mypy --strict gate -- psycopg2-binary ships no py.typed
+# marker/stubs of its own.
+types-psycopg2>=2.9.21,<3.0.0

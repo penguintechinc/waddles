@@ -111,6 +111,45 @@ pub struct CliConfig {
     /// (spec §7.3).
     #[arg(long, env = "EXECUTOR_CALL_TIMEOUT_MS", default_value_t = 2000)]
     pub executor_call_timeout_ms: u64,
+    /// Host-API heartbeat interval: how often the stage sends `ping` to
+    /// each connected executor session (fix/executor-link-heartbeat, alpha
+    /// 2026-10-02 incident: a rolled svc pod left the executor bound to a
+    /// terminated peer with no liveness signal at all). A session is
+    /// dropped after [`HEARTBEAT_MISSED_LIMIT`] consecutive missed `pong`s.
+    #[arg(long, env = "HEARTBEAT_INTERVAL_MS", default_value_t = 5000)]
+    pub heartbeat_interval_ms: u64,
+    /// Threshold for `crate::host_api::run_zero_executor_watchdog`'s
+    /// periodic ERROR log: how long zero live executor sessions must
+    /// persist before the watchdog starts logging loudly on its fixed
+    /// cadence. Deliberately NOT wired into `/readyz`/`/healthz`/`/health`
+    /// -- regression: readiness gated on executor connection deadlocked
+    /// rollouts (alpha 2026-10-02): a bundle-executor dials this service
+    /// through its ClusterIP Service, which only routes to Ready pods, so
+    /// gating readiness/liveness on executor presence meant a freshly
+    /// rolled pod could never become Ready (no executor would ever reach
+    /// it) and the rollout stalled forever.
+    #[arg(long, env = "EXECUTOR_GRACE_SECONDS", default_value_t = 60)]
+    pub executor_grace_seconds: u64,
+    /// Capacity (frames) of each host-API connection's bounded writer
+    /// channel. A full channel applies backpressure to producers rather
+    /// than growing memory without limit.
+    #[arg(long, env = "HOST_API_WRITER_CHANNEL_CAPACITY", default_value_t = 1024)]
+    pub host_api_writer_channel_capacity: usize,
+    /// How long a producer awaits writer-channel capacity before the frame
+    /// is shed (logged + metriced, never silent).
+    #[arg(long, env = "HOST_API_WRITER_SEND_TIMEOUT_MS", default_value_t = 30000)]
+    pub host_api_writer_send_timeout_ms: u64,
+    /// Cap on concurrently running `host-call` handler tasks per
+    /// connection; the excess is shed with an `overloaded` error reply.
+    #[arg(
+        long,
+        env = "HOST_API_MAX_CONCURRENT_HOST_CALLS",
+        default_value_t = 256
+    )]
+    pub host_api_max_concurrent_host_calls: usize,
+    /// Cap on simultaneously accepted host-API connections.
+    #[arg(long, env = "HOST_API_MAX_CONNECTIONS", default_value_t = 64)]
+    pub host_api_max_connections: usize,
 
     /// Maximum dispatch attempts before a retryable failure is recorded
     /// terminal (spec §4.3).
@@ -189,13 +228,48 @@ pub struct CliConfig {
     #[arg(long, env = "ACTION_BUNDLE_SIDECAR_KEY", default_value = "")]
     pub action_bundle_sidecar_key: String,
 
-    /// Lifts the private-address half of the bundle `http` capability's
-    /// SSRF guard (spec §8.2 step 6 / §8.5) for hosts already on that
-    /// bundle's manifest `egress` allowlist -- loopback, link-local,
-    /// unspecified, multicast and the cloud-metadata addresses stay
-    /// blocked regardless of this setting.
-    #[arg(long, env = "EGRESS_ALLOW_PRIVATE_HOSTS", default_value_t = false)]
-    pub egress_allow_private_hosts: bool,
+    /// Interim, config-sourced instance-wide private-IP egress policy
+    /// (`bundle_host_http::egress::InstanceEgressPolicy`, Justin's
+    /// decision: "private-ip is also subject to the INSTANCE policy --
+    /// default deny, global-admin opt-in"). PR #428/#432's capability-gate
+    /// grant snapshot is the eventual live source this field is a stopgap
+    /// for; until that lands, an operator flips it at the pod level.
+    /// Supersedes the removed `EGRESS_ALLOW_PRIVATE_HOSTS` flag, which
+    /// never actually gated anything once the three-category grant model
+    /// landed (security review finding, PR #468, MEDIUM) -- see
+    /// [`CliConfig::validate`] for the startup error if it's still set.
+    #[arg(
+        long,
+        env = "INSTANCE_EGRESS_ALLOW_PRIVATE_IP",
+        default_value_t = false
+    )]
+    pub instance_egress_allow_private_ip: bool,
+    /// Comma-separated CIDR blocks (IPv4/IPv6, `bundle_host_http::egress::
+    /// ClusterCidrDenylist`) covering this deployment's own pod, Service,
+    /// and node ranges -- never liftable by any egress grant or by
+    /// `instance_egress_allow_private_ip` (Justin's decision: "a CONFIGURED
+    /// denylist of the cluster's own pod, service and node CIDRs"). Empty
+    /// (the default) is tolerated only when [`Self::deployment_tier`] is
+    /// `alpha`/`local` -- [`CliConfig::validate`] hard-fails startup
+    /// otherwise (security review finding, PR #468, MEDIUM: an empty
+    /// denylist in beta/gamma/production leaves this stage's own cluster
+    /// network reachable via bundle-initiated SSRF).
+    #[arg(long, env = "EGRESS_CLUSTER_CIDR_DENYLIST", default_value = "")]
+    pub egress_cluster_cidr_denylist: String,
+    /// Deployment tier -- already set chart-wide via the shared ConfigMap's
+    /// `DEPLOYMENT_TIER` key (`templates/configmap.yaml`, `global.
+    /// deploymentTier`, which itself defaults to `"production"` and is
+    /// overridden to `"alpha"` only by `values-alpha.yaml`). The only thing
+    /// this crate consults it for today is [`Self::
+    /// egress_cluster_cidr_denylist`]'s fail-closed check. Defaults to
+    /// `"alpha"` here (CLI/test default, matching this struct's other
+    /// dev-permissive defaults e.g. `sandbox_gvisor`) -- every non-alpha/
+    /// local Helm deployment sets `DEPLOYMENT_TIER` explicitly via the
+    /// ConfigMap regardless, so this default only governs a bare local
+    /// binary run or an un-updated test fixture, never a real beta/gamma/
+    /// production pod.
+    #[arg(long, env = "DEPLOYMENT_TIER", default_value = "alpha")]
+    pub deployment_tier: String,
     /// Default per-bundle egress token-bucket rate (spec §7.3), overridden
     /// per bundle by `manifest.limits.egress_rps` when present.
     #[arg(long, env = "EGRESS_RATE_LIMIT_RPS", default_value_t = 10)]
@@ -264,6 +338,63 @@ pub struct CliConfig {
         default_value_t = 15
     )]
     pub bundle_config_full_reconcile_minutes: i64,
+
+    /// hub-api's internal gRPC endpoint (`waddles.hub.internal.v1`,
+    /// `core/hub_client::HubClient::connect`'s `endpoint`), e.g.
+    /// `https://waddlebot-hub-api-v3:50204`. Empty (the default) means "not
+    /// configured" -- [`crate::build_hub_client`] fails loud at startup
+    /// rather than starting and silently showing the neutral label for
+    /// every egress send when PII detokenization is enabled and this is
+    /// unset (user requirement: "fail loud, not silent degraded-UX").
+    /// Field shape mirrors `core/svc_process::config::CliConfig`'s
+    /// identical addition -- same env var names across both services.
+    #[arg(long, env = "HUB_API_GRPC_ENDPOINT", default_value = "")]
+    pub hub_api_grpc_endpoint: String,
+    /// hub-api's machine-JWT bootstrap endpoint
+    /// (`hub_api/blueprints/service_jwt_bp.py`'s `POST /internal/
+    /// service-token`, `service_auth::MachineJwtClient`'s `token_endpoint`),
+    /// e.g. `http://waddlebot-hub-api-v3:8204/internal/service-token`.
+    /// Empty (the default) means "not configured" -- same fail-loud
+    /// contract as [`Self::hub_api_grpc_endpoint`].
+    #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT", default_value = "")]
+    pub service_jwt_token_endpoint: String,
+    /// Path to this pod's projected Kubernetes ServiceAccount token, read
+    /// by [`service_auth::MachineJwtClient`] to bootstrap a machine JWT --
+    /// same default every other machine-JWT bootstrap in this repo uses
+    /// (`libs/flask_core/flask_core/service_jwt.py`).
+    #[arg(
+        long,
+        env = "SERVICE_JWT_SA_TOKEN_PATH",
+        default_value = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    )]
+    pub service_jwt_sa_token_path: String,
+    /// Path to the PEM CA bundle that signed hub-api's internal gRPC server
+    /// cert (`k8s/helm/waddlebot/templates/hub-api-grpc-tls-secret.yaml`'s
+    /// `ca.crt`, mounted by `templates/svc-action-rust.yaml`), passed as
+    /// `core/hub_client::HubClient::connect`'s `ca_cert_path`. Empty (the
+    /// default) falls back to `connect`'s system/webpki trust store --
+    /// never correct against this chart's self-signed internal CA, but
+    /// kept as the permissive default for tests/local runs that dial a
+    /// publicly-rooted endpoint instead.
+    #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
+    pub hub_api_grpc_ca_file: String,
+
+    /// Plain env/values off-switch for outbound PII detokenization
+    /// (`crate::build_hub_client`'s gate), independent of the
+    /// `waddles.core.disable-pii-detokenization` PostHog kill-switch --
+    /// field-for-field mirror of `core/svc_process::config::CliConfig::
+    /// pii_tokenization_enabled_override`'s identical rationale (same env
+    /// var naming convention, `PII_DETOKENIZATION_ENABLED` for this
+    /// service's detokenization pass). `None` (unset, the default) leaves
+    /// the existing PostHog-gated, default-ENABLED, fail-loud-when-
+    /// unreachable behavior unchanged; `Some(false)` is the only value this
+    /// crate's startup gate treats specially (see [`crate::run_with_shutdown`]'s
+    /// call site): detokenization runs disabled, `hub_client` is never
+    /// connected, and startup never fails loud. Explicit, loudly-logged
+    /// operator escape hatch for dev/air-gapped deployments -- never a
+    /// silent bypass, never the default in a production tenant.
+    #[arg(long, env = "PII_DETOKENIZATION_ENABLED")]
+    pub pii_detokenization_enabled_override: Option<bool>,
 }
 
 impl CliConfig {
@@ -288,13 +419,91 @@ impl CliConfig {
                 reason: "must be set together".to_string(),
             });
         }
+        if self.heartbeat_interval_ms == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "heartbeat_interval_ms",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.host_api_writer_channel_capacity == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_writer_channel_capacity",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.host_api_writer_send_timeout_ms == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_writer_send_timeout_ms",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.host_api_max_concurrent_host_calls == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_max_concurrent_host_calls",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.host_api_max_connections == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_max_connections",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.executor_grace_seconds == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "executor_grace_seconds",
+                reason: "must be positive".to_string(),
+            });
+        }
         if self.action_base_backoff_ms > self.action_max_backoff_ms {
             return Err(ConfigError::InvalidValue {
                 field: "action_base_backoff_ms/action_max_backoff_ms",
                 reason: "base backoff must not exceed the max backoff".to_string(),
             });
         }
+        let denylist = self.cluster_cidr_denylist()?;
+        if denylist.is_empty() && !matches!(self.deployment_tier.as_str(), "alpha" | "local") {
+            return Err(ConfigError::InvalidValue {
+                field: "egress_cluster_cidr_denylist",
+                reason: format!(
+                    "EGRESS_CLUSTER_CIDR_DENYLIST must be set (non-empty) when \
+                     DEPLOYMENT_TIER={:?} -- only alpha/local tolerate an empty \
+                     cluster CIDR denylist",
+                    self.deployment_tier
+                ),
+            });
+        }
         Ok(())
+    }
+
+    /// Parses [`Self::egress_cluster_cidr_denylist`] into the guard's own
+    /// type. Fails closed on a malformed entry (comma-separated, empty
+    /// segments ignored) -- see `bundle_host_http::egress::
+    /// ClusterCidrDenylist::parse`'s doc.
+    pub fn cluster_cidr_denylist(
+        &self,
+    ) -> Result<bundle_host_http::egress::ClusterCidrDenylist, ConfigError> {
+        let entries: Vec<&str> = self
+            .egress_cluster_cidr_denylist
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        bundle_host_http::egress::ClusterCidrDenylist::parse(entries).map_err(|reason| {
+            ConfigError::InvalidValue {
+                field: "egress_cluster_cidr_denylist",
+                reason,
+            }
+        })
+    }
+
+    /// The interim, config-sourced [`bundle_host_http::egress::
+    /// InstanceEgressPolicy`] snapshot -- see
+    /// [`Self::instance_egress_allow_private_ip`]'s doc.
+    pub fn instance_egress_policy(&self) -> bundle_host_http::egress::InstanceEgressPolicy {
+        bundle_host_http::egress::InstanceEgressPolicy {
+            allow_private_ip_egress: self.instance_egress_allow_private_ip,
+        }
     }
 
     /// [`Self::bundle_config_poll_seconds`] clamped to a 5s floor -- a
@@ -311,6 +520,19 @@ impl CliConfig {
         std::time::Duration::from_secs(
             (self.bundle_config_full_reconcile_minutes.max(1) as u64) * 60,
         )
+    }
+
+    /// [`Self::heartbeat_interval_ms`] as a [`std::time::Duration`] --
+    /// `validate` already rejects `0`, but this is also used before
+    /// `validate` runs in a couple of test helpers, so floor at 1ms rather
+    /// than panicking on a zero-length sleep/timeout.
+    pub fn heartbeat_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.heartbeat_interval_ms.max(1))
+    }
+
+    /// [`Self::executor_grace_seconds`] as a [`std::time::Duration`].
+    pub fn executor_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.executor_grace_seconds.max(1))
     }
 }
 
@@ -565,7 +787,7 @@ mod tests {
     #[test]
     fn egress_defaults_match_spec_7_3_and_8_2() {
         let cli = CliConfig::parse_from(["svc-action"]);
-        assert!(!cli.egress_allow_private_hosts);
+        assert!(!cli.instance_egress_allow_private_ip);
         assert_eq!(cli.egress_rate_limit_rps, 10);
         assert_eq!(cli.egress_rate_limit_burst, 20);
         assert_eq!(cli.egress_timeout_ms, 5000);
@@ -574,9 +796,141 @@ mod tests {
     }
 
     #[test]
-    fn egress_allow_private_hosts_flag_override_is_honored() {
-        let cli = CliConfig::parse_from(["svc-action", "--egress-allow-private-hosts"]);
-        assert!(cli.egress_allow_private_hosts);
+    fn instance_egress_allow_private_ip_flag_override_is_honored() {
+        let cli = CliConfig::parse_from(["svc-action", "--instance-egress-allow-private-ip"]);
+        assert!(cli.instance_egress_allow_private_ip);
+        assert!(cli.instance_egress_policy().allow_private_ip_egress);
+    }
+
+    /// Security review fix (PR #468, MEDIUM): an empty cluster CIDR
+    /// denylist is a hard startup error outside alpha/local -- the default
+    /// `deployment_tier` in tests/CLI defaults is `"alpha"`, so this must be
+    /// set explicitly to prove the gate actually fires.
+    /// regression: `heartbeat_interval_ms: 0` would otherwise sleep on a
+    /// zero-length interval -- `validate()` rejects it as a hard startup
+    /// error rather than letting the heartbeat loop hot-loop.
+    #[test]
+    fn heartbeat_interval_ms_zero_is_rejected() {
+        let cli = CliConfig::parse_from(["svc-action", "--heartbeat-interval-ms", "0"]);
+        assert_eq!(
+            cli.validate().unwrap_err(),
+            ConfigError::InvalidValue {
+                field: "heartbeat_interval_ms",
+                reason: "must be positive".to_string(),
+            }
+        );
+    }
+
+    /// The host-API bounds default to the documented values and each zero
+    /// value is a hard startup error (a zero-capacity channel or a zero
+    /// permit semaphore would deadlock every send / shed every call).
+    #[test]
+    fn host_api_bounds_default_and_reject_zero() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        assert_eq!(cli.host_api_writer_channel_capacity, 1024);
+        assert_eq!(cli.host_api_writer_send_timeout_ms, 30_000);
+        assert_eq!(cli.host_api_max_concurrent_host_calls, 256);
+        assert_eq!(cli.host_api_max_connections, 64);
+        assert!(cli.validate().is_ok());
+
+        for (flag, field) in [
+            (
+                "--host-api-writer-channel-capacity",
+                "host_api_writer_channel_capacity",
+            ),
+            (
+                "--host-api-writer-send-timeout-ms",
+                "host_api_writer_send_timeout_ms",
+            ),
+            (
+                "--host-api-max-concurrent-host-calls",
+                "host_api_max_concurrent_host_calls",
+            ),
+            ("--host-api-max-connections", "host_api_max_connections"),
+        ] {
+            let cli = CliConfig::parse_from(["svc-action", flag, "0"]);
+            assert_eq!(
+                cli.validate().unwrap_err(),
+                ConfigError::InvalidValue {
+                    field,
+                    reason: "must be positive".to_string(),
+                },
+                "{flag}=0 must be rejected"
+            );
+        }
+    }
+
+    /// regression: `executor_grace_seconds: 0` would make the zero-executor
+    /// watchdog fire the instant any executor session blips, even
+    /// transiently -- `validate()` rejects it as a hard startup error.
+    #[test]
+    fn executor_grace_seconds_zero_is_rejected() {
+        let cli = CliConfig::parse_from(["svc-action", "--executor-grace-seconds", "0"]);
+        assert_eq!(
+            cli.validate().unwrap_err(),
+            ConfigError::InvalidValue {
+                field: "executor_grace_seconds",
+                reason: "must be positive".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn empty_cluster_cidr_denylist_is_rejected_outside_alpha_local() {
+        let cli = CliConfig::parse_from(["svc-action", "--deployment-tier", "beta"]);
+        let err = cli.validate().unwrap_err();
+        assert_eq!(
+            err,
+            ConfigError::InvalidValue {
+                field: "egress_cluster_cidr_denylist",
+                reason: "EGRESS_CLUSTER_CIDR_DENYLIST must be set (non-empty) when \
+                     DEPLOYMENT_TIER=\"beta\" -- only alpha/local tolerate an empty \
+                     cluster CIDR denylist"
+                    .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn empty_cluster_cidr_denylist_is_tolerated_in_alpha_and_local() {
+        for tier in ["alpha", "local"] {
+            let cli = CliConfig::parse_from(["svc-action", "--deployment-tier", tier]);
+            cli.validate()
+                .unwrap_or_else(|e| panic!("tier {tier:?} should tolerate an empty denylist: {e}"));
+        }
+    }
+
+    #[test]
+    fn cluster_cidr_denylist_is_required_and_parsed_outside_alpha_local() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--deployment-tier",
+            "production",
+            "--egress-cluster-cidr-denylist",
+            "10.42.0.0/16, 10.43.0.0/16 ,192.168.0.0/16",
+        ]);
+        cli.validate().expect("a populated denylist passes");
+        let denylist = cli.cluster_cidr_denylist().unwrap();
+        assert!(!denylist.is_empty());
+    }
+
+    #[test]
+    fn malformed_cluster_cidr_denylist_entry_is_rejected() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--deployment-tier",
+            "alpha",
+            "--egress-cluster-cidr-denylist",
+            "not-a-cidr",
+        ]);
+        let err = cli.cluster_cidr_denylist().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue {
+                field: "egress_cluster_cidr_denylist",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -723,6 +1077,37 @@ mod tests {
         assert_eq!(
             cli.full_reconcile_interval(),
             std::time::Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn bundle_config_poll_interval_is_clamped_to_a_five_second_floor() {
+        let cli = CliConfig::parse_from(["svc-action", "--bundle-config-poll-seconds", "0"]);
+        assert_eq!(
+            cli.bundle_config_poll_interval(),
+            std::time::Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn heartbeat_interval_reflects_the_configured_value() {
+        let cli = CliConfig::parse_from(["svc-action", "--heartbeat-interval-ms", "250"]);
+        assert_eq!(
+            cli.heartbeat_interval(),
+            std::time::Duration::from_millis(250)
+        );
+    }
+
+    /// `validate()` already rejects `0` (`heartbeat_interval_ms_zero_is_
+    /// rejected` above), but `heartbeat_interval()` is also called by a
+    /// couple of test helpers before `validate()` runs -- floors at 1ms
+    /// rather than panicking on a zero-length sleep/timeout.
+    #[test]
+    fn heartbeat_interval_floors_at_one_millisecond_pre_validation() {
+        let cli = CliConfig::parse_from(["svc-action", "--heartbeat-interval-ms", "0"]);
+        assert_eq!(
+            cli.heartbeat_interval(),
+            std::time::Duration::from_millis(1)
         );
     }
 

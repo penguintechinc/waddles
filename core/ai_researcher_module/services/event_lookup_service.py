@@ -19,6 +19,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from flask_core import describe_db_error
+from flask_core.ai_guard import render_search_results, wrap_untrusted
+
 logger = logging.getLogger(__name__)
 
 EVENT_SEARCH_SYSTEM_PROMPT = (
@@ -181,17 +184,14 @@ class EventLookupService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'EVENT_SEARCH_SYSTEM_PROMPT',
                 EVENT_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Game: {game_name or 'Unknown'}\n"
-                f"Query: {query}\n\n"
+                f"Game: {wrap_untrusted(game_name or 'Unknown', max_chars=300)}\n"
+                f"Query: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Format these event results with event name, dates, game, "
                 "teams, format, stage, and where to watch."
@@ -232,7 +232,7 @@ class EventLookupService:
             )
 
         except Exception as exc:
-            logger.error("Event search failed: %s", exc)
+            logger.error("Event search failed: %s", describe_db_error(exc))
             return EventLookupResult(
                 success=False,
                 content="An internal error occurred during event search.",
@@ -326,17 +326,14 @@ class EventLookupService:
             sources = [r.to_dict() for r in searx_resp.results]
 
             # 5. AI synthesis
-            context_text = '\n'.join(
-                f"[{r.title}]({r.url}): {r.content}"
-                for r in searx_resp.results
-            )
+            context_text = render_search_results(searx_resp.results)
             system_prompt = getattr(
                 self.config, 'TOURNAMENT_SEARCH_SYSTEM_PROMPT',
                 TOURNAMENT_SEARCH_SYSTEM_PROMPT,
             )
             user_prompt = (
-                f"Tournament: {tournament_name or 'Unknown'}\n"
-                f"Query: {query}\n\n"
+                f"Tournament: {wrap_untrusted(tournament_name or 'Unknown', max_chars=300)}\n"
+                f"Query: {wrap_untrusted(query, max_chars=300)}\n\n"
                 f"Search results:\n{context_text}\n\n"
                 "Provide tournament details: name, organizer, dates, format, "
                 "prize pool, teams, standings, and where to watch."
@@ -377,7 +374,7 @@ class EventLookupService:
             )
 
         except Exception as exc:
-            logger.error("Tournament search failed: %s", exc)
+            logger.error("Tournament search failed: %s", describe_db_error(exc))
             return EventLookupResult(
                 success=False,
                 content="An internal error occurred during tournament search.",
@@ -416,7 +413,7 @@ class EventLookupService:
             ttl = getattr(self.config, 'EVENT_CACHE_TTL', 1800)
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as exc:
-            logger.warning("Cache set failed: %s", exc)
+            logger.warning("Cache set failed: %s", describe_db_error(exc))
 
     async def _log_search(
         self,
@@ -446,4 +443,4 @@ class EventLookupService:
                  was_cached, processing_time_ms],
             )
         except Exception as exc:
-            logger.warning("Failed to log event search: %s", exc)
+            logger.warning("Failed to log event search: %s", describe_db_error(exc))

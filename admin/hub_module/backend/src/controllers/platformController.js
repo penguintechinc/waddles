@@ -228,7 +228,7 @@ export async function getCommunities(req, res, next) {
     const search = req.query.search || '';
     const isActive = req.query.isActive !== 'false';
 
-    let whereClause = `WHERE is_active = $1`;
+    let whereClause = `WHERE is_active = $1 AND id > 0`; // excludes sentinel community 0
     const params = [isActive];
     let paramIndex = 2;
 

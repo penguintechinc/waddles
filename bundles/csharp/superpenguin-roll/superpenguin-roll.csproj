@@ -1,0 +1,77 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Real `!roll`/`!dice` process/action-stage bundle - the first C# port of a
+    PenguinTwitchBot (github.com/Psychoboy/PenguinTwitchBot) feature into
+    Waddles, ported by superpenguintv/Psychoboy's own PastyGames/Roll.cs with
+    permission (see bundle.yaml `notice`). Built on `waddle-sdk-cs`
+    (`sdk/waddle-sdk-cs`), the shared C# SDK - this project itself only
+    contains this bundle's own business logic (`RollLogic.cs`), its
+    per-project host adapter (`WaddleHostAdapter.cs`, required because
+    wit-bindgen's C# codegen is per-project - see the SDK README), and the
+    two thin WIT export shims wit-bindgen's naming contract requires
+    (`ProcessStageExportsImpl.cs`/`ActionStageExportsImpl.cs`).
+
+    Build facts (componentize-dotnet / NativeAOT-LLVM / WASI SDK pins) mirror
+    `bundles/csharp/csping` exactly - see that bundle's README for the full
+    toolchain rationale; this file only repeats the properties, not the
+    reasoning behind them.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>WaddleBundleSuperpenguinRoll</RootNamespace>
+    <AssemblyName>superpenguin_roll</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <UseAppHost>false</UseAppHost>
+    <PublishTrimmed>true</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+
+    <!-- Mandatory for any world whose imports/exports carry strings (this one
+         does, heavily) - see bundles/csharp/csping/csping.csproj's header
+         comment for the `cabi_realloc` failure this prevents. -->
+    <IlcExportUnmanagedEntrypoints>true</IlcExportUnmanagedEntrypoints>
+
+    <WitGeneratedFilesRoot>generated/wit</WitGeneratedFilesRoot>
+  </PropertyGroup>
+
+  <!-- SDK-style projects glob every *.cs file under the project directory by
+       default, including the sibling `tests/` project's own sources - exclude
+       it explicitly so `tests/SuperpenguinRoll.Tests.csproj`'s files never get
+       double-compiled into this wasi-wasm library itself. -->
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Exact-version pins only (rules/critical-rules.md Dependency Pinning) -
+         identical pins to bundles/csharp/csping/csping.csproj: both bundles
+         must use the same componentize-dotnet/NativeAOT-LLVM toolchain
+         version, confirmed against nuget.org / the dotnet-experimental feed
+         at the time csping was built. -->
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview00011" />
+    <PackageReference Include="runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Sibling-path project reference, not a NuGet package - this bundle and
+         the SDK it depends on live in the same repo and move together,
+         mirroring bundles/rust/ping's `waddle-sdk-rs` path dependency. -->
+    <ProjectReference Include="../../../sdk/waddle-sdk-cs/waddle-sdk-cs.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The normative copy: wit/waddle-bundle/stage.wit's own header comment
+         says "every consumer ... references this exact file by path ... and
+         never inlines a copy." This bundle project is the one that actually
+         runs wit-bindgen (see waddle-sdk-cs.csproj's header comment for why
+         the SDK library deliberately does not). -->
+    <Wit Include="../../../wit/waddle-bundle/stage.wit" World="stage" />
+  </ItemGroup>
+
+</Project>

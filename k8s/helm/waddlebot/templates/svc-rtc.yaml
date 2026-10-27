@@ -30,10 +30,15 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-rtc
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own
+      # /ready before this pod's main container starts (see _helpers.tpl).
+      initContainers:
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-rtc
         # SKELETON PLACEHOLDER — no Dockerfile/CI image exists yet for svc-rtc; pinned to the
@@ -42,6 +47,7 @@ spec:
         # its own Dockerfile and CI build.
         image: "{{ .Values.pipeline.goRuntimeImage }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:
@@ -97,4 +103,6 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-rtc
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-rtc" "ports" (list $.Values.pipeline.svcRtc.port) "runtime" "go" "binaries" (list "/app/module_rtc") "egress" "world") }}
 {{- end }}

@@ -31,8 +31,8 @@ httpx==0.27.2
 pyjwt>=2.13.0
 cryptography>=46.0.6
 
-# Storage
-minio==7.2.5
+# Storage (S3-compatible: SeaweedFS in dev/beta, real S3 in prod)
+boto3==1.43.85
 
 # Utilities
 python-dateutil==2.8.2

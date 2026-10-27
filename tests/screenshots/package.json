@@ -1,0 +1,12 @@
+{
+  "name": "waddles-screenshots",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Marketing screenshot capture for docs/screenshots (make screenshots)",
+  "scripts": {
+    "capture": "node capture.cjs"
+  },
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}

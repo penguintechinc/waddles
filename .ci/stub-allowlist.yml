@@ -1,0 +1,227 @@
+# Allowlist for scripts/ci/check-no-stubs.sh.
+#
+# Every entry deliberately defers a stub marker or silent-fallback finding
+# to a tracked GitHub issue -- deferral must always be deliberate and
+# tracked, never silent. The gate FAILS on:
+#   (a) any stub/silent-fallback finding in non-test source that matches
+#       NO entry below, and
+#   (b) any entry below with a missing or empty `issue` field.
+#
+# `path`  -- exact repo-relative file path (no globs; keeps each entry
+#            auditable to a single reviewed file, not a directory-wide
+#            blanket exemption).
+# `pattern` -- regex (re.search, case-insensitive) that must also match the
+#            finding's line text. Entries here intentionally reuse the same
+#            broad marker regex the detector itself uses (see
+#            scripts/ci/check-no-stubs.sh STUB_PATTERN) -- the `path` scope
+#            is what keeps this tight, not the pattern.
+# `issue` -- REQUIRED tracking issue, e.g. "gh-598". Never leave empty.
+#
+# Triage (2026-10-04): every entry below is a pre-existing, loud (returns
+# an explicit error/NotImplementedError or is a documented design gap),
+# milestone-tagged seam -- not a silent fallback. New findings outside this
+# list fail the gate; genuinely new deferred work needs its own issue +
+# allowlist entry, filed deliberately, not silently merged.
+
+# --- gh-598: svc-action M3+ seams (senders, capabilities db/flags, dispatch) ---
+- path: core/svc_action/src/capabilities.rs
+  pattern: "TODO\\(M[0-9]|not wired|not_implemented"
+  issue: gh-598
+- path: core/svc_action/src/db/entities/mod.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-598
+- path: core/svc_action/src/db/mod.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-598
+- path: core/svc_action/src/dispatch.rs
+  pattern: "TODO\\(M[0-9]|not wired"
+  issue: gh-598
+- path: core/svc_action/src/error.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-598
+- path: core/svc_action/src/host_api.rs
+  pattern: "TODO\\(M[0-9]|not wired"
+  issue: gh-598
+- path: core/svc_action/src/http/mod.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-598
+- path: core/svc_action/src/lib.rs
+  pattern: "TODO"
+  issue: gh-598
+- path: core/svc_action/src/senders.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-598
+- path: core/svc_action/src/telemetry.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-598
+
+# --- gh-599: svc-process M4(+) seams (capabilities db/flags, builtins, spine, config) ---
+- path: core/svc_process/src/builtins.rs
+  pattern: "TODO"
+  issue: gh-599
+- path: core/svc_process/src/capabilities.rs
+  pattern: "TODO\\(M[0-9]|not_implemented|not wired"
+  issue: gh-599
+- path: core/svc_process/src/config.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-599
+- path: core/svc_process/src/error.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-599
+- path: core/svc_process/src/hop.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-599
+- path: core/svc_process/src/host_api.rs
+  pattern: "TODO\\(M[0-9]|not wired"
+  issue: gh-599
+- path: core/svc_process/src/http/health.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-599
+- path: core/svc_process/src/http/mod.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-599
+- path: core/svc_process/src/lib.rs
+  pattern: "TODO\\(M[0-9]|not wired"
+  issue: gh-599
+- path: core/svc_process/src/spine.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-599
+- path: core/svc_process/src/telemetry.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-599
+
+# --- gh-600: svc-ingest M5 seams (intake/publish/webhook connectors) ---
+- path: core/svc_ingest/src/config.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-600
+- path: core/svc_ingest/src/http/health.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-600
+- path: core/svc_ingest/src/http/mod.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-600
+- path: core/svc_ingest/src/ingest/mod.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-600
+- path: core/svc_ingest/src/ingest/twitch.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-600
+- path: core/svc_ingest/src/lib.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-600
+- path: core/svc_ingest/src/publish.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-600
+
+# --- gh-601: svc-streaming TODO/not-implemented doc-noted gaps ---
+- path: core/svc_streaming/src/rtc/mod.rs
+  pattern: "TODO"
+  issue: gh-601
+- path: core/svc_streaming/src/rtc/pc_factory.rs
+  pattern: "TODO"
+  issue: gh-601
+- path: core/svc_streaming/src/api/response.rs
+  pattern: "not implemented"
+  issue: gh-601
+- path: core/svc_streaming/src/egress/discord_voice.rs
+  pattern: "not implemented"
+  issue: gh-601
+- path: core/svc_streaming/src/ingest/srt.rs
+  pattern: "not implemented"
+  issue: gh-601
+
+# --- gh-602: bundle_compiler/bundle_executor stubs (signing, upload, object_store GET) ---
+- path: core/bundle_compiler/src/lib.rs
+  pattern: "TODO"
+  issue: gh-602
+- path: core/bundle_executor/src/bucket.rs
+  pattern: "TODO"
+  issue: gh-602
+- path: core/bundle_executor/src/host/imports.rs
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-602
+- path: core/bundle_executor/src/invoke.rs
+  pattern: "TODO|not implemented"
+  issue: gh-602
+- path: core/bundle_executor/src/lib.rs
+  pattern: "TODO"
+  issue: gh-602
+- path: core/bundle_executor/src/tls.rs
+  pattern: "TODO"
+  issue: gh-602
+
+# --- gh-603: hub_api Node-port TODOs (marketplace webhooks, premium quota, chat embeds, etc.) ---
+- path: hub_api/blueprints/v1/bundle_versions.py
+  pattern: "not wired"
+  issue: gh-603
+- path: hub_api/blueprints/v1/community_chat.py
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-603
+- path: hub_api/blueprints/v1/marketplace_billing.py
+  pattern: "not implemented"
+  issue: gh-603
+- path: hub_api/blueprints/v1/marketplace_webhooks.py
+  pattern: "TODO"
+  issue: gh-603
+- path: hub_api/services/access_token_service.py
+  pattern: "TODO"
+  issue: gh-603
+- path: hub_api/services/bundle_data_ddl.py
+  pattern: "not implemented"
+  issue: gh-603
+- path: hub_api/services/community_announcements.py
+  pattern: "TODO\\(M[0-9]"
+  issue: gh-603
+- path: hub_api/services/github_sync_service.py
+  pattern: "not wired"
+  issue: gh-603
+- path: hub_api/services/marketplace_webhook_service.py
+  pattern: "TODO"
+  issue: gh-603
+- path: hub_api/services/oauth_service.py
+  pattern: "not implemented"
+  issue: gh-603
+- path: hub_api/services/paypal_service.py
+  pattern: "not implemented"
+  issue: gh-603
+
+# --- gh-604: waddle-sdk facade + bundle-host crates explicit non-impl gaps (D21 design) ---
+- path: sdk/waddle-sdk/src/waddle_sdk/_asyncio_patch.py
+  pattern: "NotImplementedError"
+  issue: gh-604
+- path: sdk/waddle-sdk/src/waddle_sdk/_poll_loop.py
+  pattern: "NotImplementedError"
+  issue: gh-604
+- path: sdk/waddle-sdk/src/waddle_sdk/db.py
+  pattern: "NotImplementedError|not implemented"
+  issue: gh-604
+- path: sdk/waddle-sdk/src/waddle_sdk/flask_core/bundle_runtime.py
+  pattern: "NotImplementedError|not implemented"
+  issue: gh-604
+- path: sdk/waddle-sdk/src/waddle_sdk/pagination.py
+  pattern: "NotImplementedError|not implemented"
+  issue: gh-604
+- path: core/bundle_host_db/src/backend.rs
+  pattern: "not implemented"
+  issue: gh-604
+- path: core/bundle_host_db/src/lib.rs
+  pattern: "not implemented"
+  issue: gh-604
+- path: core/bundle_host_http/src/egress.rs
+  pattern: "not implemented"
+  issue: gh-604
+- path: core/bundle_capability_gate/src/gate.rs
+  pattern: "not wired"
+  issue: gh-604
+
+# --- gh-606: AdminWorkflows frontend TODOs (load/save/publish/validate/undo/redo) ---
+- path: admin/hub_module/frontend/src/pages/admin/AdminWorkflows.jsx
+  pattern: "TODO"
+  issue: gh-606
+
+# --- gh-613: command bundle `!command timer` persists config but no host-side
+# periodic-firing mechanism exists yet (no WIT tick/schedule import) -- static
+# command CRUD is fully functional and unaffected; see module docstring. ---
+- path: bundles/python/command/src/app.py
+  pattern: "not wired yet"
+  issue: gh-613

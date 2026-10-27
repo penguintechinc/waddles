@@ -37,6 +37,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 import httpx
+from flask_core.safe_logging import log_exc_safe, url_host
 
 from .url_guard import SSRFError, guarded_get, validate_url
 
@@ -205,10 +206,20 @@ async def _fetch_github_markdown(
         try:
             response = await guarded_get(client, url, headers=headers)
         except SSRFError as exc:
-            logger.warning("GitHub fetch blocked by SSRF guard url=%s err=%s", url, exc)
+            log_exc_safe(
+                logger,
+                logging.WARNING,
+                "GitHub fetch blocked by SSRF guard",
+                exc,
+                host=url_host(url),
+            )
             return
         if response.is_error:
-            logger.warning("GitHub API non-OK response url=%s status=%s", url, response.status_code)
+            logger.warning(
+                "GitHub API non-OK response host=%s status=%s",
+                url_host(url),
+                response.status_code,
+            )
             return
         items = response.json()
 
@@ -233,8 +244,12 @@ async def _fetch_github_markdown(
                 try:
                     file_response = await guarded_get(client, item["url"], headers=headers)
                 except SSRFError as exc:
-                    logger.warning(
-                        "GitHub file fetch blocked by SSRF guard url=%s err=%s", item["url"], exc
+                    log_exc_safe(
+                        logger,
+                        logging.WARNING,
+                        "GitHub file fetch blocked by SSRF guard",
+                        exc,
+                        host=url_host(item["url"]),
                     )
                     continue
                 if file_response.is_error:
@@ -349,18 +364,28 @@ async def _fetch_sitemap_pages(base_url: str) -> list[_Page]:
         try:
             sitemap_response = await guarded_get(client, sitemap_url, headers=_CRAWLER_UA)
         except SSRFError as exc:
-            logger.warning(
-                "Sitemap fetch blocked by SSRF guard sitemap_url=%s err=%s", sitemap_url, exc
+            log_exc_safe(
+                logger,
+                logging.WARNING,
+                "Sitemap fetch blocked by SSRF guard",
+                exc,
+                host=url_host(sitemap_url),
             )
             return pages
         except httpx.HTTPError as exc:
-            logger.warning("Could not fetch sitemap sitemap_url=%s err=%s", sitemap_url, exc)
+            log_exc_safe(
+                logger,
+                logging.WARNING,
+                "Could not fetch sitemap",
+                exc,
+                host=url_host(sitemap_url),
+            )
             return pages
 
         if sitemap_response.is_error:
             logger.warning(
-                "Sitemap not found, skipping sitemap_url=%s status=%s",
-                sitemap_url,
+                "Sitemap not found, skipping host=%s status=%s",
+                url_host(sitemap_url),
                 sitemap_response.status_code,
             )
             return pages
@@ -388,9 +413,21 @@ async def _fetch_sitemap_pages(base_url: str) -> list[_Page]:
                 if len(text) > 100:
                     pages.append(_Page(url=page_url, title=title, content=text))
             except SSRFError as exc:
-                logger.warning("Page fetch blocked by SSRF guard page_url=%s err=%s", page_url, exc)
+                log_exc_safe(
+                    logger,
+                    logging.WARNING,
+                    "Page fetch blocked by SSRF guard",
+                    exc,
+                    host=url_host(page_url),
+                )
             except httpx.HTTPError as exc:
-                logger.warning("Failed to fetch knowledge page page_url=%s err=%s", page_url, exc)
+                log_exc_safe(
+                    logger,
+                    logging.WARNING,
+                    "Failed to fetch knowledge page",
+                    exc,
+                    host=url_host(page_url),
+                )
 
     return pages
 
@@ -683,8 +720,13 @@ async def index_source(dal: Any, source_id: int) -> None:
                 total_chunks += 1
             except Exception as exc:  # noqa: BLE001 - per-chunk error, matches Node's per-chunk try/catch
                 errors.append(f"{page.url}: {exc}")
-                logger.warning(
-                    "Chunk index error source_id=%s url=%s err=%s", source_id, page.url, exc
+                log_exc_safe(
+                    logger,
+                    logging.WARNING,
+                    "Chunk index error",
+                    exc,
+                    source_id=source_id,
+                    host=url_host(page.url),
                 )
 
     dal.commit()

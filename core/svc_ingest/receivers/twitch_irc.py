@@ -5,7 +5,7 @@ transports.irc.IrcTransport` (a real, from-scratch, Twitch-agnostic
 asyncio TCP/TLS IRC client -- see that module's own docstring; NOT a port
 of twitchio or any Twitch-specific library). This receiver's only job is
 normalizing each raw `{channel, sender, text}` dict `IrcTransport.
-receive()` yields into the platform event shape `bundles/twitch_ingest.py`
+receive()` yields into the platform event shape `builtin_handlers/twitch_ingest.py`
 consumes.
 
 ONE connection per channel (`IrcTransport.receive()`'s own single-channel-
@@ -73,7 +73,7 @@ from waddle_transports.transports.irc import IrcTransport
 logger = logging.getLogger(__name__)
 
 #: The `consumes` tag every ingest bundle wanting a raw Twitch chat message
-#: declares (`bundles/twitch_gateway_manifest.py`'s own `stages.ingest.
+#: declares (`builtin_handlers/twitch_gateway_manifest.py`'s own `stages.ingest.
 #: consumes`) -- this receiver's half of that contract.
 CONSUMES_TAG = "twitch.message"
 
@@ -174,7 +174,7 @@ class TwitchIrcReceiver(Transport):  # type: ignore[misc]
         default test/deployment override) is left untouched.
 
         Real transform (not a stub) of `IrcTransport`'s own `{channel,
-        sender, text, tags}` shape into the raw event dict `bundles/
+        sender, text, tags}` shape into the raw event dict `builtin_handlers/
         twitch_ingest.py::normalize()` consumes -- field names here are
         this receiver's own contract with that entrypoint, matching
         `receivers/discord_gateway.py`'s own precedent (no repo-wide "raw

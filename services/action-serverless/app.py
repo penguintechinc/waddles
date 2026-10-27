@@ -30,6 +30,7 @@ from quart import Quart, jsonify, request
 # Initialize Quart app
 app = Quart(__name__)
 
+
 # Configure logging
 def setup_logging():
     """Setup comprehensive logging to stdout only (container best practice)."""
@@ -47,6 +48,7 @@ def setup_logging():
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(console_handler)
+
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -72,6 +74,7 @@ try:
 except Exception as e:
     lambda_enabled = False
     logger.warning(f"Lambda module initialization failed: {e}")
+
 
 # Lambda REST endpoints
 @app.route("/api/v1/lambda/health", methods=["GET"])
@@ -182,6 +185,7 @@ except Exception as e:
     openwhisk_enabled = False
     logger.warning(f"OpenWhisk module initialization failed: {e}")
 
+
 # OpenWhisk REST endpoints
 @app.route("/api/v1/openwhisk/health", methods=["GET"])
 async def openwhisk_health():
@@ -274,6 +278,7 @@ try:
 except Exception as e:
     gcp_enabled = False
     logger.warning(f"GCP Cloud Functions module initialization failed: {e}")
+
 
 # GCP REST endpoints
 @app.route("/api/v1/gcp/health", methods=["GET"])

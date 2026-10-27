@@ -1,38 +1,37 @@
-"""``penguin_dal``-compatible database facade over the WIT ``db`` import.
+"""Structured table-ops facade over the WIT ``db`` import (stage.wit).
 
-Spec Sec4.12/D21: this module is the SDK's **one** database surface -- there is
-no ``flask_core.database.AsyncDAL`` facade and no pydal facade. Every
-statement crosses the WIT boundary through exactly one call,
-``wit_world.imports.db.execute(statement, params) -> Rows``, raising
-``componentize_py_types.Err(Error)`` on failure. The query builder below runs
-entirely in guest Python; only the final ``(statement, params)`` pair and the
-returned ``Rows`` record cross the host/guest boundary.
+**Structured, never raw SQL** (user decision: bundles use structured ``db``
+ops, not a raw-SQL arm; design doc SS1 round-1 CRITICAL finding: "no
+bundle-supplied SQL, ever"). Every statement used to cross this boundary as
+``db.execute(statement, params)``; that shape is retired. The WIT ``db``
+interface now exposes exactly five ops -- ``insert``/``get``/``query``/
+``update``/``delete`` -- matching ``core/bundle_host_db::DbHost`` byte for
+byte, enforced host-side under the least-privilege ``waddles_bundle_runtime``
+Postgres role.
 
-**Binding shapes below are not guessed.** They were confirmed by running
-``componentize-py==0.25.1``'s ``bindings`` subcommand directly against the
-committed ``wit/waddle-bundle/stage.wit`` (``componentize-py -d
-wit/waddle-bundle -w stage bindings <dir>``) and reading the generated
-``wit_world/imports/db.py``: the WIT ``variant value`` becomes one
-``@dataclass`` per case named ``Value_<PascalCase(case)>`` (``Value_NullValue``,
-``Value_BoolValue(value: bool)``, ``Value_IntValue(value: int)``,
-``Value_FloatValue(value: float)``, ``Value_TextValue(value: str)``,
-``Value_BytesValue(value: bytes)``), all module attributes of the generated
-``wit_world.imports.db`` module; ``execute`` returns a ``Rows`` dataclass
-(``columns: list[str]``, ``rows: list[list[Value]]``, ``rows_affected: int``)
-and raises the generated ``Err`` (a frozen dataclass ``Exception`` subclass
-with one attribute, ``value``, holding the ``Error`` variant) on the
-``result``'s failure arm. ``componentize_py_types`` (home of ``Err``/``Ok``)
-is generated per-build into the component's own working tree and is not
-pip-installable, so this module never imports it directly -- it classifies
-the raised exception structurally via ``getattr(exc, "value", exc)``, the
-same pattern already used by ``waddle_sdk.http`` for the WIT ``http.Error``
-variant.
+**No ``table`` parameter, by design.** Unlike a general-purpose DAL, a
+bundle owns exactly ONE table (its own, in ``app_core``/``app_community``,
+provisioned at install time from the manifest's ``data.table.columns``) --
+every op below implicitly targets that single table; there is nothing to
+name. Tenant/community/app scoping is applied server-side from the
+invocation's own authenticated scope, never from guest-supplied input
+(``bundle_host_db::scope::DbScope``'s own doc).
 
-Verified against ``/home/penguin/code/penguin-libs/packages/python-dal/src/
-penguin_dal/{db,query,field_proxy,table_proxy}.py``'s public method
-signatures (spec D21) -- no ``penguin_dal`` import exists in this file; this
-is an independent, call-compatible re-implementation over the WIT ``db``
-import.
+**Binding shapes below are not guessed.** Confirmed by running
+``componentize-py==0.25.1``'s ``bindings`` subcommand against the committed
+``wit/waddle-bundle/stage.wit``: the WIT ``variant value`` becomes one
+``@dataclass`` per case (``Value_NullValue``, ``Value_BoolValue(value: bool)``,
+``Value_IntValue(value: int)``, ``Value_FloatValue(value: float)``,
+``Value_TextValue(value: str)``, ``Value_BytesValue(value: bytes)``), the
+``record column-value`` becomes ``ColumnValue(column: str, value: Value)``,
+and ``record row`` becomes ``Row(row_id: str, version: int,
+columns: list[ColumnValue])`` -- all module attributes of the generated
+``wit_world.imports.db`` module. Each op raises the generated ``Err`` (a
+frozen dataclass ``Exception`` subclass with one attribute, ``value``,
+holding the ``db.error`` variant) on failure; this module classifies it
+structurally via ``getattr(exc, "value", exc)``, the same pattern
+``waddle_sdk.kv``/``waddle_sdk.http`` already use for their own WIT error
+variants.
 """
 
 from __future__ import annotations
@@ -43,20 +42,35 @@ from typing import Any
 from uuid import UUID
 
 
-class DALError(Exception):
-    """Base exception for this facade -- matches ``penguin_dal.exceptions.DALError``."""
+class DbError(Exception):
+    """Base exception for this facade -- wraps a WIT ``db.error`` variant."""
 
 
-class TableNotFoundError(DALError):
-    """Matches ``penguin_dal.exceptions.TableNotFoundError``."""
+class NotFoundError(DbError):
+    """``row-id`` has no matching row for this app's own scope."""
 
 
-class ValidationError(DALError):
-    """Matches ``penguin_dal.exceptions.ValidationError``."""
+class ConflictError(DbError):
+    """``expected-version`` did not match the row's current version."""
 
 
-def _coerce_param(value: Any) -> Any:
-    """Mirror real DAL param conversion before a value is wrapped as a WIT ``value``.
+class ValidationError(DbError):
+    """``invalid-column``/``invalid-value`` -- a column/value was rejected."""
+
+
+class QuotaExceededError(DbError):
+    """Per-app row/byte quota exceeded."""
+
+
+# Back-compat aliases -- the pre-structured facade raised `DALError`/
+# `ValidationError` (its `penguin_dal`-shaped names); `DALError` stays as an
+# alias of this module's own base so a caller importing either name keeps
+# working across the structured rewrite.
+DALError = DbError
+
+
+def _coerce_value(value: Any) -> Any:
+    """Mirror real-DAL param conversion before a value is wrapped as a WIT ``value``.
 
     ``UUID`` -> ``str``, ``dict``/``list`` -> JSON string, ``datetime``/``date``
     -> ISO string. Every other type is wrapped as-is by ``_to_wit_value``.
@@ -71,11 +85,8 @@ def _coerce_param(value: Any) -> Any:
 
 
 def _to_wit_value(db_mod: Any, value: Any) -> Any:
-    """Wrap one coerced Python scalar into the generated WIT ``db.Value`` union.
-
-    See this module's docstring for how the case names below were confirmed.
-    """
-    coerced = _coerce_param(value)
+    """Wrap one coerced Python scalar into the generated WIT ``db.value`` union."""
+    coerced = _coerce_value(value)
     if coerced is None:
         return db_mod.Value_NullValue()
     if isinstance(coerced, bool):  # bool is an int subclass -- must check first
@@ -90,14 +101,7 @@ def _to_wit_value(db_mod: Any, value: Any) -> Any:
 
 
 def _from_wit_value(value: Any) -> Any:
-    """Unwrap one generated WIT ``db.Value`` union member back to a Python scalar.
-
-    Dispatches on the dataclass's own class name rather than an ``isinstance``
-    check against an imported type, so this function works identically
-    against the real generated bindings (only importable inside a component)
-    and against this SDK's own host-side test doubles (``tests/wit_fakes.py``),
-    which reuse the exact same class names.
-    """
+    """Unwrap one generated WIT ``db.value`` union member back to a Python scalar."""
     type_name = type(value).__name__
     if type_name == "Value_NullValue":
         return None
@@ -111,579 +115,203 @@ def _from_wit_value(value: Any) -> Any:
     )
 
 
-def _wit_rows_to_dicts(rows: Any) -> list[dict[str, Any]]:
-    """Convert a generated WIT ``db.Rows`` record into a list of plain dicts."""
+def _to_wit_column_values(db_mod: Any, row: dict[str, Any]) -> list[Any]:
+    """Convert a plain ``{column: value}`` dict into the WIT ``list<column-value>`` shape."""
     return [
-        {col: _from_wit_value(val) for col, val in zip(rows.columns, row_values, strict=True)}
-        for row_values in rows.rows
+        db_mod.ColumnValue(column=column, value=_to_wit_value(db_mod, value))
+        for column, value in row.items()
     ]
 
 
-def _cross(statement: str, params: list[Any]) -> tuple[list[dict[str, Any]], int]:
-    """The one place every statement crosses the WIT ``db`` import.
+def _row_to_dict(row: Any) -> dict[str, Any]:
+    """Convert a generated WIT ``db.row`` record into a plain dict.
 
-    Returns ``(rows_as_dicts, rows_affected)`` -- callers that only need row
-    data (``select``) use the first element; callers that only need a count
-    (``update``/``delete``) use the second, since the WIT ``Rows.rows_affected``
-    field is authoritative for those, not ``len(rows)`` (an ``UPDATE``/``DELETE``
-    is not required to also return row data).
+    ``row_id``/``version`` (the platform-owned identity/optimistic-
+    concurrency columns) are included alongside every declared column --
+    callers needing just the declared columns can pop them, but losing them
+    silently would make ``update``/``delete``'s ``expected_version``
+    argument impossible to chain from a prior ``get``/``insert`` result.
     """
+    data: dict[str, Any] = {cv.column: _from_wit_value(cv.value) for cv in row.columns}
+    data["row_id"] = row.row_id
+    data["version"] = row.version
+    return data
+
+
+def _raise_for(exc: Exception, op: str) -> None:
+    """Classify a raised WIT ``db.error`` and re-raise as this module's own exception type.
+
+    ``getattr(exc, "value", exc)`` reaches the real ``db.error`` variant
+    without importing ``componentize_py_types`` (home of the generated
+    ``Err`` wrapper) -- see this module's docstring for why: it is
+    per-build-generated and not pip-installable.
+    """
+    detail = getattr(exc, "value", exc)
+    type_name = type(detail).__name__
+    message = f"db.{op} failed: {detail}"
+    if type_name == "Error_NotFound":
+        raise NotFoundError(message) from exc
+    if type_name == "Error_Conflict":
+        raise ConflictError(message) from exc
+    if type_name in ("Error_InvalidColumn", "Error_InvalidValue"):
+        raise ValidationError(message) from exc
+    if type_name == "Error_QuotaExceeded":
+        raise QuotaExceededError(message) from exc
+    raise DbError(message) from exc
+
+
+async def insert(row: dict[str, Any]) -> dict[str, Any]:
+    """Insert one row; returns the stored row (with ``row_id``/``version``)."""
     import wit_world  # generated binding -- only resolvable inside a component
 
     db_mod = wit_world.imports.db
-    wit_params = [_to_wit_value(db_mod, p) for p in params]
     try:
-        rows = db_mod.execute(statement, wit_params)
-    except Exception as exc:  # noqa: BLE001 - see module docstring: Err is structurally classified, never imported
+        result = db_mod.insert(_to_wit_column_values(db_mod, row))
+    except Exception as exc:  # noqa: BLE001 - classified structurally, see module docstring
+        _raise_for(exc, "insert")
+        raise  # unreachable -- _raise_for always raises
+    return _row_to_dict(result)
+
+
+async def get(row_id: str) -> dict[str, Any] | None:
+    """Fetch one row by ``row_id``; returns ``None`` if not found (never raises for that case)."""
+    import wit_world
+
+    db_mod = wit_world.imports.db
+    try:
+        result = db_mod.get(row_id)
+    except Exception as exc:  # noqa: BLE001 - classified structurally, see module docstring
         detail = getattr(exc, "value", exc)
-        raise DALError(f"db.execute failed: {detail}") from exc
-    return _wit_rows_to_dicts(rows), int(rows.rows_affected)
+        if type(detail).__name__ == "Error_NotFound":
+            return None
+        _raise_for(exc, "get")
+        raise  # unreachable
+    return _row_to_dict(result)
 
 
-class Query:
-    r"""A combinable WHERE-clause fragment -- matches ``penguin_dal.query.Query``.
+async def query(
+    limit: int = 200,
+    offset: int = 0,
+    order_by: str | None = None,
+    descending: bool = False,
+    random: bool = False,
+) -> list[dict[str, Any]]:
+    """Bounded, orderable list of this bundle's own rows.
 
-    Built as raw SQL text with ``\0`` marking one ``$N`` placeholder slot,
-    rendered left-to-right by :meth:`render`.
+    ``limit`` is clamped host-side (``bundle_host_db::MAX_QUERY_LIMIT``)
+    regardless of what is requested here. Ordering, in priority order:
+
+    - ``random=True``: ``ORDER BY random()`` -- pick uniformly, typically
+      paired with ``limit=1`` (e.g. a quote/8-ball-style bundle's "one
+      random row"). Mutually exclusive with ``order_by``.
+    - ``order_by=<column>``: sort by that declared column (or a fixed
+      sortable platform column -- ``row_id``/``version``/``created_at``/
+      ``updated_at``), ``descending`` controlling direction. Validated
+      host-side -- never a guest-supplied arbitrary SQL fragment.
+    - Neither set: the host's own default, stable ``row_id`` ascending.
+
+    Raises:
+        ValueError: both ``random`` and ``order_by`` were set -- ambiguous,
+            rejected here rather than silently picking one.
     """
+    if random and order_by is not None:
+        raise ValueError("query(): random=True and order_by=... are mutually exclusive")
 
-    __slots__ = ("sql", "params", "table")
+    import wit_world
 
-    def __init__(self, sql: str, params: list[Any], table: str) -> None:
-        """Store the raw SQL fragment, its positional params, and the table it scopes."""
-        self.sql = sql
-        self.params = list(params)
-        self.table = table
-
-    def __and__(self, other: Query) -> Query:
-        """Combine two query fragments with SQL ``AND``."""
-        return Query(f"({self.sql}) AND ({other.sql})", self.params + other.params, self.table)
-
-    def __or__(self, other: Query) -> Query:
-        """Combine two query fragments with SQL ``OR``."""
-        return Query(f"({self.sql}) OR ({other.sql})", self.params + other.params, self.table)
-
-    def render(self, start: int = 1) -> tuple[str, int]:
-        r"""Render ``\0`` placeholders as ``$start``, ``$start+1``, ... in order."""
-        idx = start
-        pieces = self.sql.split("\0")
-        rendered = pieces[0]
-        for piece in pieces[1:]:
-            rendered += f"${idx}{piece}"
-            idx += 1
-        return rendered, idx
-
-    def __repr__(self) -> str:
-        """Return a debug-friendly representation."""
-        return f"Query({self.sql!r}, params={self.params!r})"
+    db_mod = wit_world.imports.db
+    wit_order_by = None
+    if random:
+        wit_order_by = db_mod.OrderBy_Random()
+    elif order_by is not None:
+        wit_order_by = db_mod.OrderBy_Column(
+            db_mod.OrderColumn(name=order_by, descending=descending)
+        )
+    try:
+        rows = db_mod.query(limit, offset, wit_order_by)
+    except Exception as exc:  # noqa: BLE001 - classified structurally, see module docstring
+        _raise_for(exc, "query")
+        raise  # unreachable
+    return [_row_to_dict(r) for r in rows]
 
 
-class FieldProxy:
-    """One ``table.column`` reference -- matches ``penguin_dal.field_proxy.FieldProxy``.
+async def update(row_id: str, expected_version: int, row: dict[str, Any]) -> dict[str, Any]:
+    """Update one row, gated on ``expected_version`` (optimistic concurrency).
 
-    ``like``/``ilike``/``contains``/``startswith``/``endswith``/``belongs`` raise
-    ``NotImplementedError`` naming the construct (D21's rule: an explicit gap,
-    never a silent mis-execution) -- no first-party bundle call site uses them
-    as of this SDK's initial cut; add real lowering here before any bundle
-    needs one.
+    Raises :class:`ConflictError` on a version mismatch, :class:`NotFoundError`
+    if ``row_id`` no longer exists.
     """
+    import wit_world
 
-    __slots__ = ("_table", "_name")
-
-    def __init__(self, table: str, name: str) -> None:
-        """Bind this proxy to one ``table.column`` reference."""
-        self._table = table
-        self._name = name
-
-    def __eq__(self, other: object) -> Query:  # type: ignore[override]
-        """Build ``col = $n`` (or ``IS NULL`` for ``None``)."""
-        if other is None:
-            return Query(f"{self._table}.{self._name} IS NULL", [], self._table)
-        return Query(f"{self._table}.{self._name} = \0", [other], self._table)
-
-    def __ne__(self, other: object) -> Query:  # type: ignore[override]
-        """Build ``col != $n`` (or ``IS NOT NULL`` for ``None``)."""
-        if other is None:
-            return Query(f"{self._table}.{self._name} IS NOT NULL", [], self._table)
-        return Query(f"{self._table}.{self._name} != \0", [other], self._table)
-
-    def __gt__(self, other: Any) -> Query:
-        """Build ``col > $n``."""
-        return Query(f"{self._table}.{self._name} > \0", [other], self._table)
-
-    def __lt__(self, other: Any) -> Query:
-        """Build ``col < $n``."""
-        return Query(f"{self._table}.{self._name} < \0", [other], self._table)
-
-    def __ge__(self, other: Any) -> Query:
-        """Build ``col >= $n``."""
-        return Query(f"{self._table}.{self._name} >= \0", [other], self._table)
-
-    def __le__(self, other: Any) -> Query:
-        """Build ``col <= $n``."""
-        return Query(f"{self._table}.{self._name} <= \0", [other], self._table)
-
-    def like(self, pattern: str) -> Query:
-        """Not implemented -- see class docstring."""
-        raise NotImplementedError("FieldProxy.like() is not implemented in the waddle-sdk facade")
-
-    def ilike(self, pattern: str) -> Query:
-        """Not implemented -- see class docstring."""
-        raise NotImplementedError("FieldProxy.ilike() is not implemented in the waddle-sdk facade")
-
-    def contains(self, value: str) -> Query:
-        """Not implemented -- see class docstring."""
-        raise NotImplementedError(
-            "FieldProxy.contains() is not implemented in the waddle-sdk facade"
-        )
-
-    def startswith(self, value: str) -> Query:
-        """Not implemented -- see class docstring."""
-        raise NotImplementedError(
-            "FieldProxy.startswith() is not implemented in the waddle-sdk facade"
-        )
-
-    def endswith(self, value: str) -> Query:
-        """Not implemented -- see class docstring."""
-        raise NotImplementedError(
-            "FieldProxy.endswith() is not implemented in the waddle-sdk facade"
-        )
-
-    def belongs(self, values: Any) -> Query:
-        """Not implemented -- see class docstring."""
-        raise NotImplementedError(
-            "FieldProxy.belongs() is not implemented in the waddle-sdk facade"
-        )
-
-    def __hash__(self) -> int:  # needed because __eq__ is overridden above
-        """Hash by (table, column) identity."""
-        return hash((self._table, self._name))
-
-    def __repr__(self) -> str:
-        """Return a debug-friendly representation."""
-        return f"FieldProxy({self._table}.{self._name})"
+    db_mod = wit_world.imports.db
+    try:
+        result = db_mod.update(row_id, expected_version, _to_wit_column_values(db_mod, row))
+    except Exception as exc:  # noqa: BLE001 - classified structurally, see module docstring
+        _raise_for(exc, "update")
+        raise  # unreachable
+    return _row_to_dict(result)
 
 
-# `Field` is the same type as `FieldProxy` in this facade -- the real
-# penguin_dal exposes both names (`Field` from `.field`, `FieldProxy` from
-# `.field_proxy`) as historically-distinct but call-compatible types; a
-# single class satisfies both import names here.
-Field = FieldProxy
+async def delete(row_id: str, expected_version: int) -> None:
+    """Delete one row, gated on ``expected_version`` the same way as :func:`update`."""
+    import wit_world
 
-
-class Row:
-    """One result row -- dict AND attribute access, matching ``penguin_dal.query.Row``."""
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        """Wrap one row's column-name -> value mapping."""
-        self._data = data
-
-    def __getitem__(self, key: str) -> Any:
-        """Return ``self._data[key]``."""
-        return self._data[key]
-
-    def __contains__(self, key: str) -> bool:
-        """Return whether ``key`` is a column in this row."""
-        return key in self._data
-
-    def __iter__(self) -> Any:
-        """Iterate over column names."""
-        return iter(self._data)
-
-    def __len__(self) -> int:
-        """Return the number of columns."""
-        return len(self._data)
-
-    def __eq__(self, other: object) -> bool:
-        """Compare by underlying data mapping."""
-        return isinstance(other, Row) and self._data == other._data
-
-    def __getattr__(self, name: str) -> Any:
-        """Return ``self._data[name]`` for any non-dunder attribute."""
-        if name.startswith("_"):
-            raise AttributeError(name)
-        try:
-            return self._data[name]
-        except KeyError as exc:
-            raise AttributeError(name) from exc
-
-    def keys(self) -> list[str]:
-        """Return the column names."""
-        return list(self._data.keys())
-
-    def values(self) -> list[Any]:
-        """Return the column values."""
-        return list(self._data.values())
-
-    def items(self) -> list[tuple[str, Any]]:
-        """Return the (column, value) pairs."""
-        return list(self._data.items())
-
-    def as_dict(self) -> dict[str, Any]:
-        """Return a plain ``dict`` copy of this row."""
-        return dict(self._data)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Return ``self._data.get(key, default)``."""
-        return self._data.get(key, default)
-
-    def __repr__(self) -> str:
-        """Return a debug-friendly representation."""
-        return f"Row({self._data!r})"
+    db_mod = wit_world.imports.db
+    try:
+        db_mod.delete(row_id, expected_version)
+    except Exception as exc:  # noqa: BLE001 - classified structurally, see module docstring
+        _raise_for(exc, "delete")
+        raise  # unreachable
 
 
 class Rows:
-    """A result set -- matches ``penguin_dal.query.Rows``.
+    """Inert legacy container -- retained only for a now-unused type reference.
 
-    Truthy/iterable/indexable, with ``.first()``/``.last()``/``.as_list()``.
+    `waddle_sdk.flask_core.bundle_runtime`'s `raw_sql_rows`/`raw_sql_write`
+    (already, independently, permanent `NotImplementedError` stubs -- see
+    that module) keep a resolvable return-type name to import. The raw-SQL
+    arm this type used to carry results for is retired (user decision:
+    structured `db` ops, not raw SQL) -- nothing in this module ever
+    constructs one anymore.
     """
 
-    def __init__(self, rows: list[Row]) -> None:
-        """Wrap a list of already-materialized :class:`Row` objects."""
-        self.rows = rows
-
-    def first(self) -> Row | None:
-        """Return the first row, or ``None`` if empty."""
-        return self.rows[0] if self.rows else None
-
-    def last(self) -> Row | None:
-        """Return the last row, or ``None`` if empty."""
-        return self.rows[-1] if self.rows else None
-
-    def as_list(self) -> list[dict[str, Any]]:
-        """Return every row as a plain ``dict``."""
-        return [r.as_dict() for r in self.rows]
-
-    def __iter__(self) -> Any:
-        """Iterate over rows."""
-        return iter(self.rows)
-
-    def __len__(self) -> int:
-        """Return the number of rows."""
-        return len(self.rows)
-
-    def __getitem__(self, index: int) -> Row:
-        """Return the row at ``index``."""
-        return self.rows[index]
-
-    def __bool__(self) -> bool:
-        """Return whether any rows are present."""
-        return bool(self.rows)
-
-    def __repr__(self) -> str:
-        """Return a debug-friendly representation."""
-        return f"Rows({self.rows!r})"
-
-
-class AsyncQuerySet:
-    """Created by ``AsyncDB.__call__(query)``.
-
-    Matches ``penguin_dal.query.AsyncQuerySet``'s public methods exactly
-    (``select``/``update``/``delete``/``count``/``exists``, all ``async def``).
-    ``orderby``/``limitby`` are accepted for signature compatibility and raise
-    ``NotImplementedError`` if actually supplied.
-    """
-
-    def __init__(self, table_name: str, query: Query | None) -> None:
-        """Scope this query set to ``table_name``, optionally filtered by ``query``."""
-        self._table_name = table_name
-        self._query = query
-
-    async def select(
-        self, *columns: FieldProxy, orderby: Any = None, limitby: tuple[int, int] | None = None
-    ) -> Rows:
-        """Run a ``SELECT`` and return the matching rows."""
-        if orderby is not None or limitby is not None:
-            raise NotImplementedError(
-                "AsyncQuerySet.select(orderby=..., limitby=...) is not implemented "
-                "in the waddle-sdk facade"
-            )
-        select_list = (
-            "*" if not columns else ", ".join(f"{self._table_name}.{c._name}" for c in columns)
-        )
-        if self._query is not None:
-            where_sql, _ = self._query.render(1)
-            sql = f"SELECT {select_list} FROM {self._table_name} WHERE {where_sql}"
-            params = self._query.params
-        else:
-            sql = f"SELECT {select_list} FROM {self._table_name}"
-            params = []
-        rows, _ = _cross(sql, params)
-        return Rows([Row(r) for r in rows])
-
-    async def update(self, **kwargs: Any) -> int:
-        """Run an ``UPDATE`` and return the number of rows affected."""
-        set_cols = list(kwargs.keys())
-        set_clause = ", ".join(f"{col} = ${i + 1}" for i, col in enumerate(set_cols))
-        set_params = [kwargs[c] for c in set_cols]
-        if self._query is not None:
-            where_sql, _ = self._query.render(len(set_cols) + 1)
-            sql = f"UPDATE {self._table_name} SET {set_clause} WHERE {where_sql}"
-            params = set_params + self._query.params
-        else:
-            sql = f"UPDATE {self._table_name} SET {set_clause}"
-            params = set_params
-        _, rows_affected = _cross(sql, params)
-        return rows_affected
-
-    async def delete(self) -> int:
-        """Run a ``DELETE`` and return the number of rows affected."""
-        if self._query is not None:
-            where_sql, _ = self._query.render(1)
-            sql = f"DELETE FROM {self._table_name} WHERE {where_sql}"
-            params = self._query.params
-        else:
-            sql = f"DELETE FROM {self._table_name}"
-            params = []
-        _, rows_affected = _cross(sql, params)
-        return rows_affected
-
-    async def count(self) -> int:
-        """Return the number of matching rows."""
-        if self._query is not None:
-            where_sql, _ = self._query.render(1)
-            sql = f"SELECT COUNT(*) as count FROM {self._table_name} WHERE {where_sql}"
-            params = self._query.params
-        else:
-            sql = f"SELECT COUNT(*) as count FROM {self._table_name}"
-            params = []
-        rows, _ = _cross(sql, params)
-        return int(rows[0]["count"]) if rows else 0
-
-    async def exists(self) -> bool:
-        """Return whether any row matches."""
-        if self._query is not None:
-            where_sql, _ = self._query.render(1)
-            sql = f"SELECT 1 as exists FROM {self._table_name} WHERE {where_sql}"
-            params = self._query.params
-        else:
-            sql = f"SELECT 1 as exists FROM {self._table_name}"
-            params = []
-        rows, _ = _cross(sql, params)
-        return len(rows) > 0
-
-
-# Table name -> real PK column name, for tables whose primary key isn't
-# `id`. Populated only via `register_primary_key()` -- see that function's
-# docstring for why this registry exists instead of live introspection.
-_PRIMARY_KEY_OVERRIDES: dict[str, str | None] = {}
-
-
-def register_primary_key(table: str, pk_column: str | None) -> None:
-    """Register ``table``'s real primary-key column name (spec D21).
-
-    **Necessary, documented substitute for schema introspection.** Real
-    ``penguin_dal.TableProxy`` reads the actual PK column from live-reflected
-    SQLAlchemy metadata (``Table.primary_key.columns``); this facade has no
-    metadata to reflect -- the WIT ``db`` interface exposes exactly one
-    member, ``execute`` (see ``wit/waddle-bundle/stage.wit``), with no
-    schema-reflection capability at all. ``id`` is therefore the default PK
-    column name -- true for every first-party bundle table today -- and
-    remains the fallback for any table never registered here.
-
-    Call this once (e.g. at bundle import time) before first access to a
-    table whose real PK column is something other than ``id``, so
-    :class:`TableProxy`'s ``__getitem__``/``async_insert`` build the correct
-    ``WHERE``/``RETURNING`` clause instead of guessing ``id``. Pass
-    ``pk_column=None`` to mark a table's PK as explicitly unsupported (e.g.
-    a composite key -- this facade's single-value ``db.table[pk]``/
-    ``RETURNING <col>`` shape has no way to represent one); doing so makes
-    ``__getitem__``/``async_insert`` raise ``NotImplementedError`` naming the
-    table (D21's rule: an explicit gap, never a silent mis-execution) rather
-    than emitting a wrong or nonsensical column name.
-    """
-    _PRIMARY_KEY_OVERRIDES[table] = pk_column
-
-
-def reset_primary_key_overrides_for_tests() -> None:
-    """Clear every registered PK override. Test-only."""
-    _PRIMARY_KEY_OVERRIDES.clear()
-
-
-class TableProxy:
-    """``db.command_aliases`` -- matches ``penguin_dal.table_proxy.TableProxy``.
-
-    **Documented, necessary deviation from ``penguin_dal``:** the real
-    ``TableProxy.__getattr__`` validates column names against live-reflected
-    SQLAlchemy metadata; this facade has no metadata to reflect (there is no
-    live connection inside the sandbox -- the WIT ``db`` import *is* the
-    connection), so ``__getattr__`` returns a ``FieldProxy`` for any attribute
-    name unconditionally. Column/table-name validation happens where it
-    always has to happen in this design: the stage's SQL parser and Postgres
-    itself.
-
-    **Second documented, necessary deviation:** ``__getitem__``/
-    ``async_insert`` assume the PK column is named ``id`` unless overridden
-    via :func:`register_primary_key` -- see that function's docstring for why
-    live PK introspection is impossible here.
-    """
-
-    def __init__(self, name: str) -> None:
-        """Bind this proxy to one table name."""
-        self._name = name
-
-    @property
-    def table_name(self) -> str:
-        """Return the table name."""
-        return self._name
-
-    def __getattr__(self, name: str) -> FieldProxy:
-        """Return a ``FieldProxy`` for any non-dunder attribute name."""
-        if name.startswith("_"):
-            raise AttributeError(name)
-        return FieldProxy(self._name, name)
-
-    def _resolve_pk_column(self) -> str:
-        """Return this table's real PK column name, or raise if unsupported.
-
-        See :class:`TableProxy`'s docstring / :func:`register_primary_key`
-        for why ``id`` is the default and how to override it.
-        """
-        pk_column = _PRIMARY_KEY_OVERRIDES.get(self._name, "id")
-        if pk_column is None:
-            raise NotImplementedError(f"non-'id' primary key not supported: {self._name}")
-        return pk_column
-
-    def __getitem__(self, pk: Any) -> Row | None:
-        """PK lookup -- ``db.table[42]``.
-
-        Synchronous, matching the real ``TableProxy.__getitem__``'s return
-        type -- this facade's ``_cross()`` is itself a synchronous WIT host
-        call (D21: "single-threaded and synchronous underneath"), so no event
-        loop is needed here at all, unlike the real implementation's
-        ``run_until_complete`` (which exists there only because its
-        underlying engine call genuinely is async I/O).
-        """
-        pk_column = self._resolve_pk_column()
-        rows, _ = _cross(
-            f"SELECT * FROM {self._name} WHERE {self._name}.{pk_column} = $1", [pk]
-        )
-        return Row(rows[0]) if rows else None
-
-    def insert(self, **kwargs: Any) -> Any:
-        """Not implemented (sync) -- use :meth:`async_insert`."""
-        raise NotImplementedError(
-            "TableProxy.insert() (sync) is not implemented in the waddle-sdk facade "
-            "-- use async_insert()"
-        )
-
-    async def async_insert(self, **kwargs: Any) -> Any:
-        """Insert one row and return its PK value (appends ``RETURNING <pk column>``)."""
-        pk_column = self._resolve_pk_column()
-        cols = list(kwargs.keys())
-        col_list = ", ".join(cols)
-        placeholders = ", ".join(f"${i + 1}" for i in range(len(cols)))
-        sql = (
-            f"INSERT INTO {self._name} ({col_list}) VALUES ({placeholders}) "
-            f"RETURNING {pk_column}"
-        )
-        params = [kwargs[c] for c in cols]
-        rows, _ = _cross(sql, params)
-        return rows[0][pk_column] if rows else None
-
-    def bulk_insert(self, rows: list[dict[str, Any]]) -> None:
-        """Not implemented (sync) -- use :meth:`async_bulk_insert`."""
-        raise NotImplementedError(
-            "TableProxy.bulk_insert() (sync) is not implemented in the waddle-sdk facade "
-            "-- use async_bulk_insert()"
-        )
-
-    async def async_bulk_insert(self, rows: list[dict[str, Any]]) -> None:
-        """Insert multiple rows, one ``async_insert()`` call each."""
-        for row in rows:
-            await self.async_insert(**row)
-
-    def __repr__(self) -> str:
-        """Return a debug-friendly representation."""
-        return f"TableProxy({self._name})"
+    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+        """Wrap an already-materialized list of row dicts, if any."""
+        self.rows = rows or []
 
 
 class AsyncDB:
-    """``get_bundle_dal()``'s return value -- matches ``penguin_dal.db.AsyncDB``.
+    """Legacy compatibility placeholder for the component-bootstrap wiring.
 
-    ``__getattr__`` -> ``TableProxy``, ``__call__(query)`` -> ``AsyncQuerySet``,
-    plus the raw ``execute()`` escape hatch.
+    Retained only so `_component_entry.py`'s
+    ``set_bundle_dal(AsyncDB())`` and the `flask_core`-compatible
+    `get_bundle_dal()` shim keep importing and constructing successfully.
+
+    **The DAL-style, multi-table query-builder facade this class used to
+    implement is retired** (user decision: bundles use this module's
+    structured `insert`/`get`/`query`/`update`/`delete` functions directly,
+    never a `db.<table>.<column> == value` query builder lowering to raw
+    SQL -- design doc SS1 round-1 CRITICAL finding: "no bundle-supplied SQL,
+    ever"). Every attribute access past construction raises
+    `NotImplementedError` naming the structured replacement, rather than
+    silently mis-executing against a WIT `db` import that no longer has an
+    `execute` op at all.
     """
 
-    def __getattr__(self, name: str) -> TableProxy:
-        """Return a ``TableProxy`` for any non-dunder attribute name."""
+    def __getattr__(self, name: str) -> Any:
+        """Raise, naming the structured functions bundle authors should call instead."""
         if name.startswith("_"):
             raise AttributeError(name)
-        return TableProxy(name)
-
-    def __call__(self, query: Query | None = None) -> AsyncQuerySet:
-        """Return an ``AsyncQuerySet`` scoped to ``query``."""
-        table_name = query.table if query is not None else None
-        if table_name is None:
-            raise ValidationError(
-                "AsyncDB.__call__(query) requires a query built from a table's own FieldProxy"
-            )
-        return AsyncQuerySet(table_name, query)
-
-    async def execute(
-        self, statement: str, params: list[Any] | None = None
-    ) -> list[dict[str, Any]]:
-        """Run raw SQL (``$1``/``$2``/... already in ``statement``) and return the rows."""
-        rows, _ = _cross(statement, list(params) if params else [])
-        return rows
-
-    @property
-    def engine(self) -> Any:
-        """Not implemented.
-
-        Real ``penguin_dal.AsyncDB.engine`` exposes a live SQLAlchemy async
-        engine for raw connection use (``flask_core.bundle_runtime.raw_sql_rows``/
-        ``raw_sql_write`` build on exactly this). There is no live engine
-        inside the sandbox -- the WIT ``db`` import *is* the connection, one
-        parameterized statement at a time -- so this construct cannot be
-        lowered and raises explicitly (D21) rather than returning something
-        that silently mis-executes.
-        """
         raise NotImplementedError(
-            "AsyncDB.engine is not implemented in the waddle-sdk facade -- there is no "
-            "live SQLAlchemy engine inside the sandbox; use the query builder or "
-            "AsyncDB.execute() instead of a raw engine connection"
+            f"AsyncDB.{name} is retired -- call waddle_sdk.db's structured "
+            "insert()/get()/query()/update()/delete() functions directly instead "
+            "of a DAL-style table proxy (user decision: structured db ops, not raw SQL)"
         )
 
-    async def commit(self) -> None:
-        """No-op -- every statement already committed host-side, per statement."""
-        return None
-
-    async def close(self) -> None:
-        """No-op -- there is no client-held connection to close."""
-        return None
-
-
-DB = AsyncDB
-# `penguin_dal.db.DB` is the sync variant upstream; unified here for the same
-# "no client-held connection" reason `commit`/`close` are no-ops.
-
-
-class DatabaseManager:
-    """Not implemented.
-
-    Real ``penguin_dal.DatabaseManager`` opens primary/replica connections
-    from two database URLs and routes reads/writes between them -- there is
-    no database URL a WASM guest can connect to (the WIT ``db`` import is the
-    only connection, and read/write routing is a host-side, not guest-side,
-    concern). Raises explicitly on construction rather than being silently
-    unusable.
-    """
-
-    def __init__(self, write_url: str, read_url: str | None = None, **kwargs: Any) -> None:
-        """Always raise -- see class docstring."""
+    def __call__(self, *_args: Any, **_kwargs: Any) -> Any:
+        """Raise -- the old `db(query)` entry point is retired (see class docstring)."""
         raise NotImplementedError(
-            "DatabaseManager is not implemented in the waddle-sdk facade -- there is no "
-            "database URL to connect to inside the sandbox; read/write splitting is a "
-            "host-side concern"
+            "AsyncDB.__call__ (the DAL query-builder entry point) is retired -- call "
+            "waddle_sdk.db's structured insert()/get()/query()/update()/delete() "
+            "functions directly instead"
         )
-
-
-def create_dal() -> AsyncDB:
-    """Matches ``penguin_dal.factory.create_dal`` by name and return type only.
-
-    Takes no arguments, since there is no database URL to connect to inside
-    the sandbox (the WIT ``db`` import *is* the connection). See this
-    module's docstring for why this is a necessary, documented deviation.
-    """
-    return AsyncDB()

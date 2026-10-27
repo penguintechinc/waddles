@@ -31,20 +31,62 @@ pub struct AppState {
     pub metrics: Arc<prometheus::Registry>,
     pub request_metrics: RequestMetrics,
     pub started_at: Instant,
+    /// `true` once the action-stage dispatch loop
+    /// (`crate::lib::try_start_dispatch`) is connected and actively
+    /// reading -- defaults `true` (nothing to wait for) when
+    /// `ACTION_APP_ID` is unset. Backs `GET /readyz` (combined with
+    /// `connections` below: readiness is loop-running AND
+    /// executor-connected). regression: drain loop exited on NOGROUP
+    /// (alpha 2026-10-02)
+    pub consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// `true` once the multi-tenant changelog consumer
+    /// (`crate::changelog_consumer::run`) has completed its initial full
+    /// active-set read -- independent of `consumer_loop_ready` (this path
+    /// runs unconditionally alongside the legacy dispatch loop, never
+    /// mutually exclusive with it, see `try_start_changelog_consumer`'s own
+    /// doc). Defaults `false`; `try_start_changelog_consumer` flips it to
+    /// `true` immediately if `DB_READER_PASSWORD` is unset (nothing to wait
+    /// for), or once `initial_state` succeeds otherwise.
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // -- `GET /readyz` previously had no signal at all for this path (only
+    // ever checked `ACTION_APP_ID`), so the pod stayed `Ready` with no
+    // changelog consumer running after a startup decode failure.
+    pub changelog_consumer_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// Fix/executor-link-heartbeat: `/health`/`/healthz`/`/readyz` read this
+    /// directly so liveness/readiness reflect whether an executor session is
+    /// actually live, not just "the HTTP server is answering" -- the alpha
+    /// 2026-10-02 incident this exists to catch left every pod
+    /// `Running`/`Ready` while silently dead-lettering everything.
+    pub connections: Arc<crate::host_api::ConnectionRegistry>,
 }
 
 impl AppState {
-    /// Builds the shared application state from a loaded [`Config`] and the
-    /// Prometheus [`prometheus::Registry`] created during telemetry init.
-    /// Registers this service's base request metrics against `metrics` --
-    /// see [`crate::telemetry::register_request_metrics`].
-    pub fn new(config: Config, metrics: prometheus::Registry) -> Self {
+    /// Builds the shared application state from a loaded [`Config`], the
+    /// Prometheus [`prometheus::Registry`] created during telemetry init,
+    /// and the host-API [`crate::host_api::ConnectionRegistry`]. Registers
+    /// this service's base request metrics against `metrics` -- see
+    /// [`crate::telemetry::register_request_metrics`].
+    pub fn new(
+        config: Config,
+        metrics: prometheus::Registry,
+        connections: Arc<crate::host_api::ConnectionRegistry>,
+    ) -> Self {
         let request_metrics = crate::telemetry::register_request_metrics(&metrics);
+        // `changelog_consumer_ready` starts `true` (nothing to wait for)
+        // unless `DB_READER_PASSWORD` is actually configured -- matches
+        // `try_start_changelog_consumer`'s own early-return branch, which
+        // sets it `true` explicitly for the same "not configured" case.
+        let changelog_consumer_configured = config.db_reader_password.is_some();
         Self {
             config: Arc::new(config),
             metrics: Arc::new(metrics),
             request_metrics,
             started_at: Instant::now(),
+            consumer_loop_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            changelog_consumer_ready: Arc::new(std::sync::atomic::AtomicBool::new(
+                !changelog_consumer_configured,
+            )),
+            connections,
         }
     }
 }
@@ -80,6 +122,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
         .route("/healthz", get(health::healthz))
+        .route("/readyz", get(health::readyz))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(
             state,
@@ -116,7 +159,11 @@ mod tests {
             discord_bot_token: None,
             db_reader_password: None,
         };
-        AppState::new(config, prometheus::Registry::new())
+        AppState::new(
+            config,
+            prometheus::Registry::new(),
+            Arc::new(crate::host_api::ConnectionRegistry::new()),
+        )
     }
 
     /// Drives a request through the full `router()` (middleware included)
@@ -125,6 +172,12 @@ mod tests {
     /// tests for the handler-level coverage.
     #[tokio::test]
     async fn router_serves_healthz_and_records_metrics() {
+        // regression: readiness gated on executor connection deadlocked
+        // rollouts (alpha 2026-10-02) -- `/healthz` (the container-level
+        // `--healthcheck` probe target) must stay `ok` with zero executor
+        // sessions; see `http::health`'s own transition tests for the full
+        // before/after coverage. The metrics-recording assertion below
+        // holds regardless of status code.
         let state = test_state();
         let response = router(state.clone())
             .oneshot(

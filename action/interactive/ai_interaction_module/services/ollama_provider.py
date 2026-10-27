@@ -11,8 +11,11 @@ import logging
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 
+from flask_core.ai_guard import redact_pii, sanitize_model_output
+from flask_core.ai_tool_authz import ToolCallDenied, reject_unsolicited_tool_calls
+
 from config import Config
-from .prompt_safety import UNTRUSTED_DATA_NOTICE, wrap_untrusted
+from .prompt_safety import UNTRUSTED_DATA_NOTICE, safe_label, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,9 @@ class OllamaProvider:
     timeout: int = field(default_factory=lambda: Config.OLLAMA_TIMEOUT)
     cert_path: str = field(default_factory=lambda: Config.OLLAMA_CERT_PATH)
     verify_ssl: bool = field(default_factory=lambda: Config.OLLAMA_VERIFY_SSL)
+    disable_thinking: bool = field(
+        default_factory=lambda: Config.OLLAMA_DISABLE_THINKING
+    )
     base_url: str = field(init=False)
     ssl_context: Optional[ssl.SSLContext] = field(init=False, default=None)
 
@@ -151,18 +157,30 @@ class OllamaProvider:
             messages = self._build_messages(
                 message_content, message_type, user_id, platform, context
             )
+            if Config.AI_REDACT_PII_SELF_HOSTED:
+                # Opt-in egress hygiene for the self-hosted tier (the WaddleAI
+                # provider, which leaves our infrastructure, always redacts).
+                messages = [
+                    {**m, "content": redact_pii(m["content"])} for m in messages
+                ]
 
             # Build request payload (Ollama's /api/chat message API, not
             # /api/generate's single-string prompt)
             payload = {
                 "model": self.model,
                 "messages": messages,
-                "temperature": self.temperature,
+                # temperature belongs under `options`; a top-level key is
+                # silently ignored by Ollama (the model ran at its default).
                 "options": {
+                    "temperature": self.temperature,
                     "num_predict": self.max_tokens
                 },
                 "stream": False  # Get complete response
             }
+            if self.disable_thinking:
+                # Reasoning models (e.g. gemma4) otherwise burn num_predict on
+                # hidden thinking and return an empty `content`.
+                payload["think"] = False
 
             # Make async request
             verify_param = (  # noqa: E501
@@ -177,10 +195,29 @@ class OllamaProvider:
 
                 if response.status_code == 200:
                     data = response.json()
+                    # This surface never offers tools: a tool call in the answer
+                    # is a hijacked/misbehaving model -- refuse it loudly (the
+                    # ToolCallDenied propagates; AIService logs + meters it and
+                    # serves its canned reply, never the model's output).
+                    reject_unsolicited_tool_calls(
+                        data, provider="ollama", surface="chat_reply"
+                    )
                     generated_text = data.get('message', {}).get('content', '')
 
                     # Clean and validate response
                     cleaned_response = self._clean_response(generated_text)
+
+                    if not cleaned_response:
+                        # Never hand the caller a blank "success": surface why,
+                        # so AIService's canned fallback is a logged decision.
+                        logger.error(
+                            f"Ollama returned an empty completion "
+                            f"(model={self.model}, "
+                            f"done_reason={data.get('done_reason')!r}, "
+                            f"thinking_present="
+                            f"{bool(data.get('message', {}).get('thinking'))})"
+                        )
+                        return None
 
                     logger.info(  # noqa: E501
                         f"Ollama generated response: {len(cleaned_response)} "
@@ -196,6 +233,8 @@ class OllamaProvider:
                     )
                     return None
 
+        except ToolCallDenied:
+            raise
         except httpx.TimeoutException:
             logger.error(f"Ollama request timed out after {self.timeout}s")
             return None
@@ -287,7 +326,7 @@ class OllamaProvider:
         # Build context-aware system prompt (instructions only -- no
         # untrusted content lives in this message)
         system_parts = [Config.SYSTEM_PROMPT]
-        system_parts.append(f"\nPlatform: {platform}")
+        system_parts.append(f"\nPlatform: {safe_label(platform)}")
 
         # Add trigger-specific context
         match trigger_type:
@@ -394,13 +433,14 @@ class OllamaProvider:
 
             case _:
                 event_desc = (  # noqa: E501
-                    f"User {safe_user_id} triggered a {message_type} event!"
+                    f"User {safe_user_id} triggered a "
+                    f"{safe_label(message_type)} event!"
                 )
                 instruction = "Generate an appropriate response."
 
         system_content = (
             f"{Config.SYSTEM_PROMPT}\n\n"
-            f"Platform: {platform}\n\n"
+            f"Platform: {safe_label(platform)}\n\n"
             f"{instruction}\n"
             "Keep it short, enthusiastic, and under 150 characters:\n\n"
             f"{UNTRUSTED_DATA_NOTICE}"
@@ -424,8 +464,10 @@ class OllamaProvider:
         if not response:
             return ""
 
-        # Strip whitespace
-        cleaned = response.strip()
+        # Neutralise exfiltration channels in the reply itself (remote-image
+        # beacons, active HTML, @everyone/@here and role pings, invisible
+        # smuggling characters) before it is posted to a chat platform.
+        cleaned = sanitize_model_output(response).strip()
 
         # Remove any leaked system prompts
         if cleaned.lower().startswith("you are"):

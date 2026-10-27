@@ -45,17 +45,75 @@ pub struct CliConfig {
     #[arg(long, env = "EXECUTOR_MAX_MEMORY_LIMIT_MB", default_value_t = 256)]
     pub executor_max_memory_limit_mb: u32,
 
-    /// Pre-instantiated stores kept warm per loaded bundle (spec SS7.2).
+    /// Max concurrent in-flight instances (invocations) PER loaded bundle
+    /// digest (spec SS7.2) -- enforced by a per-bundle semaphore in
+    /// `crate::invoke::Executor`. Each call still gets a FRESH `Store` (no
+    /// guest state is shared across invokes, so a digest shared by several
+    /// tenants can never leak data between them); what is reused is the
+    /// pre-linked `InstancePre`, so per-call work is instantiation only.
     #[arg(long, env = "EXECUTOR_INSTANCES_PER_BUNDLE", default_value_t = 4)]
     pub executor_instances_per_bundle: u32,
 
+    /// Wasmtime fuel budget armed on every `process-stage.transform` call
+    /// (connector spec docs/superpowers/specs/2026-09-28-connector-bundles.md
+    /// SS0 condition 4: "the existing epoch deadline (PR #406) plus fuel per
+    /// `on-frame` invocation"). `transform` is this executor's hot,
+    /// per-event path -- the `stage` world's analogue of the connector
+    /// world's not-yet-implemented `receiver.on-frame` -- so it gets its own
+    /// budget, distinct from `dispatch`'s. A guest instruction executes
+    /// roughly one unit of fuel per operation (wasmtime's own accounting,
+    /// not wall-clock), so this is a CPU-work bound complementing (never
+    /// replacing) the epoch wall-clock deadline: a tight loop that never
+    /// yields can burn this budget well before an epoch tick fires.
+    #[arg(
+        long,
+        env = "EXECUTOR_FUEL_LIMIT_TRANSFORM",
+        default_value_t = 500_000_000
+    )]
+    pub executor_fuel_limit_transform: u64,
+
+    /// Same as [`Self::executor_fuel_limit_transform`], armed instead for
+    /// `action-stage.dispatch` calls -- kept as its own knob since a sender
+    /// bundle's outbound-shaping work has a different realistic cost profile
+    /// than a receiver-side transform.
+    #[arg(
+        long,
+        env = "EXECUTOR_FUEL_LIMIT_DISPATCH",
+        default_value_t = 500_000_000
+    )]
+    pub executor_fuel_limit_dispatch: u64,
+
+    /// Wasmtime fuel budget armed on every connector-world export call
+    /// (`receiver.on-connect`/`on-frame`/`on-heartbeat-due`/`on-disconnect`,
+    /// connector spec SS3.5 "`on-frame` fuel (Gemini condition 4)"). An
+    /// instruction-count bound independent of, and in addition to, the epoch
+    /// deadline; whichever trips first aborts the call into a typed
+    /// `crate::connector::ConnectorCallError`. Per-platform tuning is
+    /// expected; this is the global default.
+    #[arg(
+        long,
+        env = "EXECUTOR_CONNECTOR_FUEL_LIMIT",
+        default_value_t = 50_000_000
+    )]
+    pub executor_connector_fuel_limit: u64,
+
+    /// Concurrent in-flight calls per always-pinned connector bundle (connector
+    /// spec SS2.3: "sized to the replica's executor worker-thread count").
+    /// A call beyond this waits `EXECUTOR_POOL_WAIT_MS`, then fails
+    /// `pool_exhausted` rather than queueing unboundedly.
+    #[arg(long, env = "EXECUTOR_CONNECTOR_POOL_SIZE", default_value_t = 8)]
+    pub executor_connector_pool_size: u32,
+
     /// Global ceiling on in-flight calls across all loaded bundles (spec
-    /// SS7.2).
+    /// SS7.2) -- enforced by a process-wide semaphore; also the size of the
+    /// slice of the tokio blocking pool guest execution may occupy.
     #[arg(long, env = "EXECUTOR_MAX_CONCURRENT_CALLS", default_value_t = 32)]
     pub executor_max_concurrent_calls: u32,
 
-    /// How long a call waits for a free pooled instance before failing
-    /// `pool_exhausted` (spec SS7.2).
+    /// How long a call waits for a free per-bundle instance slot AND a
+    /// global call slot before failing `pool_exhausted` (spec SS7.2),
+    /// reported as an `EXECUTOR_DEADLINE` error with detail
+    /// `pool_exhausted`.
     #[arg(long, env = "EXECUTOR_POOL_WAIT_MS", default_value_t = 500)]
     pub executor_pool_wait_ms: u64,
 
@@ -163,6 +221,81 @@ pub struct CliConfig {
     /// unbounded misconfiguration- or compromise-controlled data.
     #[arg(long, env = "BUNDLE_MAX_COMPONENT_BYTES", default_value_t = 33_554_432)]
     pub bundle_max_component_bytes: u64,
+
+    /// JSON object mapping `key_id -> base64(32-byte Ed25519 public key)`
+    /// (spec SS5.6/Gemini condition 9) -- the platform key(s)
+    /// `crate::signing::verify_artifact_signature` checks a bundle's
+    /// signed sidecar against, supporting rotation via multiple entries.
+    /// `Option` (rather than required) for the same reason
+    /// `bundle_bucket_endpoint` is: every existing test's `CliConfig`
+    /// fixture keeps parsing without setting it, and `crate::invoke::
+    /// Executor::new` treats an unset/blank value as "verification off"
+    /// (`crate::signing::PlatformPublicKeys::from_cli`) -- but the real
+    /// production path (`crate::lib::run`, via `PlatformPublicKeys::
+    /// from_cli_required`) fails closed at startup if it's unset, so that
+    /// "off" state is never reachable outside a test that never claimed
+    /// to enforce signatures in the first place.
+    #[arg(long, env = "BUNDLE_SIGNING_PUBLIC_KEYS")]
+    pub bundle_signing_public_keys: Option<String>,
+
+    /// Interval between `crate::heartbeat`'s liveness checks (and, when
+    /// `EXECUTOR_SELF_PING_ENABLED` is set, this executor's own `ping`
+    /// frames). A connection is declared stale after
+    /// `heartbeat::STALE_INTERVAL_MULTIPLIER` silent intervals.
+    #[arg(long, env = "EXECUTOR_HEARTBEAT_INTERVAL_SECS", default_value_t = 5)]
+    pub executor_heartbeat_interval_secs: u64,
+
+    /// Kill switch for the whole stale-session monitor (`crate::heartbeat`),
+    /// in case it ever needs rolling back independently of a redeploy.
+    /// Default on -- this is the fix for the silent-half-open-connection
+    /// incident this PR exists to close.
+    #[arg(long, env = "EXECUTOR_HEARTBEAT_ENABLED", default_value_t = true)]
+    pub executor_heartbeat_enabled: bool,
+
+    /// Whether this executor ALSO sends its own `ping` to the stage on the
+    /// heartbeat interval, rather than only reacting to frames the stage
+    /// sends. Defaults to **false**: today's svc-process/svc-action
+    /// host-API read loop treats an unsolicited `ping` FROM the executor as
+    /// a fatal/unexpected frame and closes the connection -- flipping this
+    /// on before the companion fix (`fix/executor-link-heartbeat`, svc
+    /// side) lands would kill every healthy connection on its first
+    /// self-initiated heartbeat. Set to `true` once that PR is deployed.
+    #[arg(long, env = "EXECUTOR_SELF_PING_ENABLED", default_value_t = false)]
+    pub executor_self_ping_enabled: bool,
+
+    /// Where `crate::probe` atomically writes a timestamp whenever the
+    /// host-API session is healthy, and `--healthcheck=session` reads it
+    /// back from (spec: this process has no HTTP surface, so Kubernetes'
+    /// liveness/readiness probes exec this binary instead of hitting a
+    /// port).
+    #[arg(
+        long,
+        env = "EXECUTOR_PROBE_FILE",
+        default_value = "/tmp/executor-live"
+    )]
+    pub executor_probe_file: PathBuf,
+
+    /// `--healthcheck=session`'s default max age for the probe file (and
+    /// the startup-grace window before a still-missing file is treated as
+    /// a failure) when `--max-age` is not passed explicitly.
+    #[arg(long, env = "EXECUTOR_GRACE_SECONDS", default_value_t = 60)]
+    pub executor_grace_secs: u64,
+
+    /// Ceiling on concurrent WASM JIT compiles (`Component::new`). Each
+    /// compile runs on a tokio blocking-pool thread (never the async
+    /// reactor) and holds one of these permits for its duration, so a burst
+    /// of cold digests from many tenants queues instead of saturating every
+    /// core. Compiles are CPU-heavy (~3-4s for a large component, spec
+    /// SS7.2), hence the small default.
+    #[arg(long, env = "EXECUTOR_MAX_CONCURRENT_COMPILES", default_value_t = 2)]
+    pub executor_max_concurrent_compiles: u32,
+
+    /// On SIGTERM/SIGINT: how long to wait for in-flight invokes/compiles to
+    /// drain before exiting 0 anyway. Keep below the pod's
+    /// `terminationGracePeriodSeconds` (Kubernetes default 30s) so a rollout
+    /// never falls through to SIGKILL.
+    #[arg(long, env = "EXECUTOR_SHUTDOWN_DRAIN_SECONDS", default_value_t = 25)]
+    pub executor_shutdown_drain_secs: u64,
 }
 
 impl CliConfig {
@@ -180,6 +313,10 @@ impl CliConfig {
             executor_memory_limit_mb: 64,
             executor_max_memory_limit_mb: 256,
             executor_instances_per_bundle: 4,
+            executor_fuel_limit_transform: 500_000_000,
+            executor_fuel_limit_dispatch: 500_000_000,
+            executor_connector_fuel_limit: 50_000_000,
+            executor_connector_pool_size: 8,
             executor_max_concurrent_calls: 32,
             executor_pool_wait_ms: 500,
             executor_precompile_dir: PathBuf::from("/var/cache/waddles/wasm"),
@@ -197,6 +334,14 @@ impl CliConfig {
             bundle_bucket_ca_file: None,
             bundle_fetch_timeout_s: 30,
             bundle_max_component_bytes: 33_554_432,
+            bundle_signing_public_keys: None,
+            executor_heartbeat_interval_secs: 5,
+            executor_heartbeat_enabled: true,
+            executor_self_ping_enabled: false,
+            executor_probe_file: PathBuf::from("/tmp/executor-live"),
+            executor_grace_secs: 60,
+            executor_max_concurrent_compiles: 2,
+            executor_shutdown_drain_secs: 25,
         }
     }
 
@@ -221,6 +366,38 @@ impl CliConfig {
             return Err(ExecutorError::Config(format!(
                 "EXECUTOR_MEMORY_LIMIT_MB ({}) must be > 0 and <= EXECUTOR_MAX_MEMORY_LIMIT_MB ({})",
                 self.executor_memory_limit_mb, self.executor_max_memory_limit_mb
+            )));
+        }
+        if self.executor_fuel_limit_transform == 0 {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_FUEL_LIMIT_TRANSFORM must be > 0".to_string(),
+            ));
+        }
+        if self.executor_fuel_limit_dispatch == 0 {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_FUEL_LIMIT_DISPATCH must be > 0".to_string(),
+            ));
+        }
+        if self.executor_connector_fuel_limit == 0 {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_CONNECTOR_FUEL_LIMIT must be > 0".to_string(),
+            ));
+        }
+        if self.executor_connector_pool_size == 0 {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_CONNECTOR_POOL_SIZE must be > 0".to_string(),
+            ));
+        }
+        if self.executor_instances_per_bundle == 0
+            || self.executor_max_concurrent_calls == 0
+            || self.executor_max_concurrent_compiles == 0
+        {
+            return Err(ExecutorError::Config(format!(
+                "EXECUTOR_INSTANCES_PER_BUNDLE ({}), EXECUTOR_MAX_CONCURRENT_CALLS ({}) and \
+                 EXECUTOR_MAX_CONCURRENT_COMPILES ({}) must all be >= 1",
+                self.executor_instances_per_bundle,
+                self.executor_max_concurrent_calls,
+                self.executor_max_concurrent_compiles
             )));
         }
         if self.executor_wasm_collector != "drc" {
@@ -294,6 +471,7 @@ mod tests {
         assert_eq!(cfg.bundle_bucket_region, "us-east-1");
         assert_eq!(cfg.bundle_fetch_timeout_s, 30);
         assert_eq!(cfg.bundle_max_component_bytes, 33_554_432);
+        assert!(cfg.bundle_signing_public_keys.is_none());
         Ok(())
     }
 
@@ -309,6 +487,20 @@ mod tests {
         assert!(cfg.bundle_bucket_secret_access_key.is_none());
         assert!(cfg.bundle_bucket_ca_file.is_none());
         assert_eq!(cfg.bundle_bucket_region, "us-east-1");
+        assert!(cfg.bundle_signing_public_keys.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_signing_public_keys_parses_from_its_env_flag(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut args = base_args();
+        args.extend_from_slice(&["--bundle-signing-public-keys", r#"{"k1":"AAAA"}"#]);
+        let cfg = CliConfig::try_parse_from(args)?;
+        assert_eq!(
+            cfg.bundle_signing_public_keys.as_deref(),
+            Some(r#"{"k1":"AAAA"}"#)
+        );
         Ok(())
     }
 
@@ -354,6 +546,32 @@ mod tests {
         args.extend_from_slice(&["--executor-memory-limit-mb", "512"]);
         let cfg = CliConfig::try_parse_from(args)?;
         assert!(matches!(cfg.validate(), Err(ExecutorError::Config(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn zero_concurrency_knobs_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        for flag in [
+            "--executor-instances-per-bundle",
+            "--executor-max-concurrent-calls",
+            "--executor-max-concurrent-compiles",
+        ] {
+            let mut a = base_args();
+            a.extend([flag, "0"]);
+            let cfg = CliConfig::try_parse_from(a)?;
+            assert!(
+                matches!(cfg.validate(), Err(ExecutorError::Config(_))),
+                "{flag}=0 must be rejected"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrency_and_drain_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = CliConfig::try_parse_from(base_args())?;
+        assert_eq!(cfg.executor_max_concurrent_compiles, 2);
+        assert_eq!(cfg.executor_shutdown_drain_secs, 25);
         Ok(())
     }
 

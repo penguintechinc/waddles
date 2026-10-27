@@ -15,7 +15,7 @@ pyjwt>=2.13.0,<3.0.0
 
 # M1 Core Identity/Auth group (bcrypt, httpx come transitively via flask_core):
 webauthn>=3.0.0,<4.0.0  # passkey_service.py -- WebAuthn/FIDO2 registration+auth
-boto3>=1.35.0,<2.0.0  # storage_service.py -- S3/MinIO avatar storage only, no local-disk fallback
+boto3>=1.35.0,<2.0.0  # storage_service.py -- S3-compatible avatar storage only, no local-disk fallback
 # Async HTTP client -- blueprints/v1/event.py's EventCalendarProxyClient
 # forwards to the calendar-interaction service; pin matches
 # action/interactive/calendar_interaction_module/requirements.in's own
@@ -45,6 +45,16 @@ httpx>=0.27.0,<0.28.0
 # floor was raised.
 cryptography>=44.0.1,<51.0.0
 
+# feature/hub-api-internal-grpc: grpc.aio server for svc-ingest/svc-process/
+# svc-action's internal PII+key RPCs (proto/waddles/hub/internal/v1/*.proto,
+# hub_api/grpc_internal/). Already a transitive flask_core dependency
+# (libs/flask_core/requirements.in pins grpcio>=1.83.0,<1.84.0); pinned
+# directly here too now that hub_api's own app code (grpc_internal/)
+# imports it, not just flask_core's, matching this file's own header
+# convention for httpx/redis/cryptography above.
+grpcio>=1.83.0,<1.84.0
+opentelemetry-instrumentation-grpc==0.66b1
+
 # M2b workstreams/usage-metering group (spec Sec5.11/Sec5.12, D30/D31):
 # penguin-dal (R52 coordinator ruling, "we aren't using pydal anymore for
 # new tables... instead we are running penguin-dal") is the runtime
@@ -67,3 +77,18 @@ redis==8.1.0
 # (spec D28's normative role x table x privilege matrix, migrations
 # 0020-0021 render GRANT/REVOKE SQL from it).
 PyYAML>=6.0.2,<7.0.0
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- bootstrap.py (hub-api's
+# own startup schema check: create_all+stamp on fresh install, Alembic
+# current-vs-heads comparison otherwise) imports alembic directly, not just
+# transitively via flask_core. Pinned to the exact same resolved version
+# flask_core's own requirements.txt already locks (1.19.1) so the image
+# never carries two different alembic versions.
+alembic==1.19.1
+# Enterprise SSO (migration 0049, services/sso_saml.py) -- SAML 2.0 XML-DSig verification.
+# signxml is pure Python on top of lxml + cryptography (no native libxmlsec1), returns the
+# *signed* element so trust decisions can follow the "see what is signed" rule, and enforces
+# an algorithm allow-list. lxml arrives transitively and is never imported directly: the repo
+# forbids lxml imports (tests/unit/test_no_unsafe_xml.py), so untrusted XML is parsed with
+# defusedxml and only signxml touches lxml.
+signxml>=5.1.0,<6.0.0
+defusedxml>=0.7.1,<0.8.0

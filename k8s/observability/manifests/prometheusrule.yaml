@@ -1,0 +1,519 @@
+# GENERATED from alerts/waddles-slo.rules.yml by scripts/obs_tool.py - do not edit.
+# Regenerate: make -C k8s/observability render-rules
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: waddles-slo
+  namespace: waddlebot
+  labels:
+    app.kubernetes.io/name: waddlebot
+    app.kubernetes.io/part-of: waddles
+    app.kubernetes.io/component: observability
+spec:
+  groups:
+  - name: waddles.recording
+    interval: 30s
+    rules:
+    - record: waddles:http_requests:rate5m
+      expr: sum(rate(svc_ingest_http_requests_total[5m]))
+      labels:
+        service: svc-ingest
+    - record: waddles:http_requests:rate5m
+      expr: sum(rate(svc_process_http_requests_total[5m]))
+      labels:
+        service: svc-process
+    - record: waddles:http_requests:rate5m
+      expr: sum(rate(svc_action_http_requests_total[5m]))
+      labels:
+        service: svc-action
+    - record: waddles:http_requests:rate5m
+      expr: sum(rate(svc_presentation_http_requests_total[5m]))
+      labels:
+        service: svc-presentation
+    - record: waddles:http_requests:rate5m
+      expr: sum(rate(svc_streaming_http_requests_total[5m]))
+      labels:
+        service: svc-streaming
+    - record: waddles:http_error_ratio:rate5m
+      expr: sum(rate(svc_ingest_http_requests_total{status=~"5.."}[5m])) / sum(rate(svc_ingest_http_requests_total[5m]))
+      labels:
+        service: svc-ingest
+    - record: waddles:http_error_ratio:rate5m
+      expr: sum(rate(svc_process_http_requests_total{status=~"5.."}[5m])) / sum(rate(svc_process_http_requests_total[5m]))
+      labels:
+        service: svc-process
+    - record: waddles:http_error_ratio:rate5m
+      expr: sum(rate(svc_action_http_requests_total{status=~"5.."}[5m])) / sum(rate(svc_action_http_requests_total[5m]))
+      labels:
+        service: svc-action
+    - record: waddles:http_error_ratio:rate5m
+      expr: sum(rate(svc_presentation_http_requests_total{status=~"5.."}[5m])) / sum(rate(svc_presentation_http_requests_total[5m]))
+      labels:
+        service: svc-presentation
+    - record: waddles:http_error_ratio:rate5m
+      expr: sum(rate(svc_streaming_http_requests_total{status=~"5.."}[5m])) / sum(rate(svc_streaming_http_requests_total[5m]))
+      labels:
+        service: svc-streaming
+    - record: waddles:http_request_duration_seconds:p99_5m
+      expr: histogram_quantile(0.99, sum by (le) (rate(svc_ingest_http_request_duration_seconds_bucket[5m])))
+      labels:
+        service: svc-ingest
+    - record: waddles:http_request_duration_seconds:p99_5m
+      expr: histogram_quantile(0.99, sum by (le) (rate(svc_process_http_request_duration_seconds_bucket[5m])))
+      labels:
+        service: svc-process
+    - record: waddles:http_request_duration_seconds:p99_5m
+      expr: histogram_quantile(0.99, sum by (le) (rate(svc_action_http_request_duration_seconds_bucket[5m])))
+      labels:
+        service: svc-action
+    - record: waddles:http_request_duration_seconds:p99_5m
+      expr: histogram_quantile(0.99, sum by (le) (rate(svc_presentation_http_request_duration_seconds_bucket[5m])))
+      labels:
+        service: svc-presentation
+    - record: waddles:http_request_duration_seconds:p99_5m
+      expr: histogram_quantile(0.99, sum by (le) (rate(svc_streaming_http_request_duration_seconds_bucket[5m])))
+      labels:
+        service: svc-streaming
+    - record: waddles:grpc_internal_error_ratio:rate5m
+      expr: sum(rate(grpc_server_request_duration_seconds_count{rpc_grpc_status_code=~"INTERNAL|UNKNOWN|UNAVAILABLE|DEADLINE_EXCEEDED|DATA_LOSS"}[5m])) / sum(rate(grpc_server_request_duration_seconds_count[5m]))
+    - record: waddles:grpc_internal_slow_ratio:rate5m
+      expr: 1 - sum(rate(grpc_server_request_duration_seconds_bucket{le="5"}[5m])) / sum(rate(grpc_server_request_duration_seconds_count[5m]))
+    - record: waddles:bundle_capability_denials:rate5m
+      expr: (sum(rate(waddles_bundle_kv_authorize_denied_total[5m])) or vector(0)) + (sum(rate(waddles_bundle_tables_authorize_denied_total[5m])) or vector(0)) + (sum(rate(waddles_bundle_quota_denied_total[5m])) or vector(0)) + (sum(rate(waddles_bundle_kv_quota_rejections_total[5m])) or vector(0)) + (sum(rate(svc_process_egress_denied_total[5m])) or vector(0)) + (sum(rate(svc_action_egress_denied_total[5m])) or vector(0)) + (sum(rate(waddles_bundle_capability_denied_total[5m])) or vector(0))
+  - name: waddles.slo.http
+    rules:
+    - alert: WaddlesHttpHighErrorRate
+      expr: waddles:http_error_ratio:rate5m > 0.05 and waddles:http_requests:rate5m > 0.05
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: '{{ $labels.service }} 5xx ratio above 5%'
+        description: '{{ $labels.service }} has answered {{ $value | humanizePercentage }} of requests with 5xx over 5m (10m sustained).'
+    - alert: WaddlesHttpErrorRateCritical
+      expr: waddles:http_error_ratio:rate5m > 0.20 and waddles:http_requests:rate5m > 0.05
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: '{{ $labels.service }} 5xx ratio above 20%'
+        description: '{{ $labels.service }} is failing {{ $value | humanizePercentage }} of requests over 5m.'
+    - alert: WaddlesHttpLatencyP99High
+      expr: waddles:http_request_duration_seconds:p99_5m > 1 and waddles:http_requests:rate5m > 0.05
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: '{{ $labels.service }} p99 request latency above 1s'
+        description: '{{ $labels.service }} p99 is {{ $value | humanizeDuration }} over 5m (10m sustained).'
+    - alert: WaddlesHttpLatencyP99Critical
+      expr: waddles:http_request_duration_seconds:p99_5m > 5 and waddles:http_requests:rate5m > 0.05
+      for: 10m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: '{{ $labels.service }} p99 request latency above 5s'
+        description: '{{ $labels.service }} p99 is {{ $value | humanizeDuration }} over 5m.'
+  - name: waddles.slo.hub-api
+    rules:
+    - alert: WaddlesHubApiGrpcErrorRate
+      expr: waddles:grpc_internal_error_ratio:rate5m > 0.05
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: hub-api internal gRPC server-error ratio above 5%
+        description: '{{ $value | humanizePercentage }} of internal gRPC calls ended INTERNAL/UNKNOWN/UNAVAILABLE/DEADLINE_EXCEEDED/DATA_LOSS over 5m. The data plane depends on these RPCs for PII and key resolution.'
+    - alert: WaddlesHubApiGrpcSlowCalls
+      expr: waddles:grpc_internal_slow_ratio:rate5m > 0.01
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: More than 1% of hub-api internal gRPC calls take over 5s
+        description: '{{ $value | humanizePercentage }} of internal gRPC calls exceeded 5s over 5m. Share-based on purpose: the OTel default bucket layout makes seconds-histogram quantiles coarse.'
+    - alert: WaddlesActiveSetWatermarkStalled
+      expr: time() - max(waddles_bundle_active_set_watermark_computed_at_epoch_seconds) > 120
+      for: 2m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: bundle active-set safe_seq watermark has not advanced
+        description: No successful safe_seq computation for {{ $value | humanizeDuration }} (job SAFE_SEQ_STALL_ALERT default 30s + one OTLP export interval). svc-process/svc-action stop picking up bundle changes.
+    - alert: WaddlesActiveSetWatermarkTickFailures
+      expr: increase(waddles_bundle_active_set_watermark_tick_failures_total[15m]) > 0
+      for: 15m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: active-set watermark ticks are failing
+        description: The watermark job has failed ticks continuously for 15m (database error most likely).
+  - name: waddles.slo.data-plane
+    rules:
+    - alert: WaddlesIngestPublishFailing
+      expr: sum(rate(svc_ingest_publish_errors_total[5m])) / (sum(rate(svc_ingest_events_published_total[5m])) + sum(rate(svc_ingest_publish_errors_total[5m]))) > 0.02
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: svc-ingest spine publish failure ratio above 2%
+        description: '{{ $value | humanizePercentage }} of platform events failed to publish onto the spine (Valkey) over 5m.'
+    - alert: WaddlesIngestReceiverUnhealthy
+      expr: svc_ingest_receiver_connection_healthy == 0
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: svc-ingest {{ $labels.platform }} receiver stopped after a fatal close
+        description: A non-retryable close ended the {{ $labels.platform }} reconnect loop on {{ $labels.instance }}; the process stays up but ingests nothing from that platform.
+    - alert: WaddlesIngestEventSubRejections
+      expr: sum(rate(svc_ingest_eventsub_verifications_total{outcome!="ok"}[5m])) / sum(rate(svc_ingest_eventsub_verifications_total[5m])) > 0.2
+      for: 15m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: More than 20% of Twitch EventSub deliveries are rejected
+        description: '{{ $value | humanizePercentage }} of EventSub webhooks failed verification (bad_signature / replay / missing header ...). Either a rotated secret or an active probe.'
+    - alert: WaddlesIngestEventSubLatencyHigh
+      expr: histogram_quantile(0.99, sum by (le) (rate(svc_ingest_eventsub_request_duration_seconds_bucket[5m]))) > 1
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: EventSub webhook handler p99 above 1s
+        description: p99 is {{ $value | humanizeDuration }}; Twitch retries and eventually revokes subscriptions that answer slower than 10s.
+    - alert: WaddlesConsumerLoopDown
+      expr: svc_ingest_consumer_loop_running == 0 or svc_process_consumer_loop_running == 0 or svc_action_consumer_loop_running == 0
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: A spine consumer loop is down or stuck reconnecting
+        description: '{{ $labels.job }} loop/receiver {{ $labels.loop }}{{ $labels.receiver }} reports consumer_loop_running=0 for 5m (Valkey unreachable or group missing).'
+    - alert: WaddlesSpineReconnectLoop
+      expr: sum by (job) (increase(svc_ingest_spine_connect_attempts_total[15m])) > 5 or sum by (job) (increase(svc_process_spine_connect_attempts_total[15m])) > 5 or sum by (job) (increase(svc_action_spine_connect_attempts_total[15m])) > 5
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: '{{ $labels.job }} keeps retrying its spine (Valkey) connection'
+        description: More than 5 connect attempts in 15m, sustained for 10m.
+    - alert: WaddlesChangelogLagHigh
+      expr: svc_process_changelog_lag > 500 or svc_action_changelog_lag > 500
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: '{{ $labels.job }} trails the bundle change log by over 500 entries'
+        description: safe_seq - last_seq is {{ $value }} on {{ $labels.instance }} for 10m; bundle changes are not being applied promptly.
+    - alert: WaddlesChangelogGapDetected
+      expr: increase(svc_process_changelog_gap_detected_total[30m]) > 0 or increase(svc_action_changelog_gap_detected_total[30m]) > 0 or increase(svc_process_changelog_retention_exceeded_total[30m]) > 0 or increase(svc_action_changelog_retention_exceeded_total[30m]) > 0
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: '{{ $labels.job }} lost change-log entries and forced a full reconcile'
+        description: A change-log gap or retention overrun was detected in the last 30m (consumer fell behind the retention window).
+    - alert: WaddlesExecutorDisconnected
+      expr: host_api_connected_executors == 0
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: '{{ $labels.job }} has no bundle-executor session'
+        description: Every dispatch from {{ $labels.instance }} is dead-lettering until an executor reconnects.
+    - alert: WaddlesExecutorHeartbeatTimeouts
+      expr: increase(host_api_heartbeat_timeouts_total[15m]) > 0
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: '{{ $labels.job }} dropped an executor session after missed heartbeats'
+        description: '{{ $value }} heartbeat-timeout drops in 15m on {{ $labels.instance }}.'
+    - alert: WaddlesDispatchDeadLettered
+      expr: increase(dispatch_dead_lettered_no_executor_total[10m]) > 0
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: '{{ $labels.job }} dead-lettered dispatches because no executor was connected'
+        description: '{{ $value }} dispatch entries dead-lettered in 10m on {{ $labels.instance }}.'
+    - alert: WaddlesBundleLoadFailures
+      expr: increase(svc_process_bundle_loads_total{result="failure"}[15m]) > 0 or increase(svc_action_bundle_loads_total{result="failure"}[15m]) > 0
+      for: 5m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: '{{ $labels.job }} failed to load one or more bundles on the executor'
+        description: '{{ $value }} failed bundle loads in 15m on {{ $labels.instance }}.'
+  - name: waddles.slo.capability-gate
+    rules:
+    - alert: WaddlesCapabilityDenialSpike
+      expr: waddles:bundle_capability_denials:rate5m > 0.2 and waddles:bundle_capability_denials:rate5m > 5 * (avg_over_time(waddles:bundle_capability_denials:rate5m[1h] offset 10m) or vector(0))
+      for: 5m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: Bundle capability / quota / egress denials spiked
+        description: '{{ $value | printf "%.2f" }} denials/s over 5m, more than 5x the previous hour. See the ''bundle executor and capability gate'' dashboard for app_id / permission.'
+    - alert: WaddlesKvMaxmemoryPolicyViolation
+      expr: increase(waddles_bundle_kv_maxmemory_policy_violation_total[1h]) > 0
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: Valkey maxmemory-policy is an allkeys-* eviction policy
+        description: storage.kv count keys can be evicted, silently resetting bundle quotas. Set the policy to noeviction or a volatile-* variant.
+  - name: waddles.slo.dependencies
+    rules:
+    - alert: WaddlesBundleDbBackendErrors
+      expr: sum(rate(waddles_bundle_tables_calls_total{result=~"backend|timeout"}[5m])) / sum(rate(waddles_bundle_tables_calls_total[5m])) > 0.05
+      for: 10m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: 'Bundle db capability: backend / timeout errors above 5%'
+        description: '{{ $value | humanizePercentage }} of storage.tables calls failed at the database (connection failure or timeout) over 5m.'
+    - alert: WaddlesBundleKvBackendErrors
+      expr: sum(rate(waddles_bundle_kv_op_errors_total{kind="backend"}[5m])) / sum(rate(waddles_bundle_kv_op_duration_seconds_count[5m])) > 0.05
+      for: 10m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: 'Bundle kv capability: backend errors above 5%'
+        description: '{{ $value | humanizePercentage }} of storage.kv ops failed at Valkey over 5m.'
+    - alert: WaddlesChangelogScopeReadFailures
+      expr: increase(svc_process_changelog_scope_failures_total{reason="read_failed"}[10m]) > 0 or increase(svc_action_changelog_scope_failures_total{reason="read_failed"}[10m]) > 0
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: '{{ $labels.job }} cannot read the active set from the database'
+        description: Per-scope read_failed errors for 10m on {{ $labels.instance }} - database connectivity or permissions.
+    - alert: WaddlesStreamingNoDatabase
+      expr: increase(stream_session_failures_total{reason="no_database"}[10m]) > 0
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: svc-streaming accepted ingest sessions it could not start - no database
+        description: '{{ $value }} sessions failed with reason=no_database in 10m (requires the stream latency instruments from PR #758).'
+    - alert: WaddlesPostgresDown
+      expr: pg_up == 0
+      for: 2m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: postgres_exporter cannot reach PostgreSQL
+        description: pg_up is 0 for {{ $labels.instance }}.
+  - name: waddles.slo.streaming
+    rules:
+    - alert: WaddlesStreamingFanoutLatencyHigh
+      expr: histogram_quantile(0.99, sum by (le) (rate(stream_fanout_latency_seconds_bucket[5m]))) > 0.25
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: WebRTC SFU fanout p99 above 250ms
+        description: 'p99 packet dwell in the fanout is {{ $value | humanizeDuration }} (requires PR #758 instruments).'
+    - alert: WaddlesStreamingTimeToFirstEgressHigh
+      expr: histogram_quantile(0.95, sum by (le) (rate(stream_time_to_first_egress_seconds_bucket[10m]))) > 15
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: Time from ingest accepted to first HLS segment above 15s (p95)
+        description: 'p95 is {{ $value | humanizeDuration }} (requires PR #758 instruments).'
+    - alert: WaddlesStreamingIngestBackpressure
+      expr: histogram_quantile(0.99, sum by (le) (rate(stream_ingest_handoff_seconds_bucket[5m]))) > 1
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: ffmpeg is back-pressuring ingest (handoff p99 above 1s)
+        description: 'Writing an ingest chunk to ffmpeg stdin takes {{ $value | humanizeDuration }} at p99 (requires PR #758 instruments).'
+    - alert: WaddlesStreamingSessionFailures
+      expr: sum(increase(stream_session_failures_total[15m])) >= 5
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: Streaming sessions are failing to start
+        description: '{{ $value }} accepted ingest sessions never became a running pipeline in 15m (requires PR #758 instruments).'
+    - alert: WaddlesStreamingIceFailures
+      expr: sum(increase(rtc_ice_failures_total[15m])) > 10
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: WHIP/WHEP peer connections are failing (ICE/DTLS)
+        description: '{{ $value }} peer connections reached Failed in 15m.'
+    - alert: WaddlesRecordingUploadFailing
+      expr: sum(rate(recording_upload_failures_total[10m])) > 0
+      for: 15m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: Recording segment uploads to object storage keep failing
+        description: Uploads have failed continuously for 15m; the local spool grows until storage recovers.
+    - alert: WaddlesRelayTargetFailures
+      expr: sum(increase(svc_streaming_relay_target_failures_total[15m])) > 3
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: RTMP/SRT relay targets are failing
+        description: '{{ $value }} relay target failures in 15m.'
+  - name: waddles.slo.presentation
+    rules:
+    - alert: WaddlesOverlayFanoutLatencyHigh
+      expr: histogram_quantile(0.99, sum by (le) (rate(svc_presentation_overlay_fanout_latency_seconds_bucket[5m]))) > 0.1
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: Overlay push fan-out p99 above 100ms
+        description: Enqueueing a published frame onto subscriber channels takes {{ $value | humanizeDuration }} at p99 (healthy is sub-millisecond).
+    - alert: WaddlesOverlayFramesDropped
+      expr: sum(rate(svc_presentation_overlay_dropped_frames_total[5m])) > 1
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: Overlay viewers are falling behind and dropping frames
+        description: '{{ $value | printf "%.2f" }} frames/s dropped over 5m (subscriber more than 64 frames behind).'
+    - alert: WaddlesOverlayImageUploadErrors
+      expr: sum(rate(svc_presentation_image_uploads_total{result="error"}[10m])) / sum(rate(svc_presentation_image_uploads_total[10m])) > 0.1
+      for: 15m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: More than 10% of overlay image uploads fail server-side
+        description: '{{ $value | humanizePercentage }} of uploads ended in error (object store / presign) over 10m.'
+  - name: waddles.telemetry-health
+    rules:
+    - alert: WaddlesScrapeTargetDown
+      expr: up{job=~".*(svc-ingest|svc-process|svc-action|svc-presentation|svc-streaming|egress-proxy).*"} == 0
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: Prometheus cannot scrape {{ $labels.job }}
+        description: /metrics on {{ $labels.instance }} has been unreachable for 5m - the pod is down or the metrics surface is dead.
+    - alert: WaddlesTelemetryAbsentIngest
+      expr: absent_over_time(svc_ingest_up[10m]) and on() (sum(kube_deployment_status_replicas_available{namespace=~"waddlebot|waddles", deployment=~".*svc-ingest.*"}) > 0)
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+        service: svc-ingest
+      annotations:
+        summary: svc-ingest pods are running but emit no telemetry
+        description: svc_ingest_up has been absent for 10m while replicas are available - exporter / metrics endpoint is dead.
+    - alert: WaddlesTelemetryAbsentProcess
+      expr: absent_over_time(svc_process_up[10m]) and on() (sum(kube_deployment_status_replicas_available{namespace=~"waddlebot|waddles", deployment=~".*svc-process.*"}) > 0)
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+        service: svc-process
+      annotations:
+        summary: svc-process pods are running but emit no telemetry
+        description: svc_process_up has been absent for 10m while replicas are available - exporter / metrics endpoint is dead.
+    - alert: WaddlesTelemetryAbsentAction
+      expr: absent_over_time(svc_action_up[10m]) and on() (sum(kube_deployment_status_replicas_available{namespace=~"waddlebot|waddles", deployment=~".*svc-action.*"}) > 0)
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+        service: svc-action
+      annotations:
+        summary: svc-action pods are running but emit no telemetry
+        description: svc_action_up has been absent for 10m while replicas are available - exporter / metrics endpoint is dead.
+    - alert: WaddlesTelemetryAbsentPresentation
+      expr: absent_over_time(svc_presentation_up[10m]) and on() (sum(kube_deployment_status_replicas_available{namespace=~"waddlebot|waddles", deployment=~".*svc-presentation.*"}) > 0)
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+        service: svc-presentation
+      annotations:
+        summary: svc-presentation pods are running but emit no telemetry
+        description: svc_presentation_up has been absent for 10m while replicas are available - exporter / metrics endpoint is dead.
+    - alert: WaddlesTelemetryAbsentStreaming
+      expr: absent_over_time(svc_streaming_up[10m]) and on() (sum(kube_deployment_status_replicas_available{namespace=~"waddlebot|waddles", deployment=~".*svc-streaming.*"}) > 0)
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+        service: svc-streaming
+      annotations:
+        summary: svc-streaming pods are running but emit no telemetry
+        description: svc_streaming_up has been absent for 10m while replicas are available - exporter / metrics endpoint is dead.
+    - alert: WaddlesOtlpExportFailing
+      expr: (sum(rate(otelcol_exporter_send_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_send_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_send_failed_log_records_total[5m])) or vector(0)) > 0
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: OTel Collector cannot export telemetry to its backend
+        description: '{{ $value | printf "%.2f" }} telemetry items/s are failing to send. Services keep serving (buffer, drop oldest) but observability is blind.'
+    - alert: WaddlesOtlpExportQueueFilling
+      expr: otelcol_exporter_queue_size / otelcol_exporter_queue_capacity > 0.8
+      for: 10m
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: OTel Collector exporter queue above 80% ({{ $labels.exporter }})
+        description: The sending queue for {{ $labels.exporter }} is {{ $value | humanizePercentage }} full - the backend is slow or down and data will soon be dropped.
+  - name: waddles.workload-health
+    rules:
+    - alert: WaddlesPodCrashLooping
+      expr: kube_pod_container_status_waiting_reason{namespace=~"waddlebot|waddles", reason="CrashLoopBackOff"} == 1
+      for: 5m
+      labels:
+        severity: critical
+        team: waddles
+      annotations:
+        summary: '{{ $labels.pod }} ({{ $labels.container }}) is crash-looping'
+        description: Container {{ $labels.container }} in pod {{ $labels.pod }} has been in CrashLoopBackOff for 5m.
+    - alert: WaddlesPodRestartingFrequently
+      expr: increase(kube_pod_container_status_restarts_total{namespace=~"waddlebot|waddles"}[30m]) >= 3
+      labels:
+        severity: warning
+        team: waddles
+      annotations:
+        summary: '{{ $labels.pod }} ({{ $labels.container }}) restarted {{ $value }} times in 30m'
+        description: Three or more restarts in 30m - OOM kill, failing liveness probe or startup error.

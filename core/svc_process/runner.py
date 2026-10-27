@@ -99,6 +99,21 @@ Skipped (never guessed) when the resolved community or the platform user
 id can't be determined, and for any non-"message" `event_type` (Twitch
 EventSub follow/subscribe/raid and similar system events are out of scope
 for this positive-accrual path). Never raises into the caller.
+
+Activation gate (P4, live-dispatch activation unification): right after
+`community_for_context` is resolved and BEFORE `bundle_context()`/
+`transform_fn` run, `services.activation_gate.is_app_activated` checks this
+envelope's resolved community against `app_activations` for `bundle.
+app_id` -- the webui's activation toggle (gh #586) was already the real
+on/off switch for the LOADING side (`hub_api`'s distribution endpoint
+already filters a community-scoped poll by `app_activations.enabled`); this
+is the missing per-EVENT equivalent, so disabling a bundle now stops live
+dispatch immediately rather than waiting on the next poll. Fails open (never
+blocks) for a tenant-wide envelope, an app_id with no `app_activations` row
+at all (most bundles today, including `bot_process` itself -- see that
+module's own docstring and `services/activation_gate.py`'s rationale), or a
+DB failure; only an EXISTING row with `enabled=False` actually blocks.
+Not-activated is a graceful skip (DEBUG log, `return 0`), never an error.
 """
 
 from __future__ import annotations
@@ -127,6 +142,7 @@ from flask_core.stage_runner import (
 from flask_core.stream_pipeline import bundle_stream_key
 
 from config import Config
+from services.activation_gate import is_app_activated
 from services.activity_accrual import ActivityAccrualResult
 from services.activity_accrual import record_activity as accrue_activity
 from services.activity_feed import record_activity
@@ -138,7 +154,7 @@ from services.raid_shoutout import RAID_EVENT_TYPE, SHOUTOUT_APP_ID, maybe_auto_
 logger = logging.getLogger(__name__)
 
 #: PostHog flag gating the raid auto-shoutout hook entirely (gh #316) --
-#: same flag key `bundles/social_shoutout_process.py`'s own `_FEATURE_FLAG`
+#: same flag key `builtin_handlers/social_shoutout_process.py`'s own `_FEATURE_FLAG`
 #: uses for the manual `!so`/`!vso` path (not imported -- that module is a
 #: process-stage bundle, this is the runner itself). Default ON: disabling
 #: this flag skips the hook (and its DB/Redis round trip) entirely, whereas
@@ -171,7 +187,7 @@ _MODERATION_ENFORCE_APP_ID = "waddles.community.moderation.default"
 
 #: Identity payload keys copied verbatim from the inbound event onto the
 #: synthetic enforcement envelope's own event payload -- exactly the field
-#: names `core/svc_action/bundles/moderation_enforce_action.py` reads to
+#: names `core/svc_action/builtin_handlers/moderation_enforce_action.py` reads to
 #: resolve its target user/channel/guild/broadcaster (`_resolve_target_
 #: user_id`, `_enforce_discord`, `_enforce_twitch`), plus `message_id`/
 #: `room_id` for audit/future use. Deliberately excludes `text` -- the
@@ -238,7 +254,7 @@ def _resolve_platform_entity_id(event: PlatformEvent) -> str | None:
     """The platform-native channel/server id for community resolution, or `None`.
 
     Same `channel_id or channel_name` normalization `_emit_activity()`
-    (below) and `bundles/community_context_process.py` already use, to
+    (below) and `builtin_handlers/community_context_process.py` already use, to
     reconcile Discord's `channel_id` against Twitch's `channel_name` into
     one platform-entity identifier.
     """
@@ -251,7 +267,7 @@ def _resolve_platform_entity_id(event: PlatformEvent) -> str | None:
 def _community_id_or_none(community: str | None) -> int | None:
     """Best-effort `int(community)` for `feature_enabled()`'s own `int | None` param, or `None`.
 
-    Same conversion `bundles/social_shoutout_process.py::_community_id`
+    Same conversion `builtin_handlers/social_shoutout_process.py::_community_id`
     performs locally for the identical `feature_enabled()` call shape --
     replicated here rather than imported (that module is a process-stage
     bundle, this is the runner itself).
@@ -384,6 +400,24 @@ class ProcessRunner:
             )
         else:
             community_for_context = str(Config.DEMO_ACTIVITY_COMMUNITY_ID)
+
+        # Activation gate (P4, live-dispatch activation unification): skip
+        # dispatch entirely for a bundle the webui's activation toggle (#586)
+        # has disabled in this envelope's resolved community -- fails open
+        # (never blocks) for a tenant-wide envelope, an unonboarded app_id
+        # with no `app_activations` row at all, or a DB hiccup; see
+        # `services/activation_gate.py`'s own module docstring for the full
+        # rationale and why that is safe for every currently-working bundle.
+        # Deliberately checked BEFORE `bundle_context()`/`transform_fn` --
+        # moderation gate, activity emit/accrual, and the `:action` LPUSH
+        # must never run for a command this community turned off.
+        if not await is_app_activated(community=community_for_context, app_id=bundle.app_id):
+            logger.debug(
+                "process.not_activated app_id=%s community=%s -- skipping dispatch",
+                bundle.app_id,
+                community_for_context,
+            )
+            return 0
 
         try:
             with bundle_context(
@@ -693,7 +727,7 @@ class ProcessRunner:
         """Best-effort raid auto-shoutout hook (gh #316) -- alongside the chat-command path.
 
         Fires for every inbound `channel.raid` event, independent of
-        `transform_fn`'s own result: `bundles.bot_process.transform()`
+        `transform_fn`'s own result: `builtin_handlers.bot_process.transform()`
         (this pipeline's chat-command router) returns `None` for any event
         with no `payload['text']` key, so a raid event never reaches the
         chat-command path at all -- this hook is the ONLY consumer that

@@ -51,6 +51,24 @@ def _bool_env(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _bounded_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Parse an integer env var that must lie within `[minimum, maximum]` (else ValueError).
+
+    Used for the session-lifetime knobs: a typo'd value must stop startup rather than silently
+    produce a session that never expires (or one that expires instantly).
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer number of seconds") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be within [{minimum}, {maximum}] seconds")
+    return value
+
+
 def _build_db_url(
     *,
     db_type: str,
@@ -239,6 +257,45 @@ class HubAPIConfig:
     connections_callback_base_url: str = "http://localhost:30879"
     connections_state_ttl_s: int = 600
 
+    # feature/hub-api-internal-grpc: gate for `grpc_internal/server.py`'s
+    # `waddles.hub.internal.v1` listener. `grpc_enabled=False` (or a
+    # missing TLS cert / empty identity allow-list at startup, handled in
+    # `app.py`) means the gRPC surface simply never starts -- fail-closed
+    # for the gRPC surface, fail-open for the rest of hub-api's HTTP app.
+    # `deployment_env` feeds `flask_core.service_jwt.load_identities_from_
+    # env()`'s bare-service-name -> SPIFFE-ID expansion
+    # (`spiffe://penguintech.io/<deployment_env>/<service>`, penguintech.md
+    # SPIFFE Identity) -- mirrors the `alpha`/`beta`/`gamma`/`v{X}` env
+    # naming `penguintech.md` Domains & TLDs already uses.
+    grpc_enabled: bool = True
+    deployment_env: str = "alpha"
+
+    # HIGH-2: SPIFFE peer-identity path of `services.machine_auth.machine_authenticated`. The
+    # header carries the verified X.509-SVID id from the mTLS listener and is read ONLY when
+    # `spiffe_peer_trust` is true (default OFF -> header ignored). Turn it on only where the edge
+    # strips this header from every request that did not arrive on the mTLS listener.
+    spiffe_peer_trust: bool = False
+    spiffe_peer_id_header: str = "X-Spiffe-Peer-Id"
+
+    # Session lifecycle (`services/session_service.py`). Access tokens are short-lived (15 min,
+    # `flask_core.auth.ACCESS_TOKEN_TTL_SECONDS`) and renewed from a rotating refresh token.
+    # `refresh_token_ttl_seconds` is the idle window (each rotation slides it forward);
+    # `session_absolute_ttl_seconds` caps a login session no matter how active it is;
+    # `refresh_reuse_grace_seconds` is how long the just-rotated-away token still answers
+    # (new access token, no rotation, no revocation) so parallel 401s from one SPA page do not
+    # read as token theft. Defaults: 7 days idle, 30 days absolute, 10 s grace.
+    refresh_token_ttl_seconds: int = 7 * 24 * 3600
+    session_absolute_ttl_seconds: int = 30 * 24 * 3600
+    refresh_reuse_grace_seconds: int = 10
+
+    def __post_init__(self) -> None:
+        """Refuse a session policy whose idle window outlives its absolute cap."""
+        if self.refresh_token_ttl_seconds > self.session_absolute_ttl_seconds:
+            raise ValueError(
+                "REFRESH_TOKEN_TTL_SECONDS (idle window) cannot exceed "
+                "SESSION_ABSOLUTE_TTL_SECONDS (absolute cap)"
+            )
+
     @classmethod
     def from_env(cls) -> HubAPIConfig:
         """Build config from the process environment. Raises on an invalid DB_TYPE."""
@@ -312,4 +369,20 @@ class HubAPIConfig:
                 or os.getenv("PUBLIC_WEBUI_URL", "http://localhost:30879")
             ).rstrip("/"),
             connections_state_ttl_s=int(os.getenv("CONNECTIONS_STATE_TTL_S", "600")),
+            grpc_enabled=_bool_env("GRPC_INTERNAL_ENABLED", True),
+            deployment_env=os.getenv("DEPLOYMENT_ENV", "alpha"),
+            spiffe_peer_trust=_bool_env("SPIFFE_PEER_TRUST", False),
+            spiffe_peer_id_header=os.getenv("SPIFFE_PEER_ID_HEADER", "X-Spiffe-Peer-Id"),
+            refresh_token_ttl_seconds=_bounded_int_env(
+                "REFRESH_TOKEN_TTL_SECONDS", 7 * 24 * 3600, minimum=900, maximum=90 * 24 * 3600
+            ),
+            session_absolute_ttl_seconds=_bounded_int_env(
+                "SESSION_ABSOLUTE_TTL_SECONDS",
+                30 * 24 * 3600,
+                minimum=3600,
+                maximum=365 * 24 * 3600,
+            ),
+            refresh_reuse_grace_seconds=_bounded_int_env(
+                "REFRESH_REUSE_GRACE_SECONDS", 10, minimum=0, maximum=60
+            ),
         )

@@ -48,6 +48,7 @@ async def status():
         "module": Config.MODULE_NAME
     })
 
+
 app.register_blueprint(api_bp)
 
 if __name__ == '__main__':

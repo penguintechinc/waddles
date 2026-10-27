@@ -13,10 +13,10 @@ _db_instance: Optional[DAL] = None
 def get_db() -> DAL:
     """Get DAL database instance."""
     global _db_instance
-    
+
     if _db_instance is None:
         db_type = os.getenv("DB_TYPE", "sqlite")
-        
+
         if db_type == "postgres":
             db_host = os.getenv("DB_HOST", "localhost")
             db_port = os.getenv("DB_PORT", "5432")
@@ -35,23 +35,23 @@ def get_db() -> DAL:
             db_path = os.getenv("DB_PATH", "/app/data/video_proxy.db")
             os.makedirs(os.path.dirname(db_path), exist_ok=True)
             db_uri = f"sqlite://{db_path}"
-        
+
         _db_instance = DAL(
             db_uri,
             folder=os.getenv("DB_FOLDER", "/app/data/databases"),
             pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
             migrate=False,
         )
-        
+
         logger.info(f"Database connected: {db_type}")
-    
+
     return _db_instance
 
 
 def init_database() -> DAL:
     """Initialize database tables using PyDAL."""
     db = get_db()
-    
+
     # Stream configurations table
     db.define_table(
         "stream_configurations",
@@ -65,7 +65,7 @@ def init_database() -> DAL:
         Field("created_at", "datetime", default=lambda: __import__("datetime").datetime.utcnow()),
         Field("updated_at", "datetime", update=lambda: __import__("datetime").datetime.utcnow()),
     )
-    
+
     # Stream destinations table
     db.define_table(
         "stream_destinations",
@@ -81,7 +81,7 @@ def init_database() -> DAL:
         Field("created_at", "datetime", default=lambda: __import__("datetime").datetime.utcnow()),
         Field("updated_at", "datetime", update=lambda: __import__("datetime").datetime.utcnow()),
     )
-    
+
     # Stream sessions table
     db.define_table(
         "stream_sessions",
@@ -94,7 +94,7 @@ def init_database() -> DAL:
         Field("bytes_sent", "bigint", default=0),
         Field("is_active", "boolean", default=True, notnull=True),
     )
-    
+
     # Stream analytics table
     db.define_table(
         "stream_analytics",
@@ -107,8 +107,8 @@ def init_database() -> DAL:
         Field("dropped_frames", "integer", default=0),
         Field("errors", "integer", default=0),
     )
-    
+
     db.commit()
     logger.info("Database tables initialized")
-    
+
     return db

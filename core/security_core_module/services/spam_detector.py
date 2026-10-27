@@ -58,12 +58,13 @@ class SpamDetector:
 
             if is_frequency_spam:
                 self.logger.audit(
-                    "Spam detected: frequency",
-                    community_id=community_id,
-                    platform=platform,
-                    platform_user_id=platform_user_id,
                     action="spam_detection",
-                    result="BLOCKED"
+                    user="system",
+                    community=str(community_id),
+                    result="BLOCKED",
+                    detail="Spam detected: frequency",
+                    platform=platform,
+                    platform_user_id=platform_user_id
                 )
                 return True
 
@@ -79,12 +80,13 @@ class SpamDetector:
 
                 if is_duplicate_spam:
                     self.logger.audit(
-                        "Spam detected: duplicate",
-                        community_id=community_id,
-                        platform=platform,
-                        platform_user_id=platform_user_id,
                         action="spam_detection",
-                        result="BLOCKED"
+                        user="system",
+                        community=str(community_id),
+                        result="BLOCKED",
+                        detail="Spam detected: duplicate",
+                        platform=platform,
+                        platform_user_id=platform_user_id
                     )
                     return True
 

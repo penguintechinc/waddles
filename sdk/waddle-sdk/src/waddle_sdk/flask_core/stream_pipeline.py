@@ -89,7 +89,15 @@ class PlatformEvent:
 
 @dataclass(slots=True)
 class StageEnvelope:
-    """One pipeline queue message -- matches the WIT ``types.stage-envelope`` record."""
+    """One pipeline queue message -- matches the WIT ``types.stage-envelope`` record.
+
+    ``tenant_id``/``community_id`` are the AUTHORITATIVE numeric scope keys a
+    ``world stage-v2`` bundle receives via ``types-v2.stage-envelope``
+    (``community_id == 0`` is tenant-wide). They stay ``None`` for a v1
+    bundle's envelope, whose WIT record has no such fields. When present,
+    ``tenant``/``community`` are DISPLAY-ONLY metadata -- never a lookup,
+    cache, routing or authorization key.
+    """
 
     tenant: str
     community: str | None
@@ -99,6 +107,24 @@ class StageEnvelope:
     ts: str
     target_app_id: str | None = None
     trace_context: str | None = None
+    tenant_id: int | None = None
+    community_id: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the numeric scope: both ids or neither, in the wire ranges."""
+        if (self.tenant_id is None) != (self.community_id is None):
+            raise ValueError("tenant_id and community_id must be supplied together")
+        if self.tenant_id is not None and self.community_id is not None:
+            for name, value in (("tenant_id", self.tenant_id), ("community_id", self.community_id)):
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise ValueError(f"{name} must be an integer, got {value!r}")
+            if not 1 <= self.tenant_id <= 2**63 - 1:
+                raise ValueError(f"tenant_id must be in [1, 2**63-1], got {self.tenant_id}")
+            if not 0 <= self.community_id <= 2**31 - 1:
+                raise ValueError(
+                    f"community_id must be in [0, 2**31-1] (0 = tenant-wide), "
+                    f"got {self.community_id}"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain, JSON-ready dict."""
@@ -114,6 +140,10 @@ class StageEnvelope:
             d["target_app_id"] = self.target_app_id
         if self.trace_context is not None:
             d["trace_context"] = self.trace_context
+        if self.tenant_id is not None:
+            d["tenant_id"] = self.tenant_id
+        if self.community_id is not None:
+            d["community_id"] = self.community_id
         return d
 
     @classmethod
@@ -128,11 +158,19 @@ class StageEnvelope:
             ts=data["ts"],
             target_app_id=data.get("target_app_id"),
             trace_context=data.get("trace_context"),
+            tenant_id=data.get("tenant_id"),
+            community_id=data.get("community_id"),
         )
 
     @classmethod
     def from_wit_record(cls, record: Any) -> StageEnvelope:
-        """Construct from the generated WIT binding's ``types.StageEnvelope`` record."""
+        """Construct from the generated WIT binding's ``StageEnvelope`` record.
+
+        Accepts both families: v1's ``types.StageEnvelope`` (no numeric ids,
+        so ``tenant_id``/``community_id`` stay ``None``) and v2's
+        ``types-v2.StageEnvelope`` (``tenant_id``/``community_id`` read off
+        the record).
+        """
         return cls(
             tenant=record.tenant,
             community=record.community,
@@ -142,4 +180,6 @@ class StageEnvelope:
             ts=record.ts,
             target_app_id=record.target_app_id,
             trace_context=record.trace_context,
+            tenant_id=getattr(record, "tenant_id", None),
+            community_id=getattr(record, "community_id", None),
         )

@@ -84,10 +84,12 @@ from waddle_transports import (
 )
 from waddle_transports.signing import SecretResolutionError, resolve_secret
 
+from receivers.badge_flags import strict_flag
+
 logger = logging.getLogger(__name__)
 
 #: The `consumes` tag every ingest bundle wanting a raw YouTube Live chat
-#: message declares (`bundles/youtube_live_ingest.py`'s own `stages.
+#: message declares (`builtin_handlers/youtube_live_ingest.py`'s own `stages.
 #: ingest.consumes`) -- this receiver's half of that contract.
 CONSUMES_TAG = "youtube.message"
 
@@ -243,7 +245,7 @@ class YouTubeLivePollReceiver(Transport):  # type: ignore[misc]
         test constructing this receiver standalone).
 
         Real transform (not a stub) of each `liveChatMessages.list` item
-        into the raw event dict `bundles/youtube_live_ingest.py::
+        into the raw event dict `builtin_handlers/youtube_live_ingest.py::
         normalize()` consumes -- field names here are this receiver's own
         contract with that entrypoint, matching `TwitchIrcReceiver.
         receive()`'s own precedent (no repo-wide "raw platform event"
@@ -655,9 +657,15 @@ class YouTubeLivePollReceiver(Transport):  # type: ignore[misc]
             "text": text,
             "author_id": author.get("channelId") or None,
             "display_name": author.get("displayName") or None,
-            "is_mod": bool(author.get("isChatModerator")),
-            "is_owner": bool(author.get("isChatOwner")),
-            "is_sponsor": bool(author.get("isChatSponsor")),
+            "is_mod": strict_flag(
+                author.get("isChatModerator"), field="isChatModerator", platform="youtube"
+            ),
+            "is_owner": strict_flag(
+                author.get("isChatOwner"), field="isChatOwner", platform="youtube"
+            ),
+            "is_sponsor": strict_flag(
+                author.get("isChatSponsor"), field="isChatSponsor", platform="youtube"
+            ),
             "message_id": item.get("id") or None,
             "published_at": snippet.get("publishedAt") or None,
         }

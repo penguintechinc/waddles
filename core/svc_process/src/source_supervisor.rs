@@ -35,14 +35,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use circuit_breaker::CircuitBreaker;
 use penguin_spine::{Grant, Scope, SpineClient, SpineConfig, SpineError, SpineMetrics};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::active_digests::ActiveDigests;
 use crate::hop::KeyRing;
 use crate::host_api::ConnectionRegistry;
 use crate::license::FeatureGate;
-use crate::spine::{LoadState, ProcessDeps};
+use crate::spine::{DigestSource, LoadState, ProcessDeps};
 use crate::telemetry::SourceBindingSupervisorMetrics;
 
 /// One `app_source_bindings` row, fully resolved for consumption: the
@@ -131,6 +133,69 @@ pub struct SupervisorDeps {
     pub approved_targets: HashMap<String, String>,
     pub metrics: Arc<dyn SpineMetrics>,
     pub license: Arc<dyn FeatureGate>,
+    /// See `spine::ProcessDeps::kv_conn`'s doc -- opened once by
+    /// `crate::lib::try_start_changelog_consumer` (inside its spawned task,
+    /// since opening it is async) and cloned into every binding consumer's
+    /// own `ProcessDeps` in [`run_binding_consumer`] below, rather than
+    /// reopened per consumer or per reconnect attempt.
+    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    /// See `spine::ProcessDeps::kv_capabilities`'s doc -- the same shared
+    /// snapshot `crate::lib::try_start_changelog_consumer`'s
+    /// `changelog_consumer::run` poll writes to, cloned (the `Arc`, not the
+    /// snapshot) into every binding consumer's own `ProcessDeps`.
+    pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+    /// See `spine::ProcessDeps::gate`'s doc -- cloned into every binding
+    /// consumer's own `ProcessDeps` in [`run_binding_consumer`] below.
+    pub gate: Arc<bundle_capability_gate::CapabilityGate>,
+    /// The live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    /// snapshot -- cloned into every binding consumer's own `ProcessDeps`
+    /// in [`run_binding_consumer`] below. `spine::handle_delivered`
+    /// resolves this PER DELIVERY, never once per connect: a bundle hot
+    /// swap must be reflected on the very next delivery (spec SS4/SS5.1),
+    /// not just the next reconnect. Fed by `crate::changelog_consumer`'s
+    /// own apply step (mirrors `core/svc_action::changelog_consumer`'s
+    /// identical `app_version_snapshot` feed) -- unlike `tenant`/
+    /// `community`, this is NOT per-binding: `bundle_active_set::
+    /// ActiveVersionSnapshot` is keyed by `app_id` alone across every
+    /// scope this supervisor's tenant serves.
+    pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::egress`'s doc.
+    pub egress: Arc<bundle_host_http::egress::EgressGuard>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::pii_gate`'s doc.
+    pub pii_gate: Arc<dyn FeatureGate>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::pii_minter`'s doc.
+    pub pii_minter: Option<Arc<dyn crate::pii_tokenize::IdentityMinter>>,
+    /// The SAME `Arc<ActiveDigests>` instance `crate::changelog_consumer`
+    /// writes to on every `load`/`unload` (`ConsumerState::active_digests`)
+    /// -- shared (never copied) into every spawned binding consumer's own
+    /// `ProcessDeps::digest_source` (`DigestSource::Active`) so a hot-swap
+    /// is visible to every already-running consumer's very next invoke.
+    /// regression: multi-tenant consumers invoked with empty legacy digest,
+    /// UnknownBundle (alpha 2026-10-03).
+    pub active_digests: Arc<ActiveDigests>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::db_wiring`'s doc.
+    pub db_wiring: Option<crate::capabilities::DbWiring>,
+    /// ONE shared instance across every binding this supervisor runs
+    /// (never one per binding) -- cloned into every spawned binding
+    /// consumer's own `ProcessDeps`, see `crate::spine::ProcessDeps::
+    /// breaker`'s doc for why pod-wide sharing is the correct scope.
+    pub breaker: Arc<CircuitBreaker>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::reputation_wiring`'s doc.
+    pub reputation_wiring: Option<crate::capabilities::ReputationWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::economy_wiring`'s doc.
+    pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::identity_wiring`'s doc.
+    pub identity_wiring: Option<crate::identity::IdentityWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::ai_wiring`'s doc.
+    pub ai_wiring: Option<crate::ai::AiWiring>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -209,11 +274,16 @@ async fn wait_or_shutdown(shutdown: &mut oneshot::Receiver<()>, dur: Duration) -
 /// stream's consumer group not provisioned yet), logged at `WARN` and
 /// retried rather than treated as fatal (see this module's doc).
 ///
-/// Each attempt builds a fresh [`ProcessDeps`] with an empty `digest`
-/// (`crate::changelog_consumer`, not this consumer, is what actually
-/// `Load`s the bundle onto the executor -- see this module's doc) and a
-/// fresh [`LoadState`] (irrelevant with an empty digest, but required by
-/// `ProcessDeps`'s shape).
+/// Each attempt builds a fresh [`ProcessDeps`] with a
+/// [`DigestSource::Active`] scoped to this binding's own `(tenant_id,
+/// community_id, app_id)` -- `crate::changelog_consumer` is still what
+/// actually `Load`s the bundle onto the executor (see this module's doc),
+/// but this consumer's own `invoke`s now resolve the CURRENT canonical
+/// digest for that same scope on every single message, from the shared
+/// [`ActiveDigests`] map that consumer writes to -- never a value captured
+/// once at spawn time (regression: multi-tenant consumers invoked with
+/// empty legacy digest, UnknownBundle, alpha 2026-10-03) -- plus a fresh
+/// [`LoadState`] per attempt.
 async fn run_binding_consumer(
     binding: ResolvedBinding,
     deps: Arc<SupervisorDeps>,
@@ -242,7 +312,14 @@ async fn run_binding_consumer(
 
         let process_deps = ProcessDeps {
             app_id: binding.app_id.clone(),
-            digest: String::new(),
+            digest_source: DigestSource::Active {
+                scope: (
+                    binding.tenant_id,
+                    binding.community_id,
+                    binding.app_id.clone(),
+                ),
+                digests: Arc::clone(&deps.active_digests),
+            },
             version: "1".to_string(),
             component_key: String::new(),
             sidecar_key: String::new(),
@@ -255,6 +332,24 @@ async fn run_binding_consumer(
             spine: spine_client,
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
+            kv_conn: deps.kv_conn.clone(),
+            kv_capabilities: Arc::clone(&deps.kv_capabilities),
+            gate: Arc::clone(&deps.gate),
+            tenant_id: binding.tenant_id,
+            community_id: binding.community_id,
+            // Shared, poll-refreshed handle -- `spine::handle_delivered`
+            // resolves this PER DELIVERY (`SupervisorDeps::
+            // app_version_snapshot`'s doc), never once here at connect time.
+            app_version_snapshot: deps.app_version_snapshot.clone(),
+            egress: Arc::clone(&deps.egress),
+            pii_gate: Arc::clone(&deps.pii_gate),
+            pii_minter: deps.pii_minter.clone(),
+            db_wiring: deps.db_wiring.clone(),
+            breaker: Arc::clone(&deps.breaker),
+            reputation_wiring: deps.reputation_wiring.clone(),
+            economy_wiring: deps.economy_wiring.clone(),
+            identity_wiring: deps.identity_wiring.clone(),
+            ai_wiring: deps.ai_wiring.clone(),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

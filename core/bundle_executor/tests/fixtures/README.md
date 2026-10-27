@@ -67,3 +67,180 @@ SDK (`10.0.401`) / `wit-bindgen` `0.58.0` (vendored by
 `BytecodeAlliance.Componentize.DotNet.WitBindgen` 0.8.0-preview00011) /
 `Microsoft.DotNet.ILCompiler.LLVM` `10.0.0-rc.1.26306.1`. See
 `bundles/csharp/csping/README.md` for the full toolchain writeup.
+
+## No `superpenguin_roll.wasm` fixture here (by design)
+
+`bundles/csharp/superpenguin-roll` (the first real C# app bundle built on
+`sdk/waddle-sdk-cs`, not a spike) builds with the exact same toolchain as
+`csping` above, but its compiled component measured **6,659,228 bytes
+(6.35 MiB)** at build time -- above the informal size this repo has used so
+far for a committed binary blob under this directory (`csping.wasm` at
+4.36 MiB was already the largest; `hostile_fixture.wasm` is 96,489 bytes).
+Rather than committing a second multi-megabyte NativeAOT-LLVM binary here,
+`core/bundle_executor` has no
+`tests/csharp_superpenguin_roll_integration.rs` -- build the component
+locally instead (`make build-superpenguin-roll-bundle`, or
+`bundles/csharp/superpenguin-roll/README.md`'s Build section) and load it
+manually if an ad hoc executor integration check is needed. Its WIT
+conformance (`hub_api/services/bundle_component_validator.py`) and business
+logic (`bundles/csharp/superpenguin-roll/tests/`) are both otherwise fully
+covered without a committed fixture.
+
+## `connector_fixture.wasm`
+
+A real, compiled `waddle:connector@1.0.0` component (`connector-fixture-
+src/`), used by `tests/linker_isolation.rs` to prove the per-component
+`Linker`'s `identity.lookup` gate (spec `docs/superpowers/specs/2026-09-28-
+connector-bundles.md` S3.2.1). `receiver.on-connect` calls
+`identity.lookup` unconditionally, so this component's compiled import set
+genuinely requires it to be linked -- instantiation succeeds only against a
+`Linker` built for a manifest passing
+`crate::manifest::VerifiedManifest::may_link_identity`, and fails
+(wasmtime's standard "unknown import" error, before any guest code runs)
+against one that doesn't.
+
+The fixture's own `wit/connector.wit` is a trimmed, self-contained copy of
+the normative `wit/waddle-connector/connector.wit` (`identity`/`receiver`/
+`sender` byte-for-byte identical; `http`/`log`/`clock`/`%flags` omitted
+since this fixture never calls them) -- avoiding this standalone
+`cargo-component` package needing its own cross-package `waddle:bundle`
+dependency resolution, which `cargo-component 0.21.1`'s `deps/` merge did
+not accept in the same layout `wasm-tools component wit` itself resolves
+correctly (worth revisiting if a future fixture needs the reused imports
+too).
+
+### Regenerating
+
+```bash
+rustup target add wasm32-wasip1
+cargo install cargo-component --locked
+cd connector-fixture-src
+cargo component build --release
+cp target/wasm32-wasip1/release/connector_fixture.wasm ../connector_fixture.wasm
+```
+
+Built and verified with `cargo-component 0.21.1` / `wasm-tools 1.259.0`
+against `wit-bindgen-rt 0.44.0` (same toolchain as `hostile_fixture.wasm`
+above).
+
+## `reputation_fixture.wasm`
+
+A real, compiled `waddle:bundle` **`world stage-next`** component
+(`reputation-fixture-src/`, issue #726), used by
+`tests/stage_next_reputation.rs` to prove a bundle can CALL the new
+`reputation` host import through the executor's production `Linker` and
+that the call reaches the stage as `capability = db`, `op =
+"reputation.get" | "reputation.adjust"`. `process-stage.transform` branches
+on `event.event-type` (`rep-get` / `rep-adjust`) and echoes the call's
+outcome (`ok:<balance>` or a stable error tag) into `payload-json`. The
+fixture's `wit/stage.wit` is a verbatim copy of the normative
+`wit/waddle-bundle/stage.wit`; refresh it whenever that file changes.
+
+### Regenerating
+
+```bash
+cd reputation-fixture-src
+cargo component build --release
+cp "${CARGO_TARGET_DIR:-target}/wasm32-wasip1/release/reputation_fixture.wasm" ../reputation_fixture.wasm
+rm -f src/bindings.rs   # generated, not committed
+```
+
+Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against
+`wit-bindgen-rt 0.44.0` (same toolchain as `hostile_fixture.wasm`).
+
+## `economy_fixture.wasm`
+
+A real, compiled `waddle:bundle` **`world stage-next`** component
+(`economy-fixture-src/`, issue #714), used by `tests/stage_next_economy.rs` to
+prove a bundle can CALL every `economy` host import through the executor's
+production `Linker` and that each call reaches the stage as `capability = db`,
+`op = "economy.balance" | "economy.wager" | "economy.transfer" |
+"economy.max_bet" | "economy.leaderboard"`. `process-stage.transform` branches
+on `event.event-type` (`eco-balance` / `eco-wager` / `eco-transfer` /
+`eco-max-bet` / `eco-board`) and echoes the call's outcome (`ok:<value>` or a
+stable error tag) into `payload-json`. The fixture's `wit/stage.wit` is a
+verbatim copy of the normative `wit/waddle-bundle/stage.wit`; refresh it
+whenever that file changes. The Python counterpart is built fresh on every run
+by `tests/stage_next_python_economy_e2e.rs` from `economy-py-bundle/`.
+
+### Regenerating
+
+```bash
+cd economy-fixture-src
+cargo component build --release
+cp "${CARGO_TARGET_DIR:-target}/wasm32-wasip1/release/economy_fixture.wasm" ../economy_fixture.wasm
+rm -f src/bindings.rs   # generated, not committed
+```
+
+Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against
+`wit-bindgen-rt 0.44.0` (same toolchain as `reputation_fixture.wasm`).
+
+## `ai_fixture.wasm`
+
+A real, compiled `waddle:bundle` **`world stage-next`** component
+(`ai-fixture-src/`), used by `tests/stage_next_ai.rs` to prove a bundle can CALL
+the `ai` host import (`ai.generate`) through the executor's production `Linker`
+and that the call reaches the stage as `capability = db`, `op = "ai.generate"`
+with exactly the four guest-controlled args (`prompt`, `max_tokens`,
+`temperature`, `json`). `process-stage.transform` handles event type
+`ai-generate` (payload `prompt` / optional `max_tokens` / `temperature_x100` /
+`json`) and echoes the outcome (`ok:<text>` or a stable error tag) into
+`payload-json`. The fixture's `wit/stage.wit` is a verbatim copy of the
+normative `wit/waddle-bundle/stage.wit`; refresh it whenever that file changes.
+The Python counterpart is built fresh on every run by
+`tests/stage_next_python_ai_e2e.rs` from `ai-py-bundle/`.
+
+### Regenerating
+
+```bash
+cd ai-fixture-src
+cp ../../../../../wit/waddle-bundle/stage.wit wit/stage.wit
+cargo component build --release
+cp "${CARGO_TARGET_DIR:-target}/wasm32-wasip1/release/ai_fixture.wasm" ../ai_fixture.wasm
+rm -f src/bindings.rs   # generated, not committed
+```
+
+Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against
+`wit-bindgen-rt 0.44.0` (same toolchain as `economy_fixture.wasm`).
+
+## `echo_connector.wasm` and `faulty_connector.wasm`
+
+Real, compiled `waddle:connector@1.0.0` components for the connector host capability (issue #840 B0; design note
+`docs/connector-host-capability.md`), used by `tests/connector_invocation.rs` and by `core/connector_e2e`.
+
+- `echo-connector-src/` -- the Echo reference/smoke connector: a faithful port of
+  `core/svc_ingest/builtin_handlers/echo_ingest.py::normalize` (`source`/`text` required, trimmed `text`, default
+  `event_type` `message` and actor `unknown`). Malformed input is `frame-error::malformed`, never a trap. The
+  `sender` export is `frame-error::unsupported` (sender wiring is a later phase).
+- `faulty-connector-src/` -- fault injection: `on-frame` bytes `ok` / `malformed` / `trap` / `spin` / `grow` /
+  `flood:<N>` make it return an event, a frame-error, trap, loop forever, hog memory, or return N events.
+
+Both use a trimmed `connector.wit` (receiver/sender/types byte-identical to the normative file; no reused
+`waddle:bundle` imports and no `identity`, which neither calls), like `connector_fixture.wasm` above.
+
+### Regenerating
+
+```bash
+cd echo-connector-src   # or faulty-connector-src
+cargo component build --release
+cp "${CARGO_TARGET_DIR:-target}/wasm32-wasip1/release/echo_connector.wasm" ../echo_connector.wasm
+rm -f src/bindings.rs   # generated, not committed
+```
+
+Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against `wit-bindgen-rt 0.44.0` (same toolchain as the
+fixtures above); `serde`/`serde_json` are exact-pinned in `echo-connector-src/Cargo.toml`.
+
+## `stage_v2_fixture.wasm`
+
+A real `world stage-v2` component (`stage-v2-fixture-src/`, numeric-scope contract proof, `tests/stage_v2_scope.rs`): `transform`
+event `scope` echoes `context-v2.get-context`'s numeric ids (or `no-scope` when `tenant-id == 0`), and `action-stage-v2.dispatch`
+echoes the envelope's ids in `provider-message-id`. The `wit/stage.wit` copy is the committed `wit/waddle-bundle/stage.wit`.
+
+```bash
+cd stage-v2-fixture-src
+cargo component build --release
+cp "$CARGO_TARGET_DIR/wasm32-wasip1/release/stage_v2_fixture.wasm" ../stage_v2_fixture.wasm   # or target/wasm32-wasip1/...
+rm -f src/bindings.rs   # generated, not committed
+```
+
+Built with `cargo-component` / `wit-bindgen-rt 0.44.0`, same toolchain as the fixtures above.

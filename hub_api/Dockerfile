@@ -3,7 +3,7 @@
 # Multi-stage, rootless. Base digest reused from services/interactive-social/
 # Dockerfile (already pinned in this repo -- devops-containers.md forbids
 # inventing a second one for the same python:3.13-slim-bookworm tag).
-FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7 AS builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 WORKDIR /app
 
 COPY hub_api/requirements.txt .
@@ -24,6 +24,8 @@ RUN pip install --no-cache-dir /app/libs/flask_core
 # package exists). Multi-arch: this Dockerfile's own multi-arch contract
 # (devops.md) selects the matching tarball by `dpkg --print-architecture`.
 ARG WASM_TOOLS_VERSION=1.259.0
+# pipefail so a failed upstream stage of a piped RUN fails the build (DL4006)
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -38,24 +40,46 @@ RUN set -eux; \
     install -m 0755 "/tmp/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux/wasm-tools" /usr/local/bin/wasm-tools; \
     rm -rf /tmp/wasm-tools.tar.gz "/tmp/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux"
 
-FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-COPY hub_api/app.py hub_api/config.py ./
+COPY hub_api/app.py hub_api/config.py hub_api/bootstrap.py ./
 COPY hub_api/blueprints ./blueprints
 COPY hub_api/routers ./routers
 COPY hub_api/openapi ./openapi
 COPY hub_api/services ./services
+COPY hub_api/grpc_internal ./grpc_internal
+COPY hub_api/cli ./cli
+# bootstrap.py's ScriptDirectory call only ever statically parses this
+# directory's revision/down_revision graph -- it never executes alembic/
+# env.py (see bootstrap.py's module docstring for why that matters in this
+# process). script.py.mako/alembic.ini/tests are revision-authoring/CI-only,
+# not needed at runtime.
+COPY alembic/versions ./alembic/versions
 
 EXPOSE 8204
+# Internal-only gRPC listener (waddles.hub.internal.v1) -- ClusterIP +
+# CiliumNetworkPolicy-scoped to svc-ingest/svc-process/svc-action, see
+# k8s/helm/waddlebot/templates/hub-api-grpc-networkpolicy.yaml.
+EXPOSE 50204
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
   CMD python3 -c "import httpx; resp = httpx.get('http://localhost:8204/healthz'); exit(0 if resp.status_code == 200 else 1)" || exit 1
 
 RUN mkdir -p /var/log/waddlebotlog \
     && groupadd -r appuser && useradd -r -g appuser -m appuser \
     && chown -R appuser:appuser /app /var/log/waddlebotlog
+
+# Remove base image's own bundled pip + ensurepip wheel: pip vendors an
+# outdated msgpack (GHSA-6v7p-g79w-8964) and pkg_resources/setuptools
+# (CVE-2025-47273) that the upstream python:3.13-slim-bookworm rebuild
+# hasn't picked up yet. Neither pip nor its vendor tree is imported by
+# any service at runtime (installs happen at build time via uv/pip
+# above), so removing them is a real fix, not a suppression.
+RUN rm -rf /usr/local/lib/python3.13/site-packages/pip \
+    /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
+    /usr/local/lib/python3.13/ensurepip
 
 USER appuser
 

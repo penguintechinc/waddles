@@ -310,12 +310,34 @@ _PLATFORM_EVENT_ALLOWED_KEYS = frozenset(
 #: forum-specific.
 PROCESS_TARGET_APP_ID_KEY = "_target_app_id"
 
-#: The only `StageEnvelope.schema_version` value this module recognizes as
-#: the D30 shape (spec Sec6.1.2). Additive-optional here (see the module
-#: note above): an ABSENT `schema_version` still means "pre-D30 legacy
-#: shape" and is accepted, but a PRESENT value other than this one is
+#: The current `StageEnvelope.schema_version`: the D30 shape PLUS the
+#: AUTHORITATIVE numeric scope keys `tenant_id`/`community_id` (data-plane
+#: numeric-id migration), both bound into `binding.mac` by the Rust
+#: `penguin-spine` v3 formula. Mirrors `penguin_spine::ENVELOPE_SCHEMA_VERSION`.
+ENVELOPE_SCHEMA_VERSION = 3
+
+#: The previous (D30, string-scope-only) `schema_version`, still accepted:
+#: producers that have not yet been taught numeric scope keep stamping it.
+#: A `2` envelope MUST NOT carry `tenant_id`/`community_id` (a v2 MAC does
+#: not cover them). Mirrors `penguin_spine::LEGACY_ENVELOPE_SCHEMA_VERSION`.
+LEGACY_ENVELOPE_SCHEMA_VERSION = 2
+
+#: Accepted PRESENT `schema_version` values. Additive-optional here (see the
+#: module note above): an ABSENT `schema_version` still means "pre-D30
+#: legacy shape" and is accepted, but a PRESENT value outside this set is
 #: rejected outright -- no coercion, no silent reinterpretation.
-ENVELOPE_SCHEMA_VERSION = 2
+_ACCEPTED_SCHEMA_VERSIONS = frozenset(
+    {LEGACY_ENVELOPE_SCHEMA_VERSION, ENVELOPE_SCHEMA_VERSION}
+)
+
+#: `community_id` value meaning "tenant-wide" (the `_tenant` stream segment's
+#: numeric twin). A real community id is always >= 1.
+TENANT_WIDE_COMMUNITY_ID = 0
+
+#: Upper bound of the wire's signed 64-bit `tenant_id` / 32-bit `community_id`
+#: (Rust `i64`/`i32`); anything larger is rejected, never truncated.
+_MAX_TENANT_ID = 2**63 - 1
+_MAX_COMMUNITY_ID = 2**31 - 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -391,11 +413,51 @@ def _optional_schema_version(d: Mapping[str, Any]) -> int | None:
         return None
     if not isinstance(value, int) or isinstance(value, bool):
         raise EnvelopeError(f"'schema_version' must be an integer, got {value!r}")
-    if value != ENVELOPE_SCHEMA_VERSION:
+    if value not in _ACCEPTED_SCHEMA_VERSIONS:
         raise EnvelopeError(
-            f"'schema_version' must equal {ENVELOPE_SCHEMA_VERSION}, got {value!r}"
+            f"'schema_version' must be {LEGACY_ENVELOPE_SCHEMA_VERSION} or "
+            f"{ENVELOPE_SCHEMA_VERSION}, got {value!r}"
         )
     return value
+
+
+def _optional_int(d: Mapping[str, Any], key: str) -> int | None:
+    """Fetch an optional integer field (`None` allowed); a bool is NOT an int."""
+    value = d.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise EnvelopeError(f"{key!r} must be an integer or null, got {value!r}")
+    return value
+
+
+def _validate_numeric_scope(
+    schema_version: int | None, tenant_id: int | None, community_id: int | None
+) -> None:
+    """Enforce the schema-version <-> numeric-scope contract (mirrors Rust).
+
+    A v3 envelope REQUIRES `tenant_id >= 1` and `community_id >= 0` (0 =
+    tenant-wide); a v2 / pre-D30 envelope must carry NEITHER (they would sit
+    outside its MAC, so honouring them would be an unauthenticated scope).
+    """
+    if schema_version == ENVELOPE_SCHEMA_VERSION:
+        if tenant_id is None or not 1 <= tenant_id <= _MAX_TENANT_ID:
+            raise EnvelopeError(
+                f"'tenant_id' is required and must be in [1, {_MAX_TENANT_ID}] on a "
+                f"schema_version {ENVELOPE_SCHEMA_VERSION} envelope, got {tenant_id!r}"
+            )
+        if community_id is None or not TENANT_WIDE_COMMUNITY_ID <= community_id <= _MAX_COMMUNITY_ID:
+            raise EnvelopeError(
+                f"'community_id' is required and must be in "
+                f"[{TENANT_WIDE_COMMUNITY_ID}, {_MAX_COMMUNITY_ID}] (0 = tenant-wide) on a "
+                f"schema_version {ENVELOPE_SCHEMA_VERSION} envelope, got {community_id!r}"
+            )
+    elif tenant_id is not None or community_id is not None:
+        raise EnvelopeError(
+            "'tenant_id'/'community_id' are only permitted on a schema_version "
+            f"{ENVELOPE_SCHEMA_VERSION} envelope (a v{LEGACY_ENVELOPE_SCHEMA_VERSION} "
+            "binding.mac does not cover them)"
+        )
 
 
 def _optional_trace(d: Mapping[str, Any]) -> Trace | None:
@@ -439,6 +501,8 @@ _STAGE_ENVELOPE_ALLOWED_KEYS = frozenset(
         "schema_version",
         "tenant",
         "community",
+        "tenant_id",
+        "community_id",
         "app_id",
         "stage",
         "event",
@@ -478,6 +542,13 @@ class StageEnvelope:
     sourced exclusively from `flask_core.get_bundle_context()`, never from
     event payload, so the security/tenancy invariant is untouched.
 
+    `tenant_id` / `community_id` (schema v3): the AUTHORITATIVE numeric scope
+    keys (`community_id == 0` is tenant-wide). `tenant` / `community` are then
+    DISPLAY-ONLY metadata -- never a lookup, stream, cache, routing or authz
+    key. Both default to `None` (a v2 / pre-D30 envelope carries neither) and
+    are validated against `schema_version` by `from_dict`; the Rust stage
+    services bind them into `binding.mac`.
+
     `schema_version`, `workstream_id`, `event_id`, `session_id`, `trace` and
     `binding` are the D30 workstream-identity/trace/tenant-wall fields
     (spec Sec5.11/6.1.2), minted once by svc-ingest and copied verbatim by
@@ -499,10 +570,21 @@ class StageEnvelope:
     session_id: str | None = None
     trace: Trace | None = None
     binding: Binding | None = None
+    tenant_id: int | None = None
+    community_id: int | None = None
+
+    def __post_init__(self) -> None:
+        """Reject an envelope whose numeric scope contradicts its schema_version."""
+        _validate_numeric_scope(self.schema_version, self.tenant_id, self.community_id)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain, JSON-ready dict; `event` nests under an `event` key."""
-        return {
+        """Serialize to a plain, JSON-ready dict; `event` nests under an `event` key.
+
+        `tenant_id`/`community_id` are emitted ONLY when set, so a v2 / legacy
+        envelope's serialized form is byte-for-byte what it was before numeric
+        scope existed (matching the Rust writer's `skip_serializing_if`).
+        """
+        d: dict[str, Any] = {
             "schema_version": self.schema_version,
             "tenant": self.tenant,
             "community": self.community,
@@ -517,6 +599,11 @@ class StageEnvelope:
             "trace": self.trace.to_dict() if self.trace is not None else None,
             "binding": self.binding.to_dict() if self.binding is not None else None,
         }
+        if self.tenant_id is not None:
+            d["tenant_id"] = self.tenant_id
+        if self.community_id is not None:
+            d["community_id"] = self.community_id
+        return d
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> StageEnvelope:
@@ -550,8 +637,11 @@ class StageEnvelope:
         session_id = _optional_str(d, "session_id")
         trace = _optional_trace(d)
         binding = _optional_binding(d)
+        tenant_id = _optional_int(d, "tenant_id")
+        community_id = _optional_int(d, "community_id")
 
         _reject_unknown_keys(d, _STAGE_ENVELOPE_ALLOWED_KEYS, "StageEnvelope")
+        _validate_numeric_scope(schema_version, tenant_id, community_id)
 
         return cls(
             tenant=tenant,
@@ -567,6 +657,8 @@ class StageEnvelope:
             session_id=session_id,
             trace=trace,
             binding=binding,
+            tenant_id=tenant_id,
+            community_id=community_id,
         )
 
 
@@ -576,6 +668,8 @@ try:
 except ImportError:
     REDIS_AVAILABLE = False
     redis = None
+
+from flask_core.valkey_tls import build_tls_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -707,7 +801,8 @@ class StreamPipeline:
                 encoding="utf-8",
                 decode_responses=True,
                 socket_connect_timeout=5,
-                socket_timeout=5
+                socket_timeout=5,
+                **build_tls_kwargs(self.redis_url)
             )
 
             # Test connection
@@ -736,7 +831,9 @@ class StreamPipeline:
     def _make_dlq_name(self, stream: str) -> str:
         """Create dead letter queue name for a stream"""
         # Extract just the stream name without prefix
-        stream_name = stream.replace(f"{self.stream_prefix}:", "")
+        # removeprefix, not replace(): replace() also stripped every later occurrence of
+        # the prefix inside the stream name itself ("s:events:process" -> "eventprocess").
+        stream_name = stream.removeprefix(f"{self.stream_prefix}:")
         return f"{self.dlq_prefix}:{stream_name}"
 
     async def publish_event(

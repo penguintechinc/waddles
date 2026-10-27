@@ -264,6 +264,20 @@ Phase 0-1 has no Rust dependency and can proceed in parallel with nothing else i
 
 ---
 
+## 16. Implementation status (updated 2026-09-29)
+
+| Phase | Status | Notes |
+|---|---|---|
+| 0 (schemas + roles) | **Done** | `alembic/versions/0030_bundle_app_schemas.py`, merged |
+| 0 (DDL compiler) | **Done** (PR #430, open) | `hub_api/services/bundle_data_ddl.py`/`bundle_data_schema.py` |
+| 3 (host wiring, `svc_process` only) | **Partial (this PR)** | `core/bundle_host_db` implements `insert`/`get`/`update`/`delete` (RLS + explicit tenant/community predicate, `user_ref` UUID enforcement, size/row quotas, statement timeout, per-call deadline), wired into `core/svc_process/src/capabilities.rs` behind `waddles.bundle-db-capability` (default OFF) and the interim manifest-declared-capability gate (`storage.tables`, mirrors `bundle_host_kv::authorize`) |
+| 3 (host wiring, `svc_action`) | **Not started** | Same crate, needs the same `DbWiring` plumbing as `svc_process` |
+| 2 (WIT interface) | **Proposed, not landed** | `stage.wit`'s `db` interface still exposes the retired `execute(statement, params)` shape (SS1 round-1 CRITICAL: no bundle-supplied SQL). This PR's host-side wiring dispatches on op strings (`insert`/`get`/`update`/`delete`) at the existing untyped `{capability, op, args}` host-API layer instead of changing the WIT file, because `stage.wit` is also consumed by `core/bundle_executor`'s `bindgen!`-generated `db::Host` trait (`core/bundle_executor/src/host/imports.rs`) and all three Tier-1 SDKs -- changing its shape requires updating those in the same change, out of this slice's scope. See the PR description for the proposed replacement interface (structured `insert`/`get`/`query`/`update`/`delete`, `query`'s `column` as a plain validated `string` rather than the per-app generated `indexed-column` enum this section originally specified, until that codegen step exists) |
+| 3 (`query`/list) | **Not started** | Host-side op only; also blocked on the `indexed-column` codegen note above |
+| 4 (quota trigger) | **Partial** | Pre-write `COUNT(*)` under the same transaction, not yet the trigger-based counter this section specifies |
+| 5 (uninstall/DSAR erasure) | Not started | |
+| 7 (OTel) | **Done for the ops landed** | `waddles_bundle_tables_*` metrics + spans, `core/bundle_host_db::metrics` |
+
 ## 15. Open questions
 
 - **Autovacuum tuning specifics** (§3.6): exact `autovacuum_vacuum_cost_delay`/`cost_limit` values for `app_core`/`app_community` need a load test against realistic bundle-table write rates before Phase 0 locks the template defaults.

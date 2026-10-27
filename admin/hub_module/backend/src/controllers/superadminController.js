@@ -21,7 +21,7 @@ export async function listCommunities(req, res, next) {
     const platform = req.query.platform;
     const isActive = req.query.isActive;
 
-    let whereClause = 'WHERE 1=1';
+    let whereClause = 'WHERE id > 0'; // excludes tenant-wide sentinel community (id 0)
     const params = [];
     let paramIndex = 1;
 

@@ -190,9 +190,11 @@ class TeamsBotService:
             if member.id != activity.recipient.id:
                 # Someone was added to the conversation
                 self.logger.audit(
-                    f"Member added: {member.name}",
                     action="member_added",
-                    user=member.id
+                    user=member.id,
+                    community="",
+                    result="SUCCESS",
+                    detail="Member added"
                 )
                 await turn_context.send_activity(
                     f"Welcome {member.name}! I'm WaddleBot."
@@ -203,9 +205,11 @@ class TeamsBotService:
         activity = turn_context.activity
         for member in activity.members_removed or []:
             self.logger.audit(
-                f"Member removed: {member.name}",
                 action="member_removed",
-                user=member.id
+                user=member.id,
+                community="",
+                result="SUCCESS",
+                detail="Member removed"
             )
 
     async def _handle_conversation_update(self, turn_context: TurnContext) -> None:
@@ -251,7 +255,7 @@ class TeamsBotService:
                 type=ActivityTypes.message,
                 text=message_text,
                 channel_id="msteams",
-                service_url=f"https://smba.trafficmanager.net/",
+                service_url="https://smba.trafficmanager.net/",
                 conversation={"id": channel_id},
                 recipient=ChannelAccount(id=channel_id, name="Teams"),
                 from_property=ChannelAccount(id=self.app_id, name="WaddleBot")
@@ -294,10 +298,11 @@ class TeamsBotService:
                 )
 
                 self.logger.audit(
-                    "Event sent to router",
                     action="router_forward",
                     user=event_data.get('user_id'),
-                    result="SUCCESS" if response.status_code < 400 else "FAILED"
+                    community=str(event_data.get("community_id") or ""),
+                    result="SUCCESS" if response.status_code < 400 else "FAILED",
+                    detail="Event sent to router"
                 )
 
                 if response.status_code == 200:

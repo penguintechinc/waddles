@@ -27,7 +27,10 @@ TENANT_SLUG = "acme-corp"
 
 @pytest.fixture
 def reputation_db(tmp_path: Any) -> Any:
-    """`(async_dal, community_id)` -- file-backed `AsyncDAL` with auth + reputation_global bound."""
+    """`(async_dal, community_id, tenant_id)`.
+
+    File-backed `AsyncDAL` with auth + `reputation_tenant` bound.
+    """
     async_dal = AsyncDAL(f"sqlite://{tmp_path / 'reputation_service_test.db'}", pool_size=1)
     dal = async_dal.dal
     dal.define_table(
@@ -49,7 +52,7 @@ def reputation_db(tmp_path: Any) -> Any:
     dal.commit()
     for table_name in dal.tables:
         dal(dal[table_name]).count()
-    yield async_dal, community_id
+    yield async_dal, community_id, tenant_id
     dal.close()
 
 
@@ -73,8 +76,11 @@ def _seed_member(
     dal.commit()
 
 
-def _seed_global(dal: Any, *, hub_user_id: int, score: int, total_events: int = 5) -> None:
-    dal.reputation_global.insert(
+def _seed_tenant(
+    dal: Any, *, tenant_id: int, hub_user_id: int, score: int, total_events: int = 5
+) -> None:
+    dal.reputation_tenant.insert(
+        tenant_id=tenant_id,
         hub_user_id=hub_user_id,
         score=score,
         total_events=total_events,
@@ -110,63 +116,81 @@ class TestReputationTier:
 
 class TestGetMyReputation:
     async def test_defaults_to_baseline_when_no_rows_exist(self, reputation_db: Any) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, tenant_id = reputation_db
         dal = async_dal.dal
         result = await svc.get_my_reputation(
-            async_dal, dal, community_id=community_id, hub_user_id=42
+            async_dal, dal, community_id=community_id, hub_user_id=42, tenant_id=tenant_id
         )
         assert result.community_score == 600
         assert result.community_tier == "Trusted"
-        assert result.global_score == 600
-        assert result.global_tier == "Trusted"
+        assert result.tenant_score == 600
+        assert result.tenant_tier == "Trusted"
         assert result.total_events == 0
         assert result.last_event_at is None
 
     async def test_reads_both_scores_when_present(self, reputation_db: Any) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, tenant_id = reputation_db
         dal = async_dal.dal
         _seed_member(
             dal, community_id=community_id, hub_user_id=7, display_name="alice", reputation=720
         )
-        _seed_global(dal, hub_user_id=7, score=820, total_events=12)
+        _seed_tenant(dal, tenant_id=tenant_id, hub_user_id=7, score=820, total_events=12)
 
         result = await svc.get_my_reputation(
-            async_dal, dal, community_id=community_id, hub_user_id=7
+            async_dal, dal, community_id=community_id, hub_user_id=7, tenant_id=tenant_id
         )
         assert result.community_score == 720
         assert result.community_tier == "Respected"
-        assert result.global_score == 820
-        assert result.global_tier == "Legend"
+        assert result.tenant_score == 820
+        assert result.tenant_tier == "Legend"
         assert result.total_events == 12
         assert result.last_event_at is not None
 
-    async def test_community_member_without_global_row_defaults_global_only(
+    async def test_community_member_without_tenant_row_defaults_tenant_only(
         self, reputation_db: Any
     ) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, tenant_id = reputation_db
         dal = async_dal.dal
         _seed_member(
             dal, community_id=community_id, hub_user_id=9, display_name="bob", reputation=300
         )
 
         result = await svc.get_my_reputation(
-            async_dal, dal, community_id=community_id, hub_user_id=9
+            async_dal, dal, community_id=community_id, hub_user_id=9, tenant_id=tenant_id
         )
         assert result.community_score == 300
         assert result.community_tier == "Newcomer"
-        assert result.global_score == 600
-        assert result.global_tier == "Trusted"
+        assert result.tenant_score == 600
+        assert result.tenant_tier == "Trusted"
+
+    async def test_tenant_score_never_leaks_from_another_tenant(self, reputation_db: Any) -> None:
+        """A `reputation_tenant` row seeded under a DIFFERENT tenant_id must never surface here."""
+        async_dal, community_id, tenant_id = reputation_db
+        dal = async_dal.dal
+        other_tenant_id = dal.tenants.insert(
+            slug="other-tenant", display_name="Other Tenant", is_active=True
+        )
+        dal.commit()
+        _seed_tenant(dal, tenant_id=other_tenant_id, hub_user_id=99, score=850, total_events=40)
+
+        result = await svc.get_my_reputation(
+            async_dal, dal, community_id=community_id, hub_user_id=99, tenant_id=tenant_id
+        )
+        # Caller's own tenant has no row for hub_user_id=99 -- baseline, not
+        # the other tenant's 850/Legend.
+        assert result.tenant_score == 600
+        assert result.tenant_tier == "Trusted"
 
 
 class TestGetLeaderboard:
     async def test_empty_community_returns_empty_list(self, reputation_db: Any) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         dal = async_dal.dal
         entries = await svc.get_leaderboard(async_dal, dal, community_id=community_id)
         assert entries == []
 
     async def test_orders_highest_first_and_includes_tier(self, reputation_db: Any) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         dal = async_dal.dal
         _seed_member(
             dal, community_id=community_id, hub_user_id=1, display_name="low", reputation=350
@@ -185,7 +209,7 @@ class TestGetLeaderboard:
         assert entries[2].tier == "Newcomer"
 
     async def test_excludes_inactive_members(self, reputation_db: Any) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         dal = async_dal.dal
         _seed_member(
             dal,
@@ -203,7 +227,7 @@ class TestGetLeaderboard:
         assert [e.display_name for e in entries] == ["here"]
 
     async def test_no_pii_fields_on_entry(self, reputation_db: Any) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         dal = async_dal.dal
         _seed_member(
             dal, community_id=community_id, hub_user_id=1, display_name="alice", reputation=600
@@ -213,7 +237,7 @@ class TestGetLeaderboard:
         assert field_names == {"display_name", "score", "tier"}
 
     async def test_limit_is_clamped(self, reputation_db: Any) -> None:
-        async_dal, community_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         dal = async_dal.dal
         for i in range(5):
             _seed_member(

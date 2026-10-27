@@ -1,5 +1,17 @@
 """Shared fixtures for hub-api's own tests.
 
+`bundle_data_pg_url`/`bundle_data_pg_conn` (`tests/test_bundle_data_ddl.py`)
+are this repo's first real-Postgres test fixtures -- `bundle_data_ddl.py`'s
+`psycopg2.sql.Composable.as_string()` golden-DDL rendering has no offline
+path (psycopg2's C extension requires a real connection/cursor to apply
+identifier/value quoting), and the RLS cross-tenant isolation test needs a
+real Postgres to prove RLS policies actually isolate rows. Session-scoped
+container (`postgres:17-bookworm`, matching `config/postgres`'s own pin),
+function-scoped throwaway database per test for isolation. Skips (not
+fails) when Docker is unavailable, same "environment-dependent, don't
+block the rest of the suite" posture as any other optional integration
+fixture.
+
 `tenant_db` mirrors `libs/flask_core/tests/test_tenancy.py` and
 `test_mcp_routes.py`'s own fixture exactly (in-memory pydal `tenants`
 table, `migrate=True`) -- ephemeral, test-only schema. Production never
@@ -48,6 +60,8 @@ take any `AsyncDAL`-like fixture with a `.dal` attribute, not just
 
 from __future__ import annotations
 
+import base64
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -65,6 +79,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     MetaData,
+    SmallInteger,
     String,
     Table,
     Text,
@@ -76,9 +91,12 @@ from services.schema import (
     bind_ai_routing_tables,
     bind_app_bundle_tables,
     bind_auth_tables,
+    bind_bar_citizen_tables,
+    bind_calendar_sync_tables,
     bind_community_authz_tables,
     bind_github_sync_tables,
     bind_lifecycle_tables,
+    bind_marketplace_module_tables,
     bind_music_tables,
     bind_overlay_tables,
     bind_platform_tables,
@@ -89,6 +107,16 @@ from services.schema import (
     bind_token_billing_tables,
 )
 
+# Env-gated real-Ollama fixtures (skip unless WADDLE_TEST_OLLAMA_URL is set) -- shared support
+# in <repo>/tests/support; see docs/testing/ollama-realpath.md. Additive re-export only.
+from tests.ollama_support import (  # noqa: E402,F401
+    json_model,
+    ollama_url,
+    safety_model,
+    single_flight,
+    text_model,
+)
+
 #: Matches flask_core.tenancy/authz's own os.getenv("SECRET_KEY", ...) fallback.
 SECRET_KEY = "change-me-in-production"
 
@@ -96,6 +124,67 @@ TENANT_SLUG = "acme-corp"
 
 #: Second tenant slug -- `lifecycle_db`'s cross-tenant IDOR fixture data.
 OTHER_TENANT_SLUG = "other-corp"
+
+#: Test-only Ed25519 signing seed (NEVER a real platform key) -- see
+#: `bundle_signing_test_env` below.
+_TEST_SIGNING_PRIVATE_KEY_B64 = base64.b64encode(b"t" * 32).decode("ascii")
+_TEST_SIGNING_KEY_ID = "test-key-1"
+
+
+@pytest.fixture(autouse=True)
+def bundle_signing_test_env(monkeypatch: Any) -> None:
+    """Every test gets a valid (test-only) Ed25519 artifact-signing key configured.
+
+    `bundle_approval_service.approve_version()` (spec SS5.6, artifact
+    signing) fails closed without `BUNDLE_SIGNING_PRIVATE_KEY`/
+    `BUNDLE_SIGNING_KEY_ID` set -- rather than mock signing away across
+    the ~30 existing `approve_version()`/`seed_one()` call sites in this
+    suite, this autouse fixture makes REAL Ed25519 signing happen on every
+    approval, matching this codebase's own "prove the wiring, don't fake
+    it" standard for security-sensitive code. A test specifically
+    exercising the "no key configured" failure path removes these with
+    `monkeypatch.delenv(...)` itself.
+    """
+    monkeypatch.setenv("BUNDLE_SIGNING_PRIVATE_KEY", _TEST_SIGNING_PRIVATE_KEY_B64)
+    monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", _TEST_SIGNING_KEY_ID)
+
+
+@pytest.fixture(autouse=True)
+def bundle_signing_sidecar_upload_mock(monkeypatch: Any) -> Any:
+    """Stubs `storage_service.write_bundle_sidecar()` so no test hits a real MinIO/S3 endpoint.
+
+    `approve_version()`'s new post-commit signed-sidecar upload
+    (`bundle_signing_service.upload_signed_sidecar()`) would otherwise
+    reach out for real -- mirrors `test_bundle_version_service.py`'s own
+    `monkeypatch.setattr(svc.storage_service, "upload_bundle_component",
+    ...)` pattern for the same reason. Returns the `AsyncMock` so a test
+    that specifically wants to assert the upload happened (call count/
+    args) can import this fixture and inspect it, or override it again
+    with its own `monkeypatch.setattr` for a real-upload/failure-path test.
+    """
+    from unittest.mock import AsyncMock
+
+    from services import storage_service
+
+    mock = AsyncMock(return_value="bundles/mock/1/mock.json")
+    monkeypatch.setattr(storage_service, "write_bundle_sidecar", mock)
+    return mock
+
+
+@pytest.fixture(autouse=True)
+def isolated_token_revocation() -> Any:
+    """Every test gets its own empty process-local JWT revocation store.
+
+    `flask_core.auth.verify_jwt_token` consults a process-wide `TokenRevocation`; a user-wide
+    cutoff written by one test (same `sub`, same second) would otherwise reject the tokens of the
+    next. Yields the live instance so a test can assert on / drive revocations directly.
+    """
+    from flask_core import token_revocation as tr
+
+    instance = tr.TokenRevocation(tr.MemoryBackend())
+    previous = tr.configure_token_revocation(instance)
+    yield instance
+    tr.configure_token_revocation(previous)
 
 
 @pytest.fixture
@@ -370,7 +459,9 @@ def seed_membership(
     dal.commit()
 
 
-def seed_super_admin(overlay_db: Any, *, user_id: int, username: str = "root") -> None:
+def seed_super_admin(
+    overlay_db: Any, *, user_id: int, username: str = "root", bootstrap: bool = False
+) -> None:
     """Insert one `hub_users` row with `is_super_admin=True`, at `hub_users.id == user_id`.
 
     Needed by any test asserting `services.community_authz.is_super_admin()`'s
@@ -381,9 +472,14 @@ def seed_super_admin(overlay_db: Any, *, user_id: int, username: str = "root") -
     must insert this BEFORE minting the matching token so `hub_users`' own
     autoincrement lands on the same id `user_id` expects (fixtures' `hub_users`
     table starts empty, so the first insert lands on id 1).
+
+    ``bootstrap=True`` marks it as the migration-081 seeded initial admin
+    (``hub_users.is_bootstrap``), the one super admin the free-tier cap never counts.
     """
     dal = overlay_db.dal
-    inserted_id: int = dal.hub_users.insert(username=username, is_super_admin=True)
+    inserted_id: int = dal.hub_users.insert(
+        username=username, is_super_admin=True, is_bootstrap=bootstrap
+    )
     dal.commit()
     assert inserted_id == user_id, (
         f"hub_users autoincrement landed on {inserted_id}, expected {user_id} -- "
@@ -448,6 +544,7 @@ def platform_db(tmp_path: Any) -> Any:
         Field("config", "json"),
     )
     bind_platform_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
     for table_name in dal.tables:
@@ -479,6 +576,7 @@ def admin_db(tmp_path: Any) -> Any:
     )
     bind_auth_tables(dal, migrate=True)
     bind_admin_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_superadmin_tenant_fields(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
@@ -519,6 +617,7 @@ def tenant_admin_db(tmp_path: Any) -> Any:
         Field("config", "json"),
     )
     bind_auth_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_tenant_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
@@ -780,6 +879,108 @@ def service_key_headers() -> dict[str, str]:
     return {"X-Service-Key": SERVICE_API_KEY}
 
 
+@pytest.fixture
+def bar_citizen_db(tmp_path: Any) -> Any:
+    """File-backed pydal DB for the Bar Citizen guild-pairing/role-sync group (migration 0034).
+
+    Additive fixture (`hub_api/PORTING.md`: new groups add their own
+    `bind_<group>_tables()` call rather than editing an existing fixture)
+    -- `bind_auth_tables()` for `tenants`/`communities`/`hub_users`, then
+    `bind_bar_citizen_tables()` on top, same layering `ai_routing_db`/
+    `overlay_db` use. Seeds one regular tenant + one global tenant + one
+    community under the regular tenant, so both `CredentialResolver` lanes
+    (tenant 0 / tenant N) and `community_in_tenant()` tenant-isolation
+    checks are exercisable without each test re-seeding rows.
+
+    Yields `(dal, community_id, tenant_id, global_tenant_id)`.
+    """
+    async_dal = AsyncDAL(f"sqlite://{tmp_path / 'bar_citizen_test.db'}", pool_size=1)
+    dal = async_dal.dal
+    dal.define_table(
+        "tenants",
+        Field("slug", unique=True),
+        Field("display_name"),
+        Field("logo_url"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("config", "json"),
+    )
+    bind_auth_tables(dal, migrate=True)
+    bind_bar_citizen_tables(dal, migrate=True)
+
+    tenant_id = dal.tenants.insert(
+        slug=TENANT_SLUG, display_name="Acme Corp", is_active=True, is_global=False
+    )
+    global_tenant_id = dal.tenants.insert(
+        slug=GLOBAL_TENANT_SLUG, display_name="Global", is_active=True, is_global=True
+    )
+    community_id = dal.communities.insert(name="test-community", tenant_id=tenant_id)
+    dal.commit()
+    for table_name in dal.tables:
+        dal(dal[table_name]).count()
+    yield dal, community_id, tenant_id, global_tenant_id
+    dal.close()
+
+
+@pytest.fixture
+def event_sync_db(tmp_path: Any) -> Any:
+    """File-backed pydal DB for the Discord event-sync group (migration 0039_event_sync_enabled).
+
+    Additive on top of `bar_citizen_db`'s own layering pattern --
+    `bind_auth_tables()` + `bind_bar_citizen_tables()` (for `guild_tenant_
+    pairings.event_sync_enabled` + `CredentialResolver`'s tenant lookup)
+    plus this group's own `bind_calendar_sync_tables()` (`calendar_events`
+    + `calendar_event_discord_syncs`). Seeds one regular tenant + one
+    global tenant + one community + one `approved` calendar event under
+    that community, so `event_discord_sync_service.py`'s tests can create
+    a guild pairing and call `sync_event()`/`run_event_sync_reconcile_
+    batch()` without each test re-seeding the base rows.
+
+    Yields `(dal, community_id, tenant_id, global_tenant_id, event_id)`.
+    """
+    async_dal = AsyncDAL(f"sqlite://{tmp_path / 'event_sync_test.db'}", pool_size=1)
+    dal = async_dal.dal
+    dal.define_table(
+        "tenants",
+        Field("slug", unique=True),
+        Field("display_name"),
+        Field("logo_url"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("config", "json"),
+    )
+    bind_auth_tables(dal, migrate=True)
+    bind_bar_citizen_tables(dal, migrate=True)
+    bind_calendar_sync_tables(dal, migrate=True)
+
+    tenant_id = dal.tenants.insert(
+        slug=TENANT_SLUG, display_name="Acme Corp", is_active=True, is_global=False
+    )
+    global_tenant_id = dal.tenants.insert(
+        slug=GLOBAL_TENANT_SLUG, display_name="Global", is_active=True, is_global=True
+    )
+    community_id = dal.communities.insert(name="test-community", tenant_id=tenant_id)
+    now = datetime.now(UTC)
+    event_id = dal.calendar_events.insert(
+        community_id=community_id,
+        title="Test Event",
+        description="A test event",
+        event_date=now,
+        end_date=None,
+        timezone="UTC",
+        location="",
+        status="approved",
+        sync_status="pending",
+        created_at=now,
+        updated_at=now,
+    )
+    dal.commit()
+    for table_name in dal.tables:
+        dal(dal[table_name]).count()
+    yield dal, community_id, tenant_id, global_tenant_id, event_id
+    dal.close()
+
+
 #: Matches `flask_core.auth.DEFAULT_TENANT_SLUG` -- the always-visible global catalog tenant.
 GLOBAL_TENANT_SLUG = "global"
 #: A second, non-global tenant distinct from `TENANT_SLUG` -- proves the marketplace-catalog
@@ -822,7 +1023,7 @@ def marketplace_catalog_db(tmp_path: Any) -> Any:
     matching `community_db`'s own `(dal, community_id)` tuple-return
     convention rather than attaching ad hoc attributes to the `DAL` object.
     """
-    from services.schema import bind_marketplace_catalog_tables
+    from services.schema import bind_marketplace_module_tables
 
     dal = DAL(f"sqlite://{tmp_path / 'marketplace_catalog_test.db'}")
     dal.define_table(
@@ -836,7 +1037,7 @@ def marketplace_catalog_db(tmp_path: Any) -> Any:
     other_id = dal.tenants.insert(slug=OTHER_TENANT_SLUG, display_name="Other Corp", is_active=True)
     dal.commit()
 
-    bind_marketplace_catalog_tables(dal, migrate=True)
+    bind_marketplace_module_tables(dal, migrate=True)
 
     now = "2026-01-01 00:00:00"
     dal.marketplace_catalog.insert(
@@ -1009,6 +1210,7 @@ def marketplace_billing_db(tenant_db: Any) -> Any:
     from services.schema import bind_marketplace_billing_tables
 
     dal = tenant_db
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_marketplace_billing_tables(dal, migrate=True)
 
     tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
@@ -1089,7 +1291,7 @@ def marketplace_db(tenant_db: Any, monkeypatch: Any) -> Any:
     Also sets `SERVICE_API_KEY` for the `internal_bp` (X-Service-Key)
     endpoint tests, matching `community_db`'s own precedent.
     """
-    from services.schema import bind_marketplace_vendor_tables
+    from services.schema import bind_marketplace_module_tables, bind_marketplace_vendor_tables
 
     monkeypatch.setenv("SERVICE_API_KEY", SERVICE_API_KEY)
     monkeypatch.setenv(
@@ -1098,6 +1300,7 @@ def marketplace_db(tenant_db: Any, monkeypatch: Any) -> Any:
     )
 
     dal = tenant_db
+    bind_marketplace_module_tables(dal, migrate=True)
     bind_marketplace_vendor_tables(dal, migrate=True)
     return dal
 
@@ -1329,7 +1532,7 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("badge", String(100)),
         Column("approval_id", BigInteger),
         Column("created_at", DateTime),
-        # migration 0024 -- the staged MinIO object keys (storage_service.
+        # migration 0024 -- the staged S3 object keys (storage_service.
         # bundle_component_key()/bundle_sidecar_key()), written by
         # bundle_version_service.py::_publish_prebuilt_version().
         Column("component_key", Text),
@@ -1340,6 +1543,13 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("license", String(50)),
         Column("license_review_required", Boolean, server_default="0"),
         Column("source_url", Text),
+        # migration 0040 -- artifact signing (spec SS5.6/Gemini review
+        # condition 9), written by bundle_signing_service.py at approval
+        # time (bundle_approval_service._write_approval_and_activate()).
+        Column("artifact_signature", Text),
+        Column("artifact_signature_key_id", String(100)),
+        Column("artifact_signed_approval_id", BigInteger),
+        Column("artifact_signed_at", DateTime),
     )
     Table(
         "app_active_versions",
@@ -1371,6 +1581,11 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("app_version_id", BigInteger),
         Column("created_at", DateTime),
         Column("updated_at", DateTime),
+        # migration 0031 -- set only by advance_state()'s own FSM transitions (plus
+        # create_version()'s stall-abandon/REJECTED-reuse writes), never by a
+        # same-status column write (_set_staging_component_key(), etc.). The
+        # create_version() stall check reads this column, not updated_at.
+        Column("status_changed_at", DateTime),
     )
     Table(
         "app_install_approvals",
@@ -1426,6 +1641,8 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("id", Integer, primary_key=True, autoincrement=True),
         Column("tenant_id", Integer, nullable=False),
         Column("name", String(255)),
+        Column("is_active", Boolean),
+        Column("is_public", Boolean),
     )
     # app_source_bindings (migration 0025) -- AUTO-BIND record of which
     # ingest_sources an approved app consumes (services/app_source_
@@ -1440,6 +1657,24 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("platform", String(50), nullable=False),
         Column("source_id", String(255), nullable=False),
         Column("created_at", DateTime),
+    )
+    # app_commands (migration 0062) -- slash-command registry, hub-api the
+    # only writer. sqlite-compatible mirror: plain types, no FKs / CHECKs
+    # (the real constraints are proven against Postgres in
+    # alembic/tests/test_0062_app_commands_registry.py).
+    Table(
+        "app_commands",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, nullable=False, server_default="0"),
+        Column("app_id", String(255), nullable=False),
+        Column("command", String(32), nullable=False),
+        Column("command_types", SmallInteger, nullable=False, server_default="1"),
+        Column("platforms", JSON, nullable=False),
+        Column("description", String(100)),
+        Column("registered_at", DateTime),
+        UniqueConstraint("tenant_id", "community_id", "app_id", "command"),
     )
     # app_global_installs / bundle_tenant_availability (migration 0027) --
     # GLOBAL and TENANT tiers of the App Bundle 3-tier split
@@ -1469,6 +1704,98 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("pinned_version_id", BigInteger),
         Column("updated_by", Integer),
         Column("updated_at", DateTime),
+    )
+    # app_permission_requests / app_tenant_permission_restrictions /
+    # community_permission_grants / app_permission_grant_versions /
+    # bundle_reputation_adjustments (migration 0032) -- sqlite-compatible
+    # mirror of the Bundle Permissions & Capability Gate grant-storage
+    # tables (services/bundle_permission_service.py).
+    Table(
+        "app_permission_requests",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("risk", String(20), nullable=False),
+        Column("params_json", JSON, server_default="{}"),
+        Column("justification", Text, nullable=False),
+        Column("approved_by", Integer),
+        Column("approval_source", String(50), server_default="human"),
+        Column("approved_at", DateTime),
+    )
+    Table(
+        "app_tenant_permission_restrictions",
+        metadata,
+        Column("tenant_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("restricted_by", Integer),
+        Column("restricted_at", DateTime),
+    )
+    Table(
+        "community_permission_grants",
+        metadata,
+        Column("community_id", Integer, nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("params_json", JSON, server_default="{}"),
+        Column("granted_by", Integer),
+        Column("granted_at", DateTime),
+        Column("revoked_by", Integer),
+        Column("revoked_at", DateTime),
+    )
+    Table(
+        "app_permission_grant_versions",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("grant_version", Integer, nullable=False),
+        Column("permission_snapshot_hash", String(71), nullable=False),
+        Column("effective_at", DateTime),
+    )
+    Table(
+        "bundle_reputation_adjustments",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer),
+        Column("target_user_uuid", String(36), nullable=False),
+        Column("scope", String(20), nullable=False),
+        Column("delta", Integer, nullable=False),
+        Column("reason_code", String(100), nullable=False),
+        Column("occurred_at", DateTime),
+        Column("reversal_of", BigInteger),
+    )
+    # instance_permission_policies / instance_permission_policy_audit
+    # (migration 0033) -- sqlite-compatible mirror of the instance policy
+    # layer (services/bundle_instance_policy_service.py).
+    Table(
+        "instance_permission_policies",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("permission_key", String(255), nullable=False),
+        Column("param_scope", String(255)),
+        Column("action", String(10), nullable=False),
+        Column("set_by", Integer),
+        Column("set_at", DateTime),
+    )
+    Table(
+        "instance_permission_policy_audit",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("permission_key", String(255), nullable=False),
+        Column("param_scope", String(255)),
+        Column("previous_action", String(10)),
+        Column("new_action", String(10), nullable=False),
+        Column("cascaded_revocations", Integer, server_default="0"),
+        Column("set_by", Integer),
+        Column("set_at", DateTime),
     )
     # `audit_log` is a pre-existing production table (services/schema.py's
     # `bind_admin_tables()`), reflected here as its sqlite-compatible
@@ -1509,3 +1836,97 @@ async def install_dal(bundle_install_db: Any) -> Any:
     await install_dal.reflect()
     yield install_dal
     await install_dal.close()
+
+
+@pytest.fixture(scope="session")
+def bundle_data_pg_url() -> Any:
+    """Session-scoped real-Postgres container URL for `test_bundle_data_ddl.py`.
+
+    See this module's own docstring for why a live Postgres is required at
+    all. Imports `testcontainers` lazily so a Docker-less environment only
+    skips these specific tests, not collection of this whole file.
+    """
+    try:
+        from testcontainers.community.postgres import PostgresContainer
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        pytest.skip(f"testcontainers unavailable: {exc}")
+
+    try:
+        container = PostgresContainer("postgres:17-bookworm")
+        container.start()
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        pytest.skip(f"docker unavailable for bundle_data_pg tests: {exc}")
+
+    url = container.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
+
+    # Roles are cluster-wide (not per-database) in Postgres -- created once
+    # here, not in the per-test `bundle_data_pg_conn` fixture below, or the
+    # second test's `CREATE ROLE` would fail with `DuplicateObject`.
+    import psycopg2
+
+    role_conn = psycopg2.connect(url)
+    role_conn.autocommit = True
+    with role_conn.cursor() as cur:
+        cur.execute("CREATE ROLE waddles_bundle_runtime")
+        # A real, non-superuser table-owner role -- needed by test_force_
+        # rls_binds_the_owning_role_too: Postgres superusers always bypass
+        # RLS regardless of FORCE (per Postgres's own RLS docs), so
+        # confirming FORCE actually binds the *owner* requires the owner to
+        # not be a superuser in the first place. NOLOGIN since tests always
+        # reach it via `SET ROLE`, never a direct connection.
+        cur.execute("CREATE ROLE waddles_bundle_migrator NOLOGIN")
+    role_conn.close()
+
+    try:
+        yield url
+    finally:
+        container.stop()
+
+
+@pytest.fixture
+def bundle_data_pg_conn(bundle_data_pg_url: str) -> Any:
+    """A fresh, empty Postgres database per test -- full isolation without recreating the container.
+
+    Also creates the `app_core`/`app_community` schemas, the `pgcrypto`
+    extension (`gen_random_uuid()`, used by the platform-owned `row_id`
+    column default), and the schema-level `USAGE`/`CREATE` grants Phase
+    0's separate role/schema-provisioning step is responsible for in
+    production (not this module's concern -- `bundle_data_ddl` only issues
+    the explicit *per-table* `GRANT` on top of that baseline).
+    `waddles_bundle_runtime`/`waddles_bundle_migrator` themselves are
+    created once, cluster-wide, by `bundle_data_pg_url` above.
+    """
+    import uuid
+
+    import psycopg2
+    from psycopg2 import sql as pg_sql
+
+    admin_conn = psycopg2.connect(bundle_data_pg_url)
+    admin_conn.autocommit = True
+    db_name = f"bundle_ddl_test_{uuid.uuid4().hex[:12]}"
+    with admin_conn.cursor() as cur:
+        cur.execute(pg_sql.SQL("CREATE DATABASE {}").format(pg_sql.Identifier(db_name)))
+    admin_conn.close()
+
+    test_url = bundle_data_pg_url.rsplit("/", 1)[0] + f"/{db_name}"
+    conn = psycopg2.connect(test_url)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS app_core")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS app_community")
+        cur.execute("GRANT USAGE ON SCHEMA app_core, app_community TO waddles_bundle_runtime")
+        cur.execute(
+            "GRANT USAGE, CREATE ON SCHEMA app_core, app_community TO waddles_bundle_migrator"
+        )
+
+    yield conn
+
+    conn.close()
+    cleanup_conn = psycopg2.connect(bundle_data_pg_url)
+    cleanup_conn.autocommit = True
+    with cleanup_conn.cursor() as cur:
+        cur.execute(
+            pg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(pg_sql.Identifier(db_name))
+        )
+    cleanup_conn.close()

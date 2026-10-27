@@ -6,7 +6,13 @@
 //! SS6.5/SS7.4).
 
 pub mod bridge;
+pub mod connector_imports;
+pub(crate) mod http_wire;
 pub mod imports;
+pub mod stage_next_ai;
+pub mod stage_next_economy;
+pub mod stage_next_identity;
+pub mod stage_next_imports;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -54,6 +60,30 @@ pub struct ExecState {
     /// error string surfaced through a host-call failure to spoof or
     /// evade classification -- see `CapTrackingLimits`'s own doc).
     pub limits: CapTrackingLimits,
+    /// The invoking tenant as the stage reported it (`context`/`get-context`,
+    /// host-derived from the invoke key, never guest-suppliable), cached by
+    /// `crate::host::connector_imports`'s `identity.lookup` so a connector
+    /// that looks up many identities in one invocation pays one `context`
+    /// round trip, not one per lookup. `None` until the first lookup
+    /// establishes it; it is fresh per call (like every other field here),
+    /// so a tenant can never leak from one invocation into the next.
+    pub(crate) identity_tenant: Option<String>,
+    /// The scope guard for a `stage-v2` invocation (`None` for v1 bundles,
+    /// which never see numeric ids). Set by `crate::invoke::run_guest` from the
+    /// `Load`-registered scopes plus, for a dispatch, the verified frame ids;
+    /// `context-v2.get-context` reads it so the id the guest sees through the
+    /// host-call is the SAME verified value as the dispatch frame's.
+    pub(crate) v2_scope: Option<V2ScopeGuard>,
+}
+
+/// The verified numeric scope a `stage-v2` invocation may observe.
+#[derive(Debug, Clone, Default)]
+pub struct V2ScopeGuard {
+    /// `(tenant_id, community_id)` pairs this bundle was `Load`ed under.
+    pub allowed: Vec<(i32, i32)>,
+    /// The ids carried (and verified against `allowed`) by the dispatch
+    /// frame, when the export is a dispatch. `get-context` must agree with it.
+    pub frame: Option<(i32, i32)>,
 }
 
 impl ExecState {
@@ -69,6 +99,8 @@ impl ExecState {
             app_id,
             call_id,
             limits: CapTrackingLimits::new(StoreLimitsBuilder::new().build()),
+            identity_tenant: None,
+            v2_scope: None,
         }
     }
 

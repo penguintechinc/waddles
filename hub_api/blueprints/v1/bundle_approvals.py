@@ -113,8 +113,8 @@ def _install_dto(row: Any) -> GlobalInstallDTO:
 
 
 @bundle_approvals_bp.route("/<app_id>/versions/<version>/permissions", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(PermissionSummaryResponse)
 async def get_permissions(
     app_id: str, version: str
@@ -131,8 +131,8 @@ async def get_permissions(
 
 
 @bundle_approvals_bp.route("/<app_id>/versions/<version>/approve", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(ApproveRequest)
 @validate_response(ApproveResponse)
 async def post_approve(
@@ -168,8 +168,8 @@ async def post_approve(
 
 
 @bundle_approvals_bp.route("/<app_id>/versions/<version>/deny", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(DenyRequest)
 @validate_response(MessageResponse)
 async def post_deny(
@@ -187,8 +187,8 @@ async def post_deny(
 
 
 @bundle_approvals_bp.route("/<app_id>/uninstall", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def post_uninstall(app_id: str) -> MessageResponse | tuple[dict[str, object], int]:
     """GLOBAL tier: revoke `app_id`'s platform-catalog install.
@@ -208,7 +208,7 @@ async def post_uninstall(app_id: str) -> MessageResponse | tuple[dict[str, objec
 
 
 @bundle_approvals_bp.route("/installs", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(GlobalInstallListResponse)
 async def list_installs() -> GlobalInstallListResponse:
     """List the platform catalog's current installs -- any authenticated tenant member."""

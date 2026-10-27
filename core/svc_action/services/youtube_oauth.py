@@ -9,14 +9,14 @@ support exactly one forced refresh on a caller-observed 401 -- same
 semantics, same safety margin, same Google OAuth error-body shape. Copied
 rather than imported because `hub_api` and `core/svc_action` are separate
 deployable services with no shared runtime dependency between them (same
-reasoning `bundles/discord_send_action.py`'s own module docstring gives
+reasoning `builtin_handlers/discord_send_action.py`'s own module docstring gives
 for not adding a new third-party SDK dependency instead of reusing
 `waddle_transports` primitives already in scope) -- this module is
 intentionally small enough that copying it is cheaper than introducing a
 cross-service import.
 
 Also provides `token_has_scope()`, which the `hub_api` module has no
-equivalent of: `bundles/youtube_send_action.py` needs to distinguish "the
+equivalent of: `builtin_handlers/youtube_send_action.py` needs to distinguish "the
 refresh token itself doesn't carry chat-send permission" (a permanent
 error, unfixable without reissuing OAuth consent) from a transient/real
 403 API error body, so it can surface the specific, actionable message
@@ -31,7 +31,7 @@ token, or access token value itself -- only cache hit/miss/refresh and
 which error class a refresh failure falls into.
 
 `get_access_token_for_community()` (gh-320) is the community-aware entry
-point `bundles/youtube_send_action.py` calls instead of `get_access_token`
+point `builtin_handlers/youtube_send_action.py` calls instead of `get_access_token`
 directly: it tries `waddle_transports.community_credentials
 .resolve_community_tokens(community_id, "youtube")` first -- a
 `source == "community"` result means hub-api has a per-community-connected
@@ -205,7 +205,7 @@ async def get_access_token_for_community(
     refresh machinery never applies to it. Any other outcome (`source ==
     "env"`, a `None` result, the resolver module not being importable yet,
     or the resolver itself raising) falls through to `get_access_token`
-    unchanged -- identical to this bundle's behavior before gh-320.
+    unchanged -- identical to this handler's behavior before gh-320.
 
     Never logs the resolved token value -- only which source it came from.
     """

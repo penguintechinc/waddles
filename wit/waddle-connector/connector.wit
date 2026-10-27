@@ -1,0 +1,186 @@
+// Normative copy. Source of truth: `waddle:connector/connector@1.0.0`, spec
+// `docs/superpowers/specs/2026-09-28-connector-bundles.md` S1.
+//
+// Every consumer (the executor's per-component Linker, the bundle-compiler's
+// import-allowlist validator, and the connector reference bundles) references
+// this exact file by path `wit/waddle-connector/connector.wit` and never
+// inlines a copy. On any conflict between this file and the spec prose, the
+// spec wins -- open a PR here to reconcile, never silently diverge.
+//
+// `http`/`log`/`clock`/`flags` are reused verbatim from
+// `waddle:bundle@1.0.0` (`wit/waddle-bundle/stage.wit`) -- qualified,
+// cross-package imports below, resolved against that package's own
+// resolvable copy at `deps/waddle-bundle/stage.wit` (standard `wit-parser`
+// deps layout; the design spec's illustrative `import http;` shorthand is
+// expanded here to the fully-qualified form a real toolchain requires).
+package waddle:connector@1.0.0;
+
+interface types {
+  /// Immutable, host-constructed. Never guest-influenced (same
+  /// confused-deputy rule as InvokeScope, PR #419 S5.1).
+  record connection-ctx {
+    platform: string,
+    /// Opaque source id -- NEVER a channel/guild name (scale design's
+    /// "opaque source ids in stream keys" rule extends to every value a
+    /// connector bundle can see).
+    source-id: string,
+    /// Host-assigned, stable per logical session (survives a transport
+    /// reconnect if the host RESUMEs; new value on a fresh session).
+    connection-id: string,
+    /// Opaque session handle for RESUME-capable transports (Discord).
+    /// The bundle never parses this -- it round-trips it back into
+    /// build-identify on reconnect; the host is the only reader.
+    session-token: option<string>,
+  }
+
+  record raw-frame {
+    ctx: connection-ctx,
+    bytes: list<u8>,
+    received-at: string,          // RFC 3339 UTC, ms precision
+  }
+
+  /// Same shape as waddle:bundle/types.platform-event, except `actor`
+  /// (and any target-user field inside payload-json) is ALREADY a
+  /// canonical UUID or ephemeral pseudonym by the time on-frame returns
+  /// it -- see S3.3. `payload-json` may itself carry `{user:<uuid>}`
+  /// placeholders for any additional mentioned users (same grammar as
+  /// PR #419 S10.4's outbound placeholders, reused inbound).
+  record normalized-event {
+    platform: string,
+    event-type: string,
+    actor: option<string>,
+    payload-json: string,
+    occurred-at: string,
+  }
+
+  /// Returned by on-connect. `secret-refs` pairs a byte-range/field slot
+  /// with an OPAQUE handle the guest cannot decode -- never the credential
+  /// itself. The host's outbound transport substitutes the real value at
+  /// send time, after the guest has returned (S2.1) -- the exact
+  /// `http::request.secret-refs` pattern from stage.wit:89, extended to
+  /// raw transport frames and hardened per Gemini condition 8.
+  record handshake-payload {
+    bytes: list<u8>,
+    secret-refs: list<tuple<string, string>>,
+  }
+
+  variant frame-error { unsupported(string), malformed(string), backend(string) }
+}
+
+/// Host-mediated identity lookup, reading the RO Postgres replica through
+/// the dedicated `waddles_connector_pii_reader` role (S3.3) -- column-
+/// scoped to identity columns only. **Capability: `connector.pii.read`,
+/// dangerous, global-approved/first-party-core-only (S3.1/S3.2) -- never
+/// exposed to `stage`/`stage-v1_1`, so an ordinary app bundle has no
+/// linker path to it at all (S3.3).** This is the one place a connector
+/// bundle may hold raw PII (a handle/display name) in guest memory,
+/// justified by S3.2's privileged-trust-tier argument.
+interface identity {
+  variant identity-key {
+    /// Resolve a UUID back to its displayable identity (outbound mention
+    /// rendering, sender.build-request).
+    uuid(string),
+    /// Resolve a raw platform identity to its canonical UUID (inbound
+    /// tokenization, receiver.on-frame). `(platform, platform-user-id)`.
+    platform-identity(tuple<string, string>),
+  }
+
+  record identity-record {
+    uuid: string,
+    /// false = no real hub_users row exists; `uuid` is a deterministic
+    /// ephemeral pseudonym (PR #419 S10.3's UUIDv5 scheme) and `handle`/
+    /// `display-name` are always `none` -- never mints a real row just
+    /// because a platform identity was looked up.
+    linked: bool,
+    handle: option<string>,
+    display-name: option<string>,
+  }
+
+  variant error { denied(string), not-found, rate-limited(u32), backend(string) }
+
+  /// `not-found`: the target was erased (S3.3's erasure-invalidation
+  /// rule) or never existed. `rate-limited`: the per-connector-digest
+  /// token bucket (S3.3) is exhausted -- callers must back off, never spin.
+  lookup: func(key: identity-key) -> result<identity-record, error>;
+}
+
+interface receiver {
+  use types.{connection-ctx, raw-frame, normalized-event, handshake-payload, frame-error};
+
+  /// Called once per new/resumed connection. Returns the platform's
+  /// IDENTIFY/AUTH/subscribe frame; `ctx.session-token` is populated on a
+  /// resume attempt so the bundle can build a RESUME payload instead of a
+  /// fresh IDENTIFY, when the platform supports it.
+  on-connect: func(ctx: connection-ctx) -> result<handshake-payload, frame-error>;
+
+  /// The hot path. One raw transport frame in, zero or more normalized
+  /// events out (a single Discord dispatch, IRC line, EventSub delivery,
+  /// or polled batch may yield 0..N events -- return-side batching, not
+  /// call-side, S4).
+  on-frame: func(frame: raw-frame) -> result<list<normalized-event>, frame-error>;
+
+  /// The host calls this on its own heartbeat/keepalive timer -- NEVER
+  /// gated on on-frame's latency (S4). `none` means "host sends its
+  /// platform-default heartbeat unchanged"; `some` lets a bundle whose
+  /// platform needs a non-trivial heartbeat body (e.g. a sequence number)
+  /// supply one.
+  on-heartbeat-due: func(ctx: connection-ctx) -> result<option<list<u8>>, frame-error>;
+
+  on-disconnect: func(ctx: connection-ctx, reason: string);
+}
+
+interface sender {
+  use types.{frame-error};
+
+  record header { name: string, value: string }
+
+  record action {
+    kind: string,               // e.g. "chat.send", "moderation.ban" -- platform-agnostic verb
+    target-source-id: string,   // opaque, resolved server-side from app_outbound_bindings
+    payload-json: string,       // may carry {user:<uuid>} placeholders from an app bundle's
+                                 // relay.push, or a raw target the connector itself resolves
+                                 // via identity.lookup -- see S3.3
+  }
+
+  /// The templated request the HOST will send. `secret-refs` carries an
+  /// OPAQUE handle per slot (S2.1) -- the host's outbound layer substitutes
+  /// the real credential at send time, after this call returns; the guest
+  /// never sees a resolved value. Placeholder/mention RENDERING, by
+  /// contrast, happens inside build-request itself, via identity.lookup
+  /// (S3.3, Justin's PII decision): the
+  /// connector is the privileged, sink-adjacent component, so it may
+  /// render `{user:<uuid>}` into a real handle/display name before
+  /// returning this record. The host still owns the actual socket write
+  /// -- build-request (not a bundle-owned send) stays preferred so no
+  /// bundle ever opens a socket, not because the bundle can't touch PII.
+  record http-request-tpl {
+    method: string,
+    url: string,
+    headers: list<header>,
+    body: option<list<u8>>,
+    secret-refs: list<tuple<string, string>>,
+  }
+
+  /// Preferred: the bundle shapes the platform-specific request -- including
+  /// resolving any {user:<uuid>} placeholder via identity.lookup and
+  /// applying per-sink escaping (IRC-safe, HTML-entity, etc.) -- and the
+  /// host transmits it. No socket/HTTP client in the guest.
+  build-request: func(action: action) -> result<http-request-tpl, frame-error>;
+}
+
+world connector {
+  import identity;
+  import waddle:bundle/http@1.0.0;  // reused from waddle:bundle@1.0.0 -- guarded, for a
+                                     // sender's fallback path (S3.4) and any receiver-side
+                                     // REST call (e.g. Twitch subscription bookkeeping
+                                     // stays host-side, not bundle-side -- see S2).
+  import waddle:bundle/log@1.0.0;   // reused from waddle:bundle@1.0.0 -- scrubbed by the
+                                     // same host pipeline as every other bundle's log
+                                     // calls (S3.5, Gemini condition 6), regardless of a
+                                     // connector's elevated identity.lookup trust tier.
+  import waddle:bundle/clock@1.0.0;
+  import waddle:bundle/%flags@1.0.0;
+
+  export receiver;
+  export sender;
+}

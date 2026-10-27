@@ -1,0 +1,29 @@
+{
+  "context": {
+    "message_type": "notification"
+  },
+  "frame": {
+    "event": {
+      "broadcaster_user_id": "111",
+      "broadcaster_user_login": "somechannel",
+      "title": "new title"
+    },
+    "subscription": {
+      "condition": {
+        "broadcaster_user_id": "111"
+      },
+      "id": "sub-1",
+      "type": "channel.update",
+      "version": "1"
+    }
+  },
+  "golden": null,
+  "golden_origin": "rust",
+  "id": "twitch/eventsub_unknown_type_ignored",
+  "outcome": "dropped",
+  "path": "twitch_eventsub",
+  "pii_classifier": "pass",
+  "platform": "twitch",
+  "python_divergences": [],
+  "seed": "core/svc_ingest/src/normalize.rs tests + core/svc_ingest/tests/test_eventsub.py + test_builtin_twitch_eventsub_ingest.py"
+}

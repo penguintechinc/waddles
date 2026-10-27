@@ -10,7 +10,10 @@ webui:
 global:
   imageRegistry: "ghcr.io/penguintechinc/waddlebot"
   imageTag: "latest"
-  imagePullPolicy: Always
+  # IfNotPresent: scripts/deploy-beta.sh always passes a unique per-deploy tag
+  # (--set-string global.imageTag=beta-<epoch>), so Always buys nothing. Override with
+  # --set global.imagePullPolicy=Always only when deploying a mutable tag (e.g. `latest`).
+  imagePullPolicy: IfNotPresent
   imagePullSecrets:
     - name: ghcr-pull-secret
   corsOrigin: "https://hub.waddlebot.io,https://waddlebot.io,https://waddles.penguintech.cloud,https://waddlebot.penguintech.cloud,http://localhost:3000,http://localhost:5173"
@@ -19,6 +22,16 @@ global:
 infrastructure:
   postgresql:
     enabled: true
+    # Database credentials (H-1 / H-3, docs/DATABASE_CREDENTIALS.md). global.deploymentTier=
+    # production means NOTHING is generated: pre-create BOTH Secrets (ExternalSecret / SealedSecret
+    # in practice) before `helm upgrade`, or the render fails with the missing key's name.
+    #   owner:  kubectl -n waddlebot create secret generic waddlebot-db-admin \
+    #             --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+    #   roles:  one PW_<ROLE_UPPERCASE> key per role in config/postgres/service-roles.yaml, e.g.
+    #             kubectl -n waddlebot create secret generic waddlebot-db-credentials \
+    #               --from-literal=PW_WADDLES_HUB_API="$(openssl rand -hex 24)" ...   (33 keys)
+    # (or point serviceRoles.existingSecret / admin.existingSecret at your own Secret names).
+    # The old repo-public *_dev_changeme passwords are burned and neutralized by alembic 0055.
     image: postgres:16-bookworm@sha256:a0fd72825431f4b7fd3f9d5def9f370b9c22012f1a9e37ece1a5749b95333fb7
     replicas: 1
     persistence:
@@ -37,7 +50,30 @@ infrastructure:
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
-  minio:
+  # Durable delivery-state Valkey: primary + 1 warm replica on longhorn (replicated volume).
+  # Set infrastructure.valkeyDurable.password explicitly (no auto-generation outside alpha/local).
+  valkeyDurable:
+    enabled: true
+    replicas: 2
+    maxMemory: "256mb"
+    antiAffinity: "soft"
+    persistence:
+      size: 3Gi
+      storageClass: "longhorn"
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "400m", memory: "512Mi" }
+  # Dedicated bundle-kv Valkey (noeviction quota store): single pod, no replication.
+  valkeyKv:
+    enabled: true
+    maxMemory: "128mb"
+    persistence:
+      size: 1Gi
+      storageClass: "longhorn"
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits: { cpu: "250m", memory: "256Mi" }
+  seaweedfs:
     enabled: false
   ollama:
     enabled: false
@@ -78,6 +114,15 @@ pipeline:
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "500m", memory: "512Mi" }
+    # feature/bundle-artifact-signing -- run `make generate-bundle-signing-key
+    # KEY_ID=<label> KUBE_CONTEXT=dal2-beta NAMESPACE=waddlebot` once before the first
+    # bundle approval on this env (uses the default secret name -- see values.yaml's
+    # pipeline.hubApi.bundleSigning comment); deploymentTier=beta is outside alpha/local
+    # so templates/auto-provisioned-keys-job.yaml's hook cannot generate this Secret
+    # itself, only derive+publish its public key once it exists. rustDataPlane stays
+    # disabled here (base default) -- fix/chart-autogen-bundle-signing-key: no
+    # bundleSigningPublicKeys override is needed when the executor IS enabled here, it
+    # now sources the public key from the auto-derived ConfigMap by default.
   hubWebui:
     replicas: 1
     resources:
@@ -410,7 +455,7 @@ modules:
 sharedEnv:
   DB_HOST: "infra-postgres"
   REDIS_HOST: "infra-redis"
-  MINIO_ENDPOINT: "infra-minio:9000"
+  MINIO_ENDPOINT: "infra-seaweedfs:8333"
   QDRANT_HOST: "infra-qdrant"
   ROUTER_URL: "http://waddlebot-router:8000"
   HUB_URL: "http://waddlebot-hub-api:8060"
@@ -526,10 +571,15 @@ ingress:
           pathType: Prefix
           service: inventory-interaction
           port: 8024
+        # SECURITY: routed through hub-api, NOT calendar-interaction directly
+        # -- hub-api's scope-gated event_calendar_bp + EventCalendarProxyClient
+        # are the only legitimate JWT-validators/setters of the
+        # X-User-Context/X-API-Key headers calendar_interaction_module trusts
+        # (live authz bypass, fixed 2026-10).
         - path: /api/v1/calendar
           pathType: Prefix
-          service: calendar-interaction
-          port: 8030
+          service: hub-api
+          port: 8060
         - path: /api/v1/memories
           pathType: Prefix
           service: memories-interaction
@@ -708,9 +758,12 @@ httproute:
     - path: /api/v1/alias
       service: "waddlebot-interactive-social"
       port: 8010
+    # SECURITY: routed through hub-api, NOT waddlebot-interactive-productivity
+    # directly (live authz bypass, fixed 2026-10) -- see matching comment above.
     - path: /api/v1/calendar
-      service: "waddlebot-interactive-productivity"
-      port: 8030
+      service: "waddlebot-hub-api"
+      port: 8060
+      timeoutSeconds: 3600
     - path: /api/v1/loyalty
       service: "waddlebot-interactive-loyalty"
       port: 8032
@@ -762,10 +815,34 @@ httproute:
 networkPolicy:
   enabled: true
 
+# Egress lockdown — MANDATORY from beta on (the fail guard in
+# infrastructure/egress-proxy.yaml blocks a render with this off).
+egressProxy:
+  enabled: true
+  environment: "beta"
+  replicas: 1
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "250m", memory: "256Mi" }
+egressPolicy:
+  enabled: true
+  clusterCidrs:
+    podCidr: "10.244.0.0/16"      # dal2 — confirm against cluster CNI config before deploy
+    serviceCidr: "10.96.0.0/12"
+    nodeCidr: "10.0.0.0/8"
+
 presentation:
   image:
     repository: "waddlebot-svc-presentation"
     tag: "latest"
+
+# R5: the SPIRE agent DaemonSet is an approved ROOT EXCEPTION (uid 0 + hostPath Workload-API socket
+# dir) that neither PSA baseline nor restricted admits, and it lives in this namespace, so beta cannot
+# ENFORCE restricted while spire.enabled=true (the chart `fail`s if you try). audit/warn stay
+# `restricted` so every non-spire violation is still surfaced. Follow-up: move SPIRE to its own
+# namespace, then drop this override. gamma/production (spire off) enforce `restricted`.
+podSecurity:
+  enforce: privileged
 
 spire:
   enabled: true

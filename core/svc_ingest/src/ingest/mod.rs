@@ -16,6 +16,7 @@
 //! on a bare successful connect, before the session had proven itself).
 
 pub mod discord;
+pub mod discord_identify_budget;
 pub mod twitch;
 pub mod twitch_eventsub;
 

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Excludes compiler/source-generator-emitted code from the 90% coverage
+     gate (rules/critical-rules.md Coverage). The System.Text.Json
+     source-generated `WaddleSdkJsonContext` partial-class members under
+     obj/ are never hand-written, and asserting coverage on generated
+     serialization plumbing is not a meaningful signal, the same reasoning
+     `sdk/waddle-sdk-rs`'s wasm32-only glue exclusion documents for its own
+     compiler-emitted seam. -->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <Exclude>[*]*.g</Exclude>
+          <ExcludeByFile>**/obj/**/*.g.cs</ExcludeByFile>
+          <ExcludeByAttribute>GeneratedCodeAttribute,CompilerGeneratedAttribute</ExcludeByAttribute>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

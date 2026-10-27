@@ -42,6 +42,7 @@ class dbquery:
 # Below are all the dataclasses for the WaddleDBM
 # ===============================================
 
+
 @dataclass
 class module_commands:
     module_id: int
@@ -62,14 +63,16 @@ class module:
     module_type_id: int
     metadata: dict
 
+
 @dataclass
 class module_command_metadata:
     action: str
     description: str
     method: str
     parameters: list
-    payload_keys: list 
+    payload_keys: list
     req_priv_list: list
+
 
 @dataclass
 class identity:
@@ -78,10 +81,12 @@ class identity:
     ip_address: str
     browser_fingerprints: list
 
+
 @dataclass
 class community:
     community_name: str
     community_description: str
+
 
 @dataclass
 class identity_label:
@@ -89,12 +94,14 @@ class identity_label:
     community_id: int
     label: str
 
+
 @dataclass
 class community_module:
     module_id: int
     community_id: int
     enabled: bool
     priv_list: list
+
 
 @dataclass
 class role:
@@ -104,11 +111,13 @@ class role:
     priv_list: list
     requirements: list
 
+
 @dataclass
 class community_member:
     community_id: int
     identity_id: int
     role_id: int
+
 
 @dataclass
 class reputation:
@@ -116,16 +125,19 @@ class reputation:
     community_id: int
     amount: int
 
+
 @dataclass
 class currency:
     community_id: int
     identity_id: int
     amount: int
 
+
 @dataclass
 class gateway_server_type:
     type_name: str
     description: str
+
 
 @dataclass
 class gateway_server:
@@ -135,6 +147,7 @@ class gateway_server:
     server_type: int
     protocol: str
 
+
 @dataclass
 class routing:
     channel: str
@@ -142,15 +155,18 @@ class routing:
     routing_gateway_ids: list
     aliases: list
 
-@dataclass  
+
+@dataclass
 class context:
     identity_id: int
     community_id: int
+
 
 @dataclass
 class account_type:
     type_name: str
     description: str
+
 
 @dataclass
 class gateway_account:
@@ -158,10 +174,12 @@ class gateway_account:
     account_type: int
     is_default: bool
 
+
 @dataclass
 class gateway_type:
     type_name: str
     description: str
+
 
 @dataclass
 class routing_gateway:
@@ -170,6 +188,7 @@ class routing_gateway:
     gateway_type: int
     activation_key: str
     is_active: bool
+
 
 @dataclass
 class calender:
@@ -181,6 +200,7 @@ class calender:
     not_start_sent: bool
     not_end_sent: bool
 
+
 @dataclass
 class admin_context:
     identity_id: int
@@ -188,16 +208,19 @@ class admin_context:
     session_token: str
     session_expires: datetime
 
+
 @dataclass
 class text_response:
     community_id: int
     text_val: str
     response_val: str
 
+
 @dataclass
 class prize_status:
     status_name: str
     description: str
+
 
 @dataclass
 class prize:
@@ -209,10 +232,12 @@ class prize:
     prize_status: int
     timeout: int
 
+
 @dataclass
 class prize_entry:
     prize_id: int
     identity_id: int
+
 
 @dataclass
 class alias_command:
@@ -228,6 +253,7 @@ class alias_command:
 @dataclass
 class message_output:
     msg: str
+
 
 @dataclass
 class data_output:

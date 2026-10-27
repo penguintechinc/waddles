@@ -9,12 +9,19 @@ on:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
   pull_request:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+  merge_group:
+    types: [checks_requested]
+    branches: ['release/**']
   workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
   security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
@@ -69,7 +76,7 @@ jobs:
             --namespace "$NAMESPACE" \
             --create-namespace \
             --set global.imageRegistry="ghcr.io/${REPO_OWNER}/${REPO_NAME}" \
-            --set global.imageTag="$COMMIT_SHA" \
+            --set-string global.imageTag="$COMMIT_SHA" \
             --set global.imagePullPolicy=Always \
             --timeout 15m \
             --wait
@@ -80,10 +87,15 @@ jobs:
         env:
           K8S_NAMESPACE: ${{ secrets.K8S_NAMESPACE }}
         run: |
+          set -euo pipefail
           NAMESPACE="${K8S_NAMESPACE:-waddlebot}"
 
+          # No `|| true`: a deployment that never becomes ready must fail the
+          # job (Verification Integrity) -- the pod/deployment listings below
+          # still run only on a ready rollout; the always() summary step
+          # prints the same state for a failed one.
           echo "Waiting for all deployments to be ready..."
-          kubectl rollout status deployment -n "$NAMESPACE" --timeout=10m || true
+          kubectl rollout status deployment -n "$NAMESPACE" --timeout=10m
 
           echo ""
           echo "Current pod status:"
@@ -93,23 +105,25 @@ jobs:
           echo "Deployment status:"
           kubectl get deployments -n "$NAMESPACE"
 
+      # Gating: no continue-on-error and no `|| echo` -- a failing health curl
+      # must fail the deploy job, not print a message and report success.
       - name: Run smoke tests
-        continue-on-error: true
         env:
           K8S_NAMESPACE: ${{ secrets.K8S_NAMESPACE }}
         run: |
+          set -euo pipefail
           NAMESPACE="${K8S_NAMESPACE:-waddlebot}"
 
           echo "Testing router health endpoint..."
           kubectl run curl-test --image=curlimages/curl:latest --rm -i --restart=Never \
             --namespace="$NAMESPACE" \
-            -- curl -f http://router:8000/health || echo "Router health check failed"
+            -- curl -f http://router:8000/health
 
           echo ""
           echo "Testing hub health endpoint..."
           kubectl run curl-test-hub --image=curlimages/curl:latest --rm -i --restart=Never \
             --namespace="$NAMESPACE" \
-            -- curl -f http://hub:8060/api/health || echo "Hub health check failed"
+            -- curl -f http://hub:8060/api/health
 
       - name: Deployment summary
         if: always()

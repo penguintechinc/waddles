@@ -43,13 +43,19 @@ TENANT = "acme"
 class FakeFlagGate:
     """Records calls; returns a fixed result or raises a fixed exception."""
 
-    def __init__(self, result: Optional[bool] = None, raises: Optional[Exception] = None) -> None:
+    def __init__(
+        self, result: Optional[bool] = None, raises: Optional[Exception] = None
+    ) -> None:
         self.result = result
         self.raises = raises
         self.calls: list[tuple[str, str, Optional[Mapping[str, str]]]] = []
 
     def is_enabled(
-        self, flag_key: str, distinct_id: str, *, groups: Optional[Mapping[str, str]] = None
+        self,
+        flag_key: str,
+        distinct_id: str,
+        *,
+        groups: Optional[Mapping[str, str]] = None,
     ) -> Optional[bool]:
         self.calls.append((flag_key, distinct_id, groups))
         if self.raises is not None:
@@ -60,7 +66,9 @@ class FakeFlagGate:
 class FakeLicenseGate:
     """Records calls; returns a fixed tier or raises a fixed exception."""
 
-    def __init__(self, tier: Optional[str] = None, raises: Optional[Exception] = None) -> None:
+    def __init__(
+        self, tier: Optional[str] = None, raises: Optional[Exception] = None
+    ) -> None:
         self.tier = tier
         self.raises = raises
         self.calls = 0
@@ -111,7 +119,9 @@ async def test_flag_on_and_tier_entitled_returns_true() -> None:
 async def test_flag_off_returns_false() -> None:
     client, _, license_gate = make_client(flag_result=False, tier="enterprise")
     assert await client.evaluate(FLAG_KEY, tenant=TENANT) is False
-    assert license_gate.calls == 1  # license gate still runs; flag is the deciding factor
+    assert (
+        license_gate.calls == 1
+    )  # license gate still runs; flag is the deciding factor
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +135,9 @@ async def test_tier_not_entitled_returns_false_even_with_flag_on() -> None:
         tier_requirements={FLAG_KEY: "enterprise"},
     )
     assert await client.evaluate(FLAG_KEY, tenant=TENANT) is False
-    assert flag_gate.calls  # flag gate did run and returned True -- license alone vetoed it
+    assert (
+        flag_gate.calls
+    )  # flag gate did run and returned True -- license alone vetoed it
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +168,16 @@ async def test_both_services_down_with_warm_cache_returns_cached_value() -> None
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_cold_cache_unknown_flag_returns_default() -> None:
-    client, _, _ = make_client(flag_result=None, tier="enterprise")  # None = unresolvable/unknown
-    assert await client.evaluate("waddles.never.seen", tenant=TENANT, default=True) is True
-    assert await client.evaluate("waddles.never.seen.2", tenant=TENANT, default=False) is False
+    client, _, _ = make_client(
+        flag_result=None, tier="enterprise"
+    )  # None = unresolvable/unknown
+    assert (
+        await client.evaluate("waddles.never.seen", tenant=TENANT, default=True) is True
+    )
+    assert (
+        await client.evaluate("waddles.never.seen.2", tenant=TENANT, default=False)
+        is False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +197,9 @@ async def test_bypass_domain_skips_license_but_not_flag() -> None:
 @pytest.mark.asyncio
 async def test_bypass_domain_still_respects_flag_off() -> None:
     client, _, license_gate = make_client(flag_result=False, tier=None)
-    result = await client.evaluate(FLAG_KEY, tenant=TENANT, request_host="app.waddles.app")
+    result = await client.evaluate(
+        FLAG_KEY, tenant=TENANT, request_host="app.waddles.app"
+    )
     assert result is False
     assert license_gate.calls == 0
 
@@ -188,7 +209,9 @@ async def test_non_bypass_domain_still_checks_license() -> None:
     client, _, license_gate = make_client(
         flag_result=True, tier="free", tier_requirements={FLAG_KEY: "enterprise"}
     )
-    result = await client.evaluate(FLAG_KEY, tenant=TENANT, request_host="app.example.com")
+    result = await client.evaluate(
+        FLAG_KEY, tenant=TENANT, request_host="app.example.com"
+    )
     assert result is False
     assert license_gate.calls == 1
 
@@ -256,7 +279,9 @@ def test_resolve_bypass_depth(hostname: Optional[str], expected_depth: str) -> N
 
 
 @pytest.mark.asyncio
-async def test_global_community_bypass_skips_license_for_community_scoped_check() -> None:
+async def test_global_community_bypass_skips_license_for_community_scoped_check() -> (
+    None
+):
     """`"global_community"` depth (pre-prod SaaS host) bypasses even a per-community check."""
     client, _, license_gate = make_client(
         flag_result=True, tier="free", tier_requirements={FLAG_KEY: "enterprise"}
@@ -301,16 +326,22 @@ async def test_global_only_bypass_still_bypasses_tenant_wide_license() -> None:
         FLAG_KEY, tenant=TENANT, community=None, request_host="app.waddles.app"
     )
     assert result is True
-    assert license_gate.calls == 0  # bypassed -- community-scoped restriction doesn't apply here
+    assert (
+        license_gate.calls == 0
+    )  # bypassed -- community-scoped restriction doesn't apply here
 
 
 # ---------------------------------------------------------------------------
 # feature_flags.feature_enabled delegates to the entitlement client
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_feature_enabled_delegates_to_entitlement_client(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_feature_enabled_delegates_to_entitlement_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client, flag_gate, license_gate = make_client(
-        flag_result=True, tier="professional", tier_requirements={FLAG_KEY: "professional"}
+        flag_result=True,
+        tier="professional",
+        tier_requirements={FLAG_KEY: "professional"},
     )
 
     import flask_core.feature_flags as feature_flags_module
@@ -360,7 +391,9 @@ async def test_unexpected_exception_in_gate_returns_default_never_raises() -> No
         def is_enabled(self, *args: object, **kwargs: object) -> Optional[bool]:
             raise RuntimeError("boom")
 
-    client = EntitlementClient(flag_gate=ExplodingFlagGate(), license_gate=FakeLicenseGate(tier="free"))
+    client = EntitlementClient(
+        flag_gate=ExplodingFlagGate(), license_gate=FakeLicenseGate(tier="free")
+    )
     assert await client.evaluate(FLAG_KEY, tenant=TENANT, default=False) is False
 
 
@@ -375,7 +408,9 @@ def test_posthog_flag_gate_delegates_to_posthog_client() -> None:
     result = gate.is_enabled(FLAG_KEY, TENANT, groups={"tenant": TENANT})
 
     assert result is True
-    mock_client.feature_enabled.assert_called_once_with(FLAG_KEY, TENANT, groups={"tenant": TENANT})
+    mock_client.feature_enabled.assert_called_once_with(
+        FLAG_KEY, TENANT, groups={"tenant": TENANT}
+    )
 
 
 def test_posthog_flag_gate_returns_none_on_client_error() -> None:
@@ -386,14 +421,20 @@ def test_posthog_flag_gate_returns_none_on_client_error() -> None:
     assert gate.is_enabled(FLAG_KEY, TENANT) is None
 
 
-def test_posthog_flag_gate_from_env_disabled_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_posthog_flag_gate_from_env_disabled_without_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("POSTHOG_API_KEY", raising=False)
     monkeypatch.delenv("POSTHOG_KEY", raising=False)
     gate = PostHogFlagGate.from_env()
-    assert gate.is_enabled(FLAG_KEY, TENANT) is None  # disabled client resolves to None, never raises
+    assert (
+        gate.is_enabled(FLAG_KEY, TENANT) is None
+    )  # disabled client resolves to None, never raises
 
 
-def test_posthog_flag_gate_from_env_reads_configured_host_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_posthog_flag_gate_from_env_reads_configured_host_and_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("POSTHOG_API_KEY", "phc_test_key")
     monkeypatch.setenv("POSTHOG_HOST", "https://posthog.example.com")
     gate = PostHogFlagGate.from_env()
@@ -426,7 +467,9 @@ def test_penguin_license_gate_from_env_uses_real_dependency_when_available(
 ) -> None:
     sentinel_client = MagicMock()
     monkeypatch.setattr(entitlement_module, "_PENGUIN_LICENSING_AVAILABLE", True)
-    monkeypatch.setattr(entitlement_module, "get_license_client", lambda: sentinel_client)
+    monkeypatch.setattr(
+        entitlement_module, "get_waddles_license_client", lambda: sentinel_client
+    )
     gate = PenguinLicenseGate.from_env()
     assert gate._client is sentinel_client
 
@@ -434,7 +477,9 @@ def test_penguin_license_gate_from_env_uses_real_dependency_when_available(
 # ---------------------------------------------------------------------------
 # Process-wide singleton
 # ---------------------------------------------------------------------------
-def test_get_entitlement_client_returns_shared_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_entitlement_client_returns_shared_singleton(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(entitlement_module, "_default_client", None)
     first = get_entitlement_client()
     second = get_entitlement_client()
@@ -446,7 +491,9 @@ def test_get_entitlement_client_returns_shared_singleton(monkeypatch: pytest.Mon
 # context, quart isn't a test dependency of this leaf module so a fake
 # `quart` module is injected into sys.modules for the duration of the test.
 # ---------------------------------------------------------------------------
-def test_current_request_host_reads_quart_request_host(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_current_request_host_reads_quart_request_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_request = types.SimpleNamespace(host="waddles.penguintech.cloud")
     fake_quart = types.ModuleType("quart")
     fake_quart.request = fake_request  # type: ignore[attr-defined]
@@ -455,3 +502,88 @@ def test_current_request_host_reads_quart_request_host(monkeypatch: pytest.Monke
     import flask_core.feature_flags as feature_flags_module
 
     assert feature_flags_module._current_request_host() == "waddles.penguintech.cloud"
+
+
+# ---------------------------------------------------------------------------
+# ENV baseline (PostHog -> ENV -> default); licensed flags excepted
+# ---------------------------------------------------------------------------
+ENV_FLAG = "waddles.webui.discord_bot_install_link"
+ENV_VAR = "FLAG_WADDLES_WEBUI_DISCORD_BOT_INSTALL_LINK"
+
+
+def test_env_flag_var_name_derivation() -> None:
+    from flask_core.entitlement import env_flag_var_name
+
+    assert env_flag_var_name(ENV_FLAG) == ENV_VAR
+    assert env_flag_var_name("waddles.core.disable-x") == "FLAG_WADDLES_CORE_DISABLE_X"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["true", "1", "YES", "on"])
+async def test_env_true_when_posthog_unavailable(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv(ENV_VAR, raw)
+    client, _, _ = make_client(flag_result=None)
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is True
+
+
+@pytest.mark.asyncio
+async def test_env_true_even_when_license_gate_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ENV_VAR, "true")
+    client, _, _ = make_client(
+        flag_result=None, tier=None, tier_raises=RuntimeError("down")
+    )
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is True
+
+
+@pytest.mark.asyncio
+async def test_env_unset_uses_hard_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ENV_VAR, raising=False)
+    client, _, _ = make_client(flag_result=None)
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT, default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_env_garbage_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_VAR, "maybe")
+    client, _, _ = make_client(flag_result=None)
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+
+
+@pytest.mark.asyncio
+async def test_posthog_connected_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_VAR, "true")
+    client, _, _ = make_client(flag_result=False)
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+    monkeypatch.setenv(ENV_VAR, "false")
+    client2, _, _ = make_client(flag_result=True)
+    assert await client2.evaluate(ENV_FLAG, tenant=TENANT) is True
+
+
+@pytest.mark.asyncio
+async def test_licensed_flag_not_env_bypassable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FLAG_WADDLES_COMMUNITY_CUSTOM_DOMAINS", "true")
+    # PostHog down + tier too low: env must not grant.
+    client, _, _ = make_client(
+        flag_result=None, tier="free", tier_requirements={FLAG_KEY: "enterprise"}
+    )
+    assert await client.evaluate(FLAG_KEY, tenant=TENANT) is False
+    # PostHog down + licence gate down: unverifiable -> deny, env ignored.
+    client2, _, _ = make_client(
+        flag_result=None,
+        tier=None,
+        tier_raises=RuntimeError("down"),
+        tier_requirements={FLAG_KEY: "enterprise"},
+    )
+    assert await client2.evaluate(FLAG_KEY, tenant=TENANT, default=True) is False
+    # Entitled tier but PostHog unresolvable: env must not stand in for the flag gate.
+    client3, _, _ = make_client(
+        flag_result=None, tier="enterprise", tier_requirements={FLAG_KEY: "enterprise"}
+    )
+    assert await client3.evaluate(FLAG_KEY, tenant=TENANT) is False

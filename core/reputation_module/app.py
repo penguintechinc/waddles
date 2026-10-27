@@ -24,6 +24,7 @@ from flask_core import (  # noqa: E402
     install_security_headers,
 )
 from flask_core.grpc_tls import bind_secure_port, default_server_options  # noqa: E402
+from flask_core.tenancy import get_tenant_context  # noqa: E402
 from config import Config  # noqa: E402
 from services.reputation_service import ReputationService  # noqa: E402
 from services.weight_manager import WeightManager  # noqa: E402
@@ -45,7 +46,7 @@ api_bp = Blueprint('api', __name__, url_prefix='/api/v1')
 internal_bp = Blueprint('internal', __name__, url_prefix='/api/v1/internal')
 admin_bp = Blueprint('admin', __name__, url_prefix='/api/v1/admin')
 
-# SECURITY (C6, A01 -- unauthenticated access): `api_bp` (community/global
+# SECURITY (C6, A01 -- unauthenticated access): `api_bp` (community/tenant
 # reputation reads) and `admin_bp` (community-scoped reputation writes)
 # had ZERO authentication -- `internal_bp` already gates on
 # `_verify_service_key()` below, but these two did not. Registered once
@@ -191,7 +192,7 @@ async def status():
         "module": Config.MODULE_NAME,
         "version": Config.MODULE_VERSION,
         "features": {
-            "global_reputation": True,
+            "tenant_reputation": True,
             "custom_weights": "premium",
             "auto_ban": True,
             "giveaway_protection": True
@@ -269,11 +270,21 @@ async def get_leaderboard(community_id: int):
     })
 
 
-@api_bp.route('/reputation/global/<int:user_id>')
+@api_bp.route('/reputation/tenant/<int:user_id>')
 @async_endpoint
-async def get_global_reputation(user_id: int):
-    """Get global (cross-community) reputation for a user."""
-    info = await reputation_service.get_global_reputation(user_id)
+async def get_tenant_reputation(user_id: int):
+    """Get tenant-wide (cross-community, single-tenant) reputation for a user.
+
+    `tenant_id` is read from `request.tenant_context` -- published by
+    `install_community_scoped_auth` from the caller's bearer JWT `tenant`
+    claim, never from a path/query parameter (security.md Tenant Isolation:
+    tenant is never client-supplied).
+    """
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return error_response("Tenant context missing", 403)
+
+    info = await reputation_service.get_tenant_reputation(ctx.tenant_id, user_id)
     if not info:
         return error_response("User not found", 404)
 
@@ -287,15 +298,19 @@ async def get_global_reputation(user_id: int):
     })
 
 
-@api_bp.route('/reputation/global/leaderboard')
+@api_bp.route('/reputation/tenant/leaderboard')
 @async_endpoint
-async def get_global_leaderboard():
-    """Get global reputation leaderboard."""
+async def get_tenant_leaderboard():
+    """Get the tenant-wide reputation leaderboard for the caller's own tenant."""
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return error_response("Tenant context missing", 403)
+
     limit = request.args.get('limit', 25, type=int)
     offset = request.args.get('offset', 0, type=int)
 
-    leaderboard = await reputation_service.get_global_leaderboard(
-        limit=min(limit, 100), offset=offset
+    leaderboard = await reputation_service.get_tenant_leaderboard(
+        ctx.tenant_id, limit=min(limit, 100), offset=offset
     )
 
     return success_response({

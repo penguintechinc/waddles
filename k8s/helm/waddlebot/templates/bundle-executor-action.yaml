@@ -6,12 +6,19 @@
 # stageTarget=svc-process-rust) keeps serving svc-process; this one is pinned to
 # pipeline.rustDataPlane.bundleExecutorAction.stageTarget (default svc-action-rust).
 #
-# Byte-for-byte the same D9/D10 credential-less posture, securityContext, health-check
-# shape, and hostApiTls client wiring as templates/bundle-executor.yaml -- see that file's
-# header comment for the full rationale (not repeated here). Gated on the top-level
-# pipeline.rustDataPlane.enabled flag (default false) plus this module's own .enabled
-# sub-flag.
+# Byte-for-byte the same D9/D10 credential-less posture, securityContext, and hostApiTls
+# client wiring as templates/bundle-executor.yaml -- see that file's header comment for
+# the full rationale (not repeated here), INCLUDING the fix/executor-session-liveness
+# three-probe shape (startupProbe = engine build-test, liveness/readinessProbe =
+# `--healthcheck=session` against core/bundle_executor/src/probe.rs's on-disk liveness
+# file). Gated on the top-level pipeline.rustDataPlane.enabled flag (default false) plus
+# this module's own .enabled sub-flag.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutorAction.enabled }}
+{{- /* fix/chart-autogen-bundle-signing-key -- see templates/bundle-executor.yaml's
+header comment for the full rationale (identical here): BUNDLE_SIGNING_PUBLIC_KEYS
+now sources from the auto-provisioned ConfigMap by default instead of a render-time
+`fail` guard requiring a hand-pasted values override. */}}
+{{- $bseaCmName := .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -21,27 +28,44 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: bundle-executor-action
 spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "bundleExecutorAction")) }}
   replicas: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: bundle-executor-action
   template:
     metadata:
+      annotations:
+        # fix/cert-regen-on-identity-change -- rolls every pod when the desired
+        # host-api-tls identity/SANs change, even though the Secret object itself is
+        # reused by name when kept (see templates/host-api-tls-secret.yaml's policy
+        # comment); derived from identity+SANs only, never key material.
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        checksum/host-api-tls: {{ include "waddlebot.hostApiTlsPodChecksum" . | quote }}
+        {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: bundle-executor-action
     spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       automountServiceAccountToken: false
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own
+      # /ready before this pod's main container starts (see _helpers.tpl).
+      initContainers:
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: bundle-executor
         # Same image as templates/bundle-executor.yaml -- literally the same crate/binary,
         # pointed at a different stage purely via env vars below.
-        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag }}"
-        imagePullPolicy: Always
+        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
+        # Values-driven -- same as templates/bundle-executor.yaml (see svc-process-rust.yaml).
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001
@@ -75,37 +99,65 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.wasmCollector | quote }}
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.sandboxGvisor | quote }}
+        # feature/bundle-artifact-signing -- shared platform key set, see values.yaml's
+        # pipeline.rustDataPlane.bundleSigningPublicKeys comment (not secret; public keys).
+        # fix/chart-autogen-bundle-signing-key -- see templates/bundle-executor.yaml's
+        # matching env block comment for the full rationale.
+        {{- if .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
+        - name: BUNDLE_SIGNING_PUBLIC_KEYS
+          value: {{ .Values.pipeline.rustDataPlane.bundleSigningPublicKeys | toJson | quote }}
+        {{- else }}
+        - name: BUNDLE_SIGNING_PUBLIC_KEYS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $bseaCmName }}
+              key: BUNDLE_SIGNING_PUBLIC_KEYS
+        {{- end }}
         - name: BUNDLE_BUCKET_ENDPOINT
-          value: "http://{{ .Values.infrastructure.minio.service.name }}:{{ .Values.infrastructure.minio.service.apiPort }}"
+          value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
         - name: BUNDLE_BUCKET_NAME
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.bucketName | quote }}
         - name: BUNDLE_BUCKET_REGION
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.bucketRegion | quote }}
+        # feature/seaweedfs-object-storage -- least-privilege "bundle-executor"
+        # (data-plane) S3 identity: Read/List ONLY, scoped to this bucket -- see
+        # templates/infrastructure/seaweedfs.yaml's s3-identities.json. Replaces the
+        # former MINIO_ROOT_USER/MINIO_ROOT_PASSWORD admin credential, which could PUT.
         - name: BUNDLE_BUCKET_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_USER
+              key: DATAPLANE_S3_ACCESS_KEY_ID
         - name: BUNDLE_BUCKET_SECRET_ACCESS_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_PASSWORD
+              key: DATAPLANE_S3_SECRET_ACCESS_KEY
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
         {{- end }}
-        livenessProbe:
+        startupProbe:
+          # fix/alpha-deploy-executor-and-failfast -- see templates/bundle-executor.yaml's
+          # identical comment on this same probe for the full rationale (same binary, same
+          # cold-compile workload): failureThreshold bumped from 12 (62s) to 65 (~5.5min).
           exec:
             command: ["/app/bundle-executor", "--healthcheck"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 65
+        livenessProbe:
+          exec:
+            command: ["/app/bundle-executor", "--healthcheck=session", "--max-age", "60"]
           initialDelaySeconds: 10
-          periodSeconds: 30
+          periodSeconds: 15
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
           exec:
-            command: ["/app/bundle-executor", "--healthcheck"]
+            command: ["/app/bundle-executor", "--healthcheck=session", "--max-age", "20"]
           initialDelaySeconds: 5
-          periodSeconds: 15
+          periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
         resources:
@@ -126,4 +178,6 @@ spec:
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
       {{- end }}
+# R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "bundle-executor-action" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false) }}
 {{- end }}

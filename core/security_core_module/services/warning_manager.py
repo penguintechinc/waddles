@@ -47,13 +47,14 @@ class WarningManager:
             await self._check_escalation(community_id, platform, platform_user_id, config)
 
             self.logger.audit(
-                "Automated warning issued",
-                community_id=community_id,
+                action="issue_warning",
+                user="system",
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Automated warning issued",
                 platform=platform,
                 platform_user_id=platform_user_id,
-                warning_type=warning_type,
-                action="issue_warning",
-                result="SUCCESS"
+                warning_type=warning_type
             )
 
             return {
@@ -92,13 +93,13 @@ class WarningManager:
             self.dal.commit()
 
             self.logger.audit(
-                "Manual warning issued",
-                community_id=community_id,
-                platform=platform,
-                platform_user_id=platform_user_id,
-                issued_by=issued_by,
                 action="issue_manual_warning",
-                result="SUCCESS"
+                user=str(issued_by or "system"),
+                community=str(community_id),
+                result="SUCCESS",
+                detail="Manual warning issued",
+                platform=platform,
+                platform_user_id=platform_user_id
             )
 
             return {
@@ -128,11 +129,12 @@ class WarningManager:
             self.dal.commit()
 
             self.logger.audit(
-                "Warning revoked",
-                warning_id=warning_id,
-                revoked_by=revoked_by,
                 action="revoke_warning",
-                result="SUCCESS"
+                user=str(revoked_by or "system"),
+                community="",
+                result="SUCCESS",
+                detail="Warning revoked",
+                warning_id=warning_id
             )
 
             return {'revoked': True}
@@ -258,8 +260,11 @@ class WarningManager:
             # Check thresholds
             if warning_count >= config['warning_threshold_ban']:
                 self.logger.audit(
-                    "Auto-escalation: ban threshold reached",
-                    community_id=community_id,
+                    action="auto_escalation_ban",
+                    user="system",
+                    community=str(community_id),
+                    result="ESCALATED",
+                    detail="Auto-escalation: ban threshold reached",
                     platform=platform,
                     platform_user_id=platform_user_id,
                     warning_count=warning_count
@@ -268,8 +273,11 @@ class WarningManager:
 
             elif warning_count >= config['warning_threshold_timeout']:
                 self.logger.audit(
-                    "Auto-escalation: timeout threshold reached",
-                    community_id=community_id,
+                    action="auto_escalation_timeout",
+                    user="system",
+                    community=str(community_id),
+                    result="ESCALATED",
+                    detail="Auto-escalation: timeout threshold reached",
                     platform=platform,
                     platform_user_id=platform_user_id,
                     warning_count=warning_count

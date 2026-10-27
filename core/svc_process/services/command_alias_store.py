@@ -1,4 +1,4 @@
-"""Per-community command alias lookups -- backs `bundles.bot_process`'s alias-expansion hook.
+"""Per-community command alias lookups -- backs `builtin_handlers.bot_process`'s alias hook.
 
 `command_aliases` (migration `013_schema_optimizations.sql`) maps a
 community-scoped `alias` word to a free-text `target_command` expansion
@@ -6,8 +6,8 @@ community-scoped `alias` word to a free-text `target_command` expansion
 now`) -- `bot_process.transform()` looks up any `!<word>` that is not
 already a built-in or loaded feature command, rewrites the message with
 the stored expansion, and re-parses once (see that module's own docstring
-for the no-recursion guarantee). The `!alias` management bundle (a
-separate bundle, out of scope here) is the surface writing to this same
+for the no-recursion guarantee). The `!alias` management handler (a
+separate handler, out of scope here) is the surface writing to this same
 table; it is expected to call `invalidate_alias` after every add/update/
 delete so a just-changed alias is never served stale for the remainder of
 its cache TTL.
@@ -257,7 +257,7 @@ async def invalidate_alias(
 ) -> None:
     """Delete the cached lookup for `(community_id, alias)`.
 
-    Called by the alias-management bundle immediately after an
+    Called by the alias-management handler immediately after an
     add/update/delete so a just-changed alias is never served from a stale
     cache entry for the remainder of its TTL.
 

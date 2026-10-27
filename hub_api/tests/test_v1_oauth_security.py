@@ -134,7 +134,7 @@ class TestIdentityLinkStateIsServerSide:
         self, auth_db: Any, monkeypatch: Any
     ) -> None:
         """`start_identity_link` persists `user_id` in `hub_oauth_states`, never in the token."""
-        monkeypatch.setenv("DISCORD_CLIENT_ID", "test-client-id")
+        monkeypatch.setenv("DISCORD_CLIENT_ID", "123456789012345678")
         user_id = _seed_user(auth_db, email="bob@example.com")
 
         authorize_url, state = await identity_service.start_identity_link(

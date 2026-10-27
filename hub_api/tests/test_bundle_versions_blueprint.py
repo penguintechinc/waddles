@@ -202,7 +202,7 @@ async def test_get_version_after_post_reflects_state(app: Quart) -> None:
 
 @pytest.fixture
 def mock_component_pipeline(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    """Mocks the STAGE/PROVISION boundary (`validate_component`, MinIO, Valkey) for vendor tests.
+    """Mocks the STAGE/PROVISION boundary (`validate_component`, S3, Valkey) for vendor tests.
 
     Defaults to a conformant component and a fresh consumer-group client;
     individual tests override `svc.validate_component`'s return value or

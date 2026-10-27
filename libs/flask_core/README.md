@@ -10,6 +10,12 @@ Shared utilities and components for all WaddleBot Flask/Quart modules.
 - Read replica support for query distribution
 - Transaction management with context managers
 - Bulk operations support
+- **Redacted error logging** (`db_errors.py`): DB failures are logged as operation +
+  exception type + SQLSTATE/driver code + a fixed category label -- never the driver
+  message (see [Database error logging](#database-error-logging))
+- **Redacted validation logging** (`validation_errors.py`): validation failures are logged as
+  error count + declared field locations + error types -- never the client's `input`/`msg`
+  (see [Validation error logging](#validation-error-logging))
 
 ### Authentication (`auth.py`)
 - **Flask-Security-Too** integration for user management
@@ -30,6 +36,9 @@ Shared utilities and components for all WaddleBot Flask/Quart modules.
 - Console, file, and optional syslog output
 - Log rotation with configurable size and backup count
 - Performance logging with execution time tracking
+- **Redaction-safe exception logging** (`safe_logging.py`): `describe_exc` /
+  `log_exc_safe` / `url_host` report exception type + code + a fixed category and
+  never the message (see [Exception logging](#exception-logging-never-log-the-message))
 
 ### API Utilities (`api_utils.py`)
 - Standardized API response formatting
@@ -39,6 +48,36 @@ Shared utilities and components for all WaddleBot Flask/Quart modules.
 - Request validation
 - CORS headers support
 - Pagination utilities
+
+### Feature flags & license-tier enforcement (`entitlement.py`, `feature_flags.py`, `tier_catalog.py`)
+
+Every `feature_enabled(flag, tenant=..., community=...)` is a **two-gate** check and
+**both must pass**:
+
+1. the PostHog flag is ON (rollout switch / kill-switch), **and**
+2. the tenant's **effective tier** is at or above the feature's **required tier**.
+
+A PostHog flag alone never grants a licensed feature -- a Free tenant with the flag on is
+denied a Professional/Enterprise feature.
+
+| Concept | Rule |
+|---|---|
+| Required tier | Stricter of: explicit `EntitlementClient.tier_requirements`, the registered `FeatureContract.min_tier` (live `FeatureRegistry`), and the static `tier_catalog.FEATURE_MIN_TIERS` snapshot. No source can lower another; unlisted flag = `free`; an unrecognised tier is unsatisfiable (denies), never free. |
+| Effective tier | `max(tenant_tier, community_tier)`, cascading down: a tenant's tier lifts every community in it; a community can be allocated *above* its tenant (optional `CommunityTierSource`), never below. Tenant-wide checks (`community=None`) use the tenant tier only. `feature_flags.get_tier()` exposes it (`free` on any doubt). |
+| Tenant tier source | `penguin_licensing.LicenseClient.validate().tier` against `license.penguintech.io` (`community` == `free`). |
+| Fail closed | Tier is a hard veto over flag state, the degradation cache and the caller's `default`. License gate unreachable -> last-known tier within `ENTITLEMENT_TIER_GRACE_SECONDS` (default 72h); never seen/expired -> a licensed feature is **denied**, not defaulted. Only Free-tier flags degrade to `default`. |
+| Bypass | Hardcoded domains only (`*.penguincloud.io`, `*.penguintech.cloud` = every scope; `*.waddles.app` = tenant-wide only). Skips the tier check, never the flag. **No env var, CLI flag or config switch lifts a tier** -- env baselines exist for plain FEATURE flags only. |
+| Statutory rights | DSAR, erasure, Do-Not-Sell and consent withdrawal are never tier-gated: not in the catalog/contracts, and their endpoints never call `feature_enabled`. |
+
+**Adding or changing a feature's tier:** edit the contract's `min_tier` in
+`libs/<module>_module/features.py` **and** `tier_catalog._FEATURE_MIN_TIERS` -- the catalog exists
+because the hub-api image installs `flask_core` alone (the `*_module` packages and their
+registrations are absent there). `tests/test_tier_enforcement.py::TestCatalogMatchesContracts`
+fails if the two drift, in either direction.
+
+Observability: counter `waddles_entitlement_decisions_total{outcome,reason,required_tier}`
+(`reason=tier_denied` is licensing enforcement firing; `tier_unverifiable` is a fail-closed deny) and
+histogram `waddles_entitlement_tier_resolution_seconds{source}`. Labels never carry tenant/PII.
 
 ## Installation
 
@@ -73,10 +112,90 @@ rows = await dal.select_async(users.id == user_id)
 await dal.update_async(users.id == user_id, email='newemail@example.com')
 ```
 
+#### Database error logging
+
+**SECURITY (PII in logs):** a DB driver error's message routinely embeds the *bound
+values* of the failed statement (psycopg2 `DETAIL: Key (email)=(...) already exists`,
+`invalid input syntax for type uuid: "..."`, pydal's inlined INSERT text, SQLAlchemy's
+`[parameters: (...)]`). flask_core therefore **never logs the raw driver message** --
+not in the log line, not via `exc_info`/traceback rendering, not in `extra`.
+
+Every `AsyncDAL` operation, `db_operation()`, the `install_db_resilience()` teardown
+hook, `ReadReplicaManager`/`ReadReplicaRouter`, `ChannelShardManager` and the
+`async_endpoint` decorator log through `flask_core.db_errors` instead:
+
+```
+ERROR flask_core.database ExecuteSQL error: type=psycopg2.errors.UniqueViolation \
+      sqlstate=23505 category=unique_violation constraint=users_email_key table=users
+DEBUG flask_core.database ExecuteSQL error: sanitized traceback
+      (frames only -- file/line/function/source, no exception text)
+```
+
+| Emitted | Never emitted |
+|---|---|
+| operation label, exception type | exception message / `args` |
+| SQLSTATE (`pgcode`/`sqlstate`), sqlite error name, MySQL errno | SQL text, bound parameters |
+| fixed category label looked up from the SQLSTATE | `DETAIL`/`CONTEXT`/`LINE n:` echoes |
+| constraint/table/column names (regex-validated identifiers only) | anything failing validation (dropped) |
+
+The allowlist fails closed: inside DB wrappers even non-driver exceptions are logged
+type-only (pydal casts values before the driver sees them, so its own `ValueError` can
+echo one). The exception is still re-raised unchanged. Failures outside DB wrappers
+(`async_endpoint`, teardown) are redacted only when a DB driver error is in the cause
+chain; other errors keep their full message and traceback.
+
+Services should use the same helpers instead of `logger.error(f"... {e}")` around DB calls:
+
+```python
+from flask_core import log_db_error
+
+try:
+    await dal.executesql_async(sql, params)
+except Exception as exc:
+    log_db_error(logger, "load widgets failed", exc)
+    raise
+```
+
+Note: re-raised driver errors that reach Quart's own `Exception on request` handler are
+logged by Quart, outside flask_core -- catch/translate them at the service boundary if
+that log stream is in scope for PII controls.
+
+### Request validation
+
+`flask_core.validation` provides `validate_json` / `validate_query` / `validate_form`
+(Pydantic) decorators and `validate_data` for programmatic use.
+
+#### Validation error logging
+
+**SECURITY (PII in logs):** a Pydantic `ValidationError` entry carries the client's `input`,
+and its `msg`/`ctx` and `loc` can echo it too (a custom `ValueError(f"bad {v}")`, a UUID parse
+error naming the bad character, an `extra_forbidden` error whose `loc` is a client-chosen key).
+The decorators therefore **never log the raw errors**. They log through
+`flask_core.validation_errors.describe_validation_errors`:
+
+```
+WARNING flask_core.validation AUTHZ validation_failed endpoint=signup model=Signup \
+        errors=3 fields=age:int_parsing,meta.<key>:int_parsing,<key>:extra_forbidden
+```
+
+| Emitted | Never emitted |
+|---|---|
+| error count | `input` value |
+| field location, only if a declared field name/alias of the model | `msg`, `ctx`, `url` |
+| list index / dict key / extra key -> `[]` / `<key>` placeholder | client-chosen key names, index numbers |
+| Pydantic error type (regex-validated token) | anything failing validation (`unknown`) |
+
+Exceptions raised *inside* a decorated endpoint also reach the decorators' `except Exception`;
+those are logged type-only (plus SQLSTATE/category for DB driver errors) via
+`flask_core.db_errors.log_db_error`, with a frames-only traceback at DEBUG -- never `str(e)`.
+The 400 response body is unchanged (it goes back to the same client that sent the data).
+Use `describe_validation_errors(exc, Model)` instead of `logger.error(f"... {exc.errors()}")`
+in service code.
+
 ### Authentication
 
 ```python
-from libs.flask_core import setup_auth, create_jwt_token
+from libs.flask_core import setup_auth, create_jwt_token, verify_jwt_token
 from quart import Quart
 
 app = Quart(__name__)
@@ -91,9 +210,40 @@ token = create_jwt_token(
     username='john',
     email='john@example.com',
     roles=['user', 'moderator'],
-    secret_key=app.config['SECRET_KEY']
+    secret_key=app.config['SECRET_KEY'],
+    tenant='global',   # mandatory -- there is no untenanted token
+    scope='community:read',
 )
+
+# Verify (returns the payload, or None -- never raises for a bad token)
+payload = verify_jwt_token(token, app.config['SECRET_KEY'])
 ```
+
+`verify_jwt_token` pins one algorithm (HS256), rejects `alg: none` and `jku`/`jwk`/`x5u`/`x5c`
+headers, and requires `sub iss aud iat exp scope tenant`; each call emits
+`waddles_jwt_verifications_total{verifier,alg,outcome}`. See
+[`docs/JWT_VERIFICATION.md`](../../docs/JWT_VERIFICATION.md).
+
+Tokens live **15 minutes** by default (`JWT_ACCESS_TTL_SECONDS`, 300-900; machine tokens may ask
+for `expiration_hours=1`, nothing longer is minted or accepted) and carry a random `jti` plus an
+optional `sid` (login session). Every verification also consults the **revocation store**
+(`flask_core.token_revocation`): a token revoked by `jti`, by session, or by a per-user cutoff is
+rejected before its `exp`. The store is Valkey when `VALKEY_URL`/`REDIS_URL` is set (process-local
+otherwise, with a WARNING) behind a 5 s local cache; if Valkey is unreachable the service keeps
+serving for 60 s, then fails closed.
+
+```python
+from flask_core.token_revocation import get_token_revocation
+
+revocation = get_token_revocation()           # built from the environment on first use
+revocation.revoke_token(payload['jti'], exp=payload['exp'])   # this token, before its exp
+revocation.revoke_session(payload['sid'])                     # every token of a login session
+revocation.revoke_user(payload['sub'])                        # every token issued so far
+await revocation.arevoke_user('42')                           # off-loop variants: a-prefixed
+```
+
+See [`docs/TOKEN_REVOCATION.md`](../../docs/TOKEN_REVOCATION.md) for the key layout, the outage
+policy and tuning knobs.
 
 ### API Endpoints
 
@@ -137,6 +287,56 @@ logger.audit(action='update_settings', user='john', community='my_community', re
 logger.error('Something went wrong', user='john', action='process_data')
 logger.performance(action='process_batch', execution_time=150)
 ```
+
+#### Exception logging (never log the message)
+
+A raw exception's text is data-influenced: DB driver errors embed the bound values of
+the failed statement, `httpx` errors embed the request URL (query-string secrets
+included), SSRF-guard errors embed the offending URL, crypto errors can echo key or
+ciphertext fragments. So `f"...{e}"`, `"...%s", exc`, `str(e)`,
+`extra={"error": str(e)}` and `exc_info=True` all write whatever the failing operation
+was handling into the log. On any path that touches credentials, tokens, URLs, or user
+data, use `flask_core.safe_logging` instead:
+
+```python
+import logging
+from flask_core import describe_exc, log_exc_safe, url_host
+
+try:
+    await client.post(token_url, data=form)
+except httpx.HTTPError as exc:
+    # -> "token refresh failed type=httpx.HTTPStatusError code=401 category=http_status host=id.twitch.tv"
+    log_exc_safe(logger, logging.WARNING, "token refresh failed", exc, host=url_host(token_url))
+    # building a new error message? use describe_exc, and `from None` so the cause
+    # (which holds the URL/body) is not rendered in a traceback chain:
+    raise RefreshError(f"refresh failed: {describe_exc(exc)}") from None
+```
+
+| Helper | Returns |
+|---|---|
+| `describe_exc(exc)` | `type=... [code=...] category=... [cause=...]` -- safe for logs, error messages, span attributes |
+| `classify_exc(exc)` | the same as a frozen `SafeExcInfo` dataclass |
+| `log_exc_safe(logger, level, event, exc, **fields)` | logs `event` + `describe_exc` + `name=value` fields; DEBUG also logs a frames-only traceback (no exception text); never attaches `exc_info` |
+| `frames_only(exc)` | `file:line:func` frames, innermost first -- where it failed, without the footer |
+| `url_host(url)` | the lowercase hostname only (drops userinfo, port, path, query, fragment); `<invalid-url>` if unparseable |
+
+What is reported is allowlisted: the type is the charset-validated qualified class name;
+the code is a SQLSTATE/driver code, HTTP status (100-599), botocore error code, or
+`errno`, accepted only if it matches a strict pattern (a hostile attribute value is
+dropped); the category is a label from a closed table (`unique_violation`,
+`crypto_auth_failed`, `network_timeout`, `http_status`, ...) looked up by class/SQLSTATE,
+never derived from text. DB driver errors are classified by `flask_core.db_errors` (the
+single owner of the SQLSTATE tables) -- `describe_exc` reuses its code and category, so
+the two never disagree; use `describe_db_error` / `log_db_error` when you also want the
+constraint/table/column identifiers. `str(exc)` and `exc.args` are never read, and the `orig` /
+`__cause__` / `__context__` chain contributes only types, codes and categories.
+
+- `event` is typed `LiteralString`: `mypy --strict` rejects an f-string that
+  interpolates runtime data into it.
+- `**fields` are the caller's responsibility -- pass ids, hosts and counts, never user
+  input. Values are rendered single-line, printable ASCII, capped at 128 chars.
+- Third-party library loggers are outside this helper: `httpx` itself logs
+  `HTTP Request: GET <full url>` at INFO.
 
 ### Data Models
 

@@ -137,3 +137,110 @@ def test_stage_envelope_from_wit_record() -> None:
     assert envelope.tenant == "acme"
     assert envelope.event.platform == "discord"
     assert envelope.target_app_id is None
+
+
+def _wit_event() -> wit_shapes.WitPlatformEvent:
+    return wit_shapes.WitPlatformEvent(
+        platform="discord",
+        event_type="chat.message",
+        actor="u1",
+        payload_json="{}",
+        occurred_at="ts",
+    )
+
+
+def test_stage_envelope_from_wit_record_v1_has_no_numeric_scope() -> None:
+    """A v1 record (no numeric fields) leaves tenant_id/community_id None."""
+    envelope = StageEnvelope.from_wit_record(
+        wit_shapes.WitStageEnvelope(
+            tenant="acme",
+            community="main",
+            app_id="waddles.social.alias.default",
+            stage="process",
+            event=_wit_event(),
+            ts="ts",
+            target_app_id=None,
+            trace_context=None,
+        )
+    )
+    assert envelope.tenant_id is None
+    assert envelope.community_id is None
+    assert "tenant_id" not in envelope.to_dict()
+
+
+def test_stage_envelope_from_wit_record_v2_carries_authoritative_numeric_scope() -> None:
+    """A stage-v2 record's ids are read off it; the strings stay display metadata."""
+    envelope = StageEnvelope.from_wit_record(
+        wit_shapes.WitStageEnvelopeV2(
+            tenant_id=10,
+            community_id=7,
+            tenant="acme",
+            community="main",
+            app_id="waddles.social.alias.default",
+            stage="action",
+            event=_wit_event(),
+            ts="ts",
+            target_app_id=None,
+            trace_context=None,
+        )
+    )
+    assert (envelope.tenant_id, envelope.community_id) == (10, 7)
+    assert envelope.tenant == "acme"
+    out = envelope.to_dict()
+    assert (out["tenant_id"], out["community_id"]) == (10, 7)
+    assert StageEnvelope.from_dict(out) == envelope
+
+
+def test_stage_envelope_v2_tenant_wide_is_community_zero() -> None:
+    envelope = StageEnvelope.from_wit_record(
+        wit_shapes.WitStageEnvelopeV2(
+            tenant_id=1,
+            community_id=0,
+            tenant="acme",
+            community=None,
+            app_id="waddles.social.alias.default",
+            stage="action",
+            event=_wit_event(),
+            ts="ts",
+            target_app_id=None,
+            trace_context=None,
+        )
+    )
+    assert envelope.community_id == 0
+
+
+@pytest.mark.parametrize(
+    ("tenant_id", "community_id"),
+    [
+        (0, 0),  # tenant ids start at 1
+        (-1, 0),
+        (10, -1),
+        (2**63, 0),  # overflows the wire's i64
+        (10, 2**31),  # overflows the wire's i32
+        (10, None),  # both or neither
+        (None, 0),
+        (True, 0),  # a bool is not an id
+        ("10", 0),
+    ],
+)
+def test_stage_envelope_rejects_invalid_numeric_scope(
+    tenant_id: object, community_id: object
+) -> None:
+    """Out-of-range / mistyped / half-supplied scope fails loudly, never coerces."""
+    with pytest.raises(ValueError):
+        StageEnvelope(
+            tenant="acme",
+            community=None,
+            app_id="waddles.social.alias.default",
+            stage="action",
+            event=PlatformEvent(
+                platform="discord",
+                event_type="chat.message",
+                actor=None,
+                payload={},
+                occurred_at="ts",
+            ),
+            ts="ts",
+            tenant_id=tenant_id,  # type: ignore[arg-type]
+            community_id=community_id,  # type: ignore[arg-type]
+        )

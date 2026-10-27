@@ -1,0 +1,71 @@
+## Waddlebot - Gamma Environment Overrides
+#
+# feature/bundle-artifact-signing + feature/bundle-egress-gateway -- gamma has no full
+# values-gamma.yaml yet (DO gamma context/cluster is TBD, see
+# admin/.claude/rules/penguintech.md); this file exists ONLY to carry the bundle-signing
+# and egress-proxy overrides those two PRs required per environment. Extend in place once
+# gamma's full topology (infrastructure sizing, image registry, etc.) lands, mirroring
+# values-beta.yaml's shape rather than duplicating it here.
+global:
+  deploymentTier: "gamma"
+  # Per-deploy unique gamma-<epoch> tags -> IfNotPresent (matches values.yaml default; stated
+  # explicitly so all four env files declare the policy). Always only for a mutable tag.
+  imagePullPolicy: IfNotPresent
+
+pipeline:
+  hubApi:
+    # Run `make generate-bundle-signing-key KEY_ID=<label> KUBE_CONTEXT=<DO gamma context>
+    # NAMESPACE=waddlebot` once before the first bundle approval on this env -- see
+    # values.yaml's pipeline.hubApi.bundleSigning comment and the chart README's rollout
+    # order. Default secret name (waddlebot-bundle-signing) used -- no override needed
+    # unless running multiple releases in one namespace.
+    bundleSigning:
+      secretName: ""
+  rustDataPlane:
+    # fix/chart-autogen-bundle-signing-key -- no longer required once the executor is
+    # enabled on gamma: it sources BUNDLE_SIGNING_PUBLIC_KEYS from the
+    # auto-provisioned ConfigMap by default (templates/auto-provisioned-keys-job.yaml
+    # derives+publishes it from whatever Secret pipeline.hubApi.bundleSigning above
+    # points at). Only set this explicitly to pin a specific key, e.g.:
+    #   bundleSigningPublicKeys:
+    #     2026-09-key1: "<base64 32-byte Ed25519 public key>"
+    bundleSigningPublicKeys: {}
+
+# Egress lockdown — MANDATORY (fail guard blocks a render with this off).
+egressProxy:
+  enabled: true
+  environment: "gamma"
+  replicas: 1
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "250m", memory: "256Mi" }
+
+egressPolicy:
+  enabled: true
+  clusterCidrs:
+    podCidr: "10.244.0.0/16"    # DigitalOcean DOKS default — confirm against cluster before deploy
+    serviceCidr: "10.96.0.0/12"
+    nodeCidr: "10.0.0.0/8"
+
+spire:
+  environment: "gamma"
+
+infrastructure:
+  # Durable delivery-state Valkey: primary + 1 warm replica, required anti-affinity.
+  # Set infrastructure.valkeyDurable.password explicitly (no auto-generation outside alpha/local).
+  valkeyDurable:
+    enabled: true
+    replicas: 2
+    maxMemory: "600mb"
+    antiAffinity: "hard"
+    persistence:
+      size: 5Gi
+  # Dedicated bundle-kv Valkey (noeviction quota store): single pod, no replication.
+  valkeyKv:
+    enabled: true
+    maxMemory: "128mb"
+    persistence:
+      size: 1Gi
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits: { cpu: "250m", memory: "256Mi" }

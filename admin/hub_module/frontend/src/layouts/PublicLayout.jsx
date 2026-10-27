@@ -1,10 +1,18 @@
+import { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
+import { Bars3Icon, XMarkIcon } from '@heroicons/react/24/outline';
 import { useAuth } from '../contexts/AuthContext';
 import GlobalBanner from '../components/GlobalBanner';
 
 function PublicLayout() {
   const { user, isAuthenticated, logout } = useAuth();
   const location = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Close the mobile menu on navigation
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [location.pathname]);
 
   const navLinks = [
     { to: '/', label: 'Home' },
@@ -44,8 +52,8 @@ function PublicLayout() {
               ))}
             </div>
 
-            {/* Auth buttons */}
-            <div className="flex items-center space-x-4">
+            {/* Auth buttons (hidden below md — repeated inside the mobile menu) */}
+            <div className="hidden md:flex items-center space-x-4">
               {isAuthenticated ? (
                 <>
                   <Link
@@ -88,7 +96,66 @@ function PublicLayout() {
                 </Link>
               )}
             </div>
+
+            {/* Mobile menu toggle */}
+            <div className="flex items-center md:hidden">
+              <button
+                type="button"
+                onClick={() => setMenuOpen((o) => !o)}
+                aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+                aria-expanded={menuOpen}
+                aria-controls="public-mobile-menu"
+                data-testid="public-mobile-menu-toggle"
+                className="p-2 rounded-lg text-navy-300 hover:text-sky-300 hover:bg-navy-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                {menuOpen ? <XMarkIcon className="w-6 h-6" /> : <Bars3Icon className="w-6 h-6" />}
+              </button>
+            </div>
           </div>
+
+          {/* Mobile menu panel */}
+          {menuOpen && (
+            <div id="public-mobile-menu" data-testid="public-mobile-menu" className="md:hidden pb-4 space-y-1">
+              {navLinks.map((link) => (
+                <Link
+                  key={link.to}
+                  to={link.to}
+                  className={`block px-3 py-2 rounded-lg text-sm font-medium ${
+                    location.pathname === link.to
+                      ? 'text-gold-400 bg-navy-800'
+                      : 'text-navy-300 hover:text-sky-300 hover:bg-navy-800'
+                  }`}
+                >
+                  {link.label}
+                </Link>
+              ))}
+              <div className="border-t border-navy-700 pt-2 mt-2 space-y-1">
+                {isAuthenticated ? (
+                  <>
+                    <Link to="/dashboard" className="block px-3 py-2 rounded-lg text-sm font-medium text-navy-300 hover:text-sky-300 hover:bg-navy-800">
+                      Dashboard
+                    </Link>
+                    {user?.roles?.includes('platform-admin') && (
+                      <Link to="/platform" className="block px-3 py-2 rounded-lg text-sm font-medium text-gold-400 hover:text-gold-300 hover:bg-navy-800">
+                        Admin
+                      </Link>
+                    )}
+                    <button
+                      type="button"
+                      onClick={logout}
+                      className="block w-full text-left px-3 py-2 rounded-lg text-sm font-medium text-navy-300 hover:text-sky-300 hover:bg-navy-800"
+                    >
+                      Logout
+                    </button>
+                  </>
+                ) : (
+                  <Link to="/login" className="btn btn-primary block text-center">
+                    Sign In
+                  </Link>
+                )}
+              </div>
+            </div>
+          )}
         </nav>
       </header>
 

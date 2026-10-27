@@ -75,7 +75,8 @@ async def kick_webhook():
     payload = await request.get_data()
 
     if not verify_kick_signature(payload, signature):
-        logger.auth("Invalid webhook signature", action="webhook_verify", result="FAILURE")
+        logger.auth(action="webhook_verify", user="anonymous", result="FAILURE",
+                    detail="Invalid webhook signature")
         return error_response("Invalid signature", 401)
 
     try:
@@ -83,9 +84,12 @@ async def kick_webhook():
         event_type = event.get('type', 'unknown')
 
         logger.audit(
-            f"KICK webhook received: {event_type}",
             action="webhook_receive",
-            event_type=event_type
+            user="system",
+            community="",
+            result="RECEIVED",
+            detail=f"KICK webhook received: {event_type}",
+            source_event_type=event_type
         )
 
         # Process event based on type
@@ -147,9 +151,11 @@ async def submit_to_router(payload: dict):
             ) as response:
                 if response.status == 200:
                     logger.audit(
-                        "Event submitted to router",
                         action="router_submit",
-                        result="SUCCESS"
+                        user="system",
+                        community="",
+                        result="SUCCESS",
+                        detail="Event submitted to router"
                     )
                 else:
                     logger.error(

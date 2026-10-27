@@ -1,10 +1,10 @@
-"""Tests for `services.community_context_store` -- the `!cc` bundle's DB+Redis-backed store.
+"""Tests for `services.community_context_store` -- the `!cc` handler's DB+Redis-backed store.
 
 `dal`/`redis_client` are always passed explicitly (this module's own
 test-injection override params) except for the small set of
 `TestDefaultResolution` cases that exercise the real
 `flask_core.get_bundle_dal()`/singleton-Redis-client fallback paths the
-`!cc` bundle itself relies on (it calls every function with ONLY the
+`!cc` handler itself relies on (it calls every function with ONLY the
 documented required keyword arguments).
 """
 

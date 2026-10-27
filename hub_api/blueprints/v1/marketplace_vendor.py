@@ -68,7 +68,7 @@ def _int_query_arg(name: str, default: int) -> int:
 
 
 @vendor_bp.route("/profile", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_vendor_profile() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/profile`."""
     dal = _dal()
@@ -78,7 +78,7 @@ async def get_vendor_profile() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/profile", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def create_vendor_profile() -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/vendor/profile`."""
     dal = _dal()
@@ -92,7 +92,7 @@ async def create_vendor_profile() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/profile", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def update_vendor_profile() -> tuple[dict[str, Any], int]:
     """`PUT /api/v1/marketplace/vendor/profile`."""
     dal = _dal()
@@ -110,7 +110,7 @@ async def update_vendor_profile() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/dashboard", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_vendor_dashboard() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/dashboard`."""
     dal = _dal()
@@ -128,7 +128,7 @@ async def get_vendor_dashboard() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/analytics/sales", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_sales_metrics() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/analytics/sales`."""
     dal = _dal()
@@ -141,7 +141,7 @@ async def get_sales_metrics() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/analytics/installs", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_install_time_series() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/analytics/installs`."""
     dal = _dal()
@@ -153,7 +153,7 @@ async def get_install_time_series() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/analytics/api-usage", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_api_usage_metrics() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/analytics/api-usage`."""
     get_current_user_id(request)  # auth check only, matches Node (userId unused downstream)
@@ -163,7 +163,7 @@ async def get_api_usage_metrics() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/analytics/discount-codes", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_discount_code_performance() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/analytics/discount-codes`."""
     dal = _dal()
@@ -173,7 +173,7 @@ async def get_discount_code_performance() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/analytics/communities", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_community_drilldown() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/analytics/communities`."""
     dal = _dal()
@@ -197,7 +197,7 @@ async def get_community_drilldown() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/analytics/export", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def export_analytics_csv() -> Response:
     """`GET /api/v1/marketplace/vendor/analytics/export`."""
     dal = _dal()
@@ -217,7 +217,7 @@ async def export_analytics_csv() -> Response:
 
 
 @vendor_bp.route("/analytics/overview", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_vendor_analytics_overview() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/analytics/overview`."""
     dal = _dal()
@@ -233,7 +233,7 @@ async def get_vendor_analytics_overview() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/modules", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_vendor_modules() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/modules`."""
     dal = _dal()
@@ -245,7 +245,7 @@ async def get_vendor_modules() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/modules", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def create_vendor_module() -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/vendor/modules`."""
     dal = _dal()
@@ -259,7 +259,7 @@ async def create_vendor_module() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/modules/<int:module_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def update_vendor_module(module_id: int) -> tuple[dict[str, Any], int]:
     """`PUT /api/v1/marketplace/vendor/modules/<id>` -- IDOR-safe (own modules only)."""
     dal = _dal()
@@ -273,7 +273,7 @@ async def update_vendor_module(module_id: int) -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/modules/<int:module_id>/submit", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def submit_module_for_review(
     module_id: int,
 ) -> tuple[dict[str, Any], int] | tuple[Response, int]:
@@ -316,7 +316,7 @@ async def submit_module_for_review(
 
 
 @vendor_bp.route("/request", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_vendor_request() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/vendor/request`."""
     dal = _dal()
@@ -326,7 +326,7 @@ async def get_vendor_request() -> tuple[dict[str, Any], int]:
 
 
 @vendor_bp.route("/request", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def create_vendor_request() -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/vendor/request`."""
     dal = _dal()

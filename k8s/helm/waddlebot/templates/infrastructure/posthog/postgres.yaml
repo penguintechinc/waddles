@@ -87,4 +87,6 @@ spec:
         resources:
           requests:
             storage: {{ .Values.posthog.postgres.storage }}
+# R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "database" "name" "posthog-postgres" "selector" (dict "app.kubernetes.io/name" "posthog-postgres") "ports" (list 5432) "egress" "internal" "tetragon" false) }}
 {{- end }}

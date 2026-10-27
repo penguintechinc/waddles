@@ -3,7 +3,7 @@ name = "svc-action"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Waddles ACTION stage-runner -- terminal pipeline stage: dispatch outcomes to platform senders, retry-with-backoff, audit to action_dispatch_log."
 
@@ -27,7 +27,13 @@ path = "src/main.rs"
 # that file's header comment for the full rationale. `deny.toml`'s
 # `[sources] allow-git` must list this exact repository URL.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
+# Host-API acceptor TCP keepalive (fix/executor-link-heartbeat, alpha
+# 2026-10-02 incident: a rolled svc pod left the executor's socket
+# half-open with no OS-level signal) -- already resolves to this exact
+# version transitively (tokio/rustls), pinned directly here so
+# `SockRef::set_tcp_keepalive` is available without bumping anything else.
+socket2 = { version = "=0.6.5", features = ["all"] }
 axum = "=0.8.9"
 tower-http = { version = "=0.7.1", features = ["trace"] }
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -65,7 +71,7 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
 # `penguin-logging` owns the tracing-subscriber/OTel/OTLP stack internally
 # (spec SS4.9) -- see `src/telemetry.rs`. Pinned to the HEAD of
 # `release/rust-logging/v0.1.x` at the time of this commit.
-penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0a320ba2b08a6850b66e3062f6a9dfb44fec6950", package = "penguin-logging", version = "=0.1.0" }
 # `penguin-spine` (spec SS4.7): the action-stage's own `:action` stream
 # `XREADGROUP` consumer (single consumer group `{app_id}`) -- see
 # `src/dispatch.rs`. Pinned to the tip of `release/rust-spine/v0.1.x`,
@@ -76,31 +82,29 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # landed `binding` module (a separate follow-up, re-verified against this
 # rev's own canonical test vectors, not done here), and `src/dispatch.rs`'s
 # `fixture_delivered` for the `group` field this rev added.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "90060a93925c50668cc1c6dd47a4ae24a7b4e321", package = "penguin-spine", version = "=0.2.0" }
 # `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # (PR penguintechinc/penguin-libs#93, same commit `core/bundle_executor`
 # pins).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69f25b007e397bcf22c20bee368495f61f0a1b8a", package = "penguin-bundle-host", version = "=0.2.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "17cd3956808e425e9710245dedde69aca7969d9a", package = "penguin-bundle-host", version = "=0.2.1" }
 # Spec SS13.5's two flags this crate gates on (`waddles.core.rust-data-plane`,
 # `waddles.core.bundle-egress`) -- see `src/flags.rs`. Pinned to the tip of
 # `release/rust-licensing/v0.1.x`.
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "7110125df28045322e7c4c527d1d1be806f2f086", package = "penguin-licensing", version = "=0.1.0" }
 # D30 envelope binding MAC (spec SS5.11): HMAC-SHA256 hop verification --
 # `src/hop.rs`. Same exact pins `penguin-spine` itself uses internally for
 # byte-identical behavior. `penguin-spine`'s own `binding` module (above)
 # now implements the identical formula -- `src/hop.rs`'s module doc records
 # the cross-check against that module's canonical test vectors and why this
 # crate keeps its own copy rather than switching over in this landing.
-hmac = "=0.12.1"
 sha2 = "=0.10.9"
-subtle = "=2.6.1"
 hex = "=0.4.3"
 # mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8302`: this
 # crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
 # (the client side) with the roles reversed. Same exact version pins.
-rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "tls12"] }
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
 rustls-pki-types = "=1.15.1"
 # `relay` host capability (Twitch outbound, spec SS7.4) LPUSHes onto
@@ -110,7 +114,15 @@ rustls-pki-types = "=1.15.1"
 # operation is envelope-typed (`SpineClient::append` requires a
 # `StageEnvelope`), so this is a second, direct `redis` connection, same
 # crate/feature pins `penguin-spine` itself uses internally.
-redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
+# `script` for the atomic fixed-window counter behind the `dm.send` throttle
+# (`capabilities::INCR_WINDOW_SCRIPT`) -- already compiled in via
+# `bundle-host-kv`'s own redis dependency; declared here too so this crate
+# never relies on cargo feature unification for it.
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "script"] }
+# Unguessable id for each queued Discord op's confirmation handshake
+# (`capabilities::handle_discord_queued_op`'s `op_id`). Already in this
+# crate's lockfile transitively at the same exact version.
+uuid = { version = "=1.26.1", features = ["v4"] }
 # The DB-driven active-bundle loader's shared, read-only Postgres query +
 # diff logic (`src/bundle_loader.rs`) -- a same-repo `path` dependency, NOT
 # a `penguin-libs` git dependency: this schema
@@ -119,12 +131,72 @@ redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"
 # declares the identical dependency so the query/diff logic is written and
 # tested exactly once. See `core/bundle_active_set/Cargo.toml`.
 bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
+# The `kv` bundle host capability's shared key-derivation/isolation/quota
+# logic (`src/capabilities.rs`'s `handle_kv`) -- a same-repo `path`
+# dependency, NOT a `penguin-libs` git dependency: like `bundle-active-set`
+# above, this is this repo's own security boundary for `stage.wit`'s
+# `interface kv`, evolved alongside the manifest schema and executor this
+# repo owns. `core/svc_process` declares the identical dependency so the
+# capability is written and tested exactly once. See
+# `core/bundle_host_kv/Cargo.toml`.
+bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+# The standard enforcement gate every host capability arm calls first
+# (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+# SS5, `src/capabilities.rs`).
+bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
+# Per-source circuit breaker for guest faults (connector spec SS0 condition
+# 5) -- a same-repo `path` dependency (NOT `penguin-libs`: purely generic,
+# no dependency on this repo's schema/wire protocol). `core/svc_process`
+# declares the identical dependency so the breaker logic is written and
+# tested exactly once. See `core/circuit_breaker/Cargo.toml`.
+circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
+# `db` bundle host capability (`src/capabilities.rs::handle_db`) -- same
+# same-repo path dependency as `core/svc_process`'s identical line: this
+# crate's identifier-safety/tenant-isolation rules are owned by this
+# repo's own bundle-db-capability design doc, not penguin-libs.
+bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
+# The bundle `http` host capability's shared, SSRF-hardened egress guard
+# (`src/egress.rs`, now a thin re-export shim) -- extracted here (PR #459
+# follow-up) so `core/svc_process` can enforce the identical pipeline for
+# its own `http` capability without a second copy. Same same-repo `path`-
+# dependency rationale as `bundle-active-set` above: this pipeline is
+# specific to this repo's own bundle-host wire shapes, not a penguin-libs
+# crate.
+bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# Outbound PII-detokenization pass (`src/capabilities.rs`'s
+# `detokenize_text`/`with_detokenize`) -- the egress half of the PII
+# boundary whose inbound half is `core/svc_process`'s own `pii_tokenize`
+# dependency on `hub_client`. Same-repo path dependency, same rationale as
+# `bundle-active-set` above.
+egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
+# `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames` client,
+# needed directly (not just transitively via `egress_detokenizer`) so
+# `crate::lib`'s startup wiring can construct the real
+# `egress_detokenizer::HubClientResolver`.
+hub_client = { path = "../hub_client", version = "=0.1.0" }
+
+# `src/stage_metrics.rs`: OTel instruments built from the global meter
+# provider `penguin-logging` installs (never a provider of its own). Same
+# exact pin `penguin-logging` and the `bundle-host-*` crates use, already
+# resolved in this Cargo.lock.
+opentelemetry = "=0.32.0"
+# `src/metrics_facade.rs`: `bundle-capability-gate` records its audit
+# counters (`waddles_bundle_capability_{denied,authorized}_total`) through
+# the `metrics` facade and installs no recorder itself; this service
+# installs an OTel-backed one so they are no longer silently dropped. Same
+# exact pin the gate crate uses, already resolved in this Cargo.lock.
+metrics = "=0.24.6"
 
 [dev-dependencies]
+# `InMemoryMetricExporter` (the SDK's `testing` feature) so tests read back
+# the metric data points a collector would actually receive -- proving the
+# instruments EMIT, not merely exist. Same exact version `penguin-logging`
+# pins, so no second copy enters the graph.
+opentelemetry_sdk = { version = "=0.32.1", features = ["testing"] }
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
 # `tokio::time::{pause,advance}` for retry-backoff tests. Never linked into
 # the release binary.
-tokio = { version = "=1.53.1", features = ["test-util"] }
+tokio = { version = "=1.53.3", features = ["test-util"] }
 # `ServiceExt::oneshot` -- drives a request through the full `http::router`
 # (middleware included) in tests without binding a real socket. Test-only;
 # never linked into the release binary.

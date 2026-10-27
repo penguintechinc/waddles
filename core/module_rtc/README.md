@@ -10,7 +10,7 @@ Go/LiveKit-based WebRTC module for community calls. Stateless, scalable to 1000+
 - Moderator controls (mute all, kick, lock room)
 - Participant role management (host, moderator, speaker, viewer)
 - Screen annotations and shared whiteboard
-- Recording support (optional, storage to MinIO)
+- Recording support (optional, storage to SeaweedFS/S3)
 
 ## Configuration
 

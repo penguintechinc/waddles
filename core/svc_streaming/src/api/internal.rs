@@ -109,11 +109,23 @@ pub enum IngestKind {
 }
 
 /// `POST /api/v1/internal/streaming/ingest-auth` request body.
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IngestAuthRequest {
     pub kind: IngestKind,
     pub key: String,
+}
+
+/// Hand-written `Debug`: `key` is the presented stream key/token -- a bearer
+/// credential -- so a derived `{:?}` of the request would print it. Shows
+/// the key's fingerprint instead.
+impl std::fmt::Debug for IngestAuthRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IngestAuthRequest")
+            .field("kind", &self.kind)
+            .field("key_hash", &crate::redact::fingerprint(&self.key))
+            .finish()
+    }
 }
 
 /// `POST /api/v1/internal/streaming/ingest-auth` response body.

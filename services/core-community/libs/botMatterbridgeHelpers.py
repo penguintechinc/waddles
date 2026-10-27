@@ -15,6 +15,7 @@ matterbridgePostURL = os.getenv("MATTERBRIDGE_URL")
 # set the logging level
 logging.basicConfig(level=logging.INFO)
 
+
 # Class to initialize the helpers class
 class matterbridge_helpers:
     # Constructor
@@ -31,21 +32,21 @@ class matterbridge_helpers:
         community = self.db(self.db.communities.id == community_id).select().first()
         if not community:
             raise ValueError(f"No community found with id {community_id}")
-        
+
         # In the routing table, get the routing_gateway_ids for the given community id. If the routing_gateway_ids list is empty, return an error.
         routings = self.db(self.db.routing.community_id == community.id).select().first()
 
         if not routings:
             logging.error("No routings found for the current community.")
             return None
-        
+
         # Get the channel_id and account from the routing_gateway_ids
         channel_ids = []
         accounts = []
         if len(routings.routing_gateway_ids) == 0:
             logging.error("No routing gateways found for the current community. Unable to send a message.")
             return None
-        
+
         for routing_gateway_id in routings.routing_gateway_ids:
             channel_id = self.get_channel_id(routing_gateway_id)
             account = self.get_account(routing_gateway_id)
@@ -85,10 +86,9 @@ class matterbridge_helpers:
         if not gateway_server:
             return None
         return f"{gateway_server.protocol}.{gateway_server.name}"
-    
+
     # A function to announce the winner of a giveaway in the chat of every gateway that the community is connected to, via Matterbridge.
     def announce_winner(self, giveaway, winner):
         payloads = self.create_matterbridge_payloads(giveaway.community_id, f"Giveaway with guid {giveaway.guid} is closed. Winner is {winner.identity_name}.")
         for payload in payloads:
             self.send_matterbridge_message(payload)
-    

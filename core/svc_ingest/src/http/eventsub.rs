@@ -359,6 +359,83 @@ mod tests {
         assert_eq!(&body[..], b"chal-123");
     }
 
+    /// Every non-`Challenge` `render()` arm is a `200` with a fixed JSON
+    /// `status` field -- distinct response shapes, never previously
+    /// exercised individually (`challenge_response_is_plain_text_not_json`
+    /// above only covers `Challenge`).
+    #[tokio::test]
+    async fn render_ack_is_200_json_with_ok_status() {
+        let response = render(EventSubResponse::Ack);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn render_duplicate_ignored_is_200_json() {
+        let response = render(EventSubResponse::DuplicateIgnored);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["status"], "duplicate_ignored");
+    }
+
+    #[tokio::test]
+    async fn render_acknowledged_is_200_json() {
+        let response = render(EventSubResponse::Acknowledged);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["status"], "acknowledged");
+    }
+
+    #[tokio::test]
+    async fn render_ignored_is_200_json() {
+        let response = render(EventSubResponse::Ignored);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["status"], "ignored");
+    }
+
+    #[tokio::test]
+    async fn render_unknown_type_is_200_json() {
+        let response = render(EventSubResponse::UnknownType);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["status"], "unknown_type");
+    }
+
+    /// `outcome_label`'s remaining variants `outcome_label_covers_every_
+    /// variant` doesn't already assert (`Acknowledged`/`Ignored`/
+    /// `UnknownType`/`Challenge`/`UnsupportedContentType`/`MalformedBody`).
+    #[test]
+    fn outcome_label_covers_the_remaining_variants() {
+        assert_eq!(
+            outcome_label(&Ok(EventSubResponse::Acknowledged)),
+            "acknowledged"
+        );
+        assert_eq!(outcome_label(&Ok(EventSubResponse::Ignored)), "ignored");
+        assert_eq!(
+            outcome_label(&Ok(EventSubResponse::UnknownType)),
+            "unknown_type"
+        );
+        assert_eq!(
+            outcome_label(&Ok(EventSubResponse::Challenge("x".to_string()))),
+            "challenge"
+        );
+        assert_eq!(
+            outcome_label(&Err(EventSubError::UnsupportedContentType)),
+            "unsupported_content_type"
+        );
+        assert_eq!(
+            outcome_label(&Err(EventSubError::MalformedBody)),
+            "malformed_body"
+        );
+    }
+
     #[test]
     fn outcome_label_covers_every_variant() {
         assert_eq!(outcome_label(&Ok(EventSubResponse::Ack)), "ack");

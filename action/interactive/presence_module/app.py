@@ -118,9 +118,10 @@ async def update_presence():
         logger.audit(
             action="presence_update",
             user=user_id,
+            community="",
+            result="STARTED",
             platform=source_platform,
             status=canonical_status,
-            result="STARTED",
         )
 
         result = await presence_service.process_presence_update(
@@ -134,9 +135,10 @@ async def update_presence():
         logger.audit(
             action="presence_update",
             user=user_id,
+            community="",
+            result="SUCCESS",
             platform=source_platform,
             status=canonical_status,
-            result="SUCCESS",
         )
         return success_response(result)
 
@@ -228,6 +230,7 @@ async def update_user_settings(user_id: str):
         logger.audit(
             action="update_presence_settings",
             user=user_id,
+            community="",
             result="SUCCESS",
         )
         return success_response(updated)

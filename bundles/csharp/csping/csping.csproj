@@ -4,13 +4,21 @@
     Minimal, real `!csping` -> `pong (c#)` process/action-stage bundle,
     compiled to a WASI 0.2 component with `componentize-dotnet`
     (BytecodeAlliance.Componentize.DotNet.Wasm.SDK) against the committed
-    `wit/waddle-bundle/stage.wit` world: the C#-toolchain feasibility
-    spike (spec `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md`
-    S18 R13 / D35). Mirrors `bundles/rust/ping` and `bundles/python/pyping`:
-    a `Library` output (no `Program.cs`/`wasi:cli/run` export; the `stage`
-    world exports only `process-stage`/`action-stage`), referencing the
-    single normative WIT file by relative path rather than copying it, per
-    that file's own header comment.
+    `wit/waddle-bundle/stage.wit` world. Built on `waddle-sdk-cs`
+    (`sdk/waddle-sdk-cs`), the shared C# SDK - this project itself only
+    contains this bundle's own business logic (`CspingLogic.cs`/
+    `CspingDispatch.cs`), its per-project host adapter
+    (`WaddleHostAdapter.cs`, required because wit-bindgen's C# codegen is
+    per-project - see the SDK README), and the two thin WIT export shims
+    wit-bindgen's naming contract requires (`ProcessStageExportsImpl.cs`/
+    `ActionStageExportsImpl.cs`). Mirrors `bundles/csharp/superpenguin-roll`
+    exactly - csping was the original C#-toolchain feasibility spike (spec
+    `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` S18 R13 /
+    D35) and is now also the SDK-adoption proof: a `Library` output (no
+    `Program.cs`/`wasi:cli/run` export; the `stage` world exports only
+    `process-stage`/`action-stage`), referencing the single normative WIT
+    file by relative path rather than copying it, per that file's own header
+    comment.
   -->
 
   <PropertyGroup>
@@ -56,6 +64,15 @@
     <WitGeneratedFilesRoot>generated/wit</WitGeneratedFilesRoot>
   </PropertyGroup>
 
+  <!-- SDK-style projects glob every *.cs file under the project directory by
+       default, including the sibling `tests/` project's own sources - exclude
+       it explicitly so `tests/Csping.Tests.csproj`'s files never get
+       double-compiled into this wasi-wasm library itself (mirrors
+       `bundles/csharp/superpenguin-roll/superpenguin-roll.csproj`). -->
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <!--
       Exact-version pins only (rules/critical-rules.md Dependency
@@ -70,6 +87,14 @@
     -->
     <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview00011" />
     <PackageReference Include="runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Sibling-path project reference, not a NuGet package - this bundle and
+         the SDK it depends on live in the same repo and move together,
+         mirroring `bundles/csharp/superpenguin-roll/superpenguin-roll.csproj`
+         and `bundles/rust/ping`'s `waddle-sdk-rs` path dependency. -->
+    <ProjectReference Include="../../../sdk/waddle-sdk-cs/waddle-sdk-cs.csproj" />
   </ItemGroup>
 
   <ItemGroup>

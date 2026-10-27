@@ -4,6 +4,7 @@ Polling Service - REST polling endpoint handler for real-time updates
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from dateutil import parser as date_parser
+from .log_safety import log_failure
 
 
 class PollingService:
@@ -87,5 +88,5 @@ class PollingService:
             return response
 
         except Exception as e:
-            self.logger.error(f"Failed to get polling updates: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to get polling updates", e, community_id=community_id)
             raise

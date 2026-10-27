@@ -2,7 +2,7 @@
 # Not wired into the root Makefile; invoke directly from this directory
 # (`make -C core/svc_streaming <target>`) until the Python alpha retires.
 
-.PHONY: build test lint fmt fmt-check clippy test-security coverage docker-build clean
+.PHONY: build test lint fmt fmt-check clippy test-security coverage docker-build image-smoke clean
 
 build:
 	cargo build --all-targets
@@ -31,8 +31,17 @@ test-security:
 coverage:
 	cargo llvm-cov --fail-under-lines 90
 
+# Image variants (cpu|amd|nvidia) -- see the Container section of README.md.
+# Builds one variant; tag is alpha-<epoch>-<variant>. Usage: make docker-build VARIANT=amd
+VARIANT ?= cpu
+
 docker-build:
-	docker build -f Dockerfile.rust -t localhost:32000/waddlebot/svc-streaming:alpha-$$(date +%s) .
+	docker build -f Dockerfile.rust --target $(VARIANT) -t localhost:32000/waddlebot/svc-streaming:alpha-$$(date +%s)-$(VARIANT) .
+
+# Smoke-tests a built variant image: encoders, driver wiring, CPU fallback. Usage:
+#   make image-smoke VARIANT=nvidia IMAGE=localhost:32000/waddlebot/svc-streaming:alpha-1700000000-nvidia
+image-smoke:
+	bash scripts/image-smoke.sh $(IMAGE) $(VARIANT)
 
 clean:
 	cargo clean

@@ -1,0 +1,104 @@
+## Waddlebot - Production Environment Overrides
+#
+# feature/bundle-artifact-signing + feature/bundle-egress-gateway -- production has no full
+# values-production.yaml yet (DO prod cluster not built, see
+# admin/.claude/rules/penguintech.md); this file exists ONLY to carry the bundle-signing and
+# egress-proxy overrides those two PRs required per environment. Extend in place once
+# production's full topology lands, mirroring values-beta.yaml's shape.
+global:
+  deploymentTier: "production"
+  # PenguinTech images require a SHA256-digest pin in production (critical-rules.md
+  # Dependency Pinning) -- imageTag here MUST be a digest reference once the production
+  # image pipeline exists, never a mutable tag like alpha/beta use.
+  # IfNotPresent is correct for digest-pinned prod images (immutable ref -> a cached layer is the
+  # same image); also governs hub-api + the Rust data-plane Deployments (no hardcoded Always).
+  imagePullPolicy: IfNotPresent
+
+pipeline:
+  hubApi:
+    # Run `make generate-bundle-signing-key KEY_ID=<label> KUBE_CONTEXT=<DO prod context>
+    # NAMESPACE=waddlebot` once before the first bundle approval on this env -- see
+    # values.yaml's pipeline.hubApi.bundleSigning comment and the chart README's rollout
+    # order. Production's signing key MUST be distinct from gamma/beta's -- never reuse a
+    # lower-environment key here.
+    bundleSigning:
+      secretName: ""
+    # Reconciler stays enabled at the base default (values.yaml) -- production is exactly
+    # where a missed sidecar re-upload matters most.
+  rustDataPlane:
+    # fix/chart-autogen-bundle-signing-key -- no longer required before the executor
+    # starts here: it sources BUNDLE_SIGNING_PUBLIC_KEYS from the auto-provisioned
+    # ConfigMap by default (derived+published from whatever Secret
+    # pipeline.hubApi.bundleSigning above points at). Only set this explicitly to pin
+    # THIS environment's own key, e.g.:
+    #   bundleSigningPublicKeys:
+    #     2026-09-prod-key1: "<base64 32-byte Ed25519 public key>"
+    bundleSigningPublicKeys: {}
+
+# Resilience (templates/autoscaling.yaml). Production runs multi-replica: HPA on the stateless
+# services (CPU 70%), PodDisruptionBudgets rendered automatically for every service whose
+# effective replicas > 1. svc-streaming / svc-presentation stay single-replica singletons and
+# are never autoscaled. HPA minReplicas is the production floor (3+ per the prod resource tier).
+autoscaling:
+  defaults:
+    minReplicas: 3
+    maxReplicas: 10
+  services:
+    hubApi: { enabled: true }
+    hubWebui: { enabled: true }
+    svcActionRust: { enabled: true }
+    svcProcessRust: { enabled: true }
+    bundleExecutor: { enabled: true }
+    bundleExecutorAction: { enabled: true }
+    reputation: { enabled: true }
+
+# Egress lockdown — MANDATORY (fail guard blocks a render with this off).
+# PenguinTech prod resource tier (500m/1000m cpu, 512Mi/1Gi mem, replicas 3+) for the proxy.
+egressProxy:
+  enabled: true
+  environment: "production"
+  replicas: 3
+  resources:
+    requests: { cpu: "500m", memory: "512Mi" }
+    limits: { cpu: "1000m", memory: "1Gi" }
+
+egressPolicy:
+  enabled: true
+  clusterCidrs:
+    podCidr: "10.244.0.0/16"    # DigitalOcean DOKS default — confirm against cluster before deploy
+    serviceCidr: "10.96.0.0/12"
+    nodeCidr: "10.0.0.0/8"
+
+spire:
+  environment: "production"
+
+# Production admits only signed, SBOM-attested Waddles images (Kyverno, Enforce).
+# Requires the Kyverno CRDs installed in the production cluster. See docs/SUPPLY_CHAIN.md.
+supplyChain:
+  verifyImages:
+    enabled: true
+    enforce: true
+
+infrastructure:
+  # Durable delivery-state Valkey (99.99% delivery SLA): primary + 1 warm replica, REQUIRED
+  # anti-affinity (separate nodes), PDB. Set infrastructure.valkeyDurable.password explicitly.
+  # Pick a replicated/durable storageClass for the target cluster before first deploy.
+  valkeyDurable:
+    enabled: true
+    replicas: 2
+    maxMemory: "1gb"
+    antiAffinity: "hard"
+    persistence:
+      size: 10Gi
+    resources:
+      requests: { cpu: "500m", memory: "1536Mi" }
+      limits: { cpu: "1000m", memory: "2Gi" }
+  # Dedicated bundle-kv Valkey (noeviction quota store): single pod, no replication.
+  valkeyKv:
+    enabled: true
+    maxMemory: "256mb"
+    persistence:
+      size: 2Gi
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }

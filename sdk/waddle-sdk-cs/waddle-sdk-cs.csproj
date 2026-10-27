@@ -1,0 +1,81 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Tier-1(spike) C# SDK for Waddles app bundles: typed, reflection-free
+    (NativeAOT-LLVM/wasi-wasm-safe) helpers over the `waddle:bundle/stage@1.0.0`
+    WIT world (`wit/waddle-bundle/stage.wit`). Model: `sdk/waddle-sdk-rs`
+    (path-dependency SDK, no registry publish) and `sdk/waddle-sdk` (Python).
+
+    DELIBERATELY NOT a `<Wit Include=... World="stage" />` project, and this
+    is not an oversight - see README.md "Why this SDK never touches
+    wit-bindgen's generated types directly" for the full reasoning. Short
+    version: `wit-bindgen`'s C# backend (`BytecodeAlliance.Componentize.
+    DotNet.WitBindgen`, used by `bundles/csharp/csping`) regenerates a fresh,
+    nominally-distinct copy of every WIT record/interface type PER PROJECT
+    that references the `.wit` file. Unlike Rust's `wit_bindgen::generate!`
+    macro (expanded exactly once, in `waddle-sdk-rs` itself, with the
+    resulting types re-exported with full type identity to every downstream
+    bundle crate - see `sdk/waddle-sdk-rs/src/bindings_glue.rs`), a C#
+    class library that also ran the WIT source generator would produce
+    `Types.PlatformEvent`/`IKvImports`/etc. that are a DIFFERENT CLR type
+    from the ones a consuming bundle project generates for itself, even
+    though both are generated from the identical WIT source - C#'s type
+    system is nominal, not structural, so these would not be
+    interchangeable and every SDK method signature touching a WIT type
+    would fail to compile in the bundle project. This SDK's entire public
+    surface therefore operates on its own idiomatic POCOs (this project's
+    `Types`/`Chat`/`Db`/etc. namespaces) and plain BCL primitives
+    (`string`, `byte[]`, `long`, ...) only - never a wit-bindgen-generated
+    type - so every method signature here is usable, unmodified, from any
+    bundle project regardless of that project's own WIT codegen. Each
+    bundle supplies a small (~40-60 line) per-project adapter implementing
+    this SDK's `IWaddleHost` capability interfaces by delegating to its own
+    generated import bindings - see README.md "Writing a bundle" for the
+    exact shape, and `bundles/csharp/superpenguin-roll/WaddleHostAdapter.cs`
+    for a real one.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>WaddleSdk</RootNamespace>
+    <AssemblyName>WaddleSdk</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <!--
+      Never set `RuntimeIdentifier`/`SelfContained`/`PublishTrimmed` here -
+      those are the CONSUMING bundle project's responsibility (its own
+      `<RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>` publish pulls this
+      library into the same NativeAOT-LLVM compilation).
+
+      `IsAotCompatible`/`EnableTrimAnalyzer`/`EnableAotAnalyzer` were tried
+      here to turn on trim/AOT analyzer warnings for this project's own code
+      (catching a reflection-based API creeping in at THIS project's build
+      time, not a bundle's) but pull in a `Microsoft.NET.ILLink.Tasks`
+      restore that fails offline/against this pinned SDK image
+      (`NETSDK1064: Package ... version 10.0.12 was not found`) for a
+      library with no `RuntimeIdentifier` of its own - removed rather than
+      pinning a workaround package version. This SDK's reflection-freedom is
+      verified by design (every JSON path goes through a source-generated
+      `JsonSerializerContext`, see `Json/WaddleSdkJsonContext.cs`) and by the
+      fact the consuming bundle's own NativeAOT-LLVM publish (which DOES set
+      `PublishTrimmed`) would fail loudly on a reflection call this SDK
+      introduced - revisit enabling these analyzers if a future SDK/image
+      pin resolves the restore failure.
+    -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- SDK-style projects glob every *.cs file under the project directory by
+       default, including the sibling `tests/` project's own sources - exclude
+       it explicitly so `tests/WaddleSdk.Tests.csproj` (which references THIS
+       project) never gets double-compiled into this library itself. -->
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+
+</Project>
