@@ -208,6 +208,17 @@ x25519-dalek = { version = "=2.0.1", features = ["getrandom"] }
 service_auth = { path = "../service_auth", version = "=0.1.0" }
 connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
 
+# Dataplane scope-resolver machine-JWT client (`src/scope_resolver.rs`): bootstraps
+# with the pod's projected SA token, caches/refreshes the hub-api-issued EdDSA
+# machine JWT. Same-repo path dependency, so the Docker build context is `core/`
+# (see Dockerfile.rust) exactly like core/svc_process.
+service_auth = { path = "../service_auth", version = "=0.1.0" }
+
+# Per-community Twitch inbound (`src/twitch_sessions/`): pages hub-api's
+# data-plane binding list via `ConnectionResolve::list_bindings`. Same-repo
+# path dependency (Docker build context is `core/`), like `service_auth`.
+connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
+
 [dev-dependencies]
 http-body-util = "=0.1.3"
 # Already resolved transitively (tokio-tungstenite's own dependency) at
