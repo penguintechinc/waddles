@@ -1,0 +1,60 @@
+schema_version: 2
+app_id: waddles.core.example.bingo
+name: Chat Bingo Bundle (Python)
+# 1.0.0: initial kv-only v1 -- !bingo (card) / bingo (claim) / status / start / call / end. Cards are
+# derived from a per-round seed + the viewer's pseudonym, never stored. See src/app.py's module
+# docstring. Activation-gated only (no feature flag).
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/bingo
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!bingo"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!bingo"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- kv-only by design (stateless-ish: cards are recomputed from a round seed).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists the per-community bingo round (seed, call counter, winner claim and winner record)"
+  - id: "chat.send:discord"
+    justification: "bingo replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "bingo replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

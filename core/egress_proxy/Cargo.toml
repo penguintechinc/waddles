@@ -21,7 +21,7 @@ path = "src/main.rs"
 # path dependencies below) are copied verbatim so no dependent crate
 # resolves a second version of the same package.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 hyper = { version = "=1.11.1", features = ["full"] }
 hyper-util = { version = "=0.1.19", features = ["full"] }
 http-body-util = "=0.1.3"
@@ -45,7 +45,7 @@ tracing = "=0.1.44"
 # second OTLP setup: standard OTEL_EXPORTER_OTLP_* env vars, graceful
 # degradation (unset endpoint or a failed exporter build never panics or
 # blocks proxying), stdout JSON always works. See src/telemetry.rs.
-penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0a320ba2b08a6850b66e3062f6a9dfb44fec6950", package = "penguin-logging", version = "=0.1.0" }
 # Same versions penguin-logging itself pins (its own Cargo.toml) --
 # needed directly here for `tracing_opentelemetry::OpenTelemetrySpanExt`
 # (attaching an extracted parent trace context to a request span) and
@@ -100,7 +100,7 @@ bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 egress-assertion = { path = "../egress_assertion", version = "=0.1.0" }
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 tower = { version = "=0.5.3", features = ["util"] }
 # Test-only: `service_auth::test_support::Capture` (an in-memory OTel metric
 # exporter) proves the assertion verifier reports into the same

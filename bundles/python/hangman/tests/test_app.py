@@ -135,7 +135,7 @@ def _scoped(key: str, *, community: str = "comm-1") -> str:
 def _start_with_word(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch, word: str = "python"
 ) -> None:
-    monkeypatch.setattr("app.random.choice", lambda seq: word)
+    monkeypatch.setattr("app._RNG.choice", lambda seq: word)
     _run(dispatch(_envelope("start"), {}, http_client=None))
 
 
@@ -376,7 +376,7 @@ def test_bare_hangman_reveal_matches_explicit_reveal(
 def test_different_communities_never_share_hangman_state(
     fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.random.choice", lambda seq: "python")
+    monkeypatch.setattr("app._RNG.choice", lambda seq: "python")
     _run(dispatch(_envelope("start", community="comm-1"), {}, http_client=None))
     _run(dispatch(_envelope("start", community="comm-2"), {}, http_client=None))
 

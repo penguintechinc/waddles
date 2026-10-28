@@ -28,13 +28,14 @@ TestCatalogMatchesContracts`` fails on any drift.
 | ``analytics.advanced``                  | enterprise   | ``waddles.analytics.advanced``                  |
 | ``video_proxy.streaming``               | free         | ``waddles.video_proxy.streaming``               |
 | ``video_proxy.premium_limits``          | professional | ``waddles.video_proxy.premium_limits``          |
-| ``auth.sso_google``                     | professional | ``waddles.auth.sso_google``                     |
+| ``auth.sso_custom``                     | professional | ``waddles.auth.sso_custom``                     |
 | ``auth.sso_saml``                       | enterprise   | ``waddles.auth.sso_saml``                       |
 | ``compliance.audit_logs``               | enterprise   | ``waddles.compliance.audit_logs``               |
 | ``compliance.audit_export``             | enterprise   | ``waddles.compliance.audit_export``             |
 | ``compliance.external_kms``             | enterprise   | ``waddles.compliance.external_kms``             |
 | ``integrations.waddleai``               | enterprise   | ``waddles.integrations.waddleai``               |
 | ``integrations.provider_connections``   | professional | ``waddles.integrations.provider_connections``   |
+| ``integrations.static_connections``     | professional | ``waddles.integrations.static_connections``     |
 | ``tenancy.multi_tenant``                | enterprise   | ``waddles.tenancy.multi_tenant``                |
 | ``compliance.bulk_dsar``                | enterprise   | ``waddles.compliance.bulk_dsar``                |
 | ``tenancy.whitelabel``                  | professional | ``waddles.tenancy.whitelabel``                  |
@@ -153,12 +154,12 @@ _FEATURE_DEFS: Tuple[Dict[str, Any], ...] = (
         "flag": "waddles.video_proxy.premium_limits",
     },
     {
-        "id": "auth.sso_google",
+        "id": "auth.sso_custom",
         "version": 1,
         "module": "auth",
         "requires_scopes": frozenset({"auth.sso:admin"}),
         "min_tier": "professional",
-        "flag": "waddles.auth.sso_google",
+        "flag": "waddles.auth.sso_custom",
     },
     {
         "id": "auth.sso_saml",
@@ -219,6 +220,16 @@ _FEATURE_DEFS: Tuple[Dict[str, Any], ...] = (
         "requires_scopes": frozenset({"connections:admin"}),
         "min_tier": "professional",
         "flag": "waddles.integrations.provider_connections",
+    },
+    {
+        # Static-secret connection kinds (external HTTP / AWS Lambda / GCP function): an extra gate
+        # on top of `integrations.provider_connections` for creating one (default OFF).
+        "id": "integrations.static_connections",
+        "version": 1,
+        "module": "integrations",
+        "requires_scopes": frozenset({"connections:admin"}),
+        "min_tier": "professional",
+        "flag": "waddles.integrations.static_connections",
     },
     {
         "id": "tenancy.multi_tenant",
@@ -342,10 +353,10 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
         "is_default": True,
     },
     {
-        "app_id": "waddles.auth.sso_google.default",
-        "name": "Google SSO (default)",
+        "app_id": "waddles.auth.sso_custom.default",
+        "name": "Custom OAuth2/OIDC SSO (default)",
         "version": "1.0.0",
-        "feature": "waddles.auth.sso_google",
+        "feature": "waddles.auth.sso_custom",
         "module": "auth",
         "provider": "builtin",
         "surfaces": ("action",),
@@ -354,7 +365,7 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
     },
     {
         "app_id": "waddles.auth.sso_saml.default",
-        "name": "SAML/OIDC SSO (default)",
+        "name": "SAML SSO (default)",
         "version": "1.0.0",
         "feature": "waddles.auth.sso_saml",
         "module": "auth",
@@ -412,6 +423,17 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
         "name": "Provider Connections (default)",
         "version": "1.0.0",
         "feature": "waddles.integrations.provider_connections",
+        "module": "integrations",
+        "provider": "builtin",
+        "surfaces": ("action",),
+        "permissions": ("connections:admin",),
+        "is_default": True,
+    },
+    {
+        "app_id": "waddles.integrations.static_connections.default",
+        "name": "Static-Secret Connections (default)",
+        "version": "1.0.0",
+        "feature": "waddles.integrations.static_connections",
         "module": "integrations",
         "provider": "builtin",
         "surfaces": ("action",),

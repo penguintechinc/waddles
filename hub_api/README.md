@@ -123,7 +123,7 @@ Full design, threat model and operating guide: [`docs/compliance/audit-logging.m
 
 ## Enterprise SSO (SAML 2.0 / OIDC / Google)
 
-Tier-gated (`waddles.auth.sso_saml` Enterprise, `waddles.auth.sso_google` Professional, both default OFF).
+Tier-gated by connection type: `waddles.auth.sso_saml` Enterprise, `waddles.auth.sso_custom` (custom OAuth2/OIDC) Professional, both default OFF; named Google is ungated.
 Full deployment, configuration, security model and troubleshooting guide:
 [`docs/SSO.md`](../docs/SSO.md). Tests live in `tests/sso/` (OIDC/SAML run against protocol-faithful fake
 IdPs -- only the IdP socket and Redis are replaced) plus a real-Postgres migration test in
@@ -188,7 +188,7 @@ Gates are `flask_core.feature_flags.feature_enabled` (PostHog flag AND license t
 - `libs/flask_core` ships no `py.typed` marker and `tenant_middleware`/
   `require_scope`'s inner wrappers are unannotated -- every consumer sees
   mypy `--strict`'s `untyped-decorator`; worked around here with scoped,
-  documented `# type: ignore[untyped-decorator]` (see `blueprints/v2/platform.py`,
+  documented `# type: ignore[misc]` (see `blueprints/v2/platform.py`,
   `openapi/routes.py`).
 - `AsyncDAL.close_async()` (`libs/flask_core/flask_core/database.py`)
   closes the underlying pydal `DAL` from a different thread than created

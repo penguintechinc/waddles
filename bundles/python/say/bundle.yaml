@@ -1,0 +1,63 @@
+schema_version: 2
+app_id: waddles.core.example.say
+name: Say Bundle (Python)
+# 1.0.0: initial -- `!say <text>` (moderator/broadcaster only) relays the text as an announcement.
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+# Attribution: concept inspired by PenguinTwitchBot (SuperPenguinTV / Psychoboy), used with
+# permission -- ideas/design only, NO code copied (same inspiration-only shape as
+# bundles/python/fish; contrast bundles/csharp/superpenguin-roll, a line-for-line port).
+author: "superpenguintv (Psychoboy)"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/say
+notice: |
+  Inspired by PenguinTwitchBot by SuperPenguinTV (with permission) --
+  ideas/design only, no code copied
+  (https://github.com/Psychoboy/PenguinTwitchBot). This is an original Waddles
+  implementation of the mod-gated `!say` announce concept.
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!say"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!say"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: "chat.send:discord"
+    justification: "say relays the announcement (or a denial) to the origin channel via relay.push -> chat.send:discord"
+  - id: "chat.send:twitch"
+    justification: "say relays the announcement (or a denial) to the origin channel via relay.push -> chat.send:twitch"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.5"
+  min_version: "1.0.5"
+  max_version: null

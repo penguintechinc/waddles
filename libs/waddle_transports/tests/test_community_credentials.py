@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -25,7 +26,19 @@ def _clean_cache() -> Any:
     community_credentials.reset_cache_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _sa_token(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Point the bootstrap at a projected-SA-token stand-in file; no static key anywhere."""
+    sa = tmp_path / "sa-token"
+    sa.write_text("projected-sa-token\n", encoding="utf-8")
+    monkeypatch.setenv("SERVICE_JWT_SA_TOKEN_PATH", str(sa))
+    monkeypatch.delenv("SERVICE_JWT_TOKEN_ENDPOINT", raising=False)
+    monkeypatch.delenv("SERVICE_API_KEY", raising=False)
+    return sa
+
+
 _RealAsyncClient = httpx.AsyncClient
+_MINT_JWT = "minted.community.jwt"
 
 
 def _patch_client(
@@ -33,8 +46,13 @@ def _patch_client(
 ) -> None:
     """Monkeypatch `httpx.AsyncClient` so `fetch_community_tokens`'s own construction is mocked."""
 
+    def _with_mint(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/service-token":
+            return httpx.Response(200, json={"token": _MINT_JWT, "expires_in": 300})
+        return handler(request)
+
     def _factory(**kwargs: Any) -> httpx.AsyncClient:
-        return _RealAsyncClient(transport=httpx.MockTransport(handler))
+        return _RealAsyncClient(transport=httpx.MockTransport(_with_mint))
 
     monkeypatch.setattr(community_credentials.httpx, "AsyncClient", _factory)
 
@@ -111,6 +129,24 @@ class TestFetchCommunityTokens:
         )
         assert result.expires_at is not None
         assert result.expires_at.isoformat() == "2026-09-11T12:00:00+00:00"
+
+    async def test_hub_api_envelope_shape_is_unwrapped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_client(
+            monkeypatch,
+            lambda r: httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {"access_token": "at-env", "scopes": ["s"]},
+                    "meta": {"version": 1},
+                },
+            ),
+        )
+        result = await fetch_community_tokens(3, "youtube", hub_api_url="https://hub.internal")
+        assert result is not None and result.access_token == "at-env"
+        assert result.scopes == ["s"]
 
     async def test_minimal_response_defaults_optional_fields(
         self, monkeypatch: pytest.MonkeyPatch
@@ -199,17 +235,113 @@ class TestFetchCommunityTokens:
         assert result is not None
         assert result.expires_at is None
 
-    async def test_sends_service_key_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SERVICE_API_KEY", "svc-secret-xyz")
-        captured = {}
+    async def test_sends_minted_bearer_not_service_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SERVICE_API_KEY", "svc-secret-xyz")  # must be ignored entirely
+        seen: list[httpx.Request] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            captured["header"] = request.headers.get("X-Service-Key")
+            seen.append(request)
             return httpx.Response(200, json={"access_token": "at"})
 
         _patch_client(monkeypatch, handler)
+        await fetch_community_tokens(9, "youtube", hub_api_url="https://hub.internal")
+        assert len(seen) == 1
+        assert seen[0].headers["Authorization"] == f"Bearer {_MINT_JWT}"
+        assert "X-Service-Key" not in seen[0].headers
+
+    async def test_mint_request_is_community_bound_with_sa_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mints: list[httpx.Request] = []
+
+        def _factory(**kwargs: Any) -> httpx.AsyncClient:
+            def h(request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/internal/service-token":
+                    mints.append(request)
+                    return httpx.Response(200, json={"token": _MINT_JWT, "expires_in": 300})
+                return httpx.Response(200, json={"access_token": "at"})
+
+            return _RealAsyncClient(transport=httpx.MockTransport(h))
+
+        monkeypatch.setattr(community_credentials.httpx, "AsyncClient", _factory)
+        await fetch_community_tokens(42, "youtube", hub_api_url="https://hub.internal")
+        await fetch_community_tokens(42, "youtube", hub_api_url="https://hub.internal")
+        assert len(mints) == 1  # second call reuses the cached community JWT
+        assert mints[0].headers["Authorization"] == "Bearer projected-sa-token"
+        assert json.loads(mints[0].content) == {"scope": "connections:resolve", "community_id": 42}
+
+    async def test_missing_sa_token_file_returns_none_and_never_calls_resource(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("SERVICE_JWT_SA_TOKEN_PATH", str(tmp_path / "absent"))
+        seen: list[httpx.Request] = []
+        _patch_client(monkeypatch, lambda r: seen.append(r) or httpx.Response(200, json={}))
+        with caplog.at_level("WARNING", logger="waddle_transports.community_credentials"):
+            result = await fetch_community_tokens(1, "youtube", hub_api_url="https://hub.internal")
+        assert result is None
+        assert seen == []
+        assert any("mint_no_sa_token" in r.message for r in caplog.records)
+
+    async def test_empty_sa_token_file_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, _sa_token: Any
+    ) -> None:
+        _sa_token.write_text("  \n", encoding="utf-8")
+        _patch_client(monkeypatch, lambda r: httpx.Response(200, json={"access_token": "at"}))
+        assert await fetch_community_tokens(1, "youtube", hub_api_url="https://h.internal") is None
+
+    @pytest.mark.parametrize(
+        "mint_response",
+        [
+            httpx.Response(401, json={"error": "unauthorized"}),
+            httpx.Response(200, content=b"nope"),
+            httpx.Response(200, json={"token": "t"}),
+            httpx.Response(200, json={"token": "", "expires_in": 300}),
+            httpx.Response(200, json={"token": "t", "expires_in": 0}),
+        ],
+    )
+    async def test_bad_mint_response_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, mint_response: httpx.Response
+    ) -> None:
+        def h(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/internal/service-token":
+                return mint_response
+            raise AssertionError("resource must not be called without a minted JWT")
+
+        monkeypatch.setattr(
+            community_credentials.httpx,
+            "AsyncClient",
+            lambda **kw: _RealAsyncClient(transport=httpx.MockTransport(h)),
+        )
+        assert await fetch_community_tokens(1, "youtube", hub_api_url="https://h.internal") is None
+
+    async def test_rejected_jwt_is_evicted_from_cache(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_client(monkeypatch, lambda r: httpx.Response(401))
+        await fetch_community_tokens(5, "youtube", hub_api_url="https://hub.internal")
+        assert 5 not in community_credentials._jwt_cache
+
+    async def test_mint_endpoint_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(
+            "SERVICE_JWT_TOKEN_ENDPOINT", "https://issuer.internal/internal/service-token"
+        )
+        hosts: list[str] = []
+
+        def h(request: httpx.Request) -> httpx.Response:
+            hosts.append(request.url.host)
+            if request.url.path == "/internal/service-token":
+                return httpx.Response(200, json={"token": _MINT_JWT, "expires_in": 300})
+            return httpx.Response(200, json={"access_token": "at"})
+
+        monkeypatch.setattr(
+            community_credentials.httpx,
+            "AsyncClient",
+            lambda **kw: _RealAsyncClient(transport=httpx.MockTransport(h)),
+        )
         await fetch_community_tokens(1, "youtube", hub_api_url="https://hub.internal")
-        assert captured["header"] == "svc-secret-xyz"
+        assert hosts == ["issuer.internal", "hub.internal"]
 
     async def test_uses_explicit_hub_api_url_over_env(
         self, monkeypatch: pytest.MonkeyPatch

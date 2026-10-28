@@ -45,6 +45,12 @@ pub fn install_scope_resolver(resolver: Arc<ScopeResolver<HubScopeSource>>) -> b
     SCOPE_RESOLVER.set(resolver).is_ok()
 }
 
+/// `true` once [`install_scope_resolver`] has run -- dynamic Twitch sessions
+/// publish under per-community scope from it and refuse to start without.
+pub fn scope_resolver_installed() -> bool {
+    SCOPE_RESOLVER.get().is_some()
+}
+
 /// Fixed namespace for PA-WORKSTREAM's deterministic fixed-platform
 /// workstream ids. Generated once and never regenerated -- changing it
 /// would change every fixed-platform `workstream_id` on next deploy,
@@ -109,6 +115,15 @@ pub enum PublishError {
     /// stamped -- a producer bug; refused loudly rather than published.
     #[error("inconsistent scope refused: {0}")]
     InconsistentScope(String),
+    /// The session's bound community id differs from the community resolved
+    /// for its channel: the event is DROPPED (tenant-isolation guard).
+    #[error("event dropped, session community {bound} != resolved community {resolved}")]
+    ScopeMismatch {
+        /// Community id the session was bound to (numeric, non-PII).
+        bound: i64,
+        /// Community id the scope resolver returned.
+        resolved: i64,
+    },
 }
 
 /// Producer-side guard (finding 4): the authoritative numeric scope and the
@@ -144,10 +159,13 @@ fn assert_scope_consistent(resolved: &ResolvedScope, scope: &Scope) -> Result<()
 /// suppress this if the trait is only used in your own code" escape hatch
 /// applies literally -- `svc-ingest` is a deployed service binary, not a
 /// published library other crates implement this trait against.
-#[allow(async_fn_in_trait)]
 pub trait EventAppender: Send + Sync {
     /// Performs the `XADD`, returning the new entry id.
-    async fn append(&self, stream: &str, env: &StageEnvelope) -> Result<String, SpineError>;
+    fn append(
+        &self,
+        stream: &str,
+        env: &StageEnvelope,
+    ) -> impl std::future::Future<Output = Result<String, SpineError>> + Send;
 }
 
 impl EventAppender for SpineClient {
@@ -210,11 +228,79 @@ pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
     .await
 }
 
+/// [`publish_event`] for a session bound to a specific community: the
+/// resolved scope's community MUST equal `bound_community_id` or the event is
+/// dropped with [`PublishError::ScopeMismatch`] (counted + WARN-logged).
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_event_bound<A: EventAppender, M: SpineMetrics + ?Sized>(
+    bound_community_id: i64,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    source_id: &str,
+    workstream_id: &str,
+    session_id: Option<&str>,
+    event: PlatformEvent,
+) -> Result<String, PublishError> {
+    publish_event_with_binding(
+        SCOPE_RESOLVER.get().map(Arc::as_ref),
+        Some(bound_community_id),
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        source_id,
+        workstream_id,
+        session_id,
+        event,
+    )
+    .await
+}
+
 /// [`publish_event`] with an explicit resolver (`None` = v2/static path) --
 /// the seam tests drive directly instead of the process-wide static.
 #[allow(clippy::too_many_arguments)]
 pub async fn publish_event_with<A: EventAppender, M: SpineMetrics + ?Sized, S: ScopeSource>(
     resolver: Option<&ScopeResolver<S>>,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    source_id: &str,
+    workstream_id: &str,
+    session_id: Option<&str>,
+    event: PlatformEvent,
+) -> Result<String, PublishError> {
+    publish_event_with_binding(
+        resolver,
+        None,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        source_id,
+        workstream_id,
+        session_id,
+        event,
+    )
+    .await
+}
+
+/// Shared publish body; `bound_community_id` (`Some` for per-community
+/// sessions) is checked against the resolved scope before anything is stamped.
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_event_with_binding<
+    A: EventAppender,
+    M: SpineMetrics + ?Sized,
+    S: ScopeSource,
+>(
+    resolver: Option<&ScopeResolver<S>>,
+    bound_community_id: Option<i64>,
     appender: &A,
     metrics: &M,
     keyring: &KeyRing,
@@ -248,6 +334,21 @@ pub async fn publish_event_with<A: EventAppender, M: SpineMetrics + ?Sized, S: S
         }
         None => None,
     };
+    if let (Some(bound), Some(res), Some(r)) = (bound_community_id, resolved.as_ref(), resolver) {
+        if bound != i64::from(res.community_id) {
+            r.record_scope_mismatch();
+            tracing::warn!(
+                bound_community_id = bound,
+                resolved_community_id = res.community_id,
+                tenant_id = res.tenant_id,
+                "dropping event: session community disagrees with resolved scope"
+            );
+            return Err(PublishError::ScopeMismatch {
+                bound,
+                resolved: i64::from(res.community_id),
+            });
+        }
+    }
     let v3_scope = resolved.as_ref().map(ResolvedScope::spine_scope);
     let scope = match (&resolved, &v3_scope) {
         (Some(res), Some(sc)) => {
@@ -758,6 +859,7 @@ mod tests {
     struct NoMetrics;
     impl ResolverMetrics for NoMetrics {
         fn scope_resolution(&self, _platform: &str, _outcome: &'static str) {}
+        fn scope_mismatch(&self) {}
     }
 
     fn resolver_for(reply: Result<RawScope, FetchError>) -> ScopeResolver<FixedSource> {
@@ -801,6 +903,73 @@ mod tests {
         .unwrap();
         let (stream, env) = appender.calls.lock().unwrap()[0].clone();
         (stream, env, keyring)
+    }
+
+    #[derive(Default)]
+    struct CountMismatch(std::sync::atomic::AtomicUsize);
+    impl ResolverMetrics for CountMismatch {
+        fn scope_resolution(&self, _platform: &str, _outcome: &'static str) {}
+        fn scope_mismatch(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    async fn publish_bound(
+        bound: i64,
+        counter: &Arc<CountMismatch>,
+    ) -> (Result<String, PublishError>, usize) {
+        let resolver = ScopeResolver::new(
+            FixedSource(resolved_ok()),
+            ResolverConfig::default(),
+            counter.clone(),
+        );
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let res = publish_event_with_binding(
+            Some(&resolver),
+            Some(bound),
+            &appender,
+            &RecordingMetrics::default(),
+            &test_keyring(),
+            "test-kid",
+            &Scope::new("static-tenant", None),
+            "tw-channelA",
+            "ws-1",
+            None,
+            test_event(),
+        )
+        .await;
+        let n = appender.calls.lock().unwrap().len();
+        (res, n)
+    }
+
+    // regression: tenant isolation -- a session bound to community X must
+    // never publish under the community the hub resolved for its channel
+    // when they disagree.
+    #[tokio::test]
+    async fn bound_community_mismatch_drops_the_event_and_counts_it() {
+        let counter = Arc::new(CountMismatch::default());
+        let (res, appended) = publish_bound(77, &counter).await; // resolved = 9
+        assert!(matches!(
+            res,
+            Err(PublishError::ScopeMismatch {
+                bound: 77,
+                resolved: 9
+            })
+        ));
+        assert_eq!(appended, 0, "mismatched event must not reach the spine");
+        assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn bound_community_match_publishes_normally_without_counting() {
+        let counter = Arc::new(CountMismatch::default());
+        let (res, appended) = publish_bound(9, &counter).await;
+        assert!(res.is_ok());
+        assert_eq!(appended, 1);
+        assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

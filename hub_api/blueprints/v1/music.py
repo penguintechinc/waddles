@@ -175,7 +175,7 @@ class RadioStationResponse:
 
 
 @music_bp.route("/<int:community_id>/music/settings", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(MusicSettingsResponse)
 async def get_music_settings(
     community_id: int,
@@ -195,7 +195,7 @@ async def get_music_settings(
 
 
 @music_bp.route("/<int:community_id>/music/settings", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(UpdateMusicSettingsRequest)
 # NOT @validate_response -- update_music_settings() calls update_async then
 # returns a nested-dataclass response, the exact crash class
@@ -223,7 +223,7 @@ async def update_music_settings(data: UpdateMusicSettingsRequest, community_id: 
 
 
 @music_bp.route("/<int:community_id>/music/providers", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(MusicProvidersResponse)
 async def get_providers(
     community_id: int,
@@ -239,7 +239,7 @@ async def get_providers(
 
 
 @music_bp.route("/<int:community_id>/music/providers/<provider>/oauth", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(StartOAuthRequest)
 @validate_response(StartOAuthResponse)
 async def start_oauth(
@@ -262,7 +262,7 @@ async def start_oauth(
 
 
 @music_bp.route("/<int:community_id>/music/providers/<provider>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def disconnect_provider(
     community_id: int, provider: str
@@ -278,7 +278,7 @@ async def disconnect_provider(
 
 
 @music_bp.route("/<int:community_id>/music/radio-stations", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(RadioStationsResponse)
 async def get_radio_stations(
     community_id: int,
@@ -305,7 +305,7 @@ async def get_radio_stations(
 
 
 @music_bp.route("/<int:community_id>/music/radio-stations", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(AddRadioStationRequest)
 # NOT @validate_response -- add_radio_station() calls insert_async then
 # returns a nested-dataclass response (services/dto_response.py's crash).
@@ -332,7 +332,7 @@ async def add_radio_station(data: AddRadioStationRequest, community_id: int) -> 
 
 
 @music_bp.route("/<int:community_id>/music/radio-stations/<int:station_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def remove_radio_station(
     community_id: int, station_id: int

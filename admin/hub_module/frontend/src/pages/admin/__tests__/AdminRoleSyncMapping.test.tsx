@@ -136,6 +136,7 @@ const PAIRING: GuildPairing = {
   discord_guild_id: '555000111',
   direction: 'bidirectional',
   sync_enabled: true,
+  event_sync_enabled: false,
   role_name_prefix: 'wb-',
   created_by_user_id: 1,
   created_at: '2026-10-01T00:00:00Z',

@@ -83,6 +83,11 @@ from waddle_sdk import community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 #: Chat-invoked heads. `!raffle` carries the full grammar (open/close/draw/list/bare);
 #: `!enter` is a pure bare alias for the bare-`!raffle` ENTER action -- see module docstring.
 _RAFFLE_HEAD = "!raffle"
@@ -340,7 +345,7 @@ async def _save_entrants(
 
 def _pick_winner(entrants: list[str]) -> str:
     """Pick one uniformly-random entrant pseudonym. Isolated for seeded-RNG testing."""
-    return random.choice(entrants)  # noqa: S311 - a game, not a security decision
+    return _RNG.choice(entrants)
 
 
 async def _handle_open(community: str, *, provider: str, channel_id: str) -> str:

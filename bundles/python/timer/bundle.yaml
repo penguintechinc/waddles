@@ -1,0 +1,60 @@
+schema_version: 2
+app_id: waddles.core.example.timer
+name: Timed Announcements Bundle (Python)
+# 1.0.0: initial kv-only recurring announcements -- !timer add/del/list/enable/disable/reset,
+# fired by chat activity (there is no tick/scheduler event). See src/app.py's module docstring
+# (feature/bundles-queue-timer).
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/timer
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      # NO `filters.command_prefix` on purpose: the chat-activity tick needs EVERY chat.message in
+      # the channel, not just `!timer` lines. An absent filter key is "not a constraint"
+      # (rust-data-plane design spec section 6), so the stage sees every chat line; transform()
+      # forwards `!timer` commands and ordinary lines (as a tick) and drops anything without text.
+      - platform: twitch
+        event_types: ["chat.message"]
+      - platform: discord
+        event_types: ["chat.message"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- state lives in `kv` only (see `permissions` below).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists the per-community timer config, per-timer last-fired times and short-lived claim/lock keys"
+  - id: "chat.send:discord"
+    justification: "timer replies to !timer commands and posts due announcements to the channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "timer replies to !timer commands and posts due announcements to the channel via the relay host import (relay.push -> chat.send:twitch)"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

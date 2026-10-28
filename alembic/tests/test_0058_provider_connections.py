@@ -109,16 +109,23 @@ class TestStaticSchemaDrift:
             "community_connection_access": guild_pairing.CommunityConnectionAccess,
         }
         for table, model in models.items():
-            model_new = {c.name for c in model.__table__.columns} - pre_0058[table]
+            # 0063 (seal_aad_version) added its own columns on top; this test only owns 0058's.
+            from test_0035_schema_drift import _COLUMNS_ADDED_0063  # type: ignore[import-not-found]
+
+            model_new = (
+                {c.name for c in model.__table__.columns}
+                - pre_0058[table]
+                - _COLUMNS_ADDED_0063[table]
+            )
             sql_new = _added_columns(sql, table)
             assert sql_new, f"no ADD COLUMN found for {table}"
             assert sql_new == model_new, table
 
     def test_the_0035_drift_guard_knows_exactly_the_columns_0058_adds(self) -> None:
-        from test_0035_schema_drift import _COLUMNS_ADDED_LATER  # type: ignore[import-not-found]
+        from test_0035_schema_drift import _COLUMNS_ADDED_0058  # type: ignore[import-not-found]
 
         sql = _upgrade_sql()
-        for table, columns in _COLUMNS_ADDED_LATER.items():
+        for table, columns in _COLUMNS_ADDED_0058.items():
             assert _added_columns(sql, table) == columns, table
 
     def test_downgrade_drops_everything_upgrade_adds(self) -> None:
