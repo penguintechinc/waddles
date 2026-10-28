@@ -37,6 +37,11 @@ from typing import Any, cast
 from waddle_sdk import kv, log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 COMMAND = "!winner"
 
 ENTRANTS_KEY = "winner.entrants"
@@ -107,7 +112,7 @@ async def _save_entrants(entrants: list[str]) -> None:
 
 def _pick_winner(entrants: list[str]) -> str:
     """Pick one uniformly-random entrant. Isolated so tests can pin the choice."""
-    return random.choice(entrants)  # noqa: S311 - a game, not a security decision
+    return _RNG.choice(entrants)
 
 
 def _is_privileged(event: PlatformEvent) -> bool:

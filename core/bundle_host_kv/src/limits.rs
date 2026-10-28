@@ -22,12 +22,11 @@ pub const MAX_TTL_SECONDS: u32 = 30 * 24 * 60 * 60;
 
 /// Highest number of *live* keys one `(tenant, community, app_id)` may
 /// hold at once (task quota: "max key count per app per community").
-/// Enforced against `KvScope::count_key`'s counter, which this crate keeps
-/// consistent with the live key set via the same atomic Lua script every
-/// `set`/`increment`/`delete` runs (`crate::backend`) -- see that module's
-/// doc for the one known eventual-consistency gap (a key that expires via
-/// Valkey's own TTL sweep, rather than an explicit `delete`, is not
-/// observed by this counter until something next touches it).
+/// Enforced against `KvScope::live_key`'s expiry-scored index, which every
+/// quota-checked `set`/`increment` trims of lapsed (TTL-expired) members
+/// inside the same atomic Lua script that then checks the count
+/// (`crate::backend`) -- so TTL keys free their slot once they lapse, and
+/// the ceiling bounds keys that are live *now*, never keys ever written.
 pub const MAX_KEYS_PER_APP: u64 = 10_000;
 
 /// Highest number of `kv` ops one invocation may perform (task quota:
@@ -50,7 +49,7 @@ pub const RATE_LIMIT_WINDOW_SECONDS: u64 = 30;
 /// stuck/crashed reconciler's lock lifetime, and doubles as the de facto
 /// rate limit on how often one app can trigger a full `SCAN` (at most once
 /// per this window, since the lock is only released early on success, and
-/// a successful reconciliation makes `count_key` present again so no
+/// a successful reconciliation makes `live_key` present again so no
 /// subsequent write re-triggers reconciliation until it is evicted again).
 pub const RECONCILE_LOCK_TTL_MS: u64 = 5_000;
 

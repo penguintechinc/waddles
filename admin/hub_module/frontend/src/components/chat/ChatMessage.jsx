@@ -57,7 +57,7 @@ export default function ChatMessage({ message }) {
   };
 
   return (
-    <div className={`flex gap-3 p-3 hover:bg-gray-800/50 transition-colors ${isOwnMessage ? 'bg-gray-800/30' : ''}`}>
+    <div className={`flex gap-3 p-3 hover:bg-surface-raised/50 transition-colors ${isOwnMessage ? 'bg-surface-raised/30' : ''}`}>
       {/* Avatar */}
       <div className="flex-shrink-0">
         {message.senderAvatarUrl ? (
@@ -67,7 +67,7 @@ export default function ChatMessage({ message }) {
             className="w-10 h-10 rounded-full"
           />
         ) : (
-          <div className="w-10 h-10 rounded-full bg-gray-700 flex items-center justify-center text-gray-300 font-semibold">
+          <div className="w-10 h-10 rounded-full bg-navy-700 flex items-center justify-center text-fg-secondary font-semibold">
             {message.senderUsername?.[0]?.toUpperCase() || '?'}
           </div>
         )}
@@ -77,7 +77,7 @@ export default function ChatMessage({ message }) {
       <div className="flex-1 min-w-0">
         {/* Header: Username + Platform + Timestamp */}
         <div className="flex items-center gap-2 mb-1">
-          <span className={`font-semibold ${isOwnMessage ? 'text-blue-400' : 'text-gray-200'}`}>
+          <span className={`font-semibold ${isOwnMessage ? 'text-blue-400' : 'text-fg'}`}>
             {message.senderUsername}
           </span>
 
@@ -90,13 +90,13 @@ export default function ChatMessage({ message }) {
           </span>
 
           {/* Timestamp */}
-          <span className="text-xs text-gray-500" title={new Date(message.createdAt).toLocaleString()}>
+          <span className="text-xs text-fg-muted" title={new Date(message.createdAt).toLocaleString()}>
             {formatTime(message.createdAt)}
           </span>
         </div>
 
         {/* Message text */}
-        <div className="text-gray-300 break-words whitespace-pre-wrap">
+        <div className="text-fg-secondary break-words whitespace-pre-wrap">
           {message.content}
         </div>
       </div>

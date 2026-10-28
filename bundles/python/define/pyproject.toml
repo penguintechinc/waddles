@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-define"
+version = "1.0.0"
+description = "`!define <term>` -> a concise AI-generated definition, relayed to the caller's origin platform. AI-backed (ai.generate), activation-gated, no feature flag."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

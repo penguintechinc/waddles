@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-rate"
+version = "1.0.0"
+description = "`!rate <thing>` -> a deterministic X/10 rating, relayed to the origin platform. Static, stateless."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

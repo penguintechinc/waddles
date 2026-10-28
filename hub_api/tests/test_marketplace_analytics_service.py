@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from services import marketplace_analytics_service as analytics
-from services.schema import bind_marketplace_vendor_tables
+from services.schema import bind_marketplace_module_tables, bind_marketplace_vendor_tables
 
 
 @pytest.fixture
@@ -22,6 +22,7 @@ def dal() -> Any:
     from pydal import DAL
 
     db = DAL("sqlite:memory")
+    bind_marketplace_module_tables(db, migrate=True)
     bind_marketplace_vendor_tables(db, migrate=True)
     yield db
     db.close()
@@ -108,6 +109,8 @@ class TestDiscountCodePerformance:
             is_active=True,
             valid_from=now - timedelta(days=1),
             valid_until=now + timedelta(days=30),
+            created_at=now,
+            updated_at=now,
         )
         expired_code = dal.vendor_discount_codes.insert(
             code="EXPIRED",
@@ -115,11 +118,16 @@ class TestDiscountCodePerformance:
             discount_type="fixed_amount",
             discount_value=5,
             is_active=True,
+            valid_from=now - timedelta(days=30),
             valid_until=now - timedelta(days=1),
+            created_at=now,
+            updated_at=now,
         )
         dal.discount_code_redemptions.insert(
             discount_code_id=active_code,
             community_id=1,
+            original_price_cents=500,
+            discounted_price_cents=400,
             discount_amount_cents=100,
             redeemed_at=now,
         )

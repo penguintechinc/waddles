@@ -45,6 +45,7 @@ from urllib.parse import urlencode
 import httpx
 
 from services.credential_resolver import store_tenant_credentials
+from services.discord_bot_install import DISCORD_BOT_INSTALL_PERMISSIONS
 from services.errors import ApiError, bad_request
 from services.tenant_discord_install_state import consume_state, create_state
 from services.url_guard import validate_outbound_url
@@ -62,14 +63,13 @@ _BOT_INSTALL_SCOPES = "bot applications.commands"
 _ALLOWED_SCHEMES: tuple[str, ...] = ("https",)
 _TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 
-#: Discord permission bitfield requested at install time -- the minimal
-#: set Bar Citizen's own role-sync worker needs (manage roles, read/send
-#: messages, manage webhooks) plus MANAGE_EVENTS (bit 33), which the
-#: calendar event-sync push engine needs to create Discord scheduled
-#: events -- not Administrator. Named constant so a future
-#: permission-set change is a one-line diff.
+#: Discord permission bitfield requested at install time -- ONE authoritative
+#: mask shared with the SaaS install card (`services.discord_bot_install.
+#: DISCORD_BOT_INSTALL_PERMISSIONS`, every bit documented there). Never
+#: redefine it here: a second mask previously drifted (missing VIEW_CHANNEL,
+#: carrying MANAGE_CHANNELS) and risked a silent role-sync failure.
 MANAGE_EVENTS_PERMISSION = 1 << 33  # 8589934592
-DEFAULT_BOT_PERMISSIONS = 268511312 | MANAGE_EVENTS_PERMISSION
+DEFAULT_BOT_PERMISSIONS = DISCORD_BOT_INSTALL_PERMISSIONS
 
 
 class DiscordInstallError(ApiError):

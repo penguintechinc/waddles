@@ -157,38 +157,41 @@ function TenantDashboard() {
               </div>
             )}
             <div>
-              <label className="block text-sky-300 text-sm font-medium mb-1">
+              <label htmlFor="tenant-dashboard-display-name" className="block text-sky-300 text-sm font-medium mb-1">
                 Display Name
               </label>
               <input
+                id="tenant-dashboard-display-name"
                 type="text"
                 value={form.displayName}
                 onChange={(e) => setForm((f) => ({ ...f, displayName: e.target.value }))}
-                className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 placeholder-sky-600 focus:outline-none focus:border-gold-500 text-sm"
+                className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 placeholder-sky-600 focus:border-gold-500 text-sm"
                 placeholder="Tenant display name"
               />
             </div>
             <div>
-              <label className="block text-sky-300 text-sm font-medium mb-1">
+              <label htmlFor="tenant-dashboard-description" className="block text-sky-300 text-sm font-medium mb-1">
                 Description
               </label>
               <textarea
+                id="tenant-dashboard-description"
                 value={form.description}
                 onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
                 rows={3}
-                className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 placeholder-sky-600 focus:outline-none focus:border-gold-500 text-sm resize-none"
+                className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 placeholder-sky-600 focus:border-gold-500 text-sm resize-none"
                 placeholder="Brief description of this tenant"
               />
             </div>
             <div>
-              <label className="block text-sky-300 text-sm font-medium mb-1">
+              <label htmlFor="tenant-dashboard-logo-url" className="block text-sky-300 text-sm font-medium mb-1">
                 Logo URL
               </label>
               <input
+                id="tenant-dashboard-logo-url"
                 type="url"
                 value={form.logoUrl}
                 onChange={(e) => setForm((f) => ({ ...f, logoUrl: e.target.value }))}
-                className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 placeholder-sky-600 focus:outline-none focus:border-gold-500 text-sm"
+                className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 placeholder-sky-600 focus:border-gold-500 text-sm"
                 placeholder="https://example.com/logo.png"
               />
               {form.logoUrl && (

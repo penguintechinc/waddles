@@ -137,7 +137,6 @@ Net: 94 of the 178 tables are erased (75 delete + 4 scrub-only + 15 core; 79 of 
 | `platform_integrations` | `user_id` | User-level integration tokens; hub-api's DB role is *denied* this table by design (`service-roles.yaml` `deny_tables`). Needs a `SECURITY DEFINER` erase function or a credential-service call. |
 | `activity_stats_daily` | `platform_user_id`, `platform_username` | Hub-linked rows are deleted; rows keyed only by a platform id (no `platform` column) cannot be matched without risking a cross-platform collision. |
 | `hub_admins` | `email`, `username` | Legacy admin table with its own credentials, not keyed to `hub_users`. |
-| `live_activity_events` | `actor` | Free-text chat actor label stored with the message body; no stable id to match. |
 | `loyalty_giveaway_keys` | `claimed_by_user_id` | `varchar` id with no `platform` column (the winner row, which has one, *is* deleted). |
 | `communities` | `created_by`, `deleted_by`, `owner_id`, `owner_name` | Free-form `varchar` set by a superadmin, not a `hub_users` reference. |
 | `command_aliases` | `deleted_by` | `varchar` of unknown shape (hub id, username or `system`). |
@@ -147,6 +146,8 @@ Net: 94 of the 178 tables are erased (75 delete + 4 scrub-only + 15 core; 79 of 
 | `shoutout_creators` | `platform_username` | Creator handle with no id column to match on. |
 | `video_shoutout_history` | `triggered_by_user_id`, `triggered_by_username` | Platform id/handle of the trigger user with no `platform` column for the actor. |
 | `vendor_submissions` | `vendor_email`, `support_email` | Company contact e-mails typed on a submission, not linked to the submitting user. |
+
+**Live activity feed (`live_activity_events`).** The feed row stores the raw chat handle (`actor`) and message text. Erasure now deletes it by the platform-native id stored with it (`actor_platform_user_id`, migration 0062, matched as a `(platform, id)` pair like every other platform-keyed table). Residual: rows written before 0062 (or without a payload `author_id`) carry no id and cannot be matched; they are bounded by the retention window planned in `docs/compliance/data-retention.md` (pending legal/DPO review). Ingest-side handle tokenization will remove the raw handle entirely.
 
 **Assumed hub ids.** Fifteen legacy-module integer columns (`ASSUMED_HUB_ID_COLUMNS` in the registry — e.g. `memories_reminders.user_id`, `platform_admins.user_id`, `support_tickets.reporter_user_id`) declare no foreign key but are matched as `hub_users.id`, because the module code only ever writes the hub id. If any ever held another value, a different user's row with the same integer would be erased; each is listed (and a test fails if a new un-FK'd hub-id match is added without being listed) so the assumption is reviewable.
 

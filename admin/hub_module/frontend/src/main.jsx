@@ -9,6 +9,7 @@ import { CookieConsentProvider } from './contexts/CookieConsentContext';
 import CookieBanner from './components/CookieBanner';
 import CookiePreferencesModal from './components/CookiePreferencesModal';
 import { queryClient } from './lib/queryClient';
+import './styles/tokens.css';
 import './index.css';
 
 // TanStack Query wraps the whole app (S0 foundation) so any new per-domain

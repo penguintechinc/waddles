@@ -1034,7 +1034,7 @@ mod tests {
             vec!["transform".to_string(), "dispatch".to_string()]
         );
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(

@@ -177,6 +177,63 @@ pub struct CliConfig {
     /// never connects must never leave the pod looking healthy forever.
     #[arg(long, env = "SPINE_CONNECT_GRACE_SECS", default_value_t = 120)]
     pub spine_connect_grace_secs: u64,
+
+    /// Seconds between per-community Twitch session reconcile passes
+    /// (`crate::twitch_sessions::SessionManager`); minimum
+    /// [`MIN_TWITCH_RECONCILE_INTERVAL_SECS`] -- a faster loop would hammer
+    /// hub-api's binding list for no benefit.
+    #[arg(long, env = "TWITCH_RECONCILE_INTERVAL_SECS", default_value_t = 60)]
+    pub twitch_reconcile_interval_secs: u64,
+
+    /// Per-call bound (seconds) on hub-api credential resolution and binding
+    /// discovery for dynamic Twitch sessions. Must be non-zero.
+    #[arg(long, env = "TWITCH_RESOLVE_TIMEOUT_SECS", default_value_t = 10)]
+    pub twitch_resolve_timeout_secs: u64,
+}
+
+/// Floor for `TWITCH_RECONCILE_INTERVAL_SECS`.
+pub const MIN_TWITCH_RECONCILE_INTERVAL_SECS: u64 = 10;
+
+/// Ceiling for `TWITCH_RECONCILE_INTERVAL_SECS` (one hour) -- keeps the
+/// lease/window arithmetic far from `Duration` overflow.
+pub const MAX_TWITCH_RECONCILE_INTERVAL_SECS: u64 = 3600;
+
+/// How the Twitch inbound path starts, decided by [`validate_twitch_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TwitchMode {
+    /// `INGEST_DYNAMIC_CONNECTIONS` ON: per-community sessions resolved
+    /// from hub-api (`crate::twitch_sessions`).
+    Dynamic,
+    /// Flag OFF with a complete static identity: the single-tenant dev
+    /// fallback (`crate::try_start_twitch_irc`).
+    StaticDev,
+    /// Nothing configured: no Twitch inbound receiver.
+    Off,
+}
+
+/// Decides the Twitch inbound mode from configuration. Flag ON plus a static
+/// `TWITCH_IRC_NICK`/`TWITCH_IRC_CHANNEL` is a fatal conflict (never a silent
+/// precedence choice); the error names the settings, never the token.
+pub fn validate_twitch_mode(cfg: &Config) -> Result<TwitchMode, ConfigError> {
+    let cli = &cfg.cli;
+    if cli.dynamic_connections {
+        if !cli.twitch_irc_nick.is_empty() || !cli.twitch_irc_channel.is_empty() {
+            return Err(ConfigError::InvalidValue {
+                field: "TWITCH_IRC_NICK/TWITCH_IRC_CHANNEL",
+                reason: "must be unset while INGEST_DYNAMIC_CONNECTIONS is ON \
+                         (per-community Twitch identities come from hub-api; \
+                         a static identity would conflict)"
+                    .to_string(),
+            });
+        }
+        cli.validate_twitch_timing()?;
+        return Ok(TwitchMode::Dynamic);
+    }
+    if cfg.twitch_irc_enabled() {
+        Ok(TwitchMode::StaticDev)
+    } else {
+        Ok(TwitchMode::Off)
+    }
 }
 
 impl CliConfig {
@@ -187,6 +244,29 @@ impl CliConfig {
             return Err(ConfigError::InvalidValue {
                 field: "http_port/metrics_port",
                 reason: "port 0 is not a valid bind port".to_string(),
+            });
+        }
+        self.validate_twitch_timing()
+    }
+
+    /// Validates the dynamic-Twitch timing settings.
+    fn validate_twitch_timing(&self) -> Result<(), ConfigError> {
+        if self.twitch_reconcile_interval_secs < MIN_TWITCH_RECONCILE_INTERVAL_SECS {
+            return Err(ConfigError::InvalidValue {
+                field: "TWITCH_RECONCILE_INTERVAL_SECS",
+                reason: format!("must be at least {MIN_TWITCH_RECONCILE_INTERVAL_SECS}"),
+            });
+        }
+        if self.twitch_reconcile_interval_secs > MAX_TWITCH_RECONCILE_INTERVAL_SECS {
+            return Err(ConfigError::InvalidValue {
+                field: "TWITCH_RECONCILE_INTERVAL_SECS",
+                reason: format!("must be at most {MAX_TWITCH_RECONCILE_INTERVAL_SECS}"),
+            });
+        }
+        if self.twitch_resolve_timeout_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "TWITCH_RESOLVE_TIMEOUT_SECS",
+                reason: "must be greater than zero".to_string(),
             });
         }
         Ok(())
@@ -225,6 +305,20 @@ pub struct Config {
     /// subscription/broadcaster, docs/superpowers/specs/2026-09-28-
     /// connections-credentials-design.md §2) lands in a later increment.
     pub twitch_eventsub_secret: Option<Secret>,
+    /// `INGEST_DEV_KEK` -- switches identity-field encryption
+    /// (`crate::identity_crypto`) from the production `HubApiDekProvider`
+    /// to the dev/alpha-only `LocalDevDekProvider`. Never set in
+    /// beta/gamma/prod: `LocalDevDekProvider::new` additionally hard-gates
+    /// on [`Self::deployment_environment`] and refuses construction
+    /// outside alpha/local regardless of whether this is set.
+    pub ingest_dev_kek: Option<Secret>,
+    /// `WADDLES_ENV` -- this deployment's environment name
+    /// (`alpha`/`local`/`beta`/`gamma`/`production`), read directly from
+    /// the environment (never a CLI flag: an operator should not be able
+    /// to flip this via a pod command-line override). Gates
+    /// [`crate::identity_crypto::LocalDevDekProvider`] -- see
+    /// [`Self::deployment_environment`].
+    pub waddles_env: String,
 }
 
 impl fmt::Debug for Config {
@@ -253,6 +347,11 @@ impl fmt::Debug for Config {
                     .as_ref()
                     .map(|_| Secret::new("")),
             )
+            .field(
+                "ingest_dev_kek",
+                &self.ingest_dev_kek.as_ref().map(|_| Secret::new("")),
+            )
+            .field("waddles_env", &self.waddles_env)
             .finish()
     }
 }
@@ -280,7 +379,20 @@ impl Config {
             twitch_eventsub_secret: std::env::var("TWITCH_EVENTSUB_SECRET")
                 .ok()
                 .map(Secret::new),
+            ingest_dev_kek: std::env::var("INGEST_DEV_KEK").ok().map(Secret::new),
+            // Default `"production"` (never `"alpha"`/`"local"`) -- an
+            // unset `WADDLES_ENV` must never accidentally satisfy
+            // `LocalDevDekProvider`'s environment gate, fail closed.
+            waddles_env: std::env::var("WADDLES_ENV").unwrap_or_else(|_| "production".to_string()),
         })
+    }
+
+    /// This deployment's environment name, for
+    /// [`crate::identity_crypto::LocalDevDekProvider`]'s hard environment
+    /// gate -- see [`Self::waddles_env`]'s doc comment.
+    #[must_use]
+    pub fn deployment_environment(&self) -> &str {
+        &self.waddles_env
     }
 
     /// The `penguin_spine::Scope` every fixed-platform receiver mints
@@ -345,6 +457,87 @@ mod tests {
             // of these specific variables within the test process.
             unsafe { std::env::remove_var(var) };
         }
+    }
+
+    // ---- validate_twitch_mode (Task 7 mode table) ----
+
+    fn mode_cfg(flag: bool, nick: &str, channel: &str, token: Option<&str>) -> Config {
+        let mut cli = CliConfig::parse_from(["svc-ingest"]);
+        cli.dynamic_connections = flag;
+        cli.twitch_irc_nick = nick.to_string();
+        cli.twitch_irc_channel = channel.to_string();
+        Config {
+            cli,
+            twitch_irc_oauth_token: token.map(Secret::new),
+            discord_bot_token: None,
+            envelope_binding_keys: None,
+            twitch_eventsub_secret: None,
+            ingest_dev_kek: None,
+            waddles_env: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn flag_on_with_static_nick_or_channel_is_fatal() {
+        const TOKEN: &str = "tok-SECRET-123";
+        for (nick, channel) in [("bot", ""), ("", "chan"), ("bot", "chan")] {
+            let cfg = mode_cfg(true, nick, channel, Some(TOKEN));
+            let err = validate_twitch_mode(&cfg).expect_err("must be fatal");
+            let text = format!("{err} / {err:?}");
+            assert!(text.contains("TWITCH_IRC_NICK"), "{text}");
+            assert!(text.contains("TWITCH_IRC_CHANNEL"), "{text}");
+            assert!(text.contains("INGEST_DYNAMIC_CONNECTIONS"), "{text}");
+            assert!(!text.contains(TOKEN), "token leaked: {text}");
+        }
+    }
+
+    #[test]
+    fn flag_on_without_static_env_is_dynamic() {
+        // A token alone (outbound relay) never conflicts with dynamic mode.
+        for token in [None, Some("outbound-only")] {
+            let cfg = mode_cfg(true, "", "", token);
+            assert_eq!(validate_twitch_mode(&cfg), Ok(TwitchMode::Dynamic));
+        }
+    }
+
+    #[test]
+    fn flag_off_with_complete_static_env_is_static_dev() {
+        let cfg = mode_cfg(false, "bot", "chan", Some("t"));
+        assert_eq!(validate_twitch_mode(&cfg), Ok(TwitchMode::StaticDev));
+    }
+
+    #[test]
+    fn flag_off_without_env_is_off() {
+        assert_eq!(
+            validate_twitch_mode(&mode_cfg(false, "", "", None)),
+            Ok(TwitchMode::Off)
+        );
+        // Incomplete static env (no token) is today's "not started" = Off.
+        assert_eq!(
+            validate_twitch_mode(&mode_cfg(false, "bot", "chan", None)),
+            Ok(TwitchMode::Off)
+        );
+    }
+
+    #[test]
+    fn reconcile_interval_below_minimum_is_rejected() {
+        let mut cli = CliConfig::parse_from(["svc-ingest"]);
+        assert_eq!(cli.twitch_reconcile_interval_secs, 60);
+        assert_eq!(cli.twitch_resolve_timeout_secs, 10);
+        cli.twitch_reconcile_interval_secs = MIN_TWITCH_RECONCILE_INTERVAL_SECS - 1;
+        assert!(cli.validate().is_err());
+        cli.twitch_reconcile_interval_secs = MIN_TWITCH_RECONCILE_INTERVAL_SECS;
+        assert!(cli.validate().is_ok());
+        cli.twitch_reconcile_interval_secs = MAX_TWITCH_RECONCILE_INTERVAL_SECS;
+        assert!(cli.validate().is_ok());
+        cli.twitch_reconcile_interval_secs = MAX_TWITCH_RECONCILE_INTERVAL_SECS + 1;
+        assert!(cli.validate().is_err(), "above the ceiling is rejected");
+        cli.twitch_reconcile_interval_secs = 60;
+        cli.twitch_resolve_timeout_secs = 0;
+        assert!(cli.validate().is_err(), "zero resolve timeout is invalid");
+        let mut cfg = mode_cfg(true, "", "", None);
+        cfg.cli.twitch_reconcile_interval_secs = 1;
+        assert!(validate_twitch_mode(&cfg).is_err());
     }
 
     #[test]
@@ -436,6 +629,8 @@ mod tests {
             discord_bot_token: None,
             envelope_binding_keys: None,
             twitch_eventsub_secret: None,
+            ingest_dev_kek: None,
+            waddles_env: "production".to_string(),
         };
         let scope = cfg.ingest_scope();
         assert_eq!(scope.tenant, "acme");
@@ -457,6 +652,8 @@ mod tests {
             discord_bot_token: None,
             envelope_binding_keys: None,
             twitch_eventsub_secret: None,
+            ingest_dev_kek: None,
+            waddles_env: "production".to_string(),
         };
         let scope = cfg.ingest_scope();
         assert_eq!(scope.community.as_deref(), Some("main"));

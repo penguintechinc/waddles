@@ -345,11 +345,11 @@ def test_spin_is_open_to_anyone(fake_host) -> None:
 def test_spin_picks_uniformly_from_options(
     monkeypatch: pytest.MonkeyPatch, fake_host
 ) -> None:
-    """Seeded-RNG spin: `random.choice` is monkeypatched to prove the exact option surfaces."""
+    """Seeded-RNG spin: `_RNG.choice` is monkeypatched to prove the exact option surfaces."""
     _seed_options(fake_host, "comm-1", ["tacos", "pizza", "sushi"])
     import app
 
-    monkeypatch.setattr(app.random, "choice", lambda seq: seq[1])
+    monkeypatch.setattr(app._RNG, "choice", lambda seq: seq[1])
     result = _transform_in("comm-1", "!wheel spin")
     assert "pizza" in _reply_text(result)
 

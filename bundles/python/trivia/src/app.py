@@ -3,7 +3,7 @@
 v1 scope (2026-10-07, feature/bundle-trivia):
 
 - `!trivia start` poses one question from an embedded Q&A bank
-  (`QUESTION_BANK`, selected via `random.choice`) and stores it as the
+  (`QUESTION_BANK`, selected via `_RNG.choice`) and stores it as the
   community's one active question in `kv`. If a question is already
   active for the community, `start` does NOT overwrite it -- it re-shows
   the existing question instead, so a careless double `start` can never
@@ -63,6 +63,11 @@ from typing import Any, NoReturn
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 SPEC = CommandSpec(name="trivia", sub_modules=frozenset({"start", "score"}))
 
@@ -347,7 +352,7 @@ async def _handle_start(*, community: str, provider: str, channel_id: str) -> st
         log.info("trivia.start_already_active", community=community)
         return f"A trivia question is already active: {existing['question']} (!trivia answer ...)"
 
-    question, answer_raw = random.choice(QUESTION_BANK)  # noqa: S311 -- a game pick, not crypto
+    question, answer_raw = _RNG.choice(QUESTION_BANK)
     active = {
         "question": question,
         "answer_raw": answer_raw,

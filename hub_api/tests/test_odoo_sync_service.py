@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from services import odoo_sync_service as svc
+from tests.test_sync_worker_dal import block_penguin_dal_asyncdb, fake_worker_dal
 
 _KEY = "ref-key-not-a-secret"  # gitleaks:allow - test fixture value
 _ENV = {
@@ -364,21 +365,15 @@ class TestMain:
 
     @staticmethod
     def _patch(monkeypatch: pytest.MonkeyPatch, dal: Any, summary: svc.SyncSummary) -> None:
-        import services.bundle_install_dal as bid
+        # regression: main() once read `.dal` off a penguin-dal AsyncDB (TableNotFoundError:
+        # Table 'dal' not found). Any return to `build_install_dal` now dies with that real error.
+        block_penguin_dal_asyncdb(monkeypatch)
+        monkeypatch.setattr(svc, "open_worker_dal", fake_worker_dal(dal))
 
-        class _Inst:
-            pass
-
-        inst = _Inst()
-        inst.dal = dal  # type: ignore[attr-defined]
-
-        async def build(url: str, pool_size: int = 1) -> Any:
-            return inst
-
-        async def run(*_a: Any, **_k: Any) -> svc.SyncSummary:
+        async def run(batch_dal: Any, *_a: Any, **_k: Any) -> svc.SyncSummary:
+            assert batch_dal is dal
             return summary
 
-        monkeypatch.setattr(bid, "build_install_dal", build)
         monkeypatch.setattr(svc, "run_odoo_sync_batch", run)
         for k, v in {**_ENV, "DATABASE_URL": "sqlite://x"}.items():
             monkeypatch.setenv(k, v)
@@ -409,3 +404,38 @@ class TestMain:
             monkeypatch.delenv(k, raising=False)
         with pytest.raises(svc.OdooConfigError):
             await svc.main()
+
+    async def test_main_runs_on_a_real_pydal_dal_not_an_asyncdb_attribute(
+        self,
+        bar_citizen_db: Any,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """regression: main() read `.dal` off a penguin-dal AsyncDB -> `TableNotFoundError`.
+
+        Nothing about the DAL layer is faked: the real `main()` opens a real sqlite file through
+        the real `init_database` seam, binds its own tables on that fresh DAL, and the real batch
+        reads communities/members with raw pydal. Only the Odoo socket is replaced.
+        """
+        dal, community_id, _t, _g = bar_citizen_db
+        _add_member(dal, community_id, "1")
+        dal.commit()
+        for k, v in {
+            **_ENV,
+            "DATABASE_URL": f"sqlite://{tmp_path / 'bar_citizen_test.db'}",
+        }.items():
+            monkeypatch.setenv(k, v)
+        monkeypatch.setenv(svc.ENV_BASELINE_VAR, "1")
+        fake = FakeOdoo()
+        real_client = svc.OdooClient
+
+        def _client_over_fake(cfg: svc.OdooConfig) -> svc.OdooClient:
+            http = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+            return real_client(cfg, http=http)
+
+        monkeypatch.setattr(svc, "OdooClient", _client_over_fake)
+        assert await svc.main() == 0
+        out = capsys.readouterr().out
+        assert "communities_examined=1" in out and "synced=1" in out and "created=1" in out
+        assert len(fake.records) == 1

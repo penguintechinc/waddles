@@ -23,6 +23,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from flask_core.service_jwt import ServiceJwtIssuer, SigningKey
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -71,6 +73,15 @@ def app(tenant_db: Any) -> Quart:
     QuartSchema(quart_app)
     register_blueprints(quart_app)
     quart_app.config["dal"] = tenant_db
+    # A configured (real Ed25519) machine-JWT verifier: the connection token route no longer has an
+    # X-Service-Key path, and with NO verifier it answers 503 (a deliberate fail-closed deployment
+    # fault, covered in tests/test_machine_auth_bound.py). The sweep asserts the *unauthenticated*
+    # outcome, which only exists once service auth is configured.
+    private = Ed25519PrivateKey.generate()
+    key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
+    quart_app.config["SERVICE_JWT_VERIFIER"] = ServiceJwtIssuer(
+        keys={"k1": key}, active_kid="k1", identities={}, audience="waddlebot-internal"
+    ).as_verifier()
     return quart_app
 
 

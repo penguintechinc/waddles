@@ -407,9 +407,9 @@ function SuperAdminTenants() {
 
       {deactivatingTenant && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-          <div className="bg-navy-900 rounded-xl shadow-xl max-w-md w-full mx-4 border border-navy-700">
+          <div role="dialog" aria-modal="true" aria-labelledby="super-admin-tenants-dialog-1-title" className="bg-navy-900 rounded-xl shadow-xl max-w-md w-full mx-4 border border-navy-700">
             <div className="p-6 border-b border-navy-700">
-              <h2 className="text-xl font-semibold text-red-400">Deactivate Tenant</h2>
+              <h2 id="super-admin-tenants-dialog-1-title" className="text-xl font-semibold text-red-400">Deactivate Tenant</h2>
             </div>
             <form onSubmit={handleDeactivateSubmit}>
               <div className="p-6 space-y-4">

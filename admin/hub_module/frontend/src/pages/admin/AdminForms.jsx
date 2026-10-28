@@ -261,13 +261,14 @@ function AdminForms() {
         <div className="space-y-4">
           {forms.length === 0 ? (
             <div className="card p-8 text-center">
-              <DocumentTextIcon className="h-16 w-16 text-gray-500 mx-auto mb-4" />
-              <p className="text-gray-400">No forms yet. Create your first form!</p>
+              <DocumentTextIcon className="h-16 w-16 text-fg-muted mx-auto mb-4" />
+              <p className="text-fg-muted">No forms yet. Create your first form!</p>
             </div>
           ) : (
             forms.map((form) => (
               <div
                 key={form.id}
+                data-click-delegate
                 className={`card p-4 cursor-pointer hover:ring-2 hover:ring-sky-500 transition ${
                   selectedForm?.id === form.id ? 'ring-2 ring-sky-500' : ''
                 }`}
@@ -275,11 +276,11 @@ function AdminForms() {
               >
                 <div className="flex justify-between items-start">
                   <div>
-                    <h3 className="text-white font-medium">{form.title}</h3>
+                    <h3 className="text-white font-medium"><button type="button" className="text-left hover:underline focus-visible:underline">{form.title}</button></h3>
                     {form.description && (
-                      <p className="text-gray-400 text-sm mt-1 line-clamp-2">{form.description}</p>
+                      <p className="text-fg-muted text-sm mt-1 line-clamp-2">{form.description}</p>
                     )}
-                    <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
+                    <div className="flex items-center gap-4 mt-2 text-xs text-fg-muted">
                       <span className="flex items-center gap-1">
                         <EyeIcon className="h-3 w-3" />
                         {form.view_visibility}
@@ -289,6 +290,7 @@ function AdminForms() {
                     </div>
                   </div>
                   <button
+                    aria-label={`Delete form ${form.title}`}
                     onClick={(e) => { e.stopPropagation(); deleteForm(form.id); }}
                     className="btn btn-sm btn-danger"
                   >
@@ -311,22 +313,22 @@ function AdminForms() {
                   Export CSV
                 </button>
               </div>
-              <p className="text-gray-500 text-sm mb-4">
+              <p className="text-fg-muted text-sm mb-4">
                 {submissions.length} submission{submissions.length !== 1 ? 's' : ''}
               </p>
               {submissions.length === 0 ? (
-                <p className="text-gray-400 text-center py-8">No submissions yet</p>
+                <p className="text-fg-muted text-center py-8">No submissions yet</p>
               ) : (
                 <div className="space-y-3 max-h-96 overflow-y-auto">
                   {submissions.map((sub) => (
-                    <div key={sub.id} className="p-3 bg-gray-800 rounded">
-                      <div className="flex justify-between text-xs text-gray-500 mb-2">
+                    <div key={sub.id} className="p-3 bg-surface-raised rounded">
+                      <div className="flex justify-between text-xs text-fg-muted mb-2">
                         <span>{sub.user_id || 'Anonymous'}</span>
                         <span>{new Date(sub.submitted_at).toLocaleString()}</span>
                       </div>
                       {selectedForm.fields?.map((field) => (
                         <div key={field.id} className="text-sm mb-1">
-                          <span className="text-gray-400">{field.label}:</span>
+                          <span className="text-fg-muted">{field.label}:</span>
                           <span className="text-white ml-2">
                             {JSON.stringify(sub.values[field.id]) || '-'}
                           </span>
@@ -338,7 +340,7 @@ function AdminForms() {
               )}
             </>
           ) : (
-            <p className="text-gray-400 text-center py-8">Select a form to view submissions</p>
+            <p className="text-fg-muted text-center py-8">Select a form to view submissions</p>
           )}
         </div>
       </div>

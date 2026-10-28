@@ -1,13 +1,12 @@
 //! The invocation seam between svc_ingest (the host that owns the socket) and
 //! whatever runs the connector WASM -- the bundle executor.
 //!
-//! Production reaches the executor over the host-API wire, which today has no
-//! connector export kinds (`penguin_bundle_host::wire::ExportKind` is
-//! `Transform`/`Dispatch` only, an external `penguin-libs` type). Until that
-//! lands, [`UnwiredInvoker`] is the production default: it fails every call
-//! with a typed, loud [`ConnectorInvokeError::Unavailable`], never a silent
-//! empty result. The real-path harness (`core/connector_e2e`) implements this
-//! trait over the executor's in-process `ConnectorHost`.
+//! Production reaches the executor over the host-API wire
+//! (`penguin_bundle_host::wire::ExportKind::Connector*`, 0.3.0):
+//! [`super::WireConnectorInvoker`] implements this trait over that wire. Every
+//! way a call can fail -- including "no executor attached" -- is a typed,
+//! loud [`ConnectorInvokeError`], never a silent empty result. The real-path
+//! harness (`core/connector_e2e`) drives the real executor through it.
 
 use super::types::{ConnectionCtx, ConnectorEvent, ConnectorFrameError, Handshake, RawFrame};
 
@@ -120,87 +119,9 @@ pub trait ConnectorInvoker: Send + Sync {
     ) -> Result<(), ConnectorInvokeError>;
 }
 
-/// The production default until the executor wire exposes connector exports:
-/// every call fails [`ConnectorInvokeError::Unavailable`], loudly. A driver
-/// built on this never publishes anything and never pretends to.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UnwiredInvoker;
-
-const UNWIRED: &str = "connector execution is unavailable: the executor host-API wire has no \
-connector export kinds yet (penguin-libs ExportKind::Transform/Dispatch only)";
-
-impl ConnectorInvoker for UnwiredInvoker {
-    async fn on_connect(
-        &self,
-        _platform: &str,
-        _ctx: &ConnectionCtx,
-    ) -> Result<Handshake, ConnectorInvokeError> {
-        Err(ConnectorInvokeError::Unavailable(UNWIRED.to_string()))
-    }
-
-    async fn on_frame(
-        &self,
-        _platform: &str,
-        _frame: RawFrame,
-    ) -> Result<Vec<ConnectorEvent>, ConnectorInvokeError> {
-        Err(ConnectorInvokeError::Unavailable(UNWIRED.to_string()))
-    }
-
-    async fn on_heartbeat_due(
-        &self,
-        _platform: &str,
-        _ctx: &ConnectionCtx,
-    ) -> Result<Option<Vec<u8>>, ConnectorInvokeError> {
-        Err(ConnectorInvokeError::Unavailable(UNWIRED.to_string()))
-    }
-
-    async fn on_disconnect(
-        &self,
-        _platform: &str,
-        _ctx: &ConnectionCtx,
-        _reason: &str,
-    ) -> Result<(), ConnectorInvokeError> {
-        Err(ConnectorInvokeError::Unavailable(UNWIRED.to_string()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ctx() -> ConnectionCtx {
-        ConnectionCtx {
-            platform: "echo".to_string(),
-            source_id: "s".to_string(),
-            connection_id: "c".to_string(),
-            session_token: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn the_unwired_invoker_fails_every_export_with_a_typed_unavailable_error() {
-        let inv = UnwiredInvoker;
-        let frame = RawFrame {
-            ctx: ctx(),
-            bytes: vec![1],
-            received_at: "2026-10-12T00:00:00.000Z".to_string(),
-        };
-        let results = [
-            inv.on_connect("echo", &ctx()).await.err(),
-            inv.on_frame("echo", frame).await.err(),
-            inv.on_heartbeat_due("echo", &ctx()).await.err(),
-            inv.on_disconnect("echo", &ctx(), "r").await.err(),
-        ];
-        assert_eq!(results.len(), 4);
-        for err in results {
-            let err = err.expect("every export must fail loudly");
-            assert!(
-                matches!(err, ConnectorInvokeError::Unavailable(ref m) if m.contains("unavailable"))
-            );
-            assert!(err.tears_down_connection());
-            assert_eq!(err.kind(), "unavailable");
-        }
-    }
 
     #[test]
     fn a_sandbox_trip_diagnostic_is_truncated_on_a_char_boundary() {

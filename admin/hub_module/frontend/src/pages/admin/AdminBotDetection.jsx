@@ -259,10 +259,11 @@ function AdminBotDetection() {
       <div className="card p-4 mb-6">
         <div className="grid md:grid-cols-3 gap-4">
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">
+            <label htmlFor="admin-bot-detection-status" className="block text-sm font-medium text-navy-300 mb-2">
               Status
             </label>
             <select
+              id="admin-bot-detection-status"
               value={filters.status}
               onChange={(e) => updateFilter('status', e.target.value)}
               className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
@@ -273,10 +274,11 @@ function AdminBotDetection() {
             </select>
           </div>
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">
+            <label htmlFor="admin-bot-detection-minimum-confidence" className="block text-sm font-medium text-navy-300 mb-2">
               Minimum Confidence
             </label>
             <select
+              id="admin-bot-detection-minimum-confidence"
               value={filters.minConfidence}
               onChange={(e) => updateFilter('minConfidence', parseInt(e.target.value))}
               className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"

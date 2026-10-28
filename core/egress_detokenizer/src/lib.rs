@@ -516,4 +516,86 @@ mod tests {
             }
         }
     }
+
+    /// FNV-1a 64-bit -- the digest the shared parity pin uses (no hashing crate needed).
+    fn fnv1a64(state: u64, data: &[u8]) -> u64 {
+        data.iter().fold(state, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    fn unhex(s: &str) -> String {
+        let bytes: Vec<u8> = (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("pin file holds valid hex"))
+            .collect();
+        String::from_utf8(bytes).expect("pin file holds valid UTF-8")
+    }
+
+    fn hex(s: &str) -> String {
+        s.bytes().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Pins this crate's `{user:<token>}` grammar to the Python oracle behind
+    /// `sdk/waddle-sdk/tests/test_safe_text_differential.py`, which proves
+    /// `waddle_sdk.safe_text` never lets through an input this crate would resolve. Both
+    /// sides run the SAME corpus (every concatenation of the pin's atoms up to `max_len`,
+    /// then its curated cases) through `extract_tokens` + `detokenize` and must reproduce the
+    /// pinned digest. Changing the grammar fails this test: update the Python oracle, then
+    /// regenerate the pin -- never just the digest.
+    #[test]
+    fn grammar_matches_the_sanitizer_parity_pin() {
+        const PIN: &str = include_str!("../tests/fixtures/sanitizer_parity.txt");
+        let mut atoms: Vec<String> = Vec::new();
+        let mut max_len = 0usize;
+        let mut curated: Vec<String> = Vec::new();
+        let mut want_digest = String::new();
+        for line in PIN.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
+            let (key, value) = line.split_once('=').expect("pin lines are key=value");
+            match key {
+                "atoms" => atoms = value.split(',').map(unhex).collect(),
+                "max_len" => max_len = value.parse().expect("max_len is a number"),
+                "case" => curated.push(unhex(value)),
+                "fnv1a64" => want_digest = value.to_string(),
+                other => panic!("unknown pin key {other:?}"),
+            }
+        }
+        assert!(
+            !atoms.is_empty() && !want_digest.is_empty(),
+            "pin file is incomplete"
+        );
+
+        let mut corpus: Vec<String> = Vec::new();
+        for len in 0..=max_len {
+            let total = atoms.len().pow(u32::try_from(len).expect("small max_len"));
+            for mut n in 0..total {
+                let mut picks = vec![0usize; len];
+                for slot in picks.iter_mut().rev() {
+                    *slot = n % atoms.len();
+                    n /= atoms.len();
+                }
+                corpus.push(picks.iter().map(|&i| atoms[i].as_str()).collect::<String>());
+            }
+        }
+        corpus.extend(curated);
+        assert!(corpus.len() > 9000, "the corpus must really be enumerated");
+
+        let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+        for text in &corpus {
+            let tokens = extract_tokens(text);
+            let resolved: HashMap<String, String> = tokens
+                .iter()
+                .map(|t| (t.clone(), format!("<N:{t}>")))
+                .collect();
+            let out = detokenize(text, &resolved, Sink::Twitch);
+            let token_hex: Vec<String> = tokens.iter().map(|t| hex(t)).collect();
+            let line = format!("{}|{}|{}\n", hex(text), token_hex.join(","), hex(&out.text));
+            digest = fnv1a64(digest, line.as_bytes());
+        }
+        assert_eq!(
+            format!("{digest:016x}"),
+            want_digest,
+            "the detokenizer grammar no longer matches the pin the Python sanitizer oracle uses"
+        );
+    }
 }

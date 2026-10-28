@@ -1,0 +1,262 @@
+{
+ "kek_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+ "kek_previous_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+ "kek_ids": [
+  "630dcd2966c43366",
+  "72dbb7336c767800"
+ ],
+ "kek_id_current": "630dcd2966c43366",
+ "codes": [
+  {
+   "tenant_id": 1,
+   "platform": "discord",
+   "platform_user_id": "123456789012345678",
+   "norm_platform": "discord",
+   "norm_platform_user_id": "123456789012345678",
+   "tenant_key_vers": [
+    "630dcd2966c43366",
+    "72dbb7336c767800"
+   ],
+   "codes": [
+    {
+     "key_ver": "630dcd2966c43366",
+     "hmac": "b4e169e18c90e79ef491285cf408286e374d68c4df3a445e946fdf09b80913bf"
+    },
+    {
+     "key_ver": "72dbb7336c767800",
+     "hmac": "6d08e755b24c26d2afba5b349c9c3e2e13331502d28eff65ef6e633b4eae409b"
+    }
+   ]
+  },
+  {
+   "tenant_id": 1,
+   "platform": "  Discord ",
+   "platform_user_id": "  123456789012345678\t",
+   "norm_platform": "discord",
+   "norm_platform_user_id": "123456789012345678",
+   "tenant_key_vers": [
+    "630dcd2966c43366",
+    "72dbb7336c767800"
+   ],
+   "codes": [
+    {
+     "key_ver": "630dcd2966c43366",
+     "hmac": "b4e169e18c90e79ef491285cf408286e374d68c4df3a445e946fdf09b80913bf"
+    },
+    {
+     "key_ver": "72dbb7336c767800",
+     "hmac": "6d08e755b24c26d2afba5b349c9c3e2e13331502d28eff65ef6e633b4eae409b"
+    }
+   ]
+  },
+  {
+   "tenant_id": 2,
+   "platform": "discord",
+   "platform_user_id": "123456789012345678",
+   "norm_platform": "discord",
+   "norm_platform_user_id": "123456789012345678",
+   "tenant_key_vers": [
+    "630dcd2966c43366",
+    "72dbb7336c767800"
+   ],
+   "codes": [
+    {
+     "key_ver": "630dcd2966c43366",
+     "hmac": "bc74bf8055192a50bcd6b6e5c71c0ec5a273601d41408b0a4a90cc81cc9adbff"
+    },
+    {
+     "key_ver": "72dbb7336c767800",
+     "hmac": "0fdf21df9a77d20743f0ae6417e9aa7a0bb123c60a198f0ed305c3e035a3e5ad"
+    }
+   ]
+  },
+  {
+   "tenant_id": 2,
+   "platform": "twitch",
+   "platform_user_id": "CaseSensitiveName",
+   "norm_platform": "twitch",
+   "norm_platform_user_id": "CaseSensitiveName",
+   "tenant_key_vers": [
+    "630dcd2966c43366",
+    "72dbb7336c767800"
+   ],
+   "codes": [
+    {
+     "key_ver": "630dcd2966c43366",
+     "hmac": "f4c7ecc270fd31abcf1d0aa5a9e8972e18a17ffb47cb359dad79f7507d0d349d"
+    },
+    {
+     "key_ver": "72dbb7336c767800",
+     "hmac": "460290b852b9d1d319beb974dceb280da4c3c99bc4381257b13a66f508680e2b"
+    }
+   ]
+  },
+  {
+   "tenant_id": 42,
+   "platform": "kick",
+   "platform_user_id": "caf\u00e9-\ud83d\ude00",
+   "norm_platform": "kick",
+   "norm_platform_user_id": "caf\u00e9-\ud83d\ude00",
+   "tenant_key_vers": [
+    "630dcd2966c43366",
+    "72dbb7336c767800"
+   ],
+   "codes": [
+    {
+     "key_ver": "630dcd2966c43366",
+     "hmac": "d01ab4896deb7f3a5611a7e0d52436b23865e35539487b589ec0617ebbed775a"
+    },
+    {
+     "key_ver": "72dbb7336c767800",
+     "hmac": "43cbafe6719d5e515fe5025ca607145aec3154d8dc4352b7b69e11b4e7ca6147"
+    }
+   ]
+  },
+  {
+   "tenant_id": 7,
+   "platform": "\u212aick",
+   "platform_user_id": "u1",
+   "norm_platform": "kick",
+   "norm_platform_user_id": "u1",
+   "tenant_key_vers": [
+    "630dcd2966c43366",
+    "72dbb7336c767800"
+   ],
+   "codes": [
+    {
+     "key_ver": "630dcd2966c43366",
+     "hmac": "531dc8e351ab68e5f8c5d1a4a787aa5ed7b141a037550991f86df4019097e183"
+    },
+    {
+     "key_ver": "72dbb7336c767800",
+     "hmac": "faeb62fe0be165d4beb9e0301e106d0cbd94837ff8ccebdede54c773e8142626"
+    }
+   ]
+  },
+  {
+   "tenant_id": 7,
+   "platform": "kick",
+   "platform_user_id": "\u001cpadded\u001f",
+   "norm_platform": "kick",
+   "norm_platform_user_id": "padded",
+   "tenant_key_vers": [
+    "630dcd2966c43366",
+    "72dbb7336c767800"
+   ],
+   "codes": [
+    {
+     "key_ver": "630dcd2966c43366",
+     "hmac": "5c944791db8972adf268a47617a08008580f98fcb70d41a1ad2adacb6268cfaf"
+    },
+    {
+     "key_ver": "72dbb7336c767800",
+     "hmac": "d213f909a7bea094ff92b7ca99342d8bf81382c5f586cb9ce50077fdbe3bd901"
+    }
+   ]
+  },
+  {
+   "tenant_id": 7,
+   "platform": "kick",
+   "platform_user_id": "\u00a0nbsp\u3000",
+   "norm_platform": "kick",
+   "norm_platform_user_id": "nbsp",
+   "tenant_key_vers": [
+    "630dcd2966c43366",
+    "72dbb7336c767800"
+   ],
+   "codes": [
+    {
+     "key_ver": "630dcd2966c43366",
+     "hmac": "a5377d4c277ca1b9840e1e09a1de029ec9b91e6768e4fa122be7c3be573da399"
+    },
+    {
+     "key_ver": "72dbb7336c767800",
+     "hmac": "fa5f5698ac9bbf0e5870e4a5eed3d6d51408e6bb1bb575f5de76da7786d2d06e"
+    }
+   ]
+  },
+  {
+   "tenant_id": 9,
+   "platform": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "platform_user_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "norm_platform": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "norm_platform_user_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "tenant_key_vers": [
+    "630dcd2966c43366",
+    "72dbb7336c767800"
+   ],
+   "codes": [
+    {
+     "key_ver": "630dcd2966c43366",
+     "hmac": "7116f39ee153a86305f340ad6e42f66a062e3ec3fe79649d97183bc804b739b7"
+    },
+    {
+     "key_ver": "72dbb7336c767800",
+     "hmac": "4affcbda8d42dfd521ca0712d0e0b8096dca3d1ffb5e2b731d9437702dd8184b"
+    }
+   ]
+  }
+ ],
+ "invalid": [
+  {
+   "tenant_id": 0,
+   "platform": "discord",
+   "platform_user_id": "1"
+  },
+  {
+   "tenant_id": -1,
+   "platform": "discord",
+   "platform_user_id": "1"
+  },
+  {
+   "tenant_id": 1,
+   "platform": "",
+   "platform_user_id": "1"
+  },
+  {
+   "tenant_id": 1,
+   "platform": "9bad",
+   "platform_user_id": "1"
+  },
+  {
+   "tenant_id": 1,
+   "platform": "Bad-Plat",
+   "platform_user_id": "1"
+  },
+  {
+   "tenant_id": 1,
+   "platform": "discord",
+   "platform_user_id": ""
+  },
+  {
+   "tenant_id": 1,
+   "platform": "discord",
+   "platform_user_id": "   "
+  },
+  {
+   "tenant_id": 1,
+   "platform": "discord",
+   "platform_user_id": "a\u0000b"
+  },
+  {
+   "tenant_id": 1,
+   "platform": "discord",
+   "platform_user_id": "a\u007fb"
+  },
+  {
+   "tenant_id": 1,
+   "platform": "discord",
+   "platform_user_id": "a\nb"
+  },
+  {
+   "tenant_id": 1,
+   "platform": "discord",
+   "platform_user_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+   "tenant_id": 1,
+   "platform": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "platform_user_id": "1"
+  }
+ ]
+}

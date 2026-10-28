@@ -28,11 +28,31 @@ B0 is host plumbing only -- it implements **no** platform connector.
 | `Transport` trait | `core/svc_ingest/src/connector/transport.rs` | Host-owned socket/poll/webhook abstraction, one impl per family (none shipped in B0) |
 | `ConnectorRegistry` | `core/svc_ingest/src/connector/registry.rs` | Always-pinned platform -> connector map; no removal/eviction; re-registering is an error |
 | `ConnectorDriver` | `core/svc_ingest/src/connector/driver.rs` | connect -> `on-connect` -> handshake -> frame pump -> reconnect under `crate::ingest::Backoff` |
-| `ConnectorInvoker` | `core/svc_ingest/src/connector/invoker.rs` | Seam to the executor. Production default `UnwiredInvoker` fails every call loudly |
+| `ConnectorInvoker` | `core/svc_ingest/src/connector/invoker.rs` | Seam to the executor + the typed three-class `ConnectorInvokeError` |
+| `WireConnectorInvoker` / `ExecutorLink` | `core/svc_ingest/src/connector/wire_invoker.rs` | **Production invoker**: carries each `receiver` export as an `ExportKind::Connector*` `invoke` frame over the executor host-API wire. `ExecutorLink` is svc_ingest's listening side (executor dials, `hello`/`hello-ok`, correlation-id multiplexing); no executor attached = typed `Unavailable`, loudly |
+| `ConnectorRouter` | `core/bundle_executor/src/connector_wire.rs` | Executor side of the wire: always-pinned `ConnectorHost` registry keyed by digest; translates the canonical-JSON payloads and maps `ConnectorCallError` onto typed `error` frames |
 | `EventSink` / `SpineEventSink` | `core/svc_ingest/src/connector/sink.rs` | Validates events via `penguin_spine::PlatformEvent` and publishes through the one `publish_event` site |
-| `ExecutorInvoker` | `core/connector_e2e/src/lib.rs` | `ConnectorInvoker` over the in-process `ConnectorHost` -- the real-path harness |
+| `WireRig` | `core/connector_e2e/src/lib.rs` | Real executor + real `ExecutorLink` joined by a duplex pipe (stand-in for the mTLS socket) -- the real-path harness; reconnects and severs are real |
 | Echo connector | `core/bundle_executor/tests/fixtures/echo-connector-src` | **Test fixture only** (no production build/deploy path): a faithful port of `builtin_handlers/echo_ingest.py::normalize`; the B0 smoke. Because it is not production code, `.ci/builtin-handler-map.yaml` keeps `echo_ingest` **pending** -- the parity gate must not go green on a fixture |
 | Fault connector | `core/bundle_executor/tests/fixtures/faulty-connector-src` | Trap / spin / memory hog / event flood on demand |
+
+## Wire contract (`penguin-bundle-host` 0.3.0 `ExportKind::Connector*`)
+
+`invoke.export` is one of `connector_on_connect` / `connector_on_frame` / `connector_on_heartbeat_due` /
+`connector_on_disconnect`; `app_id` + `digest` name the pinned connector (executor refuses an unpinned digest or a
+mismatched `app_id`: `UNKNOWN_BUNDLE`). Payloads are canonical JSON, unknown fields rejected, all `bytes` base64:
+
+| Export | `payload` | `result.payload` |
+|---|---|---|
+| `connector_on_connect` | `{ctx}` | `{bytes, secret_refs:[[slot,handle],..]}` |
+| `connector_on_frame` | `{ctx, bytes, received_at}` | `{events:[{platform,event_type,actor,payload_json,occurred_at}]}` or `{frame_error:{kind,message}}` |
+| `connector_on_heartbeat_due` | `{ctx}` | `{bytes}` (`null` = none) |
+| `connector_on_disconnect` | `{ctx, reason}` | `{}` |
+
+Sandbox containment is a typed `error` frame, mapped back by `WireConnectorInvoker` (by code, never message text; the
+executor's message is never carried into the host error): `EXECUTOR_DEADLINE` (+`fuel_exhausted`) / `MEMORY_LIMIT` /
+`WASM_TRAP` -> `SandboxTrip`; `EXECUTOR_DEADLINE`+`pool_exhausted`, any other code, no executor, lost connection, reply
+timeout or a malformed reply -> `Unavailable`.
 
 ## Failure classes (spec S2.6)
 
@@ -86,10 +106,11 @@ spoofed platform, rejected/failed events, truncation) are sampled -- 5 per 30s p
 
 ## Not in B0 (explicit, typed, not silent)
 
-- **Wire exposure.** `penguin_bundle_host::wire::ExportKind` (external `penguin-libs`) has only `Transform` /
-  `Dispatch`, so a stage cannot yet ask the executor process to run a connector export. Until `penguin-libs` adds
-  connector kinds and every `svc_*`/executor rev is bumped, svc_ingest's invoker is `UnwiredInvoker`
-  (`ConnectorInvokeError::Unavailable`). The contract is proven in-process by `core/connector_e2e`.
+- **A production listener + pinned set.** The wire invoker takes any accepted duplex stream
+  (`ExecutorLink::attach`); the mTLS accept loop and the executor-side startup list of pinned core
+  connectors arrive with the first real platform connector (neither exists in production yet, and svc_ingest
+  still constructs no `ConnectorDriver`). Pinned connectors run with no host-call bridge: a connector import
+  that needs one (`http`, ...) fails typed, and any `host-call` frame is answered `HOST_CALL_DENIED`.
 - Real platform transports, heartbeat scheduling (a dedicated per-connection task, spec S3.5), secret-handle
   substitution in the outbound path (spec S2.1), `identity.lookup` backing (RO-replica reader, cache, audit,
   invalidation -- spec S3.3/S3.4), sender dispatch in `svc_action`, shadow-mode harness, flipping any
@@ -98,9 +119,9 @@ spoofed platform, rejected/failed events, truncation) are sampled -- 5 per 30s p
 ## Running it
 
 ```bash
-cd core/bundle_executor && cargo test --test connector_invocation --lib connector   # executor half
+cd core/bundle_executor && cargo test --test connector_invocation --test connector_wire --lib connector   # executor half
 cd core/svc_ingest      && cargo test --test connector_driver --test connector_sink --lib connector
-cd core/connector_e2e   && cargo test                                              # the end-to-end smoke
+cd core/connector_e2e   && cargo test                                              # the end-to-end smoke (over the real wire)
 ```
 
 Rebuilding the fixtures: see `core/bundle_executor/tests/fixtures/README.md`.

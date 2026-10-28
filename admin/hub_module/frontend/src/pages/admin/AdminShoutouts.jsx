@@ -54,14 +54,18 @@ function AdminShoutouts() {
     }
   }, [activeTab, communityId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function fetchHistory() {
+  // `filters` lets a caller (Clear) pass the values it is about to set: reading
+  // the `historyFilter*` state here would use this render's stale closure.
+  async function fetchHistory(
+    filters = { from: historyFilterFrom, to: historyFilterTo, type: historyFilterType },
+  ) {
     setHistoryLoading(true);
     setHistoryError(null);
     try {
       const params = {};
-      if (historyFilterFrom) params.from = historyFilterFrom;
-      if (historyFilterTo) params.to = historyFilterTo;
-      if (historyFilterType) params.type = historyFilterType;
+      if (filters.from) params.from = filters.from;
+      if (filters.to) params.to = filters.to;
+      if (filters.type) params.type = filters.type;
       const res = await adminApi.getShoutoutHistory(communityId, params);
       setHistory(res.data?.history || res.data?.shoutouts || []);
     } catch (err) {
@@ -248,6 +252,7 @@ function AdminShoutouts() {
                 <p className="text-sm text-navy-400">Send text-based shoutouts in chat</p>
               </div>
               <input
+                aria-label="Text Shoutout (!so)"
                 type="checkbox"
                 checked={config.soEnabled}
                 onChange={(e) => updateConfig('soEnabled', e.target.checked)}
@@ -296,6 +301,7 @@ function AdminShoutouts() {
                 <p className="text-sm text-navy-400">Display video clips on stream overlay</p>
               </div>
               <input
+                aria-label="Video Shoutout (!vso)"
                 type="checkbox"
                 checked={config.vsoEnabled}
                 onChange={(e) => updateConfig('vsoEnabled', e.target.checked)}
@@ -341,10 +347,11 @@ function AdminShoutouts() {
             <h2 className="text-lg font-semibold text-sky-100 mb-4">Auto-Shoutout</h2>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-shoutouts-auto-shoutout-mode" className="block text-sm font-medium text-navy-300 mb-2">
                   Auto-Shoutout Mode
                 </label>
                 <select
+                  id="admin-shoutouts-auto-shoutout-mode"
                   value={config.autoShoutoutMode}
                   onChange={(e) => updateConfig('autoShoutoutMode', e.target.value)}
                   className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
@@ -398,10 +405,11 @@ function AdminShoutouts() {
             <h2 className="text-lg font-semibold text-sky-100 mb-4">Video Widget Settings</h2>
             <div className="grid md:grid-cols-3 gap-4">
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-shoutouts-widget-position" className="block text-sm font-medium text-navy-300 mb-2">
                   Widget Position
                 </label>
                 <select
+                  id="admin-shoutouts-widget-position"
                   value={config.widgetPosition}
                   onChange={(e) => updateConfig('widgetPosition', e.target.value)}
                   className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
@@ -413,10 +421,11 @@ function AdminShoutouts() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-shoutouts-duration-seconds" className="block text-sm font-medium text-navy-300 mb-2">
                   Duration (seconds)
                 </label>
                 <input
+                  id="admin-shoutouts-duration-seconds"
                   type="number"
                   min="10"
                   max="120"
@@ -428,10 +437,11 @@ function AdminShoutouts() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-shoutouts-cooldown-minutes" className="block text-sm font-medium text-navy-300 mb-2">
                   Cooldown (minutes)
                 </label>
                 <input
+                  id="admin-shoutouts-cooldown-minutes"
                   type="number"
                   min="1"
                   max="1440"
@@ -472,6 +482,7 @@ function AdminShoutouts() {
             </p>
             <div className="flex items-center space-x-2">
               <input
+                aria-label="Video shoutout overlay URL"
                 type="text"
                 readOnly
                 value={`${window.location.origin}/overlay/video-shoutout?community=${communityId}&position=${config.widgetPosition}`}
@@ -500,6 +511,7 @@ function AdminShoutouts() {
             <h2 className="text-lg font-semibold text-sky-100 mb-4">Add Creator to Auto-Shoutout List</h2>
             <div className="flex space-x-4">
               <select
+                aria-label="Creator platform"
                 value={newCreator.platform}
                 onChange={(e) => setNewCreator({ ...newCreator, platform: e.target.value })}
                 className="px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
@@ -508,6 +520,7 @@ function AdminShoutouts() {
                 <option value="youtube">YouTube</option>
               </select>
               <input
+                aria-label="Username"
                 type="text"
                 value={newCreator.username}
                 onChange={(e) => setNewCreator({ ...newCreator, username: e.target.value })}
@@ -578,8 +591,9 @@ function AdminShoutouts() {
           <div className="card p-4">
             <div className="flex flex-wrap gap-4 items-end">
               <div>
-                <label className="block text-xs text-navy-400 mb-1">From</label>
+                <label htmlFor="admin-shoutouts-from" className="block text-xs text-navy-400 mb-1">From</label>
                 <input
+                  id="admin-shoutouts-from"
                   type="date"
                   value={historyFilterFrom}
                   onChange={(e) => setHistoryFilterFrom(e.target.value)}
@@ -587,8 +601,9 @@ function AdminShoutouts() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-navy-400 mb-1">To</label>
+                <label htmlFor="admin-shoutouts-to" className="block text-xs text-navy-400 mb-1">To</label>
                 <input
+                  id="admin-shoutouts-to"
                   type="date"
                   value={historyFilterTo}
                   onChange={(e) => setHistoryFilterTo(e.target.value)}
@@ -596,8 +611,9 @@ function AdminShoutouts() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-navy-400 mb-1">Type</label>
+                <label htmlFor="admin-shoutouts-type" className="block text-xs text-navy-400 mb-1">Type</label>
                 <select
+                  id="admin-shoutouts-type"
                   value={historyFilterType}
                   onChange={(e) => setHistoryFilterType(e.target.value)}
                   className="input text-sm"
@@ -609,7 +625,7 @@ function AdminShoutouts() {
                   <option value="manual">Manual</option>
                 </select>
               </div>
-              <button onClick={fetchHistory} className="btn btn-secondary text-sm">
+              <button onClick={() => fetchHistory()} className="btn btn-secondary text-sm">
                 Apply Filters
               </button>
               <button
@@ -617,7 +633,7 @@ function AdminShoutouts() {
                   setHistoryFilterFrom('');
                   setHistoryFilterTo('');
                   setHistoryFilterType('');
-                  setTimeout(fetchHistory, 0);
+                  fetchHistory({ from: '', to: '', type: '' });
                 }}
                 className="text-navy-400 hover:text-sky-300 text-sm transition-colors"
               >

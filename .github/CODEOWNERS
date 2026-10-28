@@ -1,12 +1,6 @@
 # CODEOWNERS
 #
-# PROPOSAL (chore/v3-ci-cleanup): this catch-all owner list is a starting
-# point for the repo owner to confirm or change, not a settled decision.
-# The org ruleset requires code-owner review on every PR
-# (require_code_owner_review: true), so a repo without any CODEOWNERS file
-# matches nobody and that requirement silently blocks all PRs.
-#
-# PenguinzTech is the repo's usual PR author (100% of recent merged PRs),
-# so per convention they cannot be the sole/self-approving owner here.
-# Chromeninja and Tim-Machine are the only other collaborators.
-*   @Chromeninja @Tim-Machine
+# Owners confirmed by the repo owner. Both are listed on the catch-all so that
+# when @penguinztech authors a PR, @Chromeninja is the non-author code owner
+# who can approve it (branch protection blocks self-approval).
+*   @Chromeninja @penguinztech

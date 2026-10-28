@@ -38,7 +38,6 @@ EXPECTED_REVIEW: dict[str, frozenset[str]] = {
     "platform_integrations": frozenset({"user_id"}),
     "activity_stats_daily": frozenset({"platform_user_id", "platform_username"}),
     "hub_admins": frozenset({"email", "username"}),
-    "live_activity_events": frozenset({"actor"}),
     "loyalty_giveaway_keys": frozenset({"claimed_by_user_id"}),
     "communities": frozenset({"created_by", "deleted_by", "owner_id", "owner_name"}),
     "command_aliases": frozenset({"deleted_by"}),
