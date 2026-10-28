@@ -42,6 +42,8 @@ export { Tabs } from './Tabs';
 export type { TabItem, TabsProps } from './Tabs';
 export { DataTable } from './DataTable';
 export type { Column, DataTableProps } from './DataTable';
+export { NotAvailableYet, ServedFeature } from './NotAvailableYet';
+export type { NotAvailableYetProps, ServedFeatureProps } from './NotAvailableYet';
 export { QueryBoundary } from './QueryBoundary';
 export type { QueryBoundaryProps } from './QueryBoundary';
 export { RouteErrorBoundary } from './RouteErrorBoundary';

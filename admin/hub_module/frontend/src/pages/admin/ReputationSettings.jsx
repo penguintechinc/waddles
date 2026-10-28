@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
-import { TrophyIcon } from '@heroicons/react/24/outline';
+import { NotAvailableYet } from '../../components/ui';
+import { ReputationLeaderboardTab } from '../../components/community/ReputationLeaderboardTab';
+import { isFeatureServed } from '../../lib/unservedFeatures';
 
 // FICO-style tier definitions
 const REPUTATION_TIERS = [
@@ -45,19 +47,18 @@ function ReputationSettings() {
   const [atRiskUsers, setAtRiskUsers] = useState([]);
   const [showAtRisk, setShowAtRisk] = useState(false);
 
-  // Leaderboard state
-  const [leaderboard, setLeaderboard] = useState([]);
-  const [leaderboardLoading, setLeaderboardLoading] = useState(false);
+  // hub-api serves neither the reputation config nor the at-risk list yet (only the
+  // leaderboard), so those are gated rather than called: see UNSERVED_FEATURES.
+  const configServed = isFeatureServed('reputation-config');
+  const atRiskServed = isFeatureServed('reputation-at-risk');
 
   useEffect(() => {
-    fetchConfig();
-  }, [communityId]);
-
-  useEffect(() => {
-    if (activeTab === 'leaderboard') {
-      fetchLeaderboard();
+    if (!configServed) {
+      setLoading(false);
+      return;
     }
-  }, [activeTab, communityId]);
+    fetchConfig();
+  }, [communityId, configServed]);
 
   async function fetchConfig() {
     setLoading(true);
@@ -114,20 +115,6 @@ function ReputationSettings() {
     }
   }
 
-  async function fetchLeaderboard() {
-    setLeaderboardLoading(true);
-    try {
-      const response = await adminApi.getReputationLeaderboard(communityId, { limit: 50 });
-      if (response.data.success) {
-        setLeaderboard(response.data.users || []);
-      }
-    } catch (err) {
-      console.error('Failed to fetch leaderboard:', err);
-    } finally {
-      setLeaderboardLoading(false);
-    }
-  }
-
   async function handleSave() {
     setSaving(true);
     setMessage(null);
@@ -168,7 +155,7 @@ function ReputationSettings() {
     );
   }
 
-  if (!config) {
+  if (configServed && !config) {
     return (
       <div className="text-center py-12 text-red-400">
         Failed to load configuration
@@ -176,7 +163,7 @@ function ReputationSettings() {
     );
   }
 
-  const isPremium = config.is_premium;
+  const isPremium = config?.is_premium;
 
   const tabs = [
     { id: 'settings', label: 'Settings' },
@@ -192,21 +179,25 @@ function ReputationSettings() {
             FICO-style reputation scoring (300-850 range)
           </p>
         </div>
-        {activeTab === 'settings' && (
+        {activeTab === 'settings' && (configServed || atRiskServed) && (
           <div className="flex gap-3">
-            <button
-              onClick={fetchAtRiskUsers}
-              className="btn btn-secondary"
-            >
-              View At-Risk Users
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              className="btn btn-primary disabled:opacity-50"
-            >
-              {saving ? 'Saving...' : 'Save Changes'}
-            </button>
+            {atRiskServed && (
+              <button
+                onClick={fetchAtRiskUsers}
+                className="btn btn-secondary"
+              >
+                View At-Risk Users
+              </button>
+            )}
+            {configServed && (
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="btn btn-primary disabled:opacity-50"
+              >
+                {saving ? 'Saving...' : 'Save Changes'}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -242,7 +233,10 @@ function ReputationSettings() {
       )}
 
       {/* Settings Tab */}
-      {activeTab === 'settings' && (
+      {activeTab === 'settings' && !configServed && (
+        <NotAvailableYet feature="reputation-config" />
+      )}
+      {activeTab === 'settings' && configServed && (
         <>
           {!isPremium && (
             <div className="mb-6 p-4 rounded-lg border bg-gold-500/10 border-gold-500/30">
@@ -460,80 +454,7 @@ function ReputationSettings() {
 
       {/* Leaderboard Tab */}
       {activeTab === 'leaderboard' && (
-        <div className="space-y-6">
-          {leaderboardLoading ? (
-            <div className="flex justify-center py-12">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gold-400"></div>
-            </div>
-          ) : leaderboard.length === 0 ? (
-            <div className="bg-navy-800 border border-navy-700 rounded-lg p-12 text-center">
-              <TrophyIcon className="w-12 h-12 text-navy-500 mx-auto mb-4" />
-              <h3 className="text-lg font-semibold text-sky-100 mb-2">No Reputation Data</h3>
-              <p className="text-navy-400">
-                No members with reputation scores yet.
-              </p>
-            </div>
-          ) : (
-            <div className="bg-navy-800 border border-navy-700 rounded-lg overflow-hidden">
-              <table className="w-full">
-                <thead className="bg-navy-900">
-                  <tr>
-                    <th className="text-left py-3 px-4 text-navy-400 font-medium text-sm w-16">Rank</th>
-                    <th className="text-left py-3 px-4 text-navy-400 font-medium text-sm">Member</th>
-                    <th className="text-left py-3 px-4 text-navy-400 font-medium text-sm">Tier</th>
-                    <th className="text-right py-3 px-4 text-navy-400 font-medium text-sm">Score</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-navy-700">
-                  {leaderboard.map((user, index) => {
-                    const tier = getTierForScore(user.reputation?.score || 0);
-                    return (
-                      <tr key={user.userId} className="hover:bg-navy-700/50">
-                        <td className="py-3 px-4">
-                          <span className={`font-bold ${index < 3 ? 'text-gold-400' : 'text-navy-400'}`}>
-                            #{user.rank || index + 1}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4">
-                          <div className="flex items-center space-x-3">
-                            <div className="w-8 h-8 rounded-full bg-navy-700 flex items-center justify-center overflow-hidden">
-                              {user.avatarUrl ? (
-                                <img src={user.avatarUrl} alt="" className="w-full h-full object-cover" />
-                              ) : (
-                                <span className="text-navy-400 text-sm">
-                                  {user.username?.[0]?.toUpperCase()}
-                                </span>
-                              )}
-                            </div>
-                            <span className="font-medium text-sky-100">{user.username}</span>
-                          </div>
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${tier.bg} ${tier.color} border border-white/10`}>
-                            {user.reputation?.label || tier.label}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <div className="flex items-center justify-end space-x-3">
-                            <div className="w-24 h-2 bg-navy-700 rounded-full overflow-hidden">
-                              <div
-                                className={`h-full ${tier.bg.replace('/20', '')}`}
-                                style={{ width: `${((user.reputation?.score || 0) - 300) / 5.5}%` }}
-                              ></div>
-                            </div>
-                            <span className={`font-bold ${tier.color} w-12 text-right`}>
-                              {user.reputation?.score || 0}
-                            </span>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+        <ReputationLeaderboardTab communityId={Number(communityId)} />
       )}
 
       {/* At-Risk Users Modal */}

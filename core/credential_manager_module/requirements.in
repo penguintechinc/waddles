@@ -1,0 +1,25 @@
+# Web framework and async utilities
+quart>=0.19.0
+hypercorn>=0.15.0
+
+# Database
+asyncpg>=0.29.0
+psycopg[binary]>=3.1.0
+
+# Redis and caching
+redis>=5.0.0
+
+# HTTP client
+httpx>=0.26.0
+
+# Logging
+python-json-logger>=2.0.0
+
+# Cryptography and security
+cryptography>=46.0.6
+
+# Type hints
+typing-extensions>=4.8.0
+
+# PenguinTech shared libraries
+penguin-sal[k8s]==0.2.1

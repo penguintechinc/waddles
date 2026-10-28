@@ -12,6 +12,16 @@ const communityTypes = [
   { value: 'other', label: 'Other', icon: '📌', description: 'Other community types' },
 ];
 
+/**
+ * Create/edit community form (shared by the member and super-admin create pages).
+ * @param {object} props
+ * @param {(form: Record<string, unknown>) => (void | Promise<void>)} props.onSubmit
+ * @param {boolean} [props.saving]
+ * @param {string | null} [props.error]
+ * @param {boolean} [props.showOwnerFields]
+ * @param {string} props.backLink
+ * @param {string} [props.title]
+ */
 function CommunityForm({
   onSubmit,
   saving = false,

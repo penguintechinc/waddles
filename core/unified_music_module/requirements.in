@@ -1,0 +1,2 @@
+# Core dependencies for unified_music_module
+httpx>=0.25.0  # Async HTTP client for API requests

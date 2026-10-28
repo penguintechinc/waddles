@@ -1,7 +1,7 @@
 import { lazy } from 'react';
 import { Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
-import { LoadingState } from './components/ui';
+import { LoadingState, ServedFeature } from './components/ui';
 
 // Every page is route-level code-split: the shell (layouts) ships in the main
 // bundle, each page loads on demand behind the layout's <RouteOutlet />.
@@ -220,7 +220,7 @@ function App() {
         <Route path="/communities" element={<CommunitiesPage />} />
         <Route path="/communities/:id" element={<CommunityPublicPage />} />
         <Route path="/live" element={<LiveStreamsPage />} />
-        <Route path="/users/:userId" element={<UserPublicProfile />} />
+        <Route path="/users/:userId" element={<ServedFeature feature="member-profile"><UserPublicProfile /></ServedFeature>} />
         <Route
           path="/secret"
           element={
@@ -324,19 +324,19 @@ function App() {
         <Route path="/admin/:communityId/marketplace/:source/:id" element={<AdminMarketplaceModuleDetail />} />
         <Route path="/admin/:communityId/premium" element={<AdminCommunityPremium />} />
         <Route path="/admin/:communityId/stream-overlays" element={<AdminStreamOverlays />} />
-        <Route path="/admin/:communityId/domains" element={<AdminDomains />} />
-        <Route path="/admin/:communityId/servers" element={<AdminServers />} />
+        <Route path="/admin/:communityId/domains" element={<ServedFeature feature="custom-domains"><AdminDomains /></ServedFeature>} />
+        <Route path="/admin/:communityId/servers" element={<ServedFeature feature="linked-servers"><AdminServers /></ServedFeature>} />
         <Route path="/admin/:communityId/connected-platforms" element={<AdminConnectedPlatforms />} />
-        <Route path="/admin/:communityId/mirror-groups" element={<AdminMirrorGroups />} />
+        <Route path="/admin/:communityId/mirror-groups" element={<ServedFeature feature="mirror-groups"><AdminMirrorGroups /></ServedFeature>} />
         <Route path="/admin/:communityId/leaderboard" element={<AdminLeaderboardConfig />} />
         <Route path="/admin/:communityId/profile" element={<AdminCommunityProfile />} />
         <Route path="/admin/:communityId/reputation" element={<ReputationSettings />} />
-        <Route path="/admin/:communityId/ai-insights" element={<AdminAIInsights />} />
-        <Route path="/admin/:communityId/ai-config" element={<AdminAIResearcherConfig />} />
+        <Route path="/admin/:communityId/ai-insights" element={<ServedFeature feature="ai-insights"><AdminAIInsights /></ServedFeature>} />
+        <Route path="/admin/:communityId/ai-config" element={<ServedFeature feature="ai-researcher"><AdminAIResearcherConfig /></ServedFeature>} />
         <Route path="/admin/:communityId/ai-chatter" element={<AdminAIChatterConfig />} />
-        <Route path="/admin/:communityId/bot-detection" element={<AdminBotDetection />} />
+        <Route path="/admin/:communityId/bot-detection" element={<ServedFeature feature="bot-detection"><AdminBotDetection /></ServedFeature>} />
         <Route path="/admin/:communityId/announcements" element={<AdminAnnouncements />} />
-        <Route path="/admin/:communityId/analytics" element={<AdminAnalytics />} />
+        <Route path="/admin/:communityId/analytics" element={<ServedFeature feature="community-analytics"><AdminAnalytics /></ServedFeature>} />
         <Route path="/admin/:communityId/security" element={<AdminSecurity />} />
         <Route path="/admin/:communityId/loyalty" element={<LoyaltySettings />} />
         <Route path="/admin/:communityId/loyalty/leaderboard" element={<LoyaltyLeaderboard />} />
@@ -346,7 +346,7 @@ function App() {
         <Route path="/admin/:communityId/connections" element={<CommunityConnections />} />
         <Route path="/admin/:communityId/raffle-customization" element={<AdminRaffleCustomization />} />
         <Route path="/admin/:communityId/shoutouts" element={<AdminShoutouts />} />
-        <Route path="/admin/:communityId/translation" element={<AdminTranslation />} />
+        <Route path="/admin/:communityId/translation" element={<ServedFeature feature="translation"><AdminTranslation /></ServedFeature>} />
         <Route path="/admin/:communityId/music" element={<AdminMusicDashboard />} />
         <Route path="/admin/:communityId/music/settings" element={<AdminMusicSettings />} />
         <Route path="/admin/:communityId/music/providers" element={<AdminMusicProviders />} />
@@ -366,7 +366,7 @@ function App() {
         <Route path="/admin/:communityId/rcon" element={<AdminRconServers />} />
         <Route path="/admin/:communityId/tokens" element={<AdminCommunityTokens />} />
         <Route path="/admin/:communityId/commands" element={<AdminCommands />} />
-        <Route path="/admin/:communityId/platform-settings" element={<AdminPlatformSettings />} />
+        <Route path="/admin/:communityId/platform-settings" element={<ServedFeature feature="linked-servers"><AdminPlatformSettings /></ServedFeature>} />
         <Route path="/admin/:communityId/interaction-channels" element={<AdminInteractionChannels />} />
         <Route path="/admin/:communityId/roles" element={<AdminCommunityRoles />} />
         <Route path="/admin/:communityId/members/:userId/analytics" element={<AdminMemberAnalytics />} />
@@ -417,8 +417,8 @@ function App() {
         <Route path="/superadmin/vendor-requests" element={<SuperAdminVendorRequests />} />
         <Route path="/superadmin/users" element={<SuperAdminUsers />} />
         <Route path="/superadmin/platform-config" element={<SuperAdminPlatformConfig />} />
-        <Route path="/superadmin/software-discovery" element={<SuperAdminSoftwareDiscovery />} />
-        <Route path="/superadmin/services" element={<SuperAdminServiceDiscovery />} />
+        <Route path="/superadmin/software-discovery" element={<ServedFeature feature="software-discovery"><SuperAdminSoftwareDiscovery /></ServedFeature>} />
+        <Route path="/superadmin/services" element={<ServedFeature feature="service-discovery"><SuperAdminServiceDiscovery /></ServedFeature>} />
         <Route path="/superadmin/analytics" element={<SuperAdminAnalytics />} />
         <Route path="/superadmin/tenants" element={<SuperAdminTenants />} />
         <Route path="/superadmin/marketplace-settings" element={<SuperAdminMarketplaceSettings />} />

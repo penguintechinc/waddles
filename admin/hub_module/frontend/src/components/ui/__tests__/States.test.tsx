@@ -25,6 +25,13 @@ describe('getErrorMessage', () => {
     expect(getErrorMessage({ response: { data: { detail: 'Why' } } })).toBe('Why');
   });
 
+  it('reads the nested hub-api error_response envelope', () => {
+    const envelope = { response: { status: 409, data: { success: false, error: { code: 'CONFLICT', message: 'Already a member' } } } };
+    expect(getErrorMessage(envelope)).toBe('Already a member');
+    // A nested error with no message still falls through to the status mapping.
+    expect(getErrorMessage({ response: { status: 403, data: { error: { code: 'X' } } } })).toMatch(/permission/i);
+  });
+
   it('maps 403/404 without a body to friendly text', () => {
     expect(getErrorMessage({ response: { status: 403 } })).toMatch(/permission/i);
     expect(getErrorMessage({ response: { status: 404 } })).toMatch(/could not find/i);

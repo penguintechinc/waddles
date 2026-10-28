@@ -193,7 +193,7 @@ async def create_connection(
         )
     except ApiError as exc:
         return _err(exc)
-    return _ok({"status": "success", "data": _connection_dict(connection)}, 201)
+    return _ok({"status": "success", "data": _connection_created_dict(connection)}, 201)
 
 
 @github_sync_admin_bp.route(
@@ -322,8 +322,9 @@ async def trigger_sync(
 class RepoConnectionDTO:
     """Wire shape of a GitHub repo connection (encrypted token never a field).
 
-    `webhook_secret` is intentionally exposed (admin-only routes): the community
-    admin must paste it into GitHub's webhook settings; Node's contract did the same.
+    `webhook_secret` is NEVER a field here (write-only): list/get return only the
+    `webhook_secret_set` boolean. The server-generated secret is revealed exactly
+    once, in the create response, via `_connection_created_dict`.
     """
 
     id: int
@@ -336,10 +337,17 @@ class RepoConnectionDTO:
     default_labels: list[str]
     auto_close_on_github_close: bool
     auth_type: str
-    webhook_secret: str
+    webhook_secret_set: bool
     installation_id: str | None
     is_active: bool
     token_masked: str
+
+
+def _connection_created_dict(c: svc.RepoConnection) -> dict[str, object]:
+    """Shape a freshly created connection, revealing `webhook_secret` once (never re-served)."""
+    body = _connection_dict(c)
+    body["webhook_secret"] = c.webhook_secret
+    return body
 
 
 def _connection_dict(c: svc.RepoConnection) -> dict[str, object]:
@@ -356,7 +364,7 @@ def _connection_dict(c: svc.RepoConnection) -> dict[str, object]:
             default_labels=c.default_labels,
             auto_close_on_github_close=c.auto_close_on_github_close,
             auth_type=c.auth_type,
-            webhook_secret=c.webhook_secret,
+            webhook_secret_set=bool(c.webhook_secret),
             installation_id=c.installation_id,
             is_active=c.is_active,
             token_masked=c.token_masked,
