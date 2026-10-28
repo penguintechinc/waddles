@@ -45,7 +45,7 @@ pub const SLOW_BUCKETS_S: [f64; 13] = [
 
 /// Every instrument name this module registers -- asserted against emitted
 /// data in tests and mirrored in `docs/observability/data-plane-metrics.md`.
-pub const METRIC_NAMES: [&str; 19] = [
+pub const METRIC_NAMES: [&str; 21] = [
     "waddles_executor_load_seconds",
     "waddles_executor_loads_total",
     "waddles_executor_unloads_total",
@@ -65,6 +65,8 @@ pub const METRIC_NAMES: [&str; 19] = [
     "waddles_executor_orphaned_unloads_total",
     "waddles_executor_connector_calls_total",
     "waddles_executor_connector_call_seconds",
+    "waddles_executor_wire_frames_shed_total",
+    "waddles_executor_wire_backpressure_total",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -177,6 +179,7 @@ pub fn host_call_result(outcome: &Result<(), &crate::error::ExecutorError>) -> &
         }
         Err(ExecutorError::HostCallDenied { .. }) => "error",
         Err(ExecutorError::ConnectionUnavailable) => "connection_lost",
+        Err(ExecutorError::WriterBackpressure(_)) => "backpressure",
         Err(_) => "malformed",
     }
 }
@@ -203,6 +206,8 @@ pub struct ExecutorMetrics {
     orphaned_unloads: Counter<u64>,
     connector_calls: Counter<u64>,
     connector_call_seconds: Histogram<f64>,
+    wire_frames_shed: Counter<u64>,
+    wire_backpressure: Counter<u64>,
 }
 
 /// Keeps `waddles_executor_invocations_active` accurate on every exit path
@@ -308,6 +313,14 @@ impl ExecutorMetrics {
             heartbeat_timeouts: counter(
                 "waddles_executor_heartbeat_timeouts_total",
                 "Sessions dropped because no frame arrived within the stale threshold",
+            ),
+            wire_frames_shed: counter(
+                "waddles_executor_wire_frames_shed_total",
+                "Sheddable (telemetry) frames dropped because the outbound writer queue was full",
+            ),
+            wire_backpressure: counter(
+                "waddles_executor_wire_backpressure_total",
+                "Must-deliver frames that hit a full writer queue, by outcome (waited, timeout)",
             ),
             orphaned_unloads: counter(
                 "waddles_executor_orphaned_unloads_total",
@@ -505,6 +518,22 @@ impl ExecutorMetrics {
     /// (`waddles_executor_heartbeat_timeouts_total`).
     pub fn record_heartbeat_timeout(&self) {
         self.heartbeat_timeouts.add(1, &[]);
+    }
+
+    /// Counts one sheddable frame dropped on a full writer queue
+    /// (`waddles_executor_wire_frames_shed_total`); `class` is a static
+    /// capability name, never guest-supplied.
+    pub fn record_frame_shed(&self, class: &'static str) {
+        self.wire_frames_shed
+            .add(1, &[KeyValue::new("class", class)]);
+    }
+
+    /// Counts one must-deliver frame that met a full writer queue
+    /// (`waddles_executor_wire_backpressure_total`); `outcome` is `waited`
+    /// or `timeout`.
+    pub fn record_wire_backpressure(&self, outcome: &'static str) {
+        self.wire_backpressure
+            .add(1, &[KeyValue::new("outcome", outcome)]);
     }
 }
 
@@ -1001,6 +1030,8 @@ mod tests {
         m.record_reconnect();
         m.record_heartbeat_timeout();
         m.record_connector_call("a", "on-frame", "ok", Duration::from_millis(1));
+        m.record_frame_shed("log");
+        m.record_wire_backpressure("waited");
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -1012,7 +1043,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 19);
+        assert_eq!(METRIC_NAMES.len(), 21);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",

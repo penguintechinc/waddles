@@ -270,7 +270,7 @@ def _comment_dto(row: Any) -> CommentDTO:
 
 
 @support_admin_bp.route("/<int:community_id>/support/categories", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def list_categories(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/categories` -- open to any authenticated tenant member."""
     if not _tenant_ok(community_id):
@@ -281,8 +281,8 @@ async def list_categories(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @support_admin_bp.route("/<int:community_id>/support/categories", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.support:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.support:admin")  # type: ignore[misc]
 @validate_request(CreateCategoryRequest)
 async def create_category(
     data: CreateCategoryRequest, community_id: int
@@ -306,8 +306,8 @@ async def create_category(
 
 
 @support_admin_bp.route("/<int:community_id>/support/categories/<int:category_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.support:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.support:admin")  # type: ignore[misc]
 @validate_request(UpdateCategoryRequest)
 async def update_category(
     data: UpdateCategoryRequest, community_id: int, category_id: int
@@ -335,8 +335,8 @@ async def update_category(
 @support_admin_bp.route(
     "/<int:community_id>/support/categories/<int:category_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.support:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.support:admin")  # type: ignore[misc]
 async def delete_category(community_id: int, category_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/support/categories/<categoryId>`."""
     if not _tenant_ok(community_id):
@@ -355,8 +355,8 @@ async def delete_category(community_id: int, category_id: int) -> tuple[dict[str
 
 
 @support_admin_bp.route("/<int:community_id>/support/tickets", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.support:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.support:admin")  # type: ignore[misc]
 async def list_tickets(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/tickets` -- filters + pagination."""
     if not _tenant_ok(community_id):
@@ -380,8 +380,8 @@ async def list_tickets(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @support_admin_bp.route("/<int:community_id>/support/tickets/<int:ticket_id>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.support:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.support:admin")  # type: ignore[misc]
 async def get_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/tickets/<ticketId>` -- includes internal comments."""
     if not _tenant_ok(community_id):
@@ -402,8 +402,8 @@ async def get_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, objec
 @support_admin_bp.route(
     "/<int:community_id>/support/tickets/<int:ticket_id>/status", methods=["PUT"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.support:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.support:admin")  # type: ignore[misc]
 @validate_request(UpdateStatusRequest)
 async def update_ticket_status(
     data: UpdateStatusRequest, community_id: int, ticket_id: int
@@ -422,8 +422,8 @@ async def update_ticket_status(
 @support_admin_bp.route(
     "/<int:community_id>/support/tickets/<int:ticket_id>/assign", methods=["PUT"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.support:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.support:admin")  # type: ignore[misc]
 @validate_request(AssignRequest)
 async def assign_ticket(
     data: AssignRequest, community_id: int, ticket_id: int
@@ -442,8 +442,8 @@ async def assign_ticket(
 @support_admin_bp.route(
     "/<int:community_id>/support/tickets/<int:ticket_id>/priority", methods=["PUT"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.support:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.support:admin")  # type: ignore[misc]
 @validate_request(UpdatePriorityRequest)
 async def update_ticket_priority(
     data: UpdatePriorityRequest, community_id: int, ticket_id: int
@@ -462,8 +462,8 @@ async def update_ticket_priority(
 @support_admin_bp.route(
     "/<int:community_id>/support/tickets/<int:ticket_id>/comments", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.support:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.support:admin")  # type: ignore[misc]
 @validate_request(AddCommentRequest)
 async def add_comment(
     data: AddCommentRequest, community_id: int, ticket_id: int
@@ -490,8 +490,8 @@ async def add_comment(
 
 
 @support_admin_bp.route("/<int:community_id>/support/stats", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.support:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.support:admin")  # type: ignore[misc]
 async def get_ticket_stats(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/stats`."""
     if not _tenant_ok(community_id):
@@ -518,7 +518,7 @@ async def get_ticket_stats(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @support_member_bp.route("/<int:community_id>/support/submit", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(CreateTicketRequest)
 async def submit_ticket(
     data: CreateTicketRequest, community_id: int
@@ -548,7 +548,7 @@ async def submit_ticket(
 
 
 @support_member_bp.route("/<int:community_id>/support/my-tickets", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_my_tickets(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/my-tickets`."""
     if not _tenant_ok(community_id):
@@ -560,7 +560,7 @@ async def get_my_tickets(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @support_member_bp.route("/<int:community_id>/support/my-tickets/<int:ticket_id>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_my_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/my-tickets/<ticketId>` -- reporter-only (SECURITY FIX)."""
     if not _tenant_ok(community_id):
@@ -586,7 +586,7 @@ async def get_my_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, ob
 @support_member_bp.route(
     "/<int:community_id>/support/my-tickets/<int:ticket_id>/comments", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(AddOwnCommentRequest)
 async def add_own_comment(
     data: AddOwnCommentRequest, community_id: int, ticket_id: int

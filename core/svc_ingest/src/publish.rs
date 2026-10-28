@@ -45,6 +45,14 @@ pub fn install_scope_resolver(resolver: Arc<ScopeResolver<HubScopeSource>>) -> b
     SCOPE_RESOLVER.set(resolver).is_ok()
 }
 
+/// `true` once [`install_scope_resolver`] has run -- dynamic Twitch sessions
+/// publish under per-community scope from it and refuse to start without.
+pub fn scope_resolver_installed() -> bool {
+    SCOPE_RESOLVER.get().is_some()
+}
+
+use crate::identity_crypto::{self, DekProvider, DekUnavailableError};
+
 /// Fixed namespace for PA-WORKSTREAM's deterministic fixed-platform
 /// workstream ids. Generated once and never regenerated -- changing it
 /// would change every fixed-platform `workstream_id` on next deploy,
@@ -109,6 +117,28 @@ pub enum PublishError {
     /// stamped -- a producer bug; refused loudly rather than published.
     #[error("inconsistent scope refused: {0}")]
     InconsistentScope(String),
+    /// The session's bound community id differs from the community resolved
+    /// for its channel: the event is DROPPED (tenant-isolation guard).
+    #[error("event dropped, session community {bound} != resolved community {resolved}")]
+    ScopeMismatch {
+        /// Community id the session was bound to (numeric, non-PII).
+        bound: i64,
+        /// Community id the scope resolver returned.
+        resolved: i64,
+    },
+    /// The tenant's identity-field DEK could not be resolved -- fail
+    /// closed (`security.md`/`critical-rules.md` PII Tokenization): this
+    /// event is held (never appended, never written plaintext) rather than
+    /// silently written unencrypted. See `crate::identity_crypto`'s module
+    /// doc. Full dead-letter-queue persistence for this path is a
+    /// documented gap: `penguin_spine::SpineClient` exposes no raw
+    /// Valkey-list write primitive today (it is `XADD`/`XREADGROUP`-only,
+    /// see `src/outbound.rs`'s own doc comment on why the Twitch relay
+    /// queue uses a *direct* `redis` client instead) -- wiring a
+    /// `{stream}:identity_deadletter` `LPUSH` here is `// TODO(M5)`,
+    /// tracked alongside this crate's other documented crate-gap TODOs.
+    #[error("identity-field dek unavailable, event held (never written plaintext): {0}")]
+    DekUnavailable(#[from] DekUnavailableError),
 }
 
 /// Producer-side guard (finding 4): the authoritative numeric scope and the
@@ -144,10 +174,13 @@ fn assert_scope_consistent(resolved: &ResolvedScope, scope: &Scope) -> Result<()
 /// suppress this if the trait is only used in your own code" escape hatch
 /// applies literally -- `svc-ingest` is a deployed service binary, not a
 /// published library other crates implement this trait against.
-#[allow(async_fn_in_trait)]
 pub trait EventAppender: Send + Sync {
     /// Performs the `XADD`, returning the new entry id.
-    async fn append(&self, stream: &str, env: &StageEnvelope) -> Result<String, SpineError>;
+    fn append(
+        &self,
+        stream: &str,
+        env: &StageEnvelope,
+    ) -> impl std::future::Future<Output = Result<String, SpineError>> + Send;
 }
 
 impl EventAppender for SpineClient {
@@ -184,7 +217,7 @@ fn mint_trace() -> Trace {
 /// bound by `compute_binding_mac_v3`, and `scope` is ignored in favor of the
 /// resolved scope. Without it, behavior is the unchanged v2/static path.
 #[allow(clippy::too_many_arguments)]
-pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
+pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
     appender: &A,
     metrics: &M,
     keyring: &KeyRing,
@@ -194,6 +227,8 @@ pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
     workstream_id: &str,
     session_id: Option<&str>,
     event: PlatformEvent,
+    dek_provider: &D,
+    identity_metrics: &prometheus::IntCounterVec,
 ) -> Result<String, PublishError> {
     publish_event_with(
         SCOPE_RESOLVER.get().map(Arc::as_ref),
@@ -206,6 +241,44 @@ pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
         workstream_id,
         session_id,
         event,
+        dek_provider,
+        identity_metrics,
+    )
+    .await
+}
+
+/// [`publish_event`] for a session bound to a specific community: the
+/// resolved scope's community MUST equal `bound_community_id` or the event is
+/// dropped with [`PublishError::ScopeMismatch`] (counted + WARN-logged).
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_event_bound<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
+    bound_community_id: i64,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    source_id: &str,
+    workstream_id: &str,
+    session_id: Option<&str>,
+    event: PlatformEvent,
+    dek_provider: &D,
+    identity_metrics: &prometheus::IntCounterVec,
+) -> Result<String, PublishError> {
+    publish_event_with_binding(
+        SCOPE_RESOLVER.get().map(Arc::as_ref),
+        Some(bound_community_id),
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        source_id,
+        workstream_id,
+        session_id,
+        event,
+        dek_provider,
+        identity_metrics,
     )
     .await
 }
@@ -213,7 +286,12 @@ pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
 /// [`publish_event`] with an explicit resolver (`None` = v2/static path) --
 /// the seam tests drive directly instead of the process-wide static.
 #[allow(clippy::too_many_arguments)]
-pub async fn publish_event_with<A: EventAppender, M: SpineMetrics + ?Sized, S: ScopeSource>(
+pub async fn publish_event_with<
+    A: EventAppender,
+    M: SpineMetrics + ?Sized,
+    S: ScopeSource,
+    D: DekProvider,
+>(
     resolver: Option<&ScopeResolver<S>>,
     appender: &A,
     metrics: &M,
@@ -224,6 +302,49 @@ pub async fn publish_event_with<A: EventAppender, M: SpineMetrics + ?Sized, S: S
     workstream_id: &str,
     session_id: Option<&str>,
     event: PlatformEvent,
+    dek_provider: &D,
+    identity_metrics: &prometheus::IntCounterVec,
+) -> Result<String, PublishError> {
+    publish_event_with_binding(
+        resolver,
+        None,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        source_id,
+        workstream_id,
+        session_id,
+        event,
+        dek_provider,
+        identity_metrics,
+    )
+    .await
+}
+
+/// Shared publish body; `bound_community_id` (`Some` for per-community
+/// sessions) is checked against the resolved scope before anything is stamped.
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_event_with_binding<
+    A: EventAppender,
+    M: SpineMetrics + ?Sized,
+    S: ScopeSource,
+    D: DekProvider,
+>(
+    resolver: Option<&ScopeResolver<S>>,
+    bound_community_id: Option<i64>,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    source_id: &str,
+    workstream_id: &str,
+    session_id: Option<&str>,
+    mut event: PlatformEvent,
+    dek_provider: &D,
+    identity_metrics: &prometheus::IntCounterVec,
 ) -> Result<String, PublishError> {
     // v3: resolve the authoritative numeric scope from the event's platform
     // source (Discord guild id / Twitch channel login = `source.account_id`).
@@ -248,6 +369,21 @@ pub async fn publish_event_with<A: EventAppender, M: SpineMetrics + ?Sized, S: S
         }
         None => None,
     };
+    if let (Some(bound), Some(res), Some(r)) = (bound_community_id, resolved.as_ref(), resolver) {
+        if bound != i64::from(res.community_id) {
+            r.record_scope_mismatch();
+            tracing::warn!(
+                bound_community_id = bound,
+                resolved_community_id = res.community_id,
+                tenant_id = res.tenant_id,
+                "dropping event: session community disagrees with resolved scope"
+            );
+            return Err(PublishError::ScopeMismatch {
+                bound,
+                resolved: i64::from(res.community_id),
+            });
+        }
+    }
     let v3_scope = resolved.as_ref().map(ResolvedScope::spine_scope);
     let scope = match (&resolved, &v3_scope) {
         (Some(res), Some(sc)) => {
@@ -264,6 +400,68 @@ pub async fn publish_event_with<A: EventAppender, M: SpineMetrics + ?Sized, S: S
         .expect("mint_trace always produces a valid W3C traceparent")
         .to_string();
     let event_id = Uuid::new_v4().to_string();
+
+    // critical-rules.md PII Tokenization / security.md: every identity-
+    // bearing field this event carries -- top-level `actor` plus every
+    // `identity_crypto::PAYLOAD_IDENTITY_FIELDS` payload field present as a
+    // string (author/display_name/user_login/user_display_name/
+    // broadcaster_login/text) -- is AES-256-GCM envelope-encrypted here,
+    // one independent envelope per field, each AAD-bound to this exact
+    // (tenant, stream, <field name>, event_id, dek_version) before the
+    // XADD, so no identity value or handle-bearing message text ever sits
+    // plaintext on a stream outside the PII boundary. See
+    // `identity_crypto`'s module doc for the full field list and the
+    // (deliberate) `channel_name` exclusion. Fail closed: a DEK-
+    // unavailable error returns before any field is touched or the event
+    // is appended -- see `PublishError::DekUnavailable`'s doc comment.
+    let has_identity_payload_field = identity_crypto::PAYLOAD_IDENTITY_FIELDS
+        .iter()
+        .any(|field| {
+            matches!(
+                event.payload.get(*field),
+                Some(serde_json::Value::String(_))
+            )
+        });
+    if event.actor.is_some() || has_identity_payload_field {
+        match dek_provider.get_dek(&scope.tenant).await {
+            Ok((dek, dek_version)) => {
+                let encrypt_field = |value: &str, field: &str| -> String {
+                    let envelope = identity_crypto::encrypt_identity_value(
+                        value,
+                        &dek,
+                        dek_version,
+                        &scope.tenant,
+                        &stream,
+                        field,
+                        &event_id,
+                    );
+                    serde_json::to_string(&envelope)
+                        .expect("JsonEnvelope is always representable as JSON")
+                };
+
+                if let Some(actor) = event.actor.take() {
+                    event.actor = Some(encrypt_field(&actor, "actor"));
+                }
+                for field in identity_crypto::PAYLOAD_IDENTITY_FIELDS {
+                    if let Some(serde_json::Value::String(value)) = event.payload.get(*field) {
+                        let ciphertext = encrypt_field(value, field);
+                        event
+                            .payload
+                            .insert((*field).to_string(), serde_json::Value::String(ciphertext));
+                    }
+                }
+                identity_metrics
+                    .with_label_values(&[scope.tenant.as_str(), "success"])
+                    .inc();
+            }
+            Err(err) => {
+                identity_metrics
+                    .with_label_values(&[scope.tenant.as_str(), "dek_unavailable"])
+                    .inc();
+                return Err(PublishError::DekUnavailable(err));
+            }
+        }
+    }
 
     let mac = match &resolved {
         Some(res) => compute_binding_mac_v3(
@@ -405,6 +603,47 @@ mod tests {
         KeyRing::new(vec![("test-kid".to_string(), vec![7u8; 32])])
     }
 
+    fn test_identity_metrics() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_identity_encryption_total", "test-only"),
+            &["tenant", "status"],
+        )
+        .unwrap()
+    }
+
+    /// Always resolves a fixed test DEK -- the "identity encryption
+    /// succeeds" path through [`publish_event`].
+    struct FakeDekProvider;
+
+    impl DekProvider for FakeDekProvider {
+        async fn get_dek(
+            &self,
+            _tenant_id: &str,
+        ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
+            Ok((zeroize::Zeroizing::new([9u8; 32]), 3))
+        }
+    }
+
+    fn test_dek_provider() -> FakeDekProvider {
+        FakeDekProvider
+    }
+
+    /// Always fails closed -- the "identity DEK unavailable" path.
+    struct FailingDekProvider;
+
+    impl DekProvider for FailingDekProvider {
+        async fn get_dek(
+            &self,
+            tenant_id: &str,
+        ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
+            Err(DekUnavailableError {
+                tenant_id: tenant_id.to_string(),
+                dek_version: None,
+                reason: "no broker configured in this test".to_string(),
+            })
+        }
+    }
+
     #[tokio::test]
     async fn writes_onto_the_correct_source_stream_with_d30_fields_populated() {
         let appender = FakeAppender {
@@ -424,6 +663,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -495,6 +736,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -533,6 +776,8 @@ mod tests {
             "ws-2",
             Some("session-abc"),
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -560,6 +805,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -573,6 +820,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -605,6 +854,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap_err();
@@ -631,6 +882,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap_err();
@@ -659,6 +912,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -706,6 +961,8 @@ mod tests {
             "ws-1",
             None,
             event,
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -758,6 +1015,7 @@ mod tests {
     struct NoMetrics;
     impl ResolverMetrics for NoMetrics {
         fn scope_resolution(&self, _platform: &str, _outcome: &'static str) {}
+        fn scope_mismatch(&self) {}
     }
 
     fn resolver_for(reply: Result<RawScope, FetchError>) -> ScopeResolver<FixedSource> {
@@ -796,11 +1054,154 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
         let (stream, env) = appender.calls.lock().unwrap()[0].clone();
         (stream, env, keyring)
+    }
+
+    #[derive(Default)]
+    struct CountMismatch(std::sync::atomic::AtomicUsize);
+    impl ResolverMetrics for CountMismatch {
+        fn scope_resolution(&self, _platform: &str, _outcome: &'static str) {}
+        fn scope_mismatch(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    async fn publish_bound(
+        bound: i64,
+        counter: &Arc<CountMismatch>,
+    ) -> (Result<String, PublishError>, usize) {
+        let resolver = ScopeResolver::new(
+            FixedSource(resolved_ok()),
+            ResolverConfig::default(),
+            counter.clone(),
+        );
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let res = publish_event_with_binding(
+            Some(&resolver),
+            Some(bound),
+            &appender,
+            &RecordingMetrics::default(),
+            &test_keyring(),
+            "test-kid",
+            &Scope::new("static-tenant", None),
+            "tw-channelA",
+            "ws-1",
+            None,
+            test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
+        )
+        .await;
+        let n = appender.calls.lock().unwrap().len();
+        (res, n)
+    }
+
+    // regression: tenant isolation -- a session bound to community X must
+    // never publish under the community the hub resolved for its channel
+    // when they disagree.
+    #[tokio::test]
+    async fn bound_community_mismatch_drops_the_event_and_counts_it() {
+        let counter = Arc::new(CountMismatch::default());
+        let (res, appended) = publish_bound(77, &counter).await; // resolved = 9
+        assert!(matches!(
+            res,
+            Err(PublishError::ScopeMismatch {
+                bound: 77,
+                resolved: 9
+            })
+        ));
+        assert_eq!(appended, 0, "mismatched event must not reach the spine");
+        assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn bound_community_match_publishes_normally_without_counting() {
+        let counter = Arc::new(CountMismatch::default());
+        let (res, appended) = publish_bound(9, &counter).await;
+        assert!(res.is_ok());
+        assert_eq!(appended, 1);
+        assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// security.md / critical-rules.md PII Tokenization: the raw
+    /// `event.actor` value ("alice") must never appear anywhere in the
+    /// serialized envelope this crate `XADD`s.
+    #[tokio::test]
+    async fn actor_is_never_written_plaintext_onto_the_stream() {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+        let scope = Scope::new("acme", None);
+        publish_event(
+            &appender,
+            &metrics,
+            &keyring,
+            "test-kid",
+            &scope,
+            "tw-channelA",
+            "ws-1",
+            None,
+            test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
+        )
+        .await
+        .unwrap();
+        let calls = appender.calls.lock().unwrap();
+        let serialized = serde_json::to_string(&calls[0].1).unwrap();
+        assert!(
+            !serialized.contains("alice"),
+            "raw actor value must never appear in the serialized envelope"
+        );
+        // The encrypted replacement is a JSON envelope object encoded as a
+        // string, matching PR #440's `json.dumps(ciphertext_envelope)`
+        // wire shape exactly.
+        let actor_field = calls[0].1.event.actor.as_deref().unwrap();
+        let parsed: crate::identity_crypto::JsonEnvelope =
+            serde_json::from_str(actor_field).unwrap();
+        assert_eq!(parsed.dek_version, 3);
+    }
+
+    /// Fail-closed: a DEK-unavailable tenant must never reach `XADD`.
+    #[tokio::test]
+    async fn dek_unavailable_fails_closed_before_any_append() {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+        let scope = Scope::new("acme", None);
+        let err = publish_event(
+            &appender,
+            &metrics,
+            &keyring,
+            "test-kid",
+            &scope,
+            "tw-channelA",
+            "ws-1",
+            None,
+            test_event(),
+            &FailingDekProvider,
+            &test_identity_metrics(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, PublishError::DekUnavailable(_)));
+        assert!(
+            appender.calls.lock().unwrap().is_empty(),
+            "held event must never reach the spine"
+        );
     }
 
     #[tokio::test]
@@ -872,6 +1273,8 @@ mod tests {
                 "ws-1",
                 None,
                 test_event(),
+                &FakeDekProvider,
+                &test_identity_metrics(),
             )
             .await;
             assert!(matches!(res, Err(PublishError::Unresolved(_))), "{res:?}");
@@ -881,6 +1284,199 @@ mod tests {
             );
         }
     }
+
+
+    /// A `None` actor (system/account-level event) never touches the DEK
+    /// provider at all -- no encryption needed, no DEK resolution attempt.
+    #[tokio::test]
+    async fn no_identity_fields_skips_identity_encryption_entirely() {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+        let scope = Scope::new("acme", None);
+        let mut event = test_event();
+        event.actor = None;
+        // `test_event()`'s payload carries `text`, one of
+        // `identity_crypto::PAYLOAD_IDENTITY_FIELDS` -- clear it too so
+        // this event genuinely carries zero identity-bearing fields and
+        // the DEK provider (which fails closed) is never even called.
+        event.payload.remove("text");
+        publish_event(
+            &appender,
+            &metrics,
+            &keyring,
+            "test-kid",
+            &scope,
+            "tw-channelA",
+            "ws-1",
+            None,
+            event,
+            &FailingDekProvider,
+            &test_identity_metrics(),
+        )
+        .await
+        .unwrap();
+        let published = &appender.calls.lock().unwrap()[0].1.event;
+        assert_eq!(published.actor, None);
+        assert_eq!(published.payload.get("text"), None);
+    }
+
+    /// A payload identity field (`text`) present with a `None` `actor`
+    /// still triggers DEK resolution and encryption -- identity fields are
+    /// evaluated independently of `actor`, not gated by its presence.
+    #[tokio::test]
+    async fn payload_identity_field_alone_still_triggers_encryption() {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+        let scope = Scope::new("acme", None);
+        let mut event = test_event();
+        event.actor = None;
+        publish_event(
+            &appender,
+            &metrics,
+            &keyring,
+            "test-kid",
+            &scope,
+            "tw-channelA",
+            "ws-1",
+            None,
+            event,
+            &test_dek_provider(),
+            &test_identity_metrics(),
+        )
+        .await
+        .unwrap();
+        let published = &appender.calls.lock().unwrap()[0].1.event;
+        assert_eq!(published.actor, None);
+        let text_field = published
+            .payload
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        let parsed: crate::identity_crypto::JsonEnvelope =
+            serde_json::from_str(text_field).unwrap();
+        assert_eq!(parsed.dek_version, 3);
+    }
+
+    /// Table test (coordinator follow-up): for realistic Discord and Twitch
+    /// normalizer output, asserts NO plaintext identity value or
+    /// handle-bearing text substring survives into the serialized stream
+    /// entry `publish_event` `XADD`s -- covers every normalizer this crate
+    /// ships (Twitch IRC, Twitch EventSub, Discord Gateway), each with a
+    /// realistic `@handle`/`<@id>` mention in the message body. A non-zero
+    /// case count is asserted directly (`critical-rules.md` Verification
+    /// Integrity: a loop that silently iterates zero times would pass
+    /// vacuously).
+    #[tokio::test]
+    async fn no_normalizer_output_leaks_plaintext_identity_or_mention_text() {
+        struct Case {
+            name: &'static str,
+            event: PlatformEvent,
+            /// Every plaintext substring that must NOT appear anywhere in
+            /// the serialized envelope once `publish_event` has run.
+            forbidden_substrings: &'static [&'static str],
+        }
+
+        let twitch_irc_msg = penguin_connector_twitch::irc::ChatMessage {
+            channel: "#somechannel".to_string(),
+            sender: "chatterbox99".to_string(),
+            text: "hey @moderator_jane can you check this out".to_string(),
+            tags: Some("display-name=ChatterBox99;user-id=555".to_string()),
+        };
+        let discord_msg = penguin_connector_discord::gateway::ChatMessage {
+            guild_id: Some("111".to_string()),
+            channel_id: "222".to_string(),
+            message_id: "333".to_string(),
+            author_id: "444".to_string(),
+            author_username: "discorduser42".to_string(),
+            content: "thanks <@999888777> for the heads up".to_string(),
+        };
+        let eventsub_event = serde_json::json!({
+            "broadcaster_user_id": "111",
+            "broadcaster_user_login": "channelowner_login",
+            "from_broadcaster_user_id": "222",
+            "from_broadcaster_user_login": "raider_login",
+            "from_broadcaster_user_name": "RaiderDisplayName",
+            "viewers": 42,
+        });
+
+        let cases = vec![
+            Case {
+                name: "twitch_irc",
+                event: crate::normalize::normalize_twitch_irc(&twitch_irc_msg),
+                forbidden_substrings: &["chatterbox99", "ChatterBox99", "moderator_jane"],
+            },
+            Case {
+                name: "discord_gateway",
+                event: crate::normalize::normalize_discord(
+                    &discord_msg,
+                    &crate::normalize::DiscordPermissions::default(),
+                ),
+                forbidden_substrings: &["discorduser42", "999888777"],
+            },
+            Case {
+                name: "twitch_eventsub_raid",
+                event: crate::normalize::normalize_twitch_eventsub(
+                    "channel.raid",
+                    &eventsub_event,
+                    None,
+                ),
+                forbidden_substrings: &["channelowner_login", "raider_login", "RaiderDisplayName"],
+            },
+        ];
+
+        // Verification Integrity: assert the denominator before using it --
+        // a scanner over zero cases would otherwise report a vacuous pass.
+        assert!(
+            !cases.is_empty(),
+            "table test must examine at least one case"
+        );
+        let mut examined = 0;
+        for case in cases {
+            let appender = FakeAppender {
+                calls: Mutex::new(vec![]),
+                fail: false,
+            };
+            let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+            let scope = Scope::new("acme", None);
+            publish_event(
+                &appender,
+                &metrics,
+                &keyring,
+                "test-kid",
+                &scope,
+                "src-under-test",
+                "ws-1",
+                None,
+                case.event,
+                &test_dek_provider(),
+                &test_identity_metrics(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("case {:?}: publish_event failed: {e}", case.name));
+
+            let calls = appender.calls.lock().unwrap();
+            let serialized = serde_json::to_string(&calls[0].1).unwrap();
+            for needle in case.forbidden_substrings {
+                assert!(
+                    !serialized.contains(needle),
+                    "case {:?}: forbidden plaintext {needle:?} leaked into the serialized envelope",
+                    case.name
+                );
+            }
+            examined += 1;
+        }
+        assert_eq!(
+            examined, 3,
+            "expected to examine exactly the 3 defined normalizer cases"
+        );
+    }
+
 
     #[tokio::test]
     async fn sourceless_and_dm_events_are_dropped_without_resolving() {
@@ -907,6 +1503,8 @@ mod tests {
                 "ws-1",
                 None,
                 ev,
+                &test_dek_provider(),
+                &test_identity_metrics(),
             )
             .await;
             assert!(matches!(
@@ -924,7 +1522,7 @@ mod tests {
             fail: false,
         };
         let keyring = test_keyring();
-        publish_event_with::<_, _, FixedSource>(
+        publish_event_with::<_, _, FixedSource, _>(
             None,
             &appender,
             &RecordingMetrics::default(),
@@ -935,6 +1533,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();

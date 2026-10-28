@@ -234,8 +234,9 @@ function AdminConnectedPlatforms() {
             <h3 className="font-semibold text-sky-100">New OAuth Credential</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">Platform</label>
+                <label htmlFor="admin-connected-platforms-platform" className="block text-sm font-medium text-sky-200 mb-1">Platform</label>
                 <input
+                  id="admin-connected-platforms-platform"
                   className="input w-full"
                   placeholder="e.g. twitch, discord"
                   value={oauthForm.platform}
@@ -244,8 +245,9 @@ function AdminConnectedPlatforms() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">Scopes (comma-separated)</label>
+                <label htmlFor="admin-connected-platforms-scopes-comma-separated" className="block text-sm font-medium text-sky-200 mb-1">Scopes (comma-separated)</label>
                 <input
+                  id="admin-connected-platforms-scopes-comma-separated"
                   className="input w-full"
                   placeholder="e.g. read:user, channel:manage"
                   value={oauthForm.scopes}
@@ -253,8 +255,9 @@ function AdminConnectedPlatforms() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">Client ID</label>
+                <label htmlFor="admin-connected-platforms-client-id" className="block text-sm font-medium text-sky-200 mb-1">Client ID</label>
                 <input
+                  id="admin-connected-platforms-client-id"
                   className="input w-full"
                   placeholder="Client ID"
                   value={oauthForm.clientId}
@@ -263,8 +266,9 @@ function AdminConnectedPlatforms() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">Client Secret</label>
+                <label htmlFor="admin-connected-platforms-client-secret" className="block text-sm font-medium text-sky-200 mb-1">Client Secret</label>
                 <input
+                  id="admin-connected-platforms-client-secret"
                   type="password"
                   className="input w-full"
                   placeholder="Client Secret"

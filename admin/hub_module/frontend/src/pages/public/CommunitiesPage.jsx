@@ -92,6 +92,7 @@ function CommunitiesPage() {
       <div className="flex flex-col sm:flex-row gap-4 mb-8 max-w-2xl mx-auto">
         <div className="flex-1">
           <input
+            aria-label="Search communities"
             type="text"
             placeholder="Search communities..."
             value={search}
@@ -101,6 +102,7 @@ function CommunitiesPage() {
         </div>
         <div className="sm:w-48">
           <select
+            aria-label="Filter by platform"
             value={platformFilter}
             onChange={(e) => setPlatformFilter(e.target.value)}
             className="input w-full"
@@ -114,6 +116,7 @@ function CommunitiesPage() {
         </div>
         <div className="sm:w-48">
           <select
+            aria-label="Filter by type"
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value)}
             className="input w-full"

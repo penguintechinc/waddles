@@ -98,6 +98,12 @@ class ConnectionNotUsable(ProviderConnectionError):
         self.reason = reason
 
 
+class StaticScopeRequired(ProviderConnectionError):  # noqa: N818 - sibling of the other refusals
+    """The caller may resolve OAuth connections but not static-secret kinds (least privilege)."""
+
+    code = "static_scope_required"
+
+
 class VaultUnavailable(ProviderConnectionError):
     """The at-rest encryption key is missing or malformed; the store refuses to run without it."""
 
@@ -114,3 +120,9 @@ class SchemaMissing(ProviderConnectionError):
     """The connection tables or migration-0058 columns are not present."""
 
     code = "schema_missing"
+
+
+class FeatureNotEnabled(ProviderConnectionError):
+    """The tenant's plan / flag does not allow this operation (mapped to HTTP 402 by the API)."""
+
+    code = "feature_not_enabled"

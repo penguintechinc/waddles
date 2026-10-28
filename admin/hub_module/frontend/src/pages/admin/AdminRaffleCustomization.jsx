@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../../services/api';
+import { onActivate } from '../../components/ui/a11y';
 import {
   SpeakerWaveIcon,
   ArrowUpTrayIcon,
@@ -238,6 +239,9 @@ function EventCard({ eventDef, customization, onSave, onDelete, onUpload }) {
             </div>
           ) : (
             <div
+              role="button"
+              tabIndex={0}
+              onKeyDown={onActivate(() => fileInputRef.current?.click())}
               className="cursor-pointer"
               onClick={() => fileInputRef.current?.click()}
             >
@@ -249,6 +253,7 @@ function EventCard({ eventDef, customization, onSave, onDelete, onUpload }) {
           )}
         </div>
         <input
+          aria-label="Upload sound file"
           ref={fileInputRef}
           type="file"
           accept=".mp3,.ogg,.wav,audio/mpeg,audio/ogg,audio/wav"
@@ -264,6 +269,7 @@ function EventCard({ eventDef, customization, onSave, onDelete, onUpload }) {
           <span className="text-xs font-medium text-navy-300 uppercase tracking-wider">Message Template</span>
         </div>
         <textarea
+          aria-label="Enter message template"
           value={messageTemplate}
           onChange={(e) => handleTemplateChange(e.target.value)}
           rows={3}

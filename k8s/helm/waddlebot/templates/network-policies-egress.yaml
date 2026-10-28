@@ -63,6 +63,59 @@ spec:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
               protocol: TCP
+    {{- /*
+      Valkey dual-listener TLS port. Rust data-plane pods use
+      rediss://<svc>:<tls.port> when TLS material is available; permit that
+      listener only under the same condition used by the deployment and clients.
+    */}}
+    {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: redis
+            app.kubernetes.io/component: cache
+      toPorts:
+        - ports:
+            - port: {{ .Values.infrastructure.redis.tls.port | quote }}
+              protocol: TCP
+    {{- end }}
+    {{- if .Values.infrastructure.valkeyDurable.enabled }}
+    # Durable delivery-state Valkey (templates/infrastructure/valkey-durable.yaml): spine
+    # streams / transport queues / acks. TLS port only when TLS is on (plaintext listener is
+    # disabled server-side); plaintext port only in the TLS-off local/ci path.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: valkey-durable
+            app.kubernetes.io/component: delivery-store
+      toPorts:
+        - ports:
+            {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+            - port: {{ .Values.infrastructure.redis.tls.port | quote }}
+              protocol: TCP
+            {{- else }}
+            - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
+              protocol: TCP
+            {{- end }}
+    {{- end }}
+    {{- if .Values.infrastructure.valkeyKv.enabled }}
+    # Dedicated bundle-kv Valkey (templates/infrastructure/valkey-kv.yaml): quota counters.
+    # TLS port only when TLS is on (plaintext listener disabled server-side).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: valkey-kv
+            app.kubernetes.io/component: kv-store
+      toPorts:
+        - ports:
+            {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+            - port: {{ .Values.infrastructure.redis.tls.port | quote }}
+              protocol: TCP
+            {{- else }}
+            - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
+              protocol: TCP
+            {{- end }}
+    {{- end }}
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/instance: {{ .Release.Name }}
@@ -81,7 +134,8 @@ spec:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.seaweedfsPort | quote }}
               protocol: TCP
-    # hub-api gRPC.
+    # hub-api gRPC + HTTP readiness (the wait-for-hub-api init container probes
+    # /ready on the HTTP port; without it every data-plane pod sticks in Init).
     - toEndpoints:
         - matchLabels:
             {{- include "waddlebot.selectorLabels" . | nindent 12 }}
@@ -89,6 +143,8 @@ spec:
       toPorts:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.hubApiGrpcPort | quote }}
+              protocol: TCP
+            - port: {{ .Values.egressPolicy.inCluster.hubApiHttpPort | quote }}
               protocol: TCP
     # feature/alpha-localized-posthog -- in-cluster PostHog (feature-flag
     # execution plane), reached directly by svc-process-rust/svc-action-rust's
@@ -132,6 +188,49 @@ spec:
             - port: {{ .Values.egressProxy.port | quote }}
               protocol: TCP
 ---
+# Discord gateway egress for svc-ingest-rust ONLY (additive to dataplane-egress-deny; Cilium
+# policies union). toFQDNs needs the DNS lookups proxied (rules.dns), so this policy carries
+# its own kube-dns rule with a matchPattern -- the shared deny CNP's DNS rule is untouched.
+# Scoped: 443/TCP to the named Discord hosts only, no blanket world egress.
+{{- if .Values.egressPolicy.discordGateway.enabled }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-ingest-discord-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: svc-ingest-rust
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: UDP
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: TCP
+          rules:
+            dns:
+              {{- range .Values.egressPolicy.discordGateway.fqdns }}
+              - matchName: {{ . | quote }}
+              {{- end }}
+    - toFQDNs:
+        {{- range .Values.egressPolicy.discordGateway.fqdns }}
+        - matchName: {{ . | quote }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+{{- end }}
+---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -173,4 +272,62 @@ spec:
             - port: {{ . | quote }}
               protocol: TCP
             {{- end }}
+---
+{{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+# feature/edge-reshape-chunk2-twitch-inbound -- hub-api HTTP egress for svc-ingest-rust ONLY.
+# hub-api's HTTP port carries the internal provider-connections routes (list bindings /
+# resolve token) and /internal/service-token used by svc-ingest's per-community Twitch
+# sessions. Deliberately NOT part of dataplane-egress-deny (which selects every dataplane
+# component): granting it there would hand hub-api HTTP to every dataplane pod. Cilium
+# unions allows across CNPs selecting the same endpoint, so this adds to that baseline.
+# svc-action has its OWN sibling policy below -- never widen this one.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-ingest-hubapi-http-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-ingest-rust
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: hub-api
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.hubApi.port | quote }}
+              protocol: TCP
+{{- end }}
+---
+{{- if .Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled }}
+# hub-api HTTP egress for svc-action ONLY: its per-send community credential resolution
+# (connections:resolve via /internal/service-token + the provider-connections routes) calls
+# hub-api's HTTP port. Own policy, not dataplane-wide -- see the svc-ingest policy above.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-action-hubapi-http-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-action
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: hub-api
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.hubApi.port | quote }}
+              protocol: TCP
+{{- end }}
 {{- end }}

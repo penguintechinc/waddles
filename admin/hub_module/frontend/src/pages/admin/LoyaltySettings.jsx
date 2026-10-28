@@ -179,10 +179,11 @@ function LoyaltySettings() {
           <h2 className="text-lg font-semibold text-sky-100 mb-4">Currency Settings</h2>
           <div className="grid md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="loyalty-settings-currency-name" className="block text-sm font-medium text-navy-300 mb-2">
                 Currency Name
               </label>
               <input
+                id="loyalty-settings-currency-name"
                 type="text"
                 value={config.currency_name ?? ''}
                 onChange={(e) => updateField('currency_name', e.target.value)}
@@ -195,10 +196,11 @@ function LoyaltySettings() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="loyalty-settings-currency-symbol" className="block text-sm font-medium text-navy-300 mb-2">
                 Currency Symbol
               </label>
               <input
+                id="loyalty-settings-currency-symbol"
                 type="text"
                 value={config.currency_symbol ?? ''}
                 onChange={(e) => updateField('currency_symbol', e.target.value)}
@@ -218,10 +220,11 @@ function LoyaltySettings() {
           <h2 className="text-lg font-semibold text-sky-100 mb-4">Chat Earning</h2>
           <div className="grid md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="loyalty-settings-points-per-chat-message" className="block text-sm font-medium text-navy-300 mb-2">
                 Points Per Chat Message
               </label>
               <input
+                id="loyalty-settings-points-per-chat-message"
                 type="number"
                 min="0"
                 step="1"
@@ -234,10 +237,11 @@ function LoyaltySettings() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="loyalty-settings-chat-cooldown-seconds" className="block text-sm font-medium text-navy-300 mb-2">
                 Chat Cooldown (seconds)
               </label>
               <input
+                id="loyalty-settings-chat-cooldown-seconds"
                 type="number"
                 min="0"
                 step="1"
@@ -271,10 +275,11 @@ function LoyaltySettings() {
 
             {config.earn_watch_enabled && (
               <div className="ml-4">
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="loyalty-settings-points-per-minute-watched" className="block text-sm font-medium text-navy-300 mb-2">
                   Points Per Minute Watched
                 </label>
                 <input
+                  id="loyalty-settings-points-per-minute-watched"
                   type="number"
                   min="0"
                   step="1"
@@ -293,10 +298,11 @@ function LoyaltySettings() {
         <div className="card p-6">
           <h2 className="text-lg font-semibold text-sky-100 mb-4">Balance Cap</h2>
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">
+            <label htmlFor="loyalty-settings-maximum-balance" className="block text-sm font-medium text-navy-300 mb-2">
               Maximum Balance
             </label>
             <input
+              id="loyalty-settings-maximum-balance"
               type="number"
               min="0"
               step="1"

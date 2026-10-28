@@ -225,11 +225,12 @@ export default function ForumView({ channel }) {
             {!selectedPost.locked && (
               <form onSubmit={handleCreateReply} className="mt-2 flex flex-col gap-2">
                 <textarea
+                  aria-label="Write a reply"
                   value={replyText}
                   onChange={(e) => setReplyText(e.target.value)}
                   placeholder="Write a reply..."
                   rows={3}
-                  className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:border-gold-500 placeholder-navy-500"
+                  className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm resize-none focus:border-gold-500 placeholder-navy-500"
                 />
                 <div className="flex items-center gap-3">
                   <button
@@ -289,18 +290,20 @@ export default function ForumView({ channel }) {
         >
           <h3 className="text-sky-100 font-medium text-sm">New Post</h3>
           <input
+            aria-label="Post title"
             type="text"
             value={newPostTitle}
             onChange={(e) => setNewPostTitle(e.target.value)}
             placeholder="Post title"
-            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-gold-500 placeholder-navy-500"
+            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:border-gold-500 placeholder-navy-500"
           />
           <textarea
+            aria-label="Write your post"
             value={newPostBody}
             onChange={(e) => setNewPostBody(e.target.value)}
             placeholder="Write your post..."
             rows={4}
-            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:border-gold-500 placeholder-navy-500"
+            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm resize-none focus:border-gold-500 placeholder-navy-500"
           />
           <div className="flex items-center gap-3">
             <button

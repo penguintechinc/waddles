@@ -45,6 +45,11 @@ from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 SPEC = CommandSpec(name="gamble")
 
 STARTING_BALANCE = 100
@@ -101,7 +106,7 @@ class BetOutcome:
 
 def _roll(odds_percent: int) -> bool:
     """Return True with probability `odds_percent`/100."""
-    return random.randint(1, 100) <= odds_percent  # noqa: S311 - a game, not security
+    return _RNG.randint(1, 100) <= odds_percent
 
 
 def _resolve_command(parsed: ParsedCommand | None) -> str:

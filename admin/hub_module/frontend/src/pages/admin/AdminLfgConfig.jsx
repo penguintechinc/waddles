@@ -103,27 +103,29 @@ function AdminLfgConfig() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">Max Party Size</label>
+          <label htmlFor="admin-lfg-config-max-party-size" className="block text-sm font-medium text-sky-100 mb-2">Max Party Size</label>
           <input
+            id="admin-lfg-config-max-party-size"
             type="number"
             value={config.maxPartySize}
             onChange={(e) => setConfig({ ...config, maxPartySize: parseInt(e.target.value) || 1 })}
             min={2}
             max={100}
-            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500"
+            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500"
           />
           <p className="text-xs text-navy-400 mt-1">Maximum number of players in a group (2-100)</p>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">Timeout (minutes)</label>
+          <label htmlFor="admin-lfg-config-timeout-minutes" className="block text-sm font-medium text-sky-100 mb-2">Timeout (minutes)</label>
           <input
+            id="admin-lfg-config-timeout-minutes"
             type="number"
             value={config.timeoutMinutes}
             onChange={(e) => setConfig({ ...config, timeoutMinutes: parseInt(e.target.value) || 5 })}
             min={5}
             max={1440}
-            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500"
+            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500"
           />
           <p className="text-xs text-navy-400 mt-1">How long a group listing stays active</p>
         </div>

@@ -35,15 +35,50 @@ def _unwrap(body: Any) -> dict[str, Any]:
     return {}
 
 
+_CLIENT_4XX_PASSTHROUGH = frozenset({400, 404, 409, 422, 429})
+_MAX_UPSTREAM_MESSAGE = 200
+
+
+def _sanitized_upstream_message(body: Any, status_code: int) -> str:
+    """Return a bounded `error.message` from an analytics-core envelope, else a generic one."""
+    if isinstance(body, dict):
+        err = body.get("error")
+        message = err.get("message") if isinstance(err, dict) else None
+        if isinstance(message, str) and message.strip():
+            return message.strip()[:_MAX_UPSTREAM_MESSAGE]
+    return f"Request rejected by analytics-core (HTTP {status_code})"
+
+
+def _upstream_error(result: ProxyResult) -> tuple[dict[str, Any], int]:
+    """Map a failed `analytics-core` call to the right client-facing response.
+
+    Only {400, 404, 409, 422, 429} are client-meaningful: they pass through
+    with that status but the body is RE-WRAPPED via `api_error` from the
+    upstream `error.message` (never the raw upstream body, which could leak
+    analytics-core internals). Transport failures, 5xx, and every other 4xx
+    -- notably 401/403, which mean hub-api's OWN service-key auth failed, not
+    the end-client's token -- map to 502 naming `analytics-core`.
+    """
+    if not result.transport_error and result.status_code in _CLIENT_4XX_PASSTHROUGH:
+        return api_error(
+            _sanitized_upstream_message(result.body, result.status_code), result.status_code
+        )
+    if result.transport_error:
+        message = "Upstream dependency analytics-core is unreachable or timed out"
+    else:
+        message = f"Upstream dependency analytics-core returned HTTP {result.status_code}"
+    return api_error(message, 502)
+
+
 def _relay(result: ProxyResult) -> tuple[dict[str, Any], int]:
     """Port of every simple pass-through controller action's `try/catch` -> `res.json`.
 
-    `ok=False` (any downstream non-2xx or transport failure) masks to a
-    generic 500 -- see `analytics_proxy.py`'s `ProxyResult` docstring for
-    why this matches Node's own inherited `errorHandler.js` behavior.
+    `ok=False` fails LOUD, never as a masked 500 (gh-894): connection/timeout
+    failures and upstream 5xx -> 502 naming the upstream dependency; an
+    upstream 401/403/other-4xx -> 502; client-meaningful 4xx re-wrapped (see `_upstream_error`).
     """
     if not result.ok:
-        return api_error("An unexpected error occurred", 500)
+        return _upstream_error(result)
     return {"success": True, **_unwrap(result.body)}, 200
 
 
@@ -63,8 +98,9 @@ async def platform_overview(client: AnalyticsCoreProxyClient) -> tuple[dict[str,
         client.get("/api/v1/analytics/platform/reputation"),
         client.get("/api/v1/analytics/platform/activity"),
     )
-    if not (summary_result.ok and reputation_result.ok and activity_result.ok):
-        return api_error("An unexpected error occurred", 500)
+    for failed in (summary_result, reputation_result, activity_result):
+        if not failed.ok:
+            return _upstream_error(failed)
 
     summary = _unwrap(summary_result.body)
     reputation = _unwrap(reputation_result.body)

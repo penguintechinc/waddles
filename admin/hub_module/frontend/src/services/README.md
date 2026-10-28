@@ -39,5 +39,9 @@ export const bundleCatalogApi = {
 };
 ```
 
+- Narrow every response with `src/lib/wire.ts` (`expectRecord`, `readString`, ...) instead of
+  casting: hub-api mostly serves snake_case, and a drifted shape must surface as an error state,
+  not an empty page. Only call routes the audit confirms are served (`npm run audit:api`).
+
 Existing pages are converted to this pattern **on touch**, not in bulk --
 don't migrate an unrelated page's calls while adding a new domain module.

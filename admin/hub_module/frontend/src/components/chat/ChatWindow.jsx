@@ -48,7 +48,7 @@ export default function ChatWindow({ messages, typingUsers, loading }) {
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
           </div>
         ) : messages.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-gray-500">
+          <div className="flex items-center justify-center h-full text-fg-muted">
             No messages yet. Start the conversation!
           </div>
         ) : (
@@ -59,7 +59,7 @@ export default function ChatWindow({ messages, typingUsers, loading }) {
 
             {/* Typing indicators */}
             {typingUsers.length > 0 && (
-              <div className="flex gap-3 p-3 text-gray-400 text-sm italic">
+              <div className="flex gap-3 p-3 text-fg-muted text-sm italic">
                 <div className="flex-shrink-0 w-10 h-10"></div>
                 <div className="flex-1">
                   {typingUsers.length === 1
@@ -78,6 +78,7 @@ export default function ChatWindow({ messages, typingUsers, loading }) {
       {/* Scroll to bottom button */}
       {!autoScroll && messages.length > 0 && (
         <button
+          aria-label="Scroll to latest message"
           onClick={scrollToBottom}
           className="absolute bottom-4 right-4 bg-blue-600 hover:bg-blue-700 text-white
                      rounded-full p-3 shadow-lg transition-all transform hover:scale-110"

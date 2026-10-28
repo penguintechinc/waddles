@@ -1,7 +1,13 @@
-import { useState, useEffect } from 'react';
-import { Outlet, Link, useLocation, useParams } from 'react-router-dom';
+import { useMemo, useState } from 'react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { SidebarMenu, SidebarMenuTrigger } from '@penguintechinc/react-libs';
 import { useAuth } from '../contexts/AuthContext';
+import { useFeatureFlag } from '../lib/useFeatureFlag';
 import GlobalBanner from '../components/GlobalBanner';
+import UserDropdown from '../components/UserDropdown';
+import { MAIN_CONTENT_ID, RouteAnnouncer, RouteOutlet, SkipLink } from '../components/ui';
+import { WADDLES_SIDEBAR_COLORS } from '../theme/sidebarTheme';
+import { useSidebarNav } from './useSidebarNav';
 import {
   HomeIcon,
   UserGroupIcon,
@@ -9,7 +15,6 @@ import {
   GlobeAltIcon,
   ChartBarIcon,
   DocumentTextIcon,
-  ArrowLeftOnRectangleIcon,
   ShieldCheckIcon,
   Cog6ToothIcon,
   BuildingStorefrontIcon,
@@ -31,8 +36,6 @@ import {
   HashtagIcon,
   AdjustmentsHorizontalIcon,
   SignalIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
   MusicalNoteIcon,
   VideoCameraIcon,
   HeartIcon,
@@ -45,20 +48,22 @@ import {
   ArrowPathRoundedSquareIcon,
 } from '@heroicons/react/24/outline';
 
+/**
+ * Admin shell for community admin, platform admin and super admin routes.
+ * Uses the shared SidebarMenu (responsive drawer on mobile) with tokenised
+ * colors; `useSidebarNav` makes exactly one item active per route.
+ */
 function AdminLayout() {
-  const { user, logout, isPlatformAdmin, isSuperAdmin } = useAuth();
+  const { isPlatformAdmin, isSuperAdmin } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const { communityId } = useParams();
-
-  // Collapsible section state
-  const [expandedSections, setExpandedSections] = useState({});
-
-  const toggleSection = (key) => {
-    setExpandedSections((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
+  const [mobileOpen, setMobileOpen] = useState(false);
+  // Bundle management is feature-flagged (defaults OFF); only advertise it when the page will render.
+  const bundlesEnabled = useFeatureFlag('waddles.webui.community_bundles');
 
   // Section definitions for community admin
-  const communitySections = communityId
+  const communitySections = useMemo(() => (communityId
     ? [
         {
           key: 'community',
@@ -172,6 +177,9 @@ function AdminLayout() {
           items: [
             { to: `/admin/${communityId}/analytics`, icon: ChartBarIcon, label: 'Analytics' },
             { to: `/admin/${communityId}/workflows`, icon: CommandLineIcon, label: 'Workflows', premium: true },
+            ...(bundlesEnabled
+              ? [{ to: `/admin/${communityId}/bundles`, icon: PuzzlePieceIcon, label: 'Bundle Apps' }]
+              : []),
             { to: `/admin/${communityId}/domains`, icon: GlobeAltIcon, label: 'Custom Domains' },
             { to: `/admin/${communityId}/translation`, icon: LanguageIcon, label: 'Translation' },
             { to: `/admin/${communityId}/support`, icon: TicketIcon, label: 'Support Tickets' },
@@ -180,197 +188,124 @@ function AdminLayout() {
           ],
         },
       ]
-    : [];
-
-  // Auto-expand section containing active route
-  useEffect(() => {
-    if (!communityId) return;
-    const newExpanded = {};
-    for (const section of communitySections) {
-      const hasActive = section.items.some((item) =>
-        item.exact
-          ? location.pathname === item.to
-          : location.pathname.startsWith(item.to)
-      );
-      if (hasActive) {
-        newExpanded[section.key] = true;
-      }
-    }
-    setExpandedSections((prev) => ({ ...prev, ...newExpanded }));
-  }, [location.pathname, communityId]);
+    : []), [communityId, bundlesEnabled]);
 
   // Platform admin nav
-  const platformAdminNav = [
+  const platformAdminNav = useMemo(() => [
     { to: '/platform', icon: ChartBarIcon, label: 'Dashboard', exact: true },
     { to: '/platform/users', icon: UserGroupIcon, label: 'Users' },
     { to: '/platform/communities', icon: HomeIcon, label: 'Communities' },
-  ];
+  ], []);
 
   // Super admin nav
-  const superAdminNav = [
+  const superAdminNav = useMemo(() => [
     { to: '/superadmin', icon: ChartBarIcon, label: 'Dashboard', exact: true },
     { to: '/superadmin/communities', icon: HomeIcon, label: 'Communities' },
     { to: '/superadmin/modules', icon: BuildingStorefrontIcon, label: 'Module Registry' },
     { to: '/superadmin/analytics', icon: ChartBarIcon, label: 'Analytics' },
     { to: '/superadmin/platform-config', icon: Cog6ToothIcon, label: 'Platform Config' },
     { to: '/superadmin/tenants', icon: ServerStackIcon, label: 'Tenants' },
-  ];
-
-  const isActive = (to, exact = false) => {
-    if (exact) return location.pathname === to;
-    return location.pathname.startsWith(to);
-  };
+  ], []);
 
   const isSuperAdminPath = location.pathname.startsWith('/superadmin');
-  const flatNavItems = communityId
-    ? null
-    : isSuperAdminPath
-      ? superAdminNav
-      : platformAdminNav;
-  const title = communityId
-    ? 'Community Admin'
-    : isSuperAdminPath
-      ? 'Super Admin'
-      : 'Platform Admin';
+  const title = communityId ? 'Community Admin' : isSuperAdminPath ? 'Super Admin' : 'Platform Admin';
 
-  const renderNavLink = (item) => (
-    <Link
-      key={item.to}
-      to={item.to}
-      className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors ${
-        isActive(item.to, item.exact)
-          ? 'bg-gold-500/20 text-gold-400 border border-gold-500/30'
-          : 'text-navy-300 hover:bg-navy-800 hover:text-sky-300'
-      }`}
-    >
-      <div className="flex items-center space-x-3">
-        <item.icon className="w-5 h-5" />
-        <span className="text-sm font-medium">{item.label}</span>
-      </div>
-      {item.premium && (
-        <span className="text-[10px] px-1.5 py-0.5 rounded bg-gold-500 text-navy-900 font-bold">
-          PRO
-        </span>
-      )}
+  const groups = useMemo(() => {
+    if (communityId) {
+      return communitySections.map((section) => ({
+        key: section.key,
+        header: section.label,
+        collapsible: true,
+        items: section.items.map((item) => ({
+          name: item.premium ? `${item.label} (Pro)` : item.label,
+          href: item.to,
+          icon: item.icon,
+          exact: item.exact,
+        })),
+      }));
+    }
+    const flat = isSuperAdminPath ? superAdminNav : platformAdminNav;
+    return [
+      {
+        key: 'main',
+        header: title,
+        collapsible: false,
+        items: flat.map((item) => ({ name: item.label, href: item.to, icon: item.icon, exact: item.exact })),
+      },
+    ];
+  }, [communityId, communitySections, isSuperAdminPath, platformAdminNav, superAdminNav, title]);
+
+  const footer = useMemo(() => {
+    const items = [];
+    if (communityId) items.push({ name: 'View Community', href: `/dashboard/community/${communityId}`, icon: DocumentTextIcon });
+    if (isPlatformAdmin && communityId) items.push({ name: 'Platform Admin', href: '/platform', icon: ShieldCheckIcon });
+    if (isSuperAdmin && !isSuperAdminPath) items.push({ name: 'Super Admin', href: '/superadmin', icon: ShieldCheckIcon });
+    items.push({ name: 'Back to Dashboard', href: '/dashboard', icon: HomeIcon });
+    return items;
+  }, [communityId, isPlatformAdmin, isSuperAdmin, isSuperAdminPath]);
+
+  // Open the group that owns the current route (SidebarMenu autoCollapse).
+  const activeGroupKey = useMemo(() => {
+    if (!communityId) return 'main';
+    const owner = communitySections.find((section) =>
+      section.items.some((item) =>
+        item.exact ? location.pathname === item.to : location.pathname.startsWith(item.to),
+      ),
+    );
+    return owner?.key ?? 'community';
+  }, [communityId, communitySections, location.pathname]);
+
+  const nav = useSidebarNav(groups, footer, location.pathname, navigate);
+
+  const brand = (
+    <Link to="/" className="flex items-center gap-2 rounded-control">
+      <img src="/waddlebot-logo.png" alt="" className="h-8 w-8" />
+      <span className="text-xl font-bold text-fg-accent">Waddles</span>
     </Link>
   );
 
   return (
-    <div className="min-h-screen bg-navy-950">
-      <GlobalBanner />
-      {/* Top bar */}
-      <header className="bg-navy-900 border-b border-navy-700 sticky top-0 z-50">
-        <div className="flex justify-between items-center h-16 px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center space-x-4">
-            <Link to="/" className="flex items-center space-x-2">
-              <img src="/waddlebot-logo.png" alt="Waddles" className="w-8 h-8" />
-              <span className="text-xl font-bold text-gold-400">Waddles</span>
-            </Link>
-            <span className="text-navy-600">|</span>
-            <div className="flex items-center space-x-2">
-              <ShieldCheckIcon className="w-5 h-5 text-gold-400" />
-              <span className="font-medium text-gold-400">{title}</span>
+    <div className="min-h-screen bg-app">
+      <SkipLink />
+      <RouteAnnouncer />
+      <SidebarMenu
+        logo={brand}
+        categories={nav.categories}
+        currentPath={nav.currentPath}
+        onNavigate={nav.onNavigate}
+        footerItems={nav.footerItems}
+        autoCollapse
+        activeGroupKey={activeGroupKey}
+        width="w-64"
+        themeMode="dark"
+        colors={WADDLES_SIDEBAR_COLORS}
+        mobileOpen={mobileOpen}
+        onMobileClose={() => setMobileOpen(false)}
+      />
+
+      <div data-testid="admin-content-shell" className="flex min-h-screen flex-col lg:pl-64">
+        <GlobalBanner />
+        <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-line bg-surface/95 px-4 backdrop-blur sm:px-6 lg:px-8">
+          <div className="flex items-center gap-3">
+            <SidebarMenuTrigger
+              onClick={() => setMobileOpen((open) => !open)}
+              isOpen={mobileOpen}
+              themeMode="dark"
+              colors={WADDLES_SIDEBAR_COLORS}
+            />
+            <div className="lg:hidden">{brand}</div>
+            <div className="hidden items-center gap-2 text-fg-accent sm:flex">
+              <ShieldCheckIcon aria-hidden="true" className="h-5 w-5" />
+              <span className="text-sm font-semibold">{title}</span>
             </div>
           </div>
+          <UserDropdown />
+        </header>
 
-          <div className="flex items-center space-x-4">
-            {isSuperAdmin && (
-              <Link
-                to="/superadmin"
-                className="text-sm font-medium text-gold-400 hover:text-gold-300"
-              >
-                Super Admin
-              </Link>
-            )}
-            <Link to="/dashboard" className="text-sm text-navy-300 hover:text-sky-300">
-              Back to Dashboard
-            </Link>
-            <div className="flex items-center space-x-2">
-              {user?.avatarUrl ? (
-                <img src={user.avatarUrl} alt={user.username} className="w-8 h-8 rounded-full" />
-              ) : (
-                <div className="w-8 h-8 rounded-full bg-navy-700 flex items-center justify-center border border-navy-600">
-                  <span className="text-sky-100 font-medium">
-                    {user?.username?.charAt(0).toUpperCase()}
-                  </span>
-                </div>
-              )}
-              <span className="text-sm text-sky-100">{user?.username}</span>
-            </div>
-            <button
-              onClick={logout}
-              className="p-2 text-navy-400 hover:text-sky-300 rounded-lg hover:bg-navy-800"
-            >
-              <ArrowLeftOnRectangleIcon className="w-5 h-5" />
-            </button>
+        <main id={MAIN_CONTENT_ID} tabIndex={-1} className="flex-1 px-4 py-8 focus:outline-none sm:px-6 lg:px-8">
+          <div className="mx-auto w-full max-w-7xl">
+            <RouteOutlet />
           </div>
-        </div>
-      </header>
-
-      <div className="flex">
-        {/* Sidebar */}
-        <aside className="w-64 bg-navy-900 border-r border-navy-700 min-h-[calc(100vh-4rem)] sticky top-16 overflow-y-auto">
-          <nav className="p-4 space-y-1">
-            {/* Flat nav for platform/superadmin */}
-            {flatNavItems && flatNavItems.map(renderNavLink)}
-
-            {/* Collapsible sections for community admin */}
-            {communityId && communitySections.map((section) => (
-              <div key={section.key}>
-                <button
-                  onClick={() => toggleSection(section.key)}
-                  className="flex items-center justify-between w-full px-3 py-2 rounded-lg text-navy-400 hover:bg-navy-800 hover:text-sky-300 transition-colors"
-                >
-                  <div className="flex items-center space-x-3">
-                    <section.icon className="w-5 h-5" />
-                    <span className="text-xs font-semibold uppercase tracking-wider">{section.label}</span>
-                  </div>
-                  {expandedSections[section.key] ? (
-                    <ChevronDownIcon className="w-4 h-4" />
-                  ) : (
-                    <ChevronRightIcon className="w-4 h-4" />
-                  )}
-                </button>
-                {expandedSections[section.key] && (
-                  <div className="ml-2 space-y-0.5 mt-0.5">
-                    {section.items.map(renderNavLink)}
-                  </div>
-                )}
-              </div>
-            ))}
-
-            {communityId && (
-              <>
-                <div className="pt-6 pb-2">
-                  <div className="text-xs font-semibold text-navy-500 uppercase tracking-wider px-3">
-                    Quick Actions
-                  </div>
-                </div>
-                <Link
-                  to={`/dashboard/community/${communityId}`}
-                  className="flex items-center space-x-3 px-3 py-2 rounded-lg text-navy-300 hover:bg-navy-800 hover:text-sky-300"
-                >
-                  <DocumentTextIcon className="w-5 h-5" />
-                  <span className="text-sm font-medium">View Community</span>
-                </Link>
-              </>
-            )}
-
-            {isPlatformAdmin && communityId && (
-              <Link
-                to="/platform"
-                className="flex items-center space-x-3 px-3 py-2 rounded-lg text-navy-300 hover:bg-navy-800 hover:text-sky-300"
-              >
-                <ShieldCheckIcon className="w-5 h-5" />
-                <span className="text-sm font-medium">Platform Admin</span>
-              </Link>
-            )}
-          </nav>
-        </aside>
-
-        {/* Main content */}
-        <main className="flex-1 p-6">
-          <Outlet />
         </main>
       </div>
     </div>

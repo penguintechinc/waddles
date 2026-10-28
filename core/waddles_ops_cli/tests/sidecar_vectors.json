@@ -1,0 +1,26 @@
+[
+ {
+  "doc": {
+   "app_id": "a",
+   "version": "1",
+   "digest": "sha256:abababababababababababababababababababababababababababababababab",
+   "approval_id": 3,
+   "key_id": "k1",
+   "algorithm": "ed25519",
+   "signature": "c2ln"
+  },
+  "body": "{\"algorithm\":\"ed25519\",\"app_id\":\"a\",\"approval_id\":3,\"digest\":\"sha256:abababababababababababababababababababababababababababababababab\",\"key_id\":\"k1\",\"signature\":\"c2ln\",\"version\":\"1\"}"
+ },
+ {
+  "doc": {
+   "app_id": "a",
+   "version": "1",
+   "digest": "sha256:caf\u00e9-\ud83d\ude00-q\"\\\u007f",
+   "approval_id": 3,
+   "key_id": "k1",
+   "algorithm": "ed25519",
+   "signature": "c2ln"
+  },
+  "body": "{\"algorithm\":\"ed25519\",\"app_id\":\"a\",\"approval_id\":3,\"digest\":\"sha256:caf\\u00e9-\\ud83d\\ude00-q\\\"\\\\\\u007f\",\"key_id\":\"k1\",\"signature\":\"c2ln\",\"version\":\"1\"}"
+ }
+]

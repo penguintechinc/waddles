@@ -1,0 +1,1159 @@
+{
+ "canonical": [
+  {
+   "record": {
+    "chain_id": "platform",
+    "seq": 1,
+    "event_id": "00000000-0000-4000-8000-000000000000",
+    "occurred_at": "2026-10-18T01:02:03.004500Z",
+    "actor_uuid": null,
+    "actor_kind": "user",
+    "category": "auth",
+    "action": "login.success",
+    "outcome": "success",
+    "target_type": "user",
+    "target_id": "t\u00e9",
+    "details": {},
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "record_hash": "",
+    "hash_version": "sha256-v1"
+   },
+   "canonical_hex": "776164646c65732e61756469742e636861696e2e76310a7b22616374696f6e223a226c6f67696e2e73756363657373222c226163746f725f6b696e64223a2275736572222c226163746f725f75756964223a6e756c6c2c2263617465676f7279223a2261757468222c22636861696e5f6964223a22706c6174666f726d222c2264657461696c73223a7b7d2c226576656e745f6964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303030222c22686173685f76657273696f6e223a227368613235362d7631222c226f636375727265645f6174223a22323032362d31302d31385430313a30323a30332e3030343530305a222c226f7574636f6d65223a2273756363657373222c22707265765f68617368223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030222c22736571223a312c227461726765745f6964223a22745c7530306539222c227461726765745f74797065223a2275736572227d",
+   "hash": "ad07f8bc1bac6bbcdb86f3cc58179b8f4cb1616865f081608bf94f3b81f290f3"
+  },
+  {
+   "record": {
+    "chain_id": "tenant:7",
+    "seq": 2,
+    "event_id": "00000000-0000-4000-8000-000000000001",
+    "occurred_at": "2026-10-18T01:02:03.004500Z",
+    "actor_uuid": "11111111-2222-4333-8444-555555555555",
+    "actor_kind": "user",
+    "category": "auth",
+    "action": "login.success",
+    "outcome": "success",
+    "target_type": null,
+    "target_id": null,
+    "details": {
+     "k": "plain",
+     "a": 1,
+     "z": null,
+     "b": true,
+     "c": false
+    },
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "record_hash": "",
+    "hash_version": "sha256-v1"
+   },
+   "canonical_hex": "776164646c65732e61756469742e636861696e2e76310a7b22616374696f6e223a226c6f67696e2e73756363657373222c226163746f725f6b696e64223a2275736572222c226163746f725f75756964223a2231313131313131312d323232322d343333332d383434342d353535353535353535353535222c2263617465676f7279223a2261757468222c22636861696e5f6964223a2274656e616e743a37222c2264657461696c73223a7b2261223a312c2262223a747275652c2263223a66616c73652c226b223a22706c61696e222c227a223a6e756c6c7d2c226576656e745f6964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031222c22686173685f76657273696f6e223a227368613235362d7631222c226f636375727265645f6174223a22323032362d31302d31385430313a30323a30332e3030343530305a222c226f7574636f6d65223a2273756363657373222c22707265765f68617368223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030222c22736571223a322c227461726765745f6964223a6e756c6c2c227461726765745f74797065223a6e756c6c7d",
+   "hash": "4481ec021cb274578ed925ad93c5e65edfa12065b271588c0f47bc1f0c9ba362"
+  },
+  {
+   "record": {
+    "chain_id": "platform",
+    "seq": 3,
+    "event_id": "00000000-0000-4000-8000-000000000002",
+    "occurred_at": "2026-10-18T01:02:03.004500Z",
+    "actor_uuid": "11111111-2222-4333-8444-555555555555",
+    "actor_kind": "user",
+    "category": "auth",
+    "action": "login.success",
+    "outcome": "success",
+    "target_type": "user",
+    "target_id": "t\u00e9",
+    "details": {
+     "u": "caf\u00e9",
+     "emoji": "x\ud83d\ude00y",
+     "nul": "a\u0000b",
+     "del": "a\u007fb"
+    },
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "record_hash": "",
+    "hash_version": "sha256-v1"
+   },
+   "canonical_hex": "776164646c65732e61756469742e636861696e2e76310a7b22616374696f6e223a226c6f67696e2e73756363657373222c226163746f725f6b696e64223a2275736572222c226163746f725f75756964223a2231313131313131312d323232322d343333332d383434342d353535353535353535353535222c2263617465676f7279223a2261757468222c22636861696e5f6964223a22706c6174666f726d222c2264657461696c73223a7b2264656c223a22615c753030376662222c22656d6f6a69223a22785c75643833645c756465303079222c226e756c223a22615c753030303062222c2275223a226361665c7530306539227d2c226576656e745f6964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303032222c22686173685f76657273696f6e223a227368613235362d7631222c226f636375727265645f6174223a22323032362d31302d31385430313a30323a30332e3030343530305a222c226f7574636f6d65223a2273756363657373222c22707265765f68617368223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030222c22736571223a332c227461726765745f6964223a22745c7530306539222c227461726765745f74797065223a2275736572227d",
+   "hash": "54bbd1f98e07dc2f8ba884e09267f33f2ad827cad923a30acd6889bba511900c"
+  },
+  {
+   "record": {
+    "chain_id": "tenant:7",
+    "seq": 4,
+    "event_id": "00000000-0000-4000-8000-000000000003",
+    "occurred_at": "2026-10-18T01:02:03.004500Z",
+    "actor_uuid": null,
+    "actor_kind": "user",
+    "category": "auth",
+    "action": "login.success",
+    "outcome": "success",
+    "target_type": null,
+    "target_id": null,
+    "details": {
+     "q": "he said \"hi\"\\n",
+     "ctl": "\n\r\t\b\f\u001f\u0001",
+     "sep": "\u2028\u2029"
+    },
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "record_hash": "",
+    "hash_version": "sha256-v1"
+   },
+   "canonical_hex": "776164646c65732e61756469742e636861696e2e76310a7b22616374696f6e223a226c6f67696e2e73756363657373222c226163746f725f6b696e64223a2275736572222c226163746f725f75756964223a6e756c6c2c2263617465676f7279223a2261757468222c22636861696e5f6964223a2274656e616e743a37222c2264657461696c73223a7b2263746c223a225c6e5c725c745c625c665c75303031665c7530303031222c2271223a2268652073616964205c2268695c225c5c6e222c22736570223a225c75323032385c7532303239227d2c226576656e745f6964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303033222c22686173685f76657273696f6e223a227368613235362d7631222c226f636375727265645f6174223a22323032362d31302d31385430313a30323a30332e3030343530305a222c226f7574636f6d65223a2273756363657373222c22707265765f68617368223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030222c22736571223a342c227461726765745f6964223a6e756c6c2c227461726765745f74797065223a6e756c6c7d",
+   "hash": "50bee97f78eae4bd73c6b6e464e5c006f178a45a934d72d6bd5ddba7f35ae058"
+  },
+  {
+   "record": {
+    "chain_id": "platform",
+    "seq": 5,
+    "event_id": "00000000-0000-4000-8000-000000000004",
+    "occurred_at": "2026-10-18T01:02:03.004500Z",
+    "actor_uuid": "11111111-2222-4333-8444-555555555555",
+    "actor_kind": "user",
+    "category": "auth",
+    "action": "login.success",
+    "outcome": "success",
+    "target_type": "user",
+    "target_id": "t\u00e9",
+    "details": {
+     "big": 9223372036854775807,
+     "neg": -9223372036854775808,
+     "zero": 0,
+     "lst": [
+      1,
+      "a\u00ff",
+      null,
+      true,
+      []
+     ]
+    },
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "record_hash": "",
+    "hash_version": "sha256-v1"
+   },
+   "canonical_hex": "776164646c65732e61756469742e636861696e2e76310a7b22616374696f6e223a226c6f67696e2e73756363657373222c226163746f725f6b696e64223a2275736572222c226163746f725f75756964223a2231313131313131312d323232322d343333332d383434342d353535353535353535353535222c2263617465676f7279223a2261757468222c22636861696e5f6964223a22706c6174666f726d222c2264657461696c73223a7b22626967223a393232333337323033363835343737353830372c226c7374223a5b312c22615c7530306666222c6e756c6c2c747275652c5b5d5d2c226e6567223a2d393232333337323033363835343737353830382c227a65726f223a307d2c226576656e745f6964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303034222c22686173685f76657273696f6e223a227368613235362d7631222c226f636375727265645f6174223a22323032362d31302d31385430313a30323a30332e3030343530305a222c226f7574636f6d65223a2273756363657373222c22707265765f68617368223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030222c22736571223a352c227461726765745f6964223a22745c7530306539222c227461726765745f74797065223a2275736572227d",
+   "hash": "9ad7c93afbf3010450583761410a51a8c7722bac548e9cbeb58e4170ca50367d"
+  },
+  {
+   "record": {
+    "chain_id": "tenant:7",
+    "seq": 6,
+    "event_id": "00000000-0000-4000-8000-000000000005",
+    "occurred_at": "2026-10-18T01:02:03.004500Z",
+    "actor_uuid": "11111111-2222-4333-8444-555555555555",
+    "actor_kind": "user",
+    "category": "auth",
+    "action": "login.success",
+    "outcome": "success",
+    "target_type": null,
+    "target_id": null,
+    "details": {
+     "\u00e9key": 1,
+     "Zkey": 2,
+     "akey": 3,
+     "\ud83d\ude00k": 4,
+     "\uffffk": 5
+    },
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "record_hash": "",
+    "hash_version": "sha256-v1"
+   },
+   "canonical_hex": "776164646c65732e61756469742e636861696e2e76310a7b22616374696f6e223a226c6f67696e2e73756363657373222c226163746f725f6b696e64223a2275736572222c226163746f725f75756964223a2231313131313131312d323232322d343333332d383434342d353535353535353535353535222c2263617465676f7279223a2261757468222c22636861696e5f6964223a2274656e616e743a37222c2264657461696c73223a7b225a6b6579223a322c22616b6579223a332c225c75303065396b6579223a312c225c75666666666b223a352c225c75643833645c75646530306b223a347d2c226576656e745f6964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303035222c22686173685f76657273696f6e223a227368613235362d7631222c226f636375727265645f6174223a22323032362d31302d31385430313a30323a30332e3030343530305a222c226f7574636f6d65223a2273756363657373222c22707265765f68617368223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030222c22736571223a362c227461726765745f6964223a6e756c6c2c227461726765745f74797065223a6e756c6c7d",
+   "hash": "8092b953028efbec06c24b305509e69c72c6a5e6cea08550c81926ad86dac234"
+  }
+ ],
+ "chains": [
+  {
+   "name": "intact",
+   "records": [
+    {
+     "chain_id": "tenant:7",
+     "seq": 1,
+     "event_id": "00000000-0000-4000-8000-000000000001",
+     "occurred_at": "2026-10-18T00:00:01.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app1@1.0.0",
+     "details": {
+      "k": "plain",
+      "a": 1,
+      "z": null,
+      "b": true,
+      "c": false
+     },
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 2,
+     "event_id": "00000000-0000-4000-8000-000000000002",
+     "occurred_at": "2026-10-18T00:00:02.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app2@1.0.0",
+     "details": {
+      "q": "he said \"hi\"\\n",
+      "ctl": "\n\r\t\b\f\u001f\u0001",
+      "sep": "\u2028\u2029"
+     },
+     "prev_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "record_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 3,
+     "event_id": "00000000-0000-4000-8000-000000000003",
+     "occurred_at": "2026-10-18T00:00:03.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app3@1.0.0",
+     "details": {
+      "big": 9223372036854775807,
+      "neg": -9223372036854775808,
+      "zero": 0,
+      "lst": [
+       1,
+       "a\u00ff",
+       null,
+       true,
+       []
+      ]
+     },
+     "prev_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "record_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 4,
+     "event_id": "00000000-0000-4000-8000-000000000004",
+     "occurred_at": "2026-10-18T00:00:04.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app4@1.0.0",
+     "details": {
+      "\u00e9key": 1,
+      "Zkey": 2,
+      "akey": 3,
+      "\ud83d\ude00k": 4,
+      "\uffffk": 5
+     },
+     "prev_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "record_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 5,
+     "event_id": "00000000-0000-4000-8000-000000000005",
+     "occurred_at": "2026-10-18T00:00:05.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app5@1.0.0",
+     "details": {},
+     "prev_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "record_hash": "05a7bbc53028bd5382ce716020140cf72959e70fa1c575cab14ececd1eee6c5b",
+     "hash_version": "sha256-v1"
+    }
+   ],
+   "pin_seq": null,
+   "pin_hash": null,
+   "status": "intact",
+   "examined": 5,
+   "head_seq": 5,
+   "head_hash": "05a7bbc53028bd5382ce716020140cf72959e70fa1c575cab14ececd1eee6c5b",
+   "break_seq": null,
+   "break_reason": null,
+   "break_detail": null
+  },
+  {
+   "name": "intact_pinned",
+   "records": [
+    {
+     "chain_id": "tenant:7",
+     "seq": 1,
+     "event_id": "00000000-0000-4000-8000-000000000001",
+     "occurred_at": "2026-10-18T00:00:01.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app1@1.0.0",
+     "details": {
+      "k": "plain",
+      "a": 1,
+      "z": null,
+      "b": true,
+      "c": false
+     },
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 2,
+     "event_id": "00000000-0000-4000-8000-000000000002",
+     "occurred_at": "2026-10-18T00:00:02.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app2@1.0.0",
+     "details": {
+      "q": "he said \"hi\"\\n",
+      "ctl": "\n\r\t\b\f\u001f\u0001",
+      "sep": "\u2028\u2029"
+     },
+     "prev_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "record_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 3,
+     "event_id": "00000000-0000-4000-8000-000000000003",
+     "occurred_at": "2026-10-18T00:00:03.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app3@1.0.0",
+     "details": {
+      "big": 9223372036854775807,
+      "neg": -9223372036854775808,
+      "zero": 0,
+      "lst": [
+       1,
+       "a\u00ff",
+       null,
+       true,
+       []
+      ]
+     },
+     "prev_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "record_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 4,
+     "event_id": "00000000-0000-4000-8000-000000000004",
+     "occurred_at": "2026-10-18T00:00:04.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app4@1.0.0",
+     "details": {
+      "\u00e9key": 1,
+      "Zkey": 2,
+      "akey": 3,
+      "\ud83d\ude00k": 4,
+      "\uffffk": 5
+     },
+     "prev_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "record_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 5,
+     "event_id": "00000000-0000-4000-8000-000000000005",
+     "occurred_at": "2026-10-18T00:00:05.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app5@1.0.0",
+     "details": {},
+     "prev_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "record_hash": "05a7bbc53028bd5382ce716020140cf72959e70fa1c575cab14ececd1eee6c5b",
+     "hash_version": "sha256-v1"
+    }
+   ],
+   "pin_seq": 5,
+   "pin_hash": "05a7bbc53028bd5382ce716020140cf72959e70fa1c575cab14ececd1eee6c5b",
+   "status": "intact",
+   "examined": 5,
+   "head_seq": 5,
+   "head_hash": "05a7bbc53028bd5382ce716020140cf72959e70fa1c575cab14ececd1eee6c5b",
+   "break_seq": null,
+   "break_reason": null,
+   "break_detail": null
+  },
+  {
+   "name": "head_seq_mismatch",
+   "records": [
+    {
+     "chain_id": "tenant:7",
+     "seq": 1,
+     "event_id": "00000000-0000-4000-8000-000000000001",
+     "occurred_at": "2026-10-18T00:00:01.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app1@1.0.0",
+     "details": {
+      "k": "plain",
+      "a": 1,
+      "z": null,
+      "b": true,
+      "c": false
+     },
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 2,
+     "event_id": "00000000-0000-4000-8000-000000000002",
+     "occurred_at": "2026-10-18T00:00:02.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app2@1.0.0",
+     "details": {
+      "q": "he said \"hi\"\\n",
+      "ctl": "\n\r\t\b\f\u001f\u0001",
+      "sep": "\u2028\u2029"
+     },
+     "prev_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "record_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 3,
+     "event_id": "00000000-0000-4000-8000-000000000003",
+     "occurred_at": "2026-10-18T00:00:03.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app3@1.0.0",
+     "details": {
+      "big": 9223372036854775807,
+      "neg": -9223372036854775808,
+      "zero": 0,
+      "lst": [
+       1,
+       "a\u00ff",
+       null,
+       true,
+       []
+      ]
+     },
+     "prev_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "record_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 4,
+     "event_id": "00000000-0000-4000-8000-000000000004",
+     "occurred_at": "2026-10-18T00:00:04.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app4@1.0.0",
+     "details": {
+      "\u00e9key": 1,
+      "Zkey": 2,
+      "akey": 3,
+      "\ud83d\ude00k": 4,
+      "\uffffk": 5
+     },
+     "prev_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "record_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "hash_version": "sha256-v1"
+    }
+   ],
+   "pin_seq": 5,
+   "pin_hash": null,
+   "status": "broken",
+   "examined": 4,
+   "head_seq": 4,
+   "head_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+   "break_seq": 4,
+   "break_reason": "head_mismatch",
+   "break_detail": "head seq 4 != pinned seq 5 (records removed from the tail, or appended since the pin)"
+  },
+  {
+   "name": "head_hash_mismatch",
+   "records": [
+    {
+     "chain_id": "tenant:7",
+     "seq": 1,
+     "event_id": "00000000-0000-4000-8000-000000000001",
+     "occurred_at": "2026-10-18T00:00:01.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app1@1.0.0",
+     "details": {
+      "k": "plain",
+      "a": 1,
+      "z": null,
+      "b": true,
+      "c": false
+     },
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 2,
+     "event_id": "00000000-0000-4000-8000-000000000002",
+     "occurred_at": "2026-10-18T00:00:02.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app2@1.0.0",
+     "details": {
+      "q": "he said \"hi\"\\n",
+      "ctl": "\n\r\t\b\f\u001f\u0001",
+      "sep": "\u2028\u2029"
+     },
+     "prev_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "record_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 3,
+     "event_id": "00000000-0000-4000-8000-000000000003",
+     "occurred_at": "2026-10-18T00:00:03.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app3@1.0.0",
+     "details": {
+      "big": 9223372036854775807,
+      "neg": -9223372036854775808,
+      "zero": 0,
+      "lst": [
+       1,
+       "a\u00ff",
+       null,
+       true,
+       []
+      ]
+     },
+     "prev_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "record_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 4,
+     "event_id": "00000000-0000-4000-8000-000000000004",
+     "occurred_at": "2026-10-18T00:00:04.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app4@1.0.0",
+     "details": {
+      "\u00e9key": 1,
+      "Zkey": 2,
+      "akey": 3,
+      "\ud83d\ude00k": 4,
+      "\uffffk": 5
+     },
+     "prev_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "record_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 5,
+     "event_id": "00000000-0000-4000-8000-000000000005",
+     "occurred_at": "2026-10-18T00:00:05.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app5@1.0.0",
+     "details": {},
+     "prev_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "record_hash": "05a7bbc53028bd5382ce716020140cf72959e70fa1c575cab14ececd1eee6c5b",
+     "hash_version": "sha256-v1"
+    }
+   ],
+   "pin_seq": null,
+   "pin_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+   "status": "broken",
+   "examined": 5,
+   "head_seq": 5,
+   "head_hash": "05a7bbc53028bd5382ce716020140cf72959e70fa1c575cab14ececd1eee6c5b",
+   "break_seq": 5,
+   "break_reason": "head_mismatch",
+   "break_detail": "head hash differs from the pinned head hash"
+  },
+  {
+   "name": "tampered_field",
+   "records": [
+    {
+     "chain_id": "tenant:7",
+     "seq": 1,
+     "event_id": "00000000-0000-4000-8000-000000000001",
+     "occurred_at": "2026-10-18T00:00:01.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app1@1.0.0",
+     "details": {
+      "k": "plain",
+      "a": 1,
+      "z": null,
+      "b": true,
+      "c": false
+     },
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 2,
+     "event_id": "00000000-0000-4000-8000-000000000002",
+     "occurred_at": "2026-10-18T00:00:02.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app2@1.0.0",
+     "details": {
+      "q": "he said \"hi\"\\n",
+      "ctl": "\n\r\t\b\f\u001f\u0001",
+      "sep": "\u2028\u2029"
+     },
+     "prev_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "record_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 3,
+     "event_id": "00000000-0000-4000-8000-000000000003",
+     "occurred_at": "2026-10-18T00:00:03.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "failure",
+     "target_type": "app",
+     "target_id": "app3@1.0.0",
+     "details": {
+      "big": 9223372036854775807,
+      "neg": -9223372036854775808,
+      "zero": 0,
+      "lst": [
+       1,
+       "a\u00ff",
+       null,
+       true,
+       []
+      ]
+     },
+     "prev_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "record_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 4,
+     "event_id": "00000000-0000-4000-8000-000000000004",
+     "occurred_at": "2026-10-18T00:00:04.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app4@1.0.0",
+     "details": {
+      "\u00e9key": 1,
+      "Zkey": 2,
+      "akey": 3,
+      "\ud83d\ude00k": 4,
+      "\uffffk": 5
+     },
+     "prev_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "record_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 5,
+     "event_id": "00000000-0000-4000-8000-000000000005",
+     "occurred_at": "2026-10-18T00:00:05.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app5@1.0.0",
+     "details": {},
+     "prev_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "record_hash": "05a7bbc53028bd5382ce716020140cf72959e70fa1c575cab14ececd1eee6c5b",
+     "hash_version": "sha256-v1"
+    }
+   ],
+   "pin_seq": null,
+   "pin_hash": null,
+   "status": "broken",
+   "examined": 3,
+   "head_seq": 2,
+   "head_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+   "break_seq": 3,
+   "break_reason": "hash_mismatch",
+   "break_detail": "recomputed hash differs from stored record_hash (record was altered)"
+  },
+  {
+   "name": "seq_gap",
+   "records": [
+    {
+     "chain_id": "tenant:7",
+     "seq": 1,
+     "event_id": "00000000-0000-4000-8000-000000000001",
+     "occurred_at": "2026-10-18T00:00:01.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app1@1.0.0",
+     "details": {
+      "k": "plain",
+      "a": 1,
+      "z": null,
+      "b": true,
+      "c": false
+     },
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 2,
+     "event_id": "00000000-0000-4000-8000-000000000002",
+     "occurred_at": "2026-10-18T00:00:02.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app2@1.0.0",
+     "details": {
+      "q": "he said \"hi\"\\n",
+      "ctl": "\n\r\t\b\f\u001f\u0001",
+      "sep": "\u2028\u2029"
+     },
+     "prev_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "record_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 4,
+     "event_id": "00000000-0000-4000-8000-000000000004",
+     "occurred_at": "2026-10-18T00:00:04.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app4@1.0.0",
+     "details": {
+      "\u00e9key": 1,
+      "Zkey": 2,
+      "akey": 3,
+      "\ud83d\ude00k": 4,
+      "\uffffk": 5
+     },
+     "prev_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "record_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 5,
+     "event_id": "00000000-0000-4000-8000-000000000005",
+     "occurred_at": "2026-10-18T00:00:05.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app5@1.0.0",
+     "details": {},
+     "prev_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "record_hash": "05a7bbc53028bd5382ce716020140cf72959e70fa1c575cab14ececd1eee6c5b",
+     "hash_version": "sha256-v1"
+    }
+   ],
+   "pin_seq": null,
+   "pin_hash": null,
+   "status": "broken",
+   "examined": 3,
+   "head_seq": 2,
+   "head_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+   "break_seq": 4,
+   "break_reason": "seq_gap",
+   "break_detail": "expected seq 3, found 4"
+  },
+  {
+   "name": "prev_mismatch",
+   "records": [
+    {
+     "chain_id": "tenant:7",
+     "seq": 1,
+     "event_id": "00000000-0000-4000-8000-000000000001",
+     "occurred_at": "2026-10-18T00:00:01.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app1@1.0.0",
+     "details": {
+      "k": "plain",
+      "a": 1,
+      "z": null,
+      "b": true,
+      "c": false
+     },
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 3,
+     "event_id": "00000000-0000-4000-8000-000000000003",
+     "occurred_at": "2026-10-18T00:00:03.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app3@1.0.0",
+     "details": {
+      "big": 9223372036854775807,
+      "neg": -9223372036854775808,
+      "zero": 0,
+      "lst": [
+       1,
+       "a\u00ff",
+       null,
+       true,
+       []
+      ]
+     },
+     "prev_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "record_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 2,
+     "event_id": "00000000-0000-4000-8000-000000000002",
+     "occurred_at": "2026-10-18T00:00:02.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app2@1.0.0",
+     "details": {
+      "q": "he said \"hi\"\\n",
+      "ctl": "\n\r\t\b\f\u001f\u0001",
+      "sep": "\u2028\u2029"
+     },
+     "prev_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "record_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 4,
+     "event_id": "00000000-0000-4000-8000-000000000004",
+     "occurred_at": "2026-10-18T00:00:04.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app4@1.0.0",
+     "details": {
+      "\u00e9key": 1,
+      "Zkey": 2,
+      "akey": 3,
+      "\ud83d\ude00k": 4,
+      "\uffffk": 5
+     },
+     "prev_hash": "facc7e018d14bf795499c28ac375182776477a67ed3fef96c63f3e815aaa4801",
+     "record_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:7",
+     "seq": 5,
+     "event_id": "00000000-0000-4000-8000-000000000005",
+     "occurred_at": "2026-10-18T00:00:05.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app5@1.0.0",
+     "details": {},
+     "prev_hash": "b748289a3441f60a9eb3f8a106ffa9126c31761eb8981f41eb47d12b57a4c80a",
+     "record_hash": "05a7bbc53028bd5382ce716020140cf72959e70fa1c575cab14ececd1eee6c5b",
+     "hash_version": "sha256-v1"
+    }
+   ],
+   "pin_seq": null,
+   "pin_hash": null,
+   "status": "broken",
+   "examined": 2,
+   "head_seq": 1,
+   "head_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+   "break_seq": 3,
+   "break_reason": "seq_gap",
+   "break_detail": "expected seq 2, found 3"
+  },
+  {
+   "name": "wrong_chain",
+   "records": [
+    {
+     "chain_id": "tenant:7",
+     "seq": 1,
+     "event_id": "00000000-0000-4000-8000-000000000001",
+     "occurred_at": "2026-10-18T00:00:01.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app1@1.0.0",
+     "details": {
+      "k": "plain",
+      "a": 1,
+      "z": null,
+      "b": true,
+      "c": false
+     },
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "hash_version": "sha256-v1"
+    },
+    {
+     "chain_id": "tenant:8",
+     "seq": 2,
+     "event_id": "00000000-0000-4000-8000-000000000002",
+     "occurred_at": "2026-10-18T00:00:02.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app2@1.0.0",
+     "details": {
+      "q": "he said \"hi\"\\n",
+      "ctl": "\n\r\t\b\f\u001f\u0001",
+      "sep": "\u2028\u2029"
+     },
+     "prev_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "record_hash": "c2c7d90dfde70dbcba598c72a794b4df3e4b02dd8089cf803a9cbf606f79ee57",
+     "hash_version": "sha256-v1"
+    }
+   ],
+   "pin_seq": null,
+   "pin_hash": null,
+   "status": "broken",
+   "examined": 2,
+   "head_seq": 1,
+   "head_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+   "break_seq": 2,
+   "break_reason": "chain_id_mismatch",
+   "break_detail": "record belongs to another chain"
+  },
+  {
+   "name": "bad_version",
+   "records": [
+    {
+     "chain_id": "tenant:7",
+     "seq": 1,
+     "event_id": "00000000-0000-4000-8000-000000000001",
+     "occurred_at": "2026-10-18T00:00:01.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app1@1.0.0",
+     "details": {
+      "k": "plain",
+      "a": 1,
+      "z": null,
+      "b": true,
+      "c": false
+     },
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "98839ff8ee9cccb99282b54d1274cd2d2c6e05aada20be3cccea705390bbd632",
+     "hash_version": "sha256-v2"
+    }
+   ],
+   "pin_seq": null,
+   "pin_hash": null,
+   "status": "broken",
+   "examined": 1,
+   "head_seq": null,
+   "head_hash": null,
+   "break_seq": 1,
+   "break_reason": "hash_version_unsupported",
+   "break_detail": "unsupported hash_version 'sha256-v2'"
+  },
+  {
+   "name": "malformed_hash",
+   "records": [
+    {
+     "chain_id": "tenant:7",
+     "seq": 1,
+     "event_id": "00000000-0000-4000-8000-000000000001",
+     "occurred_at": "2026-10-18T00:00:01.000001Z",
+     "actor_uuid": null,
+     "actor_kind": "system",
+     "category": "bundle",
+     "action": "bundle.approve",
+     "outcome": "success",
+     "target_type": "app",
+     "target_id": "app1@1.0.0",
+     "details": {
+      "k": "plain",
+      "a": 1,
+      "z": null,
+      "b": true,
+      "c": false
+     },
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "XYZ",
+     "hash_version": "sha256-v1"
+    }
+   ],
+   "pin_seq": null,
+   "pin_hash": null,
+   "status": "broken",
+   "examined": 1,
+   "head_seq": null,
+   "head_hash": null,
+   "break_seq": 1,
+   "break_reason": "malformed_hash",
+   "break_detail": "prev_hash/record_hash not SHA-256 hex"
+  },
+  {
+   "name": "empty",
+   "records": [],
+   "pin_seq": null,
+   "pin_hash": null,
+   "status": "empty",
+   "examined": 0,
+   "head_seq": null,
+   "head_hash": null,
+   "break_seq": null,
+   "break_reason": null,
+   "break_detail": null
+  },
+  {
+   "name": "empty_pinned",
+   "records": [],
+   "pin_seq": 1,
+   "pin_hash": null,
+   "status": "broken",
+   "examined": 0,
+   "head_seq": null,
+   "head_hash": null,
+   "break_seq": null,
+   "break_reason": "head_mismatch",
+   "break_detail": "chain is empty but a head was pinned"
+  }
+ ]
+}

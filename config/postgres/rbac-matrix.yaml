@@ -53,6 +53,7 @@ tables:
   - sso_connections
   - sso_identities
   - suppression_records
+  - app_commands
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -882,4 +883,32 @@ grants:
     privileges: []
   - role: migration_runner
     table: suppression_records
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0062_app_commands_registry: slash-command registry. Hub-api is the ONLY writer (Phase 1);
+  # explicit empty rows for every other role keep the equality check honest. Phase 2 widens
+  # svc_ingest to SELECT.
+  - role: hub_api
+    table: app_commands
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_commands
+    privileges: []
+  - role: svc_ingest
+    table: app_commands
+    privileges: []
+  - role: svc_process
+    table: app_commands
+    privileges: []
+  - role: svc_action
+    table: app_commands
+    privileges: []
+  - role: svc_streaming
+    table: app_commands
+    privileges: []
+  - role: webui
+    table: app_commands
+    privileges: []
+  - role: migration_runner
+    table: app_commands
     privileges: [SELECT, INSERT, UPDATE, DELETE]

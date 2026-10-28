@@ -35,12 +35,13 @@
 //!
 //! # What is NOT here (deliberate, typed, not silent)
 //!
-//! - The host-API *wire* exposure of these exports. `penguin_bundle_host`'s
-//!   `ExportKind` (external `penguin-libs`, pinned by rev) has only
-//!   `Transform`/`Dispatch`, so a stage cannot yet ask this process to run a
-//!   connector export over the wire; extending it is a `penguin-libs` change.
-//!   Until then the in-process API below is the invocation surface (used by
-//!   the real-path harness, `core/connector_e2e`).
+//! - Loading a connector *over the wire*. The four `receiver` exports are
+//!   reachable over the host-API wire (`penguin-bundle-host` 0.3.0
+//!   `ExportKind::Connector*`, routed by [`crate::connector_wire`]), but a
+//!   connector is pinned in-process (`Executor::pin_connector`), never by a
+//!   stage `load`: it is core-only and always-pinned, so a stage can neither
+//!   load nor evict one. Which connectors a production executor pins at
+//!   startup lands with the first real platform connector.
 //! - Ed25519 artifact-signature verification (`crate::signing`, spec S3.2.1
 //!   gate 1). [`VerifiedManifest`] is by construction the *output* of that
 //!   gate; [`ConnectorHost::load`] additionally refuses any non-core

@@ -32,8 +32,8 @@ export default function PersonalAccessToken() {
         tokenApi.getPAT(),
         tokenApi.getPATScopes(),
       ]);
-      setToken(patRes.token || null);
-      setScopes(scopesRes.scopes || []);
+      setToken(patRes.data?.pat || null);
+      setScopes(scopesRes.data?.scopes || []);
     } catch (err) {
       setError(err.message || 'Failed to load token data.');
     } finally {
@@ -72,7 +72,7 @@ export default function PersonalAccessToken() {
         scope_ceiling: selectedScopes.length ? selectedScopes : null,
       };
       const res = await tokenApi.createPAT(payload);
-      setNewTokenValue(res.token);
+      setNewTokenValue(res.data.token);
       setShowCreateModal(false);
       setCopied(false);
       setShowSuccessModal(true);
@@ -220,18 +220,19 @@ export default function PersonalAccessToken() {
       {/* Create Token Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
-            <h2 className="text-lg font-semibold text-sky-100 mb-4">Create Personal Access Token</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="personal-access-token-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
+            <h2 id="personal-access-token-dialog-1-title" className="text-lg font-semibold text-sky-100 mb-4">Create Personal Access Token</h2>
 
             <form onSubmit={handleCreate} className="space-y-5">
               <div>
-                <label className="block text-sm text-navy-400 mb-1.5">Token Name <span className="text-red-400">*</span></label>
+                <label htmlFor="personal-access-token-input" className="block text-sm text-navy-400 mb-1.5">Token Name <span className="text-red-400">*</span></label>
                 <input
+                  id="personal-access-token-input"
                   type="text"
                   value={createName}
                   onChange={(e) => setCreateName(e.target.value)}
                   placeholder="e.g. My deploy script"
-                  className="w-full bg-navy-800 border border-navy-700 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 text-sm focus:outline-none focus:border-gold-400"
+                  className="w-full bg-navy-800 border border-navy-700 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 text-sm focus:border-gold-400"
                 />
               </div>
 
@@ -245,14 +246,14 @@ export default function PersonalAccessToken() {
                     <p className="text-xs text-gold-400 uppercase tracking-wide mb-2">{category}</p>
                     <div className="space-y-1.5">
                       {categoryScopes.map((scope) => (
-                        <label key={scope.key} className="flex items-start gap-2.5 cursor-pointer">
+                        <label key={scope.scope_key} className="flex items-start gap-2.5 cursor-pointer">
                           <input
                             type="checkbox"
-                            checked={selectedScopes.includes(scope.key)}
-                            onChange={() => toggleScope(scope.key)}
+                            checked={selectedScopes.includes(scope.scope_key)}
+                            onChange={() => toggleScope(scope.scope_key)}
                             className="mt-0.5 accent-gold-400"
                           />
-                          <span className="text-sm text-sky-100">{scope.key}</span>
+                          <span className="text-sm text-sky-100">{scope.scope_key}</span>
                           {scope.description && (
                             <span className="text-xs text-navy-400 ml-1">{scope.description}</span>
                           )}
@@ -291,10 +292,10 @@ export default function PersonalAccessToken() {
       {/* Success Modal */}
       {showSuccessModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="personal-access-token-dialog-2-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
             <div className="flex items-center gap-2 mb-2">
               <ShieldCheckIcon className="h-5 w-5 text-green-400" />
-              <h2 className="text-lg font-semibold text-sky-100">Token Created</h2>
+              <h2 id="personal-access-token-dialog-2-title" className="text-lg font-semibold text-sky-100">Token Created</h2>
             </div>
             <p className="text-red-400 text-sm mb-4 font-medium">
               This token will not be shown again. Store it securely.

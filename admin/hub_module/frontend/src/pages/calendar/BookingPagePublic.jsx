@@ -249,6 +249,7 @@ function BookingPagePublic() {
                   <h3 className="text-lg font-semibold text-sky-100">Select a Date</h3>
                   <div className="flex items-center gap-2">
                     <button
+                      aria-label="Previous month"
                       onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1))}
                       className="p-1 hover:bg-navy-800 rounded"
                     >
@@ -258,6 +259,7 @@ function BookingPagePublic() {
                       {currentMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
                     </div>
                     <button
+                      aria-label="Next month"
                       onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1))}
                       className="p-1 hover:bg-navy-800 rounded"
                     >

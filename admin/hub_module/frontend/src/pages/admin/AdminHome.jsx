@@ -56,7 +56,7 @@ function AdminHome() {
                   <card.icon className="w-6 h-6 text-white" />
                 </div>
                 <div className="text-3xl font-bold">{card.value ?? '-'}</div>
-                <div className="text-slate-600">{card.label}</div>
+                <div className="text-fg-muted">{card.label}</div>
               </div>
             </Link>
           ))}
