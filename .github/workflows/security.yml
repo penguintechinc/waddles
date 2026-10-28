@@ -68,6 +68,8 @@ jobs:
             path: admin/hub_module/backend
           - name: Hub frontend
             path: admin/hub_module/frontend
+            # GHSA-mrhx-c7xc-m3w5: zod DoS, transitive via @penguintechinc/react-libs@1.3.4 (pins zod 3.x, no 3.x patch); allow-list pending react-libs->zod4. Low exposure (login-form lib).
+            audit_allow: "GHSA-mrhx-c7xc-m3w5"
           - name: Marketplace
             path: admin/marketplace_module/backend
           - name: Website

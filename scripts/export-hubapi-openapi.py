@@ -27,7 +27,10 @@ def main() -> int:
     sys.path.insert(0, str(ROOT / "hub_api"))
     from app import create_app  # noqa: PLC0415
 
-    schema = create_app().extensions["QUART_SCHEMA"].openapi_provider.schema()
+    # Hold a strong ref: quart-schema keeps only a weakref to the app, so a
+    # temporary create_app() is collected before schema() runs.
+    app = create_app()
+    schema = app.extensions["QUART_SCHEMA"].openapi_provider.schema()
     schema = json.loads(json.dumps(schema))
     paths = schema.get("paths", {})
     for item in paths.values():

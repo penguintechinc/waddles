@@ -90,6 +90,7 @@ from services.credential_resolver import (
 )
 from services.guild_pairing import list_event_sync_enabled_pairings
 from services.schema import bind_auth_tables, bind_calendar_sync_tables
+from services.sync_worker_dal import open_worker_dal
 
 try:
     from flask_core.feature_flags import feature_enabled
@@ -872,23 +873,15 @@ async def run_event_sync_reconcile_batch(
             await bound_http_client.aclose()
 
 
-async def _build_install_dal() -> Any:
-    """Open this standalone CronJob process's own penguin-dal connection.
-
-    Same DSN/pattern as `role_sync_service.py::_build_install_dal` /
-    `usage_aggregator_service.py::_build_install_dal`.
-    """
-    from services.bundle_install_dal import build_install_dal
-
-    return await build_install_dal(os.environ["DATABASE_URL"], pool_size=1)
-
-
 async def main() -> int:
-    """CronJob entrypoint: one reconcile pass, denominators printed, never a silent zero."""
-    install_dal = await _build_install_dal()
-    dal = install_dal.dal
+    """CronJob entrypoint: one reconcile pass, denominators printed, never a silent zero.
 
-    summary = await run_event_sync_reconcile_batch(dal)
+    The engine queries the RAW pydal DAL (`async_dal.dal`), the same object hub-api builds in
+    `app.py::startup` -- never a penguin-dal `AsyncDB` (no `.dal`; reading one raises
+    `TableNotFoundError: Table 'dal' not found`, see `services/sync_worker_dal.py`).
+    """
+    with open_worker_dal(os.environ["DATABASE_URL"]) as async_dal:
+        summary = await run_event_sync_reconcile_batch(async_dal.dal)
     print(
         f"event_discord_sync: events_examined={summary.events_examined} "
         f"events_synced={summary.events_synced} events_failed={summary.events_failed}"

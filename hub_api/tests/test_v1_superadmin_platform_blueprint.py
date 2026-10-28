@@ -329,10 +329,14 @@ class TestTenantManagement:
         # admin_db fixture seeds exactly one tenant (TENANT_SLUG)
         assert body["pagination"]["total"] == 1
 
-    async def test_create_tenant_success(self, client: Any) -> None:
+    async def test_create_tenant_success(self, client: Any, admin_db: Any) -> None:
+        # Free-tier cap (1 tenant, catch-all counts): run as the excluded operator-plane
+        # `system` tenant -- see tests/test_free_tier_caps.py.
+        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="system")
+        admin_db.dal.commit()
         response = await client.post(
             "/api/v1/superadmin/tenants",
-            headers=_headers(),
+            headers=_headers(tenant="system"),
             json={"slug": "new-tenant", "displayName": "New Tenant"},
         )
         assert response.status_code == 201

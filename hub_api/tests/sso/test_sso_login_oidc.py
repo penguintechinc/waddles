@@ -451,7 +451,7 @@ class TestEntitlementAtLoginTime:
         self, kit: Kit, entitlements: Entitlements
     ) -> None:
         public_id = await kit.create(kit.oidc_body())
-        entitlements.flag_off("waddles.auth.sso_saml")
+        entitlements.flag_off("waddles.auth.sso_custom")
         redirect = await kit.client.get(f"/api/v1/auth/sso/{public_id}/login")
         assert kit.error_reason(redirect) == "sso_not_entitled"
 
@@ -603,10 +603,35 @@ class TestGoogle:
         )
         assert (await kit.redeem(await kit.oidc_login(public_id)))["sub"]
 
-    async def test_professional_tier_is_enough_for_google_but_not_generic_oidc(
+    async def test_free_tier_is_enough_for_google_login(
         self, kit: Kit, google: FakeOidcIdp, entitlements: Entitlements
     ) -> None:
-        entitlements.set_tier("professional")
+        entitlements.set_tier("free")
         public_id = await kit.create(kit.google_body())
         assert (await kit.redeem(await kit.oidc_login(public_id)))["sub"]
         assert (await kit.post_connection(kit.oidc_body())).status_code == 402
+        assert (await kit.post_connection(kit.saml_body())).status_code == 402
+
+    async def test_google_is_ungated_even_when_flag_server_is_unreachable(
+        self, kit: Kit, entitlements: Entitlements
+    ) -> None:
+        def boom(*_a: Any, **_k: Any) -> bool | None:
+            raise ConnectionError("posthog down")
+
+        entitlements.set_tier("free")
+        entitlements.flags.is_enabled = boom  # type: ignore[method-assign]  # simulate outage
+        entitlements._install()
+        assert (await kit.post_connection(kit.google_body())).status_code == 201
+        # Gated types degrade closed (never crash): 402, not 500.
+        assert (await kit.post_connection(kit.oidc_body())).status_code == 402
+
+    async def test_professional_allows_custom_oidc_but_not_saml(
+        self, kit: Kit, entitlements: Entitlements
+    ) -> None:
+        entitlements.set_tier("professional")
+        assert (await kit.post_connection(kit.oidc_body())).status_code == 201
+        assert (await kit.post_connection(kit.saml_body())).status_code == 402
+
+    async def test_enterprise_allows_saml(self, kit: Kit, entitlements: Entitlements) -> None:
+        entitlements.set_tier("enterprise")
+        assert (await kit.post_connection(kit.saml_body())).status_code == 201

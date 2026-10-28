@@ -78,14 +78,12 @@ missing `tenant_id` column to the EXISTING `communities` binding --
 gap, not a new table). `communities`/`community_members` are the same M1/
 M6-owned tables every other Community-module blueprint already reads.
 
-Known inherited behavior (preserved, not fixed -- migration plan's
-Non-goals: "no behavior changes"): `analyticsService.js`'s axios calls
-never set `err.statusCode`, so Node's `errorHandler.js` masks EVERY
-downstream failure (analytics-core 4xx/5xx, timeout, connection refused)
-to a generic 500 -- identical bug shape to `blueprints/v1/event.py`'s own
-documented "Known inherited behavior". Reproduced here via
-`services/community_common.py::api_error` on any `ProxyResult(ok=False)`
-(see `services/analytics_service.py::_relay`).
+Upstream failures (gh-894): `analytics-core` transport failures (timeout,
+connection refused) and upstream 5xx are relayed as a 502 JSON envelope naming
+the upstream dependency, as are upstream 401/403/other 4xx (hub-api's own
+service auth, never the client's); {400,404,409,422,429} keep their status with a
+re-wrapped `api_error` body -- see `services/analytics_service.py::_upstream_error`. Never a
+masked 500.
 """
 
 from __future__ import annotations
@@ -171,7 +169,7 @@ def _clamp_limit(
 
 
 @analytics_bp.route("/me/stats", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_my_stats() -> Any:
     """`GET /api/v1/analytics/me/stats`."""
     user_id = get_current_user_id(request)
@@ -179,7 +177,7 @@ async def get_my_stats() -> Any:
 
 
 @analytics_bp.route("/me/reputation", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_my_reputation() -> Any:
     """`GET /api/v1/analytics/me/reputation`."""
     user_id = get_current_user_id(request)
@@ -192,8 +190,8 @@ async def get_my_reputation() -> Any:
 
 
 @analytics_bp.route("/community/<int:community_id>/members/<int:user_id>/stats", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_COMMUNITY_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_COMMUNITY_ADMIN)  # type: ignore[misc]
 async def get_member_stats(community_id: int, user_id: int) -> Any:
     """`GET /api/v1/analytics/community/<communityId>/members/<userId>/stats`."""
     ctx = get_tenant_context(request)
@@ -210,8 +208,8 @@ async def get_member_stats(community_id: int, user_id: int) -> Any:
 @analytics_bp.route(
     "/community/<int:community_id>/members/<int:user_id>/reputation", methods=["GET"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_COMMUNITY_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_COMMUNITY_ADMIN)  # type: ignore[misc]
 async def get_member_reputation(community_id: int, user_id: int) -> Any:
     """`GET /api/v1/analytics/community/<communityId>/members/<userId>/reputation`."""
     ctx = get_tenant_context(request)
@@ -231,24 +229,24 @@ async def get_member_reputation(community_id: int, user_id: int) -> Any:
 
 
 @analytics_bp.route("/platform/overview", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_PLATFORM_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
 async def get_platform_overview() -> Any:
     """`GET /api/v1/analytics/platform/overview`."""
     return await svc.platform_overview(_proxy_client)
 
 
 @analytics_bp.route("/platform/reputation", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_PLATFORM_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
 async def get_platform_reputation() -> Any:
     """`GET /api/v1/analytics/platform/reputation`."""
     return await svc.reputation_distribution(_proxy_client)
 
 
 @analytics_bp.route("/platform/growth", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_PLATFORM_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
 async def get_platform_growth() -> Any:
     """`GET /api/v1/analytics/platform/growth`."""
     period = request.args.get("period", "90d")
@@ -256,16 +254,16 @@ async def get_platform_growth() -> Any:
 
 
 @analytics_bp.route("/platform/activity", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_PLATFORM_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
 async def get_platform_activity() -> Any:
     """`GET /api/v1/analytics/platform/activity`."""
     return await svc.activity_breakdown(_proxy_client)
 
 
 @analytics_bp.route("/platform/community-health", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_PLATFORM_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
 async def get_platform_community_health() -> Any:
     """`GET /api/v1/analytics/platform/community-health`.
 
@@ -289,8 +287,8 @@ async def get_platform_community_health() -> Any:
 
 
 @analytics_bp.route("/admin/users/<int:user_id>/stats", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_USERS_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_USERS_ADMIN)  # type: ignore[misc]
 async def get_admin_user_stats(user_id: int) -> Any:
     """`GET /api/v1/analytics/admin/users/<userId>/stats`."""
     caller_id = get_current_user_id(request)
@@ -298,8 +296,8 @@ async def get_admin_user_stats(user_id: int) -> Any:
 
 
 @analytics_bp.route("/admin/users/<int:user_id>/reputation", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_USERS_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_USERS_ADMIN)  # type: ignore[misc]
 async def get_admin_user_reputation(user_id: int) -> Any:
     """`GET /api/v1/analytics/admin/users/<userId>/reputation`."""
     caller_id = get_current_user_id(request)

@@ -3,8 +3,8 @@
 Ties the protocol layers (`sso_oidc`, `sso_saml`) to hub-api's identity model:
 
 * **Entitlement.** Every protocol maps to a tier-catalog flag (`sso_types.
-  flag_for_protocol`): SAML/OIDC -> `waddles.auth.sso_saml` (Enterprise), Google
-  -> `waddles.auth.sso_google` (Professional). Evaluated with the real
+  flag_for_protocol`): SAML -> `waddles.auth.sso_saml` (Enterprise), custom OIDC
+  -> `waddles.auth.sso_custom` (Professional), Google -> ungated (Free). Evaluated with the real
   two-gate `flask_core.feature_flags.feature_enabled` for the connection's
   tenant at connection create/update/enable, when listing login options, at
   login start AND again at login completion -- a downgrade stops logins at once.
@@ -78,6 +78,7 @@ from services.sso_types import (
     SsoPolicyError,
     SsoProtocolError,
     flag_for_protocol,
+    required_tier_for_protocol,
 )
 
 logger = logging.getLogger(__name__)
@@ -348,12 +349,15 @@ async def get_connection(ctx: SsoContext, tenant_id: int, public_id: str) -> Sso
 
 async def is_entitled(tenant_slug: str, protocol: str) -> bool:
     """True when the two-gate entitlement check passes for `tenant_slug` and `protocol`."""
-    return bool(await feature_enabled(flag_for_protocol(protocol), tenant=tenant_slug))
+    flag = flag_for_protocol(protocol)
+    if flag is None:  # named Google connection: ungated at every tier
+        return True
+    return bool(await feature_enabled(flag, tenant=tenant_slug))
 
 
 async def _require_entitled(tenant_slug: str, protocol: str) -> None:
     if not await is_entitled(tenant_slug, protocol):
-        tier = "Enterprise" if protocol != PROTOCOL_GOOGLE else "Professional"
+        tier = required_tier_for_protocol(protocol)
         raise payment_required(f"{protocol} SSO requires the {tier} plan or higher")
 
 

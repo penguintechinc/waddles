@@ -1,0 +1,22 @@
+{
+  "accessToken": null,
+  "communityId": 7,
+  "connectionId": 12,
+  "endpoint": {
+    "function": null,
+    "project": null,
+    "region": null,
+    "url": "https://hooks.example.com/waddles"
+  },
+  "expiresAt": null,
+  "kind": 2,
+  "metadata": {},
+  "provider": "external_http",
+  "secret": {
+    "fields": {
+      "token": "STATIC-SECRET-bearer-0123456789"
+    },
+    "scheme": 1
+  },
+  "success": true
+}
