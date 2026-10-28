@@ -26,8 +26,16 @@ count_flake8() {
   local out
   # --exit-zero: flake8 exits 1 on findings AND on a crash, which are
   # indistinguishable; with it, any non-zero exit is a genuine crash.
-  out=$(tool_capture "0" flake8 . --exit-zero --max-line-length=120 \
-    --exclude=.git,__pycache__,venv,.venv,node_modules,.worktrees,.claude/worktrees,vendor) || return 1
+  # Style config (line length, excludes) lives ONLY in .flake8; the version is
+  # pinned in requirements-lint.txt and verified here so counts stay comparable.
+  local want have
+  want=$(sed -n 's/^flake8==\([0-9.]*\).*/\1/p' requirements-lint.txt)
+  have=$(flake8 --version | head -n1 | awk '{print $1}')
+  if [ -z "$want" ] || [ "$have" != "$want" ]; then
+    echo "flake8 version mismatch: have '$have', requirements-lint.txt pins '$want'" >&2
+    return 1
+  fi
+  out=$(tool_capture "0" flake8 . --exit-zero) || return 1
   printf '%s\n' "$out" | count_matching '.'
 }
 run_counted_check "flake8" flake8 "$py_count" count_flake8

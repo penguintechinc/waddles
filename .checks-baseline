@@ -18,7 +18,11 @@
 #   gitleaks 420 -> 415, doc-refs 23 -> 21, govulncheck 2 -> 0.
 # Counts are tool-version sensitive (flake8 7.1.1 / pycodestyle 2.12.1 locally),
 # so pin tool versions when wiring `make lint` into CI.
-flake8=1600
+# 2026-10-18: flake8 line length reconciled 120 (old CLI flag) -> 100 (ruff's
+# line-length everywhere; config now only in .flake8). Same tree: 1612 @120,
+# 3230 @100 - the +~1600 are real E501s, not new debt. Count-ratchet is a STOPGAP
+# (a swap of one finding for another passes); real fix = retire flake8 for ruff.
+flake8=3230
 shellcheck=5206
 hadolint=40
 golangci-lint=0
