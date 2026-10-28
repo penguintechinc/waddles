@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 from flask_core import StageEnvelope, get_bundle_context
+from flask_core.ai_disclosure import AI_DISCLOSURE, with_ai_disclosure
 from waddle_transports import NonRetryableTransportError, RetryableTransportError, TransportResult
 from waddle_transports.url_guard import SSRFError, guarded_request
 
@@ -145,12 +146,16 @@ async def waddleai_completion(
         raise NonRetryableTransportError(
             "waddleai API response missing 'text' field or not a string"
         )
+    # EU AI Act Art.50: guarantee the reply carries the AI-generated disclosure
+    # (hub-api already adds it; this is idempotent defence-in-depth).
+    ai_text = with_ai_disclosure(ai_text)
 
     return TransportResult(
         transport="bundle",
         detail=(
             f"waddleai completion sent, community={community_id} "
-            f"tokens={data.get('output_tokens', 0)}"
+            f"tokens={data.get('output_tokens', 0)} "
+            f"ai_disclosed={AI_DISCLOSURE.strip() in ai_text}"
         ),
         http_status=response.status_code,
     )

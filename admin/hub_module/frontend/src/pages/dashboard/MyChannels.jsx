@@ -172,7 +172,7 @@ function MyChannels() {
             <ExclamationTriangleIcon className="w-5 h-5 text-red-400" />
             <span className="text-red-400">{error}</span>
           </div>
-          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
+          <button aria-label="Close" onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -184,7 +184,7 @@ function MyChannels() {
             <CheckCircleIcon className="w-5 h-5 text-emerald-400" />
             <span className="text-emerald-300">{success}</span>
           </div>
-          <button onClick={() => setSuccess(null)} className="text-emerald-400 hover:text-emerald-300">
+          <button aria-label="Close" onClick={() => setSuccess(null)} className="text-emerald-400 hover:text-emerald-300">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -311,12 +311,12 @@ function MyChannels() {
       {/* Join Request Modal */}
       {joinModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md w-full mx-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="my-channels-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md w-full mx-4">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-sky-100">
+              <h3 id="my-channels-dialog-1-title" className="text-lg font-semibold text-sky-100">
                 Request to Join a Community
               </h3>
-              <button onClick={closeJoinModal} className="text-navy-400 hover:text-sky-100">
+              <button aria-label="Close" onClick={closeJoinModal} className="text-navy-400 hover:text-sky-100">
                 <XMarkIcon className="w-6 h-6" />
               </button>
             </div>
@@ -334,15 +334,16 @@ function MyChannels() {
 
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-1">
+                <label htmlFor="my-channels-community-name-or-slug" className="block text-sm font-medium text-navy-300 mb-1">
                   Community Name or Slug
                 </label>
                 <input
+                  id="my-channels-community-name-or-slug"
                   type="text"
                   value={communitySlug}
                   onChange={(e) => setCommunitySlug(e.target.value)}
                   placeholder="e.g. my-awesome-community"
-                  className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 placeholder-navy-500 focus:outline-none focus:border-gold-500 text-sm"
+                  className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 placeholder-navy-500 focus:border-gold-500 text-sm"
                   onKeyDown={(e) => e.key === 'Enter' && handleJoinRequest()}
                 />
               </div>

@@ -73,6 +73,33 @@ describe('DiscordBotInstallLink', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
+  it('install URL carries the MANAGE_EVENTS permission bit (1<<33) for event sync', async () => {
+    mockedUseFeatureFlag.mockReturnValue(true);
+    mockedGetInstallUrl.mockResolvedValue(
+      'https://discord.com/oauth2/authorize?client_id=123&scope=bot+applications.commands&permissions=1108906961990&integration_type=0',
+    );
+    renderWithQueryClient(<DiscordBotInstallLink />);
+    const link = await screen.findByTestId('discord-bot-install-link');
+    await waitFor(() => expect(link).toHaveAttribute('href', expect.stringContaining('permissions=')));
+    const perms = BigInt(new URL(link.getAttribute('href') ?? '').searchParams.get('permissions') ?? '0');
+    expect((perms >> 33n) & 1n).toBe(1n);
+  });
+
+  it('never crashes and shows nothing when the flag server is unreachable (flag resolves OFF)', () => {
+    mockedUseFeatureFlag.mockReturnValue(false);
+    const { container } = renderWithQueryClient(<DiscordBotInstallLink />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('shows a generic load error on a non-503 failure', async () => {
+    mockedUseFeatureFlag.mockReturnValue(true);
+    mockedGetInstallUrl.mockRejectedValue({ response: { status: 500, data: {} } });
+    renderWithQueryClient(<DiscordBotInstallLink />);
+    expect(await screen.findByTestId('discord-bot-install-error')).toHaveTextContent(
+      'Failed to load the Discord install link',
+    );
+  });
+
   it('shows a configuration message on 503 provider_not_configured', async () => {
     mockedUseFeatureFlag.mockReturnValue(true);
     const err = {

@@ -1,0 +1,18 @@
+# ScopedTokenService Requirements
+# Dependencies for the OAuth-like token management service
+
+# Core JWT library (already available in WaddleBot)
+pyjwt>=2.12.1
+
+# Testing dependencies (optional, for running tests)
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# Note: The following are part of Python standard library:
+# - secrets (cryptographic random)
+# - hashlib (SHA-256 hashing)
+# - datetime (timestamp handling)
+# - logging (structured logging)
+# - dataclasses (type safety)
+# - enum (enumerations)
+# - typing (type hints)

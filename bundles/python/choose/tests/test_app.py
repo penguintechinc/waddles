@@ -218,7 +218,7 @@ def test_pick_is_drawn_via_random_choice_over_the_parsed_options(
         seen.append(list(options))
         return options[-1]
 
-    monkeypatch.setattr(app.random, "choice", _pick_last)
+    monkeypatch.setattr(app._RNG, "choice", _pick_last)
     result = _run(transform(_sample_event("!choose pizza night | movie night")))
     assert result is not None
     assert seen == [["pizza night", "movie night"]]

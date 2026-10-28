@@ -386,9 +386,35 @@ class TestActivityFeedEmit:
         assert row["community_id"] == 42
         assert row["platform"] == "twitch"
         assert row["actor"] == "penguin"
+        # No payload author_id -> NO erasure key; the display-name fallback must never leak in.
+        assert row["actor_platform_user_id"] is None
         assert row["message_in"] == "hello there"
         assert row["reply_out"] == "HELLO THERE"
         assert row["channel_id"] == "chan-1"
+
+    async def test_actor_platform_user_id_is_the_payload_author_id(
+        self, redis_client: Any, http_client_factory: Any, _activity_dal: _FakeActivityDal
+    ) -> None:
+        """regression: GRC G4/G2 -- the feed row carries the platform-native id (erasure key)."""
+        poller = _make_poller(
+            http_client_factory,
+            [
+                {
+                    "appId": APP_ID,
+                    "communityId": 42,
+                    "entrypoint": "builtin_handlers.echo_process:transform",
+                    "spec": {},
+                    "config": {},
+                }
+            ],
+        )
+        runner = ProcessRunner(poller=poller, redis_client=redis_client, tenant_slug=TENANT)
+        process_key = bundle_stream_key(TENANT, "42", APP_ID, "process")
+        env_in = _envelope(community="42", stage="process", text="hi")
+        env_in.event.payload["author_id"] = "98765"
+        await redis_client.lpush(process_key, json.dumps(env_in.to_dict()))
+        await runner.run_once()
+        assert _activity_dal.inserted[0]["actor_platform_user_id"] == "98765"
 
     async def test_no_reply_writes_reply_out_null(
         self, redis_client: Any, http_client_factory: Any, _activity_dal: _FakeActivityDal

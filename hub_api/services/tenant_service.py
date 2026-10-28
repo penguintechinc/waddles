@@ -40,6 +40,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from services.errors import bad_request, forbidden, not_found
+from services.free_tier_caps import add_tenant_admin_capped
 
 VALID_TENANT_ADMIN_ROLES = ("tenant-admin", "tenant-owner")
 
@@ -221,9 +222,13 @@ async def get_tenant_admins(async_dal: Any, dal: Any, *, tenant_id: int) -> list
 
 
 async def add_tenant_admin(
-    async_dal: Any, dal: Any, *, tenant_id: int, user_id: int, role: str
+    async_dal: Any, dal: Any, *, tenant_id: int, user_id: int, role: str, tenant_slug: str
 ) -> None:
-    """Grant (or update) a tenant admin role for a user. Raises 400/404 as Node does."""
+    """Grant (or update) a tenant admin role for a user. Raises 400/404 as Node does.
+
+    ``tenant_slug`` is the TARGET tenant (the one receiving the admin): the free-tier
+    admin cap's tier and count are both resolved against it, never the caller's tenant.
+    """
     if role not in VALID_TENANT_ADMIN_ROLES:
         raise bad_request(f"role must be one of: {', '.join(VALID_TENANT_ADMIN_ROLES)}")
 
@@ -240,12 +245,17 @@ async def add_tenant_admin(
             role=role,
         )
     else:
-        await async_dal.insert_async(
-            dal.tenant_admins,
+        await add_tenant_admin_capped(
+            async_dal,
+            dal,
+            target_tenant_slug=tenant_slug,
             tenant_id=tenant_id,
-            user_id=user_id,
-            role=role,
-            created_at=datetime.now(UTC),
+            values={
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "role": role,
+                "created_at": datetime.now(UTC),
+            },
         )
 
 

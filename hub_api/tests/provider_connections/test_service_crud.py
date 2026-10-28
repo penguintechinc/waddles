@@ -28,7 +28,7 @@ from tests.provider_connections.conftest import (
     FakeClock,
 )
 from tests.provider_connections.fake_twitch import FakeTwitch
-from tests.provider_connections.support import create_twitch, grant_to, raw_rows
+from tests.provider_connections.support import create_twitch, grant_to, open_row, raw_rows
 
 
 class TestCreate:
@@ -77,7 +77,7 @@ class TestCreate:
         access, refresh = bot_tokens
         await create_twitch(pc_service, pc_db, (f"oauth:{access}", refresh))
         row = (await raw_rows(pc_db, "platform_connections"))[0]
-        assert PlatformKeyVault().open(row["access_token"]) == access
+        assert open_row(row) == access
 
     async def test_can_be_created_disabled(
         self, pc_service: ProviderConnectionService, pc_db: Any, bot_tokens: Any
@@ -205,7 +205,7 @@ class TestConflicts:
             )
         after = await raw_rows(pc_db, "platform_connections")
         assert after == before  # not one byte of the existing link changed
-        assert PlatformKeyVault().open(after[0]["access_token"]) == bot_tokens[0]
+        assert open_row(after[0]) == bot_tokens[0]
         assert len(await raw_rows(pc_db, "community_connection_access")) == 1
         assert first.binding.connection.id == after[0]["id"]
 
@@ -401,9 +401,9 @@ class TestUpdate:
             refresh_token=new_refresh,
         )
         row = (await raw_rows(pc_db, "platform_connections"))[0]
-        vault = PlatformKeyVault()
-        assert vault.open(row["access_token"]) == new_access
-        assert vault.open(row["refresh_token"]) == new_refresh
+        assert open_row(row) == new_access
+        assert open_row(row, "refresh_token") == new_refresh
+        assert row["seal_version"] == 1
         assert updated.binding.connection.resource_id == CHANNEL_ID
         assert row["status"] == "active" and row["status_reason"] is None
 
@@ -580,7 +580,7 @@ class TestDelete:
         )
         remaining = await raw_rows(pc_db, "platform_connections")
         assert len(remaining) == 1
-        assert PlatformKeyVault().open(remaining[0]["access_token"]) == bot_tokens[0]
+        assert open_row(remaining[0]) == bot_tokens[0]
         survivor = await pc_service.get(
             tenant_id=pc_db.seed.tenant_id,
             community_id=pc_db.seed.second_community_id,

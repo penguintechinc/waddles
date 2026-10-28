@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { Link, useParams, useNavigate } from 'react-router-dom';
+import { EmptyState } from '../../components/ui';
 import {
   PuzzlePieceIcon,
   Cog6ToothIcon,
@@ -259,7 +260,7 @@ function AdminModules() {
             <ExclamationTriangleIcon className="w-5 h-5 text-red-400" />
             <span className="text-red-400">{error}</span>
           </div>
-          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
+          <button aria-label="Close" onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -275,7 +276,7 @@ function AdminModules() {
             <CheckIcon className="w-5 h-5" />
             <span>{message.text}</span>
           </div>
-          <button onClick={() => setMessage(null)} className="hover:opacity-75">
+          <button aria-label="Close" onClick={() => setMessage(null)} className="hover:opacity-75">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -428,17 +429,19 @@ function AdminModules() {
             <div className="flex-1 relative">
               <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 text-navy-400 w-5 h-5" />
               <input
+                aria-label="Search modules"
                 type="text"
                 placeholder="Search modules..."
                 value={search}
                 onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-                className="w-full pl-10 pr-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500"
+                className="w-full pl-10 pr-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500"
               />
             </div>
             <select
+              aria-label="Filter by category"
               value={category}
               onChange={(e) => { setCategory(e.target.value); setPage(1); }}
-              className="px-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500"
+              className="px-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500"
             >
               {categories.map((cat) => (
                 <option key={cat.value} value={cat.value}>{cat.label}</option>
@@ -568,24 +571,25 @@ function AdminModules() {
           hub-api yet -- this tab is deliberately a placeholder rather
           than a call against an invented endpoint. */}
       {activeTab === 'bundle-apps' && (
-        <div
-          className="bg-navy-800 border border-navy-700 border-dashed rounded-xl p-12 text-center"
-          data-testid="community-bundle-apps-followup"
-        >
-          <PuzzlePieceIcon className="w-12 h-12 text-navy-500 mx-auto mb-4" />
-          <h3 className="text-lg font-semibold text-gold-400 mb-2">Bundle Apps (Coming Soon)</h3>
-          <p className="text-navy-400">
-            Activating or deactivating bundle-catalog apps made available to your tenant will
-            appear here once the community-level activation backend endpoint ships.
-          </p>
+        <div className="card" data-testid="community-bundle-apps-followup">
+          <EmptyState
+            icon={<PuzzlePieceIcon />}
+            title="Bundle Apps (Coming Soon)"
+            description="Activate or deactivate the bundle-catalog apps your tenant has made available to this community."
+            action={
+              <Link to={`/admin/${communityId}/bundles`} className="btn btn-primary">
+                Open bundle apps
+              </Link>
+            }
+          />
         </div>
       )}
 
       {/* Core Module Warning Modal */}
       {showCoreWarning && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-800 rounded-lg p-6 max-w-md border border-navy-700">
-            <h3 className="text-lg font-bold text-sky-100 mb-4">Disable Core Module?</h3>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-modules-dialog-1-title" className="bg-navy-800 rounded-lg p-6 max-w-md border border-navy-700">
+            <h3 id="admin-modules-dialog-1-title" className="text-lg font-bold text-sky-100 mb-4">Disable Core Module?</h3>
             <p className="text-navy-300 mb-4">
               You are about to disable <span className="text-gold-400">{pendingDisable?.module.displayName || pendingDisable?.module.name}</span>,
               a core Waddles module. This may affect community functionality.
@@ -614,12 +618,13 @@ function AdminModules() {
       {/* Configuration Modal (JSON editor fallback) */}
       {configModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-modules-dialog-2-title" className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-sky-100">
+              <h3 id="admin-modules-dialog-2-title" className="text-lg font-semibold text-sky-100">
                 Configure: {configModal.displayName || configModal.name}
               </h3>
               <button
+                aria-label="Close"
                 onClick={closeConfigModal}
                 className="text-navy-400 hover:text-sky-100"
               >
@@ -638,9 +643,10 @@ function AdminModules() {
             )}
 
             <textarea
+              aria-label="Module configuration (JSON)"
               value={configText}
               onChange={(e) => setConfigText(e.target.value)}
-              className="flex-1 w-full bg-navy-900 border border-navy-700 rounded-lg p-4 font-mono text-sm text-sky-100 focus:outline-none focus:border-gold-500 min-h-[300px] resize-none"
+              className="flex-1 w-full bg-navy-900 border border-navy-700 rounded-lg p-4 font-mono text-sm text-sky-100 focus:border-gold-500 min-h-[300px] resize-none"
               placeholder="{}"
             />
 

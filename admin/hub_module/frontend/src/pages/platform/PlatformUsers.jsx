@@ -1,10 +1,17 @@
+import { UserGroupIcon } from '@heroicons/react/24/outline';
+import { Card, EmptyState, PageHeader } from '../../components/ui';
+
 function PlatformUsers() {
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Platform Users</h1>
-      <div className="card p-6">
-        <p className="text-slate-600">User management - Coming soon</p>
-      </div>
+      <PageHeader title="Platform Users" />
+      <Card>
+        <EmptyState
+          icon={<UserGroupIcon />}
+          title="User management is not built yet"
+          description="Platform-wide user administration will live here. Super admins can manage users today from Super Admin > User Management."
+        />
+      </Card>
     </div>
   );
 }

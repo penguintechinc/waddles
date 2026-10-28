@@ -72,8 +72,8 @@ class PlatformEchoResponse:
 # flask_core ships a py.typed marker -- rather than silencing --strict
 # project-wide.
 @platform_bp.route("/status", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:read")  # type: ignore[misc]
 @validate_response(PlatformStatusResponse)
 async def platform_status() -> PlatformStatusResponse:
     """Prove the tenant + scope + response-DTO chain with a trivial read."""
@@ -87,8 +87,8 @@ async def platform_status() -> PlatformStatusResponse:
 
 
 @platform_bp.route("/echo", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:write")  # type: ignore[misc]
 @validate_request(PlatformEchoRequest)
 @validate_response(PlatformEchoResponse)
 async def platform_echo(data: PlatformEchoRequest) -> PlatformEchoResponse:

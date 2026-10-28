@@ -28,7 +28,7 @@ function CommandFlagBadge({ appId }: { appId: string }) {
   return (
     <span
       className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ${
-        enabled ? 'bg-emerald-900/50 text-emerald-300' : 'bg-slate-700/60 text-slate-400'
+        enabled ? 'bg-emerald-900/50 text-emerald-300' : 'bg-navy-700/60 text-fg-muted'
       }`}
       title="Read-only PostHog runtime flag -- the activation state below is the source of truth"
     >
@@ -92,7 +92,7 @@ export default function AdminCommunityBundles() {
 
   if (!pageEnabled) {
     return (
-      <div className="flex items-center justify-center min-h-[50vh] text-slate-400" role="status">
+      <div className="flex items-center justify-center min-h-[50vh] text-fg-muted" role="status">
         Community bundles are not yet available for this community.
       </div>
     );
@@ -117,7 +117,7 @@ export default function AdminCommunityBundles() {
   ];
 
   return (
-    <div className="p-6 text-slate-300">
+    <div className="p-6 text-fg-secondary">
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-semibold text-amber-400">Community Bundles</h1>
         {canManage && (
@@ -133,7 +133,7 @@ export default function AdminCommunityBundles() {
       </div>
 
       {isLoading && (
-        <p role="status" className="text-slate-400">
+        <p role="status" className="text-fg-muted">
           Loading bundles…
         </p>
       )}
@@ -145,19 +145,19 @@ export default function AdminCommunityBundles() {
       )}
 
       {!isLoading && !listError && (bundles?.length ?? 0) === 0 && (
-        <p className="text-slate-400">No bundles activated for this community yet.</p>
+        <p className="text-fg-muted">No bundles activated for this community yet.</p>
       )}
 
       <ul className="space-y-2" data-testid="bundle-activation-list">
         {bundles?.map((bundle) => (
           <li
             key={bundle.appId}
-            className="flex items-center justify-between rounded border border-slate-700 bg-slate-800 px-4 py-3"
+            className="flex items-center justify-between rounded border border-line bg-surface-raised px-4 py-3"
             data-testid={`bundle-row-${bundle.appId}`}
           >
             <div>
-              <p className="font-medium text-slate-100">{bundle.appId}</p>
-              <p className="text-xs text-slate-500">
+              <p className="font-medium text-fg">{bundle.appId}</p>
+              <p className="text-xs text-fg-muted">
                 Activated{' '}
                 {bundle.activatedAt ? new Date(bundle.activatedAt).toLocaleString() : 'unknown'}
               </p>

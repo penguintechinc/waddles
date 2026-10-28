@@ -111,7 +111,7 @@ class DeletionSuccessResponse:
 
 
 @data_privacy_bp.route("", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def export_user_data() -> tuple[Any, int]:
     """Export the authenticated user's personal data (GDPR Art. 15/20)."""
     async_dal, dal = _dal()
@@ -134,7 +134,7 @@ async def export_user_data() -> tuple[Any, int]:
 
 
 @data_privacy_bp.route("", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(RequestDataDeletionRequest)
 async def request_data_deletion(data: RequestDataDeletionRequest) -> tuple[Any, int]:
     """Anonymize and delete personal data for the authenticated user (GDPR Art. 17)."""

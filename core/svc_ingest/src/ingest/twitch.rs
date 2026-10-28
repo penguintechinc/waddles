@@ -24,7 +24,9 @@ use penguin_spine::{KeyRing, Scope, SpineMetrics};
 use tokio::sync::oneshot;
 
 use crate::ingest::{Backoff, STABILITY_WINDOW};
-use crate::publish::{deterministic_workstream_id, publish_event, EventAppender};
+use crate::publish::{
+    deterministic_workstream_id, publish_event, publish_event_bound, EventAppender,
+};
 
 /// Abstraction over a live, joined IRC connection's `recv()` -- lets
 /// [`run_loop`] be driven by a scripted fake in tests instead of a real
@@ -64,6 +66,31 @@ impl IrcConnector for TwitchIrcReceiver {
     }
 }
 
+/// Identity attached to every log/span line of one session -- numeric ids
+/// only, because a Twitch channel login is a username (PII) and must never
+/// reach a log line, span field, or `Debug` output. The static
+/// single-channel path uses `{0, 0}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionLabel {
+    /// Community (team-layer) id owning the session; 0 for the static path.
+    pub community_id: i64,
+    /// Provider-connection id backing the session; 0 for the static path.
+    pub connection_id: i64,
+}
+
+/// Maps a [`TwitchError`] to a static class label for logging. The error's
+/// `Display` embeds free-form transport/server text (which can echo the
+/// channel login or nick -- PII), so it must never reach a log field.
+fn twitch_error_class(err: &TwitchError) -> &'static str {
+    match err {
+        TwitchError::Config(_) => "config",
+        TwitchError::Connection(_) => "connection",
+        TwitchError::RegistrationRejected(_) => "registration_rejected",
+        TwitchError::RegistrationTimeout => "registration_timeout",
+        TwitchError::ClosedBeforeRegistration => "closed_before_registration",
+    }
+}
+
 /// Runs the connect/receive/publish/reconnect loop until `shutdown`
 /// resolves. Split out from [`run`] (which builds the real connector,
 /// keyring, and `SpineClient`) so this control flow is exercised in tests
@@ -84,7 +111,7 @@ impl IrcConnector for TwitchIrcReceiver {
 ///   bad nick/password, an auth failure) stops this loop entirely instead
 ///   of backing off forever against a connection that can never succeed.
 #[allow(clippy::too_many_arguments)] // every parameter is independently varied across tests; a params struct would just move the same count elsewhere
-async fn run_loop<C, A, M>(
+async fn run_loop<C, A, M, Dk>(
     connector: C,
     configured_nick: &str,
     appender: &A,
@@ -92,6 +119,9 @@ async fn run_loop<C, A, M>(
     keyring: &KeyRing,
     active_kid: &str,
     scope: &Scope,
+    label: SessionLabel,
+    dek_provider: &Dk,
+    identity_metrics: &prometheus::IntCounterVec,
     source_id: String,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
@@ -99,6 +129,7 @@ async fn run_loop<C, A, M>(
     C: IrcConnector,
     A: EventAppender,
     M: SpineMetrics,
+    Dk: crate::identity_crypto::DekProvider,
 {
     let workstream_id = deterministic_workstream_id(&source_id);
 
@@ -110,13 +141,13 @@ async fn run_loop<C, A, M>(
                     // Deliberately NOT `backoff.reset()` -- a successful
                     // connect+register+join is not evidence the session is
                     // usable. See `crate::ingest::Backoff`'s doc comment.
-                    tracing::info!(platform = "twitch", source_id = %source_id, "connected, awaiting session stability");
+                    tracing::info!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, "connected, awaiting session stability");
                     channel
                 }
                 Err(err) => {
-                    tracing::warn!(platform = "twitch", source_id = %source_id, error = %err, "connect failed, retrying");
+                    tracing::warn!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = twitch_error_class(&err), "connect failed, retrying");
                     if !err.is_retryable() {
-                        tracing::error!(platform = "twitch", source_id = %source_id, error = %err, "non-retryable connect failure, stopping Twitch ingest");
+                        tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = twitch_error_class(&err), "non-retryable connect failure, stopping Twitch ingest");
                         return;
                     }
                     let delay = backoff.delay();
@@ -139,37 +170,61 @@ async fn run_loop<C, A, M>(
                 () = &mut stability_timer, if !stable => {
                     stable = true;
                     backoff.reset();
-                    tracing::info!(platform = "twitch", source_id = %source_id, "session stable (stability window elapsed), backoff reset");
+                    tracing::info!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, "session stable (stability window elapsed), backoff reset");
                 }
                 recv = channel.recv() => match recv {
                     Ok(Some(msg)) => {
                         if !stable {
                             stable = true;
                             backoff.reset();
-                            tracing::info!(platform = "twitch", source_id = %source_id, "session stable (line received), backoff reset");
+                            tracing::info!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, "session stable (line received), backoff reset");
                         }
                         if crate::normalize::is_self_message(&msg.sender, configured_nick) {
                             continue;
                         }
                         let event = crate::normalize::normalize_twitch_irc(&msg);
-                        if let Err(err) = publish_event(
-                            appender,
-                            metrics,
-                            keyring,
-                            active_kid,
-                            scope,
-                            &source_id,
-                            &workstream_id,
-                            None,
-                            event,
-                        )
-                        .await
-                        {
-                            tracing::error!(platform = "twitch", source_id = %source_id, error = %err, "failed to publish chat event");
+                        // The spine error's Display can embed the stream key (which contains the
+                        // channel-derived source_id), so only a static class is logged.
+                        let published = if label.connection_id != 0 {
+                            // Dynamic session: bind the publish scope to this
+                            // session's own community (tenant isolation).
+                            publish_event_bound(
+                                label.community_id,
+                                appender,
+                                metrics,
+                                keyring,
+                                active_kid,
+                                scope,
+                                &source_id,
+                                &workstream_id,
+                                None,
+                                event,
+                                dek_provider,
+                                identity_metrics,
+                            )
+                            .await
+                        } else {
+                            publish_event(
+                                appender,
+                                metrics,
+                                keyring,
+                                active_kid,
+                                scope,
+                                &source_id,
+                                &workstream_id,
+                                None,
+                                event,
+                                dek_provider,
+                                identity_metrics,
+                            )
+                            .await
+                        };
+                        if let Err(_err) = published {
+                            tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = "publish", "failed to publish chat event");
                         }
                     }
                     Ok(None) => {
-                        tracing::warn!(platform = "twitch", source_id = %source_id, "connection closed, reconnecting");
+                        tracing::warn!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, "connection closed, reconnecting");
                         let delay = backoff.delay();
                         tokio::select! {
                             _ = &mut shutdown => return,
@@ -178,9 +233,9 @@ async fn run_loop<C, A, M>(
                         continue 'outer;
                     }
                     Err(err) => {
-                        tracing::warn!(platform = "twitch", source_id = %source_id, error = %err, "recv error, reconnecting");
+                        tracing::warn!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = twitch_error_class(&err), "recv error, reconnecting");
                         if !err.is_retryable() {
-                            tracing::error!(platform = "twitch", source_id = %source_id, error = %err, "non-retryable gateway error, stopping Twitch ingest");
+                            tracing::error!(platform = "twitch", community_id = label.community_id, connection_id = label.connection_id, error_class = twitch_error_class(&err), "non-retryable gateway error, stopping Twitch ingest");
                             return;
                         }
                         let delay = backoff.delay();
@@ -237,12 +292,55 @@ pub fn irc_config(
     cfg
 }
 
-/// Connects the real Twitch IRC receiver and a real `SpineClient`-backed
-/// publisher, then runs [`run_loop`] until `shutdown` resolves. This is the
-/// function `crate::lib::try_start_twitch_irc` spawns as its own background
-/// task.
+/// Runs one IRC session (connect/receive/publish/reconnect with backoff)
+/// for `channel` until `shutdown` resolves or a non-retryable error stops
+/// it. Reusable per community: derives `source_id`/workstream from
+/// `channel` internally (an infra key, never logged) and tags every log
+/// line with the numeric `label` instead.
 #[allow(clippy::too_many_arguments)] // mirrors run_loop's own justification
-pub async fn run<A: EventAppender, M: SpineMetrics>(
+pub async fn run_with_connector<C, A, M, Dk>(
+    connector: C,
+    configured_nick: &str,
+    channel: &str,
+    label: SessionLabel,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    dek_provider: &Dk,
+    identity_metrics: &prometheus::IntCounterVec,
+    shutdown: oneshot::Receiver<()>,
+) where
+    C: IrcConnector,
+    A: EventAppender,
+    M: SpineMetrics,
+    Dk: crate::identity_crypto::DekProvider,
+{
+    run_loop(
+        connector,
+        configured_nick,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        label,
+        dek_provider,
+        identity_metrics,
+        source_id(channel),
+        Backoff::new(Duration::from_secs(30)),
+        shutdown,
+    )
+    .await;
+}
+
+/// Connects the real Twitch IRC receiver and a real `SpineClient`-backed
+/// publisher, then runs [`run_with_connector`] until `shutdown` resolves.
+/// This is the function `crate::lib::try_start_twitch_irc` spawns as its
+/// own background task (static single-channel path, label `{0, 0}`).
+#[allow(clippy::too_many_arguments)] // mirrors run_loop's own justification
+pub async fn run<A: EventAppender, M: SpineMetrics, Dk: crate::identity_crypto::DekProvider>(
     irc_cfg: IrcConfig,
     channel: &str,
     configured_nick: &str,
@@ -251,21 +349,22 @@ pub async fn run<A: EventAppender, M: SpineMetrics>(
     keyring: &KeyRing,
     active_kid: &str,
     scope: &Scope,
+    dek_provider: &Dk,
+    identity_metrics: &prometheus::IntCounterVec,
     shutdown: oneshot::Receiver<()>,
 ) {
-    let receiver = TwitchIrcReceiver::new(irc_cfg);
-    let sid = source_id(channel);
-    let backoff = Backoff::new(Duration::from_secs(30));
-    run_loop(
-        receiver,
+    run_with_connector(
+        TwitchIrcReceiver::new(irc_cfg),
         configured_nick,
+        channel,
+        SessionLabel::default(),
         appender,
         metrics,
         keyring,
         active_kid,
         scope,
-        sid,
-        backoff,
+        dek_provider,
+        identity_metrics,
         shutdown,
     )
     .await;
@@ -277,6 +376,54 @@ mod tests {
     use penguin_spine::SpineError;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    struct FakeDekProvider;
+    impl crate::identity_crypto::DekProvider for FakeDekProvider {
+        async fn get_dek(
+            &self,
+            _tenant_id: &str,
+        ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError>
+        {
+            Ok((zeroize::Zeroizing::new([9u8; 32]), 1))
+        }
+    }
+
+    /// Decrypts a `publish_event`-encrypted payload field back to
+    /// plaintext for test assertions -- `stream`/`env.event_id` come from
+    /// the captured `EventAppender::append` call itself, so this stays
+    /// correct regardless of how `source_stream`/`event_id` are derived;
+    /// the DEK is [`FakeDekProvider`]'s fixed test key.
+    fn decrypt_test_payload_field(
+        stream: &str,
+        env: &penguin_spine::StageEnvelope,
+        field: &str,
+    ) -> String {
+        let raw = env
+            .event
+            .payload
+            .get(field)
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("payload.{field} missing"));
+        let envelope: crate::identity_crypto::JsonEnvelope = serde_json::from_str(raw).unwrap();
+        let dek = zeroize::Zeroizing::new([9u8; 32]);
+        crate::identity_crypto::decrypt_identity_value(
+            &envelope,
+            &dek,
+            "acme",
+            stream,
+            field,
+            &env.event_id,
+        )
+        .unwrap()
+    }
+
+    fn test_identity_metrics() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_twitch_identity_encryption_total", "test-only"),
+            &["tenant", "status"],
+        )
+        .unwrap()
+    }
 
     fn test_keyring() -> KeyRing {
         KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
@@ -386,6 +533,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_label_default_is_zero_for_static_path() {
+        let label = SessionLabel::default();
+        assert_eq!((label.community_id, label.connection_id), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn run_with_connector_publishes_and_stops_on_shutdown() {
+        let connector = FakeConnector::new(
+            vec![test_msg("someuser", "hello"), test_msg("someuser", "world")],
+            0,
+        );
+        let appender = RecordingAppender::default();
+        let (tx, rx) = oneshot::channel();
+        let keyring = test_keyring();
+        let scope = Scope::new("acme", None);
+        let identity_metrics = test_identity_metrics();
+        let fut = run_with_connector(
+            connector,
+            "waddlebot",
+            "#SomeChannel",
+            SessionLabel {
+                community_id: 7,
+                connection_id: 9,
+            },
+            &appender,
+            &NoopTestMetrics,
+            &keyring,
+            "k1",
+            &scope,
+            &FakeDekProvider,
+            &identity_metrics,
+            rx,
+        );
+        tokio::pin!(fut);
+        // Let the loop publish both messages, then signal shutdown.
+        let early = tokio::time::timeout(Duration::from_millis(300), &mut fut).await;
+        assert!(early.is_err(), "loop must keep running until shutdown");
+        assert_eq!(appender.calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            appender.calls.lock().unwrap()[0].0,
+            "waddles:t:acme:c:_tenant:src:twitch:tw-somechannel:events"
+        );
+        tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), &mut fut)
+            .await
+            .expect("future completes after shutdown");
+    }
+
     #[tokio::test]
     async fn publishes_every_message_before_the_reconnect_that_fails_permanently() {
         // Deliberately never sends `shutdown`: with a *pre-sent* shutdown,
@@ -416,6 +612,12 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -434,13 +636,8 @@ mod tests {
             "waddles:t:acme:c:_tenant:src:twitch:tw-somechannel:events"
         );
         assert_eq!(
-            calls[0]
-                .1
-                .event
-                .payload
-                .get("text")
-                .and_then(|v| v.as_str()),
-            Some("hello")
+            decrypt_test_payload_field(&calls[0].0, &calls[0].1, "text"),
+            "hello"
         );
         assert_eq!(calls[0].1.workstream_id, calls[1].1.workstream_id);
     }
@@ -469,6 +666,12 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -480,13 +683,8 @@ mod tests {
         let calls = appender.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "the self-echoed message must not publish");
         assert_eq!(
-            calls[0]
-                .1
-                .event
-                .payload
-                .get("text")
-                .and_then(|v| v.as_str()),
-            Some("real")
+            decrypt_test_payload_field(&calls[0].0, &calls[0].1, "text"),
+            "real"
         );
     }
 
@@ -506,6 +704,12 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -606,6 +810,12 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 backoff,
                 rx,
@@ -661,6 +871,12 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -729,6 +945,12 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                SessionLabel {
+                    community_id: 0,
+                    connection_id: 0,
+                },
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 backoff,
                 rx,

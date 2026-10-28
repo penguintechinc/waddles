@@ -163,11 +163,12 @@ function SuperAdminVendorRequests() {
 
       {/* Filters */}
       <div className="bg-navy-800 border border-navy-700 rounded-lg p-4">
-        <label className="block text-sm font-medium text-navy-300 mb-2">Filter by Status</label>
+        <label htmlFor="super-admin-vendor-requests-filter-by-status" className="block text-sm font-medium text-navy-300 mb-2">Filter by Status</label>
         <select
+          id="super-admin-vendor-requests-filter-by-status"
           value={filters.status}
           onChange={(e) => setFilters({ ...filters, status: e.target.value })}
-          className="w-full md:w-64 bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:outline-none focus:border-gold-400"
+          className="w-full md:w-64 bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:border-gold-400"
         >
           <option value="pending">Pending</option>
           <option value="approved">Approved</option>

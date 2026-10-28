@@ -94,7 +94,7 @@ function AdminAIChatterConfig() {
             )}
             <span>{message.text}</span>
           </div>
-          <button onClick={() => setMessage(null)} className="hover:opacity-75">
+          <button aria-label="Close" onClick={() => setMessage(null)} className="hover:opacity-75">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -129,11 +129,12 @@ function AdminAIChatterConfig() {
 
             {/* Max Responses Per Window */}
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-aichatter-config-max-ai-responses-per-time-window" className="block text-sm font-medium text-navy-300 mb-2">
                 Max AI responses per time window
               </label>
               <div className="flex items-center gap-4">
                 <input
+                  id="admin-aichatter-config-max-ai-responses-per-time-window"
                   type="number"
                   min="1"
                   max="100"
@@ -150,11 +151,12 @@ function AdminAIChatterConfig() {
 
             {/* Window Duration */}
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-aichatter-config-time-window-duration-minutes" className="block text-sm font-medium text-navy-300 mb-2">
                 Time window duration (minutes)
               </label>
               <div className="flex items-center gap-4">
                 <input
+                  id="admin-aichatter-config-time-window-duration-minutes"
                   type="number"
                   min="1"
                   max="60"
@@ -171,11 +173,12 @@ function AdminAIChatterConfig() {
 
             {/* Per-User Limit */}
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-aichatter-config-max-responses-per-user-per-window" className="block text-sm font-medium text-navy-300 mb-2">
                 Max responses per user per window
               </label>
               <div className="flex items-center gap-4">
                 <input
+                  id="admin-aichatter-config-max-responses-per-user-per-window"
                   type="number"
                   min="1"
                   max="20"
@@ -192,11 +195,12 @@ function AdminAIChatterConfig() {
 
             {/* Response Probability */}
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-aichatter-config-input" className="block text-sm font-medium text-navy-300 mb-2">
                 Response probability ({Math.round((config.response_probability || 0.3) * 100)}%)
               </label>
               <div className="flex items-center gap-4">
                 <input
+                  id="admin-aichatter-config-input"
                   type="range"
                   min="0.05"
                   max="1"
@@ -218,11 +222,12 @@ function AdminAIChatterConfig() {
 
             {/* Min Message Length */}
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-aichatter-config-minimum-message-length-characters" className="block text-sm font-medium text-navy-300 mb-2">
                 Minimum message length (characters)
               </label>
               <div className="flex items-center gap-4">
                 <input
+                  id="admin-aichatter-config-minimum-message-length-characters"
                   type="number"
                   min="1"
                   max="100"

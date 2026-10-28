@@ -62,7 +62,7 @@ function UserPublicProfile() {
   if (loading) {
     return (
       <div className="flex justify-center py-12">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-sky-500"></div>
       </div>
     );
   }
@@ -71,9 +71,9 @@ function UserPublicProfile() {
     return (
       <div className="max-w-3xl mx-auto">
         <div className="card p-12 text-center">
-          <LockClosedIcon className="w-16 h-16 mx-auto text-slate-400 mb-4" />
+          <LockClosedIcon className="w-16 h-16 mx-auto text-fg-muted mb-4" />
           <h2 className="text-xl font-semibold mb-2">Profile Restricted</h2>
-          <p className="text-slate-600">
+          <p className="text-fg-muted">
             This user has restricted who can view their profile.
           </p>
         </div>
@@ -85,9 +85,9 @@ function UserPublicProfile() {
     return (
       <div className="max-w-3xl mx-auto">
         <div className="card p-12 text-center">
-          <UserCircleIcon className="w-16 h-16 mx-auto text-slate-400 mb-4" />
+          <UserCircleIcon className="w-16 h-16 mx-auto text-fg-muted mb-4" />
           <h2 className="text-xl font-semibold mb-2">{error || 'Profile not found'}</h2>
-          <Link to="/" className="text-primary-600 hover:text-primary-700">
+          <Link to="/" className="text-interactive hover:text-interactive-hover">
             Go back home
           </Link>
         </div>
@@ -113,11 +113,11 @@ function UserPublicProfile() {
                 <img
                   src={profile.avatarUrl}
                   alt={profile.displayName || profile.username}
-                  className="w-24 h-24 rounded-full border-4 border-white object-cover bg-white"
+                  className="w-24 h-24 rounded-full border-4 border-surface object-cover bg-surface"
                 />
               ) : (
-                <div className="w-24 h-24 rounded-full border-4 border-white bg-slate-200 flex items-center justify-center">
-                  <UserCircleIcon className="w-16 h-16 text-slate-400" />
+                <div className="w-24 h-24 rounded-full border-4 border-surface bg-navy-700 flex items-center justify-center">
+                  <UserCircleIcon className="w-16 h-16 text-fg-muted" />
                 </div>
               )}
             </div>
@@ -128,18 +128,18 @@ function UserPublicProfile() {
                 {profile.displayName || profile.username}
               </h1>
               {profile.displayName && (
-                <p className="text-slate-600">@{profile.username}</p>
+                <p className="text-fg-muted">@{profile.username}</p>
               )}
             </div>
           </div>
 
           {/* Bio */}
           {profile.bio && (
-            <p className="mt-4 text-slate-700 whitespace-pre-wrap">{profile.bio}</p>
+            <p className="mt-4 text-fg-secondary whitespace-pre-wrap">{profile.bio}</p>
           )}
 
           {/* Meta info */}
-          <div className="mt-4 flex flex-wrap gap-4 text-sm text-slate-600">
+          <div className="mt-4 flex flex-wrap gap-4 text-sm text-fg-muted">
             {location && (
               <div className="flex items-center gap-1">
                 <MapPinIcon className="w-4 h-4" />
@@ -169,7 +169,7 @@ function UserPublicProfile() {
               return (
                 <div
                   key={platform.platform}
-                  className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg"
+                  className="flex items-center gap-3 p-3 bg-surface-raised rounded-lg"
                 >
                   <div
                     className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold"
@@ -179,7 +179,7 @@ function UserPublicProfile() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="font-medium">{info.name}</div>
-                    <div className="text-sm text-slate-600 truncate">{platform.platformUsername}</div>
+                    <div className="text-sm text-fg-muted truncate">{platform.platformUsername}</div>
                   </div>
                 </div>
               );
@@ -198,26 +198,26 @@ function UserPublicProfile() {
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             {profile.activityStats.totalWatchTime !== undefined && (
               <div className="text-center">
-                <div className="text-2xl font-bold text-primary-600">
+                <div className="text-2xl font-bold text-interactive">
                   {Math.floor(profile.activityStats.totalWatchTime / 60)}h
                 </div>
-                <div className="text-sm text-slate-600">Watch Time</div>
+                <div className="text-sm text-fg-muted">Watch Time</div>
               </div>
             )}
             {profile.activityStats.totalMessages !== undefined && (
               <div className="text-center">
-                <div className="text-2xl font-bold text-primary-600">
+                <div className="text-2xl font-bold text-interactive">
                   {profile.activityStats.totalMessages.toLocaleString()}
                 </div>
-                <div className="text-sm text-slate-600">Messages</div>
+                <div className="text-sm text-fg-muted">Messages</div>
               </div>
             )}
             {profile.activityStats.communitiesJoined !== undefined && (
               <div className="text-center">
-                <div className="text-2xl font-bold text-primary-600">
+                <div className="text-2xl font-bold text-interactive">
                   {profile.activityStats.communitiesJoined}
                 </div>
-                <div className="text-sm text-slate-600">Communities</div>
+                <div className="text-sm text-fg-muted">Communities</div>
               </div>
             )}
           </div>
@@ -236,7 +236,7 @@ function UserPublicProfile() {
               <Link
                 key={community.id}
                 to={`/communities/${community.id}`}
-                className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors"
+                className="flex items-center gap-3 p-3 bg-surface-raised rounded-lg hover:bg-navy-700 transition-colors"
               >
                 {community.logoUrl ? (
                   <img
@@ -245,13 +245,13 @@ function UserPublicProfile() {
                     className="w-10 h-10 rounded-lg object-cover"
                   />
                 ) : (
-                  <div className="w-10 h-10 rounded-lg bg-primary-100 flex items-center justify-center">
-                    <UsersIcon className="w-5 h-5 text-primary-600" />
+                  <div className="w-10 h-10 rounded-lg bg-sky-500/15 flex items-center justify-center">
+                    <UsersIcon className="w-5 h-5 text-interactive" />
                   </div>
                 )}
                 <div className="min-w-0 flex-1">
                   <div className="font-medium truncate">{community.displayName || community.name}</div>
-                  <div className="text-sm text-slate-600">{community.role}</div>
+                  <div className="text-sm text-fg-muted">{community.role}</div>
                 </div>
               </Link>
             ))}

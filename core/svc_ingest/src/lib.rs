@@ -68,6 +68,7 @@ pub mod crypto;
 pub mod discord_rest;
 pub mod error;
 pub mod http;
+pub mod identity_crypto;
 pub mod ingest;
 pub mod license;
 pub mod normalize;
@@ -76,6 +77,7 @@ pub mod outbound_ops;
 pub mod publish;
 pub mod scope_resolver;
 pub mod telemetry;
+pub mod twitch_sessions;
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -264,6 +266,9 @@ where
     // `None`. `flag_enabled` never performs inline network I/O (see
     // `crate::license`'s module doc), so this check never blocks startup
     // regardless of license/flag-server reachability.
+    // A contradictory Twitch config (dynamic flag ON + a static identity, or
+    // bad timing) fails loudly even when the data plane below is OFF.
+    config::validate_twitch_mode(&config)?;
     let license_client = license::build_license_client();
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
@@ -277,19 +282,28 @@ where
         // YouTube/Kick receivers, the generic webhook/JWT intake, and D31
         // usage metering are `// TODO(M5)` -- not started here, see this
         // module's doc comment.
-        try_start_twitch_irc(
+        // One shared identity-field DEK provider for every receiver --
+        // `ConfiguredDekProvider` is cheaply `Clone` (see its doc comment),
+        // so each independently-spawned receiver task gets its own handle
+        // onto the same underlying TTL cache / HTTP client.
+        let dek_provider = build_dek_provider(&config, reqwest::Client::new());
+
+        start_twitch_inbound(
             &config,
             ingest_metrics.clone(),
             Arc::clone(&receiver_readiness),
-        );
+            dek_provider.clone(),
+        )?;
         try_start_discord(
             &config,
             ingest_metrics.clone(),
             Arc::clone(&receiver_readiness),
+            dek_provider.clone(),
         );
         try_start_twitch_outbound(&config);
         try_start_discord_outbound(&config);
-        state.eventsub = try_build_eventsub_state(&config, ingest_metrics.clone()).await;
+        state.eventsub =
+            try_build_eventsub_state(&config, ingest_metrics.clone(), dek_provider).await;
     } else {
         // WARN, not INFO: with the flag OFF no outbound drain runs, so
         // `svc_action` refuses every Discord chat.delete/dm.send (no
@@ -372,6 +386,57 @@ fn try_install_scope_resolver(
     Ok(())
 }
 
+/// Picks the Twitch inbound path from configuration
+/// ([`config::validate_twitch_mode`]) and starts it: per-community sessions
+/// (flag ON), the single-tenant static dev receiver (flag OFF + complete
+/// static env), or nothing. A flag-ON conflict with the static identity, or
+/// any dynamic-mode misconfiguration, is an `Err` that fails the process.
+fn start_twitch_inbound(
+    config: &config::Config,
+    metrics: Arc<telemetry::IngestMetrics>,
+    readiness: Arc<ReceiverReadiness>,
+    dek_provider: identity_crypto::ConfiguredDekProvider<
+        identity_crypto::UnimplementedMachineJwtProvider,
+    >,
+) -> anyhow::Result<()> {
+    let mode = config::validate_twitch_mode(config)?;
+    let dek_dynamic = dek_provider.clone();
+    dispatch_twitch_mode(
+        mode,
+        || try_start_twitch_irc(config, metrics.clone(), readiness.clone(), dek_provider),
+        || {
+            twitch_sessions::boot::try_start_twitch_sessions(
+                config,
+                metrics.clone(),
+                readiness.clone(),
+                dek_dynamic,
+            )
+        },
+    )
+}
+
+/// Runs exactly the one starter matching `mode` -- `Dynamic` never starts the
+/// static receiver, `StaticDev` never starts the manager. Split from
+/// [`start_twitch_inbound`] so the dispatch is testable without sockets.
+pub fn dispatch_twitch_mode(
+    mode: config::TwitchMode,
+    static_dev: impl FnOnce(),
+    dynamic: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match mode {
+        config::TwitchMode::Dynamic => dynamic(),
+        config::TwitchMode::StaticDev => {
+            tracing::warn!("single-tenant static identity \u{2014} dev fallback");
+            static_dev();
+            Ok(())
+        }
+        config::TwitchMode::Off => {
+            tracing::info!("no twitch inbound configured; twitch receiver not started");
+            Ok(())
+        }
+    }
+}
+
 /// Attempts to start the Twitch IRC receiver (`crate::ingest::twitch::run`)
 /// as its own background task and returns immediately either way -- never
 /// blocks or fails `run_with_shutdown`'s caller. Three independent reasons
@@ -394,6 +459,9 @@ fn try_start_twitch_irc(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
+    dek_provider: identity_crypto::ConfiguredDekProvider<
+        identity_crypto::UnimplementedMachineJwtProvider,
+    >,
 ) {
     if !config.twitch_irc_enabled() {
         tracing::info!(
@@ -471,6 +539,8 @@ fn try_start_twitch_irc(
             &keyring,
             &active_kid,
             &scope,
+            &dek_provider,
+            &metrics.identity_encryption_total,
             shutdown_rx,
         )
         .await;
@@ -489,6 +559,9 @@ fn try_start_discord(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
+    dek_provider: identity_crypto::ConfiguredDekProvider<
+        identity_crypto::UnimplementedMachineJwtProvider,
+    >,
 ) {
     if !config.discord_enabled() {
         tracing::info!("DISCORD_BOT_TOKEN not set; discord gateway receiver not started");
@@ -557,6 +630,8 @@ fn try_start_discord(
             &keyring,
             &active_kid,
             &scope,
+            &dek_provider,
+            &metrics.identity_encryption_total,
             shutdown_rx,
         )
         .await;
@@ -688,6 +763,9 @@ fn try_start_discord_outbound(config: &config::Config) {
 async fn try_build_eventsub_state(
     config: &config::Config,
     metrics: Arc<telemetry::IngestMetrics>,
+    dek_provider: identity_crypto::ConfiguredDekProvider<
+        identity_crypto::UnimplementedMachineJwtProvider,
+    >,
 ) -> Option<Arc<http::eventsub::EventSubState>> {
     let keyring = resolve_binding_keyring(config, "twitch eventsub")?;
 
@@ -712,14 +790,14 @@ async fn try_build_eventsub_state(
     let redis_client = match outbound::build_redis_client(&spine_cfg) {
         Ok(client) => client,
         Err(err) => {
-            tracing::warn!(error = %err, "valkey client build failed; twitch eventsub receiver not started");
+            tracing::warn!(error_kind = ?err.kind(), "valkey client build failed; twitch eventsub receiver not started");
             return None;
         }
     };
     let conn = match redis_client.get_multiplexed_async_connection().await {
         Ok(conn) => conn,
         Err(err) => {
-            tracing::warn!(error = %err, "valkey connect failed; twitch eventsub receiver not started");
+            tracing::warn!(error_kind = ?err.kind(), "valkey connect failed; twitch eventsub receiver not started");
             return None;
         }
     };
@@ -742,7 +820,72 @@ async fn try_build_eventsub_state(
         keyring,
         active_kid: config.cli.binding_active_kid.clone(),
         scope: config.ingest_scope(),
+        dek_provider,
     }))
+}
+
+/// Builds this runner's identity-field [`identity_crypto::DekProvider`] --
+/// shared across every receiver via `try_start_*` (see call sites below).
+///
+/// Production posture (`config.ingest_dev_kek` unset): [`identity_crypto::
+/// HubApiDekProvider`], authenticated via [`identity_crypto::
+/// UnimplementedMachineJwtProvider`] until `core/service_auth`'s real EdDSA
+/// machine-JWT minter lands (PR #438) -- every call fails closed with
+/// [`identity_crypto::DekUnavailableError`] until then, the documented gap
+/// this task calls out (not a silent stub). hub-api's own broker endpoint
+/// (`POST /api/v1/internal/keys/tenant-dek`, `feature/tenant-dek-broker`)
+/// is a second, independent documented gap -- also unmerged as of this
+/// writing.
+///
+/// Dev/alpha fallback (`config.ingest_dev_kek` set): [`identity_crypto::
+/// LocalDevDekProvider`], hard-gated to [`config::Config::
+/// deployment_environment`] `alpha`/`local` regardless of whether the dev
+/// KEK is configured -- refuses construction otherwise (see that type's
+/// doc comment). A misconfigured beta/gamma/prod deployment with
+/// `INGEST_DEV_KEK` accidentally set therefore still falls through to
+/// `HubApiDekProvider` (logged loudly), never to a silently-accepted dev
+/// KEK outside alpha/local.
+///
+/// Both are wrapped in [`identity_crypto::TtlCachedDekProvider`] (default
+/// 10-minute TTL) so a steady-state ingest loop does not resolve a DEK on
+/// every event.
+fn build_dek_provider(
+    config: &config::Config,
+    http: reqwest::Client,
+) -> identity_crypto::ConfiguredDekProvider<identity_crypto::UnimplementedMachineJwtProvider> {
+    use identity_crypto::{
+        ConfiguredDekProvider, HubApiDekProvider, LocalDevDekProvider, TtlCachedDekProvider,
+        UnimplementedMachineJwtProvider, DEFAULT_DEK_CACHE_TTL,
+    };
+
+    if let Some(kek) = config.ingest_dev_kek.as_ref() {
+        match LocalDevDekProvider::new(config.deployment_environment(), "INGEST_DEV_KEK") {
+            Ok(provider) => {
+                let _ = kek; // presence already checked by LocalDevDekProvider::new via std::env::var
+                return ConfiguredDekProvider::LocalDev(TtlCachedDekProvider::new(
+                    provider,
+                    DEFAULT_DEK_CACHE_TTL,
+                ));
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "INGEST_DEV_KEK is set but LocalDevDekProvider was refused; \
+                     falling back to HubApiDekProvider (never a silent dev-key fallback \
+                     outside alpha/local)"
+                );
+            }
+        }
+    }
+    ConfiguredDekProvider::HubApi(TtlCachedDekProvider::new(
+        HubApiDekProvider::new(
+            http,
+            config.cli.hub_api_url.clone(),
+            UnimplementedMachineJwtProvider,
+            SERVICE_NAME,
+        ),
+        DEFAULT_DEK_CACHE_TTL,
+    ))
 }
 
 /// Shared keyring-resolution step for [`try_start_twitch_irc`]/
@@ -934,6 +1077,8 @@ mod tests {
             discord_bot_token: None,
             envelope_binding_keys: None,
             twitch_eventsub_secret: None,
+            ingest_dev_kek: None,
+            waddles_env: "production".to_string(),
         }
     }
 
@@ -1040,18 +1185,36 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// A [`identity_crypto::ConfiguredDekProvider`] safe to construct in
+    /// tests that never actually resolve a DEK (every `try_start_*`
+    /// no-op-before-spawn test below returns before the spawned task would
+    /// call `get_dek`).
+    fn test_dek_provider(
+    ) -> identity_crypto::ConfiguredDekProvider<identity_crypto::UnimplementedMachineJwtProvider>
+    {
+        identity_crypto::ConfiguredDekProvider::HubApi(identity_crypto::TtlCachedDekProvider::new(
+            identity_crypto::HubApiDekProvider::new(
+                reqwest::Client::new(),
+                "http://hub-api:8204",
+                identity_crypto::UnimplementedMachineJwtProvider,
+                SERVICE_NAME,
+            ),
+            identity_crypto::DEFAULT_DEK_CACHE_TTL,
+        ))
+    }
+
     #[tokio::test]
     async fn try_start_twitch_irc_noop_when_not_configured() {
         // No `tracing` subscriber installed in this test (see
         // `run.rs`'s own doc on why only one test per binary calls
         // `telemetry::init`) -- `tracing::info!`/`warn!` are harmless
         // no-ops without one.
-        try_start_twitch_irc(&base_config(), test_ingest_metrics(), test_readiness());
+        try_start_twitch_irc(&base_config(), test_ingest_metrics(), test_readiness(), test_dek_provider());
     }
 
     #[tokio::test]
     async fn try_start_discord_noop_when_not_configured() {
-        try_start_discord(&base_config(), test_ingest_metrics(), test_readiness());
+        try_start_discord(&base_config(), test_ingest_metrics(), test_readiness(), test_dek_provider());
     }
 
     #[tokio::test]
@@ -1066,7 +1229,7 @@ mod tests {
         config.cli.twitch_irc_channel = "somechannel".to_string();
         config.twitch_irc_oauth_token = Some(crate::config::Secret::new("test-token"));
         // envelope_binding_keys stays None -> must not start.
-        try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness());
+        try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness(), test_dek_provider());
     }
 
     #[tokio::test]
@@ -1075,7 +1238,7 @@ mod tests {
         config.discord_bot_token = Some(crate::config::Secret::new("test-token"));
         config.envelope_binding_keys = Some(crate::config::Secret::new("k1:aabbcc"));
         // binding_active_kid stays "" -> must not start.
-        try_start_discord(&config, test_ingest_metrics(), test_readiness());
+        try_start_discord(&config, test_ingest_metrics(), test_readiness(), test_dek_provider());
     }
 
     #[tokio::test]
@@ -1102,7 +1265,7 @@ mod tests {
         config.envelope_binding_keys = Some(crate::config::Secret::new(
             "k1:0102030405060708090a0b0c0d0e0f10",
         ));
-        try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness());
+        try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness(), test_dek_provider());
     }
 
     #[tokio::test]
@@ -1152,7 +1315,7 @@ mod tests {
             config.envelope_binding_keys = Some(crate::config::Secret::new(
                 "k1:0102030405060708090a0b0c0d0e0f10",
             ));
-            try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness());
+            try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness(), test_dek_provider());
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");
@@ -1180,7 +1343,7 @@ mod tests {
             config.envelope_binding_keys = Some(crate::config::Secret::new(
                 "k1:0102030405060708090a0b0c0d0e0f10",
             ));
-            try_start_discord(&config, test_ingest_metrics(), test_readiness());
+            try_start_discord(&config, test_ingest_metrics(), test_readiness(), test_dek_provider());
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");

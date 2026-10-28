@@ -4,7 +4,7 @@
 # auto-provisioned-secrets.yaml's symmetric keys (`lookup` decides keep-vs-generate,
 # `randBytes`/`sha256sum` supply the entropy -- 64 lowercase hex chars), with ONE
 # deliberate difference: a miss outside alpha/local does NOT fail the release.
-# SSO is entitlement-gated (waddles.auth.sso_saml / waddles.auth.sso_google, default
+# SSO is entitlement-gated (waddles.auth.sso_saml / waddles.auth.sso_custom, default
 # OFF), so a beta/gamma/production install that never uses it must still succeed.
 # hub-api reads this key through an `optional: true` secretKeyRef (templates/_sso.tpl);
 # if SSO is later used without the key, it fails LOUDLY at request time (503

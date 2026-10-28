@@ -11,11 +11,15 @@ suites.
 
 from __future__ import annotations
 
+import ast
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -32,6 +36,7 @@ from services.oauth_providers import (
 )
 
 CALLBACK_BASE = "http://localhost:19999"
+SERVICE_ID = spiffe_id("alpha", "svc-action")
 
 
 def _test_hub_config() -> HubAPIConfig:
@@ -83,7 +88,45 @@ def app(community_db: Any) -> Quart:
     quart_app.config["dal"] = dal
     quart_app.config["async_dal"] = dal  # placeholder -- every connections_svc call is mocked
     quart_app.config["HUB_API_CONFIG"] = _test_hub_config()
+    quart_app.config["SERVICE_JWT_ISSUER"] = _service_issuer()
+    quart_app.config["SERVICE_JWT_VERIFIER"] = quart_app.config["SERVICE_JWT_ISSUER"].as_verifier()
     return quart_app
+
+
+def _service_issuer() -> ServiceJwtIssuer:
+    """Real Ed25519 issuer allow-listing one system-tenant service for ``connections:resolve``."""
+    private = Ed25519PrivateKey.generate()
+    identity = ServiceIdentity(
+        service_id=SERVICE_ID,
+        k8s_namespace="waddlebot",
+        k8s_service_account="svc-action",
+        allowed_scopes=frozenset({"connections:resolve"}),
+        tenant="system",
+    )
+    return ServiceJwtIssuer(
+        keys={"k1": SigningKey("k1", private, private.public_key())},
+        active_kid="k1",
+        identities={SERVICE_ID: identity},
+    )
+
+
+@pytest.fixture
+def mint_headers(app: Quart) -> Any:
+    """Factory: ``mint_headers(community_id)`` -> Bearer header of a community-bound machine JWT."""
+
+    def _mint(community_id: int, *, scope: str = "connections:resolve") -> dict[str, str]:
+        token, _ = app.config["SERVICE_JWT_ISSUER"].issue_with_claims(
+            SERVICE_ID, scope, ttl_seconds=300, extra_claims={"community": community_id}
+        )
+        return {"Authorization": f"Bearer {token}"}
+
+    return _mint
+
+
+@pytest.fixture
+def bound_headers(mint_headers: Any, community_db: Any) -> dict[str, str]:
+    """Bearer header bound to the seeded test community."""
+    return mint_headers(community_db[1])
 
 
 @pytest.fixture
@@ -565,7 +608,7 @@ class TestDeleteConnection:
 
 class TestInternalGetToken:
     async def test_fresh_token_returned_without_refresh(
-        self, client: Any, service_key_headers: Any, community_db: Any, monkeypatch: Any
+        self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
         _, community_id = community_db
         tokens = DecryptedTokens(
@@ -584,7 +627,7 @@ class TestInternalGetToken:
 
         response = await client.get(
             f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
-            headers=service_key_headers,
+            headers=bound_headers,
         )
 
         assert response.status_code == 200
@@ -593,7 +636,7 @@ class TestInternalGetToken:
         mock_refresh.assert_not_awaited()
 
     async def test_near_expiry_token_is_refreshed_and_persisted(
-        self, client: Any, service_key_headers: Any, community_db: Any, monkeypatch: Any
+        self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
         _, community_id = community_db
         tokens = DecryptedTokens(
@@ -627,7 +670,7 @@ class TestInternalGetToken:
 
         response = await client.get(
             f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
-            headers=service_key_headers,
+            headers=bound_headers,
         )
 
         assert response.status_code == 200
@@ -640,7 +683,7 @@ class TestInternalGetToken:
         assert mock_store.await_args.kwargs["access_token"] == "AT_NEW"
 
     async def test_not_connected_is_404(
-        self, client: Any, service_key_headers: Any, community_db: Any, monkeypatch: Any
+        self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
         _, community_id = community_db
         monkeypatch.setattr(
@@ -650,12 +693,12 @@ class TestInternalGetToken:
         )
         response = await client.get(
             f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
-            headers=service_key_headers,
+            headers=bound_headers,
         )
         assert response.status_code == 404
 
     async def test_refresh_failure_is_502(
-        self, client: Any, service_key_headers: Any, community_db: Any, monkeypatch: Any
+        self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
         _, community_id = community_db
         tokens = DecryptedTokens(
@@ -677,7 +720,7 @@ class TestInternalGetToken:
 
         response = await client.get(
             f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
-            headers=service_key_headers,
+            headers=bound_headers,
         )
         assert response.status_code == 502
         body = await response.get_json()
@@ -690,15 +733,15 @@ class TestInternalGetToken:
         )
         assert response.status_code == 401
 
-    async def test_unknown_community_is_404(self, client: Any, service_key_headers: Any) -> None:
+    async def test_unknown_community_is_404(self, client: Any, mint_headers: Any) -> None:
         response = await client.get(
             "/api/v1/internal/communities/999999/connections/youtube/token",
-            headers=service_key_headers,
+            headers=mint_headers(999999),
         )
         assert response.status_code == 404
 
     async def test_unsupported_provider_is_400(
-        self, client: Any, service_key_headers: Any, community_db: Any, monkeypatch: Any
+        self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
         _, community_id = community_db
         monkeypatch.setattr(
@@ -708,6 +751,125 @@ class TestInternalGetToken:
         )
         response = await client.get(
             f"/api/v1/internal/communities/{community_id}/connections/nope/token",
-            headers=service_key_headers,
+            headers=bound_headers,
         )
         assert response.status_code == 400
+
+
+class TestInternalGetTokenAuth:
+    """HIGH-2: the token route accepts ONLY a community-bound machine JWT, never a static key."""
+
+    URL = "/api/v1/internal/communities/{cid}/connections/youtube/token"
+
+    async def test_service_key_header_alone_is_401(
+        self, client: Any, service_key_headers: Any, community_db: Any
+    ) -> None:
+        # regression: HIGH-2 -- a valid shared X-Service-Key with NO Bearer must not authenticate.
+        _, community_id = community_db
+        response = await client.get(self.URL.format(cid=community_id), headers=service_key_headers)
+        assert response.status_code == 401
+
+    async def test_valid_service_key_plus_bearer_for_other_community_is_403(
+        self, client: Any, service_key_headers: Any, mint_headers: Any, community_db: Any
+    ) -> None:
+        _, community_id = community_db
+        headers = {**service_key_headers, **mint_headers(community_id + 1)}
+        response = await client.get(self.URL.format(cid=community_id), headers=headers)
+        assert response.status_code == 403
+
+    async def test_unconfigured_verifier_is_503_not_open(
+        self, client: Any, app: Quart, service_key_headers: Any, community_db: Any
+    ) -> None:
+        _, community_id = community_db
+        app.config["SERVICE_JWT_VERIFIER"] = None
+        response = await client.get(self.URL.format(cid=community_id), headers=service_key_headers)
+        assert response.status_code == 503
+
+    async def test_wrong_scope_is_401(
+        self, client: Any, mint_headers: Any, community_db: Any, app: Quart
+    ) -> None:
+        _, community_id = community_db
+        ident = app.config["SERVICE_JWT_ISSUER"].identities[SERVICE_ID]
+        app.config["SERVICE_JWT_ISSUER"].identities[SERVICE_ID] = ServiceIdentity(
+            ident.service_id,
+            ident.k8s_namespace,
+            ident.k8s_service_account,
+            frozenset({"connections:resolve", "other:scope"}),
+            "system",
+        )
+        response = await client.get(
+            self.URL.format(cid=community_id),
+            headers=mint_headers(community_id, scope="other:scope"),
+        )
+        assert response.status_code == 401
+
+    async def test_token_for_matching_community_returns_tokens_and_refreshes(
+        self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
+    ) -> None:
+        _, community_id = community_db
+        tokens = DecryptedTokens(
+            access_token="AT_OLD",  # noqa: S106
+            refresh_token="RT_OLD",  # noqa: S106
+            expires_at=datetime.now(UTC) + timedelta(seconds=10),  # inside the 60s skew
+            scopes=["a"],
+        )
+        monkeypatch.setattr(
+            connections_module.connections_svc,
+            "get_decrypted_tokens",
+            AsyncMock(return_value=tokens),
+        )
+        monkeypatch.setattr(
+            connections_module.providers_svc,
+            "refresh_access_token",
+            AsyncMock(
+                return_value=TokenResponse(
+                    access_token="AT_NEW",  # noqa: S106
+                    refresh_token=None,
+                    expires_in=3600,
+                    scopes=["a"],
+                    token_type="Bearer",  # noqa: S106
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            connections_module.connections_svc, "store_refreshed_access_token", AsyncMock()
+        )
+        response = await client.get(self.URL.format(cid=community_id), headers=bound_headers)
+        assert response.status_code == 200
+        assert (await response.get_json())["data"]["access_token"] == "AT_NEW"
+
+    async def test_endpoint_response_is_no_store(
+        self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
+    ) -> None:
+        _, community_id = community_db
+        monkeypatch.setattr(
+            connections_module.connections_svc,
+            "get_decrypted_tokens",
+            AsyncMock(
+                return_value=DecryptedTokens(
+                    access_token="AT",  # noqa: S106
+                    refresh_token=None,
+                    expires_at=None,
+                    scopes=[],
+                )
+            ),
+        )
+        response = await client.get(self.URL.format(cid=community_id), headers=bound_headers)
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+        # 401s carry it too: nothing under /internal may be cached.
+        denied = await client.get(self.URL.format(cid=community_id))
+        assert denied.status_code == 401
+        assert denied.headers["Cache-Control"] == "no-store"
+
+
+def test_no_service_key_import_in_community_connections() -> None:
+    """AST guard: the connection-token module never imports or calls the static-secret check."""
+    path = Path(connections_module.__file__)
+    assert path.is_file(), "scanned file must exist"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    nodes = list(ast.walk(tree))
+    assert len(nodes) > 500, "scanned file unexpectedly small"
+    imported = {a.name for n in nodes if isinstance(n, ast.ImportFrom) for a in n.names}
+    used = {n.id for n in nodes if isinstance(n, ast.Name)}
+    assert "is_valid_service_key" not in imported | used

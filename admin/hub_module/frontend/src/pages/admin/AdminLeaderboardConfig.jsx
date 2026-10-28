@@ -210,10 +210,11 @@ function AdminLeaderboardConfig() {
           </p>
           <div className="grid md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-leaderboard-config-minimum-watch-time-minutes" className="block text-sm font-medium text-navy-300 mb-2">
                 Minimum Watch Time (minutes)
               </label>
               <input
+                id="admin-leaderboard-config-minimum-watch-time-minutes"
                 type="number"
                 min="0"
                 max="1440"
@@ -226,10 +227,11 @@ function AdminLeaderboardConfig() {
               </p>
             </div>
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-leaderboard-config-minimum-message-count" className="block text-sm font-medium text-navy-300 mb-2">
                 Minimum Message Count
               </label>
               <input
+                id="admin-leaderboard-config-minimum-message-count"
                 type="number"
                 min="0"
                 max="10000"
@@ -248,10 +250,11 @@ function AdminLeaderboardConfig() {
         <div className="card p-6">
           <h2 className="text-lg font-semibold text-sky-100 mb-4">Display Settings</h2>
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">
+            <label htmlFor="admin-leaderboard-config-leaderboard-display-limit" className="block text-sm font-medium text-navy-300 mb-2">
               Leaderboard Display Limit
             </label>
             <select
+              id="admin-leaderboard-config-leaderboard-display-limit"
               value={config.displayLimit || 25}
               onChange={(e) => updateConfig('displayLimit', parseInt(e.target.value))}
               className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"

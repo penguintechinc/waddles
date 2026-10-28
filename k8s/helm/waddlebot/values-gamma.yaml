@@ -49,3 +49,23 @@ egressPolicy:
 
 spire:
   environment: "gamma"
+
+infrastructure:
+  # Durable delivery-state Valkey: primary + 1 warm replica, required anti-affinity.
+  # Set infrastructure.valkeyDurable.password explicitly (no auto-generation outside alpha/local).
+  valkeyDurable:
+    enabled: true
+    replicas: 2
+    maxMemory: "600mb"
+    antiAffinity: "hard"
+    persistence:
+      size: 5Gi
+  # Dedicated bundle-kv Valkey (noeviction quota store): single pod, no replication.
+  valkeyKv:
+    enabled: true
+    maxMemory: "128mb"
+    persistence:
+      size: 1Gi
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits: { cpu: "250m", memory: "256Mi" }
