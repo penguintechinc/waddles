@@ -588,6 +588,7 @@ dependencies = [
  "clap",
  "penguin-spine",
  "prometheus",
+ "serde_json",
  "sha2",
  "svc-ingest",
  "tokio",
