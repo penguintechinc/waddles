@@ -95,7 +95,7 @@ class VersionDTO:
 
 
 @bundle_versions_bp.route("/<app_id>/versions", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(CreateVersionResponse, 202)
 async def post_version(
     app_id: str,
@@ -197,7 +197,7 @@ async def post_version(
 
 
 @bundle_versions_bp.route("/<app_id>/versions", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def list_versions_route(app_id: str) -> dict[str, object]:
     """Every uploaded version of `app_id`, newest first."""
     install_dal = _install_dal()
@@ -209,7 +209,7 @@ async def list_versions_route(app_id: str) -> dict[str, object]:
 
 
 @bundle_versions_bp.route("/<app_id>/versions/<version>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(VersionDTO)
 async def get_version(app_id: str, version: str) -> VersionDTO | tuple[dict[str, object], int]:
     """The state-machine state, reject reason (if any), scan status and digest for one version."""

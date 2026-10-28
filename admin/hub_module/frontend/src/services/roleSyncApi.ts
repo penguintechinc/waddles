@@ -79,6 +79,18 @@ interface GuildPairingListResponse {
   pairings: GuildPairing[];
 }
 
+interface GuildPairingResponse {
+  success: boolean;
+  pairing: GuildPairing;
+}
+
+/** Mutable subset of a pairing accepted by `PATCH .../guild-pairings/<id>`. */
+export interface UpdateGuildPairingPayload {
+  sync_enabled?: boolean;
+  direction?: GuildPairingDirection;
+  role_name_prefix?: string;
+}
+
 interface RoleSyncBindingListResponse {
   success: boolean;
   bindings: RoleSyncBinding[];
@@ -95,6 +107,15 @@ export const roleSyncApi = {
     apiClient
       .get<GuildPairingListResponse>(`/api/v1/communities/${communityId}/guild-pairings`)
       .then((res) => res.data.pairings),
+
+  /** `PATCH .../guild-pairings/<pairingId>` -- requires `community.guild_pairing:write`. */
+  updatePairing: (communityId: number, pairingId: number, payload: UpdateGuildPairingPayload) =>
+    apiClient
+      .patch<GuildPairingResponse>(
+        `/api/v1/communities/${communityId}/guild-pairings/${pairingId}`,
+        payload,
+      )
+      .then((res) => res.data.pairing),
 
   /** `GET .../guild-pairings/<pairingId>/role-bindings` -- requires `community.guild_pairing:read`. */
   listBindings: (communityId: number, pairingId: number) =>

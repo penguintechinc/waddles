@@ -237,6 +237,15 @@ RULES: tuple[Rule, ...] = (
     # --- subject-owned rows: DELETE ---------------------------------------------------------------
     delete("activity_logs", hub("user_id")),
     delete("activity_stats_daily", hub("hub_user_id")),
+    # The live feed row holds the raw handle (`actor`) + message text; the platform-native id
+    # (`actor_platform_user_id`, migration 0062) is the erasure key. Rows written before 0062 have
+    # a NULL id and age out via the retention window (docs/compliance/data-retention.md).
+    Rule(
+        "live_activity_events",
+        Action.DELETE,
+        matches=(platform("platform", "actor_platform_user_id"),),
+        columns=("actor",),
+    ),
     delete("analytics_suspected_bots", platform("platform", "platform_user_id")),
     delete("auto_shoutout_creators", platform("platform", "platform_user_id")),
     delete("booking_page_members", hub("hub_user_id")),
@@ -480,11 +489,6 @@ RULES: tuple[Rule, ...] = (
         "email",
         "username",
         reason="legacy admin table with its own credentials, not keyed to hub_users",
-    ),
-    review(
-        "live_activity_events",
-        "actor",
-        reason="free-text chat actor label with the message body, no stable id to match",
     ),
     review(
         "loyalty_giveaway_keys",

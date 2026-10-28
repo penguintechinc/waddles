@@ -240,6 +240,12 @@ pub struct Executor<S: ComponentSource> {
     /// `EXECUTOR_FUEL_LIMIT_DISPATCH` (connector spec SS0 condition 4).
     fuel_limit_dispatch: u64,
     bundles: RwLock<HashMap<String, LoadedBundle>>,
+    /// Always-pinned connector registry (`penguin-bundle-host` 0.3.0
+    /// `ExportKind::Connector*`): survives reconnects, unlike `bundles`.
+    connectors: crate::connector_wire::ConnectorRouter,
+    /// Per-component `Linker` cache for connector loads via
+    /// [`Executor::pin_connector`].
+    connector_linkers: crate::engine::LinkerCache,
     /// Single-flight compile-in-progress tracker (gh security review item
     /// 2): concurrent `load`s for the SAME cold digest share one `OnceCell`,
     /// so N scopes activating an identical never-before-seen digest at once
@@ -347,6 +353,7 @@ impl<S: ComponentSource> Executor<S> {
             }
         });
         let signing_keys = PlatformPublicKeys::from_cli(cfg)?;
+        let connector_linkers = crate::engine::LinkerCache::new(engine.clone());
         Ok(Self {
             engine,
             linker,
@@ -357,6 +364,8 @@ impl<S: ComponentSource> Executor<S> {
             fuel_limit_transform: cfg.executor_fuel_limit_transform,
             fuel_limit_dispatch: cfg.executor_fuel_limit_dispatch,
             bundles: RwLock::new(HashMap::new()),
+            connectors: crate::connector_wire::ConnectorRouter::new(),
+            connector_linkers,
             compiling: tokio::sync::Mutex::new(HashMap::new()),
             call_limiter: Arc::new(Semaphore::new(cfg.executor_max_concurrent_calls as usize)),
             compile_limiter: Arc::new(Semaphore::new(
@@ -372,6 +381,36 @@ impl<S: ComponentSource> Executor<S> {
             signing_keys,
             metrics: metrics::executor_metrics(),
         })
+    }
+
+    /// Pins a core connector component for the process lifetime so a stage
+    /// can invoke its `receiver` exports over the host-API wire
+    /// (`ExportKind::Connector*`). Refuses (typed, fail closed) a non-core
+    /// namespace, a non-`connector` world, a digest mismatch, or a digest
+    /// already pinned -- see [`ConnectorHost::load`]. Not reachable over the
+    /// wire: a stage can neither pin nor evict a connector.
+    pub async fn pin_connector(
+        &self,
+        manifest: &crate::manifest::VerifiedManifest,
+        component_bytes: Vec<u8>,
+        limits: crate::connector::ConnectorLimits,
+        bridge: Option<Arc<HostBridge>>,
+    ) -> Result<(), ExecutorError> {
+        let host = crate::connector::ConnectorHost::load(
+            &self.engine,
+            &self.connector_linkers,
+            manifest,
+            component_bytes,
+            limits,
+            bridge,
+        )
+        .await?;
+        self.connectors.pin(host).await
+    }
+
+    /// Number of pinned connectors (diagnostics / tests).
+    pub async fn pinned_connectors(&self) -> usize {
+        self.connectors.len().await
     }
 
     /// Test seam: routes this executor's load/unload/invoke metrics into
@@ -527,10 +566,7 @@ fn resolve_memory_limit_mb(requested_mb: u32, default_mb: u32, max_mb: u32) -> u
 
 /// The stable `export` label for an invoke's [`ExportKind`].
 fn export_label(kind: &ExportKind) -> &'static str {
-    match kind {
-        ExportKind::Transform => "transform",
-        ExportKind::Dispatch => "dispatch",
-    }
+    kind.as_str()
 }
 
 /// The error reported when fuel accounting is unavailable on a store this
@@ -1030,6 +1066,13 @@ impl<S: ComponentSource> Executor<S> {
         // unrecognized digest is always `UNKNOWN_BUNDLE`, even if some OTHER
         // digest is currently resident for this same `app_id` under a
         // different scope.
+        // Connector exports are routed to the always-pinned connector
+        // registry, never the scope-refcounted stage registry below: a
+        // connector is core-only, pinned for the process lifetime, and
+        // neither loadable nor evictable over the wire.
+        if body.export.is_connector() {
+            return self.connectors.invoke(body).await;
+        }
         let (pre, slots, memory_limit_mb, allowed_scopes) = {
             let bundles = self.bundles.read().await;
             let loaded = bundles
@@ -1061,6 +1104,18 @@ impl<S: ComponentSource> Executor<S> {
         let fuel_budget = match body.export {
             ExportKind::Transform => self.fuel_limit_transform,
             ExportKind::Dispatch => self.fuel_limit_dispatch,
+            // Routed to `self.connectors` above; the connector fuel budget is
+            // `ConnectorLimits::fuel`. Reaching here would be a routing bug,
+            // so refuse rather than guess a budget.
+            ExportKind::ConnectorOnConnect
+            | ExportKind::ConnectorOnFrame
+            | ExportKind::ConnectorOnHeartbeatDue
+            | ExportKind::ConnectorOnDisconnect => {
+                return Err(error_body(
+                    ErrorCode::ExportMissing,
+                    "connector export reached the stage invoke path",
+                ));
+            }
         };
         let job = GuestJob {
             engine: self.engine.clone(),
@@ -1293,6 +1348,18 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
                     return Err(trap_to_error_body(trap, memory_cap_hit));
                 }
             }
+        }
+        // Connector exports never reach the stage guest runner (`invoke_inner`
+        // routes them to `ConnectorRouter` first); a stage `Store` has no
+        // connector world, so refuse loudly rather than invent a result.
+        ExportKind::ConnectorOnConnect
+        | ExportKind::ConnectorOnFrame
+        | ExportKind::ConnectorOnHeartbeatDue
+        | ExportKind::ConnectorOnDisconnect => {
+            return Err(error_body(
+                ErrorCode::ExportMissing,
+                "connector export reached the stage guest runner",
+            ));
         }
     }
     .map_err(|e| error_body(ErrorCode::LoadFailed, format!("result encode failed: {e}")))?;
@@ -1741,7 +1808,7 @@ mod tests {
     #[tokio::test]
     async fn on_invoke_rejects_an_unloaded_app_id() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -1782,7 +1849,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -1885,7 +1952,7 @@ mod tests {
         app_id: &str,
         digest: &str,
     ) -> Result<ResultBody, ErrorBody> {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         executor
             .on_invoke(
@@ -2235,7 +2302,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let deadline_ms = 500;
         let start = std::time::Instant::now();
@@ -2314,7 +2381,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -2349,7 +2416,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -2410,7 +2477,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -2575,7 +2642,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -2619,7 +2686,7 @@ mod tests {
             .on_load(fixture_load_body("waddles.test.app"))
             .await
             .expect("a fresh bundle still loads after another bundle's fuel trap");
-        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection2 = crate::wire::Connection::new(tx2);
         let ok = executor
             .on_invoke(
@@ -2666,7 +2733,7 @@ mod tests {
         // receiver is discarded (as below, same as this module's other
         // no-host-call tests) never blocks waiting for an answer that would
         // never come -- a host-call branch would hang forever here instead.
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -2737,7 +2804,7 @@ mod tests {
             }
         });
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         // Generous deadline/fuel: the point is real elapsed wall-clock time
         // for the heartbeat to tick during, not a trap.
@@ -3251,7 +3318,7 @@ mod tests {
         const N: u32 = 2000;
         let start = std::time::Instant::now();
         for i in 0..N {
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
             let connection = crate::wire::Connection::new(tx);
             executor
                 .on_invoke(
@@ -3316,7 +3383,7 @@ mod tests {
             payload: serde_json::Value,
             deadline_ms: u64,
         ) -> Result<ResultBody, ErrorBody> {
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
             let connection = crate::wire::Connection::new(tx);
             executor
                 .on_invoke(

@@ -207,10 +207,11 @@ function AdminAIResearcherConfig() {
           <h2 className="text-lg font-semibold text-sky-100 mb-4">AI Provider</h2>
           <div className="grid md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-airesearcher-config-ai-provider" className="block text-sm font-medium text-navy-300 mb-2">
                 AI Provider
               </label>
               <select
+                id="admin-airesearcher-config-ai-provider"
                 value={config.aiProvider}
                 onChange={(e) => updateConfig('aiProvider', e.target.value)}
                 className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
@@ -231,10 +232,11 @@ function AdminAIResearcherConfig() {
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-airesearcher-config-ai-model" className="block text-sm font-medium text-navy-300 mb-2">
                 AI Model
               </label>
               <select
+                id="admin-airesearcher-config-ai-model"
                 value={config.aiModel}
                 onChange={(e) => updateConfig('aiModel', e.target.value)}
                 className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
@@ -281,10 +283,11 @@ function AdminAIResearcherConfig() {
               {config.customEndpoint?.enabled && (
                 <>
                   <div>
-                    <label className="block text-sm font-medium text-navy-300 mb-2">
+                    <label htmlFor="admin-airesearcher-config-endpoint-url" className="block text-sm font-medium text-navy-300 mb-2">
                       Endpoint URL
                     </label>
                     <input
+                      id="admin-airesearcher-config-endpoint-url"
                       type="url"
                       value={config.customEndpoint?.url || ''}
                       onChange={(e) => updateConfig('customEndpoint', {
@@ -296,10 +299,11 @@ function AdminAIResearcherConfig() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-navy-300 mb-2">
+                    <label htmlFor="admin-airesearcher-config-api-key" className="block text-sm font-medium text-navy-300 mb-2">
                       API Key
                     </label>
                     <input
+                      id="admin-airesearcher-config-api-key"
                       type="password"
                       value={config.customEndpoint?.apiKey || ''}
                       onChange={(e) => updateConfig('customEndpoint', {
@@ -356,10 +360,11 @@ function AdminAIResearcherConfig() {
           <h2 className="text-lg font-semibold text-sky-100 mb-4">Rate Limits</h2>
           <div className="grid md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-airesearcher-config-per-user-per-hour" className="block text-sm font-medium text-navy-300 mb-2">
                 Per User (per hour)
               </label>
               <input
+                id="admin-airesearcher-config-per-user-per-hour"
                 type="number"
                 min="1"
                 max="100"
@@ -372,10 +377,11 @@ function AdminAIResearcherConfig() {
               </p>
             </div>
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-airesearcher-config-per-community-per-hour" className="block text-sm font-medium text-navy-300 mb-2">
                 Per Community (per hour)
               </label>
               <input
+                id="admin-airesearcher-config-per-community-per-hour"
                 type="number"
                 min="10"
                 max="1000"
@@ -431,6 +437,7 @@ function AdminAIResearcherConfig() {
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-semibold text-sky-100">Weekly Summary</h2>
             <input
+              aria-label="Weekly Summary"
               type="checkbox"
               checked={config.weeklySummaryEnabled}
               onChange={(e) => updateConfig('weeklySummaryEnabled', e.target.checked)}
@@ -440,10 +447,11 @@ function AdminAIResearcherConfig() {
           {config.weeklySummaryEnabled && (
             <div className="grid md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-airesearcher-config-day-of-week" className="block text-sm font-medium text-navy-300 mb-2">
                   Day of Week
                 </label>
                 <select
+                  id="admin-airesearcher-config-day-of-week"
                   value={config.weeklySummaryDay}
                   onChange={(e) => updateConfig('weeklySummaryDay', parseInt(e.target.value))}
                   className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
@@ -454,10 +462,11 @@ function AdminAIResearcherConfig() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-airesearcher-config-hour-0-23" className="block text-sm font-medium text-navy-300 mb-2">
                   Hour (0-23)
                 </label>
                 <input
+                  id="admin-airesearcher-config-hour-0-23"
                   type="number"
                   min="0"
                   max="23"
@@ -488,6 +497,7 @@ function AdminAIResearcherConfig() {
               )}
             </div>
             <input
+              aria-label="Bot Detection"
               type="checkbox"
               checked={config.botDetectionEnabled}
               onChange={(e) => updateConfig('botDetectionEnabled', e.target.checked)}
@@ -502,10 +512,11 @@ function AdminAIResearcherConfig() {
           )}
           {config.botDetectionEnabled && (
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-airesearcher-config-input" className="block text-sm font-medium text-navy-300 mb-2">
                 Confidence Threshold ({config.botConfidenceThreshold}%)
               </label>
               <input
+                id="admin-airesearcher-config-input"
                 type="range"
                 min="50"
                 max="99"
@@ -565,10 +576,11 @@ function AdminAIResearcherConfig() {
         <div className="card p-6">
           <h2 className="text-lg font-semibold text-sky-100 mb-4">Webhook Integration</h2>
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">
+            <label htmlFor="admin-airesearcher-config-webhook-url-optional" className="block text-sm font-medium text-navy-300 mb-2">
               Webhook URL (Optional)
             </label>
             <input
+              id="admin-airesearcher-config-webhook-url-optional"
               type="url"
               value={config.webhookUrl}
               onChange={(e) => updateConfig('webhookUrl', e.target.value)}

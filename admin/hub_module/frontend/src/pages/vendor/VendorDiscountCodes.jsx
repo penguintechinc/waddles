@@ -37,6 +37,7 @@ function Toast({ toasts, onDismiss }) {
           )}
           <span>{t.message}</span>
           <button
+            aria-label="Dismiss notification"
             onClick={() => onDismiss(t.id)}
             className="ml-2 opacity-60 hover:opacity-100 transition-opacity"
           >
@@ -54,11 +55,11 @@ function ConfirmDialog({ open, title, message, confirmLabel = 'Confirm', onConfi
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-navy-800 border border-navy-700 rounded-xl p-6 w-full max-w-sm shadow-2xl">
+      <div role="dialog" aria-modal="true" aria-labelledby="vendor-discount-codes-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-xl p-6 w-full max-w-sm shadow-2xl">
         <div className="flex items-start space-x-3 mb-4">
           <ExclamationTriangleIcon className="w-6 h-6 text-orange-400 flex-shrink-0 mt-0.5" />
           <div>
-            <h3 className="text-white font-semibold">{title}</h3>
+            <h3 id="vendor-discount-codes-dialog-1-title" className="text-white font-semibold">{title}</h3>
             <p className="text-navy-300 text-sm mt-1">{message}</p>
           </div>
         </div>
@@ -246,13 +247,14 @@ function CodeModal({ open, onClose, onSaved, editCode, modules }) {
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
-      <div className="bg-navy-800 border border-navy-700 rounded-xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
+      <div role="dialog" aria-modal="true" aria-labelledby="vendor-discount-codes-dialog-2-title" className="bg-navy-800 border border-navy-700 rounded-xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
         {/* Modal header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-navy-700">
-          <h2 className="text-xl font-bold text-white">
+          <h2 id="vendor-discount-codes-dialog-2-title" className="text-xl font-bold text-white">
             {isEdit ? 'Edit Discount Code' : 'Create Discount Code'}
           </h2>
           <button
+            aria-label="Close"
             onClick={onClose}
             className="text-navy-400 hover:text-white transition-colors"
           >
@@ -270,28 +272,30 @@ function CodeModal({ open, onClose, onSaved, editCode, modules }) {
 
           {/* Code */}
           <div>
-            <label className="block text-sm font-medium text-navy-200 mb-1.5">
+            <label htmlFor="vendor-discount-codes-input" className="block text-sm font-medium text-navy-200 mb-1.5">
               Code <span className="text-red-400">*</span>
             </label>
             <input
+              id="vendor-discount-codes-input"
               type="text"
               value={form.code}
               onChange={handleCodeInput}
               disabled={isEdit}
               placeholder="e.g. LAUNCH50"
               maxLength={32}
-              className="w-full bg-navy-900 border border-navy-600 text-white font-mono tracking-widest rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500 disabled:opacity-50 disabled:cursor-not-allowed placeholder-navy-500"
+              className="w-full bg-navy-900 border border-navy-600 text-white font-mono tracking-widest rounded-lg px-3 py-2 text-sm focus:border-sky-500 disabled:opacity-50 disabled:cursor-not-allowed placeholder-navy-500"
             />
             <p className="text-xs text-navy-400 mt-1">Alphanumeric only — auto-uppercased.</p>
           </div>
 
           {/* Module */}
           <div>
-            <label className="block text-sm font-medium text-navy-200 mb-1.5">Module</label>
+            <label htmlFor="vendor-discount-codes-module" className="block text-sm font-medium text-navy-200 mb-1.5">Module</label>
             <select
+              id="vendor-discount-codes-module"
               value={form.module_id}
               onChange={(e) => set('module_id', e.target.value)}
-              className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500"
+              className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:border-sky-500"
             >
               <option value="">All My Modules</option>
               {modules.map((m) => (
@@ -344,6 +348,7 @@ function CodeModal({ open, onClose, onSaved, editCode, modules }) {
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-navy-400 text-sm">$</span>
                 )}
                 <input
+                  aria-label="Discount value"
                   type="number"
                   min="0"
                   max={form.discount_type === 'percentage' ? '100' : undefined}
@@ -351,7 +356,7 @@ function CodeModal({ open, onClose, onSaved, editCode, modules }) {
                   value={form.discount_value}
                   onChange={(e) => set('discount_value', e.target.value)}
                   placeholder={form.discount_type === 'percentage' ? '25' : '5.00'}
-                  className={`w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500 ${
+                  className={`w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:border-sky-500 ${
                     form.discount_type === 'fixed' ? 'pl-7' : ''
                   } ${form.discount_type === 'percentage' ? 'pr-7' : ''}`}
                 />
@@ -365,28 +370,30 @@ function CodeModal({ open, onClose, onSaved, editCode, modules }) {
           {/* Two-column: Max Uses + Window Days */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-navy-200 mb-1.5">Max Uses</label>
+              <label htmlFor="vendor-discount-codes-max-uses" className="block text-sm font-medium text-navy-200 mb-1.5">Max Uses</label>
               <input
+                id="vendor-discount-codes-max-uses"
                 type="number"
                 min="1"
                 step="1"
                 value={form.max_uses}
                 onChange={(e) => set('max_uses', e.target.value)}
                 placeholder="Unlimited"
-                className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500 placeholder-navy-500"
+                className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:border-sky-500 placeholder-navy-500"
               />
               <p className="text-xs text-navy-400 mt-1">Leave empty for unlimited.</p>
             </div>
             <div>
-              <label className="block text-sm font-medium text-navy-200 mb-1.5">Window (days)</label>
+              <label htmlFor="vendor-discount-codes-window-days" className="block text-sm font-medium text-navy-200 mb-1.5">Window (days)</label>
               <input
+                id="vendor-discount-codes-window-days"
                 type="number"
                 min="1"
                 step="1"
                 value={form.usage_window_days}
                 onChange={(e) => set('usage_window_days', e.target.value)}
                 placeholder="No expiry"
-                className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500 placeholder-navy-500"
+                className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:border-sky-500 placeholder-navy-500"
               />
               <p className="text-xs text-navy-400 mt-1">Expires N days after creation.</p>
             </div>
@@ -394,15 +401,16 @@ function CodeModal({ open, onClose, onSaved, editCode, modules }) {
 
           {/* Application Months */}
           <div>
-            <label className="block text-sm font-medium text-navy-200 mb-1.5">Application Months</label>
+            <label htmlFor="vendor-discount-codes-application-months" className="block text-sm font-medium text-navy-200 mb-1.5">Application Months</label>
             <input
+              id="vendor-discount-codes-application-months"
               type="number"
               min="1"
               step="1"
               value={form.application_months}
               onChange={(e) => set('application_months', e.target.value)}
               placeholder="Forever"
-              className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500 placeholder-navy-500"
+              className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:border-sky-500 placeholder-navy-500"
             />
             <p className="text-xs text-navy-400 mt-1">Discount applies for first N months of subscription.</p>
           </div>
@@ -410,21 +418,23 @@ function CodeModal({ open, onClose, onSaved, editCode, modules }) {
           {/* Valid From / Until */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-navy-200 mb-1.5">Valid From</label>
+              <label htmlFor="vendor-discount-codes-valid-from" className="block text-sm font-medium text-navy-200 mb-1.5">Valid From</label>
               <input
+                id="vendor-discount-codes-valid-from"
                 type="date"
                 value={form.valid_from}
                 onChange={(e) => set('valid_from', e.target.value)}
-                className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500"
+                className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:border-sky-500"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-navy-200 mb-1.5">Valid Until</label>
+              <label htmlFor="vendor-discount-codes-valid-until" className="block text-sm font-medium text-navy-200 mb-1.5">Valid Until</label>
               <input
+                id="vendor-discount-codes-valid-until"
                 type="date"
                 value={form.valid_until}
                 onChange={(e) => set('valid_until', e.target.value)}
-                className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500"
+                className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:border-sky-500"
               />
             </div>
           </div>

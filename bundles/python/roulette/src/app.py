@@ -14,7 +14,7 @@ v1 scope (KV-ONLY, no `db` capability -- same deliberate scoping as
 
 - Bare `!roulette` -- PULL, the grammar's bare/default action. Spins a
   six-chamber cylinder with one round loaded (`_pull_trigger()`,
-  `random.randint(1, CHAMBER_COUNT) == 1`) -- a 1-in-6 "out", 5-in-6
+  `_RNG.randint(1, CHAMBER_COUNT) == 1`) -- a 1-in-6 "out", 5-in-6
   "survive". Updates the caller's running pull count and survive/out
   totals. Enforced by a per-(community, caller) cooldown
   (`DEFAULT_COOLDOWN_SECONDS`, admin-configurable) stored as a plain kv
@@ -100,6 +100,11 @@ from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 #: No sub-modules declared for v1 -- every `VERBS` token other than
 #: `list`/`set` resolves to a usage reply (see `_resolve_command`), never a
 #: silent drop.
@@ -145,7 +150,7 @@ _OUT_FLAVORS: tuple[str, ...] = (
 
 def _pull_trigger() -> bool:
     """Spin the cylinder and pull the trigger. Return `True` if this pull is "out"."""
-    return random.randint(1, CHAMBER_COUNT) == 1  # noqa: S311 - a game, not security
+    return _RNG.randint(1, CHAMBER_COUNT) == 1
 
 
 def _pseudonym(actor: str | None) -> str:
@@ -391,7 +396,7 @@ async def _handle_pull(
             provider=provider,
             channel_id=channel_id,
         )
-        flavor = random.choice(_OUT_FLAVORS)  # noqa: S311 - a game, not a security decision
+        flavor = _RNG.choice(_OUT_FLAVORS)
         return (
             f"\U0001f52b {username} spins the cylinder and pulls the trigger... "
             f"{flavor} (pull #{pulls})"
@@ -405,7 +410,7 @@ async def _handle_pull(
         provider=provider,
         channel_id=channel_id,
     )
-    flavor = random.choice(_SURVIVE_FLAVORS)  # noqa: S311 - a game, not a security decision
+    flavor = _RNG.choice(_SURVIVE_FLAVORS)
     return (
         f"\U0001f52b {username} spins the cylinder and pulls the trigger... "
         f"{flavor} (pull #{pulls})"

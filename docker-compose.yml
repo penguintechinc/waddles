@@ -1588,6 +1588,7 @@ services:
   # MarchProxy RTMP sidecar for video proxy
   marchproxy-rtmp:
     profiles: [rtmp]  # excluded from default `up` — image broken; waddlebot/core-module-rtc may be successor
+    # DEPRECATED/DEAD: docker-compose is deprecated (K8s only); this file is a removal candidate - image left unpinned intentionally.
     image: ghcr.io/penguintechinc/marchproxy:latest
     container_name: marchproxy-rtmp
     environment:

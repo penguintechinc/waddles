@@ -1,0 +1,68 @@
+schema_version: 2
+app_id: waddles.core.example.lottery
+name: Lottery Bundle (Python)
+# 1.0.0: initial -- !lottery buy <n>/draw/claim. Economy-SDK ticket purchases, weighted draw, claim payout, activation-gated.
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+# Net-new Waddles content -- no attribution/notice required.
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/lottery
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!lottery"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!lottery"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# Stage split: the economy/identity host imports are served by the PROCESS stage only (svc_process),
+# so every command step runs in `transform`; `dispatch` only relays the reply (relay is action-stage only).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists the open round, ticket positions and entries, ticket totals, the draw result, claim reservations and per-actor cooldowns (pseudonymous keys, round-scoped TTL)"
+  - id: economy.read
+    justification: "reads the actor's balance and max stake so a short or over-cap ticket purchase fails loud before any state changes"
+  - id: economy.wager
+    justification: "debits the ticket price atomically when tickets are bought, and pays the drawn winner the pot (conserved: never more than the tickets sold) when THEY claim it, bounded by max_bet"
+    params:
+      max_bet: 500
+  - id: identity.resolve
+    justification: "resolves the triggering actor's community uuid, which the economy import requires (uuid only, never a name)"
+  - id: "chat.send:discord"
+    justification: "lottery replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "lottery replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

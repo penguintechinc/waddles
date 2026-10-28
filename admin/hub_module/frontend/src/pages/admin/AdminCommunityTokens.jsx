@@ -63,9 +63,9 @@ export default function AdminCommunityTokens() {
         tokenApi.listCATs(communityId),
         tokenApi.getCATScopes(communityId),
       ]);
-      setTokens(listRes.tokens || []);
-      setQuota(listRes.quota ?? null);
-      setScopes(scopesRes.scopes || []);
+      setTokens(listRes.data?.tokens || []);
+      setQuota(listRes.data?.quota ?? null);
+      setScopes(scopesRes.data?.scopes || []);
     } catch (err) {
       setError(err.message || 'Failed to load community tokens.');
     } finally {
@@ -107,7 +107,7 @@ export default function AdminCommunityTokens() {
         name: createName.trim(),
         scopes: selectedScopes,
       });
-      setNewTokenValue(res.token);
+      setNewTokenValue(res.data.token);
       setShowCreateModal(false);
       setCopied(false);
       setShowSuccessModal(true);
@@ -235,7 +235,7 @@ export default function AdminCommunityTokens() {
                   <td className="px-5 py-4">
                     <ScopeBadgeList scopes={token.scopes} />
                   </td>
-                  <td className="px-5 py-4 text-navy-400">{token.created_by || '—'}</td>
+                  <td className="px-5 py-4 text-navy-400">{token.created_by_name || '—'}</td>
                   <td className="px-5 py-4 text-navy-400">
                     {token.last_used_at
                       ? new Date(token.last_used_at).toLocaleDateString()
@@ -266,20 +266,21 @@ export default function AdminCommunityTokens() {
       {/* Create Token Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-lg font-semibold text-sky-100 mb-4">Create Community Access Token</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-community-tokens-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+            <h2 id="admin-community-tokens-dialog-1-title" className="text-lg font-semibold text-sky-100 mb-4">Create Community Access Token</h2>
 
             <form onSubmit={handleCreate} className="space-y-5">
               <div>
-                <label className="block text-sm text-navy-400 mb-1.5">
+                <label htmlFor="admin-community-tokens-input" className="block text-sm text-navy-400 mb-1.5">
                   Token Name <span className="text-red-400">*</span>
                 </label>
                 <input
+                  id="admin-community-tokens-input"
                   type="text"
                   value={createName}
                   onChange={(e) => setCreateName(e.target.value)}
                   placeholder="e.g. Event bot, Welcome service"
-                  className="w-full bg-navy-800 border border-navy-700 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 text-sm focus:outline-none focus:border-gold-400"
+                  className="w-full bg-navy-800 border border-navy-700 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 text-sm focus:border-gold-400"
                 />
               </div>
 
@@ -295,14 +296,14 @@ export default function AdminCommunityTokens() {
                     <p className="text-xs text-gold-400 uppercase tracking-wide mb-2">{category}</p>
                     <div className="space-y-1.5">
                       {categoryScopes.map((scope) => (
-                        <label key={scope.key} className="flex items-start gap-2.5 cursor-pointer">
+                        <label key={scope.scope_key} className="flex items-start gap-2.5 cursor-pointer">
                           <input
                             type="checkbox"
-                            checked={selectedScopes.includes(scope.key)}
-                            onChange={() => toggleScope(scope.key)}
+                            checked={selectedScopes.includes(scope.scope_key)}
+                            onChange={() => toggleScope(scope.scope_key)}
                             className="mt-0.5 accent-gold-400"
                           />
-                          <span className="text-sm text-sky-100">{scope.key}</span>
+                          <span className="text-sm text-sky-100">{scope.scope_key}</span>
                           {scope.description && (
                             <span className="text-xs text-navy-400 ml-1">{scope.description}</span>
                           )}
@@ -341,10 +342,10 @@ export default function AdminCommunityTokens() {
       {/* Success Modal */}
       {showSuccessModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-community-tokens-dialog-2-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
             <div className="flex items-center gap-2 mb-2">
               <ShieldExclamationIcon className="h-5 w-5 text-yellow-400" />
-              <h2 className="text-lg font-semibold text-sky-100">Token Created</h2>
+              <h2 id="admin-community-tokens-dialog-2-title" className="text-lg font-semibold text-sky-100">Token Created</h2>
             </div>
             <p className="text-yellow-400 text-sm mb-4 font-medium">
               This token grants community access. Treat it like a password. It will not be shown again.

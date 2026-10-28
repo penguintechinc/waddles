@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import PropTypes from 'prop-types';
 import TwitchEmbed from './TwitchEmbed';
+import { onActivate } from '../ui/a11y';
 
 /**
  * LiveStreamCard Component
@@ -29,7 +30,7 @@ function LiveStreamCard({ stream, onExpand }) {
       <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-red-500 via-purple-500 to-red-500 opacity-75 animate-pulse"></div>
 
       {!isExpanded ? (
-        <div className="cursor-pointer" onClick={handleToggle}>
+        <div role="button" tabIndex={0} onKeyDown={onActivate(handleToggle)} className="cursor-pointer" onClick={handleToggle}>
           {/* Thumbnail/Preview */}
           <div className="relative aspect-video bg-navy-950 overflow-hidden">
             {stream.thumbnailUrl ? (

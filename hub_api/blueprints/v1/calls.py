@@ -171,8 +171,8 @@ class CreateCallRoomRequest:
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_call_rooms(community_id: int) -> Any:
     """Get all call rooms for a community (admin)."""
     try:
@@ -187,8 +187,8 @@ async def get_call_rooms(community_id: int) -> Any:
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(CreateCallRoomRequest)
 async def create_call_room(community_id: int, data: CreateCallRoomRequest) -> Any:
     """Create a new call room (admin)."""
@@ -202,8 +202,8 @@ async def create_call_room(community_id: int, data: CreateCallRoomRequest) -> An
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_call_room(community_id: int, room_name: str) -> Any:
     """Get a specific call room (admin)."""
     try:
@@ -223,8 +223,8 @@ async def get_call_room(community_id: int, room_name: str) -> Any:
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def delete_call_room(community_id: int, room_name: str) -> Any:
     """Delete a call room (admin)."""
     try:
@@ -243,8 +243,8 @@ async def delete_call_room(community_id: int, room_name: str) -> Any:
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/lock", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def lock_call_room(community_id: int, room_name: str) -> Any:
     """Lock a call room (admin)."""
     try:
@@ -263,8 +263,8 @@ async def lock_call_room(community_id: int, room_name: str) -> Any:
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/unlock", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def unlock_call_room(community_id: int, room_name: str) -> Any:
     """Unlock a call room (admin)."""
     try:
@@ -283,8 +283,8 @@ async def unlock_call_room(community_id: int, room_name: str) -> Any:
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/participants", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_call_participants(community_id: int, room_name: str) -> Any:
     """Get participants in a room (admin)."""
     try:
@@ -313,8 +313,8 @@ class KickParticipantRequest:
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/kick", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(KickParticipantRequest)
 async def kick_call_participant(
     community_id: int, room_name: str, data: KickParticipantRequest
@@ -336,8 +336,8 @@ async def kick_call_participant(
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/mute-all", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def mute_all_call_participants(community_id: int, room_name: str) -> Any:
     """Mute all participants in a room (admin)."""
     try:
@@ -356,8 +356,8 @@ async def mute_all_call_participants(community_id: int, room_name: str) -> Any:
 
 
 @calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/raised-hands", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_raised_hands(community_id: int, room_name: str) -> Any:
     """Get raised hands queue (admin)."""
     try:
@@ -388,8 +388,8 @@ class AcknowledgeHandRequest:
 @calls_admin_bp.route(
     "/<int:community_id>/calls/rooms/<room_name>/acknowledge-hand", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(AcknowledgeHandRequest)
 async def acknowledge_hand(community_id: int, room_name: str, data: AcknowledgeHandRequest) -> Any:
     """Acknowledge a raised hand (admin)."""
@@ -415,8 +415,8 @@ async def acknowledge_hand(community_id: int, room_name: str, data: AcknowledgeH
 
 
 @member_voice_bp.route("/<int:community_id>/interact/voice/rooms", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_READ)  # type: ignore[misc]
 async def list_voice_rooms(community_id: int) -> Any:
     """List voice rooms for a community (member)."""
     try:
@@ -427,8 +427,8 @@ async def list_voice_rooms(community_id: int) -> Any:
 
 
 @member_voice_bp.route("/<int:community_id>/interact/voice/rooms", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_WRITE)  # type: ignore[misc]
 @validate_request(CreateCallRoomRequest)
 async def create_ad_hoc_voice_room(community_id: int, data: CreateCallRoomRequest) -> Any:
     """Create an ad-hoc voice room (member)."""
@@ -444,8 +444,8 @@ async def create_ad_hoc_voice_room(community_id: int, data: CreateCallRoomReques
 @member_voice_bp.route(
     "/<int:community_id>/interact/voice/rooms/<room_name>/join", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_WRITE)  # type: ignore[misc]
 async def join_voice_room(community_id: int, room_name: str) -> Any:
     """Join a voice room -- mints a LiveKit token for THIS caller, THIS room, only if a member."""
     try:
@@ -471,8 +471,8 @@ async def join_voice_room(community_id: int, room_name: str) -> Any:
 @member_voice_bp.route(
     "/<int:community_id>/interact/voice/rooms/<room_name>/leave", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_WRITE)  # type: ignore[misc]
 async def leave_voice_room(community_id: int, room_name: str) -> Any:
     """Leave a voice room (member)."""
     try:

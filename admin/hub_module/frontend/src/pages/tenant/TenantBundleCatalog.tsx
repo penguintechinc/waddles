@@ -85,7 +85,7 @@ export default function TenantBundleCatalog() {
 
   if (!enabled) {
     return (
-      <div className="flex items-center justify-center min-h-[50vh] text-slate-400" role="status">
+      <div className="flex items-center justify-center min-h-[50vh] text-fg-muted" role="status">
         Tenant bundle catalog is not yet available for this tenant.
       </div>
     );
@@ -122,16 +122,16 @@ export default function TenantBundleCatalog() {
   };
 
   return (
-    <div className="p-6 text-slate-300">
+    <div className="p-6 text-fg-secondary">
       <h1 className="text-xl font-semibold text-amber-400">Bundle Catalog</h1>
-      <p className="text-slate-400 mt-1">
+      <p className="text-fg-muted mt-1">
         Control which globally-installed app bundles are available to this tenant&apos;s communities.
       </p>
 
       {canManage && (
         <form onSubmit={handleAddSubmit} className="mt-6 flex items-end gap-3" aria-label="Add bundle availability">
           <div className="flex flex-col">
-            <label htmlFor="new-app-id" className="text-sm text-slate-400 mb-1">
+            <label htmlFor="new-app-id" className="text-sm text-fg-muted mb-1">
               App ID
             </label>
             <input
@@ -140,7 +140,7 @@ export default function TenantBundleCatalog() {
               value={newAppId}
               onChange={(event) => setNewAppId(event.target.value)}
               placeholder="waddles.example.app"
-              className="bg-slate-800 border border-slate-700 rounded-md px-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              className="bg-surface-raised border border-line rounded-md px-3 py-2 text-fg focus:outline-none focus:ring-2 focus:ring-sky-500"
             />
           </div>
           <button
@@ -160,19 +160,19 @@ export default function TenantBundleCatalog() {
       )}
 
       <div className="mt-6">
-        {listQuery.isLoading && <p className="text-slate-400">Loading bundles...</p>}
+        {listQuery.isLoading && <p className="text-fg-muted">Loading bundles...</p>}
         {listQuery.isError && (
           <p className="text-red-400" role="alert">
             {apiErrorMessage(listQuery.error, 'Failed to load bundle availability.')}
           </p>
         )}
         {listQuery.isSuccess && listQuery.data.length === 0 && (
-          <p className="text-slate-400">No bundles have an availability record for this tenant yet.</p>
+          <p className="text-fg-muted">No bundles have an availability record for this tenant yet.</p>
         )}
         {listQuery.isSuccess && listQuery.data.length > 0 && (
           <table className="w-full text-left border-collapse" data-testid="bundle-availability-table">
             <thead>
-              <tr className="border-b border-slate-700 text-slate-400 text-sm">
+              <tr className="border-b border-line text-fg-muted text-sm">
                 <th className="py-2 pr-4">App</th>
                 <th className="py-2 pr-4">Status</th>
                 <th className="py-2 pr-4">Pinned Version</th>
@@ -182,21 +182,21 @@ export default function TenantBundleCatalog() {
             </thead>
             <tbody>
               {listQuery.data.map((bundle) => (
-                <tr key={bundle.appId} className="border-b border-slate-800">
-                  <td className="py-2 pr-4 text-slate-200">{bundle.appId}</td>
+                <tr key={bundle.appId} className="border-b border-line">
+                  <td className="py-2 pr-4 text-fg">{bundle.appId}</td>
                   <td className="py-2 pr-4">
                     <span
                       className={
                         bundle.available
                           ? 'inline-block rounded-full bg-emerald-500/20 text-emerald-300 px-2 py-0.5 text-xs'
-                          : 'inline-block rounded-full bg-slate-700 text-slate-400 px-2 py-0.5 text-xs'
+                          : 'inline-block rounded-full bg-navy-700 text-fg-muted px-2 py-0.5 text-xs'
                       }
                     >
                       {bundle.available ? 'Available' : 'Unavailable'}
                     </span>
                   </td>
-                  <td className="py-2 pr-4 text-slate-400">{bundle.pinnedVersionId ?? '—'}</td>
-                  <td className="py-2 pr-4 text-slate-400">
+                  <td className="py-2 pr-4 text-fg-muted">{bundle.pinnedVersionId ?? '—'}</td>
+                  <td className="py-2 pr-4 text-fg-muted">
                     {bundle.updatedAt ? new Date(bundle.updatedAt).toLocaleString() : '—'}
                   </td>
                   {canManage && (

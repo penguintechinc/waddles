@@ -42,8 +42,9 @@ export default function CredentialTable({
     <div className="card overflow-hidden">
       <div className="p-4 border-b border-navy-700 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <label className="text-sm font-medium text-sky-100">Sort by:</label>
+          <label htmlFor="credential-table-sort-by" className="text-sm font-medium text-sky-100">Sort by:</label>
           <select
+            id="credential-table-sort-by"
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value)}
             className="px-3 py-1 bg-navy-800 border border-navy-600 rounded text-sm text-sky-100 focus:ring-2 focus:ring-gold-500"

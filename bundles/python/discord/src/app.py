@@ -1,30 +1,17 @@
-"""`!discord` -> a per-community Discord invite link.
+"""`!discord` -> the community's Discord invite link, KV-backed (v2 port).
 
-`!discord` (bare = read, anyone) replies with the community's configured invite
-("Join our Discord: <url>"), or a friendly "no link set" message. `!discord set <url>` and
-`!discord reset` (broadcaster/moderator only) set and clear it.
+Commands: `!discord` (anyone) shows the invite; `!discord set <url>` and `!discord remove`
+(mod/broadcaster only, fail CLOSED when role info is absent). Structure mirrors
+`bundles/python/bookmark`: `transform` does all `kv` work, `dispatch` is a pure relay.
 
-State: ONE community-scoped kv key, ``discord.invite`` (the literal guest-side key -- the WIT
-`kv` host capability scopes every key server-side by `(tenant, community, app_id)`, so two
-communities never see each other's link). Keys use ``.``, never ``:`` (gh-631).
+State is community-scoped via the host's `(tenant, community, app_id)` kv scoping. Key
+`discord.invite` (`.`-separated, never `:`, gh-631) holds the plain URL string. Only https
+URLs on `discord.gg`, `discord.com` or `discordapp.com` are accepted, so a compromised or
+careless mod cannot turn the command into an arbitrary-link poster.
 
-Mod gate FAILS CLOSED: `_is_privileged()` requires a real `bool` ``True`` in
-``event.payload["is_mod"]`` or ``["is_broadcaster"]`` -- missing, non-bool (e.g. the string
-``"true"``) or false all refuse. Discord messages carry no role info today, so `set`/`reset`
-there are refused until the ingest normalizer forwards it -- same documented limitation as
-`bundles/python/count`.
-
-URL validation is generic (any well-formed ``http(s)://`` URL with a host, no embedded
-credentials, no whitespace) because a community may use a vanity invite domain; a link that
-doesn't look like a Discord domain is still stored, with a soft warning in the reply.
-
-Logs are PII-free: platform/op/exception-type only -- never the URL value, the actor, or any
-message text.
-
-`kv`, `log` and `relay` are imported at MODULE LOAD on purpose --
-componentize-py only wizens WIT host-imports imported eagerly (see
-`docs/reference/bundle-host-imports.md`). Activation-gated only -- no feature flag: the platform's
-installed -> enabled -> activated check decides whether this bundle runs.
+Logs are PII-free: op and exception-type names only -- never the URL. A non-UTF-8 stored value
+raises `_KvFailure` (ERROR log + error reply), never a silent default. Gated behind the
+PostHog flag ``waddles.command-discord``.
 """
 
 from __future__ import annotations
@@ -33,199 +20,163 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
+from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+FLAG_KEY = "waddles.command-discord"
 COMMAND = "!discord"
 
-#: The single community-scoped kv key holding the invite URL (UTF-8 bytes).
 INVITE_KEY = "discord.invite"
+MAX_URL_LEN = 200
+INVITE_HOSTS = ("discord.gg", "discord.com", "discordapp.com")
 
-#: Longest URL accepted -- well inside the host's per-value limit.
-MAX_URL_LEN = 512
-
-_SPEC = CommandSpec(name="discord")
-_USAGE = "Usage: !discord | !discord set <url> | !discord reset"
-_DISCORD_HOSTS = ("discord.gg", "discord.com", "discordapp.com")
-_NOT_PERMITTED = "Only the broadcaster or a moderator can change the Discord link."
-_KV_ERROR = "Something went wrong with the Discord link storage - please try again."
+_USAGE = "Usage: !discord | !discord set <url> | !discord remove"
+_UNAVAILABLE_MSG = "Something went wrong accessing discord storage - please try again."
 
 
 class _KvFailure(Exception):
-    """Internal-only: a `kv` host-call failed. Always caught inside `transform`, never leaked.
+    """Internal-only: a `kv` host call or stored-data check failed; caught in `transform`."""
 
-    Mirrors `waddle_sdk.db`'s documented pattern ("Err is structurally classified, never
-    imported") since `waddle_sdk.kv` is a thin wrapper that does not catch the generated `Err`.
-    """
-
-
-class _InvalidUrl(Exception):
-    """Internal-only: the supplied invite URL was rejected; `str(exc)` is the user-facing reason.
-
-    Raised by `_validate_url` and caught in `transform`, which logs it (exception type only,
-    never the URL) and replies -- so a rejection is an explicit signal, never a swallowed default.
-    """
+    def __init__(self, op: str, error: str) -> None:
+        """Record the failing op and a PII-free error classification (exception type name)."""
+        super().__init__(f"{op}: {error}")
+        self.op = op
+        self.error = error
 
 
 async def _kv_get(key: str) -> bytes | None:
-    """`kv.get`, reclassifying the generated WIT `Err` into `_KvFailure` (fail-loud)."""
+    """`kv.get`, reclassifying a host `Err` into `_KvFailure` (fail-loud, never silent)."""
     try:
-        result = await kv.get(key)
-    except Exception as exc:  # noqa: BLE001 - classified like waddle_sdk.db/http
-        raise _KvFailure(
-            f"kv.get({key!r}) failed: {getattr(exc, 'value', exc)}"
-        ) from exc
-    return cast("bytes | None", result)
+        return cast("bytes | None", await kv.get(key))
+    except Exception as exc:
+        raise _KvFailure("kv_get", type(getattr(exc, "value", exc)).__name__) from exc
 
 
 async def _kv_set(key: str, value: bytes) -> None:
-    """`kv.set` (no TTL -- the link persists indefinitely), reclassifying `Err`."""
+    """`kv.set` (no TTL), reclassifying a host `Err` into `_KvFailure`."""
     try:
         await kv.set(key, value, ttl_seconds=0)
-    except Exception as exc:  # noqa: BLE001
-        raise _KvFailure(
-            f"kv.set({key!r}) failed: {getattr(exc, 'value', exc)}"
-        ) from exc
+    except Exception as exc:
+        raise _KvFailure("kv_set", type(getattr(exc, "value", exc)).__name__) from exc
 
 
 async def _kv_delete(key: str) -> None:
-    """`kv.delete`, reclassifying `Err` into `_KvFailure`."""
+    """`kv.delete`, reclassifying a host `Err` into `_KvFailure`."""
     try:
         await kv.delete(key)
-    except Exception as exc:  # noqa: BLE001
-        raise _KvFailure(
-            f"kv.delete({key!r}) failed: {getattr(exc, 'value', exc)}"
-        ) from exc
+    except Exception as exc:
+        raise _KvFailure("kv_delete", type(getattr(exc, "value", exc)).__name__) from exc
 
 
 def _is_privileged(event: PlatformEvent) -> bool:
-    """Broadcaster/moderator check -- fails CLOSED unless a strict `bool` `True` badge is present.
+    """Broadcaster/moderator check -- fails CLOSED when role info isn't on the event."""
+    is_mod = event.payload.get("is_mod")
+    is_broadcaster = event.payload.get("is_broadcaster")
+    if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
+        log.debug("discord.role_info_unavailable", platform=event.platform)
+        return False
+    return bool(is_mod) or bool(is_broadcaster)
 
-    Anything that is not exactly `True` (missing key, `None`, `"true"`, `1`) is a refusal.
+
+def validate_url(raw: str, *, hosts: tuple[str, ...] = ()) -> str | None:
+    """Return an error message, or `None` when `raw` is an acceptable http(s) URL.
+
+    When `hosts` is non-empty the URL's host must equal, or be a subdomain of, one of them.
     """
-    return (
-        event.payload.get("is_mod") is True
-        or event.payload.get("is_broadcaster") is True
-    )
-
-
-def _validate_url(raw: str) -> None:
-    """Raise `_InvalidUrl` (user-facing message) unless `raw` is an acceptable invite URL."""
+    if not raw:
+        return "a URL is required"
     if len(raw) > MAX_URL_LEN:
-        raise _InvalidUrl(f"That link is too long (max {MAX_URL_LEN} characters).")
+        return f"URLs must be {MAX_URL_LEN} characters or fewer"
     if any(ch.isspace() or ord(ch) < 32 for ch in raw):
-        raise _InvalidUrl("The invite link must be a single URL with no spaces.")
+        return "provide a single URL with no spaces"
     try:
         parts = urlsplit(raw)
-        # `.port` validates the port lazily and raises ValueError on a malformed one.
-        _ = parts.port
+        _ = parts.port  # raises ValueError on a malformed port
     except ValueError as exc:
-        raise _InvalidUrl("That doesn't look like a valid URL.") from exc
-    if parts.scheme.lower() not in ("http", "https"):
-        raise _InvalidUrl("The invite link must start with https:// (or http://).")
-    if not parts.hostname:
-        raise _InvalidUrl(
-            "The invite link must include a host, e.g. https://discord.gg/abc123"
-        )
-    if "@" in parts.netloc:
-        raise _InvalidUrl("The invite link must not contain embedded credentials.")
+        log.debug("discord.invalid_url", error=type(exc).__name__)
+        return "that doesn't look like a valid URL"
+    if parts.scheme not in ("http", "https"):
+        return "only http:// and https:// URLs are allowed"
+    host = (parts.hostname or "").lower()
+    if "." not in host or host.startswith(".") or host.endswith("."):
+        return "that URL needs a valid host name"
+    if parts.username is not None or parts.password is not None:
+        return "URLs with embedded credentials aren't allowed"
+    if hosts and not any(host == h or host.endswith("." + h) for h in hosts):
+        return "that URL isn't on an allowed host (" + ", ".join(hosts) + ")"
+    return None
 
 
-def _looks_like_discord(raw: str) -> bool:
-    """True if the URL's host is a Discord domain (or a subdomain of one)."""
-    host = (urlsplit(raw).hostname or "").lower()
-    return any(host == d or host.endswith("." + d) for d in _DISCORD_HOSTS)
-
-
-async def _handle_read() -> str:
-    """Reply with the stored invite, or a friendly 'not set' message."""
+async def _load() -> str | None:
+    """Return the stored invite URL, or `None` if unset; undecodable data raises `_KvFailure`."""
     raw = await _kv_get(INVITE_KEY)
     if raw is None:
-        return "No Discord link has been set yet. A moderator can set one with !discord set <url>"
+        return None
     try:
-        url = raw.decode("utf-8")
+        return raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise _KvFailure(f"corrupt discord invite: {exc}") from exc
-    if not url:
-        raise _KvFailure("corrupt discord invite: empty value")
-    return f"Join our Discord: {url}"
+        raise _KvFailure("corrupt_invite", type(exc).__name__) from exc
 
 
-async def _handle_set(args: str | None, event: PlatformEvent) -> str:
-    """Validate and store a new invite URL (mod/broadcaster only)."""
-    if not _is_privileged(event):
-        log.info("discord.permission_denied", op="set", platform=event.platform)
-        return _NOT_PERMITTED
-    if args is None:
-        return "Usage: !discord set <url>"
-    _validate_url(args)
-    await _kv_set(INVITE_KEY, args.encode("utf-8"))
-    log.info("discord.invite_set", platform=event.platform)
-    if _looks_like_discord(args):
-        return "Discord link updated."
-    return (
-        "Discord link updated. (Heads up: that doesn't look like a Discord link - "
-        "double-check it.)"
-    )
+async def _handle(rest: str, event: PlatformEvent) -> str:
+    """Handle everything after `!discord`; always returns a reply."""
+    verb, _, arg = rest.partition(" ")
+    verb = verb.lower()
+    arg = arg.strip()
 
+    if verb == "":
+        invite = await _load()
+        log.info("discord.show", configured=invite is not None)
+        if invite is None:
+            return "No Discord invite is configured yet."
+        return f"Join our Discord: {invite}"
 
-async def _handle_reset(args: str | None, event: PlatformEvent) -> str:
-    """Clear the stored invite (mod/broadcaster only)."""
-    if not _is_privileged(event):
-        log.info("discord.permission_denied", op="reset", platform=event.platform)
-        return _NOT_PERMITTED
-    if args is not None:
-        return "Usage: !discord reset"
-    await _kv_delete(INVITE_KEY)
-    log.info("discord.invite_reset", platform=event.platform)
-    return "Discord link cleared."
+    if verb == "set":
+        if not _is_privileged(event):
+            log.info("discord.permission_denied", op="set")
+            return "Only the broadcaster or a moderator can change the Discord invite."
+        if not arg:
+            return "Usage: !discord set <url>"
+        error = validate_url(arg, hosts=INVITE_HOSTS)
+        if error:
+            return f"Can't set: {error}."
+        await _kv_set(INVITE_KEY, arg.encode("utf-8"))
+        log.info("discord.set")
+        return "Saved the Discord invite."
+
+    if verb == "remove":
+        if not _is_privileged(event):
+            log.info("discord.permission_denied", op="remove")
+            return "Only the broadcaster or a moderator can change the Discord invite."
+        await _kv_delete(INVITE_KEY)
+        log.info("discord.removed")
+        return "Removed the Discord invite."
+
+    return f"Unknown !discord subcommand. {_USAGE}"
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize `!discord ...` and build the reply.
+    """Implement `process-stage.transform`: recognise `!discord` and build the reply.
 
-    Returns `None` for a non-chat payload, any message whose first token isn't `!discord`,
-    or while `waddles.command-discord` is off. A `kv` failure logs loudly
-    (`discord.kv_failure`, exception type only) and still replies -- never silent.
+    Cheap-skip (exact first-token match) comes before the flag check; a `kv` failure is logged
+    loudly (PII-free) and answered with an error reply, never swallowed into a default.
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
         return None
-    stripped = text.strip()
-    head = stripped.split(maxsplit=1)[0].lower() if stripped else ""
-    if head != COMMAND:
+    head, _, rest = text.strip().partition(" ")
+    if head.lower() != COMMAND:
+        return None
+    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:
-        parsed = parse_command(stripped, _SPEC)
-        if parsed.option is None:
-            reply = await _handle_read()
-        elif parsed.option == "set":
-            reply = await _handle_set(parsed.args, event)
-        elif parsed.option == "reset":
-            reply = await _handle_reset(parsed.args, event)
-        else:
-            reply = _USAGE
-    except CommandUsageError as exc:
-        reply = f"{exc}. {_USAGE}"
-    except _InvalidUrl as exc:
-        cause = exc.__cause__ or exc
-        log.info(
-            "discord.invalid_url",
-            error_type=type(cause).__name__,
-            platform=event.platform,
-        )
-        reply = str(exc)
+        reply = await _handle(rest.strip(), event)
     except _KvFailure as exc:
-        cause = exc.__cause__ or exc
-        log.error(
-            "discord.kv_failure",
-            error_type=type(cause).__name__,
-            platform=event.platform,
-        )
-        reply = _KV_ERROR
+        log.error("discord.kv_failure", op=exc.op, error=exc.error)
+        reply = _UNAVAILABLE_MSG
 
-    log.info("discord.transform matched", platform=event.platform)
+    log.info("discord.transform matched")
     return PlatformEvent(
         platform=event.platform,
         event_type=event.event_type,
@@ -254,16 +205,14 @@ async def dispatch(
     """Implement `action-stage.dispatch`: relay the reply text `transform` already built.
 
     Raises:
-        ValueError: The envelope's payload is missing `channel_id` or `text` (defensive --
-            `transform` always sets both when it returns a non-`None` event).
+        ValueError: The payload is missing `channel_id` or `text` (defensive -- `transform`
+            always sets both).
     """
     payload = envelope.event.payload
     channel_id = payload.get("channel_id")
     text = payload.get("text")
     if not channel_id:
-        raise ValueError(
-            "discord reply requires a channel_id from the inbound chat.message"
-        )
+        raise ValueError("discord reply requires a channel_id from the inbound chat.message")
     if not isinstance(text, str) or not text:
         raise ValueError("discord reply requires text produced by transform")
 

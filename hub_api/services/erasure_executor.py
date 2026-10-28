@@ -200,7 +200,9 @@ def run_registry_erasure(dal: Any, subject: ErasureSubject) -> RegistryResult:
             absent.add(rule.table)
             continue
         examined.add(rule.table)
-        needed = set(registry.columns_in_rule(rule))
+        # `rule.columns` on an executable rule is coverage documentation (e.g. a raw-handle
+        # column that dies with the deleted row), never read or written, so not required here.
+        needed = set(registry.columns_in_rule(rule)) - set(rule.columns)
         if rule.detach:
             needed.add("id")
         missing = sorted(needed - present)

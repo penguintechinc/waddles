@@ -30,6 +30,11 @@ from typing import Any
 from waddle_sdk import log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 #: Matches `!8ball` alone or `!8ball <anything>` -- the question's content is
 #: never inspected (the reply doesn't depend on it), only whether the command
 #: itself was invoked.
@@ -67,7 +72,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     if not isinstance(text, str) or not COMMAND_PATTERN.match(text.strip()):
         return None
 
-    answer = random.choice(ANSWERS)  # noqa: S311 - a game reply, not a security decision
+    answer = _RNG.choice(ANSWERS)
     log.info("eightball.transform matched", platform=event.platform)
 
     return PlatformEvent(

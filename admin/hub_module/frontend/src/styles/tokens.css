@@ -1,0 +1,57 @@
+/*
+ * Waddles Hub design tokens (dark theme only).
+ *
+ * Colors are space-separated RGB triplets so Tailwind's `/opacity` modifier
+ * works (`bg-surface/60`). Each triplet comment names the raw brand-scale step
+ * it aliases. Pairings used for text are contrast-verified by
+ * src/styles/__tests__/tokens.test.ts -- change a value here and that test
+ * tells you whether WCAG AA (4.5:1 text, 3:1 UI boundary) still holds.
+ *
+ * Tailwind v4 migration: each `--c-*` becomes `--color-*` inside `@theme`.
+ */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces: app < surface < raised. Fields sit one step *below* their card. */
+  --c-app: 10 25 41; /* navy-950 */
+  --c-surface: 16 42 67; /* navy-900 */
+  --c-raised: 36 59 83; /* navy-800 */
+  --c-field: 10 25 41; /* navy-950 */
+
+  /* Text. muted passes 4.5:1 on app, surface AND raised (navy-400 does not on raised). */
+  --c-fg: 224 242 254; /* sky-100 */
+  --c-fg-secondary: 159 179 200; /* navy-300 */
+  --c-fg-muted: 147 171 193; /* between navy-300 and navy-400 */
+  --c-accent-fg: 251 191 36; /* gold-400 -- headings, active nav, emphasis */
+  --c-fg-inverse: 10 25 41; /* navy-950 -- text on gold/emerald/sky solid fills */
+
+  /* Borders. line = decorative divider; line-input = control boundary (>=3:1 vs surface). */
+  --c-line: 51 78 104; /* navy-700 */
+  --c-line-strong: 72 101 129; /* navy-600 */
+  --c-line-input: 98 125 152; /* navy-500 */
+
+  /* Interaction */
+  --c-focus: 56 189 248; /* sky-400 -- 5.4:1+ against every surface */
+  --c-interactive: 56 189 248; /* sky-400 -- links */
+  --c-interactive-hover: 125 211 252; /* sky-300 */
+  --c-accent: 245 158 11; /* gold-500 -- primary CTA fill, navy-950 text 8.3:1 */
+  --c-accent-hover: 251 191 36; /* gold-400 */
+
+  /* Status. Solid = fill/border/icon; -fg = text on a tinted surface (>=6:1). */
+  --c-success: 16 185 129; /* emerald-500 */
+  --c-success-fg: 110 231 183; /* emerald-300 */
+  --c-warning: 245 158 11; /* gold-500 */
+  --c-warning-fg: 252 211 77; /* gold-300 */
+  --c-danger: 220 38 38; /* red-600, white text 4.8:1 */
+  --c-danger-hover: 185 28 28; /* red-700 */
+  --c-danger-fg: 252 165 165; /* red-300 */
+  --c-info: 14 165 233; /* sky-500 */
+  --c-info-fg: 125 211 252; /* sky-300 */
+
+  /* Shape + elevation */
+  --radius-control: 0.5rem;
+  --radius-card: 0.75rem;
+  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.3), 0 1px 3px 0 rgb(0 0 0 / 0.2);
+  --shadow-raised: 0 4px 12px -2px rgb(0 0 0 / 0.4), 0 2px 6px -2px rgb(0 0 0 / 0.3);
+  --shadow-overlay: 0 24px 48px -12px rgb(0 0 0 / 0.6);
+}

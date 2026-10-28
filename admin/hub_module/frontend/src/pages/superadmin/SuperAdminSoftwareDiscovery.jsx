@@ -46,7 +46,7 @@ const PROVIDER_CONFIG = {
   github: {
     name: 'GitHub',
     icon: GitHubIcon,
-    color: 'bg-gray-800',
+    color: 'bg-surface-raised',
     urlPlaceholder: 'https://github.com/owner/repo',
     authFields: [
       { key: 'access_token', label: 'Personal Access Token (PAT)', secret: true, placeholder: 'ghp_xxxxxxxxxxxx', required: false },

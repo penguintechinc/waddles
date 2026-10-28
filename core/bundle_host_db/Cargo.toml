@@ -40,7 +40,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
-tokio = { version = "=1.53.1", features = ["time", "sync"] }
+tokio = { version = "=1.53.3", features = ["time", "sync"] }
 uuid = { version = "=1.26.1", features = ["v4"] }
 # Custom OTel metrics (span per call, latency/rows histograms, denial
 # counters -- rules/critical-rules.md Observability), same pattern as
@@ -63,7 +63,7 @@ opentelemetry = "=0.32.0"
 bundle-host-db = { path = ".", features = ["test-util"] }
 # `test-util` (paused virtual time) lets the unit tests prove the per-call
 # deadline fires without really sleeping `CALL_DEADLINE`; it adds no crates.
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "test-util"] }
 # Integration test against a real Postgres container -- same rationale and
 # exact version as `core/bundle_host_kv`'s `testcontainers` dev-dependency
 # (RustSec-patched `astral-tokio-tar` line via `testcontainers` >=0.28.0).

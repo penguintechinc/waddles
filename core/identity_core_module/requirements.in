@@ -1,0 +1,52 @@
+# WaddleBot Flask Module - Dependencies
+
+# Core Framework
+quart>=0.19.0
+hypercorn>=0.16.0
+
+# HTTP Client (async)
+httpx>=0.27.0,<0.28.0
+
+# Environment
+python-dotenv>=1.0.0
+
+# gRPC runtime. Must track libs/flask_core/requirements.in's grpcio pin --
+# this module and flask_core are installed together (see
+# scripts/ci/install-unit-test-deps.sh) and flask_core's grpc_tls.py (added
+# in 951cac19, gRPC transport TLS) requires grpcio>=1.83.0,<1.84.0. A
+# looser/older pin here makes the combined install unresolvable (grpcio<1.77
+# vs flask_core's grpcio>=1.83 has no overlap) and breaks `make test-unit`
+# at the dependency-install step.
+grpcio>=1.83.0,<1.84.0
+
+# grpcio-tools (protoc codegen) -- REQUIRED at Docker build time: the
+# Dockerfile runs `python -m grpc_tools.protoc` to generate
+# proto/identity_pb2*.py from libs/grpc_protos/*.proto. Not imported by any
+# runtime/test code (unit tests import the pre-generated proto/ package
+# directly), but its absence breaks `docker build` with
+# `ModuleNotFoundError: No module named 'grpc_tools'`.
+#
+# Pinned to 1.81.1, NOT the grpcio>=1.83.0,<1.84.0 range above -- verified
+# empirically (2026-09-02) that every grpcio-tools release >=1.82.1 requires
+# protobuf>=7.35.1, which hard-conflicts with flask_core's protobuf<7.0 pin
+# (opentelemetry-proto==1.39.1 hard-requires protobuf<7.0; confirmed via
+# PyPI metadata, not just comment). 1.82.0 briefly relaxed this but was
+# yanked upstream ("Bad protobuf dependency version specified; only 7.x
+# should be supported", https://github.com/grpc/grpc/issues/42906) --
+# installing it is unsafe regardless of its declared metadata. 1.81.1 is the
+# newest non-yanked release requiring protobuf<7.0 (>=6.33.5), and its own
+# `grpcio>=1.81.1` constraint is satisfied by the grpcio==1.83.1 resolved
+# above. Confirmed the version gap is safe in practice: generated gencode
+# declares "Protobuf Python Version: 6.33.5" (import succeeds against
+# flask_core's protobuf==6.33.6 runtime) and the generated
+# identity_pb2_grpc.IdentityServiceStub imports and runs cleanly against the
+# grpcio==1.83.1 runtime (grpc's stub-generation surface is stable across
+# these minor versions; only the bundled protoc/protobuf codegen version
+# jumped). Bumping grpcio's pin above past 1.84.0 does not require bumping
+# this -- re-verify only if grpcio-tools' protobuf floor changes again.
+grpcio-tools==1.81.1
+
+# Development
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0

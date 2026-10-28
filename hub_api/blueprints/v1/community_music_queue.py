@@ -241,7 +241,7 @@ class MessageResponse:
 
 
 @music_queue_bp.route("/<int:community_id>/music-station/policy", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(PolicyResponse)
 async def get_policy(community_id: int) -> PolicyResponse | tuple[dict[str, object], int]:
     """Get the community's Music Station policy (community admin only)."""
@@ -258,7 +258,7 @@ async def get_policy(community_id: int) -> PolicyResponse | tuple[dict[str, obje
 
 
 @music_queue_bp.route("/<int:community_id>/music-station/policy", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(SetPolicyRequest)
 # NOT @validate_response -- writes via insert_async/update_async then
 # returns a nested-dataclass response (services/dto_response.py's
@@ -290,7 +290,7 @@ async def set_policy(data: SetPolicyRequest, community_id: int) -> Any:
 
 
 @music_queue_bp.route("/<int:community_id>/music-station/queue/requests", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(EnqueueRequestRequest)
 async def enqueue_song_request(data: EnqueueRequestRequest, community_id: int) -> Any:
     """Submit a single song request -- self-service, gated by community policy."""
@@ -328,7 +328,7 @@ async def enqueue_song_request(data: EnqueueRequestRequest, community_id: int) -
 
 
 @music_queue_bp.route("/<int:community_id>/music-station/queue/playlists", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(EnqueuePlaylistRequest)
 async def enqueue_playlist_request(data: EnqueuePlaylistRequest, community_id: int) -> Any:
     """Submit a whole playlist (list of URLs/queries) -- self-service, gated by community policy."""
@@ -365,7 +365,7 @@ async def enqueue_playlist_request(data: EnqueuePlaylistRequest, community_id: i
 
 
 @music_queue_bp.route("/<int:community_id>/music-station/queue", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(QueueListResponse)
 async def list_queue(community_id: int) -> QueueListResponse | tuple[dict[str, object], int]:
     """List the community's queue -- now-playing (if any) plus upcoming, in order."""
@@ -384,7 +384,7 @@ async def list_queue(community_id: int) -> QueueListResponse | tuple[dict[str, o
 
 
 @music_queue_bp.route("/<int:community_id>/music-station/queue/<int:queue_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def kick_song(community_id: int, queue_id: int) -> Any:
     """Kick a single song off the queue (community admin only) -- audited."""
     async_dal, dal = _dal()
@@ -410,7 +410,7 @@ async def kick_song(community_id: int, queue_id: int) -> Any:
 @music_queue_bp.route(
     "/<int:community_id>/music-station/queue/playlists/<playlist_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def kick_playlist(community_id: int, playlist_id: str) -> Any:
     """Kick an entire playlist off the queue (community admin only) -- audited once."""
     async_dal, dal = _dal()
@@ -440,7 +440,7 @@ async def kick_playlist(community_id: int, playlist_id: str) -> Any:
 
 
 @music_queue_bp.route("/<int:community_id>/music-station/queue/reorder", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(ReorderQueueRequest)
 async def reorder_queue(data: ReorderQueueRequest, community_id: int) -> Any:
     """Reorder the community's upcoming queue (community admin only)."""
@@ -459,7 +459,7 @@ async def reorder_queue(data: ReorderQueueRequest, community_id: int) -> Any:
 
 
 @music_queue_bp.route("/<int:community_id>/music-station/queue/advance", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def advance_queue(community_id: int) -> Any:
     """Advance the queue: mark now-playing played, promote the next queued track (admin only)."""
     async_dal, dal = _dal()

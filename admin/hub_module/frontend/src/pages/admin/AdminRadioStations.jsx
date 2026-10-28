@@ -196,7 +196,7 @@ function AdminRadioStations() {
             <ExclamationTriangleIcon className="w-5 h-5 text-red-400" />
             <span className="text-red-400">{error}</span>
           </div>
-          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
+          <button aria-label="Close" onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -214,7 +214,7 @@ function AdminRadioStations() {
             <CheckCircleIcon className="w-5 h-5" />
             <span>{message.text}</span>
           </div>
-          <button onClick={() => setMessage(null)} className="hover:opacity-75">
+          <button aria-label="Close" onClick={() => setMessage(null)} className="hover:opacity-75">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -228,27 +228,29 @@ function AdminRadioStations() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Station Name */}
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-radio-stations-station-name" className="block text-sm font-medium text-navy-300 mb-2">
                   Station Name *
                 </label>
                 <input
+                  id="admin-radio-stations-station-name"
                   type="text"
                   value={formData.name}
                   onChange={(e) => handleFormChange('name', e.target.value)}
                   placeholder="e.g., Lofi Hip Hop"
-                  className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:outline-none focus:border-gold-500"
+                  className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:border-gold-500"
                 />
               </div>
 
               {/* Provider */}
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-radio-stations-provider" className="block text-sm font-medium text-navy-300 mb-2">
                   Provider *
                 </label>
                 <select
+                  id="admin-radio-stations-provider"
                   value={formData.provider}
                   onChange={(e) => handleFormChange('provider', e.target.value)}
-                  className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:outline-none focus:border-gold-500"
+                  className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:border-gold-500"
                 >
                   {PROVIDER_TYPES.map((provider) => (
                     <option key={provider.value} value={provider.value}>
@@ -260,15 +262,16 @@ function AdminRadioStations() {
 
               {/* Stream URL */}
               <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-radio-stations-stream-url" className="block text-sm font-medium text-navy-300 mb-2">
                   Stream URL *
                 </label>
                 <input
+                  id="admin-radio-stations-stream-url"
                   type="url"
                   value={formData.streamUrl}
                   onChange={(e) => handleFormChange('streamUrl', e.target.value)}
                   placeholder="https://api.example.com/stream"
-                  className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:outline-none focus:border-gold-500"
+                  className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:border-gold-500"
                 />
                 <p className="text-xs text-navy-500 mt-1">
                   The URL to access the stream from this provider
@@ -278,15 +281,16 @@ function AdminRadioStations() {
               {/* API Key (conditional) */}
               {PROVIDERS_WITH_API_KEY.includes(formData.provider) && (
                 <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-navy-300 mb-2">
+                  <label htmlFor="admin-radio-stations-api-key" className="block text-sm font-medium text-navy-300 mb-2">
                     API Key *
                   </label>
                   <input
+                    id="admin-radio-stations-api-key"
                     type="password"
                     value={formData.apiKey}
                     onChange={(e) => handleFormChange('apiKey', e.target.value)}
                     placeholder="Your provider API key"
-                    className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:outline-none focus:border-gold-500"
+                    className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:border-gold-500"
                   />
                   <p className="text-xs text-navy-500 mt-1">
                     API key is required for {getProviderLabel(formData.provider)}
@@ -442,8 +446,8 @@ function AdminRadioStations() {
       {/* Delete Confirmation Modal */}
       {deleteConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md mx-4">
-            <h3 className="text-lg font-semibold text-sky-100 mb-2">Remove Radio Station?</h3>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-radio-stations-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md mx-4">
+            <h3 id="admin-radio-stations-dialog-1-title" className="text-lg font-semibold text-sky-100 mb-2">Remove Radio Station?</h3>
             <p className="text-navy-300 mb-4">
               Are you sure you want to remove{' '}
               <span className="text-gold-400 font-medium">{deleteConfirm.name}</span>?

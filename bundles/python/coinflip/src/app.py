@@ -20,7 +20,7 @@ v1 scope (KV-ONLY, no `db` capability -- same deliberate scoping as
 `fish`/`slots`, not dependent on the in-flight #623 db API):
 
 - Bare `!flip` (or `!coinflip`) -- FLIP, the grammar's bare/default action.
-  Draws one 50/50 `heads`/`tails` result (`random.choice`) and replies with
+  Draws one 50/50 `heads`/`tails` result (`_RNG.choice`) and replies with
   a fun flavor line. No call was made, so there is no win/lose outcome --
   only the caller's running flip count is updated.
 - `!flip heads` / `!flip tails` -- CALL. Same 50/50 draw, but the caller's
@@ -84,6 +84,11 @@ from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 #: Chat aliases that both route to this bundle -- see module docstring's
 #: alias-normalization rationale. Compared against `head.lower()`, so both
 #: are already lowercase.
@@ -128,7 +133,7 @@ _FLIP_FLAVORS: tuple[str, ...] = (
 
 def _flip_coin() -> str:
     """Draw one 50/50 `"heads"`/`"tails"` result."""
-    return random.choice(("heads", "tails"))  # noqa: S311 - a game, not security
+    return _RNG.choice(("heads", "tails"))
 
 
 def _evaluate_flip(call: str | None, result: str) -> bool | None:
@@ -383,7 +388,7 @@ async def _handle_flip(
     is_correct = _evaluate_flip(call, result)
 
     if is_correct is None:
-        flavor = random.choice(_FLIP_FLAVORS)  # noqa: S311 - a game, not a security decision
+        flavor = _RNG.choice(_FLIP_FLAVORS)
         return f"\U0001fa99 {username} flips a coin -- {flavor} {result.upper()}! (flip #{flips})"
 
     if is_correct:

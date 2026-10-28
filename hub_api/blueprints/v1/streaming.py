@@ -52,7 +52,7 @@ async def _authorize(community_id: int) -> None:
 
 
 @streaming_bp.route("/<int:community_id>/streams", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_stream_config(community_id: int) -> tuple[dict[str, object], int]:
     """Get stream configuration for a community."""
     try:
@@ -68,7 +68,7 @@ async def get_stream_config(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @streaming_bp.route("/<int:community_id>/streams", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def create_stream_config(community_id: int) -> tuple[dict[str, object], int]:
     """Create stream configuration for a community."""
     try:
@@ -92,7 +92,7 @@ async def create_stream_config(community_id: int) -> tuple[dict[str, object], in
 
 
 @streaming_bp.route("/<int:community_id>/streams/key/regenerate", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def regenerate_stream_key(community_id: int) -> tuple[dict[str, object], int]:
     """Regenerate stream key for a community."""
     try:
@@ -104,7 +104,7 @@ async def regenerate_stream_key(community_id: int) -> tuple[dict[str, object], i
 
 
 @streaming_bp.route("/<int:community_id>/streams/destinations", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_destinations(community_id: int) -> tuple[dict[str, object], int]:
     """Get streaming destinations for a community."""
     try:
@@ -116,7 +116,7 @@ async def get_destinations(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @streaming_bp.route("/<int:community_id>/streams/destinations", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def add_destination(community_id: int) -> tuple[dict[str, object], int]:
     """Add streaming destination for a community."""
     try:
@@ -147,7 +147,7 @@ async def add_destination(community_id: int) -> tuple[dict[str, object], int]:
 @streaming_bp.route(
     "/<int:community_id>/streams/destinations/<int:destination_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def remove_destination(
     community_id: int, destination_id: int
 ) -> tuple[dict[str, object], int]:
@@ -163,7 +163,7 @@ async def remove_destination(
 @streaming_bp.route(
     "/<int:community_id>/streams/destinations/<int:destination_id>/force-cut", methods=["PUT"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def toggle_force_cut(community_id: int, destination_id: int) -> tuple[dict[str, object], int]:
     """Toggle force cut for a destination."""
     try:
@@ -181,7 +181,7 @@ async def toggle_force_cut(community_id: int, destination_id: int) -> tuple[dict
 
 
 @streaming_bp.route("/<int:community_id>/streams/status", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_stream_status(community_id: int) -> tuple[dict[str, object], int]:
     """Get streaming status for a community."""
     try:

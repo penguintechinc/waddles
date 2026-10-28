@@ -138,8 +138,8 @@ class DistributionBundlesResponse:
 
 
 @distribution_bp.route("/bundles", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("distribution:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("distribution:read")  # type: ignore[misc]
 @validate_response(DistributionBundlesResponse)
 async def list_distribution_bundles() -> (
     DistributionBundlesResponse | tuple[dict[str, object], int]
